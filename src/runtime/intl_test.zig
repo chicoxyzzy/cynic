@@ -380,6 +380,32 @@ test "intl/temporal: era-less calendar does not read era/eraYear fields" {
     );
 }
 
+test "intl/temporal: chinese + dangi lunisolar calendars (table / leap months)" {
+    try requireIntlBuild();
+    // Table-driven over 1850-2150 (verified identical across SpiderMonkey /
+    // Kiesel / LibJS). 2023 is a chinese leap year with the leap month at
+    // ordinal 3 ("M02L"); years are numbered by the containing Gregorian year
+    // and the calendar has no era system.
+    try evalAssert1(
+        \\const d = Temporal.PlainDate.from("2024-02-10").withCalendar("chinese");
+        \\if (d.year !== 2024 || d.month !== 1 || d.day !== 1 || d.era !== undefined) throw 0;
+        \\const l = Temporal.PlainDate.from("2023-03-22").withCalendar("chinese");
+        \\if (l.month !== 3 || l.monthCode !== "M02L" || l.monthsInYear !== 13 || l.daysInYear !== 384) throw 1;
+        \\const a = Temporal.PlainDate.from({ year: 2023, monthCode: "M02L", day: 1, calendar: "chinese" });
+        \\if (a.toString().slice(0, 10) !== "2023-03-22") throw 2;
+        \\if (a.add({ years: 1 }).monthCode !== "M02") throw 3; // code-preserving; 2024 has no leap month
+        \\const u = a.until(Temporal.PlainDate.from({ year: 2024, monthCode: "M02", day: 1, calendar: "chinese" }), { largestUnit: "months" });
+        \\if (u.months !== 12) throw 4;
+        \\if (Temporal.PlainDate.from("2024-02-10").withCalendar("dangi").year !== 2024) throw 5;
+        \\// PMD anchors within [1900, 1972]; M01L has not occurred there → reject
+        \\let threw = false;
+        \\try { Temporal.PlainMonthDay.from({ year: 1898, monthCode: "M01L", day: 29, calendar: "chinese" }, { overflow: "reject" }); } catch (e) { if (e instanceof RangeError) threw = true; }
+        \\if (!threw) throw 6;
+        \\if (Temporal.PlainMonthDay.from({ monthCode: "M02L", day: 29, calendar: "chinese" }).toString().slice(0, 4) !== "1947") throw 7;
+        \\1
+    );
+}
+
 test "intl/temporal: hebrew calendar (arithmetic / leap months / M05L codes)" {
     try requireIntlBuild();
     // R&D molad+dehiyyot arithmetic, validated 0/301 mismatches vs

@@ -3285,6 +3285,7 @@ const CivilTime = struct {
     year: i64,
     month: u32, // 1-13 (calendar ordinal)
     hebrew: bool = false, // month renders as a name, never numerically (CLDR-15510)
+    lunisolar_code: i64 = 0, // chinese/dangi: month renders as its CODE number ("Nbis" when leap)
     day: u32, // 1-31
     hour: u32, // 0-23
     minute: u32,
@@ -3315,6 +3316,10 @@ fn breakDown(slots: *const intl.DateTimeFormatSlots, ms: f64) CivilTime {
         // 2050; for every other calendar year == era_year so this is a no-op.
         .year = if (std.ascii.eqlIgnoreCase(slots.calendar, "japanese")) (cf.era_year orelse cf.year) else cf.year,
         .hebrew = std.ascii.eqlIgnoreCase(slots.calendar, "hebrew"),
+        .lunisolar_code = if (std.ascii.eqlIgnoreCase(slots.calendar, "chinese") or std.ascii.eqlIgnoreCase(slots.calendar, "dangi"))
+            tshared.monthOrdinalToCode(cid, cf.year, cf.month)
+        else
+            0,
         .month = cf.month,
         .day = cf.day,
         .hour = t.hour,
@@ -4127,6 +4132,17 @@ fn emitField(out: []Seg, letter: u8, count: usize, ct: CivilTime, dd: cldr.DateD
         'M', 'L' => {
             if (ct.hebrew) {
                 setSeg(seg, "month", tshared.hebrewMonthDisplayName(ct.year, ct.month));
+            } else if (ct.lunisolar_code != 0) {
+                // chinese/dangi months print their CODE number; a leap month
+                // carries the CLDR root "bis" suffix (never a bare ordinal).
+                const n: u64 = @intCast(if (ct.lunisolar_code < 0) -ct.lunisolar_code else ct.lunisolar_code);
+                setNumberSeg(seg, "month", n, count, digit_base);
+                if (ct.lunisolar_code < 0) {
+                    const suffix = "bis";
+                    const m = @min(seg.len + suffix.len, seg.buf.len);
+                    @memcpy(seg.buf[seg.len..m], suffix[0 .. m - seg.len]);
+                    seg.len = m;
+                }
             } else if (count >= 4) setSeg(seg, "month", dd.months_wide[ct.month - 1]) else if (count == 3) setSeg(seg, "month", dd.months_abbr[ct.month - 1]) else setNumberSeg(seg, "month", ct.month, count, digit_base);
         },
         'd' => setNumberSeg(seg, "day", ct.day, count, digit_base),

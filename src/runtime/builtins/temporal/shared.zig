@@ -264,27 +264,30 @@ pub fn monthsInYearForCalendar(cal: temporal.CalendarId) i64 {
     // Upper bound across years (per-year counts come from calendarFields):
     // 13 for the coptic family and for hebrew leap years, else 12.
     if (computedCal(cal)) |c| return switch (c.family) {
-        .coptic, .hebrew => 13,
+        .coptic, .hebrew, .chinese, .dangi => 13,
         else => 12,
     };
     return 12;
 }
 
 pub fn monthFromCodeBytes(realm: *Realm, cal: temporal.CalendarId, buf: []const u8, actual_len: usize, max_month: i64) NativeError!i64 {
-    const is_hebrew = if (computedCal(cal)) |c| c.family == .hebrew else false;
+    const fam: ?CompFamily = if (computedCal(cal)) |c| c.family else null;
+    const has_leap_months = fam == .hebrew or fam == .chinese or fam == .dangi;
     if (actual_len == 4) {
-        // Leap-suffixed codes ("MxxL") exist only for the lunisolar calendars;
-        // hebrew has exactly one, "M05L" (Adar I). Encoded as the negative code
-        // number; resolveMonthOrdinal maps it per target year.
-        if (!is_hebrew or buf[3] != 'L') return throwRangeError(realm, "invalid monthCode");
+        // Leap-suffixed codes ("MxxL") exist only for the lunisolar calendars:
+        // hebrew has exactly one ("M05L", Adar I); chinese/dangi leap any month
+        // (M01L-M12L). Encoded as the negative code number; resolveMonthOrdinal
+        // maps it per target year.
+        if (!has_leap_months or buf[3] != 'L') return throwRangeError(realm, "invalid monthCode");
         const n: i64 = @as(i64, buf[1] - '0') * 10 + @as(i64, buf[2] - '0');
-        if (n != 5) return throwRangeError(realm, "invalid monthCode");
+        if (fam == .hebrew and n != 5) return throwRangeError(realm, "invalid monthCode");
+        if (n < 1 or n > 12) return throwRangeError(realm, "invalid monthCode");
         return -n;
     }
     const m: i64 = @as(i64, buf[1] - '0') * 10 + @as(i64, buf[2] - '0');
-    // Hebrew month CODES run M01-M12 (+M05L); ordinal 13 exists only through
-    // the leap-year shift, never as a literal code.
-    const code_max: i64 = if (is_hebrew) 12 else max_month;
+    // Lunisolar month CODES run M01-M12 (+ the leap forms); ordinal 13 exists
+    // only through the leap-month shift, never as a literal code.
+    const code_max: i64 = if (has_leap_months) 12 else max_month;
     if (m < 1 or m > code_max) return throwRangeError(realm, "invalid monthCode");
     return m;
 }
@@ -298,7 +301,10 @@ pub fn monthFromCodeBytes(realm: *Realm, cal: temporal.CalendarId, buf: []const 
 /// years): hebrew today; the chinese/dangi lunisolar pair when they land.
 pub fn calendarHasLeapMonths(cal: temporal.CalendarId) bool {
     const c = computedCal(cal) orelse return false;
-    return c.family == .hebrew;
+    return switch (c.family) {
+        .hebrew, .chinese, .dangi => true,
+        else => false,
+    };
 }
 
 /// Inverse of resolveMonthOrdinal: the year-independent monthCode NUMBER for a
@@ -322,11 +328,32 @@ pub fn monthOrdinalToCode(cal: temporal.CalendarId, year: i64, ordinal: u32) i64
 /// `year` (a leap code in a common year). Codes equal ordinals everywhere
 /// except hebrew leap years.
 fn compOrdForCode(f: CompFamily, year: i64, code: i64) ?i64 {
-    if (f != .hebrew) return code;
-    const ly = hebrewLeap(year);
-    if (code < 0) return if (ly) 6 else null;
-    if (code <= 5) return code;
-    return if (ly) code + 1 else code;
+    const leap_ord: i64 = compLeapOrdFor(f, year);
+    if (code < 0) {
+        if (leap_ord > 0 and -code == leap_ord - 1) return leap_ord;
+        return null;
+    }
+    if (leap_ord > 0 and code >= leap_ord) return code + 1;
+    return code;
+}
+
+/// The ordinal of the year's leap month, or 0 (hebrew: Adar I at 6 in leap
+/// years; chinese/dangi: table-driven, can follow any month).
+fn compLeapOrdFor(f: CompFamily, year: i64) u32 {
+    return switch (f) {
+        .hebrew => if (hebrewLeap(year)) 6 else 0,
+        .chinese, .dangi => lunisolarLeapOrd(f, year),
+        else => 0,
+    };
+}
+
+/// The constrained ordinal for a leap code in a year that lacks it: hebrew's
+/// Adar I merges into Adar (ICU special case); the chinese family constrains
+/// to the base month of the code.
+fn constrainLeapOrd(f: CompFamily, year: i64, code: i64) i64 {
+    if (f == .hebrew) return 6;
+    if (code >= 0) return code;
+    return compOrdForCode(f, year, -code) orelse -code;
 }
 /// Total order over month CODES: M05 < M05L < M06 (a leap code sorts after
 /// its base month). Used by the whole-year candidate comparison in
@@ -339,22 +366,17 @@ fn compCodeKey(code: i64) i64 {
 /// Family-level ordinal→code (hebrew leap: ordinal 6 → -5 ("M05L"),
 /// ordinals 7+ shift down one).
 fn compCodeForOrd(f: CompFamily, year: i64, ordinal: i64) i64 {
-    if (f != .hebrew or !hebrewLeap(year)) return ordinal;
-    if (ordinal == 6) return -5;
-    return if (ordinal >= 7) ordinal - 1 else ordinal;
+    const leap_ord: i64 = compLeapOrdFor(f, year);
+    if (leap_ord == 0) return ordinal;
+    if (ordinal == leap_ord) return -(leap_ord - 1);
+    return if (ordinal > leap_ord) ordinal - 1 else ordinal;
 }
 
 pub fn resolveMonthOrdinal(realm: *Realm, cal: temporal.CalendarId, year: i64, code: i64, reject: bool) NativeError!i64 {
     const c = computedCal(cal) orelse return code;
-    if (c.family != .hebrew) return code;
-    const leap = hebrewLeap(year);
-    if (code < 0) {
-        if (leap) return 6;
-        if (reject) return throwRangeError(realm, "monthCode M05L does not exist in this year");
-        return 6;
-    }
-    if (code <= 5 or !leap) return code;
-    return code + 1;
+    if (compOrdForCode(c.family, year, code)) |ord| return ord;
+    if (reject) return throwRangeError(realm, "monthCode does not exist in this year");
+    return constrainLeapOrd(c.family, year, code);
 }
 
 /// Reject a property-bag carrying a `calendar` or `timeZone` key — used by
@@ -593,7 +615,9 @@ pub fn calendarHasEras(cal: temporal.CalendarId) bool {
     const s = cal.slice();
     if (std.ascii.eqlIgnoreCase(s, "gregory") or std.ascii.eqlIgnoreCase(s, "roc") or std.ascii.eqlIgnoreCase(s, "buddhist")) return true;
     if (isJapanese(cal)) return true;
-    return computedCal(cal) != null;
+    // The chinese family has no era system (era = "").
+    if (computedCal(cal)) |c| return c.era.len > 0;
+    return false;
 }
 
 /// Resolve an already-read {era, eraYear} field pair against an existing year,
@@ -881,6 +905,246 @@ fn hebrewFromDays(date: i64) CompYmd {
     return .{ .year = year, .month = month, .day = @intCast(rem + 1) };
 }
 
+// ── Chinese / Dangi lunisolar calendars ──────────────────────────────────────
+// Data-driven over 1900-2100: per year (start day number in days-since-1970,
+// the ordinal of the leap month or 0, and a 12/13-bit mask of 30-day months).
+// Extracted from the Temporal implementations of SpiderMonkey / Kiesel / LibJS
+// — all three byte-identical for both calendars — and self-checked (every
+// year-start delta equals 29·monthsInYear + popCount(mask)). Years are
+// numbered by the Gregorian year containing the new year (the Temporal
+// convention); dangi is the Korean variant and differs from chinese in a
+// handful of years. Outside the table, from-fields rejects (computedToIso
+// returns null) and day-count conversion saturates to the table edge so the
+// getters stay total.
+const chinese_year_starts = [301]i32{
+    -43787, -43433, -43049, -42694, -42340, -41956, -41602, -41247, -40864, -40509,
+    -40155, -39771, -39417, -39033, -38678, -38324, -37940, -37586, -37231, -36847,
+    -36493, -36109, -35755, -35400, -35017, -34662, -34308, -33924, -33570, -33186,
+    -32831, -32477, -32093, -31739, -31384, -31000, -30646, -30292, -29908, -29553,
+    -29169, -28815, -28461, -28077, -27722, -27368, -26984, -26630, -26275, -25892,
+    -25537, -25153, -24799, -24444, -24061, -23707, -23352, -22968, -22614, -22259,
+    -21875, -21521, -21137, -20783, -20429, -20045, -19691, -19336, -18952, -18597,
+    -18213, -17859, -17505, -17121, -16767, -16413, -16028, -15674, -15319, -14935,
+    -14581, -14198, -13844, -13489, -13105, -12750, -12396, -12012, -11658, -11274,
+    -10920, -10566, -10182, -9827,  -9473,  -9088,  -8734,  -8380,  -7996,  -7642,
+    -7258,  -6904,  -6549,  -6165,  -5811,  -5456,  -5072,  -4718,  -4335,  -3980,
+    -3626,  -3242,  -2887,  -2533,  -2149,  -1794,  -1441,  -1057,  -702,   -318,
+    36,     391,    775,    1129,   1483,   1867,   2221,   2605,   2959,   3314,
+    3698,   4053,   4407,   4791,   5145,   5529,   5883,   6237,   6621,   6976,
+    7331,   7715,   8069,   8423,   8806,   9161,   9545,   9899,   10254,  10638,
+    10992,  11346,  11730,  12084,  12439,  12823,  13177,  13562,  13916,  14270,
+    14654,  15008,  15362,  15746,  16101,  16485,  16839,  17194,  17578,  17932,
+    18286,  18670,  19024,  19379,  19763,  20117,  20501,  20855,  21209,  21593,
+    21948,  22302,  22686,  23041,  23425,  23779,  24133,  24517,  24871,  25225,
+    25609,  25964,  26319,  26703,  27057,  27441,  27795,  28149,  28533,  28887,
+    29242,  29626,  29981,  30365,  30719,  31073,  31456,  31811,  32165,  32549,
+    32904,  33258,  33642,  33996,  34380,  34734,  35089,  35473,  35827,  36182,
+    36566,  36920,  37304,  37658,  38012,  38396,  38751,  39105,  39489,  39844,
+    40198,  40582,  40936,  41320,  41674,  42029,  42413,  42767,  43122,  43505,
+    43859,  44243,  44597,  44952,  45336,  45691,  46045,  46429,  46783,  47137,
+    47521,  47875,  48259,  48614,  48968,  49352,  49707,  50061,  50445,  50799,
+    51183,  51538,  51892,  52276,  52630,  52985,  53369,  53723,  54107,  54461,
+    54816,  55199,  55554,  55908,  56292,  56646,  57001,  57385,  57739,  58123,
+    58477,  58832,  59216,  59570,  59924,  60308,  60663,  61046,  61401,  61755,
+    62139,  62493,  62848,  63232,  63586,  63940,  64324,  64679,  65063,  65417,
+    65771,
+};
+const chinese_leap_ords = [301]u8{
+    0,  12, 0, 0,  8,  0, 0,  5,  0,  0,  2, 0,  11, 0, 0,  7, 0, 0,  3,  0,
+    12, 0,  0, 9,  0,  0, 5,  0,  13, 0,  0, 10, 0,  0, 7,  0, 0, 4,  0,  12,
+    0,  0,  8, 0,  0,  6, 0,  0,  2,  0,  9, 0,  0,  6, 0,  0, 5, 0,  0,  3,
+    0,  7,  0, 0,  6,  0, 0,  3,  0,  8,  0, 0,  6,  0, 0,  5, 0, 0,  3,  0,
+    7,  0,  0, 6,  0,  0, 4,  0,  8,  0,  0, 7,  0,  0, 5,  0, 0, 3,  0,  8,
+    0,  0,  6, 0,  0,  4, 0,  9,  0,  0,  7, 0,  0,  5, 0,  0, 4, 0,  8,  0,
+    0,  6,  0, 0,  5,  0, 9,  0,  0,  7,  0, 0,  5,  0, 11, 0, 0, 7,  0,  0,
+    6,  0,  0, 4,  0,  9, 0,  0,  6,  0,  0, 5,  0,  0, 3,  0, 8, 0,  0,  6,
+    0,  0,  5, 0,  10, 0, 0,  7,  0,  0,  5, 0,  0,  3, 0,  7, 0, 0,  6,  0,
+    0,  4,  0, 12, 0,  0, 7,  0,  0,  6,  0, 0,  3,  0, 8,  0, 0, 6,  0,  0,
+    4,  0,  9, 0,  0,  7, 0,  0,  5,  0,  0, 4,  0,  8, 0,  0, 6, 0,  0,  5,
+    0,  9,  0, 0,  7,  0, 0,  5,  0,  0,  4, 0,  8,  0, 0,  6, 0, 0,  5,  0,
+    9,  0,  0, 7,  0,  0, 5,  0,  0,  3,  0, 8,  0,  0, 7,  0, 0, 3,  0,  11,
+    0,  0,  8, 0,  0,  5, 0,  13, 0,  0,  9, 0,  0,  6, 0,  0, 3, 0,  12, 0,
+    0,  8,  0, 0,  4,  0, 13, 0,  0,  10, 0, 0,  6,  0, 0,  3, 0, 12, 0,  0,
+    9,
+};
+const chinese_month_masks = [301]u16{
+    1370, 2901, 3413, 2730, 5466, 1450, 3413, 2730, 2733, 1450, 3413, 1365,
+    2733, 2773, 2730, 5461, 1366, 2773, 6826, 2730, 5462, 1386, 3413, 2730,
+    2731, 1386, 3413, 1365, 2731, 2741, 1706, 5461, 1365, 2741, 5802, 2730,
+    1365, 2741, 2901, 6826, 2730, 1370, 2901, 3413, 2730, 5466, 1450, 3413,
+    2730, 2733, 5842, 1874, 3749, 5706, 1611, 2715, 5462, 1386, 2905, 5970,
+    1874, 6949, 2853, 2635, 5291, 685,  1387, 2921, 3497, 7570, 3730, 3365,
+    6733, 2646, 694,  5557, 1748, 3753, 7826, 3730, 3366, 1323, 2647, 4790,
+    2906, 1748, 3785, 1865, 5779, 2707, 1323, 2651, 2733, 1386, 6997, 2980,
+    2889, 6803, 2709, 5421, 1334, 2733, 5546, 1458, 3493, 7498, 3402, 2709,
+    2711, 1366, 2741, 2773, 1746, 3749, 3749, 1610, 3223, 2715, 5466, 1386,
+    2921, 5970, 2898, 2853, 5707, 2635, 5291, 685,  1389, 2921, 3497, 3474,
+    7461, 3365, 6733, 2646, 694,  1461, 1749, 3753, 7826, 3730, 3366, 2646,
+    2647, 5334, 858,  1749, 5833, 1865, 1683, 5419, 1323, 2651, 5466, 1386,
+    6997, 2980, 2889, 6803, 2709, 1325, 2733, 2741, 5546, 1490, 3493, 7498,
+    3402, 3221, 5422, 1366, 2741, 5554, 1746, 3749, 1829, 1611, 3223, 3243,
+    1370, 2774, 2921, 5970, 2898, 2853, 6731, 2635, 1195, 1371, 1453, 2922,
+    6994, 3474, 7461, 3365, 2645, 5293, 1206, 1461, 3498, 3785, 7826, 3730,
+    3366, 2646, 2647, 1366, 1749, 1877, 1865, 3731, 1683, 5419, 1323, 2651,
+    5466, 1386, 2917, 5962, 2890, 6805, 2709, 1325, 2733, 2741, 1450, 2981,
+    3493, 3402, 7317, 3222, 6478, 1366, 2741, 5554, 1746, 3749, 3658, 1675,
+    3223, 1195, 1371, 2774, 2922, 1874, 5925, 2885, 2699, 5275, 1195, 2395,
+    1453, 1365, 2731, 2741, 1450, 5461, 1365, 2741, 2901, 2730, 5461, 1370,
+    2901, 6826, 2730, 5466, 1450, 3413, 2730, 2733, 1450, 3413, 1365, 2733,
+    5546, 1706, 5461, 1366, 2773, 5802, 2730, 1366, 2773, 2901, 2730, 2731,
+    1386, 2901, 1365, 2731, 5482, 1450, 1365, 2731, 2741, 5546, 2730, 1365,
+    2741,
+};
+const dangi_year_starts = [301]i32{
+    -43787, -43433, -43049, -42694, -42340, -41956, -41602, -41247, -40864, -40509,
+    -40155, -39771, -39417, -39033, -38678, -38324, -37940, -37586, -37231, -36847,
+    -36493, -36109, -35755, -35400, -35017, -34662, -34308, -33924, -33570, -33186,
+    -32831, -32477, -32093, -31739, -31384, -31000, -30646, -30292, -29908, -29553,
+    -29169, -28815, -28461, -28077, -27722, -27368, -26984, -26630, -26275, -25892,
+    -25537, -25153, -24799, -24444, -24061, -23707, -23352, -22968, -22614, -22259,
+    -21875, -21521, -21137, -20783, -20429, -20045, -19690, -19336, -18952, -18597,
+    -18213, -17859, -17505, -17121, -16767, -16413, -16028, -15674, -15319, -14935,
+    -14581, -14198, -13844, -13489, -13105, -12750, -12396, -12012, -11658, -11274,
+    -10920, -10566, -10182, -9827,  -9472,  -9088,  -8734,  -8380,  -7996,  -7642,
+    -7258,  -6904,  -6549,  -6165,  -5810,  -5456,  -5072,  -4718,  -4334,  -3980,
+    -3626,  -3242,  -2887,  -2533,  -2149,  -1794,  -1440,  -1057,  -702,   -318,
+    36,     391,    775,    1129,   1483,   1867,   2221,   2605,   2959,   3314,
+    3698,   4053,   4407,   4791,   5145,   5529,   5883,   6237,   6622,   6976,
+    7331,   7715,   8069,   8423,   8806,   9161,   9545,   9900,   10254,  10638,
+    10992,  11346,  11730,  12084,  12439,  12823,  13177,  13562,  13916,  14270,
+    14654,  15008,  15362,  15746,  16101,  16485,  16839,  17194,  17578,  17932,
+    18286,  18670,  19024,  19379,  19763,  20117,  20501,  20856,  21210,  21593,
+    21948,  22302,  22686,  23041,  23425,  23779,  24133,  24517,  24871,  25225,
+    25609,  25964,  26319,  26703,  27057,  27441,  27795,  28149,  28533,  28887,
+    29242,  29626,  29981,  30365,  30719,  31073,  31456,  31811,  32165,  32549,
+    32904,  33259,  33642,  33996,  34380,  34734,  35089,  35473,  35827,  36182,
+    36566,  36920,  37304,  37658,  38012,  38396,  38751,  39105,  39489,  39844,
+    40198,  40582,  40936,  41320,  41674,  42029,  42413,  42767,  43122,  43506,
+    43859,  44243,  44598,  44952,  45336,  45691,  46045,  46429,  46783,  47137,
+    47521,  47875,  48259,  48614,  48969,  49352,  49707,  50061,  50445,  50799,
+    51183,  51538,  51892,  52276,  52630,  52985,  53369,  53723,  54107,  54461,
+    54816,  55199,  55554,  55908,  56292,  56646,  57001,  57385,  57739,  58123,
+    58477,  58832,  59216,  59570,  59924,  60308,  60663,  61017,  61401,  61755,
+    62139,  62494,  62848,  63232,  63586,  63941,  64324,  64679,  65063,  65417,
+    65771,
+};
+const dangi_leap_ords = [301]u8{
+    0,  12, 0, 0,  8,  0, 0, 5,  0,  0,  2, 0,  11, 0, 0,  7, 0, 0,  3,  0,
+    12, 0,  0, 9,  0,  0, 5, 0,  13, 0,  0, 10, 0,  0, 7,  0, 0, 4,  0,  12,
+    0,  0,  8, 0,  0,  6, 0, 0,  2,  0,  9, 0,  0,  6, 0,  0, 5, 0,  0,  3,
+    0,  7,  0, 0,  6,  0, 0, 3,  0,  8,  0, 0,  6,  0, 0,  5, 0, 0,  3,  0,
+    7,  0,  0, 6,  0,  0, 4, 0,  8,  0,  0, 7,  0,  0, 5,  0, 0, 3,  0,  8,
+    0,  0,  6, 0,  0,  4, 0, 9,  0,  0,  7, 0,  0,  5, 0,  0, 4, 0,  8,  0,
+    0,  6,  0, 0,  5,  0, 9, 0,  0,  7,  0, 0,  5,  0, 11, 0, 0, 7,  0,  0,
+    6,  0,  0, 4,  0,  9, 0, 0,  6,  0,  0, 5,  0,  0, 3,  0, 8, 0,  0,  6,
+    0,  0,  4, 0,  10, 0, 0, 6,  0,  0,  5, 0,  0,  3, 0,  7, 0, 0,  6,  0,
+    0,  4,  0, 12, 0,  0, 7, 0,  0,  6,  0, 0,  3,  0, 8,  0, 0, 6,  0,  0,
+    4,  0,  9, 0,  0,  7, 0, 0,  5,  0,  0, 4,  0,  8, 0,  0, 6, 0,  0,  5,
+    0,  9,  0, 0,  7,  0, 0, 5,  0,  0,  4, 0,  8,  0, 0,  6, 0, 0,  5,  0,
+    9,  0,  0, 7,  0,  0, 5, 0,  0,  4,  0, 8,  0,  0, 7,  0, 0, 3,  0,  11,
+    0,  0,  8, 0,  0,  5, 0, 13, 0,  0,  9, 0,  0,  6, 0,  0, 3, 0,  12, 0,
+    0,  8,  0, 0,  4,  0, 0, 2,  0,  10, 0, 0,  6,  0, 0,  3, 0, 12, 0,  0,
+    8,
+};
+const dangi_month_masks = [301]u16{
+    1370, 2901, 3413, 2730, 5466, 1450, 3413, 2730, 2733, 1450, 3413, 1365,
+    2733, 2773, 2730, 5461, 1366, 2773, 6826, 2730, 5462, 1386, 3413, 2730,
+    2731, 1386, 3413, 1365, 2731, 2741, 1706, 5461, 1365, 2741, 5802, 2730,
+    1365, 2741, 2901, 6826, 2730, 1370, 2901, 3413, 2730, 5466, 1450, 3413,
+    2730, 2733, 5842, 1874, 3749, 5706, 1611, 2715, 5462, 1386, 2905, 5970,
+    1874, 6949, 2853, 2635, 4763, 2733, 1386, 2921, 2985, 6994, 3474, 3365,
+    6733, 2390, 693,  5549, 1748, 3497, 7570, 3730, 3366, 1319, 2647, 4790,
+    2778, 1748, 3753, 1865, 5779, 2707, 1323, 2651, 2413, 2922, 6996, 2980,
+    2889, 6803, 2709, 5419, 1325, 2733, 5482, 3506, 3492, 7497, 3402, 6805,
+    2710, 1366, 2741, 2773, 1746, 3749, 3749, 3658, 3222, 2715, 5462, 1386,
+    2905, 5970, 1874, 1829, 5707, 2635, 4779, 685,  1387, 2921, 3497, 3474,
+    6949, 3365, 6733, 2646, 694,  5549, 1748, 3497, 7570, 3730, 3366, 2646,
+    2647, 4790, 2906, 1748, 3785, 1865, 1683, 5415, 1323, 2651, 5466, 874,
+    6997, 2980, 2889, 6803, 2709, 1325, 2653, 2733, 5546, 1490, 3493, 7498,
+    3402, 2709, 5421, 1366, 2741, 5546, 1746, 3749, 3749, 3658, 3222, 3227,
+    1370, 2773, 2921, 5970, 1874, 2853, 5707, 2635, 1195, 1371, 1389, 2921,
+    6994, 3474, 7461, 3365, 2637, 5293, 694,  1461, 3497, 3753, 7570, 3730,
+    3366, 2646, 2647, 1238, 1717, 1749, 3785, 3730, 1683, 5419, 1323, 2651,
+    5466, 1386, 2901, 5961, 2889, 6803, 2709, 1325, 2733, 2741, 1450, 2981,
+    3493, 3402, 6805, 3221, 5422, 1366, 2741, 5554, 1746, 3749, 7754, 1610,
+    3223, 3243, 1370, 2773, 2921, 1874, 5797, 2853, 1611, 5271, 1195, 1371,
+    1453, 3413, 2730, 2733, 1450, 3413, 1365, 2733, 2773, 1706, 5461, 1366,
+    2773, 6826, 2730, 5462, 1386, 3413, 2730, 2731, 1386, 3413, 1365, 2731,
+    5482, 1706, 5461, 1365, 2741, 5802, 2730, 1365, 2741, 2901, 2730, 5461,
+    1370, 2901, 3413, 2730, 5466, 1450, 3413, 2730, 2733, 5546, 1706, 1365,
+    2733,
+};
+
+const LunisolarTable = struct {
+    starts: []const i32,
+    leaps: []const u8,
+    masks: []const u16,
+};
+const chinese_table = LunisolarTable{ .starts = &chinese_year_starts, .leaps = &chinese_leap_ords, .masks = &chinese_month_masks };
+const dangi_table = LunisolarTable{ .starts = &dangi_year_starts, .leaps = &dangi_leap_ords, .masks = &dangi_month_masks };
+const lunisolar_first_year: i64 = 1850;
+
+fn lunisolarTable(f: CompFamily) *const LunisolarTable {
+    return if (f == .dangi) &dangi_table else &chinese_table;
+}
+fn lunisolarInRange(year: i64) bool {
+    return year >= lunisolar_first_year and year < lunisolar_first_year + 301;
+}
+fn lunisolarClampYear(year: i64) usize {
+    return @intCast(std.math.clamp(year, lunisolar_first_year, lunisolar_first_year + 300) - lunisolar_first_year);
+}
+fn lunisolarLeapOrd(f: CompFamily, year: i64) u32 {
+    if (!lunisolarInRange(year)) return 0;
+    return lunisolarTable(f).leaps[lunisolarClampYear(year)];
+}
+fn lunisolarMonthsInYear(f: CompFamily, year: i64) u32 {
+    return if (lunisolarLeapOrd(f, year) > 0) 13 else 12;
+}
+fn lunisolarDaysInMonth(f: CompFamily, year: i64, month: u32) u32 {
+    const t = lunisolarTable(f);
+    const mask = t.masks[lunisolarClampYear(year)];
+    return 29 + @as(u32, (mask >> @intCast(month - 1)) & 1);
+}
+fn lunisolarDaysInYear(f: CompFamily, year: i64) u32 {
+    const t = lunisolarTable(f);
+    const idx = lunisolarClampYear(year);
+    return 29 * lunisolarMonthsInYear(f, year) + @as(u32, @popCount(t.masks[idx]));
+}
+fn lunisolarToDays(f: CompFamily, year: i64, month: i64, day: i64) i64 {
+    const t = lunisolarTable(f);
+    const idx = lunisolarClampYear(year);
+    var days: i64 = t.starts[idx];
+    const mask = t.masks[idx];
+    var m: i64 = 1;
+    while (m < month) : (m += 1) days += 29 + @as(i64, (mask >> @intCast(m - 1)) & 1);
+    return days + day - 1;
+}
+fn lunisolarFromDays(f: CompFamily, date_in: i64) CompYmd {
+    const t = lunisolarTable(f);
+    const last = t.starts.len - 1;
+    const table_end: i64 = t.starts[last] + 29 * 12 + @as(i64, @popCount(t.masks[last]));
+    // Saturate outside the tabulated range: the getters must stay total, and
+    // from-fields never reaches here for an out-of-range year.
+    const date = std.math.clamp(date_in, t.starts[0], table_end - 1);
+    var lo: usize = 0;
+    var hi: usize = t.starts.len;
+    while (lo + 1 < hi) {
+        const mid = (lo + hi) / 2;
+        if (t.starts[mid] <= date) lo = mid else hi = mid;
+    }
+    const year = lunisolar_first_year + @as(i64, @intCast(lo));
+    var rem: i64 = date - t.starts[lo];
+    const mask = t.masks[lo];
+    const miy = lunisolarMonthsInYear(f, year);
+    var month: u32 = 1;
+    while (month < miy) : (month += 1) {
+        const dim: i64 = 29 + @as(i64, (mask >> @intCast(month - 1)) & 1);
+        if (rem < dim) break;
+        rem -= dim;
+    }
+    return .{ .year = year, .month = month, .day = @intCast(rem + 1) };
+}
+
 // ── Computational calendar family ────────────────────────────────────────────
 // A common dispatch over the calendars whose date is a closed-form function of
 // the day count: the Islamic tabular pair (islamic-civil / islamic-tbla) and
@@ -890,7 +1154,7 @@ fn hebrewFromDays(date: i64) CompYmd {
 // fixed-from / from-fixed / month-length / leap rules. Coptic epochs verified
 // against SpiderMonkey/Boa/Kiesel/libjs (coptic 1737-01-01 = ISO 2020-09-11,
 // ethiopic 2013-01-01 = ISO 2020-09-11). Reingold & Dershowitz.
-const CompFamily = enum { islamic, umalqura, hebrew, coptic, indian, persian };
+const CompFamily = enum { islamic, umalqura, hebrew, chinese, dangi, coptic, indian, persian };
 const ComputedCal = struct { family: CompFamily, epoch: i64, era: []const u8 };
 
 fn computedCal(cal: temporal.CalendarId) ?ComputedCal {
@@ -905,6 +1169,8 @@ fn computedCal(cal: temporal.CalendarId) ?ComputedCal {
     if (std.ascii.eqlIgnoreCase(s, "indian")) return .{ .family = .indian, .epoch = 0, .era = "shaka" }; // gregorian-tied, no fixed epoch
     if (std.ascii.eqlIgnoreCase(s, "persian")) return .{ .family = .persian, .epoch = 0, .era = "ap" }; // Solar Hijri; epoch baked into persianToDays
     if (std.ascii.eqlIgnoreCase(s, "hebrew")) return .{ .family = .hebrew, .epoch = 0, .era = "am" }; // epoch baked into hebrewToDays
+    if (std.ascii.eqlIgnoreCase(s, "chinese")) return .{ .family = .chinese, .epoch = 0, .era = "" }; // no era system
+    if (std.ascii.eqlIgnoreCase(s, "dangi")) return .{ .family = .dangi, .epoch = 0, .era = "" }; // no era system
     return null;
 }
 
@@ -932,6 +1198,7 @@ fn compMonthsInYear(f: CompFamily, year: i64) u32 {
     return switch (f) {
         .coptic => 13,
         .hebrew => if (hebrewLeap(year)) 13 else 12,
+        .chinese, .dangi => lunisolarMonthsInYear(f, year),
         else => 12,
     };
 }
@@ -957,6 +1224,7 @@ fn compLeap(f: CompFamily, year: i64) bool {
         .islamic => islamicLeap(year),
         .umalqura => umalquraDaysInYear(year) == 355,
         .hebrew => hebrewLeap(year),
+        .chinese, .dangi => lunisolarLeapOrd(f, year) > 0,
         .coptic => @mod(year, 4) == 3,
         .indian => indianLeap(year),
         .persian => persianLeap(year),
@@ -968,6 +1236,7 @@ fn compDaysInMonth(f: CompFamily, year: i64, month: u32) u32 {
         .islamic => islamicDaysInMonth(year, month),
         .umalqura => umalquraDaysInMonth(year, month),
         .hebrew => hebrewDaysInMonth(year, month),
+        .chinese, .dangi => lunisolarDaysInMonth(f, year, month),
         .coptic => if (month <= 12) 30 else (if (compLeap(.coptic, year)) @as(u32, 6) else 5),
         .indian => indianDaysInMonth(year, month),
         .persian => persianDaysInMonth(year, month),
@@ -979,6 +1248,7 @@ fn compDaysInYear(f: CompFamily, year: i64) u32 {
         .islamic => if (compLeap(.islamic, year)) @as(u32, 355) else 354,
         .umalqura => umalquraDaysInYear(year),
         .hebrew => hebrewDaysInYear(year),
+        .chinese, .dangi => lunisolarDaysInYear(f, year),
         .coptic => if (compLeap(.coptic, year)) @as(u32, 366) else 365,
         .indian => if (compLeap(.indian, year)) @as(u32, 366) else 365,
         .persian => if (compLeap(.persian, year)) @as(u32, 366) else 365,
@@ -991,6 +1261,7 @@ fn compToDays(c: ComputedCal, year: i64, month: i64, day: i64) i64 {
         .islamic => islamicToDays(c.epoch, year, month, day),
         .umalqura => umalquraToDays(year, month, day),
         .hebrew => hebrewToDays(year, month, day),
+        .chinese, .dangi => lunisolarToDays(c.family, year, month, day),
         .coptic => c.epoch - 1 + 365 * (year - 1) + @divFloor(year, 4) + 30 * (month - 1) + day,
         .indian => indianToDays(year, month, day),
         .persian => persianToDays(year, month, day),
@@ -1008,6 +1279,7 @@ fn compFromDays(c: ComputedCal, date: i64) CompYmd {
         },
         .umalqura => return umalquraFromDays(date),
         .hebrew => return hebrewFromDays(date),
+        .chinese, .dangi => return lunisolarFromDays(c.family, date),
         .coptic => {
             const year = @divFloor(4 * (date - c.epoch) + 1463, 1461);
             const month = @divFloor(date - compToDays(c, year, 1, 1), 30) + 1;
@@ -1136,32 +1408,36 @@ pub fn computedMonthDayRef(cal: temporal.CalendarId, code_month: i64, day_in: i6
     const ref_limit = temporal.daysFromCivil(1972, 12, 31);
     const base_year = compFromDays(c, ref_limit).year;
 
-    // Resolve the (year-independent) code number to the ordinal for `y`, or
-    // null when the month doesn't exist in that year (leap code, common year).
-    const H = struct {
-        fn ordFor(cc: ComputedCal, y: i64, code: i64) ?i64 {
-            if (cc.family != .hebrew) return code;
-            const ly = hebrewLeap(y);
-            if (code < 0) return if (ly) 6 else null;
-            if (code <= 5) return code;
-            return if (ly) code + 1 else code;
-        }
-    };
-
-    // Longest this month gets across the leap cycle (40 ≥ the Islamic 30-year
-    // cycle and two Metonic cycles), so reject can detect an impossible day and
-    // constrain can clamp.
+    // The chinese/dangi reference search is bounded below at year 1900: the
+    // pre-1900 proleptic data is where ICU4X and ICU4C disagree, so the
+    // proposal pins "has not occurred since 1900" as unrepresentable. The
+    // arithmetic calendars settle within 40 years (over an Islamic 30-year
+    // cycle and two Metonic cycles).
+    const bounded = c.family == .chinese or c.family == .dangi;
+    const floor_year: i64 = if (bounded) 1900 else base_year - 40;
     var max_day: i64 = 0;
     var p: i64 = base_year;
-    var pn: usize = 0;
-    while (pn < 40) : (pn += 1) {
-        if (H.ordFor(c, p, code_month)) |ord| {
+    while (p >= floor_year) : (p -= 1) {
+        if (compOrdForCode(c.family, p, code_month)) |ord| {
             const dim: i64 = compDaysInMonth(c.family, p, @intCast(ord));
             if (dim > max_day) max_day = dim;
         }
-        p -= 1;
     }
-    if (max_day == 0) return null; // month code never occurs (bad code)
+    var code = code_month;
+    if (max_day == 0) {
+        // The coded month never occurs in the searchable window (a rare leap
+        // month): reject throws; constrain falls back to the base month.
+        if (reject or code_month >= 0) return null;
+        code = -code_month;
+        var p2: i64 = base_year;
+        while (p2 >= floor_year) : (p2 -= 1) {
+            if (compOrdForCode(c.family, p2, code)) |ord| {
+                const dim: i64 = compDaysInMonth(c.family, p2, @intCast(ord));
+                if (dim > max_day) max_day = dim;
+            }
+        }
+        if (max_day == 0) return null;
+    }
     var day = day_in;
     if (day > max_day) {
         if (reject) return null;
@@ -1172,9 +1448,8 @@ pub fn computedMonthDayRef(cal: temporal.CalendarId, code_month: i64, day_in: i6
     // Walk calendar years down from the reference epoch to the latest one whose
     // (month, day) is both valid and lands on or before the ISO limit.
     var cy: i64 = base_year;
-    var n: usize = 0;
-    while (n < 60) : (n += 1) {
-        const ord = H.ordFor(c, cy, code_month) orelse {
+    while (cy >= floor_year) {
+        const ord = compOrdForCode(c.family, cy, code) orelse {
             cy -= 1;
             continue;
         };
@@ -1222,8 +1497,8 @@ pub fn calendarFields(cal: temporal.CalendarId, iso_y: i32, iso_m: u32, iso_d: u
             .months_in_year = compMonthsInYear(c.family, cd.year),
             .day_of_year = @intCast(date - compToDays(c, cd.year, 1, 1) + 1),
             .in_leap_year = compLeap(c.family, cd.year),
-            .era = ev.era,
-            .era_year = @intCast(ev.era_year),
+            .era = if (c.era.len == 0) null else ev.era,
+            .era_year = if (c.era.len == 0) null else @intCast(ev.era_year),
         };
     }
     // Japanese: gregorian structure with a date-based era overlay.
@@ -1303,11 +1578,15 @@ pub fn monthCodeValue(realm: *Realm, cal: temporal.CalendarId, y: i32, m: u32, d
     var mo = cf.month;
     var leap_suffix = false;
     if (computedCal(cal)) |c| {
-        // Hebrew leap years insert Adar I at ordinal 6 with code "M05L"; the
-        // months after it keep their common-year codes (ordinal - 1).
-        if (c.family == .hebrew and hebrewLeap(cf.year)) {
-            if (cf.month == 6) leap_suffix = true;
-            if (cf.month >= 6) mo = cf.month - 1;
+        // Lunisolar leap years insert a leap month whose code repeats the
+        // preceding month with an "L" suffix; later months keep their
+        // common-year codes (ordinal - 1).
+        const code = compCodeForOrd(c.family, cf.year, cf.month);
+        if (code < 0) {
+            leap_suffix = true;
+            mo = @intCast(-code);
+        } else {
+            mo = @intCast(code);
         }
     }
     var mc: [4]u8 = .{ 'M', '0' + @as(u8, @intCast(mo / 10)), '0' + @as(u8, @intCast(mo % 10)), 'L' };
@@ -1334,6 +1613,7 @@ const CalYmd = struct { year: i64, month: u32, day: u32 };
 /// ISO directly and never reach here).
 pub fn computedToIso(cal: temporal.CalendarId, cal_y: i64, cal_m: i64, cal_d: i64, reject: bool) ?CalYmd {
     const c = computedCal(cal) orelse return null;
+    if ((c.family == .chinese or c.family == .dangi) and !lunisolarInRange(cal_y)) return null;
     const miy: i64 = compMonthsInYear(c.family, cal_y);
     var m = cal_m;
     if (m < 1 or m > miy) {
@@ -1373,7 +1653,7 @@ pub fn addComputed(cal: temporal.CalendarId, iso_y: i32, iso_m: u32, iso_d: u32,
     const start_code = compCodeForOrd(c.family, start.year, start.month);
     const m_ord: i64 = compOrdForCode(c.family, y0, start_code) orelse blk: {
         if (reject and add_y != 0) return null;
-        break :blk 6; // hebrew M05L → Adar
+        break :blk constrainLeapOrd(c.family, y0, start_code);
     };
     const bym = balanceCompYearMonth(c.family, y0, m_ord + add_mo);
     const y = bym.year;
@@ -1396,22 +1676,44 @@ const CompYearMonth = struct { year: i64, month: i64 };
 /// exactly 235 months (leap years are fixed residues mod 19 — the Metonic
 /// cycle), so huge deltas jump by whole cycles before the per-year walk.
 fn balanceCompYearMonth(f: CompFamily, year_in: i64, month_in: i64) CompYearMonth {
-    if (f != .hebrew) {
+    const year_varying = switch (f) {
+        .hebrew, .chinese, .dangi => true,
+        else => false,
+    };
+    if (!year_varying) {
         const miy: i64 = compMonthsInYear(f, 0);
         const m0 = month_in - 1;
         return .{ .year = year_in + @divFloor(m0, miy), .month = @mod(m0, miy) + 1 };
     }
     var y = year_in;
     var m0 = month_in - 1; // 0-based
-    while (m0 >= 235) : (m0 -= 235) y += 19;
-    while (m0 < -235) : (m0 += 235) y -= 19;
-    while (m0 >= compMonthsInYear(.hebrew, y)) {
-        m0 -= compMonthsInYear(.hebrew, y);
+    if (f == .hebrew) {
+        // Any 19 consecutive hebrew years hold exactly 235 months (leap years
+        // are fixed residues mod 19), so huge deltas jump by whole cycles.
+        while (m0 >= 235) : (m0 -= 235) y += 19;
+        while (m0 < -235) : (m0 += 235) y -= 19;
+    }
+    while (m0 >= compMonthsInYear(f, y)) {
+        // Outside the chinese/dangi table every year reads as 12 months, so a
+        // huge remaining delta jumps in bulk instead of walking year-by-year.
+        if (f != .hebrew and !lunisolarInRange(y) and m0 >= 24) {
+            const jump = @divFloor(m0, 12) - 1;
+            y += jump;
+            m0 -= jump * 12;
+            continue;
+        }
+        m0 -= compMonthsInYear(f, y);
         y += 1;
     }
     while (m0 < 0) {
+        if (f != .hebrew and !lunisolarInRange(y - 1) and m0 <= -24) {
+            const jump = @divFloor(-m0, 12) - 1;
+            y -= jump;
+            m0 += jump * 12;
+            continue;
+        }
         y -= 1;
-        m0 += compMonthsInYear(.hebrew, y);
+        m0 += compMonthsInYear(f, y);
     }
     return .{ .year = y, .month = m0 + 1 };
 }
@@ -1470,13 +1772,13 @@ pub fn differenceComputedDate(cal: temporal.CalendarId, d1: temporal.PlainDateRe
         while (true) {
             const cy = cd1.year + cand_years;
             if (compDateSurpasses(sign, cy, key1, 0, cd2.year, key2, 0)) break;
-            const ord = compOrdForCode(c.family, cy, code1) orelse 6;
+            const ord = compOrdForCode(c.family, cy, code1) orelse constrainLeapOrd(c.family, cy, code1);
             if (compDateSurpasses(sign, cy, ord, cd1.day, cd2.year, cd2.month, cd2.day)) break;
             years = cand_years;
             cand_years += sign;
         }
         const anchor_y = cd1.year + years;
-        const anchor_m: i64 = compOrdForCode(c.family, anchor_y, code1) orelse 6;
+        const anchor_m: i64 = compOrdForCode(c.family, anchor_y, code1) orelse constrainLeapOrd(c.family, anchor_y, code1);
         var cand_months: i64 = sign;
         var inter = compStepMonth(c.family, anchor_y, anchor_m, sign);
         while (!compDateSurpasses(sign, inter.year, inter.month, cd1.day, cd2.year, cd2.month, cd2.day)) {
@@ -1505,7 +1807,7 @@ pub fn differenceComputedDate(cal: temporal.CalendarId, d1: temporal.PlainDateRe
     }
 
     const anchor2_y = cd1.year + years;
-    const anchor2_m: i64 = compOrdForCode(c.family, anchor2_y, code1) orelse 6;
+    const anchor2_m: i64 = compOrdForCode(c.family, anchor2_y, code1) orelse constrainLeapOrd(c.family, anchor2_y, code1);
     const bym = balanceCompYearMonth(c.family, anchor2_y, anchor2_m + months);
     const dim: i64 = compDaysInMonth(c.family, bym.year, @intCast(bym.month));
     const anchor = compToDays(c, bym.year, bym.month, @min(@as(i64, cd1.day), dim));
