@@ -1623,6 +1623,17 @@ test "intl: Locale info methods return correct shapes" {
     );
 }
 
+test "intl: DateTimeFormat era-only options default to a full date" {
+    try requireIntlBuild();
+    try evalAssert1(
+        \\const f = new Intl.DateTimeFormat(['en'], {era: 'narrow', timeZone: 'UTC'});
+        \\(f.format(new Temporal.PlainDate(2025, 11, 4)).startsWith('11') &&
+        \\ f.format(new Temporal.PlainTime(14, 46)).startsWith('2') &&
+        \\ f.resolvedOptions().year === 'numeric' &&
+        \\ f.format(new Date(0)).startsWith('1/1/1970')) ? 1 : 0
+    );
+}
+
 test "intl: Temporal toLocaleString field filtering + calendar month names" {
     try requireIntlBuild();
     try evalAssert1(

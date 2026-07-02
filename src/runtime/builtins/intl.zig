@@ -3797,10 +3797,22 @@ fn resolveDateTimePattern(dd: cldr.DateData, slots: *const intl.DateTimeFormatSl
         return if (has_date_style) date_pat else time_pat;
     }
 
-    // Component options (or the numeric y/m/d default).
-    const any_date = slots.weekday.len > 0 or slots.era.len > 0 or slots.year.len > 0 or slots.month.len > 0 or slots.day.len > 0;
-    const any_time = slots.hour.len > 0 or slots.minute.len > 0 or slots.second.len > 0 or slots.day_period.len > 0 or
-        slots.fractional_second_digits != null;
+    // Component options (or the §11.1.2 ToDateTimeOptions(ANY, DATE)
+    // numeric y/m/d default — which a lone { era } also takes, era being
+    // the one component outside the needDefaults check list).
+    var eff_slots = slots.*;
+    const slots_nine = slots.weekday.len > 0 or slots.year.len > 0 or slots.month.len > 0 or
+        slots.day.len > 0 or slots.hour.len > 0 or slots.minute.len > 0 or slots.second.len > 0 or
+        slots.day_period.len > 0 or slots.fractional_second_digits != null;
+    if (!slots_nine) {
+        eff_slots.year = "numeric";
+        eff_slots.month = "numeric";
+        eff_slots.day = "numeric";
+    }
+    const slots2 = &eff_slots;
+    const any_date = slots2.weekday.len > 0 or slots2.era.len > 0 or slots2.year.len > 0 or slots2.month.len > 0 or slots2.day.len > 0;
+    const any_time = slots2.hour.len > 0 or slots2.minute.len > 0 or slots2.second.len > 0 or slots2.day_period.len > 0 or
+        slots2.fractional_second_digits != null;
 
     var date_buf: [128]u8 = undefined;
     var time_buf: [128]u8 = undefined;
@@ -3809,20 +3821,20 @@ fn resolveDateTimePattern(dd: cldr.DateData, slots: *const intl.DateTimeFormatSl
 
     if (any_date or !any_time) {
         // Base template by the most textual requested field.
-        const base = if (slots.weekday.len > 0)
+        const base = if (slots2.weekday.len > 0)
             dd.date_full
-        else if (isTextualMonth(slots.month))
-            (if (std.mem.eql(u8, slots.month, "short")) dd.date_medium else dd.date_long)
+        else if (isTextualMonth(slots2.month))
+            (if (std.mem.eql(u8, slots2.month, "short")) dd.date_medium else dd.date_long)
         else
             dd.date_short;
-        date_pat = buildFromTemplate(base, slots, true, date_buf[0..]);
+        date_pat = buildFromTemplate(base, slots2, true, date_buf[0..]);
     }
     if (any_time) {
-        time_pat = buildFromTemplate(dd.time_medium, slots, false, time_buf[0..]);
+        time_pat = buildFromTemplate(dd.time_medium, slots2, false, time_buf[0..]);
         // The flexible day-period skeleton (hB) separates with a plain space,
         // unlike am/pm (h a); the template carries the am/pm separator, so
         // flatten the narrow / non-breaking space when the dayPeriod option set.
-        if (slots.day_period.len > 0) time_pat = flattenNarrowSpaces(time_buf[0..time_pat.len]);
+        if (slots2.day_period.len > 0) time_pat = flattenNarrowSpaces(time_buf[0..time_pat.len]);
     }
 
     if (date_pat.len > 0 and time_pat.len > 0)
@@ -4351,7 +4363,10 @@ fn dtfRenderArg(realm: *Realm, slots: *const intl.DateTimeFormatSlots, arg: Valu
                 const kind = std.meta.activeTag(rec.*);
                 const date_only = kind == .plain_date or kind == .plain_year_month or kind == .plain_month_day;
                 const time_only = kind == .plain_time;
-                const had_any = slots.weekday.len > 0 or slots.era.len > 0 or slots.year.len > 0 or
+                // era is outside the §11.1.2 needDefaults check list: a lone
+                // { era } takes the type's defaults rather than failing to
+                // overlap.
+                const had_any = slots.weekday.len > 0 or slots.year.len > 0 or
                     slots.month.len > 0 or slots.day.len > 0 or slots.hour.len > 0 or slots.minute.len > 0 or
                     slots.second.len > 0 or slots.day_period.len > 0 or slots.fractional_second_digits != null or
                     slots.date_style.len > 0 or slots.time_style.len > 0;
@@ -4400,7 +4415,7 @@ fn dtfRenderArg(realm: *Realm, slots: *const intl.DateTimeFormatSlots, arg: Valu
                     },
                     else => {}, // the date-time types admit every field
                 }
-                const any_relevant = s2.weekday.len > 0 or s2.era.len > 0 or s2.year.len > 0 or
+                const any_relevant = s2.weekday.len > 0 or s2.year.len > 0 or
                     s2.month.len > 0 or s2.day.len > 0 or s2.hour.len > 0 or s2.minute.len > 0 or
                     s2.second.len > 0 or s2.day_period.len > 0 or s2.fractional_second_digits != null or
                     s2.date_style.len > 0 or s2.time_style.len > 0;
