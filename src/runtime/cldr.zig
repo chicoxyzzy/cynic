@@ -702,6 +702,29 @@ pub fn currencyDisplayNameCount(locale: []const u8, code: []const u8, category: 
     return null;
 }
 
+/// Append every currency code with a display name in `locale`'s record
+/// (walking the fallback chain) to `out`. Each code is a 3-byte slice
+/// borrowed from the blob (static lifetime). This is the AvailableCurrencies
+/// set — the codes DisplayNames can name — which supportedValuesOf("currency")
+/// must enumerate so the enumerate-set matches DisplayNames (§6).
+pub fn appendCurrencyCodes(locale: []const u8, alloc: std.mem.Allocator, out: *std.ArrayListUnmanaged([]const u8)) !void {
+    if (!ensureInit() or cur_names_payload.len < 4) return;
+    const off0 = withCandidates(locale, findCurrencyName) orelse return;
+    var off = off0;
+    const cur_count = readU32(cur_names_payload, &off) orelse return;
+    var i: u32 = 0;
+    while (i < cur_count) : (i += 1) {
+        const code = readBytes(cur_names_payload, &off, 3) orelse return;
+        try out.append(alloc, code);
+        const form_count = readU8(cur_names_payload, &off) orelse return;
+        var f: u8 = 0;
+        while (f < form_count) : (f += 1) {
+            _ = readU8(cur_names_payload, &off) orelse return; // category
+            _ = readStr16(cur_names_payload, &off) orelse return; // name
+        }
+    }
+}
+
 /// Locate a locale's record in the `currency_names` section; returns the offset
 /// just past the key (at `cur_count`). Mirrors `findCurrencyLocale`.
 fn findCurrencyName(key: []const u8) ?usize {

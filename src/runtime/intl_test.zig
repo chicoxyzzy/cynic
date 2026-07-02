@@ -347,6 +347,23 @@ test "intl: supportedValuesOf(numberingSystem) enumerates the CLDR accept-set (i
     );
 }
 
+test "intl: supportedValuesOf(currency) enumerates CLDR-named codes (incl. historical ADP)" {
+    try requireIntlBuild();
+    if (!intl_config.has_locale_data) return error.SkipZigTest; // names come from the CLDR blob
+    // §6 AvailableCurrencies: every currency DisplayNames can name must be
+    // enumerated. `ADP` (Andorran Peseta, withdrawn) has a CLDR display name,
+    // so it must appear (test262 currencies-accepted-by-DisplayNames).
+    try evalAssert1(
+        \\const l = Intl.supportedValuesOf("currency");
+        \\if (!l.includes("ADP")) throw 0;
+        \\if (!l.includes("USD") || !l.includes("EUR")) throw 1;
+        \\for (let i = 1; i < l.length; i++) if (l[i - 1] >= l[i]) throw 2; // sorted + unique, upper-case
+        \\const dn = new Intl.DisplayNames("en", { type: "currency", fallback: "none" });
+        \\for (const c of l) if (typeof dn.of(c) !== "string") throw 3;
+        \\1
+    );
+}
+
 test "intl/temporal: with ignores era/eraYear on era-less calendars (no throw)" {
     try requireIntlBuild();
     // `from` requires a year and throws when era/eraYear can't supply one for an

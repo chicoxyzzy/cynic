@@ -665,9 +665,13 @@ fn intlSupportedValuesOf(realm: *Realm, this_value: Value, args: []const Value) 
         &intl.supported_calendars
     else if (std.mem.eql(u8, key, "collation"))
         &intl.supported_collations
-    else if (std.mem.eql(u8, key, "currency"))
-        &intl.supported_currencies
-    else if (std.mem.eql(u8, key, "numberingSystem")) blk: {
+    else if (std.mem.eql(u8, key, "currency")) blk: {
+        if (cldr.available) {
+            cldr.appendCurrencyCodes("en", realm.allocator, &owned) catch return error.OutOfMemory;
+            if (owned.items.len > 0) break :blk owned.items;
+        }
+        break :blk &intl.supported_currencies;
+    } else if (std.mem.eql(u8, key, "numberingSystem")) blk: {
         if (cldr.available) {
             cldr.appendNumberingSystemIds(realm.allocator, &owned) catch return error.OutOfMemory;
             if (owned.items.len > 0) break :blk owned.items;
