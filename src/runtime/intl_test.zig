@@ -406,6 +406,21 @@ test "intl/temporal: chinese + dangi lunisolar calendars (table / leap months)" 
     );
 }
 
+test "intl/temporal: PlainMonthDay forward reference years + out-of-table constrain" {
+    try requireIntlBuild();
+    // M11L last fell in 1889 and next in 2033: the reference search continues
+    // forward past 1972; M09L similarly (2014). An out-of-table chinese year
+    // constrains to the table edge (reject still throws).
+    try evalAssert1(
+        \\const rejects = (f) => { try { f(); return false; } catch (e) { return e instanceof RangeError; } };
+        \\const y = (pmd) => Number(pmd.toString().split('-')[0]);
+        \\(y(Temporal.PlainMonthDay.from({calendar: 'chinese', monthCode: 'M11L', day: 1})) === 2033 &&
+        \\ y(Temporal.PlainMonthDay.from({calendar: 'chinese', monthCode: 'M09L', day: 1})) === 2014 &&
+        \\ Temporal.PlainDate.from({calendar: 'chinese', year: 1651, monthCode: 'M01L', day: 29}).monthCode === 'M01' &&
+        \\ rejects(() => Temporal.PlainDate.from({calendar: 'chinese', year: 1651, monthCode: 'M01L', day: 29}, {overflow: 'reject'}))) ? 1 : 0
+    );
+}
+
 test "intl/temporal: PlainMonthDay year-range bail + per-year ordinal constrain" {
     try requireIntlBuild();
     try evalAssert1(
@@ -1586,6 +1601,18 @@ test "intl: Locale info methods return correct shapes" {
         \\ JSON.stringify(Reflect.ownKeys(wi)) === '["firstDay","weekend"]' &&
         \\ wi.firstDay >= 1 && wi.firstDay <= 7 &&
         \\ wi.weekend.every(d => d >= 1 && d <= 7)) ? 1 : 0
+    );
+}
+
+test "intl: Date.prototype.toLocaleString routes through DateTimeFormat" {
+    try requireIntlBuild();
+    try evalAssert1(
+        \\const d = new Date(1735213600321); // 2024-12-26T11:46:40.321Z
+        \\(d.toLocaleString('en', {year: 'numeric', timeZone: 'UTC'}) === '2024' &&
+        \\ d.toLocaleDateString('en', {timeZone: 'UTC'}) === '12/26/2024' &&
+        \\ typeof d.toLocaleTimeString('en', {timeZone: 'UTC'}) === 'string' &&
+        \\ new Date(NaN).toLocaleString('en') === 'Invalid Date' &&
+        \\ (() => { try { d.toLocaleDateString('en', {timeStyle: 'short'}); return false; } catch (e) { return e instanceof TypeError; } })()) ? 1 : 0
     );
 }
 

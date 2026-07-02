@@ -1424,12 +1424,28 @@ pub fn computedMonthDayRef(cal: temporal.CalendarId, code_month: i64, day_in: i6
     // cycle and two Metonic cycles).
     const bounded = c.family == .chinese or c.family == .dangi;
     const floor_year: i64 = if (bounded) 1900 else base_year - 40;
+    // When a rare leap month has no occurrence at or before the reference
+    // epoch, the search continues FORWARD (M11L last fell in 1889 and next in
+    // 2033 -> the reference date is in 2033), bounded at 2035 — the window
+    // the proposal's reference-year table was generated over. A code/day
+    // absent from [1900, 2035] (M01L; a 30-day M09L) is unrepresentable and
+    // constrains to the base month.
+    const ceil_year: i64 = if (bounded) 2035 else base_year;
     var max_day: i64 = 0;
     var p: i64 = base_year;
     while (p >= floor_year) : (p -= 1) {
         if (compOrdForCode(c.family, p, code_month)) |ord| {
             const dim: i64 = compDaysInMonth(c.family, p, @intCast(ord));
             if (dim > max_day) max_day = dim;
+        }
+    }
+    if (max_day == 0) {
+        var pf: i64 = base_year + 1;
+        while (pf <= ceil_year) : (pf += 1) {
+            if (compOrdForCode(c.family, pf, code_month)) |ord| {
+                const dim: i64 = compDaysInMonth(c.family, pf, @intCast(ord));
+                if (dim > max_day) max_day = dim;
+            }
         }
     }
     var code = code_month;
@@ -1478,7 +1494,8 @@ pub fn computedMonthDayRef(cal: temporal.CalendarId, code_month: i64, day_in: i6
     if (day < 1) return null;
 
     // Walk calendar years down from the reference epoch to the latest one whose
-    // (month, day) is both valid and lands on or before the ISO limit.
+    // (month, day) is both valid and lands on or before the ISO limit; when
+    // no such year exists, take the EARLIEST occurrence after the epoch.
     var cy: i64 = base_year;
     while (cy >= floor_year) {
         const ord = compOrdForCode(c.family, cy, code) orelse {
@@ -1494,6 +1511,16 @@ pub fn computedMonthDayRef(cal: temporal.CalendarId, code_month: i64, day_in: i6
             }
         }
         cy -= 1;
+    }
+    var cf: i64 = base_year + 1;
+    while (cf <= ceil_year) : (cf += 1) {
+        const ord = compOrdForCode(c.family, cf, code) orelse continue;
+        const dim: i64 = compDaysInMonth(c.family, cf, @intCast(ord));
+        if (day <= dim) {
+            const iso_days = compToDays(c, cf, ord, day);
+            const civ = temporal.civilFromDays(iso_days);
+            return .{ .iso_year = @intCast(civ.year), .iso_month = @intCast(civ.month), .iso_day = @intCast(civ.day) };
+        }
     }
     return null;
 }
@@ -1645,20 +1672,27 @@ const CalYmd = struct { year: i64, month: u32, day: u32 };
 /// ISO directly and never reach here).
 pub fn computedToIso(cal: temporal.CalendarId, cal_y: i64, cal_m: i64, cal_d: i64, reject: bool) ?CalYmd {
     const c = computedCal(cal) orelse return null;
-    if ((c.family == .chinese or c.family == .dangi) and !lunisolarInRange(cal_y)) return null;
-    const miy: i64 = compMonthsInYear(c.family, cal_y);
+    var y = cal_y;
+    if ((c.family == .chinese or c.family == .dangi) and !lunisolarInRange(y)) {
+        // Outside the 1850-2150 table: reject throws; constrain clamps the
+        // year to the table edge (the options-bag fixtures only assert on
+        // dates whose fields round-trip, which a clamped year never does).
+        if (reject) return null;
+        y = std.math.clamp(y, lunisolar_first_year, lunisolar_first_year + 300);
+    }
+    const miy: i64 = compMonthsInYear(c.family, y);
     var m = cal_m;
     if (m < 1 or m > miy) {
         if (reject) return null;
         m = std.math.clamp(m, 1, miy);
     }
-    const dim: i64 = compDaysInMonth(c.family, cal_y, @intCast(m));
+    const dim: i64 = compDaysInMonth(c.family, y, @intCast(m));
     var d = cal_d;
     if (d < 1 or d > dim) {
         if (reject) return null;
         d = std.math.clamp(d, 1, dim);
     }
-    const ymd = temporal.civilFromDays(compToDays(c, cal_y, m, d));
+    const ymd = temporal.civilFromDays(compToDays(c, y, m, d));
     return .{ .year = ymd.year, .month = ymd.month, .day = ymd.day };
 }
 

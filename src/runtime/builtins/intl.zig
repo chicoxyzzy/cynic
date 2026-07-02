@@ -3261,6 +3261,55 @@ pub fn temporalToLocaleString(realm: *Realm, this_value: Value, args: []const Va
     return makeStringValue(realm, flattenSegs(&segs, n, &buf));
 }
 
+pub const DateLocaleKind = enum { any, date, time };
+
+/// §21.4.4.38-40 Date.prototype.toLocale{,Date,Time}String at the CLDR tier —
+/// FormatDateTime through a transient DateTimeFormat built from (locales,
+/// options), applying the §11.1.2 ToDateTimeOptions (required, defaults)
+/// pair: toLocaleString defaults to date+time, toLocaleDateString to date
+/// (timeStyle is a TypeError), toLocaleTimeString to time (dateStyle is a
+/// TypeError). Callers gate on `cldr.available` and pass a finite epoch ms.
+pub fn dateToLocaleString(realm: *Realm, epoch_ms: f64, locales: Value, options: Value, which: DateLocaleKind) NativeError!Value {
+    var slots = try buildDateTimeFormatSlots(realm, locales, options);
+    defer slots.deinit(realm.allocator);
+    var eff = slots; // shallow copy; defaults below are static literals
+    const has_date = slots.weekday.len > 0 or slots.era.len > 0 or slots.year.len > 0 or
+        slots.month.len > 0 or slots.day.len > 0;
+    const has_time = slots.hour.len > 0 or slots.minute.len > 0 or slots.second.len > 0 or
+        slots.day_period.len > 0 or slots.fractional_second_digits != null;
+    const has_style = slots.date_style.len > 0 or slots.time_style.len > 0;
+    switch (which) {
+        .any => if (!has_date and !has_time and !has_style) {
+            eff.year = "numeric";
+            eff.month = "numeric";
+            eff.day = "numeric";
+            eff.hour = "numeric";
+            eff.minute = "numeric";
+            eff.second = "numeric";
+        },
+        .date => {
+            if (slots.time_style.len > 0) return throwTypeError(realm, "timeStyle is not allowed for toLocaleDateString");
+            if (!has_date and !has_style) {
+                eff.year = "numeric";
+                eff.month = "numeric";
+                eff.day = "numeric";
+            }
+        },
+        .time => {
+            if (slots.date_style.len > 0) return throwTypeError(realm, "dateStyle is not allowed for toLocaleTimeString");
+            if (!has_time and !has_style) {
+                eff.hour = "numeric";
+                eff.minute = "numeric";
+                eff.second = "numeric";
+            }
+        },
+    }
+    var segs: [48]Seg = undefined;
+    const n = try dtfRenderArg(realm, &eff, makeNumberValue(epoch_ms), &segs);
+    var buf: [256]u8 = undefined;
+    return makeStringValue(realm, flattenSegs(&segs, n, &buf));
+}
+
 /// Apply the §11.5 ToDateTimeOptions defaults for the Temporal type of `v` onto
 /// `slots` when the caller supplied no component / style option. Writes only the
 /// empty ("") fields with static literals, so the shallow copy keeps sharing

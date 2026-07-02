@@ -113,9 +113,9 @@ pub fn install(realm: *Realm) !void {
     try installNativeMethodOnProto(realm, proto, "toUTCString", dateToUTCString, 0);
     try installNativeMethodOnProto(realm, proto, "toDateString", dateToDateString, 0);
     try installNativeMethodOnProto(realm, proto, "toTimeString", dateToTimeString, 0);
-    try installNativeMethodOnProto(realm, proto, "toLocaleString", dateToString, 0);
-    try installNativeMethodOnProto(realm, proto, "toLocaleDateString", dateToDateString, 0);
-    try installNativeMethodOnProto(realm, proto, "toLocaleTimeString", dateToTimeString, 0);
+    try installNativeMethodOnProto(realm, proto, "toLocaleString", dateToLocaleString, 0);
+    try installNativeMethodOnProto(realm, proto, "toLocaleDateString", dateToLocaleDateString, 0);
+    try installNativeMethodOnProto(realm, proto, "toLocaleTimeString", dateToLocaleTimeString, 0);
     // Temporal proposal — `Date.prototype.toTemporalInstant` bridges a
     // legacy Date to a Temporal.Instant (epoch ms → epoch ns).
     try installNativeMethodOnProto(realm, proto, "toTemporalInstant", dateToTemporalInstant, 0);
@@ -983,6 +983,34 @@ fn dateGetTime(realm: *Realm, this_value: Value, args: []const Value) NativeErro
     _ = args;
     const ms = try requireDateMs(realm, this_value);
     return Value.fromDouble(ms);
+}
+
+/// §21.4.4.38-40 Date.prototype.toLocale{,Date,Time}String — at the CLDR
+/// tier these format through DateTimeFormat (see builtins/intl.zig); the
+/// structural tiers keep the legacy toString / toDateString / toTimeString
+/// shapes.
+fn dateLocaleImpl(realm: *Realm, this_value: Value, args: []const Value, which: @import("intl.zig").DateLocaleKind, comptime fallback: fn (*Realm, Value, []const Value) NativeError!Value) NativeError!Value {
+    const intl_b = @import("intl.zig");
+    const cldr = @import("../cldr.zig");
+    const ms = getDateMs(this_value) orelse return throwTypeError(realm, "Date.prototype.toLocaleString called on non-Date");
+    if (!cldr.available) return fallback(realm, this_value, args);
+    if (std.math.isNan(ms)) {
+        const s = realm.heap.allocateString("Invalid Date") catch return error.OutOfMemory;
+        return Value.fromString(s);
+    }
+    return intl_b.dateToLocaleString(realm, ms, if (args.len > 0) args[0] else Value.undefined_, if (args.len > 1) args[1] else Value.undefined_, which);
+}
+
+fn dateToLocaleString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    return dateLocaleImpl(realm, this_value, args, .any, dateToString);
+}
+
+fn dateToLocaleDateString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    return dateLocaleImpl(realm, this_value, args, .date, dateToDateString);
+}
+
+fn dateToLocaleTimeString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    return dateLocaleImpl(realm, this_value, args, .time, dateToTimeString);
 }
 
 fn dateToString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
