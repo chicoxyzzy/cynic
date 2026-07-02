@@ -1833,13 +1833,9 @@ pub fn roundZonedDateTime(epoch_ns: i128, tz: TimeZone, unit: LargestUnit, incre
         // either boundary can leave the valid epoch range — the upper bound
         // in particular, near the +8.64×10^21 ns limit. The day increment is
         // capped at 1, so the rounding increment is the whole day length.
-        const start_ns = getEpochNanosecondsFor(tz, PlainDateTimeRecord{
-            .iso_year = wall.iso_year,
-            .iso_month = wall.iso_month,
-            .iso_day = wall.iso_day,
-        }) orelse return null;
+        const start_ns = startOfDayForDate(tz, wall.iso_year, wall.iso_month, wall.iso_day) orelse return null;
         const tomorrow = addISODate(wall.date(), 0, 0, 0, 1, false) orelse return null;
-        const end_ns = getEpochNanosecondsFor(tz, PlainDateTimeRecord.combine(tomorrow, .{})) orelse return null;
+        const end_ns = startOfDayForDate(tz, tomorrow.iso_year, tomorrow.iso_month, tomorrow.iso_day) orelse return null;
         const day_len = end_ns - start_ns;
         const rounded = roundToIncrement(epoch_ns - start_ns, day_len * increment, mode);
         const result = start_ns + rounded;
@@ -1850,17 +1846,38 @@ pub fn roundZonedDateTime(epoch_ns: i128, tz: TimeZone, unit: LargestUnit, incre
     return getEpochNanosecondsFor(tz, rounded);
 }
 
-/// §6.5.x — the instant of the first wall-clock moment (midnight,
-/// 00:00:00.000000000) of `epoch_ns`'s calendar day in `tz`. For a
-/// fixed-offset zone midnight always exists and is unique.
+/// §6.5.x GetStartOfDay — the first instant of the calendar day `y-m-d`
+/// in `tz`. Usually midnight (its earliest candidate for a fold), but when
+/// a forward transition SKIPS midnight the day begins at the transition
+/// instant (e.g. Toronto 1919-03-31 sprang 23:30→00:30, so the day starts
+/// at 00:30, 30 min after the skipped 00:00). Null when the instant leaves
+/// the representable range.
+pub fn startOfDayForDate(tz: TimeZone, y: i32, mo: u8, d: u8) ?i128 {
+    const midnight = PlainDateTimeRecord{ .iso_year = y, .iso_month = mo, .iso_day = d };
+    var poss: [2]i128 = undefined;
+    const n = getPossibleEpochNanoseconds(tz, midnight, &poss);
+    if (n >= 1) {
+        if (!isValidEpochNanoseconds(poss[0])) return null;
+        return poss[0];
+    }
+    // Midnight is in a gap: the day begins at the transition instant. That
+    // instant is at or just before the compatible (later) interpretation of
+    // midnight — `compatible + 1 ns` as the strictly-before reference
+    // includes a transition that lands exactly on `compatible` (e.g. Samoa's
+    // 2011-12-30 skipped whole day, where the gap starts at midnight).
+    const compatible = disambiguateEpochNanoseconds(tz, midnight, .compatible) catch return null;
+    const t = switch (tz) {
+        .named => |nm| @import("tzdata.zig").transitionFor(nm.slice(), compatible + 1, false),
+        else => null,
+    } orelse return compatible;
+    if (!isValidEpochNanoseconds(t)) return null;
+    return t;
+}
+
+/// §6.5.x — the first instant of `epoch_ns`'s calendar day in `tz`.
 pub fn zonedStartOfDay(epoch_ns: i128, tz: TimeZone) ?i128 {
     const wall = getISODateTimeFor(tz, epoch_ns);
-    const midnight = PlainDateTimeRecord{
-        .iso_year = wall.iso_year,
-        .iso_month = wall.iso_month,
-        .iso_day = wall.iso_day,
-    };
-    return getEpochNanosecondsFor(tz, midnight);
+    return startOfDayForDate(tz, wall.iso_year, wall.iso_month, wall.iso_day);
 }
 
 /// §6.3.4 get hoursInDay — the number of hours spanned by `epoch_ns`'s
@@ -1873,13 +1890,9 @@ pub fn zonedStartOfDay(epoch_ns: i128, tz: TimeZone) ?i128 {
 /// or null in that case so the caller throws RangeError.
 pub fn zonedHoursInDay(epoch_ns: i128, tz: TimeZone) ?i128 {
     const wall = getISODateTimeFor(tz, epoch_ns);
-    const today_ns = getEpochNanosecondsFor(tz, PlainDateTimeRecord{
-        .iso_year = wall.iso_year,
-        .iso_month = wall.iso_month,
-        .iso_day = wall.iso_day,
-    }) orelse return null;
+    const today_ns = startOfDayForDate(tz, wall.iso_year, wall.iso_month, wall.iso_day) orelse return null;
     const tomorrow = addISODate(wall.date(), 0, 0, 0, 1, false) orelse return null;
-    const tomorrow_ns = getEpochNanosecondsFor(tz, PlainDateTimeRecord.combine(tomorrow, .{})) orelse return null;
+    const tomorrow_ns = startOfDayForDate(tz, tomorrow.iso_year, tomorrow.iso_month, tomorrow.iso_day) orelse return null;
     return tomorrow_ns - today_ns;
 }
 
@@ -3776,6 +3789,9 @@ pub const ParsedZonedDateTime = struct {
     behaviour: OffsetBehaviour,
     offset_ns: i128,
     offset_minute_precision: bool = true,
+    /// A date-only string (no time part) resolves to GetStartOfDay rather
+    /// than a disambiguated midnight — a forward transition can skip 00:00.
+    has_time: bool = true,
     time_zone: TimeZone,
 };
 
@@ -3793,7 +3809,9 @@ pub fn parseTemporalZonedDateTimeString(input: []const u8) error{Invalid}!Parsed
     var behaviour: OffsetBehaviour = .wall;
     var offset_ns: i128 = 0;
     var offset_minute_precision = true;
+    var has_time = false;
     if (c.eatAny("Tt ")) {
+        has_time = true;
         time = try parseIsoTime(&c);
         if (c.eatAny("Zz")) {
             behaviour = .exact;
@@ -3831,7 +3849,7 @@ pub fn parseTemporalZonedDateTimeString(input: []const u8) error{Invalid}!Parsed
     // representable). InterpretISODateTimeOffset applies the right bound
     // (CheckISODaysRange for an `option` offset, IsValidEpochNanoseconds for an
     // exact `Z`), so a genuinely out-of-range value still rejects — just later.
-    return .{ .date_time = rec, .behaviour = behaviour, .offset_ns = offset_ns, .offset_minute_precision = offset_minute_precision, .time_zone = tz };
+    return .{ .date_time = rec, .behaviour = behaviour, .offset_ns = offset_ns, .offset_minute_precision = offset_minute_precision, .has_time = has_time, .time_zone = tz };
 }
 
 /// Parse a standalone numeric UTC-offset string (`±HH`, `±HH:MM`,

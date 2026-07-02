@@ -409,6 +409,25 @@ test "intl/temporal: chinese + dangi lunisolar calendars (table / leap months)" 
     );
 }
 
+test "intl/temporal: ZonedDateTime start-of-day skips a midnight gap" {
+    try requireIntlBuild();
+    // Toronto 1919-03-31 sprang 23:30 -> 00:30, so the day starts at 00:30
+    // (30 min after the skipped midnight); a date-only string and
+    // withPlainTime(undefined) both land there, while an explicit T00
+    // disambiguates midnight compatibly (01:00-equivalent, 30 min later).
+    try evalAssert1(
+        \\const sod = Temporal.ZonedDateTime.from("1919-03-31[America/Toronto]");
+        \\const mid = Temporal.ZonedDateTime.from("1919-03-31T00[America/Toronto]");
+        \\const wpt = mid.withPlainTime();
+        \\const pd = Temporal.PlainDate.from("1919-03-31").toZonedDateTime("America/Toronto");
+        \\(sod.until(mid).minutes === 30 &&
+        \\ wpt.epochNanoseconds === sod.epochNanoseconds &&
+        \\ pd.epochNanoseconds === sod.epochNanoseconds &&
+        \\ new Temporal.ZonedDateTime(0n, "America/Vancouver").hoursInDay === 24 &&
+        \\ Temporal.PlainDateTime.from("2000-04-02T01").toZonedDateTime("America/Vancouver").hoursInDay === 23) ? 1 : 0
+    );
+}
+
 test "intl/temporal: ZonedDateTime DST gap/fold disambiguation + offset option" {
     try requireIntlBuild();
     // America/Los_Angeles: 2000-04-02T02:30 falls in the spring-forward gap;

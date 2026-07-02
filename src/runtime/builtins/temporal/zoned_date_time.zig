@@ -444,13 +444,20 @@ fn toTemporalZonedDateTime(realm: *Realm, item: Value, options: Value) NativeErr
     const dis = try getDisambiguationOption(realm, options);
     const offset_opt = try getOffsetOption(realm, options, .reject);
     _ = try getTemporalOverflowOption(realm, options);
-    // §6.5.x — an ISO string offset carries minute precision, so it matches
-    // a sub-minute zone offset after rounding (match-minutes behaviour).
-    const epoch = temporal.interpretISODateTimeOffset(parsed.date_time, parsed.behaviour, parsed.offset_ns, parsed.time_zone, offset_opt, dis, parsed.offset_minute_precision) catch |e| switch (e) {
-        error.OffsetMismatch => return throwRangeError(realm, "offset does not match the time zone"),
-        error.Ambiguous => return throwRangeError(realm, "wall-clock time is ambiguous or skipped in the time zone"),
-        error.Invalid => return throwRangeError(realm, "ZonedDateTime is out of range"),
-    };
+    // §6.5.x — a date-only string (no time part) with a wall-clock offset
+    // resolves to GetStartOfDay, so a forward transition that skips midnight
+    // still yields the day's first instant.
+    const epoch = if (!parsed.has_time and parsed.behaviour == .wall)
+        (temporal.startOfDayForDate(parsed.time_zone, parsed.date_time.iso_year, parsed.date_time.iso_month, parsed.date_time.iso_day) orelse
+            return throwRangeError(realm, "ZonedDateTime is out of range"))
+    else
+        // A string offset carries its own precision, so it matches a
+        // sub-minute zone offset after minute rounding (match-minutes).
+        temporal.interpretISODateTimeOffset(parsed.date_time, parsed.behaviour, parsed.offset_ns, parsed.time_zone, offset_opt, dis, parsed.offset_minute_precision) catch |e| switch (e) {
+            error.OffsetMismatch => return throwRangeError(realm, "offset does not match the time zone"),
+            error.Ambiguous => return throwRangeError(realm, "wall-clock time is ambiguous or skipped in the time zone"),
+            error.Invalid => return throwRangeError(realm, "ZonedDateTime is out of range"),
+        };
     return .{ .epoch_ns = epoch, .time_zone = parsed.time_zone, .calendar = parsed.date_time.calendar };
 }
 
@@ -753,11 +760,18 @@ fn zonedDateTimeWith(realm: *Realm, this_value: Value, args: []const Value) Nati
 fn zonedDateTimeWithPlainTime(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const z = try requireZonedDateTime(realm, this_value);
     const arg = argOr(args, 0, Value.undefined_);
-    const t: PlainTimeRecord = if (arg.isUndefined()) .{} else try toTemporalTime(realm, arg, Value.undefined_);
     const base = temporal.getISODateTimeFor(z.time_zone, z.epoch_ns);
-    const wall = PlainDateTimeRecord.combine(base.date(), t);
-    const epoch = temporal.getEpochNanosecondsFor(z.time_zone, wall) orelse
-        return throwRangeError(realm, "ZonedDateTime is out of range");
+    // §6.3.x — an absent time argument means the start of the day (which a
+    // forward transition can push past midnight), not a disambiguated 00:00.
+    const epoch = if (arg.isUndefined())
+        (temporal.startOfDayForDate(z.time_zone, base.iso_year, base.iso_month, base.iso_day) orelse
+            return throwRangeError(realm, "ZonedDateTime is out of range"))
+    else blk: {
+        const t = try toTemporalTime(realm, arg, Value.undefined_);
+        const wall = PlainDateTimeRecord.combine(base.date(), t);
+        break :blk temporal.getEpochNanosecondsFor(z.time_zone, wall) orelse
+            return throwRangeError(realm, "ZonedDateTime is out of range");
+    };
     return createTemporalZonedDateTime(realm, .{ .epoch_ns = epoch, .time_zone = z.time_zone, .calendar = z.calendar });
 }
 

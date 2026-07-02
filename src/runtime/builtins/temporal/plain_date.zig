@@ -768,10 +768,18 @@ fn plainDateToZonedDateTime(realm: *Realm, this_value: Value, args: []const Valu
     } else {
         tz = try toTimeZoneArg(realm, item);
     }
-    const t: PlainTimeRecord = if (time_arg.isUndefined()) .{} else try toTemporalTime(realm, time_arg, Value.undefined_);
-    const wall = PlainDateTimeRecord.combine(d, t);
-    if (!temporal.isoDateTimeWithinLimits(wall)) return throwRangeError(realm, "ZonedDateTime is out of range");
-    const epoch = temporal.getEpochNanosecondsFor(tz, wall) orelse
-        return throwRangeError(realm, "ZonedDateTime is out of range");
+    // §3.3.x — with no time the result is the start of the day (a forward
+    // transition can move it past midnight); an explicit time disambiguates
+    // as usual.
+    const epoch = if (time_arg.isUndefined())
+        (temporal.startOfDayForDate(tz, d.iso_year, d.iso_month, d.iso_day) orelse
+            return throwRangeError(realm, "ZonedDateTime is out of range"))
+    else blk: {
+        const t = try toTemporalTime(realm, time_arg, Value.undefined_);
+        const wall = PlainDateTimeRecord.combine(d, t);
+        if (!temporal.isoDateTimeWithinLimits(wall)) return throwRangeError(realm, "ZonedDateTime is out of range");
+        break :blk temporal.getEpochNanosecondsFor(tz, wall) orelse
+            return throwRangeError(realm, "ZonedDateTime is out of range");
+    };
     return createTemporalZonedDateTime(realm, .{ .epoch_ns = epoch, .time_zone = tz });
 }
