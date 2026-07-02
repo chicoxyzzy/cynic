@@ -1507,6 +1507,37 @@ pub fn disambiguateEpochNanoseconds(tz: TimeZone, dt: PlainDateTimeRecord, dis: 
     return e;
 }
 
+/// §11.x FormatUTCOffsetNanoseconds — ±HH:MM, extending to ±HH:MM:SS
+/// (and a 9-digit fraction) only when the offset is not whole minutes
+/// (sub-minute LMT offsets like Africa/Monrovia's -00:44:30).
+pub fn formatUtcOffsetNanoseconds(off_ns: i128, buf: []u8) []const u8 {
+    const abs: u64 = @intCast(if (off_ns < 0) -off_ns else off_ns);
+    const sign: u8 = if (off_ns < 0) '-' else '+';
+    const total_sec = abs / 1_000_000_000;
+    const sub_ns = abs % 1_000_000_000;
+    const h = total_sec / 3600;
+    const m = (total_sec / 60) % 60;
+    const sec = total_sec % 60;
+    var n: usize = 0;
+    buf[n] = sign;
+    n += 1;
+    n += (std.fmt.bufPrint(buf[n..], "{d:0>2}:{d:0>2}", .{ h, m }) catch return buf[0..n]).len;
+    if (sec != 0 or sub_ns != 0) {
+        n += (std.fmt.bufPrint(buf[n..], ":{d:0>2}", .{sec}) catch return buf[0..n]).len;
+        if (sub_ns != 0) {
+            var digits: [9]u8 = undefined;
+            _ = std.fmt.bufPrint(&digits, "{d:0>9}", .{sub_ns}) catch unreachable;
+            var last: usize = 9;
+            while (last > 0 and digits[last - 1] == '0') last -= 1;
+            buf[n] = '.';
+            n += 1;
+            @memcpy(buf[n .. n + last], digits[0..last]);
+            n += last;
+        }
+    }
+    return buf[0..n];
+}
+
 /// §11.x ParseTimeZoneIdentifier — UTC, offset (`±HH` / `±HH:MM` /
 /// `±HHMM`), or a structural IANA identifier (`Area/Location…`).
 /// Sub-minute offsets are rejected. Unknown/malformed input returns null.

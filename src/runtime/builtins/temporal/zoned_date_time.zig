@@ -370,9 +370,8 @@ fn zonedDateTimeOffset(realm: *Realm, t: Value, a: []const Value) NativeError!Va
     // Whole-minute offsets render as ±HH:MM; the UTC zone reports "+00:00"
     // here (distinct from its "UTC" timeZoneId).
     const off_ns = temporal.getOffsetNanosecondsFor(z.time_zone, z.epoch_ns);
-    const off_min: i32 = @intCast(@divTrunc(off_ns, 60_000_000_000));
-    var buf: [16]u8 = undefined;
-    const s = temporal.timeZoneIdentifierString(.{ .offset_minutes = off_min }, &buf);
+    var buf: [32]u8 = undefined;
+    const s = temporal.formatUtcOffsetNanoseconds(off_ns, &buf);
     const js = realm.heap.allocateString(s) catch return error.OutOfMemory;
     return Value.fromString(js);
 }
