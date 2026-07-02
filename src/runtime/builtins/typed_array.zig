@@ -2737,7 +2737,6 @@ fn typedArrayJoin(realm: *Realm, this_value: Value, args: []const Value) NativeE
 /// Locale-aware separators / format options aren't surfaced —
 /// Cynic doesn't ship Intl (out of scope per AGENTS.md).
 fn typedArrayToLocaleString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = args;
     const tv = try taValidatedView(realm, this_value, "toLocaleString");
     const elem_size = tv.kind.elementSize();
     var out: std.ArrayListUnmanaged(u8) = .empty;
@@ -2781,7 +2780,7 @@ fn typedArrayToLocaleString(realm: *Realm, this_value: Value, args: []const Valu
         const method_v = boxed.get("toLocaleString");
         var str_v: Value = undefined;
         if (heap_mod.valueAsFunction(method_v)) |_| {
-            const outcome = lantern.callValue(realm.allocator, realm, realm.active_native_fn_realm orelse realm, method_v, heap_mod.taggedObject(boxed), &.{}) catch |err| switch (err) {
+            const outcome = lantern.callValue(realm.allocator, realm, realm.active_native_fn_realm orelse realm, method_v, heap_mod.taggedObject(boxed), args) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => return error.NativeThrew,
             };

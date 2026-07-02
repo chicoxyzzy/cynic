@@ -1805,18 +1805,31 @@ fn resolveNumberingSystem(realm: *Realm, locale: []const u8, ext_locale: []const
     return realm.allocator.dupe(u8, "latn") catch error.OutOfMemory;
 }
 
+/// §21.1.3.4 / §21.2.3.3 Number|BigInt.prototype.toLocaleString at the CLDR
+/// tier — format `value` through a transient Intl.NumberFormat built from
+/// (locales, options), so both surface the locale's grouping / digit symbols.
+/// Assumes `cldr.available`; the structural tiers keep the ToString fallback.
+pub fn numberValueToLocaleString(realm: *Realm, value: Value, locales: Value, options: Value) NativeError!Value {
+    const nf = try numberFormatConstructor(realm, Value.undefined_, &.{ locales, options });
+    return numberFormatFormat(realm, nf, &.{value});
+}
+
 fn numberFormatFormat(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const rec = try requireKind(realm, this_value, .number_format);
     const v = argOr(args, 0, Value.undefined_);
-    // BigInt and non-finite fall back to ToString of the magnitude with the
-    // locale sign/symbols applied minimally; full CLDR formatting covers the
-    // finite Number path.
-    if (heap_mod.isBigInt(v) or !cldr.available) {
-        if (heap_mod.isBigInt(v)) return makeStringValue(realm, try valueToStringSlice(realm, v));
-        const n = try toNumber(realm, v);
+    // Without the CLDR blob, fall back to ToString of the magnitude.
+    if (!cldr.available) {
+        const n = if (heap_mod.isBigInt(v)) v else try toNumber(realm, v);
         return makeStringValue(realm, try valueToStringSlice(realm, n));
     }
-    const x = numberToF64(try toNumber(realm, v));
+    // §15.5.x — a BigInt formats as its (approximated) numeric value: convert
+    // to f64 and run the same CLDR path as a Number, so grouping / digit
+    // symbols apply. (Exact-decimal digits for a > 2^53 BigInt await the
+    // mathematical-value pipeline.)
+    const x = if (heap_mod.valueAsBigInt(v)) |b|
+        b.toF64()
+    else
+        numberToF64(try toNumber(realm, v));
     var buf: [256]u8 = undefined;
     const s = try formatNumericToBuf(realm, &rec.number_format, x, &buf);
     return makeStringValue(realm, s);

@@ -182,7 +182,12 @@ fn bigintToString(realm: *Realm, this_value: Value, args: []const Value) NativeE
 /// builds with `-no-icu` do the same). Delegate to
 /// `bigintToString` ignoring reserved args.
 fn bigintToLocaleString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = args;
+    // §21.2.3.3 — at the CLDR tier, format through Intl.NumberFormat so
+    // grouping / digit symbols apply; else ToString (spec-permitted fallback).
+    const bv = try bigintValueOf(realm, this_value, &.{});
+    if (@import("../cldr.zig").available) {
+        return @import("intl.zig").numberValueToLocaleString(realm, bv, argOr(args, 0, Value.undefined_), argOr(args, 1, Value.undefined_));
+    }
     return bigintToString(realm, this_value, &.{});
 }
 

@@ -1787,6 +1787,17 @@ test "intl: -t- extension canonicalization + tlang structural validation" {
     );
 }
 
+test "intl: Number/BigInt toLocaleString route through NumberFormat; Array forwards args" {
+    try requireIntlBuild();
+    try evalAssert1(
+        \\((12345).toLocaleString('en-US') === '12,345' &&
+        \\ (12345n).toLocaleString('en-US') === '12,345' &&
+        \\ (1234.5).toLocaleString('en-US', {minimumFractionDigits: 2}) === '1,234.50' &&
+        \\ [1234.5].toLocaleString('en-US', {minimumFractionDigits: 2}) === (1234.5).toLocaleString('en-US', {minimumFractionDigits: 2}) &&
+        \\ new Float64Array([1234.5]).toLocaleString('en-US', {minimumFractionDigits: 2}) === '1,234.50') ? 1 : 0
+    );
+}
+
 test "intl: Locale duplicate -u- keyword keeps the first occurrence" {
     try requireIntlBuild();
     try evalAssert1(

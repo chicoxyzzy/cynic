@@ -646,7 +646,13 @@ fn numberToString(realm: *Realm, this_value: Value, args: []const Value) NativeE
 /// `numberToString` without honoring any reserved args (radix
 /// only applies to `toString`).
 fn numberToLocaleString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = args;
+    // §21.1.3.4 — at the CLDR tier, format through a transient
+    // Intl.NumberFormat(locales, options) so locale grouping / digit symbols
+    // apply; the structural tiers keep ToString (spec-permitted fallback).
+    const nv = try numberValueOf(realm, this_value, &.{});
+    if (@import("../cldr.zig").available) {
+        return @import("intl.zig").numberValueToLocaleString(realm, nv, argOr(args, 0, Value.undefined_), argOr(args, 1, Value.undefined_));
+    }
     return numberToString(realm, this_value, &.{});
 }
 

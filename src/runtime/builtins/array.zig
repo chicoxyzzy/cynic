@@ -918,7 +918,6 @@ fn arrayToLocaleString(realm: *Realm, this_value: Value, args: []const Value) Na
         realm.pending_exception = ex;
         return error.NativeThrew;
     }
-    _ = args;
     const obj = try toObjectThis(realm, this_value);
     const len = try intrinsics.clampArrayLengthR(realm, try toLengthOf(realm, obj));
     var buf: std.ArrayListUnmanaged(u8) = .empty;
@@ -950,7 +949,7 @@ fn arrayToLocaleString(realm: *Realm, this_value: Value, args: []const Value) Na
         const method_v = try getPropertyChain(realm, boxed, "toLocaleString");
         var str_v: Value = v;
         if (heap_mod.valueAsFunction(method_v)) |_| {
-            const outcome = lantern.callValue(realm.allocator, realm, realm.active_native_fn_realm orelse realm, method_v, v, &.{}) catch |err| switch (err) {
+            const outcome = lantern.callValue(realm.allocator, realm, realm.active_native_fn_realm orelse realm, method_v, v, args) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => return error.NativeThrew,
             };
