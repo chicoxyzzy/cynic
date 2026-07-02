@@ -1577,6 +1577,20 @@ test "intl: Locale info methods return correct shapes" {
     );
 }
 
+test "intl: -t- extension canonicalization + tlang structural validation" {
+    try requireIntlBuild();
+    try evalAssert1(
+        \\const rejects = (tag) => { try { new Intl.Locale(tag); return false; } catch (e) { return e instanceof RangeError; } };
+        \\(new Intl.Locale('sl-t-sl-rozaj-biske-1994').toString() === 'sl-t-sl-1994-biske-rozaj' &&
+        \\ new Intl.Locale('DE-T-M0-DIN-K0-QWERTZ').toString() === 'de-t-k0-qwertz-m0-din' &&
+        \\ new Intl.Locale('en-t-iw').toString() === 'en-t-he' &&
+        \\ new Intl.Locale('en-t-m0-true').toString() === 'en-t-m0-true' &&
+        \\ rejects('de-t-en-emodeng-Emodeng') &&
+        \\ rejects('en-t-root') && rejects('en-t-ar-aao') && rejects('en-t-d0') &&
+        \\ rejects('en-t-en-latn-latn') && rejects('en-t-d0-x-private')) ? 1 : 0
+    );
+}
+
 test "intl: Locale multi-subtag -u- types + true elision + islamicc alias" {
     try requireIntlBuild();
     try evalAssert1(

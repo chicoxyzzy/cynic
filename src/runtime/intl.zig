@@ -515,6 +515,99 @@ pub fn isStructurallyValidLanguageTag(tag: []const u8) bool {
         // forms that look like this are accepted earlier via isGrandfathered.
         return false;
     }
+    return validTExtension(tag);
+}
+
+/// §unicode_locale_id transformed_extensions — the `-t-` extension carries a
+/// tlang (a full language id: language, optional script/region, variants with
+/// no case-insensitive duplicates) and/or tfields (tkey = alpha+digit, each
+/// with at least one alphanum{3,8} tvalue, no duplicate keys).
+fn isTKey(seg: []const u8) bool {
+    return seg.len == 2 and isAlpha(seg[0]) and isDigit(seg[1]);
+}
+
+fn validTExtension(tag: []const u8) bool {
+    var parts = std.mem.splitScalar(u8, tag, '-');
+    var in_t = false;
+    var t_any = false; // the t extension has at least one subtag
+    var saw_lang = false;
+    var saw_script = false;
+    var saw_region = false;
+    var in_tfields = false;
+    var last_was_tkey = false;
+    var variants: [16][]const u8 = undefined;
+    var vn: usize = 0;
+    var keys: [16][2]u8 = undefined;
+    var kn: usize = 0;
+    while (parts.next()) |seg| {
+        if (seg.len == 0) continue; // empty segments rejected by the caller
+        if (seg.len == 1) {
+            // Any 1-char segment before `-x-` is a singleton and ends the
+            // t extension; private use is opaque (1-char segments inside it
+            // are not singletons).
+            if (in_t) {
+                if (last_was_tkey or !t_any) return false;
+                in_t = false;
+            }
+            if (seg[0] == 'x' or seg[0] == 'X') break;
+            if (seg[0] == 't' or seg[0] == 'T') {
+                in_t = true;
+                t_any = false;
+                saw_lang = false;
+                saw_script = false;
+                saw_region = false;
+                in_tfields = false;
+                last_was_tkey = false;
+                vn = 0;
+                kn = 0;
+            }
+            continue;
+        }
+        if (!in_t) continue;
+        t_any = true;
+        if (isTKey(seg)) {
+            if (last_was_tkey) return false; // key without a value
+            const lo = [2]u8{ toLowerAscii(seg[0]), seg[1] };
+            for (keys[0..kn]) |k| if (k[0] == lo[0] and k[1] == lo[1]) return false;
+            if (kn >= keys.len) return false;
+            keys[kn] = lo;
+            kn += 1;
+            in_tfields = true;
+            last_was_tkey = true;
+            continue;
+        }
+        if (in_tfields) {
+            if (seg.len < 3 or seg.len > 8) return false; // tvalue is alphanum{3,8}
+            last_was_tkey = false;
+            continue;
+        }
+        // tlang subtags.
+        if (!saw_lang) {
+            // unicode_language_subtag — 2-3 or 5-8 ALPHA.
+            if (!allAlpha(seg) or seg.len == 4 or seg.len > 8) return false;
+            saw_lang = true;
+            continue;
+        }
+        if (!saw_script and !saw_region and vn == 0 and seg.len == 4 and allAlpha(seg)) {
+            saw_script = true;
+            continue;
+        }
+        if (!saw_region and vn == 0 and ((seg.len == 2 and allAlpha(seg)) or (seg.len == 3 and allDigit(seg)))) {
+            saw_region = true;
+            continue;
+        }
+        if ((seg.len >= 5 and seg.len <= 8) or (seg.len == 4 and isDigit(seg[0]))) {
+            for (variants[0..vn]) |v| if (std.ascii.eqlIgnoreCase(v, seg)) return false;
+            if (vn >= variants.len) return false;
+            variants[vn] = seg;
+            vn += 1;
+            continue;
+        }
+        // Anything else (3-ALPHA extlang, a second script, a stray 2-char
+        // subtag after the region, "lat0", …) is structurally invalid.
+        return false;
+    }
+    if (in_t and (last_was_tkey or !t_any)) return false;
     return true;
 }
 
@@ -657,8 +750,14 @@ pub fn canonicalizeUnicodeLocaleId(allocator: std.mem.Allocator, tag: []const u8
     var part_idx: usize = 0;
     var in_unicode_ext = false;
     var in_other_ext = false; // inside a non-`u` singleton extension (-t-, -x-, …)
+    var in_t_ext = false;
     var unicode_keywords: std.ArrayListUnmanaged([]const u8) = .empty;
     defer unicode_keywords.deinit(allocator);
+    var t_segments: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer {
+        for (t_segments.items) |t| allocator.free(t);
+        t_segments.deinit(allocator);
+    }
 
     while (parts.next()) |raw_part| {
         if (raw_part.len == 0) return error.InvalidTag;
@@ -671,14 +770,20 @@ pub fn canonicalizeUnicodeLocaleId(allocator: std.mem.Allocator, tag: []const u8
             // language → lowercase
             for (part) |*c| c.* = toLowerAscii(c.*);
         } else if (part.len == 1) {
-            // Extension singleton → lowercase; flush prior u-keywords.
+            // Extension singleton → lowercase; flush prior u-keywords /
+            // t-extension content.
             if (in_unicode_ext) {
                 try appendUnicodeKeywords(allocator, &out, &unicode_keywords);
                 in_unicode_ext = false;
             }
+            if (in_t_ext) {
+                try appendTransformedExt(allocator, &out, t_segments.items);
+                in_t_ext = false;
+            }
             for (part) |*c| c.* = toLowerAscii(c.*);
             in_other_ext = part[0] != 'u';
             if (part[0] == 'u') in_unicode_ext = true;
+            in_t_ext = part[0] == 't';
         } else if (in_unicode_ext) {
             // Unicode extension key/value — always lowercase. A 2-ALPHA
             // segment here is a `-u-` keyword key (e.g. `hc`, `ca`), not
@@ -707,6 +812,11 @@ pub fn canonicalizeUnicodeLocaleId(allocator: std.mem.Allocator, tag: []const u8
             part_idx += 1;
             continue;
         }
+        if (in_t_ext and part.len > 1) {
+            try t_segments.append(allocator, try allocator.dupe(u8, part));
+            part_idx += 1;
+            continue;
+        }
 
         if (!first) try out.append(allocator, '-');
         try out.appendSlice(allocator, part);
@@ -715,6 +825,9 @@ pub fn canonicalizeUnicodeLocaleId(allocator: std.mem.Allocator, tag: []const u8
     }
     if (in_unicode_ext) {
         try appendUnicodeKeywords(allocator, &out, &unicode_keywords);
+    }
+    if (in_t_ext) {
+        try appendTransformedExt(allocator, &out, t_segments.items);
     }
     // Free keyword dupes.
     for (unicode_keywords.items) |k| allocator.free(k);
@@ -866,6 +979,100 @@ fn canonicalUnicodeType(key: []const u8, value: []const u8) []const u8 {
     }
     if (std.mem.eql(u8, key, "ms") and std.mem.eql(u8, value, "imperial")) return "uksystem";
     return value;
+}
+
+/// §3.2.1 bcp47 transform field-value aliases (finite deprecated set),
+/// matched against the whole joined key-value group.
+fn tFieldAlias(group: []const u8) ?[]const u8 {
+    if (std.mem.eql(u8, group, "m0-names")) return "m0-prprname";
+    if (std.mem.eql(u8, group, "m0-alaloc")) return "m0-alalc97";
+    if (std.mem.eql(u8, group, "d0-name")) return "d0-charname";
+    return null;
+}
+
+/// §3.2.1 — canonical form of the `-t-` extension (all lowercase, which the
+/// caller's case pass already produced): the tlang gets the CLDR language
+/// alias on its language subtag and its variants sorted; the tfields are
+/// grouped per tkey, alias-mapped, and sorted by key. Appends `-…` after the
+/// already-emitted `t` singleton.
+fn appendTransformedExt(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    items: []const []const u8,
+) !void {
+    if (items.len == 0) return;
+    var tlang_len: usize = 0;
+    while (tlang_len < items.len and !isTKey(items[tlang_len])) : (tlang_len += 1) {}
+    if (tlang_len > 0) {
+        var repl: cldr.Subtags = .{};
+        const lang = if (cldr.languageAlias(items[0], &repl)) repl.lang else items[0];
+        try out.append(allocator, '-');
+        for (lang) |c| try out.append(allocator, toLowerAscii(c));
+        // Script / region keep their positions; variants sort alphabetically.
+        var variants: [16][]const u8 = undefined;
+        var vn: usize = 0;
+        for (items[1..tlang_len]) |seg| {
+            const is_variant = (seg.len >= 5 and seg.len <= 8) or (seg.len == 4 and isDigit(seg[0]));
+            if (is_variant and vn < variants.len) {
+                variants[vn] = seg;
+                vn += 1;
+                continue;
+            }
+            try out.append(allocator, '-');
+            try out.appendSlice(allocator, seg);
+        }
+        std.mem.sort([]const u8, variants[0..vn], {}, struct {
+            fn lt(_: void, a: []const u8, b: []const u8) bool {
+                return std.mem.lessThan(u8, a, b);
+            }
+        }.lt);
+        for (variants[0..vn]) |v| {
+            try out.append(allocator, '-');
+            try out.appendSlice(allocator, v);
+        }
+    }
+    var groups: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer {
+        for (groups.items) |g| allocator.free(g);
+        groups.deinit(allocator);
+    }
+    var i: usize = tlang_len;
+    while (i < items.len) {
+        var end = i + 1;
+        while (end < items.len and !isTKey(items[end])) : (end += 1) {}
+        var total: usize = 0;
+        for (items[i..end]) |seg| total += seg.len + 1;
+        const buf = try allocator.alloc(u8, total - 1);
+        var pos: usize = 0;
+        for (items[i..end], 0..) |seg, idx| {
+            if (idx > 0) {
+                buf[pos] = '-';
+                pos += 1;
+            }
+            @memcpy(buf[pos .. pos + seg.len], seg);
+            pos += seg.len;
+        }
+        if (tFieldAlias(buf)) |alias| {
+            allocator.free(buf);
+            try groups.append(allocator, try allocator.dupe(u8, alias));
+        } else {
+            try groups.append(allocator, buf);
+        }
+        i = end;
+    }
+    var gi: usize = 1;
+    while (gi < groups.items.len) : (gi += 1) {
+        var gj = gi;
+        while (gj > 0 and std.mem.order(u8, groups.items[gj], groups.items[gj - 1]) == .lt) : (gj -= 1) {
+            const tmp = groups.items[gj];
+            groups.items[gj] = groups.items[gj - 1];
+            groups.items[gj - 1] = tmp;
+        }
+    }
+    for (groups.items) |g| {
+        try out.append(allocator, '-');
+        try out.appendSlice(allocator, g);
+    }
 }
 
 /// §3.2.1 bcp47 deprecated type aliases that cross a subtag boundary
