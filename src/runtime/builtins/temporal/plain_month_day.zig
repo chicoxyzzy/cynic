@@ -271,7 +271,19 @@ fn toMonthDayFields(realm: *Realm, obj: *JSObject, options: Value) NativeError!P
             }
             break :blk shared.monthOrdinalToCode(cal, year_for_overflow, @intCast(ord));
         } else month;
-        const ref = shared.computedMonthDayRef(cal, code_month, day, overflow == .reject) orelse
+        // A given year sizes the day first (§: year and monthCode determine
+        // whether the calendar date exists): Cheshvan 5781 has 29 days, so
+        // day 30 constrains to 29 (or rejects) before the reference walk.
+        var day_c = day;
+        if (year_present) {
+            const ord_in_year = try shared.resolveMonthOrdinal(realm, cal, year_for_overflow, code_month, overflow == .reject);
+            const dim = shared.daysInCalendarMonth(cal, year_for_overflow, ord_in_year);
+            if (day_c > dim) {
+                if (overflow == .reject) return throwRangeError(realm, "day is out of range for the month");
+                day_c = dim;
+            }
+        }
+        const ref = shared.computedMonthDayRef(cal, code_month, day_c, overflow == .reject) orelse
             return throwRangeError(realm, "PlainMonthDay day is out of range for the calendar");
         return .{ .ref_iso_year = @intCast(ref.iso_year), .iso_month = @intCast(ref.iso_month), .iso_day = @intCast(ref.iso_day), .calendar = cal };
     }
@@ -303,6 +315,16 @@ pub fn toTemporalMonthDay(realm: *Realm, item: Value, options: Value) NativeErro
     const parsed = temporal.parseTemporalMonthDayString(s.flatBytes()) catch
         return throwRangeError(realm, "invalid ISO 8601 month-day string");
     _ = try getTemporalOverflowOption(realm, options);
+    // A full-date string with a non-ISO calendar annotation carries an ISO
+    // date; its CALENDAR (month, day) re-anchors on the canonical reference
+    // date ("2023-01-01[u-ca=hebrew]" is 8 Tevet -> M04-08).
+    if (shared.isComputedCalendar(parsed.calendar)) {
+        const cf = shared.calendarFields(parsed.calendar, parsed.ref_iso_year, parsed.iso_month, parsed.iso_day);
+        const code = shared.monthOrdinalToCode(parsed.calendar, cf.year, cf.month);
+        const ref = shared.computedMonthDayRef(parsed.calendar, code, cf.day, false) orelse
+            return throwRangeError(realm, "PlainMonthDay day is out of range for the calendar");
+        return .{ .ref_iso_year = @intCast(ref.iso_year), .iso_month = @intCast(ref.iso_month), .iso_day = @intCast(ref.iso_day), .calendar = parsed.calendar };
+    }
     return parsed;
 }
 
@@ -319,7 +341,9 @@ fn plainMonthDayFrom(realm: *Realm, this_value: Value, args: []const Value) Nati
 fn plainMonthDayEquals(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const a = try requirePlainMonthDay(realm, this_value);
     const b = try toTemporalMonthDay(realm, argOr(args, 0, Value.undefined_), Value.undefined_);
-    return Value.fromBool(compareISODate(a.date(), b.date()) == 0);
+    // §10.3.x — the reference ISO date (year included) AND the calendar
+    // both participate ("2-07[u-ca=gregory]" != the iso8601 2-07).
+    return Value.fromBool(compareISODate(a.date(), b.date()) == 0 and a.calendar.eql(&b.calendar));
 }
 
 /// §10.3.x Temporal.PlainMonthDay.prototype.with ( temporalMonthDayLike
@@ -377,7 +401,13 @@ fn plainMonthDayWith(realm: *Realm, this_value: Value, args: []const Value) Nati
         if (mc_len) |len| {
             code_month = try monthFromCodeBytes(realm, base.calendar, &mc_buf, len, 13);
         } else if (month_present) {
-            code_month = month_val;
+            // §12.2.x CalendarResolveFields — a numeric month is ambiguous
+            // for a non-ISO calendar without a year (ordinals shift with
+            // leap months): TypeError; with a year it converts through that
+            // year to the year-independent code space.
+            if (year_v.isUndefined())
+                return throwTypeError(realm, "a numeric month for this calendar requires a year");
+            code_month = shared.monthOrdinalToCode(base.calendar, year_for_overflow, @intCast(month_val));
         }
         const id: i64 = if (day_present) day_val else cf.day;
         const ref = shared.computedMonthDayRef(base.calendar, code_month, id, overflow == .reject) orelse
@@ -389,6 +419,11 @@ fn plainMonthDayWith(realm: *Realm, this_value: Value, args: []const Value) Nati
         month = try monthFromCodeBytes(realm, base.calendar, &mc_buf, len, 12);
         if (month_present and month_val != month) return throwRangeError(realm, "month and monthCode disagree");
     } else if (month_present) {
+        // §CalendarMergeFields treats month/monthCode as one unit: a partial
+        // month evicts the receiver's monthCode, and a bare numeric month
+        // needs a year on every non-ISO calendar — TypeError.
+        if (!base.calendar.isIso() and year_v.isUndefined())
+            return throwTypeError(realm, "a numeric month for this calendar requires a year");
         month = month_val;
     }
     const day: i64 = if (day_present) day_val else base.iso_day;
@@ -437,9 +472,34 @@ fn plainMonthDayToPlainDate(realm: *Realm, this_value: Value, args: []const Valu
     const obj = heap_mod.valueAsPlainObject(argOr(args, 0, Value.undefined_)) orelse
         return throwTypeError(realm, "Temporal.PlainMonthDay.prototype.toPlainDate expects an object");
     const year_v = try getPropertyChain(realm, obj, "year");
-    if (year_v.isUndefined()) return throwTypeError(realm, "argument is missing 'year'");
-    const year = try dateFieldToI64(realm, try toIntegerWithTruncation(realm, year_v));
-    const rec = temporal.regulateISODate(year, md.iso_month, md.iso_day, false) orelse
+    var year_present = !year_v.isUndefined();
+    var year: i64 = if (year_present) try dateFieldToI64(realm, try toIntegerWithTruncation(realm, year_v)) else 0;
+    // era / eraYear participate for era calendars exactly as in from(), so a
+    // non-integral eraYear surfaces as the same RangeError.
+    if (shared.calendarHasEras(md.calendar)) {
+        const era_field = try getPropertyChain(realm, obj, "era");
+        const era_year_field = try getPropertyChain(realm, obj, "eraYear");
+        const ey = try shared.resolveEraYear(realm, md.calendar, era_field, era_year_field, year_present, year, false);
+        year_present = ey.present;
+        year = ey.val;
+    }
+    if (!year_present) return throwTypeError(realm, "argument is missing 'year'");
+    // §10.3.x — the receiver holds a CALENDAR month-day; combine it with the
+    // calendar year (constrain overflow) and convert to ISO.
+    if (shared.isComputedCalendar(md.calendar)) {
+        const cf = shared.calendarFields(md.calendar, md.ref_iso_year, md.iso_month, md.iso_day);
+        const code = shared.monthOrdinalToCode(md.calendar, cf.year, cf.month);
+        const ord = try shared.resolveMonthOrdinal(realm, md.calendar, year, code, false);
+        const iso = shared.computedToIso(md.calendar, year, ord, cf.day, false) orelse
+            return throwRangeError(realm, "PlainDate is out of range");
+        var rec = temporal.regulateISODate(iso.year, @intCast(iso.month), @intCast(iso.day), false) orelse
+            return throwRangeError(realm, "PlainDate is out of range");
+        rec.calendar = md.calendar;
+        return createTemporalDate(realm, rec);
+    }
+    const iso_year = shared.calendarYearToIso(md.calendar, year);
+    var rec = temporal.regulateISODate(iso_year, md.iso_month, md.iso_day, false) orelse
         return throwRangeError(realm, "PlainDate is out of range");
+    rec.calendar = md.calendar;
     return createTemporalDate(realm, rec);
 }

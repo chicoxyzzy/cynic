@@ -713,10 +713,26 @@ fn plainDateToPlainYearMonth(realm: *Realm, this_value: Value, args: []const Val
 fn plainDateToPlainMonthDay(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const d = try requirePlainDate(realm, this_value);
+    // Computed calendars re-anchor the (calendar month, day) pair on its
+    // canonical reference ISO date; gregorian-month calendars keep the ISO
+    // month/day with the 1972 reference. The calendar always carries over.
+    if (shared.isComputedCalendar(d.calendar)) {
+        const cf = shared.calendarFields(d.calendar, d.iso_year, d.iso_month, d.iso_day);
+        const code = shared.monthOrdinalToCode(d.calendar, cf.year, cf.month);
+        const ref = shared.computedMonthDayRef(d.calendar, code, cf.day, false) orelse
+            return throwRangeError(realm, "PlainMonthDay day is out of range for the calendar");
+        return createTemporalMonthDay(realm, .{
+            .ref_iso_year = @intCast(ref.iso_year),
+            .iso_month = @intCast(ref.iso_month),
+            .iso_day = @intCast(ref.iso_day),
+            .calendar = d.calendar,
+        });
+    }
     return createTemporalMonthDay(realm, .{
         .ref_iso_year = 1972,
         .iso_month = d.iso_month,
         .iso_day = d.iso_day,
+        .calendar = d.calendar,
     });
 }
 /// §3.3.x Temporal.PlainDate.prototype.toPlainDateTime ( [ temporalTime ] )

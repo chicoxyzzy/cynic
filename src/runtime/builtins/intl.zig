@@ -3233,6 +3233,14 @@ pub fn temporalToLocaleString(realm: *Realm, this_value: Value, args: []const Va
     var zdt_tz_buf: [64]u8 = undefined;
     if (heap_mod.valueAsPlainObject(this_value)) |o| {
         if (o.getTemporalRecord()) |rec| {
+            // §Temporal toLocaleString — the construction's (required,
+            // defaults) pair rejects a style axis the type cannot express.
+            const kind0 = std.meta.activeTag(rec.*);
+            const date_only0 = kind0 == .plain_date or kind0 == .plain_year_month or kind0 == .plain_month_day;
+            if (date_only0 and slots.time_style.len > 0)
+                return throwTypeError(realm, "timeStyle is not applicable to this Temporal type");
+            if (kind0 == .plain_time and slots.date_style.len > 0)
+                return throwTypeError(realm, "dateStyle is not applicable to this Temporal type");
             if (rec.* == .zoned_date_time) {
                 if (heap_mod.valueAsPlainObject(argOr(args, 1, Value.undefined_))) |ob| {
                     if (!(try getPropertyChain(realm, ob, "timeZone")).isUndefined())
@@ -3273,7 +3281,7 @@ pub fn dateToLocaleString(realm: *Realm, epoch_ms: f64, locales: Value, options:
     var slots = try buildDateTimeFormatSlots(realm, locales, options);
     defer slots.deinit(realm.allocator);
     var eff = slots; // shallow copy; defaults below are static literals
-    const has_date = slots.weekday.len > 0 or slots.era.len > 0 or slots.year.len > 0 or
+    const has_date = slots.weekday.len > 0 or slots.year.len > 0 or
         slots.month.len > 0 or slots.day.len > 0;
     const has_time = slots.hour.len > 0 or slots.minute.len > 0 or slots.second.len > 0 or
         slots.day_period.len > 0 or slots.fractional_second_digits != null;
@@ -3321,9 +3329,12 @@ fn applyTemporalToLocaleDefaults(slots: *intl.DateTimeFormatSlots, v: Value) voi
     // component: alone it still takes the type's default component set (so a
     // lone { fractionalSecondDigits } on a PlainTime renders h:m:s.fff rather
     // than failing to overlap).
-    const has_any = slots.weekday.len > 0 or slots.era.len > 0 or slots.year.len > 0 or
+    // §11.1.2 ToDateTimeOptions checks weekday / year / month / day / hour /
+    // minute / second / dayPeriod / fractionalSecondDigits (+ the styles);
+    // era is the one component that does NOT suppress the defaults.
+    const has_any = slots.weekday.len > 0 or slots.year.len > 0 or
         slots.month.len > 0 or slots.day.len > 0 or slots.hour.len > 0 or slots.minute.len > 0 or
-        slots.second.len > 0 or slots.day_period.len > 0 or
+        slots.second.len > 0 or slots.day_period.len > 0 or slots.fractional_second_digits != null or
         slots.date_style.len > 0 or slots.time_style.len > 0;
     if (has_any) return;
     switch (rec.*) {
@@ -3536,6 +3547,7 @@ const CivilTime = struct {
     year: i64,
     month: u32, // 1-13 (calendar ordinal)
     hebrew: bool = false, // month renders as a name, never numerically (CLDR-15510)
+    named_cal: temporal.CalendarId = temporal.CalendarId.iso8601(), // named non-gregorian months (islamic/persian/...)
     lunisolar_code: i64 = 0, // chinese/dangi: month renders as its CODE number ("Nbis" when leap)
     day: u32, // 1-31
     hour: u32, // 0-23
@@ -3567,6 +3579,7 @@ fn breakDown(slots: *const intl.DateTimeFormatSlots, ms: f64) CivilTime {
         // 2050; for every other calendar year == era_year so this is a no-op.
         .year = if (std.ascii.eqlIgnoreCase(slots.calendar, "japanese")) (cf.era_year orelse cf.year) else cf.year,
         .hebrew = std.ascii.eqlIgnoreCase(slots.calendar, "hebrew"),
+        .named_cal = cid,
         .lunisolar_code = if (std.ascii.eqlIgnoreCase(slots.calendar, "chinese") or std.ascii.eqlIgnoreCase(slots.calendar, "dangi"))
             tshared.monthOrdinalToCode(cid, cf.year, cf.month)
         else
@@ -3786,7 +3799,8 @@ fn resolveDateTimePattern(dd: cldr.DateData, slots: *const intl.DateTimeFormatSl
 
     // Component options (or the numeric y/m/d default).
     const any_date = slots.weekday.len > 0 or slots.era.len > 0 or slots.year.len > 0 or slots.month.len > 0 or slots.day.len > 0;
-    const any_time = slots.hour.len > 0 or slots.minute.len > 0 or slots.second.len > 0 or slots.day_period.len > 0;
+    const any_time = slots.hour.len > 0 or slots.minute.len > 0 or slots.second.len > 0 or slots.day_period.len > 0 or
+        slots.fractional_second_digits != null;
 
     var date_buf: [128]u8 = undefined;
     var time_buf: [128]u8 = undefined;
@@ -4051,7 +4065,18 @@ fn injectFractionalSecond(pattern: []const u8, n: u32, buf: []u8) []const u8 {
             i = j - 1;
         }
     }
-    const se = s_end orelse return pattern;
+    // A lone fractionalSecondDigits option has no seconds field to attach
+    // to: the format is just the fraction digits ("SSS").
+    const se = s_end orelse {
+        if (pattern.len != 0) return pattern;
+        var l2: usize = 0;
+        var k2: u32 = 0;
+        while (k2 < n and l2 < buf.len) : (k2 += 1) {
+            buf[l2] = 'S';
+            l2 += 1;
+        }
+        return buf[0..l2];
+    };
     var l: usize = 0;
     l += copyClamp(buf, l, pattern[0..se]);
     l += copyClamp(buf, l, ".");
@@ -4234,22 +4259,43 @@ fn filterPatternByMask(pattern: []const u8, kind: temporal.TemporalKind, buf: []
     return buf[0..n];
 }
 
-fn temporalIsoCivil(y: i64, mo: u32, da: u32, h: u32, mi: u32, s: u32, ms: u32) CivilTime {
-    return .{ .year = y, .month = mo, .day = da, .hour = h, .minute = mi, .second = s, .ms_fraction = ms, .weekday = @intCast(temporal.isoDayOfWeek(y, mo, da) % 7) };
+/// Civil fields for a stored ISO date resolved into the FORMAT's calendar —
+/// the Plain-type analogue of breakDown's calendar step, so a hebrew /
+/// islamic / chinese PlainDate renders its calendar month (names, codes)
+/// rather than raw ISO fields.
+fn temporalIsoCivil(slots: *const intl.DateTimeFormatSlots, y: i64, mo: u32, da: u32, h: u32, mi: u32, s: u32, ms: u32) CivilTime {
+    const cid = temporal.CalendarId.fromSlice(slots.calendar) orelse temporal.CalendarId.iso8601();
+    const cf = tshared.calendarFields(cid, @intCast(y), mo, da);
+    return .{
+        .year = if (std.ascii.eqlIgnoreCase(slots.calendar, "japanese")) (cf.era_year orelse cf.year) else cf.year,
+        .hebrew = std.ascii.eqlIgnoreCase(slots.calendar, "hebrew"),
+        .named_cal = cid,
+        .lunisolar_code = if (std.ascii.eqlIgnoreCase(slots.calendar, "chinese") or std.ascii.eqlIgnoreCase(slots.calendar, "dangi"))
+            tshared.monthOrdinalToCode(cid, cf.year, cf.month)
+        else
+            0,
+        .month = cf.month,
+        .day = cf.day,
+        .hour = h,
+        .minute = mi,
+        .second = s,
+        .ms_fraction = ms,
+        .weekday = @intCast(temporal.isoDayOfWeek(y, mo, da) % 7),
+    };
 }
 
 /// Civil fields for a Temporal record. Plain types use their ISO fields
-/// directly (the format's time zone is ignored); an Instant is the epoch
-/// broken down in the format's zone.
+/// (resolved into the format's calendar; the format's time zone is
+/// ignored); an Instant is the epoch broken down in the format's zone.
 fn temporalCivil(slots: *const intl.DateTimeFormatSlots, rec: *const temporal.TemporalRecord) CivilTime {
     return switch (rec.*) {
         .instant => |v| breakDown(slots, @floatFromInt(@divFloor(v.epoch_ns, 1_000_000))),
-        .plain_date => |d| temporalIsoCivil(d.iso_year, d.iso_month, d.iso_day, 0, 0, 0, 0),
-        .plain_date_time => |d| temporalIsoCivil(d.iso_year, d.iso_month, d.iso_day, d.hour, d.minute, d.second, d.millisecond),
-        .plain_time => |t| temporalIsoCivil(1972, 1, 1, t.hour, t.minute, t.second, t.millisecond),
-        .plain_year_month => |d| temporalIsoCivil(d.iso_year, d.iso_month, d.ref_iso_day, 0, 0, 0, 0),
-        .plain_month_day => |d| temporalIsoCivil(d.ref_iso_year, d.iso_month, d.iso_day, 0, 0, 0, 0),
-        else => temporalIsoCivil(1970, 1, 1, 0, 0, 0, 0),
+        .plain_date => |d| temporalIsoCivil(slots, d.iso_year, d.iso_month, d.iso_day, 0, 0, 0, 0),
+        .plain_date_time => |d| temporalIsoCivil(slots, d.iso_year, d.iso_month, d.iso_day, d.hour, d.minute, d.second, d.millisecond),
+        .plain_time => |t| temporalIsoCivil(slots, 1972, 1, 1, t.hour, t.minute, t.second, t.millisecond),
+        .plain_year_month => |d| temporalIsoCivil(slots, d.iso_year, d.iso_month, d.ref_iso_day, 0, 0, 0, 0),
+        .plain_month_day => |d| temporalIsoCivil(slots, d.ref_iso_year, d.iso_month, d.iso_day, 0, 0, 0, 0),
+        else => temporalIsoCivil(slots, 1970, 1, 1, 0, 0, 0, 0),
     };
 }
 
@@ -4281,7 +4327,14 @@ fn dtfRenderArg(realm: *Realm, slots: *const intl.DateTimeFormatSlots, arg: Valu
                 else => {},
             }
             const rcal = temporalCalendarId(rec);
-            if (!std.mem.eql(u8, rcal, "iso8601") and !std.mem.eql(u8, rcal, slots.calendar))
+            // §11.5.x — PlainYearMonth / PlainMonthDay require calendar
+            // EQUALITY (their fields are calendar-dependent, so even an ISO
+            // instance mismatches a gregory formatter); the other types
+            // exempt iso8601.
+            const strict_cal = rec.* == .plain_year_month or rec.* == .plain_month_day;
+            const cal_matches = std.ascii.eqlIgnoreCase(rcal, slots.calendar) or
+                (!strict_cal and std.mem.eql(u8, rcal, "iso8601"));
+            if (!cal_matches)
                 return throwRangeError(realm, "Temporal calendar does not match the DateTimeFormat calendar");
             const dd = cldr.dateData(slots.base.dataLocale()) orelse return 0;
             // §11.5.x — defaults are per Temporal type: a PlainTime with no
@@ -4289,17 +4342,76 @@ fn dtfRenderArg(realm: *Realm, slots: *const intl.DateTimeFormatSlots, arg: Valu
             // date) re-resolves with time defaults, else nothing would overlap.
             var s2: intl.DateTimeFormatSlots = undefined;
             var pat_slots = slots;
-            const no_components = slots.weekday.len == 0 and slots.era.len == 0 and slots.year.len == 0 and
-                slots.month.len == 0 and slots.day.len == 0 and slots.hour.len == 0 and slots.minute.len == 0 and
-                slots.second.len == 0 and slots.day_period.len == 0 and slots.date_style.len == 0 and slots.time_style.len == 0;
-            if (no_components) {
-                // Only the bare-defaults case: an explicit component (e.g.
-                // {year} against a PlainTime) must still fail to overlap, not
-                // be replaced. The defaults are the same per-type sets
-                // toLocaleString applies, so a componentless formatter and
-                // toLocaleString agree on every Temporal type.
+            {
+                // §11.1.3 GetDateTimeFormat — restrict the requested options
+                // to the type's field set (era on a MonthDay is dropped, not
+                // an error); a style axis the type cannot express is a
+                // TypeError; when nothing relevant remains, the type's
+                // default components apply.
+                const kind = std.meta.activeTag(rec.*);
+                const date_only = kind == .plain_date or kind == .plain_year_month or kind == .plain_month_day;
+                const time_only = kind == .plain_time;
+                const had_any = slots.weekday.len > 0 or slots.era.len > 0 or slots.year.len > 0 or
+                    slots.month.len > 0 or slots.day.len > 0 or slots.hour.len > 0 or slots.minute.len > 0 or
+                    slots.second.len > 0 or slots.day_period.len > 0 or slots.fractional_second_digits != null or
+                    slots.date_style.len > 0 or slots.time_style.len > 0;
                 s2 = slots.*;
-                applyTemporalToLocaleDefaults(&s2, arg);
+                // An inapplicable style axis is dropped here, not an error —
+                // the toLocaleString entry points reject it at construction.
+                if (date_only) s2.time_style = "";
+                if (time_only) s2.date_style = "";
+                switch (kind) {
+                    .plain_date => {
+                        s2.hour = "";
+                        s2.minute = "";
+                        s2.second = "";
+                        s2.day_period = "";
+                        s2.fractional_second_digits = null;
+                        s2.time_zone_name = "";
+                    },
+                    .plain_year_month => {
+                        s2.weekday = "";
+                        s2.day = "";
+                        s2.hour = "";
+                        s2.minute = "";
+                        s2.second = "";
+                        s2.day_period = "";
+                        s2.fractional_second_digits = null;
+                        s2.time_zone_name = "";
+                    },
+                    .plain_month_day => {
+                        s2.weekday = "";
+                        s2.era = "";
+                        s2.year = "";
+                        s2.hour = "";
+                        s2.minute = "";
+                        s2.second = "";
+                        s2.day_period = "";
+                        s2.fractional_second_digits = null;
+                        s2.time_zone_name = "";
+                    },
+                    .plain_time => {
+                        s2.weekday = "";
+                        s2.era = "";
+                        s2.year = "";
+                        s2.month = "";
+                        s2.day = "";
+                        s2.time_zone_name = "";
+                    },
+                    else => {}, // the date-time types admit every field
+                }
+                const any_relevant = s2.weekday.len > 0 or s2.era.len > 0 or s2.year.len > 0 or
+                    s2.month.len > 0 or s2.day.len > 0 or s2.hour.len > 0 or s2.minute.len > 0 or
+                    s2.second.len > 0 or s2.day_period.len > 0 or s2.fractional_second_digits != null or
+                    s2.date_style.len > 0 or s2.time_style.len > 0;
+                if (!any_relevant) {
+                    // Explicit options that ALL fell outside the type's field
+                    // set ({year} against a PlainTime) fail to overlap; a
+                    // componentless format takes the type's defaults.
+                    if (had_any)
+                        return throwTypeError(realm, "DateTimeFormat options do not overlap the Temporal object's fields");
+                    applyTemporalToLocaleDefaults(&s2, arg);
+                }
                 pat_slots = &s2;
             }
             var pat_buf: [256]u8 = undefined;
@@ -4406,16 +4518,29 @@ fn emitField(out: []Seg, letter: u8, count: usize, ct: CivilTime, dd: cldr.DateD
                     @memcpy(seg.buf[seg.len..m], suffix[0 .. m - seg.len]);
                     seg.len = m;
                 }
-            } else if (count >= 4) setSeg(seg, "month", dd.months_wide[ct.month - 1]) else if (count == 3) setSeg(seg, "month", dd.months_abbr[ct.month - 1]) else setNumberSeg(seg, "month", ct.month, count, digit_base);
+            } else if (count >= 3) {
+                // Non-gregorian calendars with fixed month names (islamic
+                // family, persian, indian, coptic, ethiopic) use their CLDR
+                // en tables at the named widths; gregorian-month calendars
+                // index the locale's own tables.
+                if (tshared.calendarMonthNameEn(ct.named_cal, ct.month, count >= 4)) |name|
+                    setSeg(seg, "month", name)
+                else if (count >= 4)
+                    setSeg(seg, "month", dd.months_wide[ct.month - 1])
+                else
+                    setSeg(seg, "month", dd.months_abbr[ct.month - 1]);
+            } else setNumberSeg(seg, "month", ct.month, count, digit_base);
         },
         'd' => setNumberSeg(seg, "day", ct.day, count, digit_base),
         'E', 'c', 'e' => {
             if (count >= 4) setSeg(seg, "weekday", dd.days_wide[ct.weekday]) else setSeg(seg, "weekday", dd.days_abbr[ct.weekday]);
         },
         'h' => setNumberSeg(seg, "hour", h12(ct.hour), count, digit_base),
-        'H' => setNumberSeg(seg, "hour", ct.hour, count, digit_base),
+        // CLDR en (and every packed locale) writes the 23/24-hour clock
+        // 2-digit (time patterns use HH); the 12-hour clock is unpadded.
+        'H' => setNumberSeg(seg, "hour", ct.hour, @max(count, 2), digit_base),
         'K' => setNumberSeg(seg, "hour", ct.hour % 12, count, digit_base),
-        'k' => setNumberSeg(seg, "hour", if (ct.hour == 0) 24 else ct.hour, count, digit_base),
+        'k' => setNumberSeg(seg, "hour", if (ct.hour == 0) 24 else ct.hour, @max(count, 2), digit_base),
         'm' => setNumberSeg(seg, "minute", ct.minute, count, digit_base),
         's' => setNumberSeg(seg, "second", ct.second, count, digit_base),
         'S' => {

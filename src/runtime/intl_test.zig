@@ -177,8 +177,11 @@ test "intl/temporal: toLocaleString formats Temporal types via DateTimeFormat" {
         \\if (Temporal.PlainDate.from("1976-11-18").toLocaleString(L) !== "11/18/1976") throw 0;
         \\if (Temporal.PlainDateTime.from("1976-11-18T14:23:30").toLocaleString(L) !== "11/18/1976, 2:23:30 PM") throw 1;
         \\if (Temporal.PlainTime.from("14:23:30").toLocaleString(L) !== "2:23:30 PM") throw 2;
-        \\if (Temporal.PlainYearMonth.from("1976-11").toLocaleString(L) !== "11/1976") throw 3;
-        \\if (Temporal.PlainMonthDay.from("11-18").toLocaleString(L) !== "11/18") throw 4;
+        \\// PYM / PMD require calendar EQUALITY with the formatter (an ISO
+        \\// instance mismatches en's gregory formatter — RangeError).
+        \\if (Temporal.PlainYearMonth.from({year: 1976, month: 11, calendar: "gregory"}).toLocaleString(L) !== "11/1976") throw 3;
+        \\if (Temporal.PlainMonthDay.from({monthCode: "M11", day: 18, calendar: "gregory"}).toLocaleString(L) !== "11/18") throw 4;
+        \\try { Temporal.PlainMonthDay.from("11-18").toLocaleString(L); throw 7; } catch (e) { if (!(e instanceof RangeError)) throw 8; }
         \\if (Temporal.Instant.from("1976-11-18T14:23:30Z").toLocaleString(L,{timeZone:"UTC"}) !== "11/18/1976, 2:23:30 PM") throw 5;
         \\if (Temporal.PlainDate.from("1976-11-18").toLocaleString(L,{year:"numeric",month:"long",day:"numeric"}) !== "November 18, 1976") throw 6;
         \\1
@@ -403,6 +406,22 @@ test "intl/temporal: chinese + dangi lunisolar calendars (table / leap months)" 
         \\if (!threw) throw 6;
         \\if (Temporal.PlainMonthDay.from({ monthCode: "M02L", day: 29, calendar: "chinese" }).toString().slice(0, 4) !== "1947") throw 7;
         \\1
+    );
+}
+
+test "intl/temporal: PlainMonthDay equals/with/toPlainDate calendar fidelity" {
+    try requireIntlBuild();
+    try evalAssert1(
+        \\const rejects = (f, T) => { try { f(); return false; } catch (e) { return e instanceof T; } };
+        \\const heb30 = Temporal.PlainMonthDay.from({year: 5781, monthCode: 'M02', day: 30, calendar: 'hebrew'});
+        \\const pd = Temporal.PlainDate.from({year: 2023, monthCode: 'M02L', day: 5, calendar: 'chinese'});
+        \\const md = pd.toPlainMonthDay();
+        \\(new Temporal.PlainMonthDay(2, 7, 'iso8601').equals(new Temporal.PlainMonthDay(2, 7, 'gregory')) === false &&
+        \\ rejects(() => Temporal.PlainMonthDay.from({monthCode: 'M01', day: 1, calendar: 'chinese'}).with({month: 3}), TypeError) &&
+        \\ heb30.day === 29 &&
+        \\ md.monthCode === 'M02L' && md.day === 5 &&
+        \\ md.toPlainDate({year: 2023}).toString().slice(0, 10) === pd.toString().slice(0, 10) &&
+        \\ rejects(() => Temporal.PlainMonthDay.from({monthCode: 'M01', day: 1, calendar: 'gregory'}).toPlainDate({era: 'ce', eraYear: Infinity}), RangeError)) ? 1 : 0
     );
 }
 
@@ -1601,6 +1620,22 @@ test "intl: Locale info methods return correct shapes" {
         \\ JSON.stringify(Reflect.ownKeys(wi)) === '["firstDay","weekend"]' &&
         \\ wi.firstDay >= 1 && wi.firstDay <= 7 &&
         \\ wi.weekend.every(d => d >= 1 && d <= 7)) ? 1 : 0
+    );
+}
+
+test "intl: Temporal toLocaleString field filtering + calendar month names" {
+    try requireIntlBuild();
+    try evalAssert1(
+        \\const pt = new Temporal.PlainTime(14, 46);
+        \\const pmd = Temporal.PlainMonthDay.from({monthCode: 'M09', day: 16, calendar: 'islamic-tbla'});
+        \\const rejects = (f) => { try { f(); return false; } catch (e) { return e instanceof TypeError; } };
+        \\(pt.toLocaleString('en', {era: 'narrow'}).startsWith('2') &&
+        \\ pmd.toLocaleString('en-u-ca-islamic-tbla', {era: 'narrow'}).startsWith('9') &&
+        \\ pmd.toLocaleString('en-u-ca-islamic-tbla', {dateStyle: 'long'}).includes('Ramadan') &&
+        \\ rejects(() => pt.toLocaleString('en', {dateStyle: 'full', timeStyle: 'full'})) &&
+        \\ rejects(() => new Temporal.PlainDate(2026, 1, 20).toLocaleString('en', {dateStyle: 'full', timeStyle: 'full'})) &&
+        \\ new Temporal.Instant(0n).toLocaleString('en', {hourCycle: 'h23', timeZone: 'UTC'}).includes('00:00:00') &&
+        \\ new Temporal.Instant(0n).toLocaleString('en', {hourCycle: 'h24', timeZone: 'UTC'}).includes('24:00:00')) ? 1 : 0
     );
 }
 

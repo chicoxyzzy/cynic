@@ -319,10 +319,45 @@ pub fn hebrewMonthDisplayName(year: i64, ordinal: u32) []const u8 {
     return common[@min(ordinal, 12) - 1];
 }
 
+/// Days in the calendar month (by ordinal within the year).
+pub fn daysInCalendarMonth(cal: temporal.CalendarId, year: i64, ordinal: i64) i64 {
+    const c = computedCal(cal) orelse return 31;
+    return compDaysInMonth(c.family, year, @intCast(ordinal));
+}
+
 /// Months in the calendar year (13 in a hebrew/lunisolar leap year).
 pub fn monthsInCalendarYear(cal: temporal.CalendarId, year: i64) i64 {
     const c = computedCal(cal) orelse return 12;
     return compMonthsInYear(c.family, year);
+}
+
+/// CLDR `en` month display names for the non-gregorian calendars whose
+/// months have fixed names (islamic family, persian, indian, coptic,
+/// ethiopic/ethioaa). hebrew is year-aware (hebrewMonthDisplayName);
+/// chinese/dangi render codes. Returns null for gregorian-month calendars.
+pub fn calendarMonthNameEn(cal: temporal.CalendarId, ordinal: u32, wide: bool) ?[]const u8 {
+    const c = computedCal(cal) orelse return null;
+    const islamic_wide = [_][]const u8{ "Muharram", "Safar", "Rabi\u{2BB} I", "Rabi\u{2BB} II", "Jumada I", "Jumada II", "Rajab", "Sha\u{2BB}ban", "Ramadan", "Shawwal", "Dhu\u{2BB}l-Qi\u{2BB}dah", "Dhu\u{2BB}l-Hijjah" };
+    const islamic_abbr = [_][]const u8{ "Muh.", "Saf.", "Rab. I", "Rab. II", "Jum. I", "Jum. II", "Raj.", "Sha.", "Ram.", "Shaw.", "Dhu\u{2BB}l-Q.", "Dhu\u{2BB}l-H." };
+    const persian_wide = [_][]const u8{ "Farvardin", "Ordibehesht", "Khordad", "Tir", "Mordad", "Shahrivar", "Mehr", "Aban", "Azar", "Dey", "Bahman", "Esfand" };
+    const indian_wide = [_][]const u8{ "Chaitra", "Vaisakha", "Jyaistha", "Asadha", "Sravana", "Bhadra", "Asvina", "Kartika", "Agrahayana", "Pausa", "Magha", "Phalguna" };
+    const coptic_wide = [_][]const u8{ "Tout", "Baba", "Hator", "Kiahk", "Toba", "Amshir", "Baramhat", "Baramouda", "Bashans", "Paona", "Epep", "Mesra", "Nasie" };
+    const ethiopic_wide = [_][]const u8{ "Meskerem", "Tekemt", "Hedar", "Tahsas", "Ter", "Yekatit", "Megabit", "Miazia", "Genbot", "Sene", "Hamle", "Nehasse", "Pagumen" };
+    // ethiopic / ethioaa share the coptic FAMILY but not its month names.
+    const id = cal.slice();
+    if (std.ascii.eqlIgnoreCase(id, "ethiopic") or std.ascii.eqlIgnoreCase(id, "ethioaa")) {
+        if (ordinal < 1 or ordinal > ethiopic_wide.len) return null;
+        return ethiopic_wide[ordinal - 1];
+    }
+    const names: []const []const u8 = switch (c.family) {
+        .islamic, .umalqura => if (wide) &islamic_wide else &islamic_abbr,
+        .persian => &persian_wide,
+        .indian => &indian_wide,
+        .coptic => &coptic_wide,
+        .hebrew, .chinese, .dangi => return null,
+    };
+    if (ordinal < 1 or ordinal > names.len) return null;
+    return names[ordinal - 1];
 }
 
 pub fn monthOrdinalToCode(cal: temporal.CalendarId, year: i64, ordinal: u32) i64 {
