@@ -3208,13 +3208,23 @@ fn applyTemporalToLocaleDefaults(slots: *intl.DateTimeFormatSlots, v: Value) voi
             slots.minute = "numeric";
             slots.second = "numeric";
         },
-        .plain_date_time, .instant, .zoned_date_time => {
+        .plain_date_time, .instant => {
             slots.year = "numeric";
             slots.month = "numeric";
             slots.day = "numeric";
             slots.hour = "numeric";
             slots.minute = "numeric";
             slots.second = "numeric";
+        },
+        .zoned_date_time => {
+            slots.year = "numeric";
+            slots.month = "numeric";
+            slots.day = "numeric";
+            slots.hour = "numeric";
+            slots.minute = "numeric";
+            slots.second = "numeric";
+            // §6.3.x — the ZonedDateTime defaults also show the zone.
+            slots.time_zone_name = "short";
         },
         .plain_year_month => {
             slots.year = "numeric";
@@ -3537,7 +3547,11 @@ fn tzDisplay(slots: *const intl.DateTimeFormatSlots, epoch_ns: i128, style: []co
         if (std.mem.eql(u8, style, "long") or std.mem.eql(u8, style, "longGeneric")) return "Coordinated Universal Time";
         return "UTC"; // short / shortGeneric
     }
-    return fmtGmtOffset(off_ns, true, buf); // name-style fallback for a named zone
+    // Name-style fallback for a named zone without display data: the localized
+    // GMT offset, in the width matching the requested style (short → GMT+1,
+    // long → GMT+01:00) so the styles stay distinguishable.
+    const long_form = std.mem.eql(u8, style, "long") or std.mem.eql(u8, style, "longGeneric");
+    return fmtGmtOffset(off_ns, long_form, buf);
 }
 
 /// The pattern hour-field letter for a resolved hour cycle (0 = leave as-is).
