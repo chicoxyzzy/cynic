@@ -308,9 +308,25 @@ pub fn hebrewMonthDisplayName(year: i64, ordinal: u32) []const u8 {
 
 pub fn monthOrdinalToCode(cal: temporal.CalendarId, year: i64, ordinal: u32) i64 {
     const c = computedCal(cal) orelse return ordinal;
-    if (c.family != .hebrew or !hebrewLeap(year)) return ordinal;
+    return compCodeForOrd(c.family, year, ordinal);
+}
+
+/// Family-level code→ordinal: null when the coded month doesn't exist in
+/// `year` (a leap code in a common year). Codes equal ordinals everywhere
+/// except hebrew leap years.
+fn compOrdForCode(f: CompFamily, year: i64, code: i64) ?i64 {
+    if (f != .hebrew) return code;
+    const ly = hebrewLeap(year);
+    if (code < 0) return if (ly) 6 else null;
+    if (code <= 5) return code;
+    return if (ly) code + 1 else code;
+}
+/// Family-level ordinal→code (hebrew leap: ordinal 6 → -5 ("M05L"),
+/// ordinals 7+ shift down one).
+fn compCodeForOrd(f: CompFamily, year: i64, ordinal: i64) i64 {
+    if (f != .hebrew or !hebrewLeap(year)) return ordinal;
     if (ordinal == 6) return -5;
-    return if (ordinal >= 7) @as(i64, ordinal) - 1 else ordinal;
+    return if (ordinal >= 7) ordinal - 1 else ordinal;
 }
 
 pub fn resolveMonthOrdinal(realm: *Realm, cal: temporal.CalendarId, year: i64, code: i64, reject: bool) NativeError!i64 {
@@ -1334,16 +1350,18 @@ pub fn isComputedCalendar(cal: temporal.CalendarId) bool {
 pub fn addComputed(cal: temporal.CalendarId, iso_y: i32, iso_m: u32, iso_d: u32, add_y: i64, add_mo: i64, add_w: i64, add_d: i64, reject: bool) ?CalYmd {
     const c = computedCal(cal) orelse return null;
     const start = compFromDays(c, temporal.daysFromCivil(iso_y, iso_m, iso_d));
-    var y = start.year + add_y;
-    // Adding years keeps the month ordinal; a 13th month landing in a 12-month
-    // year constrains (or rejects) before the month delta is applied.
-    var m0: i64 = @as(i64, start.month) - 1; // 0-based
-    if (m0 >= compMonthsInYear(c.family, y)) {
-        if (reject) return null;
-        m0 = compMonthsInYear(c.family, y) - 1;
-    }
-    const bym = balanceCompYearMonth(c.family, y, m0 + 1 + add_mo);
-    y = bym.year;
+    const y0 = start.year + add_y;
+    // Adding years keeps the month CODE (common-year Adar "M06" + 1 year lands
+    // on leap-year Adar II, ordinal 7); a leap-only month ("M05L") landing in a
+    // common year rejects, or constrains to Adar. A 13th ordinal never carries
+    // across (its code is M12, which every year has).
+    const start_code = compCodeForOrd(c.family, start.year, start.month);
+    const m_ord: i64 = compOrdForCode(c.family, y0, start_code) orelse blk: {
+        if (reject and add_y != 0) return null;
+        break :blk 6; // hebrew M05L → Adar
+    };
+    const bym = balanceCompYearMonth(c.family, y0, m_ord + add_mo);
+    const y = bym.year;
     const m: i64 = bym.month;
     const dim: i64 = compDaysInMonth(c.family, y, @intCast(m));
     var d: i64 = start.day;
@@ -1419,15 +1437,24 @@ pub fn differenceComputedDate(cal: temporal.CalendarId, d1: temporal.PlainDateRe
 
     var years: i64 = 0;
     var months: i64 = 0;
+    // Whole-year candidates preserve the month CODE in each candidate year
+    // (constraining a leap-only month to Adar), mirroring the code-preserving
+    // year add.
+    const code1 = compCodeForOrd(c.family, cd1.year, cd1.month);
     if (largest == .year or largest == .month) {
         var cand_years: i64 = @as(i64, cd2.year) - @as(i64, cd1.year);
         if (cand_years != 0) cand_years -= sign;
-        while (!compDateSurpasses(sign, cd1.year + cand_years, cd1.month, cd1.day, cd2.year, cd2.month, cd2.day)) {
+        while (true) {
+            const cy = cd1.year + cand_years;
+            const cm = compOrdForCode(c.family, cy, code1) orelse 6;
+            if (compDateSurpasses(sign, cy, cm, cd1.day, cd2.year, cd2.month, cd2.day)) break;
             years = cand_years;
             cand_years += sign;
         }
+        const anchor_y = cd1.year + years;
+        const anchor_m: i64 = compOrdForCode(c.family, anchor_y, code1) orelse 6;
         var cand_months: i64 = sign;
-        var inter = compStepMonth(c.family, cd1.year + years, @as(i64, cd1.month), sign);
+        var inter = compStepMonth(c.family, anchor_y, anchor_m, sign);
         while (!compDateSurpasses(sign, inter.year, inter.month, cd1.day, cd2.year, cd2.month, cd2.day)) {
             months = cand_months;
             cand_months += sign;
@@ -1450,7 +1477,9 @@ pub fn differenceComputedDate(cal: temporal.CalendarId, d1: temporal.PlainDateRe
         }
     }
 
-    const bym = balanceCompYearMonth(c.family, cd1.year + years, @as(i64, cd1.month) + months);
+    const anchor2_y = cd1.year + years;
+    const anchor2_m: i64 = compOrdForCode(c.family, anchor2_y, code1) orelse 6;
+    const bym = balanceCompYearMonth(c.family, anchor2_y, anchor2_m + months);
     const dim: i64 = compDaysInMonth(c.family, bym.year, @intCast(bym.month));
     const anchor = compToDays(c, bym.year, bym.month, @min(@as(i64, cd1.day), dim));
     var days: i64 = dn2 - anchor;

@@ -404,6 +404,14 @@ test "intl/temporal: hebrew calendar (arithmetic / leap months / M05L codes)" {
         \\// common year: 12 months, Adar at ordinal 6 with code M06
         \\const c = Temporal.PlainDate.from({ year: 5783, month: 6, day: 1, calendar: "hebrew" });
         \\if (c.monthCode !== "M06" || c.monthsInYear !== 12) throw 7;
+        \\// year arithmetic preserves the month CODE: common Adar (M06, ord 6)
+        \\// + 1 year lands on leap Adar II (M06, ord 7); M05L into a common year
+        \\// rejects (or constrains to Adar).
+        \\if (c.add({ years: 1 }).month !== 7 || c.add({ years: 1 }).monthCode !== "M06") throw 8;
+        \\threw = false;
+        \\try { a1.add({ years: 1 }, { overflow: "reject" }); } catch (e) { if (e instanceof RangeError) threw = true; }
+        \\if (!threw) throw 9;
+        \\if (c.until(c.add({ years: 1 }), { largestUnit: "years" }).years !== 1) throw 10;
         \\1
     );
 }
