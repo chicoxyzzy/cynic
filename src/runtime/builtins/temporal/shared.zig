@@ -294,6 +294,13 @@ pub fn monthFromCodeBytes(realm: *Realm, cal: temporal.CalendarId, buf: []const 
 /// equal ordinals; hebrew shifts post-Shevat codes up by one in leap years and
 /// places "M05L" at ordinal 6. A leap code in a common year follows `reject`:
 /// throw, or constrain to Adar (the month Adar I merges into).
+/// Whether the calendar has leap months (month codes that exist only in some
+/// years): hebrew today; the chinese/dangi lunisolar pair when they land.
+pub fn calendarHasLeapMonths(cal: temporal.CalendarId) bool {
+    const c = computedCal(cal) orelse return false;
+    return c.family == .hebrew;
+}
+
 /// Inverse of resolveMonthOrdinal: the year-independent monthCode NUMBER for a
 /// month ordinal (hebrew leap: ordinal 6 → -5 ("M05L"), ordinals 7+ shift down).
 /// CLDR `en` month display names for the hebrew calendar. Per CLDR-15510
@@ -1461,18 +1468,21 @@ pub fn differenceComputedDate(cal: temporal.CalendarId, d1: temporal.PlainDateRe
             inter = compStepMonth(c.family, inter.year, inter.month, sign);
         }
         if (largest == .month) {
-            // Convert the whole-year span to months in the calendar's own
-            // per-year month counts (hebrew years alternate 12/13).
-            var k: i64 = 0;
-            while (k != years) {
-                if (years > 0) {
-                    months += compMonthsInYear(c.family, cd1.year + k);
-                    k += 1;
+            // Physical month distance of the code-preserving year walk: each
+            // crossed year's own month count plus the ordinal shift the code
+            // mapping introduces (common Adar M06 → leap Adar II is 13 months).
+            var mo_delta: i64 = anchor_m - @as(i64, cd1.month);
+            var yy = cd1.year;
+            while (yy != anchor_y) {
+                if (anchor_y > cd1.year) {
+                    mo_delta += compMonthsInYear(c.family, yy);
+                    yy += 1;
                 } else {
-                    k -= 1;
-                    months -= compMonthsInYear(c.family, cd1.year + k);
+                    yy -= 1;
+                    mo_delta -= compMonthsInYear(c.family, yy);
                 }
             }
+            months += mo_delta;
             years = 0;
         }
     }

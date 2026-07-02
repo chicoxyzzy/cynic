@@ -390,6 +390,10 @@ fn plainYearMonthWith(realm: *Realm, this_value: Value, args: []const Value) Nat
         if (im_is_code) {
             im = try shared.resolveMonthOrdinal(realm, base.calendar, iy, im, overflow == .reject);
             if (month_present and month_val != im) return throwRangeError(realm, "month and monthCode disagree");
+        } else if (!month_present) {
+            // The receiver's month follows its CODE into the new year (a
+            // leap-only month rejects or constrains to Adar).
+            im = try shared.resolveMonthOrdinal(realm, base.calendar, iy, shared.monthOrdinalToCode(base.calendar, cf.year, cf.month), overflow == .reject);
         }
         const iso = shared.computedToIso(base.calendar, iy, im, 1, overflow == .reject) orelse
             return throwRangeError(realm, "PlainYearMonth is out of range");

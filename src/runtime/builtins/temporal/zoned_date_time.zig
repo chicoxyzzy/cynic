@@ -709,6 +709,10 @@ fn zonedDateTimeWith(realm: *Realm, this_value: Value, args: []const Value) Nati
         if (month_code_len != null) {
             im = try shared.resolveMonthOrdinal(realm, z.calendar, iy, im, overflow == .reject);
             if (month_int_set and month_int != im) return throwRangeError(realm, "month and monthCode disagree");
+        } else if (!month_given) {
+            // The receiver's month follows its CODE into the new year (a
+            // leap-only month rejects or constrains to Adar).
+            im = try shared.resolveMonthOrdinal(realm, z.calendar, iy, shared.monthOrdinalToCode(z.calendar, cf.year, cf.month), overflow == .reject);
         }
         const id: i64 = if (day_present) day else cf.day;
         const iso = shared.computedToIso(z.calendar, iy, im, id, overflow == .reject) orelse

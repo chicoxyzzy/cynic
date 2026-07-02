@@ -210,6 +210,11 @@ fn toMonthDayFields(realm: *Realm, obj: *JSObject, options: Value) NativeError!P
     const max_month: i64 = shared.monthsInYearForCalendar(cal);
     var month: i64 = undefined;
     const has_code = mc_len != null;
+    // §CalendarResolveFields: a numeric month is ambiguous for a leap-month
+    // calendar without a year — TypeError, checked before the month/monthCode
+    // agreement (error-ordering fixture).
+    if (shared.calendarHasLeapMonths(cal) and month_present and year_v.isUndefined())
+        return throwTypeError(realm, "a numeric month for this calendar requires a year");
     if (mc_len) |len| {
         month = try monthFromCodeBytes(realm, cal, &mc_buf, len, max_month);
         if (month_present and month_val != try shared.resolveMonthOrdinal(realm, cal, year_for_overflow, month, false))
