@@ -62,6 +62,10 @@ pub const LocaleSlots = struct {
     collation: []const u8 = "",
     hour_cycle: []const u8 = "",
     case_first: []const u8 = "",
+    // A `kf` keyword can be present but valueless ("de-u-kf" from an elided
+    // "kf-true"): caseFirst then reports "" (present), distinct from the
+    // undefined it reports when the keyword is absent.
+    case_first_present: bool = false,
     numeric: bool = false,
     numbering_system: []const u8 = "",
     base_name: []const u8 = "",
@@ -1465,7 +1469,10 @@ pub fn parseLocaleComponents(allocator: std.mem.Allocator, locale: []const u8) !
     if (unicodeExtensionValue(locale, "ca")) |v| slots.calendar = try allocator.dupe(u8, v);
     if (unicodeExtensionValue(locale, "co")) |v| slots.collation = try allocator.dupe(u8, v);
     if (unicodeExtensionValue(locale, "hc")) |v| slots.hour_cycle = try allocator.dupe(u8, v);
-    if (unicodeExtensionValue(locale, "kf")) |v| slots.case_first = try allocator.dupe(u8, v);
+    if (unicodeExtensionValue(locale, "kf")) |v| {
+        slots.case_first = try allocator.dupe(u8, v);
+        slots.case_first_present = true;
+    }
     if (unicodeExtensionValue(locale, "kn")) |v| slots.numeric = std.mem.eql(u8, v, "true") or v.len == 0;
     if (unicodeExtensionValue(locale, "nu")) |v| slots.numbering_system = try allocator.dupe(u8, v);
 

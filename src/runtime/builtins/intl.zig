@@ -984,7 +984,9 @@ fn localeCalendar(realm: *Realm, this_value: Value, args: []const Value) NativeE
 fn localeCaseFirst(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const s = try localeSlots(realm, this_value);
-    if (s.case_first.len == 0) return Value.undefined_;
+    // §1.4.x — undefined only when the kf keyword is ABSENT; a present but
+    // valueless kf ("de-u-kf") reports the empty string.
+    if (!s.case_first_present and s.case_first.len == 0) return Value.undefined_;
     return makeStringValue(realm, s.case_first);
 }
 fn localeCollation(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
