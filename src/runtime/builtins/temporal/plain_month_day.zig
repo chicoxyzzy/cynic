@@ -206,9 +206,15 @@ fn toMonthDayFields(realm: *Realm, obj: *JSObject, options: Value) NativeError!P
     else
         1972;
     // era + eraYear resolve to the calendar year exactly as in the other
-    // from-fields readers (a lone era or eraYear is a TypeError).
-    const era_field = try getPropertyChain(realm, obj, "era");
-    const era_year_field = try getPropertyChain(realm, obj, "eraYear");
+    // from-fields readers (a lone era or eraYear is a TypeError); the reads
+    // happen only for calendars with an era system, so era-less calendars
+    // add no observable property gets.
+    var era_field: Value = Value.undefined_;
+    var era_year_field: Value = Value.undefined_;
+    if (shared.calendarHasEras(cal)) {
+        era_field = try getPropertyChain(realm, obj, "era");
+        era_year_field = try getPropertyChain(realm, obj, "eraYear");
+    }
     const ey_res = try shared.resolveEraYear(realm, cal, era_field, era_year_field, year_present, if (year_present) year_val else 0, true);
     if (ey_res.present) {
         year_present = true;
@@ -236,6 +242,14 @@ fn toMonthDayFields(realm: *Realm, obj: *JSObject, options: Value) NativeError!P
     } else {
         return throwTypeError(realm, "PlainMonthDay-like is missing 'month' / 'monthCode'");
     }
+    // §12.2.x CalendarResolveFields — a non-ISO year whose ISO projection
+    // cannot lie within the representable date range is a RangeError before
+    // any month-info computation (every calendar-to-ISO epoch shift is
+    // < 10^4, so ±300000 over-covers the ±275760 ISO limit). The ISO
+    // calendar consults the year only for overflow regulation, so any
+    // integer is fine there.
+    if (year_present and !cal.isIso() and (year_val > 300000 or year_val < -300000))
+        return throwRangeError(realm, "year is out of range");
     // Non-ISO calendars resolve a canonical reference ISO date for the
     // (calendar month, day) pair; gregorian-month calendars keep the ISO
     // month/day with the 1972 reference and just carry the calendar.
@@ -243,13 +257,20 @@ fn toMonthDayFields(realm: *Realm, obj: *JSObject, options: Value) NativeError!P
         // A plain `month` integer is an ordinal IN THE GIVEN YEAR (the
         // leap-month calendars require a year alongside it), so it converts to
         // the year-independent CODE space through that year — ordinal 5 of a
-        // chinese year whose leap month sits at 5 means "M04L", not "M05".
+        // chinese year whose leap month sits at 5 means "M04L", not "M05";
+        // an ordinal past the year's month count constrains to the last
+        // month (or rejects).
         const code_month: i64 = if (has_code)
             month
-        else if (year_present)
-            shared.monthOrdinalToCode(cal, year_for_overflow, @intCast(month))
-        else
-            month;
+        else if (year_present) blk: {
+            const miy = shared.monthsInCalendarYear(cal, year_for_overflow);
+            var ord = month;
+            if (ord > miy) {
+                if (overflow == .reject) return throwRangeError(realm, "month is out of range for the year");
+                ord = miy;
+            }
+            break :blk shared.monthOrdinalToCode(cal, year_for_overflow, @intCast(ord));
+        } else month;
         const ref = shared.computedMonthDayRef(cal, code_month, day, overflow == .reject) orelse
             return throwRangeError(realm, "PlainMonthDay day is out of range for the calendar");
         return .{ .ref_iso_year = @intCast(ref.iso_year), .iso_month = @intCast(ref.iso_month), .iso_day = @intCast(ref.iso_day), .calendar = cal };

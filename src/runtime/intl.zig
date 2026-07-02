@@ -1231,18 +1231,35 @@ pub fn bestAvailableLocale(available_unused: void, locale: []const u8) ?[]const 
     return locale;
 }
 
-/// §9.2.3 LookupMatcher — structural: pick first requested locale that
-/// is structurally valid, else default.
-pub fn lookupMatcher(requested: []const []const u8) []const u8 {
+/// §9.2.2 availableLocales is per constructor: most services are available
+/// where the CLDR blob has data; PluralRules' plural rules cover a wider
+/// locale set; Collator is root-collation-driven and accepts any valid tag.
+/// Structural tiers (no blob) accept every valid tag.
+pub const Availability = enum { cldr_data, plural_data, any };
+
+fn requestedLocaleAvailable(loc: []const u8, avail: Availability) bool {
+    if (!cldr.available or avail == .any) return true;
+    const lang_end = std.mem.indexOfScalar(u8, loc, '-') orelse loc.len;
+    const lang = loc[0..lang_end];
+    return switch (avail) {
+        .cldr_data => cldr.numberData(lang) != null,
+        .plural_data => cldr.hasPluralLocale(lang, false) or cldr.numberData(lang) != null,
+        .any => true,
+    };
+}
+
+/// §9.2.3 LookupMatcher — pick the first requested locale that is
+/// structurally valid and available for the service, else default.
+pub fn lookupMatcher(requested: []const []const u8, avail: Availability) []const u8 {
     for (requested) |loc| {
-        if (isStructurallyValidLanguageTag(loc)) return loc;
+        if (isStructurallyValidLanguageTag(loc) and requestedLocaleAvailable(loc, avail)) return loc;
     }
     return default_locale;
 }
 
 /// §9.2.4 BestFitMatcher — same as LookupMatcher without ICU.
-pub fn bestFitMatcher(requested: []const []const u8) []const u8 {
-    return lookupMatcher(requested);
+pub fn bestFitMatcher(requested: []const []const u8, avail: Availability) []const u8 {
+    return lookupMatcher(requested, avail);
 }
 
 pub const ResolvedLocale = struct {

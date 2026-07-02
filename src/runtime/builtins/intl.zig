@@ -325,17 +325,28 @@ fn freeLocaleList(allocator: std.mem.Allocator, list: []const []const u8) void {
     allocator.free(list);
 }
 
+const ResolvedService = struct { locale: []const u8, matcher: intl.LocaleMatcher };
+
 fn resolveServiceLocale(
     realm: *Realm,
     locales: Value,
     opts: ?*JSObject,
-) NativeError!struct { locale: []const u8, matcher: intl.LocaleMatcher } {
+) NativeError!ResolvedService {
+    return resolveServiceLocaleAvail(realm, locales, opts, .cldr_data);
+}
+
+fn resolveServiceLocaleAvail(
+    realm: *Realm,
+    locales: Value,
+    opts: ?*JSObject,
+    avail: intl.Availability,
+) NativeError!ResolvedService {
     const matcher = try getLocaleMatcher(realm, opts);
     const requested = try canonicalizeLocaleList(realm, locales);
     defer freeLocaleList(realm.allocator, requested);
     const r = switch (matcher) {
-        .lookup => intl.lookupMatcher(requested),
-        .best_fit => intl.bestFitMatcher(requested),
+        .lookup => intl.lookupMatcher(requested, avail),
+        .best_fit => intl.bestFitMatcher(requested, avail),
     };
     const canon = intl.canonicalizeUnicodeLocaleId(realm.allocator, r) catch
         realm.allocator.dupe(u8, intl.default_locale) catch return error.OutOfMemory;
@@ -1394,7 +1405,7 @@ fn collatorConstructor(realm: *Realm, this_value: Value, args: []const Value) Na
     const locales = argOr(args, 0, Value.undefined_);
     const options = argOr(args, 1, Value.undefined_);
     const opts = try getOptionsObject(realm, options);
-    const resolved = try resolveServiceLocale(realm, locales, opts);
+    const resolved = try resolveServiceLocaleAvail(realm, locales, opts, .any);
 
     var slots: intl.CollatorSlots = .{};
     errdefer slots.deinit(realm.allocator);
@@ -4459,7 +4470,7 @@ fn pluralRulesConstructor(realm: *Realm, this_value: Value, args: []const Value)
     const locales = argOr(args, 0, Value.undefined_);
     const options = argOr(args, 1, Value.undefined_);
     const opts = try getOptionsObject(realm, options);
-    const resolved = try resolveServiceLocale(realm, locales, opts);
+    const resolved = try resolveServiceLocaleAvail(realm, locales, opts, .plural_data);
     var slots: intl.PluralRulesSlots = .{};
     errdefer slots.deinit(realm.allocator);
     slots.base.locale = resolved.locale;

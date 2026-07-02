@@ -406,6 +406,18 @@ test "intl/temporal: chinese + dangi lunisolar calendars (table / leap months)" 
     );
 }
 
+test "intl/temporal: PlainMonthDay year-range bail + per-year ordinal constrain" {
+    try requireIntlBuild();
+    try evalAssert1(
+        \\const rejects = (f) => { try { f(); return false; } catch (e) { return e instanceof RangeError; } };
+        \\(rejects(() => Temporal.PlainMonthDay.from({year: -999999, monthCode: 'M02', day: 29, calendar: 'buddhist'})) &&
+        \\ rejects(() => Temporal.PlainMonthDay.from({year: 999999, monthCode: 'M06L', day: 30, calendar: 'chinese'})) &&
+        \\ rejects(() => Temporal.PlainMonthDay.from({year: 2001, month: 15, day: 1, calendar: 'chinese'}, {overflow: 'reject'})) &&
+        \\ Temporal.PlainMonthDay.from({year: 2001, month: 15, day: 1, calendar: 'chinese'}).monthCode === 'M12' &&
+        \\ Temporal.PlainMonthDay.from({year: 2001, month: 5, day: 15, calendar: 'chinese'}).monthCode === 'M04L') ? 1 : 0
+    );
+}
+
 test "intl/temporal: hebrew calendar (arithmetic / leap months / M05L codes)" {
     try requireIntlBuild();
     // R&D molad+dehiyyot arithmetic, validated 0/301 mismatches vs
@@ -658,12 +670,12 @@ test "intl off: Temporal rejects non-ISO calendar and named IANA" {
 
 test "intl: lookupMatcher falls back to default when list empty" {
     try requireIntlBuild();
-    try testing.expectEqualStrings("en", intl.lookupMatcher(&.{}));
+    try testing.expectEqualStrings("en", intl.lookupMatcher(&.{}, .cldr_data));
 }
 
 test "intl: lookupMatcher picks first structurally valid requested locale" {
     try requireIntlBuild();
-    try testing.expectEqualStrings("fr", intl.lookupMatcher(&.{ "fr", "de" }));
+    try testing.expectEqualStrings("fr", intl.lookupMatcher(&.{ "fr", "de" }, .cldr_data));
 }
 
 test "intl: parseLocaleComponents splits language and region" {
@@ -1574,6 +1586,21 @@ test "intl: Locale info methods return correct shapes" {
         \\ JSON.stringify(Reflect.ownKeys(wi)) === '["firstDay","weekend"]' &&
         \\ wi.firstDay >= 1 && wi.firstDay <= 7 &&
         \\ wi.weekend.every(d => d >= 1 && d <= 7)) ? 1 : 0
+    );
+}
+
+test "intl: Segmenter UAX #29 boundaries + locale availability" {
+    try requireIntlBuild();
+    try evalAssert1(
+        \\const w = new Intl.Segmenter('en', {granularity:'word'});
+        \\const seg = (s) => [...w.segment(s)].map(x => x.segment);
+        \\const g = new Intl.Segmenter('en', {granularity:'grapheme'});
+        \\(seg('1.23 x').join('|') === '1.23| |x' &&
+        \\ seg('台台').join('|') === '台|台' &&
+        \\ [...g.segment('\u{1F1E6}\u{1F1FA}\u{1F1E6}\u{1F1FA}')].length === 2 &&
+        \\ [...g.segment('a\u{0301}')].length === 1 &&
+        \\ [...g.segment('\u{1102}\u{1162}')].length === 1 &&
+        \\ new Intl.Segmenter(['xyz', 'ar']).resolvedOptions().locale === 'ar') ? 1 : 0
     );
 }
 

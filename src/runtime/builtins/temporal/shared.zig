@@ -319,6 +319,12 @@ pub fn hebrewMonthDisplayName(year: i64, ordinal: u32) []const u8 {
     return common[@min(ordinal, 12) - 1];
 }
 
+/// Months in the calendar year (13 in a hebrew/lunisolar leap year).
+pub fn monthsInCalendarYear(cal: temporal.CalendarId, year: i64) i64 {
+    const c = computedCal(cal) orelse return 12;
+    return compMonthsInYear(c.family, year);
+}
+
 pub fn monthOrdinalToCode(cal: temporal.CalendarId, year: i64, ordinal: u32) i64 {
     const c = computedCal(cal) orelse return ordinal;
     return compCodeForOrd(c.family, year, ordinal);

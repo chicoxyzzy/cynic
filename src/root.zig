@@ -103,6 +103,7 @@ test {
     _ = @import("runtime/surface_audit_test.zig");
     _ = @import("runtime/annex_b_rejection_test.zig");
     _ = @import("runtime/intl_test.zig");
+    _ = @import("runtime/uax29.zig");
     _ = @import("runtime/eval_policy_test.zig");
     _ = @import("runtime/eval_test.zig");
     _ = @import("runtime/wasm_js_test.zig");
