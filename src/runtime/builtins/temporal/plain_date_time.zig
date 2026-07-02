@@ -546,7 +546,8 @@ fn plainDateTimeCompare(realm: *Realm, this_value: Value, args: []const Value) N
 fn plainDateTimeEquals(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const a = try requirePlainDateTime(realm, this_value);
     const b = try toTemporalDateTime(realm, argOr(args, 0, Value.undefined_), Value.undefined_);
-    return Value.fromBool(temporal.compareISODateTime(a, b) == 0);
+    // §5.3.x — equal iff the wall-clock instants AND the calendars match.
+    return Value.fromBool(temporal.compareISODateTime(a, b) == 0 and a.calendar.eql(&b.calendar));
 }
 
 /// §5.3.x Temporal.PlainDateTime.prototype.with ( temporalDateTimeLike
@@ -758,6 +759,10 @@ fn plainDateTimeSince(realm: *Realm, this_value: Value, args: []const Value) Nat
 fn differenceTemporalDateTime(realm: *Realm, this_value: Value, args: []const Value, is_since: bool) NativeError!Value {
     const this_dt = try requirePlainDateTime(realm, this_value);
     const other_dt = try toTemporalDateTime(realm, argOr(args, 0, Value.undefined_), Value.undefined_);
+    // §5.3.x DifferenceTemporalPlainDateTime — the two calendars must match
+    // (RangeError otherwise), checked before the options are read.
+    if (!this_dt.calendar.eql(&other_dt.calendar))
+        return throwRangeError(realm, "cannot compute the difference between PlainDateTimes with different calendars");
     const opts = try getOptionsObject(realm, argOr(args, 1, Value.undefined_));
 
     // GetDifferenceSettings read order: largestUnit, increment, mode,

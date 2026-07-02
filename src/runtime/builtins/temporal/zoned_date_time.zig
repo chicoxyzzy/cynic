@@ -833,6 +833,10 @@ fn zonedDateTimeSince(realm: *Realm, this_value: Value, args: []const Value) Nat
 fn differenceTemporalZonedDateTime(realm: *Realm, this_value: Value, args: []const Value, is_since: bool) NativeError!Value {
     const z = try requireZonedDateTime(realm, this_value);
     const other = try toTemporalZonedDateTime(realm, argOr(args, 0, Value.undefined_), Value.undefined_);
+    // §6.3.x DifferenceTemporalZonedDateTime — the two calendars must match
+    // (RangeError otherwise), checked before the options are read.
+    if (!z.calendar.eql(&other.calendar))
+        return throwRangeError(realm, "cannot compute the difference between ZonedDateTimes with different calendars");
     const opts = try getOptionsObject(realm, argOr(args, 1, Value.undefined_));
 
     const largest_opt = try getTemporalUnitOption(realm, opts, "largestUnit");

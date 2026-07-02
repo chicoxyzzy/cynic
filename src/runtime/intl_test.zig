@@ -347,6 +347,24 @@ test "intl: supportedValuesOf(numberingSystem) enumerates the CLDR accept-set (i
     );
 }
 
+test "intl/temporal: PlainDateTime/ZonedDateTime since/until/equals compare calendars" {
+    try requireIntlBuild();
+    // §5.3.x / §6.3.x — since/until throw a RangeError on mismatched calendars;
+    // equals returns false (test262 different-calendars-throws / calendar-mismatch
+    // / equals/calendar-checked).
+    try evalAssert1(
+        \\const g = new Temporal.PlainDateTime(2020, 1, 1, 0, 0, 0, 0, 0, 0, "gregory");
+        \\const iso = new Temporal.PlainDateTime(2020, 1, 1, 0, 0, 0, 0, 0, 0, "iso8601");
+        \\if (g.equals(iso)) throw 0; // same instant, different calendar → not equal
+        \\let threw = false; try { g.until(iso); } catch (e) { threw = e instanceof RangeError; }
+        \\if (!threw) throw 1;
+        \\// same calendar: equal + no throw
+        \\if (!g.equals(new Temporal.PlainDateTime(2020, 1, 1, 0, 0, 0, 0, 0, 0, "gregory"))) throw 2;
+        \\g.until(new Temporal.PlainDateTime(2020, 1, 2, 0, 0, 0, 0, 0, 0, "gregory"));
+        \\1
+    );
+}
+
 test "intl/temporal: PlainDateTime.toString preserves a non-ISO calendar" {
     try requireIntlBuild();
     // §5.3.x — the calendar constructor argument survives toString's internal
