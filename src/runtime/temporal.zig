@@ -3875,6 +3875,18 @@ fn parseIsoMonthDay(c: *Cursor) error{Invalid}!ParsedDate {
 /// discarded. A `Z` UTC designator is rejected.
 pub fn parseTemporalMonthDayString(input: []const u8) error{Invalid}!PlainMonthDayRecord {
     var c = Cursor{ .s = input };
+    // The year-less MM-DD / --MM-DD / MMDD forms are ISO-calendar-only: a
+    // non-ISO u-ca annotation needs a year to anchor the month-day, so
+    // "11-18[u-ca=gregory]" is invalid while "1972-11-18[u-ca=gregory]" is not.
+    var year_less = false;
+    if (input.len >= 2 and input[0] == '-' and input[1] == '-') {
+        year_less = true;
+    } else if (input.len > 0 and input[0] != '+' and input[0] != '-') {
+        var n: usize = 0;
+        while (n < input.len and input[n] >= '0' and input[n] <= '9') : (n += 1) {}
+        const dash_follows = n < input.len and input[n] == '-';
+        if ((dash_follows and n == 2) or (!dash_follows and n == 4)) year_less = true;
+    }
     const date = try parseIsoMonthDay(&c);
     if (c.eatAny("Tt ")) {
         _ = try parseIsoTime(&c);
@@ -3887,6 +3899,7 @@ pub fn parseTemporalMonthDayString(input: []const u8) error{Invalid}!PlainMonthD
     const calendar = try consumeAnnotations(&c);
     if (!c.done()) return error.Invalid;
     const cal_id = try calendarIdFromAnnotation(calendar);
+    if (year_less and !cal_id.isIso()) return error.Invalid;
     return .{
         .ref_iso_year = 1972,
         .iso_month = @intCast(date.month),

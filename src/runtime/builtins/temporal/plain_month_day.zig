@@ -200,20 +200,32 @@ fn toMonthDayFields(realm: *Realm, obj: *JSObject, options: Value) NativeError!P
     const mc_len = try readMonthCodeField(realm, try getPropertyChain(realm, obj, "monthCode"), &mc_buf);
 
     const year_v = try getPropertyChain(realm, obj, "year");
-    const year_for_overflow: i64 = if (year_v.isUndefined())
-        1972
+    var year_present = !year_v.isUndefined();
+    var year_val: i64 = if (year_present)
+        try dateFieldToI64(realm, try toIntegerWithTruncation(realm, year_v))
     else
-        try dateFieldToI64(realm, try toIntegerWithTruncation(realm, year_v));
+        1972;
+    // era + eraYear resolve to the calendar year exactly as in the other
+    // from-fields readers (a lone era or eraYear is a TypeError).
+    const era_field = try getPropertyChain(realm, obj, "era");
+    const era_year_field = try getPropertyChain(realm, obj, "eraYear");
+    const ey_res = try shared.resolveEraYear(realm, cal, era_field, era_year_field, year_present, if (year_present) year_val else 0, true);
+    if (ey_res.present) {
+        year_present = true;
+        year_val = ey_res.val;
+    }
+    const year_for_overflow: i64 = year_val;
 
     const overflow = try getTemporalOverflowOption(realm, options);
 
     const max_month: i64 = shared.monthsInYearForCalendar(cal);
     var month: i64 = undefined;
     const has_code = mc_len != null;
-    // §CalendarResolveFields: a numeric month is ambiguous for a leap-month
-    // calendar without a year — TypeError, checked before the month/monthCode
-    // agreement (error-ordering fixture).
-    if (shared.calendarHasLeapMonths(cal) and month_present and year_v.isUndefined())
+    // §CalendarResolveFields: a numeric month is ambiguous for ANY non-ISO
+    // calendar without a year (month ordinals shift with eras and leap
+    // months) — TypeError, checked before the month/monthCode agreement
+    // (error-ordering fixtures).
+    if (!cal.isIso() and month_present and !year_present)
         return throwTypeError(realm, "a numeric month for this calendar requires a year");
     if (mc_len) |len| {
         month = try monthFromCodeBytes(realm, cal, &mc_buf, len, max_month);
@@ -234,7 +246,7 @@ fn toMonthDayFields(realm: *Realm, obj: *JSObject, options: Value) NativeError!P
         // chinese year whose leap month sits at 5 means "M04L", not "M05".
         const code_month: i64 = if (has_code)
             month
-        else if (!year_v.isUndefined())
+        else if (year_present)
             shared.monthOrdinalToCode(cal, year_for_overflow, @intCast(month))
         else
             month;
