@@ -347,6 +347,34 @@ test "intl: supportedValuesOf(numberingSystem) enumerates the CLDR accept-set (i
     );
 }
 
+test "intl: DisplayNames type:calendar names every supported calendar (fallback none)" {
+    try requireIntlBuild();
+    if (!intl_config.has_locale_data) return error.SkipZigTest;
+    // §12.4 type:"calendar": DisplayNames must return a name for each calendar
+    // in supportedValuesOf('calendar') (test262 calendars-accepted-by-DisplayNames).
+    try evalAssert1(
+        \\const dn = new Intl.DisplayNames("en", { type: "calendar", fallback: "none" });
+        \\for (const c of Intl.supportedValuesOf("calendar"))
+        \\  if (typeof dn.of(c) !== "string") throw 0;
+        \\1
+    );
+}
+
+test "intl: supportedValuesOf(timeZone) includes non-continental Etc/GMT zones + UTC" {
+    try requireIntlBuild();
+    if (!intl_config.has_locale_data) return error.SkipZigTest; // zones come from the embedded tzdb
+    // §6 AvailablePrimaryTimeZoneIdentifiers performs no continent filtering —
+    // Etc/GMT±N and UTC are primary identifiers and must appear (test262
+    // timeZones-include-non-continental).
+    try evalAssert1(
+        \\const l = Intl.supportedValuesOf("timeZone");
+        \\for (const z of ["Etc/GMT+1", "Etc/GMT+12", "Etc/GMT-14", "UTC", "America/New_York"])
+        \\  if (!l.includes(z)) throw 0;
+        \\for (let i = 1; i < l.length; i++) if (l[i - 1] >= l[i]) throw 1; // sorted + unique
+        \\1
+    );
+}
+
 test "intl: supportedValuesOf(currency) enumerates CLDR-named codes (incl. historical ADP)" {
     try requireIntlBuild();
     if (!intl_config.has_locale_data) return error.SkipZigTest; // names come from the CLDR blob

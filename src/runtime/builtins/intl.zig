@@ -677,9 +677,14 @@ fn intlSupportedValuesOf(realm: *Realm, this_value: Value, args: []const Value) 
             if (owned.items.len > 0) break :blk owned.items;
         }
         break :blk &intl.supported_numbering_systems;
-    } else if (std.mem.eql(u8, key, "timeZone"))
-        &intl.supported_time_zones
-    else if (std.mem.eql(u8, key, "unit"))
+    } else if (std.mem.eql(u8, key, "timeZone")) blk: {
+        const tzdata = @import("../tzdata.zig");
+        if (tzdata.available) {
+            tzdata.appendPrimaryZoneIdentifiers(realm.allocator, &owned) catch return error.OutOfMemory;
+            if (owned.items.len > 0) break :blk owned.items;
+        }
+        break :blk &intl.supported_time_zones;
+    } else if (std.mem.eql(u8, key, "unit"))
         &intl.supported_units
     else
         return throwRangeError(realm, "invalid key for supportedValuesOf");
@@ -5321,8 +5326,42 @@ fn displayNamesOf(realm: *Realm, this_value: Value, args: []const Value) NativeE
     if (kind != null and cldr.available) {
         if (cldr.displayName(s.base.dataLocale(), kind.?, canonical)) |nm| return makeStringValue(realm, nm);
     }
+    // §12.4 type:"calendar" — CLDR does not yet pack a per-locale calendar-name
+    // table; the en spellings serve as a structural fallback for every locale
+    // (the calendarMonthNameEn precedent).
+    if (std.mem.eql(u8, s.type_name, "calendar")) {
+        if (calendarDisplayNameEn(canonical)) |nm| return makeStringValue(realm, nm);
+    }
     if (std.mem.eql(u8, s.fallback, "none")) return Value.undefined_;
     return makeStringValue(realm, canonical); // fallback: the canonicalised code
+}
+
+/// §12.4 DisplayNames type:"calendar" — English calendar display names, one per
+/// calendar Cynic enumerates in `supportedValuesOf("calendar")`. CLDR's calendar
+/// display-name section is not yet packed into the blob, so these en spellings
+/// (CLDR `localeDisplayNames.types.calendar`) are returned for every locale as a
+/// structural fallback until that section lands — mirroring `calendarMonthNameEn`.
+fn calendarDisplayNameEn(code: []const u8) ?[]const u8 {
+    const table = [_]struct { c: []const u8, n: []const u8 }{
+        .{ .c = "buddhist", .n = "Buddhist Calendar" },
+        .{ .c = "chinese", .n = "Chinese Calendar" },
+        .{ .c = "coptic", .n = "Coptic Calendar" },
+        .{ .c = "dangi", .n = "Dangi Calendar" },
+        .{ .c = "ethioaa", .n = "Ethiopic Amete Alem Calendar" },
+        .{ .c = "ethiopic", .n = "Ethiopic Calendar" },
+        .{ .c = "gregory", .n = "Gregorian Calendar" },
+        .{ .c = "hebrew", .n = "Hebrew Calendar" },
+        .{ .c = "indian", .n = "Indian National Calendar" },
+        .{ .c = "islamic-civil", .n = "Islamic Calendar (tabular, civil epoch)" },
+        .{ .c = "islamic-tbla", .n = "Islamic Calendar (tabular, astronomical epoch)" },
+        .{ .c = "islamic-umalqura", .n = "Islamic Calendar (Umm al-Qura)" },
+        .{ .c = "iso8601", .n = "ISO-8601 Calendar" },
+        .{ .c = "japanese", .n = "Japanese Calendar" },
+        .{ .c = "persian", .n = "Persian Calendar" },
+        .{ .c = "roc", .n = "Minguo Calendar" },
+    };
+    for (table) |e| if (std.mem.eql(u8, e.c, code)) return e.n;
+    return null;
 }
 
 /// §12.5.1 — the sanctioned `dateTimeField` codes for Intl.DisplayNames.

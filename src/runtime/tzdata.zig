@@ -114,6 +114,19 @@ pub fn primaryZoneName(name: []const u8) []const u8 {
     return resolved;
 }
 
+/// Append every primary time-zone identifier in the embedded tzdb to `out`.
+/// Each zone-table entry is resolved through `primaryZoneName` (folding the
+/// UTC-equivalent family and any alias to its primary), yielding the set §6
+/// AvailablePrimaryTimeZoneIdentifiers requires. Names borrow from the blob /
+/// the links table (static lifetime); the caller sorts + dedupes. Non-continental
+/// zones (Etc/GMT±N, UTC) are included — the operation performs no filtering.
+pub fn appendPrimaryZoneIdentifiers(alloc: std.mem.Allocator, out: *std.ArrayListUnmanaged([]const u8)) !void {
+    if (!available or !ensureInit()) return;
+    for (zoneTable()) |ent| {
+        try out.append(alloc, primaryZoneName(ent.name));
+    }
+}
+
 pub fn canonicalZoneName(name: []const u8) ?[]const u8 {
     if (!available or !ensureInit()) return null;
     for (zoneTable()) |ent| {
