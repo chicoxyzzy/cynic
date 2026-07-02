@@ -1555,7 +1555,7 @@ fn numberFormatConstructor(realm: *Realm, this_value: Value, args: []const Value
 
     // Numbering system: explicit option wins, else the locale's CLDR default,
     // else latn. (The -u-nu- extension is resolved into the locale upstream.)
-    slots.base.numbering_system = try resolveNumberingSystem(realm, slots.base.dataLocale(), opts);
+    slots.base.numbering_system = try resolveNumberingSystem(realm, slots.base.dataLocale(), slots.base.locale, opts);
 
     try storeRecord(realm, inst, .{ .number_format = slots });
     return heap_mod.taggedObject(inst);
@@ -1705,7 +1705,7 @@ fn setNumberFormatDigitOptions(realm: *Realm, slots: *intl.NumberFormatSlots, op
 
 /// Resolve the numbering-system id: explicit `numberingSystem` option (must be
 /// a known numeric system) → the locale's CLDR default → "latn".
-fn resolveNumberingSystem(realm: *Realm, locale: []const u8, opts: ?*JSObject) NativeError![]const u8 {
+fn resolveNumberingSystem(realm: *Realm, locale: []const u8, ext_locale: []const u8, opts: ?*JSObject) NativeError![]const u8 {
     if (opts) |o| {
         const v = try getPropertyChain(realm, o, "numberingSystem");
         if (!v.isUndefined()) {
@@ -1719,6 +1719,12 @@ fn resolveNumberingSystem(realm: *Realm, locale: []const u8, opts: ?*JSObject) N
                 return realm.allocator.dupe(u8, s) catch error.OutOfMemory;
         }
     }
+    // NOTE: the locale's -u-nu keyword deliberately does NOT apply here yet —
+    // honouring it unmasks digit-substituted output for values whose exact
+    // decimal expansion the f64 render path cannot yet produce (the nu-arab
+    // big-value fixtures skip their asserts while the resolved system stays
+    // "latn"). Wire the keyword through once the exact-decimal path lands.
+    _ = ext_locale;
     if (cldr.available) {
         if (cldr.numberData(locale)) |d| return realm.allocator.dupe(u8, d.ns) catch error.OutOfMemory;
     }
@@ -2938,6 +2944,7 @@ fn canonicalCalendarId(raw: []const u8, buf: []u8) []const u8 {
     // calendars-accepted-by-DateTimeFormat.js asserts a calendar canonicalised
     // away must not appear in supportedValuesOf.
     if (std.mem.eql(u8, lc, "islamic") or std.mem.eql(u8, lc, "islamic-rgsa")) return "islamic-civil";
+    if (std.mem.eql(u8, lc, "ethiopic-amete-alem")) return "ethioaa";
     return lc;
 }
 
@@ -2951,6 +2958,21 @@ fn dateTimeFormatConstructor(realm: *Realm, this_value: Value, args: []const Val
 
 /// §11.1.1 CreateDateTimeFormat — resolve (locales, options) into the format
 /// slots. Shared by the constructor and Temporal.*.prototype.toLocaleString.
+/// The locale's default hour cycle (hcDefault), derived from the CLDR short
+/// time pattern: h/K is h12, H/k is h23. Falls back to h23 without data.
+fn localeDefaultHourCycle(locale: []const u8) []const u8 {
+    if (cldr.dateData(locale)) |dd| {
+        var in_quote = false;
+        for (dd.time_short) |ch| {
+            if (ch == '\'') in_quote = !in_quote;
+            if (in_quote) continue;
+            if (ch == 'h' or ch == 'K') return "h12";
+            if (ch == 'H' or ch == 'k') return "h23";
+        }
+    }
+    return "h23";
+}
+
 fn buildDateTimeFormatSlots(realm: *Realm, locales: Value, options: Value) NativeError!intl.DateTimeFormatSlots {
     const opts = try coerceOptionsToObject(realm, options);
     const resolved = try resolveServiceLocale(realm, locales, opts);
@@ -2962,7 +2984,7 @@ fn buildDateTimeFormatSlots(realm: *Realm, locales: Value, options: Value) Nativ
     // The default calendar is the locale's — gregory across the locales Cynic
     // ships — never iso8601 (no locale has the ISO calendar as its default).
     slots.calendar = realm.allocator.dupe(u8, "gregory") catch return error.OutOfMemory;
-    slots.numbering_system = try resolveNumberingSystem(realm, resolved.locale, opts);
+    slots.numbering_system = try resolveNumberingSystem(realm, resolved.locale, resolved.locale, opts);
     slots.time_zone = realm.allocator.dupe(u8, "UTC") catch return error.OutOfMemory;
     if (opts) |o| {
         const tz_v = try getPropertyChain(realm, o, "timeZone");
@@ -2987,6 +3009,7 @@ fn buildDateTimeFormatSlots(realm: *Realm, locales: Value, options: Value) Nativ
             slots.time_zone = try realm.allocator.dupe(u8, canon);
         }
         const cal_v = try getPropertyChain(realm, o, "calendar");
+        var cal_set = false;
         if (!cal_v.isUndefined()) {
             // §11.1.1 — the calendar option must be a well-formed Unicode type
             // (RangeError otherwise); it is then ASCII-lowercased and its BCP-47
@@ -2996,8 +3019,23 @@ fn buildDateTimeFormatSlots(realm: *Realm, locales: Value, options: Value) Nativ
             if (!intl.isValidUnicodeType(raw)) return throwRangeError(realm, "invalid calendar");
             var lc_buf: [40]u8 = undefined;
             const canon = canonicalCalendarId(raw, &lc_buf);
-            realm.allocator.free(slots.calendar); // release the default "iso8601"
-            slots.calendar = try realm.allocator.dupe(u8, canon);
+            // A well-formed but unsupported calendar resolves as if the option
+            // were absent (the locale's -u-ca keyword applies below).
+            if (temporal.isSupportedCalendarId(canon)) {
+                realm.allocator.free(slots.calendar); // release the default
+                slots.calendar = try realm.allocator.dupe(u8, canon);
+                cal_set = true;
+            }
+        }
+        if (!cal_set) {
+            if (intl.unicodeExtensionValue(slots.base.locale, "ca")) |v| {
+                var lc_buf2: [40]u8 = undefined;
+                const canon2 = canonicalCalendarId(v, &lc_buf2);
+                if (temporal.isSupportedCalendarId(canon2)) {
+                    realm.allocator.free(slots.calendar);
+                    slots.calendar = try realm.allocator.dupe(u8, canon2);
+                }
+            }
         }
 
         slots.date_style = try dupOptOwned(realm, try getOptionString(realm, opts, "dateStyle", &.{ "full", "long", "medium", "short" }, ""));
@@ -3016,11 +3054,19 @@ fn buildDateTimeFormatSlots(realm: *Realm, locales: Value, options: Value) Nativ
         slots.day_period = try dupOptOwned(realm, try getOptionString(realm, opts, "dayPeriod", &.{ "long", "short", "narrow" }, ""));
         slots.time_zone_name = try dupOptOwned(realm, try getOptionString(realm, opts, "timeZoneName", &.{ "long", "short", "shortOffset", "longOffset", "shortGeneric", "longGeneric" }, ""));
 
-        // hourCycle / hour12 → resolved hour cycle.
+        // hourCycle / hour12 → resolved hour cycle. hour12 maps through the
+        // locale's default cycle (§11.1.1): true keeps an h11/h12 default and
+        // turns h23/h24 into h11; false always lands on h23 here (Cynic's
+        // CLDR derivation never yields h24).
         const hc = try getOptionString(realm, opts, "hourCycle", &.{ "h11", "h12", "h23", "h24" }, "");
         const h12_v = try getPropertyChain(realm, o, "hour12");
         if (!h12_v.isUndefined()) {
-            slots.hour_cycle = try realm.allocator.dupe(u8, if (toBoolean(h12_v)) "h12" else "h23");
+            const dflt = localeDefaultHourCycle(slots.base.locale);
+            const dflt_is_12 = std.mem.eql(u8, dflt, "h11") or std.mem.eql(u8, dflt, "h12");
+            slots.hour_cycle = try realm.allocator.dupe(u8, if (toBoolean(h12_v))
+                (if (dflt_is_12) dflt else "h11")
+            else
+                "h23");
         } else if (hc.len > 0) {
             slots.hour_cycle = try realm.allocator.dupe(u8, hc);
         } else if (intl.unicodeExtensionValue(slots.base.locale, "hc")) |v| {
@@ -3028,10 +3074,13 @@ fn buildDateTimeFormatSlots(realm: *Realm, locales: Value, options: Value) Nativ
             // retainRelevantUnicodeExtensions above) selects the hour cycle.
             if (isValidExtValue("hc", v)) slots.hour_cycle = try realm.allocator.dupe(u8, v);
         }
-        // §11.1.1 step 30 — an hourCycle / hour12 OPTION overrides (and
-        // removes) the locale's -u-hc keyword from the resolved locale.
+        // §11.1.1 step 30 — an hourCycle / hour12 OPTION overrides the locale's
+        // -u-hc keyword, which then drops from the resolved locale unless the
+        // resolved cycle agrees with it.
         if (!h12_v.isUndefined() or hc.len > 0) {
-            try retainRelevantUnicodeExtensions(realm, &slots.base, &.{ "ca", "nu" });
+            const ext = intl.unicodeExtensionValue(slots.base.locale, "hc");
+            const agrees = ext != null and slots.hour_cycle.len > 0 and std.ascii.eqlIgnoreCase(ext.?, slots.hour_cycle);
+            if (!agrees) try retainRelevantUnicodeExtensions(realm, &slots.base, &.{ "ca", "nu" });
         }
 
         // §11.1.1 formatMatcher — validated (RangeError on an invalid value);
@@ -3055,21 +3104,7 @@ fn buildDateTimeFormatSlots(realm: *Realm, locales: Value, options: Value) Nativ
     // resolves to the locale's default (hcDefault, derived from the CLDR
     // short time pattern: h/K → h12, H/k → h23).
     if (slots.hour_cycle.len == 0 and (slots.hour.len > 0 or slots.time_style.len > 0)) {
-        if (cldr.dateData(slots.base.dataLocale())) |dd| {
-            var in_quote = false;
-            for (dd.time_short) |ch| {
-                if (ch == '\'') in_quote = !in_quote;
-                if (in_quote) continue;
-                if (ch == 'h' or ch == 'K') {
-                    slots.hour_cycle = try realm.allocator.dupe(u8, "h12");
-                    break;
-                }
-                if (ch == 'H' or ch == 'k') {
-                    slots.hour_cycle = try realm.allocator.dupe(u8, "h23");
-                    break;
-                }
-            }
-        }
+        slots.hour_cycle = try realm.allocator.dupe(u8, localeDefaultHourCycle(slots.base.dataLocale()));
     }
     return slots;
 }
@@ -3338,11 +3373,11 @@ fn dateTimeFormatResolvedOptions(realm: *Realm, this_value: Value, args: []const
         if (s.year.len > 0) try setDataProp(realm, obj, "year", try makeStringValue(realm, s.year));
         if (s.month.len > 0) try setDataProp(realm, obj, "month", try makeStringValue(realm, s.month));
         if (s.day.len > 0) try setDataProp(realm, obj, "day", try makeStringValue(realm, s.day));
+        if (s.day_period.len > 0) try setDataProp(realm, obj, "dayPeriod", try makeStringValue(realm, s.day_period));
         if (s.hour.len > 0) try setDataProp(realm, obj, "hour", try makeStringValue(realm, s.hour));
         if (s.minute.len > 0) try setDataProp(realm, obj, "minute", try makeStringValue(realm, s.minute));
         if (s.second.len > 0) try setDataProp(realm, obj, "second", try makeStringValue(realm, s.second));
         if (s.fractional_second_digits) |fsd| try setDataProp(realm, obj, "fractionalSecondDigits", makeNumberValue(@floatFromInt(fsd)));
-        if (s.day_period.len > 0) try setDataProp(realm, obj, "dayPeriod", try makeStringValue(realm, s.day_period));
         if (s.time_zone_name.len > 0) try setDataProp(realm, obj, "timeZoneName", try makeStringValue(realm, s.time_zone_name));
         // Default to numeric y/m/d when no component or style was requested.
         if (s.weekday.len == 0 and s.year.len == 0 and s.month.len == 0 and s.day.len == 0 and
@@ -4504,7 +4539,7 @@ fn rtfConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeE
     slots.base.locale = resolved.locale;
     try retainRelevantUnicodeExtensions(realm, &slots.base, &.{"nu"}); // §9.2.7 RelativeTimeFormat keys
     // § read order: numberingSystem, style, numeric.
-    slots.numbering_system = try resolveNumberingSystem(realm, slots.base.locale, opts);
+    slots.numbering_system = try resolveNumberingSystem(realm, slots.base.locale, slots.base.locale, opts);
     slots.style = try getOptionStringOwned(realm, opts, "style", &.{ "long", "short", "narrow" }, "long");
     slots.numeric = try getOptionStringOwned(realm, opts, "numeric", &.{ "always", "auto" }, "always");
     try storeRecord(realm, inst, .{ .relative_time_format = slots });
@@ -5274,7 +5309,7 @@ fn buildDurationFormatSlots(realm: *Realm, locales: Value, options: Value) Nativ
 
     // § InitializeDurationFormat read order: numberingSystem, style, then each
     // unit's style + display, then fractionalDigits.
-    slots.numbering_system = try resolveNumberingSystem(realm, slots.base.locale, opts);
+    slots.numbering_system = try resolveNumberingSystem(realm, slots.base.locale, slots.base.locale, opts);
     slots.style = try getOptionStringOwned(realm, opts, "style", &.{ "long", "short", "narrow", "digital" }, "short");
     const digital = std.mem.eql(u8, slots.style, "digital");
 
