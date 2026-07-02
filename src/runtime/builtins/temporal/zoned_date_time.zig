@@ -500,8 +500,8 @@ fn zonedDateTimeToString(realm: *Realm, this_value: Value, args: []const Value) 
     if (!temporal.isValidEpochNanoseconds(rounded_ns)) {
         return throwRangeError(realm, "rounded ZonedDateTime is out of range");
     }
-    var buf: [80]u8 = undefined;
-    const out = temporal.zonedDateTimeToString(.{ .epoch_ns = rounded_ns, .time_zone = z.time_zone }, &buf, .{
+    var buf: [128]u8 = undefined;
+    const out = temporal.zonedDateTimeToString(.{ .epoch_ns = rounded_ns, .time_zone = z.time_zone, .calendar = z.calendar }, &buf, .{
         .calendar = cal,
         .time_zone_name = tz_name,
         .show_offset = show_off,
@@ -516,7 +516,7 @@ fn zonedDateTimeToString(realm: *Realm, this_value: Value, args: []const Value) 
 fn zonedDateTimeToJSON(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const z = try requireZonedDateTime(realm, this_value);
-    var buf: [80]u8 = undefined;
+    var buf: [128]u8 = undefined;
     const out = temporal.zonedDateTimeToString(z, &buf, .{});
     const js = realm.heap.allocateString(out) catch return error.OutOfMemory;
     return Value.fromString(js);
@@ -531,7 +531,7 @@ fn zonedDateTimeToLocaleString(realm: *Realm, this_value: Value, args: []const V
     const z = try requireZonedDateTime(realm, this_value);
     if (@import("../../cldr.zig").available)
         return @import("../intl.zig").temporalToLocaleString(realm, this_value, args);
-    var buf: [80]u8 = undefined;
+    var buf: [128]u8 = undefined;
     const out = temporal.zonedDateTimeToString(z, &buf, .{});
     const js = realm.heap.allocateString(out) catch return error.OutOfMemory;
     return Value.fromString(js);

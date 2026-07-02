@@ -1778,7 +1778,7 @@ pub fn zonedDateTimeToString(rec: ZonedDateTimeRecord, buf: []u8, opts: ZonedToS
     switch (opts.time_zone_name) {
         .never => {},
         .auto, .critical => {
-            var tzbuf: [16]u8 = undefined;
+            var tzbuf: [40]u8 = undefined;
             const tzid = timeZoneIdentifierString(rec.time_zone, &tzbuf);
             w.byte('[');
             if (opts.time_zone_name == .critical) w.byte('!');
