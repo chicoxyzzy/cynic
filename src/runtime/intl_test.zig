@@ -1798,6 +1798,16 @@ test "intl: Number/BigInt toLocaleString route through NumberFormat; Array forwa
     );
 }
 
+test "intl: canonical form sorts extension sequences by singleton, x last" {
+    try requireIntlBuild();
+    try evalAssert1(
+        \\(Intl.getCanonicalLocales('en-u-baz-a-bar-x-u-foo')[0] === 'en-a-bar-u-baz-x-u-foo' &&
+        \\ new Intl.Locale('en-u-baz-a-bar-x-u-foo').toString() === 'en-a-bar-u-baz-x-u-foo' &&
+        \\ Intl.getCanonicalLocales('de-t-en-u-ca-gregory')[0] === 'de-t-en-u-ca-gregory' &&
+        \\ Intl.getCanonicalLocales('en-x-u-foo-a-bar')[0] === 'en-x-u-foo-a-bar') ? 1 : 0
+    );
+}
+
 test "intl: Locale duplicate -u- keyword keeps the first occurrence" {
     try requireIntlBuild();
     try evalAssert1(

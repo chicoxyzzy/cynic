@@ -706,6 +706,12 @@ pub fn isUnicodeLanguageId(code: []const u8) bool {
     return true;
 }
 
+fn extBlockLessThan(a: u8, b: u8) bool {
+    if (a == 'x') return false;
+    if (b == 'x') return true;
+    return a < b;
+}
+
 /// §6.2.3 CanonicalizeUnicodeLocaleId — structural only: normalize
 /// case (language lower, script title, region upper, extensions lower),
 /// sort unicode extension keywords, drop duplicate variants.
@@ -723,6 +729,17 @@ pub fn canonicalizeUnicodeLocaleId(allocator: std.mem.Allocator, tag: []const u8
     var in_other_ext = false; // inside a non-`u` singleton extension (-t-, -x-, …)
     var in_t_ext = false;
     var in_private_use = false;
+    // §3.2.1 — extension sequences sort by their singleton in canonical form
+    // ("…-u-…-a-…" → "…-a-…-u-…"), with the `-x-` private-use extension last.
+    // Buffer each singleton block (its content, dashes included) and emit the
+    // sorted set after the language_id; only the language_id writes to `out`
+    // during the scan.
+    const ExtBlock = struct { sing: u8, buf: std.ArrayListUnmanaged(u8) };
+    var blocks: std.ArrayListUnmanaged(ExtBlock) = .empty;
+    defer {
+        for (blocks.items) |*b| b.buf.deinit(allocator);
+        blocks.deinit(allocator);
+    }
     var unicode_keywords: std.ArrayListUnmanaged([]const u8) = .empty;
     defer unicode_keywords.deinit(allocator);
     var t_segments: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -748,20 +765,24 @@ pub fn canonicalizeUnicodeLocaleId(allocator: std.mem.Allocator, tag: []const u8
             for (part) |*c| c.* = toLowerAscii(c.*);
         } else if (part.len == 1) {
             // Extension singleton → lowercase; flush prior u-keywords /
-            // t-extension content.
+            // t-extension content into the block being closed, then open a
+            // new block for this singleton.
             if (in_unicode_ext) {
-                try appendUnicodeKeywords(allocator, &out, &unicode_keywords);
+                try appendUnicodeKeywords(allocator, &blocks.items[blocks.items.len - 1].buf, &unicode_keywords);
                 in_unicode_ext = false;
             }
             if (in_t_ext) {
-                try appendTransformedExt(allocator, &out, t_segments.items);
+                try appendTransformedExt(allocator, &blocks.items[blocks.items.len - 1].buf, t_segments.items);
                 in_t_ext = false;
             }
             for (part) |*c| c.* = toLowerAscii(c.*);
             in_other_ext = part[0] != 'u';
-            if (part[0] == 'u') in_unicode_ext = true;
+            in_unicode_ext = part[0] == 'u';
             in_t_ext = part[0] == 't';
-            if (part[0] == 'x') in_private_use = true;
+            in_private_use = part[0] == 'x';
+            try blocks.append(allocator, .{ .sing = part[0], .buf = .empty });
+            part_idx += 1;
+            continue;
         } else if (in_unicode_ext) {
             // Unicode extension key/value — always lowercase. A 2-ALPHA
             // segment here is a `-u-` keyword key (e.g. `hc`, `ca`), not
@@ -796,19 +817,44 @@ pub fn canonicalizeUnicodeLocaleId(allocator: std.mem.Allocator, tag: []const u8
             continue;
         }
 
-        if (!first) try out.append(allocator, '-');
-        try out.appendSlice(allocator, part);
-        first = false;
+        if (blocks.items.len > 0) {
+            // A non-`u`/`t` extension segment or private-use segment belongs
+            // to the current block (dash included), not the language_id.
+            const b = &blocks.items[blocks.items.len - 1].buf;
+            try b.append(allocator, '-');
+            try b.appendSlice(allocator, part);
+        } else {
+            if (!first) try out.append(allocator, '-');
+            try out.appendSlice(allocator, part);
+            first = false;
+        }
         part_idx += 1;
     }
     if (in_unicode_ext) {
-        try appendUnicodeKeywords(allocator, &out, &unicode_keywords);
+        try appendUnicodeKeywords(allocator, &blocks.items[blocks.items.len - 1].buf, &unicode_keywords);
     }
     if (in_t_ext) {
-        try appendTransformedExt(allocator, &out, t_segments.items);
+        try appendTransformedExt(allocator, &blocks.items[blocks.items.len - 1].buf, t_segments.items);
     }
     // Free keyword dupes.
     for (unicode_keywords.items) |k| allocator.free(k);
+
+    // Emit the buffered extension blocks sorted by singleton (private use `x`
+    // pinned last), each as `-<sing><content>`.
+    var bi: usize = 1;
+    while (bi < blocks.items.len) : (bi += 1) {
+        var bj = bi;
+        while (bj > 0 and extBlockLessThan(blocks.items[bj].sing, blocks.items[bj - 1].sing)) : (bj -= 1) {
+            const tmp = blocks.items[bj];
+            blocks.items[bj] = blocks.items[bj - 1];
+            blocks.items[bj - 1] = tmp;
+        }
+    }
+    for (blocks.items) |b| {
+        try out.append(allocator, '-');
+        try out.append(allocator, b.sing);
+        try out.appendSlice(allocator, b.buf.items);
+    }
 
     const canon = try out.toOwnedSlice(allocator);
     return applyLanguageAlias(allocator, canon);
