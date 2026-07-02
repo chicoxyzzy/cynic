@@ -347,6 +347,31 @@ test "intl: supportedValuesOf(numberingSystem) enumerates the CLDR accept-set (i
     );
 }
 
+test "intl: NumberFormat reads options in the §11.1.2 order" {
+    try requireIntlBuild();
+    // §11.1.2 / SetNumberFormatDigitOptions read order: numberingSystem is read
+    // 2nd (after localeMatcher), roundingPriority precedes trailingZeroDisplay,
+    // and compactDisplay + useGrouping follow the digit options before signDisplay
+    // (test262 constructor-option-read-order).
+    try evalAssert1(
+        \\const log = [];
+        \\const opts = {};
+        \\for (const k of ["localeMatcher","numberingSystem","style","currency","currencyDisplay",
+        \\  "currencySign","unit","unitDisplay","notation","minimumIntegerDigits","minimumFractionDigits",
+        \\  "maximumFractionDigits","minimumSignificantDigits","maximumSignificantDigits","roundingIncrement",
+        \\  "roundingMode","roundingPriority","trailingZeroDisplay","compactDisplay","useGrouping","signDisplay"])
+        \\  Object.defineProperty(opts, k, { get() { log.push(k); return undefined; } });
+        \\new Intl.NumberFormat("en", opts);
+        \\const at = (k) => log.indexOf(k);
+        \\if (log[1] !== "numberingSystem") throw 0;                    // numberingSystem 2nd
+        \\if (at("numberingSystem") > at("style")) throw 1;            // before style
+        \\if (at("roundingPriority") > at("trailingZeroDisplay")) throw 2;
+        \\if (at("compactDisplay") < at("trailingZeroDisplay")) throw 3; // after the digit block
+        \\if (at("useGrouping") > at("signDisplay")) throw 4;          // before signDisplay
+        \\1
+    );
+}
+
 test "intl: NumberFormat currency fraction defaults apply only in standard notation" {
     try requireIntlBuild();
     if (!intl_config.has_locale_data) return error.SkipZigTest;

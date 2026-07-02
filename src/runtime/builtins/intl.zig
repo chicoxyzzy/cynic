@@ -1593,6 +1593,10 @@ fn numberFormatConstructor(realm: *Realm, this_value: Value, args: []const Value
     // dropped); every other keyword (e.g. `-cu-usd`) is removed.
     try retainRelevantUnicodeExtensions(realm, &slots.base, &.{"nu"});
     try setDataLocale(realm, &slots.base);
+    // §11.1.2 read order: numberingSystem is read right after localeMatcher,
+    // before style. Explicit option wins, else the locale's CLDR default, else
+    // latn. (The -u-nu- extension is resolved into the locale upstream.)
+    slots.base.numbering_system = try resolveNumberingSystem(realm, slots.base.dataLocale(), slots.base.locale, opts);
     slots.style = try getOptionStringOwned(realm, opts, "style", &.{ "decimal", "percent", "currency", "unit" }, "decimal");
     const is_currency_style = std.mem.eql(u8, slots.style, "currency");
     const is_unit_style = std.mem.eql(u8, slots.style, "unit");
@@ -1636,10 +1640,6 @@ fn numberFormatConstructor(realm: *Realm, this_value: Value, args: []const Value
         slots.unit_display = try realm.allocator.dupe(u8, unit_display);
     }
     slots.notation = try getOptionStringOwned(realm, opts, "notation", &.{ "standard", "scientific", "engineering", "compact" }, "standard");
-    slots.compact_display = try getOptionStringOwned(realm, opts, "compactDisplay", &.{ "short", "long" }, "short");
-    // §15.1.2 — useGrouping defaults to "min2" under compact notation, "auto"
-    // otherwise (so compact omits grouping below ~10,000).
-    slots.use_grouping = try getUseGroupingOwned(realm, opts, if (std.mem.eql(u8, slots.notation, "compact")) "min2" else "auto");
 
     // §15.1.1 SetNumberFormatDigitOptions steps 19-20 — fraction-digit defaults
     // vary by style: percent → min 0 / max 0; decimal → min 0 / max 3; currency →
@@ -1654,11 +1654,13 @@ fn numberFormatConstructor(realm: *Realm, this_value: Value, args: []const Value
     const mxfd_default: u32 = if (cur_standard) cur_digits else if (std.mem.eql(u8, slots.style, "percent")) 0 else 3;
     try setNumberFormatDigitOptions(realm, &slots, opts, mnfd_default, mxfd_default);
 
-    slots.sign_display = try getOptionStringOwned(realm, opts, "signDisplay", &.{ "auto", "never", "always", "exceptZero", "negative" }, "auto");
+    // §11.1.2 read order: compactDisplay + useGrouping follow the digit options,
+    // before signDisplay. useGrouping defaults to "min2" under compact notation,
+    // "auto" otherwise (so compact omits grouping below ~10,000).
+    slots.compact_display = try getOptionStringOwned(realm, opts, "compactDisplay", &.{ "short", "long" }, "short");
+    slots.use_grouping = try getUseGroupingOwned(realm, opts, if (std.mem.eql(u8, slots.notation, "compact")) "min2" else "auto");
 
-    // Numbering system: explicit option wins, else the locale's CLDR default,
-    // else latn. (The -u-nu- extension is resolved into the locale upstream.)
-    slots.base.numbering_system = try resolveNumberingSystem(realm, slots.base.dataLocale(), slots.base.locale, opts);
+    slots.sign_display = try getOptionStringOwned(realm, opts, "signDisplay", &.{ "auto", "never", "always", "exceptZero", "negative" }, "auto");
 
     try storeRecord(realm, inst, .{ .number_format = slots });
     return heap_mod.taggedObject(inst);
@@ -1747,8 +1749,9 @@ fn setNumberFormatDigitOptions(realm: *Realm, slots: *intl.NumberFormatSlots, op
         else => return throwRangeError(realm, "invalid roundingIncrement"),
     }
     slots.rounding_mode = try getOptionStringOwned(realm, opts, "roundingMode", &.{ "ceil", "floor", "expand", "trunc", "halfCeil", "halfFloor", "halfExpand", "halfTrunc", "halfEven" }, "halfExpand");
-    slots.trailing_zero_display = try getOptionStringOwned(realm, opts, "trailingZeroDisplay", &.{ "auto", "stripIfInteger" }, "auto");
+    // §15.1.1 read order: roundingPriority precedes trailingZeroDisplay.
     const priority = try getOptionString(realm, opts, "roundingPriority", &.{ "auto", "morePrecision", "lessPrecision" }, "auto");
+    slots.trailing_zero_display = try getOptionStringOwned(realm, opts, "trailingZeroDisplay", &.{ "auto", "stripIfInteger" }, "auto");
 
     const is_more = std.mem.eql(u8, priority, "morePrecision");
     const is_less = std.mem.eql(u8, priority, "lessPrecision");
