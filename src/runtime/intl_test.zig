@@ -347,6 +347,23 @@ test "intl: supportedValuesOf(numberingSystem) enumerates the CLDR accept-set (i
     );
 }
 
+test "intl: DurationFormat rejects a word style after a numeric/2-digit unit" {
+    try requireIntlBuild();
+    // §1.1.5 GetDurationUnitOptions step 6 — a "long"/"short"/"narrow" unit
+    // following a "numeric"/"2-digit" unit is a RangeError (word and digital-clock
+    // forms cannot mix; test262 constructor-options-style-conflict).
+    try evalAssert1(
+        \\function bad(o) { try { new Intl.DurationFormat([], o); return false; } catch (e) { return e instanceof RangeError; } }
+        \\if (!bad({ hours: "numeric", minutes: "long" })) throw 0;
+        \\if (!bad({ hours: "2-digit", minutes: "short", seconds: "2-digit" })) throw 1;
+        \\if (!bad({ hours: "numeric", minutes: "numeric", milliseconds: "narrow" })) throw 2;
+        \\// control: an all-numeric chain (and a plain word chain) must NOT throw.
+        \\new Intl.DurationFormat([], { hours: "numeric", minutes: "numeric" });
+        \\new Intl.DurationFormat([], { hours: "long", minutes: "short" });
+        \\1
+    );
+}
+
 test "intl: DisplayNames type:calendar names every supported calendar (fallback none)" {
     try requireIntlBuild();
     if (!intl_config.has_locale_data) return error.SkipZigTest;

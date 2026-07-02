@@ -5673,6 +5673,13 @@ fn buildDurationFormatSlots(realm: *Realm, locales: Value, options: Value) Nativ
         const is_hms = comptime (i >= 4 and i <= 6);
         const is_min_sec = comptime (i == 5 or i == 6);
         const explicit = try getOptionString(realm, opts, u.name, u.styles, "");
+        // §1.1.5 GetDurationUnitOptions step 6: an explicit "long"/"short"/"narrow"
+        // style on a unit following a "numeric"/"2-digit" unit is a RangeError —
+        // word and digital-clock forms cannot mix. (An unset style is coerced to
+        // numeric/2-digit below, so only an explicit word style trips this.)
+        if (explicit.len > 0 and (std.mem.eql(u8, prev_style, "numeric") or std.mem.eql(u8, prev_style, "2-digit")) and
+            !(std.mem.eql(u8, explicit, "numeric") or std.mem.eql(u8, explicit, "2-digit")))
+            return throwRangeError(realm, "duration unit style cannot follow a numeric or 2-digit unit");
         const prev_numeric = std.mem.eql(u8, prev_style, "numeric") or std.mem.eql(u8, prev_style, "2-digit") or std.mem.eql(u8, prev_style, "fractional");
         var resolved_style: []const u8 = undefined;
         if (explicit.len > 0) {
