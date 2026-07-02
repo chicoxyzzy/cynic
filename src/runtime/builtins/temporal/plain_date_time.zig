@@ -264,11 +264,15 @@ fn plainDateTimeDayOfYear(realm: *Realm, t: Value, a: []const Value) NativeError
 fn plainDateTimeWeekOfYear(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
     const rec = try requirePlainDateTime(realm, t);
+    // §5.3.x — a calendar that does not define ISO-8601 week numbering
+    // (every non-ISO calendar Cynic ships) reports undefined.
+    if (!shared.weekFieldsForCalendar(rec.calendar)) return Value.undefined_;
     return Value.fromInt32(temporal.isoWeekOfYear(rec.iso_year, rec.iso_month, rec.iso_day).week);
 }
 fn plainDateTimeYearOfWeek(realm: *Realm, t: Value, a: []const Value) NativeError!Value {
     _ = a;
     const rec = try requirePlainDateTime(realm, t);
+    if (!shared.weekFieldsForCalendar(rec.calendar)) return Value.undefined_;
     return Value.fromInt32(temporal.isoWeekOfYear(rec.iso_year, rec.iso_month, rec.iso_day).year);
 }
 fn plainDateTimeDaysInWeek(realm: *Realm, t: Value, a: []const Value) NativeError!Value {

@@ -347,6 +347,19 @@ test "intl: supportedValuesOf(numberingSystem) enumerates the CLDR accept-set (i
     );
 }
 
+test "intl/temporal: PlainDateTime weekOfYear/yearOfWeek undefined for non-ISO calendars" {
+    try requireIntlBuild();
+    // §5.3.x — ISO-8601 week numbering is not defined for non-ISO calendars, so
+    // they report undefined (test262 weekOfYear/yearOfWeek non-iso-week-of-year).
+    try evalAssert1(
+        \\const b = new Temporal.PlainDateTime(2020, 1, 1, 0, 0, 0, 0, 0, 0, "buddhist");
+        \\if (b.weekOfYear !== undefined || b.yearOfWeek !== undefined) throw 0;
+        \\const iso = new Temporal.PlainDateTime(2020, 1, 1);
+        \\if (typeof iso.weekOfYear !== "number" || typeof iso.yearOfWeek !== "number") throw 1;
+        \\1
+    );
+}
+
 test "intl/temporal: PlainDateTime/ZonedDateTime since/until/equals compare calendars" {
     try requireIntlBuild();
     // §5.3.x / §6.3.x — since/until throw a RangeError on mismatched calendars;
