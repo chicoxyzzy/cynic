@@ -683,8 +683,9 @@ fn plainDateTimeWith(realm: *Realm, this_value: Value, args: []const Value) Nati
         month = month_int;
     }
     const iso_year = if (!year_present) year else shared.calendarYearToIso(base.calendar, year);
-    const date = temporal.regulateISODate(iso_year, month, day, overflow == .reject) orelse
+    var date = temporal.regulateISODate(iso_year, month, day, overflow == .reject) orelse
         return throwRangeError(realm, "PlainDateTime date is out of range");
+    date.calendar = base.calendar;
     const time = try regulateTime(realm, hour, minute, second, millisecond, microsecond, nanosecond, overflow);
     return createTemporalDateTime(realm, PlainDateTimeRecord.combine(date, time));
 }
