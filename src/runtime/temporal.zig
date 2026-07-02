@@ -3898,13 +3898,11 @@ pub fn isoYearMonthToString(rec: PlainYearMonthRecord, buf: []u8, calendar: Cale
     writeIsoYear(&w, rec.iso_year);
     w.byte('-');
     w.pad2(rec.iso_month);
-    // The reference day appears whenever the annotation does (always /
-    // critical, or a non-ISO calendar under auto).
-    const show_day = switch (calendar) {
-        .always, .critical => true,
-        .auto => !rec.calendar.isIso(),
-        .never => false,
-    };
+    // §9.5.x — the reference day appears when the calendar id is shown
+    // (always / critical) OR the calendar is non-ISO, independent of
+    // calendarName; only ISO under auto/never drops it (matching
+    // TemporalMonthDayToString's reference-year rule).
+    const show_day = calendar == .always or calendar == .critical or !rec.calendar.isIso();
     if (show_day) {
         w.byte('-');
         w.pad2(rec.ref_iso_day);

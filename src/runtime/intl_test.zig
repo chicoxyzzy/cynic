@@ -419,6 +419,23 @@ test "intl/temporal: PlainDateTime.toString preserves a non-ISO calendar" {
     );
 }
 
+test "intl/temporal: PlainYearMonth.toString shows the reference day for a non-ISO calendar" {
+    try requireIntlBuild();
+    // §9.5.x TemporalYearMonthToString — the reference day appears whenever the
+    // calendar is non-ISO, independent of calendarName (which only governs the
+    // [u-ca=…] annotation). ISO omits the day unless always/critical
+    // (test262 PlainYearMonth/toString/calendarname-never).
+    try evalAssert1(
+        \\const g = new Temporal.PlainYearMonth(2000, 5, "gregory");
+        \\if (g.toString({ calendarName: "never" }) !== "2000-05-01") throw 0; // day kept, annotation hidden
+        \\if (g.toString({ calendarName: "auto" }) !== "2000-05-01[u-ca=gregory]") throw 1;
+        \\const iso = new Temporal.PlainYearMonth(2000, 5);
+        \\if (iso.toString({ calendarName: "never" }) !== "2000-05") throw 2; // ISO omits the day
+        \\if (iso.toString({ calendarName: "always" }) !== "2000-05-01[u-ca=iso8601]") throw 3;
+        \\1
+    );
+}
+
 test "intl: NumberFormat hanidec uses the non-contiguous ideograph digits" {
     try requireIntlBuild();
     if (!intl_config.has_locale_data) return error.SkipZigTest;
