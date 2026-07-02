@@ -1430,10 +1430,81 @@ pub fn getISODateTimeFor(tz: TimeZone, epoch_ns: i128) PlainDateTimeRecord {
 /// DST gap/overlap, so exactly one instant maps to any wall-clock time
 /// and the `disambiguation` option never changes the answer.
 pub fn getEpochNanosecondsFor(tz: TimeZone, dt: PlainDateTimeRecord) ?i128 {
+    return disambiguateEpochNanoseconds(tz, dt, .compatible) catch null;
+}
+
+/// §6.5.x DST disambiguation choices for a wall-clock time that is skipped
+/// (gap) or repeated (fold) around a zone transition.
+pub const Disambiguation = enum { compatible, earlier, later, reject };
+
+/// §6.5.x GetPossibleEpochNanoseconds — the instants whose wall clock in
+/// `tz` equals `dt`: probe the offsets in effect a day before and after the
+/// wall time; each distinct offset yields a candidate kept when it
+/// round-trips. 0 candidates is a DST gap; 2 a fold (earlier first).
+pub fn getPossibleEpochNanoseconds(tz: TimeZone, dt: PlainDateTimeRecord, out: *[2]i128) u8 {
     const wall_ns = isoDateTimeToEpochNs(dt);
-    const epoch = wall_ns - @as(i128, getOffsetNanosecondsFor(tz, wall_ns));
-    if (!isValidEpochNanoseconds(epoch)) return null;
-    return epoch;
+    switch (tz) {
+        .utc => {
+            out[0] = wall_ns;
+            return 1;
+        },
+        .offset_minutes => |m| {
+            out[0] = wall_ns - @as(i128, m) * 60_000_000_000;
+            return 1;
+        },
+        .named => {},
+    }
+    const day_ns: i128 = 86_400_000_000_000;
+    const off_before = getOffsetNanosecondsFor(tz, wall_ns - day_ns);
+    const off_after = getOffsetNanosecondsFor(tz, wall_ns + day_ns);
+    var n: u8 = 0;
+    const c1 = wall_ns - off_before;
+    if (getOffsetNanosecondsFor(tz, c1) == off_before) {
+        out[0] = c1;
+        n = 1;
+    }
+    if (off_after != off_before) {
+        const c2 = wall_ns - off_after;
+        if (getOffsetNanosecondsFor(tz, c2) == off_after) {
+            out[n] = c2;
+            n += 1;
+        }
+    }
+    if (n == 2 and out[0] > out[1]) {
+        const t = out[0];
+        out[0] = out[1];
+        out[1] = t;
+    }
+    return n;
+}
+
+/// §6.5.x DisambiguatePossibleEpochNanoseconds — pick the instant for a
+/// wall-clock time per the disambiguation option. `error.Ambiguous` is the
+/// reject outcome for a gap or fold.
+pub fn disambiguateEpochNanoseconds(tz: TimeZone, dt: PlainDateTimeRecord, dis: Disambiguation) error{ Invalid, Ambiguous }!i128 {
+    var poss: [2]i128 = undefined;
+    const n = getPossibleEpochNanoseconds(tz, dt, &poss);
+    if (n == 1) {
+        if (!isValidEpochNanoseconds(poss[0])) return error.Invalid;
+        return poss[0];
+    }
+    if (n == 2) {
+        if (dis == .reject) return error.Ambiguous;
+        const pick = if (dis == .later) poss[1] else poss[0]; // compatible = earlier for folds
+        if (!isValidEpochNanoseconds(pick)) return error.Invalid;
+        return pick;
+    }
+    // A gap: the wall time was skipped by a forward transition.
+    if (dis == .reject) return error.Ambiguous;
+    const wall_ns = isoDateTimeToEpochNs(dt);
+    const day_ns: i128 = 86_400_000_000_000;
+    const off_before = getOffsetNanosecondsFor(tz, wall_ns - day_ns);
+    const off_after = getOffsetNanosecondsFor(tz, wall_ns + day_ns);
+    // compatible / later push the wall time forward by the gap (interpret
+    // with the pre-transition offset); earlier pulls it back.
+    const e = if (dis == .earlier) wall_ns - @as(i128, off_after) else wall_ns - @as(i128, off_before);
+    if (!isValidEpochNanoseconds(e)) return error.Invalid;
+    return e;
 }
 
 /// §11.x ParseTimeZoneIdentifier — UTC, offset (`±HH` / `±HH:MM` /
@@ -1636,11 +1707,13 @@ pub fn interpretISODateTimeOffset(
     offset_ns: i128,
     tz: TimeZone,
     offset_option: OffsetOption,
-) error{ Invalid, OffsetMismatch }!i128 {
+    dis: Disambiguation,
+    match_minutes: bool,
+) error{ Invalid, OffsetMismatch, Ambiguous }!i128 {
     // Wall clock, or the supplied offset is explicitly ignored: the zone
-    // alone places the instant.
+    // alone places the instant (DST gaps / folds disambiguate).
     if (behaviour == .wall or offset_option == .ignore) {
-        return getEpochNanosecondsFor(tz, dt) orelse error.Invalid;
+        return disambiguateEpochNanoseconds(tz, dt, dis);
     }
     // Exact UTC (`Z`), or the supplied offset is taken verbatim (`use`).
     if (behaviour == .exact or offset_option == .use) {
@@ -1655,11 +1728,30 @@ pub fn interpretISODateTimeOffset(
     // zoned wall clock must round-trip through an in-range instant.
     const wall_days = daysFromCivil(dt.iso_year, dt.iso_month, dt.iso_day);
     if (wall_days > 100_000_000 or wall_days < -100_000_000) return error.Invalid;
-    const candidate = getEpochNanosecondsFor(tz, dt) orelse return error.Invalid;
-    const cand_off: i128 = getOffsetNanosecondsFor(tz, candidate);
-    if (cand_off == offset_ns) return candidate;
+    // A candidate whose zone offset equals the supplied offset wins (this
+    // also picks the right side of a fold); an ISO string offset carries
+    // minute precision, so a sub-minute zone offset (pre-1883 LMT) matches
+    // after rounding to the minute.
+    var poss: [2]i128 = undefined;
+    const n = getPossibleEpochNanoseconds(tz, dt, &poss);
+    var i: u8 = 0;
+    while (i < n) : (i += 1) {
+        const cand_off: i128 = getOffsetNanosecondsFor(tz, poss[i]);
+        if (cand_off == offset_ns) {
+            if (!isValidEpochNanoseconds(poss[i])) return error.Invalid;
+            return poss[i];
+        }
+        if (match_minutes) {
+            const minute_ns: i128 = 60_000_000_000;
+            const rounded = @divFloor(cand_off + @divTrunc(minute_ns, 2), minute_ns) * minute_ns;
+            if (rounded == offset_ns) {
+                if (!isValidEpochNanoseconds(poss[i])) return error.Invalid;
+                return poss[i];
+            }
+        }
+    }
     if (offset_option == .reject) return error.OffsetMismatch;
-    return candidate; // prefer — fall back to the zone's own offset
+    return disambiguateEpochNanoseconds(tz, dt, dis); // prefer — the zone decides
 }
 
 /// §6.5.x AddZonedDateTime — add a calendar + time duration to an exact

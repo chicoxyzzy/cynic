@@ -2039,14 +2039,16 @@ pub fn getCalendarNameOption(realm: *Realm, options: Value) NativeError!temporal
 /// never consulted; we still read and range-check it for the observable
 /// side effect (a getter on the options bag) and the RangeError on a bad
 /// value that fixtures assert.
-pub fn getDisambiguationOption(realm: *Realm, options: Value) NativeError!void {
-    const obj = (try getOptionsObject(realm, options)) orelse return;
+pub fn getDisambiguationOption(realm: *Realm, options: Value) NativeError!temporal.Disambiguation {
+    const obj = (try getOptionsObject(realm, options)) orelse return .compatible;
     const v = try getPropertyChain(realm, obj, "disambiguation");
-    if (v.isUndefined()) return;
+    if (v.isUndefined()) return .compatible;
     const s = try stringifyArg(realm, v);
     const b = s.flatBytes();
-    if (std.mem.eql(u8, b, "compatible") or std.mem.eql(u8, b, "earlier") or
-        std.mem.eql(u8, b, "later") or std.mem.eql(u8, b, "reject")) return;
+    if (std.mem.eql(u8, b, "compatible")) return .compatible;
+    if (std.mem.eql(u8, b, "earlier")) return .earlier;
+    if (std.mem.eql(u8, b, "later")) return .later;
+    if (std.mem.eql(u8, b, "reject")) return .reject;
     return throwRangeError(realm, "disambiguation must be compatible / earlier / later / reject");
 }
 

@@ -953,8 +953,10 @@ fn plainDateTimeToZonedDateTime(realm: *Realm, this_value: Value, args: []const 
     const tz_s: *JSString = @ptrCast(@alignCast(tz_arg.asString()));
     const tz = temporal.parseTimeZoneString(tz_s.flatBytes()) orelse
         return throwRangeError(realm, "invalid time zone identifier");
-    try getDisambiguationOption(realm, argOr(args, 1, Value.undefined_));
-    const epoch = temporal.getEpochNanosecondsFor(tz, rec) orelse
-        return throwRangeError(realm, "ZonedDateTime is out of range");
+    const dis = try getDisambiguationOption(realm, argOr(args, 1, Value.undefined_));
+    const epoch = temporal.disambiguateEpochNanoseconds(tz, rec, dis) catch |e| switch (e) {
+        error.Ambiguous => return throwRangeError(realm, "wall-clock time is ambiguous or skipped in the time zone"),
+        error.Invalid => return throwRangeError(realm, "ZonedDateTime is out of range"),
+    };
     return createTemporalZonedDateTime(realm, .{ .epoch_ns = epoch, .time_zone = tz });
 }

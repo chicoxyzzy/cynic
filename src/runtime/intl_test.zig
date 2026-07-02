@@ -409,6 +409,24 @@ test "intl/temporal: chinese + dangi lunisolar calendars (table / leap months)" 
     );
 }
 
+test "intl/temporal: ZonedDateTime DST gap/fold disambiguation + offset option" {
+    try requireIntlBuild();
+    // America/Los_Angeles: 2000-04-02T02:30 falls in the spring-forward gap;
+    // 2000-10-29T01:30 repeats across the fall-back fold.
+    try evalAssert1(
+        \\const rejects = (f) => { try { f(); return false; } catch (e) { return e instanceof RangeError; } };
+        \\const gap = '2000-04-02T02:30[America/Los_Angeles]';
+        \\const fold = '2000-10-29T01:30[America/Los_Angeles]';
+        \\(Temporal.ZonedDateTime.from(gap).toString().includes('03:30') &&
+        \\ Temporal.ZonedDateTime.from(gap, {disambiguation: 'earlier'}).toString().includes('01:30') &&
+        \\ rejects(() => Temporal.ZonedDateTime.from(gap, {disambiguation: 'reject'})) &&
+        \\ Temporal.ZonedDateTime.from(fold).offset === '-07:00' &&
+        \\ Temporal.ZonedDateTime.from(fold, {disambiguation: 'later'}).offset === '-08:00' &&
+        \\ rejects(() => Temporal.ZonedDateTime.from(fold, {disambiguation: 'reject'})) &&
+        \\ Temporal.ZonedDateTime.from('2000-10-29T01:30-08:00[America/Los_Angeles]').offset === '-08:00') ? 1 : 0
+    );
+}
+
 test "intl/temporal: PlainMonthDay equals/with/toPlainDate calendar fidelity" {
     try requireIntlBuild();
     try evalAssert1(

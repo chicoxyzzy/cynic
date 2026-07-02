@@ -406,12 +406,13 @@ fn toZonedDateTimeFields(realm: *Realm, obj: *JSObject, options: Value) NativeEr
     // gets before the options-object TypeError.
     var extras: ZonedFieldExtras = .{};
     const f = try readDateTimeFieldsRaw(realm, obj, &extras);
-    try getDisambiguationOption(realm, options);
+    const dis = try getDisambiguationOption(realm, options);
     const offset_opt = try getOffsetOption(realm, options, .reject);
     const overflow = try getTemporalOverflowOption(realm, options);
     const dt = try resolveDateTimeFields(realm, f, overflow);
-    const epoch = temporal.interpretISODateTimeOffset(dt, extras.behaviour, extras.offset_ns, extras.time_zone, offset_opt) catch |e| switch (e) {
+    const epoch = temporal.interpretISODateTimeOffset(dt, extras.behaviour, extras.offset_ns, extras.time_zone, offset_opt, dis, false) catch |e| switch (e) {
         error.OffsetMismatch => return throwRangeError(realm, "offset does not match the time zone"),
+        error.Ambiguous => return throwRangeError(realm, "wall-clock time is ambiguous or skipped in the time zone"),
         error.Invalid => return throwRangeError(realm, "ZonedDateTime is out of range"),
     };
     return .{ .epoch_ns = epoch, .time_zone = extras.time_zone, .calendar = dt.calendar };
@@ -425,7 +426,7 @@ fn toTemporalZonedDateTime(realm: *Realm, item: Value, options: Value) NativeErr
         if (obj.getTemporalRecord()) |rec| {
             switch (rec.*) {
                 .zoned_date_time => |z| {
-                    try getDisambiguationOption(realm, options);
+                    _ = try getDisambiguationOption(realm, options);
                     _ = try getOffsetOption(realm, options, .reject);
                     _ = try getTemporalOverflowOption(realm, options);
                     return z;
@@ -439,11 +440,14 @@ fn toTemporalZonedDateTime(realm: *Realm, item: Value, options: Value) NativeErr
     const s: *JSString = @ptrCast(@alignCast(item.asString()));
     const parsed = temporal.parseTemporalZonedDateTimeString(s.flatBytes()) catch
         return throwRangeError(realm, "invalid ISO 8601 ZonedDateTime string");
-    try getDisambiguationOption(realm, options);
+    const dis = try getDisambiguationOption(realm, options);
     const offset_opt = try getOffsetOption(realm, options, .reject);
     _ = try getTemporalOverflowOption(realm, options);
-    const epoch = temporal.interpretISODateTimeOffset(parsed.date_time, parsed.behaviour, parsed.offset_ns, parsed.time_zone, offset_opt) catch |e| switch (e) {
+    // §6.5.x — an ISO string offset carries minute precision, so it matches
+    // a sub-minute zone offset after rounding (match-minutes behaviour).
+    const epoch = temporal.interpretISODateTimeOffset(parsed.date_time, parsed.behaviour, parsed.offset_ns, parsed.time_zone, offset_opt, dis, true) catch |e| switch (e) {
         error.OffsetMismatch => return throwRangeError(realm, "offset does not match the time zone"),
+        error.Ambiguous => return throwRangeError(realm, "wall-clock time is ambiguous or skipped in the time zone"),
         error.Invalid => return throwRangeError(realm, "ZonedDateTime is out of range"),
     };
     return .{ .epoch_ns = epoch, .time_zone = parsed.time_zone, .calendar = parsed.date_time.calendar };
@@ -693,7 +697,7 @@ fn zonedDateTimeWith(realm: *Realm, this_value: Value, args: []const Value) Nati
     // overflow) run before any algorithmic validation: a bad `monthCode` is
     // a RangeError only after all three have fired (per
     // with/options-read-before-algorithmic-validation.js).
-    try getDisambiguationOption(realm, argOr(args, 1, Value.undefined_));
+    const dis = try getDisambiguationOption(realm, argOr(args, 1, Value.undefined_));
     const offset_opt = try getOffsetOption(realm, argOr(args, 1, Value.undefined_), .prefer);
     const overflow = try getTemporalOverflowOption(realm, argOr(args, 1, Value.undefined_));
 
@@ -733,8 +737,9 @@ fn zonedDateTimeWith(realm: *Realm, this_value: Value, args: []const Value) Nati
     };
     const new_time = try regulateTime(realm, hour, minute, second, millisecond, microsecond, nanosecond, overflow);
     const wall = PlainDateTimeRecord.combine(new_date, new_time);
-    const epoch = temporal.interpretISODateTimeOffset(wall, .option, offset_ns, z.time_zone, offset_opt) catch |e| switch (e) {
+    const epoch = temporal.interpretISODateTimeOffset(wall, .option, offset_ns, z.time_zone, offset_opt, dis, false) catch |e| switch (e) {
         error.OffsetMismatch => return throwRangeError(realm, "offset does not match the time zone"),
+        error.Ambiguous => return throwRangeError(realm, "wall-clock time is ambiguous or skipped in the time zone"),
         error.Invalid => return throwRangeError(realm, "ZonedDateTime is out of range"),
     };
     return createTemporalZonedDateTime(realm, .{ .epoch_ns = epoch, .time_zone = z.time_zone, .calendar = z.calendar });
