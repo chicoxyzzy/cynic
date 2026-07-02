@@ -547,7 +547,7 @@ fn getTemporalRelativeToOption(realm: *Realm, opts: ?*JSObject) NativeError!?Rel
     // string is a plain date at midnight. A string with a `Z` designator but
     // no annotation parses as neither (a PlainDate forbids UTC) → RangeError.
     if (temporal.parseTemporalZonedDateTimeString(bytes)) |pz| {
-        const epoch = temporal.interpretISODateTimeOffset(pz.date_time, pz.behaviour, pz.offset_ns, pz.time_zone, .reject, .compatible, true) catch |e| switch (e) {
+        const epoch = temporal.interpretISODateTimeOffset(pz.date_time, pz.behaviour, pz.offset_ns, pz.time_zone, .reject, .compatible, pz.offset_minute_precision) catch |e| switch (e) {
             error.OffsetMismatch => return throwRangeError(realm, "offset does not match the time zone"),
             error.Ambiguous => return throwRangeError(realm, "wall-clock time is ambiguous or skipped in the time zone"),
             error.Invalid => return throwRangeError(realm, "relativeTo is out of range"),

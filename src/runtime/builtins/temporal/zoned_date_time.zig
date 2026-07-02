@@ -409,6 +409,8 @@ fn toZonedDateTimeFields(realm: *Realm, obj: *JSObject, options: Value) NativeEr
     const offset_opt = try getOffsetOption(realm, options, .reject);
     const overflow = try getTemporalOverflowOption(realm, options);
     const dt = try resolveDateTimeFields(realm, f, overflow);
+    // §6.5.x — a property bag offset is matched EXACTLY (never rounded to
+    // the minute); only a string source uses match-minutes.
     const epoch = temporal.interpretISODateTimeOffset(dt, extras.behaviour, extras.offset_ns, extras.time_zone, offset_opt, dis, false) catch |e| switch (e) {
         error.OffsetMismatch => return throwRangeError(realm, "offset does not match the time zone"),
         error.Ambiguous => return throwRangeError(realm, "wall-clock time is ambiguous or skipped in the time zone"),
@@ -444,7 +446,7 @@ fn toTemporalZonedDateTime(realm: *Realm, item: Value, options: Value) NativeErr
     _ = try getTemporalOverflowOption(realm, options);
     // §6.5.x — an ISO string offset carries minute precision, so it matches
     // a sub-minute zone offset after rounding (match-minutes behaviour).
-    const epoch = temporal.interpretISODateTimeOffset(parsed.date_time, parsed.behaviour, parsed.offset_ns, parsed.time_zone, offset_opt, dis, true) catch |e| switch (e) {
+    const epoch = temporal.interpretISODateTimeOffset(parsed.date_time, parsed.behaviour, parsed.offset_ns, parsed.time_zone, offset_opt, dis, parsed.offset_minute_precision) catch |e| switch (e) {
         error.OffsetMismatch => return throwRangeError(realm, "offset does not match the time zone"),
         error.Ambiguous => return throwRangeError(realm, "wall-clock time is ambiguous or skipped in the time zone"),
         error.Invalid => return throwRangeError(realm, "ZonedDateTime is out of range"),
@@ -736,6 +738,7 @@ fn zonedDateTimeWith(realm: *Realm, this_value: Value, args: []const Value) Nati
     };
     const new_time = try regulateTime(realm, hour, minute, second, millisecond, microsecond, nanosecond, overflow);
     const wall = PlainDateTimeRecord.combine(new_date, new_time);
+    // §6.5.x — with() matches the offset EXACTLY (no minute rounding).
     const epoch = temporal.interpretISODateTimeOffset(wall, .option, offset_ns, z.time_zone, offset_opt, dis, false) catch |e| switch (e) {
         error.OffsetMismatch => return throwRangeError(realm, "offset does not match the time zone"),
         error.Ambiguous => return throwRangeError(realm, "wall-clock time is ambiguous or skipped in the time zone"),

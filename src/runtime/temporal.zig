@@ -1773,8 +1773,13 @@ pub fn interpretISODateTimeOffset(
             return poss[i];
         }
         if (match_minutes) {
+            // §6.5.x — RoundNumberToIncrement(candidateOffset, 60e9,
+            // "halfExpand"): round the zone offset to the minute away from
+            // zero, then compare to the minute-precision source offset.
             const minute_ns: i128 = 60_000_000_000;
-            const rounded = @divFloor(cand_off + @divTrunc(minute_ns, 2), minute_ns) * minute_ns;
+            const mag: i128 = if (cand_off < 0) -cand_off else cand_off;
+            const rounded_mag = @divFloor(mag + @divTrunc(minute_ns, 2), minute_ns) * minute_ns;
+            const rounded: i128 = if (cand_off < 0) -rounded_mag else rounded_mag;
             if (rounded == offset_ns) {
                 if (!isValidEpochNanoseconds(poss[i])) return error.Invalid;
                 return poss[i];
@@ -2174,7 +2179,13 @@ fn parseIsoTime(c: *Cursor) error{Invalid}!ParsedTime {
 /// Parse a numeric UTC offset at the cursor (`+`/`-` already peeked):
 /// `±HH`, `±HH:MM`, `±HH:MM:SS`, `±HH:MM:SS(.|,)fraction`, or the
 /// compact colon-free forms. Returns the offset in signed nanoseconds.
-fn parseUtcOffsetNs(c: *Cursor) error{Invalid}!i128 {
+/// A parsed UTC offset plus whether it was written with only minute
+/// precision (`±HH:MM` / `±HHMM`, no seconds field): the §6.5.x offset
+/// matching rounds a sub-minute zone offset to the minute ONLY when the
+/// source offset had minute precision.
+pub const ParsedOffset = struct { ns: i128, minute_precision: bool };
+
+fn parseUtcOffsetNsPrec(c: *Cursor) error{Invalid}!ParsedOffset {
     const sign = c.peek() orelse return error.Invalid;
     if (sign != '+' and sign != '-') return error.Invalid;
     c.i += 1;
@@ -2184,25 +2195,32 @@ fn parseUtcOffsetNs(c: *Cursor) error{Invalid}!i128 {
     var minute: u32 = 0;
     var second: u32 = 0;
     var sub_ns: u32 = 0;
+    var has_seconds = false;
 
     if (c.eat(':')) {
         minute = @intCast(c.fixedDigits(2) orelse return error.Invalid);
         if (c.eat(':')) {
             second = @intCast(c.fixedDigits(2) orelse return error.Invalid);
             sub_ns = try parseFractionNs(c);
+            has_seconds = true;
         }
     } else if (c.isDigit()) {
         minute = @intCast(c.fixedDigits(2) orelse return error.Invalid);
         if (c.isDigit()) {
             second = @intCast(c.fixedDigits(2) orelse return error.Invalid);
             sub_ns = try parseFractionNs(c);
+            has_seconds = true;
         }
     }
 
     if (hour > 23 or minute > 59 or second > 59) return error.Invalid;
     const total: i128 = (@as(i128, hour) * 3600 + @as(i128, minute) * 60 + @as(i128, second)) *
         1_000_000_000 + @as(i128, sub_ns);
-    return if (neg) -total else total;
+    return .{ .ns = if (neg) -total else total, .minute_precision = !has_seconds };
+}
+
+fn parseUtcOffsetNs(c: *Cursor) error{Invalid}!i128 {
+    return (try parseUtcOffsetNsPrec(c)).ns;
 }
 
 /// Read an optional `.`/`,` fraction (1..9 digits) at the cursor,
@@ -3757,6 +3775,7 @@ pub const ParsedZonedDateTime = struct {
     date_time: PlainDateTimeRecord,
     behaviour: OffsetBehaviour,
     offset_ns: i128,
+    offset_minute_precision: bool = true,
     time_zone: TimeZone,
 };
 
@@ -3773,13 +3792,16 @@ pub fn parseTemporalZonedDateTimeString(input: []const u8) error{Invalid}!Parsed
     var time = ParsedTime{ .hour = 0, .minute = 0, .second = 0, .sub_ns = 0 };
     var behaviour: OffsetBehaviour = .wall;
     var offset_ns: i128 = 0;
+    var offset_minute_precision = true;
     if (c.eatAny("Tt ")) {
         time = try parseIsoTime(&c);
         if (c.eatAny("Zz")) {
             behaviour = .exact;
         } else if (c.peek()) |ch| {
             if (ch == '+' or ch == '-') {
-                offset_ns = try parseUtcOffsetNs(&c);
+                const po = try parseUtcOffsetNsPrec(&c);
+                offset_ns = po.ns;
+                offset_minute_precision = po.minute_precision;
                 behaviour = .option;
             }
         }
@@ -3809,7 +3831,7 @@ pub fn parseTemporalZonedDateTimeString(input: []const u8) error{Invalid}!Parsed
     // representable). InterpretISODateTimeOffset applies the right bound
     // (CheckISODaysRange for an `option` offset, IsValidEpochNanoseconds for an
     // exact `Z`), so a genuinely out-of-range value still rejects — just later.
-    return .{ .date_time = rec, .behaviour = behaviour, .offset_ns = offset_ns, .time_zone = tz };
+    return .{ .date_time = rec, .behaviour = behaviour, .offset_ns = offset_ns, .offset_minute_precision = offset_minute_precision, .time_zone = tz };
 }
 
 /// Parse a standalone numeric UTC-offset string (`±HH`, `±HH:MM`,
@@ -3817,12 +3839,16 @@ pub fn parseTemporalZonedDateTimeString(input: []const u8) error{Invalid}!Parsed
 /// property bag's `offset` field — into signed nanoseconds. Returns null
 /// on any malformed input or trailing garbage.
 pub fn parseOffsetString(input: []const u8) ?i128 {
+    return (parseOffsetStringPrec(input) orelse return null).ns;
+}
+
+pub fn parseOffsetStringPrec(input: []const u8) ?ParsedOffset {
     var c = Cursor{ .s = input };
     const ch = c.peek() orelse return null;
     if (ch != '+' and ch != '-') return null;
-    const ns = parseUtcOffsetNs(&c) catch return null;
+    const po = parseUtcOffsetNsPrec(&c) catch return null;
     if (!c.done()) return null;
-    return ns;
+    return po;
 }
 
 // ── §9 Temporal.PlainYearMonth abstract operations (pure) ──────────────────
