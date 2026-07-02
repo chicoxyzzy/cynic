@@ -868,6 +868,15 @@ fn canonicalUnicodeType(key: []const u8, value: []const u8) []const u8 {
     return value;
 }
 
+/// §3.2.1 bcp47 deprecated type aliases that cross a subtag boundary
+/// (`islamicc` → `islamic-civil`, `ethiopic-amete-alem` → `ethioaa`), matched
+/// against the whole joined key-type group.
+fn uKeywordGroupAlias(group: []const u8) ?[]const u8 {
+    if (std.mem.eql(u8, group, "ca-islamicc")) return "ca-islamic-civil";
+    if (std.mem.eql(u8, group, "ca-ethiopic-amete-alem")) return "ca-ethioaa";
+    return null;
+}
+
 fn appendUnicodeKeywords(
     allocator: std.mem.Allocator,
     out: *std.ArrayListUnmanaged(u8),
@@ -899,15 +908,15 @@ fn appendUnicodeKeywords(
         // §3.2.1 — canonicalise the type values, then drop a default `true`
         // type on a boolean key. Build the surviving segment list (key first).
         const key = items[i];
-        const boolean_key = isBooleanUKey(key);
         var segs: std.ArrayListUnmanaged([]const u8) = .empty;
         defer segs.deinit(allocator);
         try segs.append(allocator, key);
         for (items[i + 1 .. end]) |raw_type| {
             const canon = canonicalUnicodeType(key, raw_type);
-            // A boolean key with the single value `true` canonicalises to the
-            // bare key (`und-u-kn-true` → `und-u-kn`).
-            if (boolean_key and end - i == 2 and std.mem.eql(u8, canon, "true")) continue;
+            // A single type value `true` canonicalises to the bare key for
+            // every key (`und-u-kn-true` → `und-u-kn`, `de-u-kf-true` →
+            // `de-u-kf`) — UTS #35 Annex C canonicalizing syntax.
+            if (end - i == 2 and std.mem.eql(u8, canon, "true")) continue;
             try segs.append(allocator, canon);
         }
         // Concatenate the surviving segments with '-'.
@@ -924,7 +933,14 @@ fn appendUnicodeKeywords(
             @memcpy(buf[pos .. pos + s.len], s);
             pos += s.len;
         }
-        try groups.append(allocator, buf);
+        // §3.2.1 bcp47 type aliases whose source or target spans subtag
+        // boundaries — rewrite the joined group.
+        if (uKeywordGroupAlias(buf)) |alias| {
+            allocator.free(buf);
+            try groups.append(allocator, try allocator.dupe(u8, alias));
+        } else {
+            try groups.append(allocator, buf);
+        }
         i = end;
     }
     // Sort groups by full string (keys are 2-char alpha, so this is
@@ -1086,13 +1102,17 @@ pub fn unicodeExtensionValue(locale: []const u8, key: []const u8) ?[]const u8 {
         if (seg.len == 2 and std.mem.eql(u8, seg, key)) {
             if (dash == null) return ""; // key without value
             const after = rest[dash.? + 1 ..];
-            const dash2 = std.mem.indexOfScalar(u8, after, '-');
-            if (dash2) |d2| {
-                const val = after[0..d2];
-                if (val.len == 2) return ""; // next key
-                return val;
+            // §3.2 UTS #35 — the type is a SEQUENCE of alphanum{3,8}
+            // subtags ("islamic-civil"); span until the next 2-char key,
+            // a singleton, or the end of the tag.
+            var span: usize = 0;
+            var vals = std.mem.splitScalar(u8, after, '-');
+            while (vals.next()) |val| {
+                if (val.len < 3) break; // next key (2) or singleton (1)
+                span = (@intFromPtr(val.ptr) - @intFromPtr(after.ptr)) + val.len;
             }
-            return after;
+            if (span == 0) return ""; // key immediately followed by a key
+            return after[0..span];
         }
         if (dash == null) break;
         rest = rest[dash.? + 1 ..];

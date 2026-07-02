@@ -1577,6 +1577,16 @@ test "intl: Locale info methods return correct shapes" {
     );
 }
 
+test "intl: Locale multi-subtag -u- types + true elision + islamicc alias" {
+    try requireIntlBuild();
+    try evalAssert1(
+        \\(new Intl.Locale('en-u-ca-islamic-civil').calendar === 'islamic-civil' &&
+        \\ new Intl.Locale('en-u-ca-islamicc').toString() === 'en-u-ca-islamic-civil' &&
+        \\ new Intl.Locale('de-u-kf-true').toString() === 'de-u-kf' &&
+        \\ new Intl.Locale('en-u-kn-yes').toString() === 'en-u-kn') ? 1 : 0
+    );
+}
+
 test "intl: Locale getTimeZones lists the region's zones, sorted" {
     try requireIntlBuild();
     try evalAssert1(
