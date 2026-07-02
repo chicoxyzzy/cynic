@@ -378,6 +378,31 @@ test "intl/temporal: PlainDateTime/ZonedDateTime since/until/equals compare cale
     );
 }
 
+test "intl/temporal: PlainDate/PlainYearMonth since/until/equals compare calendars (canonicalized)" {
+    try requireIntlBuild();
+    // §3.3.x / §9.3.x — since/until throw a RangeError on mismatched calendars
+    // and equals compares the calendar. Ids are canonicalized before matching,
+    // so an alias spelling (islamicc) equals its preferred form (islamic-civil)
+    // and does NOT throw (test262 since|until/calendar-mismatch,
+    // equals/compare-calendar, since|until/canonicalize-calendar).
+    try evalAssert1(
+        \\// PlainDate: different calendars → equals false, until throws
+        \\const g = new Temporal.PlainDate(2024, 6, 8, "gregory");
+        \\const iso = new Temporal.PlainDate(2024, 6, 8, "iso8601");
+        \\if (g.equals(iso)) throw 0;
+        \\let t = false; try { g.until(iso); } catch (e) { t = e instanceof RangeError; }
+        \\if (!t) throw 1;
+        \\// PlainYearMonth: alias canonicalizes → since must NOT throw, result blank
+        \\const ym = new Temporal.PlainYearMonth(2024, 6, "islamic-civil", 8);
+        \\if (!ym.since("2024-06-08[u-ca=islamicc]").blank) throw 2;
+        \\// PlainYearMonth: genuinely different calendars → until throws
+        \\let t2 = false;
+        \\try { ym.until(new Temporal.PlainYearMonth(2024, 6, "gregory")); } catch (e) { t2 = e instanceof RangeError; }
+        \\if (!t2) throw 3;
+        \\1
+    );
+}
+
 test "intl/temporal: PlainDateTime.toString preserves a non-ISO calendar" {
     try requireIntlBuild();
     // §5.3.x — the calendar constructor argument survives toString's internal

@@ -395,7 +395,8 @@ fn plainDateCompare(realm: *Realm, this_value: Value, args: []const Value) Nativ
 fn plainDateEquals(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const a = try requirePlainDate(realm, this_value);
     const b = try toTemporalDate(realm, argOr(args, 0, Value.undefined_), Value.undefined_);
-    return Value.fromBool(compareISODate(a, b) == 0);
+    // §3.3.x — equal iff the ISO date AND the calendars match.
+    return Value.fromBool(compareISODate(a, b) == 0 and a.calendar.eql(&b.calendar));
 }
 
 /// §3.3.x Temporal.PlainDate.prototype.with ( temporalDateLike [, options] ).
@@ -611,6 +612,10 @@ fn plainDateSince(realm: *Realm, this_value: Value, args: []const Value) NativeE
 fn differenceTemporalDate(realm: *Realm, this_value: Value, args: []const Value, is_since: bool) NativeError!Value {
     const this_date = try requirePlainDate(realm, this_value);
     const other_date = try toTemporalDate(realm, argOr(args, 0, Value.undefined_), Value.undefined_);
+    // §3.3.x DifferenceTemporalPlainDate — the calendars must match (RangeError
+    // otherwise), checked before the options are read.
+    if (!this_date.calendar.eql(&other_date.calendar))
+        return throwRangeError(realm, "cannot compute the difference between PlainDates with different calendars");
     const opts = try getOptionsObject(realm, argOr(args, 1, Value.undefined_));
 
     // GetDifferenceSettings read order: largestUnit, increment, mode,

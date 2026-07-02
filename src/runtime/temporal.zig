@@ -115,8 +115,13 @@ pub const CalendarId = struct {
         return std.ascii.eqlIgnoreCase(self.slice(), "iso8601");
     }
 
+    /// CalendarEquals-style comparison: canonicalise both ids (resolving
+    /// legacy aliases such as `islamicc` → `islamic-civil`) before matching,
+    /// so difference/equals treat alias spellings of one calendar as equal.
     pub fn eql(self: *const CalendarId, other: *const CalendarId) bool {
-        return std.ascii.eqlIgnoreCase(self.slice(), other.slice());
+        const a = canonicalizeCalendarId(self.slice()) orelse self.slice();
+        const b = canonicalizeCalendarId(other.slice()) orelse other.slice();
+        return std.ascii.eqlIgnoreCase(a, b);
     }
 };
 

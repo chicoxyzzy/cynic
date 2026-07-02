@@ -301,7 +301,16 @@ pub fn toTemporalYearMonth(realm: *Realm, item: Value, options: Value) NativeErr
     const parsed = temporal.parseTemporalYearMonthString(s.flatBytes()) catch
         return throwRangeError(realm, "invalid ISO 8601 year-month string");
     _ = try getTemporalOverflowOption(realm, options);
-    return .{ .iso_year = parsed.iso_year, .iso_month = parsed.iso_month, .ref_iso_day = 1 };
+    // Preserve the parsed calendar annotation (`[u-ca=…]`); for the ISO calendar
+    // the reference day normalises to 1, but a non-ISO year-month keeps the
+    // parsed reference day so it round-trips (test262 since/until/equals
+    // canonicalize-calendar).
+    return .{
+        .iso_year = parsed.iso_year,
+        .iso_month = parsed.iso_month,
+        .ref_iso_day = if (parsed.calendar.isIso()) 1 else parsed.ref_iso_day,
+        .calendar = parsed.calendar,
+    };
 }
 
 /// §9.2.2 Temporal.PlainYearMonth.from ( item [, options] ).
@@ -325,7 +334,8 @@ fn plainYearMonthCompare(realm: *Realm, this_value: Value, args: []const Value) 
 fn plainYearMonthEquals(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const a = try requirePlainYearMonth(realm, this_value);
     const b = try toTemporalYearMonth(realm, argOr(args, 0, Value.undefined_), Value.undefined_);
-    return Value.fromBool(compareISODate(a.date(), b.date()) == 0);
+    // §9.3.x — equal iff the ISO reference date AND the calendars match.
+    return Value.fromBool(compareISODate(a.date(), b.date()) == 0 and a.calendar.eql(&b.calendar));
 }
 
 /// §9.3.x Temporal.PlainYearMonth.prototype.with ( temporalYearMonthLike
@@ -486,6 +496,10 @@ fn plainYearMonthSince(realm: *Realm, this_value: Value, args: []const Value) Na
 fn differenceTemporalYearMonth(realm: *Realm, this_value: Value, args: []const Value, is_since: bool) NativeError!Value {
     const this_ym = try requirePlainYearMonth(realm, this_value);
     const other_ym = try toTemporalYearMonth(realm, argOr(args, 0, Value.undefined_), Value.undefined_);
+    // §9.3.x DifferenceTemporalPlainYearMonth — the calendars must match
+    // (RangeError otherwise), checked before the options are read.
+    if (!this_ym.calendar.eql(&other_ym.calendar))
+        return throwRangeError(realm, "cannot compute the difference between PlainYearMonths with different calendars");
     const opts = try getOptionsObject(realm, argOr(args, 1, Value.undefined_));
 
     const largest_opt = try getTemporalUnitOption(realm, opts, "largestUnit");
