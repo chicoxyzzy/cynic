@@ -499,6 +499,26 @@ pub fn numberingSystemDigitBase(id: []const u8) ?u32 {
     return null;
 }
 
+/// Append every numbering-system id in the packed digit-base table to `out`.
+/// Each id borrows from the embedded blob (static lifetime). This set is
+/// exactly the systems `numberingSystemDigitBase` accepts, which is what
+/// `Intl.supportedValuesOf("numberingSystem")` must enumerate so the
+/// enumerate-set matches what NumberFormat accepts (§6 AvailableNumberingSystems).
+pub fn appendNumberingSystemIds(alloc: std.mem.Allocator, out: *std.ArrayListUnmanaged([]const u8)) !void {
+    if (!ensureInit() or ns_payload.len < 4) return;
+    const count = std.mem.readInt(u32, ns_payload[0..4], .little);
+    var off: usize = 4;
+    var i: u32 = 0;
+    while (i < count) : (i += 1) {
+        if (off + 1 > ns_payload.len) return;
+        const ilen = ns_payload[off];
+        off += 1;
+        if (off + ilen + 4 > ns_payload.len) return;
+        try out.append(alloc, ns_payload[off .. off + ilen]);
+        off += ilen + 4;
+    }
+}
+
 fn findNumber(key: []const u8) ?NumberData {
     const count = std.mem.readInt(u32, num_payload[0..4], .little);
     var off: usize = 4;

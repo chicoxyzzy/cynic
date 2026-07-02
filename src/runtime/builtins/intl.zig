@@ -654,15 +654,26 @@ fn intlSupportedValuesOf(realm: *Realm, this_value: Value, args: []const Value) 
     _ = this_value;
     const key_v = argOr(args, 0, Value.undefined_);
     const key = try valueToStringSlice(realm, key_v);
+
+    // numberingSystem is derived from the CLDR blob when present, so the
+    // enumerated set is exactly the systems NumberFormat accepts (every
+    // digit-base mapping, including recent CLDR additions like `gara`); every
+    // other key uses its curated static list. `owned` backs the blob path.
+    var owned: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer owned.deinit(realm.allocator);
     const values: []const []const u8 = if (std.mem.eql(u8, key, "calendar"))
         &intl.supported_calendars
     else if (std.mem.eql(u8, key, "collation"))
         &intl.supported_collations
     else if (std.mem.eql(u8, key, "currency"))
         &intl.supported_currencies
-    else if (std.mem.eql(u8, key, "numberingSystem"))
-        &intl.supported_numbering_systems
-    else if (std.mem.eql(u8, key, "timeZone"))
+    else if (std.mem.eql(u8, key, "numberingSystem")) blk: {
+        if (cldr.available) {
+            cldr.appendNumberingSystemIds(realm.allocator, &owned) catch return error.OutOfMemory;
+            if (owned.items.len > 0) break :blk owned.items;
+        }
+        break :blk &intl.supported_numbering_systems;
+    } else if (std.mem.eql(u8, key, "timeZone"))
         &intl.supported_time_zones
     else if (std.mem.eql(u8, key, "unit"))
         &intl.supported_units
@@ -680,7 +691,10 @@ fn intlSupportedValuesOf(realm: *Realm, this_value: Value, args: []const Value) 
 
     const arr = allocateArray(realm) catch return error.OutOfMemory;
     var i: i32 = 0;
+    var prev: ?[]const u8 = null;
     for (sorted) |v| {
+        if (prev) |p| if (std.mem.eql(u8, p, v)) continue; // drop duplicates
+        prev = v;
         var idx_buf: [24]u8 = undefined;
         const idx_key = std.fmt.bufPrint(&idx_buf, "{d}", .{i}) catch unreachable;
         arr.set(realm.allocator, idx_key, try makeStringValue(realm, v)) catch return error.OutOfMemory;

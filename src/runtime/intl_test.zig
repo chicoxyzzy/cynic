@@ -328,6 +328,25 @@ test "intl: supportedValuesOf calendars canonical + sorted; islamic aliases fold
     );
 }
 
+test "intl: supportedValuesOf(numberingSystem) enumerates the CLDR accept-set (incl. gara)" {
+    try requireIntlBuild();
+    if (!intl_config.has_locale_data) return error.SkipZigTest; // gara comes from the CLDR blob
+    // §6 AvailableNumberingSystems: the enumerated list must contain exactly
+    // the systems NumberFormat accepts. `gara` (Garay) is a recent CLDR
+    // digit-base system — NumberFormat accepts it, so supportedValuesOf must
+    // return it too (test262 numberingSystems-accepted-by-* cross-check).
+    try evalAssert1(
+        \\const l = Intl.supportedValuesOf("numberingSystem");
+        \\if (!l.includes("gara")) throw 0;
+        \\if (!l.includes("latn") || !l.includes("arab")) throw 1;
+        \\for (let i = 1; i < l.length; i++) if (l[i - 1] >= l[i]) throw 2; // sorted + unique
+        \\// every enumerated system round-trips through NumberFormat
+        \\for (const ns of l)
+        \\  if (new Intl.NumberFormat("en", { numberingSystem: ns }).resolvedOptions().numberingSystem !== ns) throw 3;
+        \\1
+    );
+}
+
 test "intl/temporal: with ignores era/eraYear on era-less calendars (no throw)" {
     try requireIntlBuild();
     // `from` requires a year and throws when era/eraYear can't supply one for an
