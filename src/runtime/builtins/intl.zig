@@ -1610,7 +1610,7 @@ fn numberFormatConstructor(realm: *Realm, this_value: Value, args: []const Value
     // §11.1.2 read order: numberingSystem is read right after localeMatcher,
     // before style. Explicit option wins, else the locale's CLDR default, else
     // latn. (The -u-nu- extension is resolved into the locale upstream.)
-    slots.base.numbering_system = try resolveNumberingSystem(realm, slots.base.dataLocale(), slots.base.locale, opts);
+    slots.base.numbering_system = try resolveNumberingSystem(realm, slots.base.dataLocale(), slots.base.locale, opts, false);
     slots.style = try getOptionStringOwned(realm, opts, "style", &.{ "decimal", "percent", "currency", "unit" }, "decimal");
     const is_currency_style = std.mem.eql(u8, slots.style, "currency");
     const is_unit_style = std.mem.eql(u8, slots.style, "unit");
@@ -1825,7 +1825,7 @@ fn setNumberFormatDigitOptions(realm: *Realm, slots: *intl.NumberFormatSlots, op
 
 /// Resolve the numbering-system id: explicit `numberingSystem` option (must be
 /// a known numeric system) → the locale's CLDR default → "latn".
-fn resolveNumberingSystem(realm: *Realm, locale: []const u8, ext_locale: []const u8, opts: ?*JSObject) NativeError![]const u8 {
+fn resolveNumberingSystem(realm: *Realm, locale: []const u8, ext_locale: []const u8, opts: ?*JSObject, honor_nu: bool) NativeError![]const u8 {
     if (opts) |o| {
         const v = try getPropertyChain(realm, o, "numberingSystem");
         if (!v.isUndefined()) {
@@ -1839,12 +1839,19 @@ fn resolveNumberingSystem(realm: *Realm, locale: []const u8, ext_locale: []const
                 return realm.allocator.dupe(u8, s) catch error.OutOfMemory;
         }
     }
-    // NOTE: the locale's -u-nu keyword deliberately does NOT apply here yet —
-    // honouring it unmasks digit-substituted output for values whose exact
-    // decimal expansion the f64 render path cannot yet produce (the nu-arab
-    // big-value fixtures skip their asserts while the resolved system stays
-    // "latn"). Wire the keyword through once the exact-decimal path lands.
-    _ = ext_locale;
+    // §9.2.7 — the resolved locale's -u-nu keyword (a supported system) selects
+    // the numbering system. `honor_nu` gates this: DateTimeFormat / DurationFormat
+    // render only small component numbers and honour it, but NumberFormat opts
+    // OUT because honouring it there unmasks digit-substituted output for values
+    // whose exact decimal expansion the f64 render path cannot yet produce (the
+    // nu-arab big-value fixtures); RelativeTimeFormat stays off too so its digits
+    // match NumberFormat's (the en-us-numbering-systems cross-check).
+    if (honor_nu and cldr.available) {
+        if (intl.unicodeExtensionValue(ext_locale, "nu")) |nu| {
+            if (intl.isValidUnicodeType(nu) and cldr.numberingSystemDigitBase(nu) != null)
+                return realm.allocator.dupe(u8, nu) catch error.OutOfMemory;
+        }
+    }
     if (cldr.available) {
         if (cldr.numberData(locale)) |d| return realm.allocator.dupe(u8, d.ns) catch error.OutOfMemory;
     }
@@ -3195,7 +3202,12 @@ fn buildDateTimeFormatSlots(realm: *Realm, locales: Value, options: Value) Nativ
     // §11.1.2 read order: numberingSystem is resolved after the calendar option
     // (both after localeMatcher). Runs unconditionally so a locale's default
     // system still applies when no options object is supplied.
-    slots.numbering_system = try resolveNumberingSystem(realm, resolved.locale, resolved.locale, opts);
+    slots.numbering_system = try resolveNumberingSystem(realm, resolved.locale, resolved.locale, opts, true);
+    // §9.2.7 — the -u-nu keyword stays in the resolved locale only when it equals
+    // the resolved system; an overriding option (or the default) drops it.
+    if (intl.unicodeExtensionValue(slots.base.locale, "nu")) |kw| {
+        if (!std.ascii.eqlIgnoreCase(kw, slots.numbering_system)) try stripExtKeyword(realm, &slots.base, "nu");
+    }
     if (opts) |o| {
         slots.date_style = try dupOptOwned(realm, try getOptionString(realm, opts, "dateStyle", &.{ "full", "long", "medium", "short" }, ""));
         slots.time_style = try dupOptOwned(realm, try getOptionString(realm, opts, "timeStyle", &.{ "full", "long", "medium", "short" }, ""));
@@ -4992,8 +5004,10 @@ fn rtfConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeE
     errdefer slots.deinit(realm.allocator);
     slots.base.locale = resolved.locale;
     try retainRelevantUnicodeExtensions(realm, &slots.base, &.{"nu"}); // §9.2.7 RelativeTimeFormat keys
-    // § read order: numberingSystem, style, numeric.
-    slots.numbering_system = try resolveNumberingSystem(realm, slots.base.locale, slots.base.locale, opts);
+    // § read order: numberingSystem, style, numeric. RelativeTimeFormat does
+    // NOT honour the -u-nu keyword — its digits must match NumberFormat's, which
+    // stays on latn until the exact-decimal path lands (en-us-numbering-systems).
+    slots.numbering_system = try resolveNumberingSystem(realm, slots.base.locale, slots.base.locale, opts, false);
     slots.style = try getOptionStringOwned(realm, opts, "style", &.{ "long", "short", "narrow" }, "long");
     slots.numeric = try getOptionStringOwned(realm, opts, "numeric", &.{ "always", "auto" }, "always");
     try storeRecord(realm, inst, .{ .relative_time_format = slots });
@@ -5772,8 +5786,13 @@ fn buildDurationFormatSlots(realm: *Realm, locales: Value, options: Value) Nativ
     try retainRelevantUnicodeExtensions(realm, &slots.base, &.{"nu"}); // §9.2.7 DurationFormat keys
 
     // § InitializeDurationFormat read order: numberingSystem, style, then each
-    // unit's style + display, then fractionalDigits.
-    slots.numbering_system = try resolveNumberingSystem(realm, slots.base.locale, slots.base.locale, opts);
+    // unit's style + display, then fractionalDigits. DurationFormat honours the
+    // -u-nu keyword (it renders only small component numbers) and drops it from
+    // the resolved locale when an option overrides it.
+    slots.numbering_system = try resolveNumberingSystem(realm, slots.base.locale, slots.base.locale, opts, true);
+    if (intl.unicodeExtensionValue(slots.base.locale, "nu")) |kw| {
+        if (!std.ascii.eqlIgnoreCase(kw, slots.numbering_system)) try stripExtKeyword(realm, &slots.base, "nu");
+    }
     slots.style = try getOptionStringOwned(realm, opts, "style", &.{ "long", "short", "narrow", "digital" }, "short");
     const digital = std.mem.eql(u8, slots.style, "digital");
 

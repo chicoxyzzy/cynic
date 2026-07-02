@@ -347,6 +347,21 @@ test "intl: supportedValuesOf(numberingSystem) enumerates the CLDR accept-set (i
     );
 }
 
+test "intl: DateTimeFormat resolves the -u-nu keyword against options (§9.2.7)" {
+    try requireIntlBuild();
+    if (!intl_config.has_locale_data) return error.SkipZigTest;
+    // §9.2.7 — DTF honours a supported -u-nu keyword; a numberingSystem option
+    // overrides it (dropping the keyword) unless it equals the keyword (test262
+    // resolved-numbering-system-unicode-extensions-and-options).
+    try evalAssert1(
+        \\function res(loc, nu) { const r = new Intl.DateTimeFormat(loc, { numberingSystem: nu }).resolvedOptions(); return r.locale + "|" + r.numberingSystem; }
+        \\if (res("en-u-nu-arab", "invalid") !== "en-u-nu-arab|arab") throw 0; // option unsupported → keyword honoured
+        \\if (res("en-u-nu-invalid", "invalid2") !== "en|latn") throw 1; // both unsupported → default
+        \\if (res("en-u-nu-latn", "arab") !== "en|arab") throw 2; // option overrides → keyword dropped
+        \\1
+    );
+}
+
 test "intl: DateTimeFormat drops an unsupported -u-ca keyword from the resolved locale" {
     try requireIntlBuild();
     if (!intl_config.has_locale_data) return error.SkipZigTest;
