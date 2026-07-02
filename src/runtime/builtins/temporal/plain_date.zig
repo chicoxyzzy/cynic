@@ -303,7 +303,8 @@ fn toISODateFields(realm: *Realm, obj: *JSObject, options: Value) NativeError!Pl
     const max_mo = shared.monthsInYearForCalendar(cal);
     var month: i64 = undefined;
     if (mc_len) |len| {
-        month = try monthFromCodeBytes(realm, &mc_buf, len, max_mo);
+        month = try monthFromCodeBytes(realm, cal, &mc_buf, len, max_mo);
+        month = try shared.resolveMonthOrdinal(realm, cal, year_val, month, overflow == .reject);
         if (month_present and month_val != month) return throwRangeError(realm, "month and monthCode disagree");
     } else if (month_present) {
         month = month_val;
@@ -458,13 +459,18 @@ fn plainDateWith(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     if (shared.isComputedCalendar(base.calendar)) {
         const cf = shared.calendarFields(base.calendar, base.iso_year, base.iso_month, base.iso_day);
         var im: i64 = cf.month;
+        var im_is_code = false;
         if (mc_len) |len| {
-            im = try monthFromCodeBytes(realm, &mc_buf, len, max_mo);
-            if (month_present and month_val != im) return throwRangeError(realm, "month and monthCode disagree");
+            im = try monthFromCodeBytes(realm, base.calendar, &mc_buf, len, max_mo);
+            im_is_code = true;
         } else if (month_present) {
             im = month_val;
         }
         const iy: i64 = if (year_present) year_val else cf.year;
+        if (im_is_code) {
+            im = try shared.resolveMonthOrdinal(realm, base.calendar, iy, im, overflow == .reject);
+            if (month_present and month_val != im) return throwRangeError(realm, "month and monthCode disagree");
+        }
         const id: i64 = if (day_present) day_val else cf.day;
         const iso = shared.computedToIso(base.calendar, iy, im, id, overflow == .reject) orelse
             return throwRangeError(realm, "PlainDate is out of range");
@@ -476,7 +482,7 @@ fn plainDateWith(realm: *Realm, this_value: Value, args: []const Value) NativeEr
 
     var month: i64 = base.iso_month;
     if (mc_len) |len| {
-        month = try monthFromCodeBytes(realm, &mc_buf, len, max_mo);
+        month = try monthFromCodeBytes(realm, base.calendar, &mc_buf, len, max_mo);
         if (month_present and month_val != month) return throwRangeError(realm, "month and monthCode disagree");
     } else if (month_present) {
         month = month_val;

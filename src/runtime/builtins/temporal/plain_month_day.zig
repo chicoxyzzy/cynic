@@ -209,9 +209,11 @@ fn toMonthDayFields(realm: *Realm, obj: *JSObject, options: Value) NativeError!P
 
     const max_month: i64 = shared.monthsInYearForCalendar(cal);
     var month: i64 = undefined;
+    const has_code = mc_len != null;
     if (mc_len) |len| {
-        month = try monthFromCodeBytes(realm, &mc_buf, len, max_month);
-        if (month_present and month_val != month) return throwRangeError(realm, "month and monthCode disagree");
+        month = try monthFromCodeBytes(realm, cal, &mc_buf, len, max_month);
+        if (month_present and month_val != try shared.resolveMonthOrdinal(realm, cal, year_for_overflow, month, false))
+            return throwRangeError(realm, "month and monthCode disagree");
     } else if (month_present) {
         month = month_val;
     } else {
@@ -221,7 +223,12 @@ fn toMonthDayFields(realm: *Realm, obj: *JSObject, options: Value) NativeError!P
     // (calendar month, day) pair; gregorian-month calendars keep the ISO
     // month/day with the 1972 reference and just carry the calendar.
     if (shared.isComputedCalendar(cal)) {
-        const ref = shared.computedMonthDayRef(cal, month, day, overflow == .reject) orelse
+        // A plain `month` integer without a code is an ordinal; the probe walk
+        // needs the year-independent CODE space, which for sub-Adar ordinals is
+        // the same number (hebrew codes only diverge from ordinals post-Adar in
+        // leap years, unreachable without a year).
+        const code_month: i64 = if (has_code) month else month;
+        const ref = shared.computedMonthDayRef(cal, code_month, day, overflow == .reject) orelse
             return throwRangeError(realm, "PlainMonthDay day is out of range for the calendar");
         return .{ .ref_iso_year = @intCast(ref.iso_year), .iso_month = @intCast(ref.iso_month), .iso_day = @intCast(ref.iso_day), .calendar = cal };
     }
@@ -319,15 +326,32 @@ fn plainMonthDayWith(realm: *Realm, this_value: Value, args: []const Value) Nati
 
     const overflow = try getTemporalOverflowOption(realm, argOr(args, 1, Value.undefined_));
 
+    if (shared.isComputedCalendar(base.calendar)) {
+        // Merge against the receiver's calendar fields and re-anchor via the
+        // canonical reference-date walk (code space, year-independent).
+        const cf = shared.calendarFields(base.calendar, base.ref_iso_year, base.iso_month, base.iso_day);
+        var code_month: i64 = shared.monthOrdinalToCode(base.calendar, cf.year, cf.month);
+        if (mc_len) |len| {
+            code_month = try monthFromCodeBytes(realm, base.calendar, &mc_buf, len, 13);
+        } else if (month_present) {
+            code_month = month_val;
+        }
+        const id: i64 = if (day_present) day_val else cf.day;
+        const ref = shared.computedMonthDayRef(base.calendar, code_month, id, overflow == .reject) orelse
+            return throwRangeError(realm, "PlainMonthDay day is out of range for the calendar");
+        return createTemporalMonthDay(realm, .{ .ref_iso_year = @intCast(ref.iso_year), .iso_month = @intCast(ref.iso_month), .iso_day = @intCast(ref.iso_day), .calendar = base.calendar });
+    }
     var month: i64 = base.iso_month;
     if (mc_len) |len| {
-        month = try monthFromCodeBytes(realm, &mc_buf, len, 12);
+        month = try monthFromCodeBytes(realm, base.calendar, &mc_buf, len, 12);
         if (month_present and month_val != month) return throwRangeError(realm, "month and monthCode disagree");
     } else if (month_present) {
         month = month_val;
     }
     const day: i64 = if (day_present) day_val else base.iso_day;
-    return createTemporalMonthDay(realm, try regulateMonthDay(realm, year_for_overflow, month, day, overflow == .reject));
+    var rec = try regulateMonthDay(realm, year_for_overflow, month, day, overflow == .reject);
+    rec.calendar = base.calendar;
+    return createTemporalMonthDay(realm, rec);
 }
 
 /// §10.3.x Temporal.PlainMonthDay.prototype.toString ( [options] ).

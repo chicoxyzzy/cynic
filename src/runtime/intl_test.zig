@@ -380,6 +380,34 @@ test "intl/temporal: era-less calendar does not read era/eraYear fields" {
     );
 }
 
+test "intl/temporal: hebrew calendar (arithmetic / leap months / M05L codes)" {
+    try requireIntlBuild();
+    // R&D molad+dehiyyot arithmetic, validated 0/301 mismatches vs
+    // SpiderMonkey/Kiesel/LibJS over AM 5600-5900. 5784 is a leap year
+    // (13 months, 383 days): ordinal 6 = Adar I (code "M05L"), ordinal 7 =
+    // Adar II (code "M06"). Rosh Hashanah 5784 = ISO 2023-09-16.
+    try evalAssert1(
+        \\const d = Temporal.PlainDate.from("2023-09-16").withCalendar("hebrew");
+        \\if (d.year !== 5784 || d.month !== 1 || d.day !== 1 || d.era !== "am") throw 0;
+        \\if (d.monthsInYear !== 13 || d.daysInYear !== 383 || !d.inLeapYear) throw 1;
+        \\const a1 = Temporal.PlainDate.from({ year: 5784, monthCode: "M05L", day: 1, calendar: "hebrew" });
+        \\if (a1.month !== 6 || a1.monthCode !== "M05L" || a1.toString().slice(0, 10) !== "2024-02-10") throw 2;
+        \\const a2 = Temporal.PlainDate.from({ year: 5784, monthCode: "M06", day: 1, calendar: "hebrew" });
+        \\if (a2.month !== 7 || a2.monthCode !== "M06") throw 3;
+        \\let threw = false;
+        \\try { Temporal.PlainDate.from({ year: 5783, monthCode: "M05L", day: 1, calendar: "hebrew" }, { overflow: "reject" }); } catch (e) { if (e instanceof RangeError) threw = true; }
+        \\if (!threw) throw 4;
+        \\// year-aware month arithmetic across the leap boundary
+        \\if (a1.add({ months: 1 }).monthCode !== "M06") throw 5;
+        \\const u = a1.until(Temporal.PlainDate.from({ year: 5785, month: 1, day: 1, calendar: "hebrew" }), { largestUnit: "months" });
+        \\if (u.months !== 8 || u.days !== 0) throw 6;
+        \\// common year: 12 months, Adar at ordinal 6 with code M06
+        \\const c = Temporal.PlainDate.from({ year: 5783, month: 6, day: 1, calendar: "hebrew" });
+        \\if (c.monthCode !== "M06" || c.monthsInYear !== 12) throw 7;
+        \\1
+    );
+}
+
 test "intl/temporal: islamic-umalqura (tabulated month lengths / from / round-trip)" {
     try requireIntlBuild();
     // AH 1300-1600 come from the Umm-al-Qura almanac table (verified identical

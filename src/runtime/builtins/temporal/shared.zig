@@ -261,15 +261,69 @@ pub fn readMonthCodeField(realm: *Realm, v: Value, buf: []u8) NativeError!?usize
 /// Months in `cal`'s year — 13 for the coptic-type calendars (epagomenal M13),
 /// 12 otherwise. Used to bound monthCode parsing per calendar.
 pub fn monthsInYearForCalendar(cal: temporal.CalendarId) i64 {
-    if (computedCal(cal)) |c| return compMonthsInYear(c.family);
+    // Upper bound across years (per-year counts come from calendarFields):
+    // 13 for the coptic family and for hebrew leap years, else 12.
+    if (computedCal(cal)) |c| return switch (c.family) {
+        .coptic, .hebrew => 13,
+        else => 12,
+    };
     return 12;
 }
 
-pub fn monthFromCodeBytes(realm: *Realm, buf: []const u8, actual_len: usize, max_month: i64) NativeError!i64 {
-    if (actual_len == 4) return throwRangeError(realm, "invalid monthCode"); // no leap-month calendars modelled
+pub fn monthFromCodeBytes(realm: *Realm, cal: temporal.CalendarId, buf: []const u8, actual_len: usize, max_month: i64) NativeError!i64 {
+    const is_hebrew = if (computedCal(cal)) |c| c.family == .hebrew else false;
+    if (actual_len == 4) {
+        // Leap-suffixed codes ("MxxL") exist only for the lunisolar calendars;
+        // hebrew has exactly one, "M05L" (Adar I). Encoded as the negative code
+        // number; resolveMonthOrdinal maps it per target year.
+        if (!is_hebrew or buf[3] != 'L') return throwRangeError(realm, "invalid monthCode");
+        const n: i64 = @as(i64, buf[1] - '0') * 10 + @as(i64, buf[2] - '0');
+        if (n != 5) return throwRangeError(realm, "invalid monthCode");
+        return -n;
+    }
     const m: i64 = @as(i64, buf[1] - '0') * 10 + @as(i64, buf[2] - '0');
-    if (m < 1 or m > max_month) return throwRangeError(realm, "invalid monthCode");
+    // Hebrew month CODES run M01-M12 (+M05L); ordinal 13 exists only through
+    // the leap-year shift, never as a literal code.
+    const code_max: i64 = if (is_hebrew) 12 else max_month;
+    if (m < 1 or m > code_max) return throwRangeError(realm, "invalid monthCode");
     return m;
+}
+
+/// Map a monthCode number from `monthFromCodeBytes` (negative = leap-suffixed)
+/// to the month ordinal in `year`. Identity for every calendar whose codes
+/// equal ordinals; hebrew shifts post-Shevat codes up by one in leap years and
+/// places "M05L" at ordinal 6. A leap code in a common year follows `reject`:
+/// throw, or constrain to Adar (the month Adar I merges into).
+/// Inverse of resolveMonthOrdinal: the year-independent monthCode NUMBER for a
+/// month ordinal (hebrew leap: ordinal 6 → -5 ("M05L"), ordinals 7+ shift down).
+/// CLDR `en` month display names for the hebrew calendar. Per CLDR-15510
+/// hebrew months are never rendered numerically, so DateTimeFormat prints
+/// these even for the "numeric" / "2-digit" month options.
+pub fn hebrewMonthDisplayName(year: i64, ordinal: u32) []const u8 {
+    const common = [_][]const u8{ "Tishri", "Heshvan", "Kislev", "Tevet", "Shevat", "Adar", "Nisan", "Iyar", "Sivan", "Tamuz", "Av", "Elul" };
+    const leapy = [_][]const u8{ "Tishri", "Heshvan", "Kislev", "Tevet", "Shevat", "Adar I", "Adar II", "Nisan", "Iyar", "Sivan", "Tamuz", "Av", "Elul" };
+    if (hebrewLeap(year)) return leapy[@min(ordinal, 13) - 1];
+    return common[@min(ordinal, 12) - 1];
+}
+
+pub fn monthOrdinalToCode(cal: temporal.CalendarId, year: i64, ordinal: u32) i64 {
+    const c = computedCal(cal) orelse return ordinal;
+    if (c.family != .hebrew or !hebrewLeap(year)) return ordinal;
+    if (ordinal == 6) return -5;
+    return if (ordinal >= 7) @as(i64, ordinal) - 1 else ordinal;
+}
+
+pub fn resolveMonthOrdinal(realm: *Realm, cal: temporal.CalendarId, year: i64, code: i64, reject: bool) NativeError!i64 {
+    const c = computedCal(cal) orelse return code;
+    if (c.family != .hebrew) return code;
+    const leap = hebrewLeap(year);
+    if (code < 0) {
+        if (leap) return 6;
+        if (reject) return throwRangeError(realm, "monthCode M05L does not exist in this year");
+        return 6;
+    }
+    if (code <= 5 or !leap) return code;
+    return code + 1;
 }
 
 /// Reject a property-bag carrying a `calendar` or `timeZone` key — used by
@@ -722,6 +776,80 @@ fn umalquraFromDays(date: i64) CompYmd {
     return .{ .year = umalqura_first_year + @as(i64, @intCast(lo)), .month = month, .day = @intCast(rem + 1) };
 }
 
+// ── Hebrew calendar ──────────────────────────────────────────────────────────
+// Arithmetic (molad + dehiyyot postponements), Reingold & Dershowitz,
+// *Calendrical Calculations* — validated 0/301 mismatches against the Temporal
+// implementations of SpiderMonkey / Kiesel / LibJS over AM 5600-5900 (year
+// starts, months-in-year, and every month length byte-identical). Months are
+// numbered ordinally from Tishri (Temporal convention): in a leap year ordinal
+// 6 is Adar I (monthCode "M05L") and ordinals 7-13 carry codes M06-M12.
+const hebrew_epoch: i64 = -1373427 - 719163; // R.D. -1373427 (Tishri 1, AM 1) in days-since-1970
+
+fn hebrewLeap(year: i64) bool {
+    return @mod(7 * year + 1, 19) < 7;
+}
+/// Days from the Hebrew epoch to the molad-derived start of year `y`, before
+/// the year-length postponements (R&D hebrew-calendar-elapsed-days).
+fn hebrewElapsedDays(year: i64) i64 {
+    const months_elapsed = @divFloor(235 * year - 234, 19);
+    const parts = 12084 + 13753 * months_elapsed;
+    var days = 29 * months_elapsed + @divFloor(parts, 25920);
+    if (@mod(3 * (days + 1), 7) < 3) days += 1;
+    return days;
+}
+/// Tishri 1 of year `y` in days-since-1970, with the two year-length
+/// postponements applied (a 356-day year start delays 2, a 382-day prior
+/// year delays 1).
+fn hebrewNewYear(year: i64) i64 {
+    const ny0 = hebrewElapsedDays(year - 1);
+    const ny1 = hebrewElapsedDays(year);
+    const ny2 = hebrewElapsedDays(year + 1);
+    const delay: i64 = if (ny2 - ny1 == 356) 2 else if (ny1 - ny0 == 382) 1 else 0;
+    return hebrew_epoch + ny1 + delay;
+}
+fn hebrewDaysInYear(year: i64) u32 {
+    return @intCast(hebrewNewYear(year + 1) - hebrewNewYear(year));
+}
+fn hebrewDaysInMonth(year: i64, month: u32) u32 {
+    const ylen = hebrewDaysInYear(year);
+    return switch (month) {
+        1 => 30, // Tishri
+        2 => if (@mod(ylen, 10) == 5) @as(u32, 30) else 29, // Marcheshvan: 30 only in a complete year
+        3 => if (@mod(ylen, 10) == 3) @as(u32, 29) else 30, // Kislev: 29 only in a deficient year
+        4 => 29, // Tevet
+        5 => 30, // Shevat
+        6 => if (hebrewLeap(year)) @as(u32, 30) else 29, // leap: Adar I; common: Adar
+        else => blk: {
+            if (hebrewLeap(year)) {
+                if (month == 7) break :blk 29; // Adar II
+                break :blk if ((month - 8) % 2 == 0) @as(u32, 30) else 29; // Nisan..Elul
+            }
+            break :blk if ((month - 7) % 2 == 0) @as(u32, 30) else 29; // Nisan..Elul
+        },
+    };
+}
+fn hebrewToDays(year: i64, month: i64, day: i64) i64 {
+    var days = hebrewNewYear(year);
+    var m: u32 = 1;
+    while (m < month) : (m += 1) days += hebrewDaysInMonth(year, m);
+    return days + day - 1;
+}
+fn hebrewFromDays(date: i64) CompYmd {
+    // Mean year 365.2468 days; estimate then correct (bounded by one step each way).
+    var year: i64 = @divFloor((date - hebrew_epoch) * 98496, 35975351) + 1;
+    while (hebrewNewYear(year) > date) year -= 1;
+    while (hebrewNewYear(year + 1) <= date) year += 1;
+    var rem: i64 = date - hebrewNewYear(year);
+    const miy: u32 = if (hebrewLeap(year)) 13 else 12;
+    var month: u32 = 1;
+    while (month < miy) : (month += 1) {
+        const dim: i64 = hebrewDaysInMonth(year, month);
+        if (rem < dim) break;
+        rem -= dim;
+    }
+    return .{ .year = year, .month = month, .day = @intCast(rem + 1) };
+}
+
 // ── Computational calendar family ────────────────────────────────────────────
 // A common dispatch over the calendars whose date is a closed-form function of
 // the day count: the Islamic tabular pair (islamic-civil / islamic-tbla) and
@@ -731,7 +859,7 @@ fn umalquraFromDays(date: i64) CompYmd {
 // fixed-from / from-fixed / month-length / leap rules. Coptic epochs verified
 // against SpiderMonkey/Boa/Kiesel/libjs (coptic 1737-01-01 = ISO 2020-09-11,
 // ethiopic 2013-01-01 = ISO 2020-09-11). Reingold & Dershowitz.
-const CompFamily = enum { islamic, umalqura, coptic, indian, persian };
+const CompFamily = enum { islamic, umalqura, hebrew, coptic, indian, persian };
 const ComputedCal = struct { family: CompFamily, epoch: i64, era: []const u8 };
 
 fn computedCal(cal: temporal.CalendarId) ?ComputedCal {
@@ -745,6 +873,7 @@ fn computedCal(cal: temporal.CalendarId) ?ComputedCal {
     if (std.ascii.eqlIgnoreCase(s, "ethioaa")) return .{ .family = .coptic, .epoch = -2725242, .era = "aa" }; // Amete Alem (= ethiopic + 5500 yr)
     if (std.ascii.eqlIgnoreCase(s, "indian")) return .{ .family = .indian, .epoch = 0, .era = "shaka" }; // gregorian-tied, no fixed epoch
     if (std.ascii.eqlIgnoreCase(s, "persian")) return .{ .family = .persian, .epoch = 0, .era = "ap" }; // Solar Hijri; epoch baked into persianToDays
+    if (std.ascii.eqlIgnoreCase(s, "hebrew")) return .{ .family = .hebrew, .epoch = 0, .era = "am" }; // epoch baked into hebrewToDays
     return null;
 }
 
@@ -768,14 +897,35 @@ fn computedEra(cal: temporal.CalendarId, c: ComputedCal, year: i64) ComputedEra 
     }
 }
 
-fn compMonthsInYear(f: CompFamily) u32 {
-    return if (f == .coptic) 13 else 12;
+fn compMonthsInYear(f: CompFamily, year: i64) u32 {
+    return switch (f) {
+        .coptic => 13,
+        .hebrew => if (hebrewLeap(year)) 13 else 12,
+        else => 12,
+    };
+}
+
+/// Step one calendar month in `sign` direction, wrapping across year
+/// boundaries with the destination year's own month count (hebrew years
+/// alternate 12/13 months, so the wrap is year-aware).
+fn compStepMonth(f: CompFamily, year: i64, month: i64, sign: i64) CompYearMonth {
+    var y = year;
+    var m = month + sign;
+    if (m > compMonthsInYear(f, y)) {
+        y += 1;
+        m = 1;
+    } else if (m < 1) {
+        y -= 1;
+        m = compMonthsInYear(f, y);
+    }
+    return .{ .year = y, .month = m };
 }
 
 fn compLeap(f: CompFamily, year: i64) bool {
     return switch (f) {
         .islamic => islamicLeap(year),
         .umalqura => umalquraDaysInYear(year) == 355,
+        .hebrew => hebrewLeap(year),
         .coptic => @mod(year, 4) == 3,
         .indian => indianLeap(year),
         .persian => persianLeap(year),
@@ -786,6 +936,7 @@ fn compDaysInMonth(f: CompFamily, year: i64, month: u32) u32 {
     return switch (f) {
         .islamic => islamicDaysInMonth(year, month),
         .umalqura => umalquraDaysInMonth(year, month),
+        .hebrew => hebrewDaysInMonth(year, month),
         .coptic => if (month <= 12) 30 else (if (compLeap(.coptic, year)) @as(u32, 6) else 5),
         .indian => indianDaysInMonth(year, month),
         .persian => persianDaysInMonth(year, month),
@@ -796,6 +947,7 @@ fn compDaysInYear(f: CompFamily, year: i64) u32 {
     return switch (f) {
         .islamic => if (compLeap(.islamic, year)) @as(u32, 355) else 354,
         .umalqura => umalquraDaysInYear(year),
+        .hebrew => hebrewDaysInYear(year),
         .coptic => if (compLeap(.coptic, year)) @as(u32, 366) else 365,
         .indian => if (compLeap(.indian, year)) @as(u32, 366) else 365,
         .persian => if (compLeap(.persian, year)) @as(u32, 366) else 365,
@@ -807,6 +959,7 @@ fn compToDays(c: ComputedCal, year: i64, month: i64, day: i64) i64 {
     return switch (c.family) {
         .islamic => islamicToDays(c.epoch, year, month, day),
         .umalqura => umalquraToDays(year, month, day),
+        .hebrew => hebrewToDays(year, month, day),
         .coptic => c.epoch - 1 + 365 * (year - 1) + @divFloor(year, 4) + 30 * (month - 1) + day,
         .indian => indianToDays(year, month, day),
         .persian => persianToDays(year, month, day),
@@ -823,6 +976,7 @@ fn compFromDays(c: ComputedCal, date: i64) CompYmd {
             return .{ .year = i.year, .month = i.month, .day = i.day };
         },
         .umalqura => return umalquraFromDays(date),
+        .hebrew => return hebrewFromDays(date),
         .coptic => {
             const year = @divFloor(4 * (date - c.epoch) + 1463, 1461);
             const month = @divFloor(date - compToDays(c, year, 1, 1), 30) + 1;
@@ -946,21 +1100,37 @@ pub const MonthDayRef = struct { iso_year: i32, iso_month: u32, iso_day: u32 };
 /// latest occurrence on or before ISO 1972-12-31 where the day is valid (so a
 /// leap-only day such as coptic M13-06 anchors to a leap year → ref ISO 1971).
 /// Returns null when the day exceeds every year's month length under reject.
-pub fn computedMonthDayRef(cal: temporal.CalendarId, month: i64, day_in: i64, reject: bool) ?MonthDayRef {
+pub fn computedMonthDayRef(cal: temporal.CalendarId, code_month: i64, day_in: i64, reject: bool) ?MonthDayRef {
     const c = computedCal(cal) orelse return null;
     const ref_limit = temporal.daysFromCivil(1972, 12, 31);
     const base_year = compFromDays(c, ref_limit).year;
 
+    // Resolve the (year-independent) code number to the ordinal for `y`, or
+    // null when the month doesn't exist in that year (leap code, common year).
+    const H = struct {
+        fn ordFor(cc: ComputedCal, y: i64, code: i64) ?i64 {
+            if (cc.family != .hebrew) return code;
+            const ly = hebrewLeap(y);
+            if (code < 0) return if (ly) 6 else null;
+            if (code <= 5) return code;
+            return if (ly) code + 1 else code;
+        }
+    };
+
     // Longest this month gets across the leap cycle (40 ≥ the Islamic 30-year
-    // cycle), so reject can detect an impossible day and constrain can clamp.
+    // cycle and two Metonic cycles), so reject can detect an impossible day and
+    // constrain can clamp.
     var max_day: i64 = 0;
     var p: i64 = base_year;
     var pn: usize = 0;
     while (pn < 40) : (pn += 1) {
-        const dim: i64 = compDaysInMonth(c.family, p, @intCast(month));
-        if (dim > max_day) max_day = dim;
+        if (H.ordFor(c, p, code_month)) |ord| {
+            const dim: i64 = compDaysInMonth(c.family, p, @intCast(ord));
+            if (dim > max_day) max_day = dim;
+        }
         p -= 1;
     }
+    if (max_day == 0) return null; // month code never occurs (bad code)
     var day = day_in;
     if (day > max_day) {
         if (reject) return null;
@@ -973,9 +1143,13 @@ pub fn computedMonthDayRef(cal: temporal.CalendarId, month: i64, day_in: i64, re
     var cy: i64 = base_year;
     var n: usize = 0;
     while (n < 60) : (n += 1) {
-        const dim: i64 = compDaysInMonth(c.family, cy, @intCast(month));
+        const ord = H.ordFor(c, cy, code_month) orelse {
+            cy -= 1;
+            continue;
+        };
+        const dim: i64 = compDaysInMonth(c.family, cy, @intCast(ord));
         if (day <= dim) {
-            const iso_days = compToDays(c, cy, month, day);
+            const iso_days = compToDays(c, cy, ord, day);
             if (iso_days <= ref_limit) {
                 const civ = temporal.civilFromDays(iso_days);
                 return .{ .iso_year = @intCast(civ.year), .iso_month = @intCast(civ.month), .iso_day = @intCast(civ.day) };
@@ -1014,7 +1188,7 @@ pub fn calendarFields(cal: temporal.CalendarId, iso_y: i32, iso_m: u32, iso_d: u
             .day = cd.day,
             .days_in_month = compDaysInMonth(c.family, cd.year, cd.month),
             .days_in_year = compDaysInYear(c.family, cd.year),
-            .months_in_year = compMonthsInYear(c.family),
+            .months_in_year = compMonthsInYear(c.family, cd.year),
             .day_of_year = @intCast(date - compToDays(c, cd.year, 1, 1) + 1),
             .in_leap_year = compLeap(c.family, cd.year),
             .era = ev.era,
@@ -1094,9 +1268,20 @@ pub fn inLeapYearValue(cal: temporal.CalendarId, y: i32, m: u32, d: u32) Value {
     return Value.fromBool(calendarFields(cal, y, m, d).in_leap_year);
 }
 pub fn monthCodeValue(realm: *Realm, cal: temporal.CalendarId, y: i32, m: u32, d: u32) NativeError!Value {
-    const mo = calendarFields(cal, y, m, d).month;
-    const mc = [_]u8{ 'M', '0' + @as(u8, @intCast(mo / 10)), '0' + @as(u8, @intCast(mo % 10)) };
-    const js = realm.heap.allocateString(&mc) catch return error.OutOfMemory;
+    const cf = calendarFields(cal, y, m, d);
+    var mo = cf.month;
+    var leap_suffix = false;
+    if (computedCal(cal)) |c| {
+        // Hebrew leap years insert Adar I at ordinal 6 with code "M05L"; the
+        // months after it keep their common-year codes (ordinal - 1).
+        if (c.family == .hebrew and hebrewLeap(cf.year)) {
+            if (cf.month == 6) leap_suffix = true;
+            if (cf.month >= 6) mo = cf.month - 1;
+        }
+    }
+    var mc: [4]u8 = .{ 'M', '0' + @as(u8, @intCast(mo / 10)), '0' + @as(u8, @intCast(mo % 10)), 'L' };
+    const len: usize = if (leap_suffix) 4 else 3;
+    const js = realm.heap.allocateString(mc[0..len]) catch return error.OutOfMemory;
     return Value.fromString(js);
 }
 pub fn eraValue(realm: *Realm, cal: temporal.CalendarId, y: i32, m: u32, d: u32) NativeError!Value {
@@ -1118,7 +1303,7 @@ const CalYmd = struct { year: i64, month: u32, day: u32 };
 /// ISO directly and never reach here).
 pub fn computedToIso(cal: temporal.CalendarId, cal_y: i64, cal_m: i64, cal_d: i64, reject: bool) ?CalYmd {
     const c = computedCal(cal) orelse return null;
-    const miy: i64 = compMonthsInYear(c.family);
+    const miy: i64 = compMonthsInYear(c.family, cal_y);
     var m = cal_m;
     if (m < 1 or m > miy) {
         if (reject) return null;
@@ -1149,11 +1334,17 @@ pub fn isComputedCalendar(cal: temporal.CalendarId) bool {
 pub fn addComputed(cal: temporal.CalendarId, iso_y: i32, iso_m: u32, iso_d: u32, add_y: i64, add_mo: i64, add_w: i64, add_d: i64, reject: bool) ?CalYmd {
     const c = computedCal(cal) orelse return null;
     const start = compFromDays(c, temporal.daysFromCivil(iso_y, iso_m, iso_d));
-    const miy: i64 = compMonthsInYear(c.family);
     var y = start.year + add_y;
-    const m_total = (@as(i64, start.month) - 1) + add_mo; // 0-based month + delta
-    y += @divFloor(m_total, miy);
-    const m: i64 = @mod(m_total, miy) + 1;
+    // Adding years keeps the month ordinal; a 13th month landing in a 12-month
+    // year constrains (or rejects) before the month delta is applied.
+    var m0: i64 = @as(i64, start.month) - 1; // 0-based
+    if (m0 >= compMonthsInYear(c.family, y)) {
+        if (reject) return null;
+        m0 = compMonthsInYear(c.family, y) - 1;
+    }
+    const bym = balanceCompYearMonth(c.family, y, m0 + 1 + add_mo);
+    y = bym.year;
+    const m: i64 = bym.month;
     const dim: i64 = compDaysInMonth(c.family, y, @intCast(m));
     var d: i64 = start.day;
     if (d > dim) {
@@ -1167,10 +1358,29 @@ pub fn addComputed(cal: temporal.CalendarId, iso_y: i32, iso_m: u32, iso_d: u32,
 
 const CompYearMonth = struct { year: i64, month: i64 };
 
-/// Carry a 1-based month into the year over `miy` months.
-fn balanceCalYearMonth(year: i64, month: i64, miy: i64) CompYearMonth {
-    const m0 = month - 1;
-    return .{ .year = year + @divFloor(m0, miy), .month = @mod(m0, miy) + 1 };
+/// Carry a (possibly far out-of-range) 1-based month into the year, honouring
+/// each crossed year's own month count. Any 19 consecutive hebrew years hold
+/// exactly 235 months (leap years are fixed residues mod 19 — the Metonic
+/// cycle), so huge deltas jump by whole cycles before the per-year walk.
+fn balanceCompYearMonth(f: CompFamily, year_in: i64, month_in: i64) CompYearMonth {
+    if (f != .hebrew) {
+        const miy: i64 = compMonthsInYear(f, 0);
+        const m0 = month_in - 1;
+        return .{ .year = year_in + @divFloor(m0, miy), .month = @mod(m0, miy) + 1 };
+    }
+    var y = year_in;
+    var m0 = month_in - 1; // 0-based
+    while (m0 >= 235) : (m0 -= 235) y += 19;
+    while (m0 < -235) : (m0 += 235) y -= 19;
+    while (m0 >= compMonthsInYear(.hebrew, y)) {
+        m0 -= compMonthsInYear(.hebrew, y);
+        y += 1;
+    }
+    while (m0 < 0) {
+        y -= 1;
+        m0 += compMonthsInYear(.hebrew, y);
+    }
+    return .{ .year = y, .month = m0 + 1 };
 }
 
 /// Whether the constrained calendar date (year, month, min(day, monthLen)) lies
@@ -1206,7 +1416,6 @@ pub fn differenceComputedDate(cal: temporal.CalendarId, d1: temporal.PlainDateRe
     const sign: i64 = if (dn2 > dn1) 1 else -1;
     const cd1 = compFromDays(c, dn1);
     const cd2 = compFromDays(c, dn2);
-    const miy: i64 = compMonthsInYear(c.family);
 
     var years: i64 = 0;
     var months: i64 = 0;
@@ -1218,19 +1427,30 @@ pub fn differenceComputedDate(cal: temporal.CalendarId, d1: temporal.PlainDateRe
             cand_years += sign;
         }
         var cand_months: i64 = sign;
-        var inter = balanceCalYearMonth(cd1.year + years, @as(i64, cd1.month) + cand_months, miy);
+        var inter = compStepMonth(c.family, cd1.year + years, @as(i64, cd1.month), sign);
         while (!compDateSurpasses(sign, inter.year, inter.month, cd1.day, cd2.year, cd2.month, cd2.day)) {
             months = cand_months;
             cand_months += sign;
-            inter = balanceCalYearMonth(inter.year, inter.month + sign, miy);
+            inter = compStepMonth(c.family, inter.year, inter.month, sign);
         }
         if (largest == .month) {
-            months += years * miy;
+            // Convert the whole-year span to months in the calendar's own
+            // per-year month counts (hebrew years alternate 12/13).
+            var k: i64 = 0;
+            while (k != years) {
+                if (years > 0) {
+                    months += compMonthsInYear(c.family, cd1.year + k);
+                    k += 1;
+                } else {
+                    k -= 1;
+                    months -= compMonthsInYear(c.family, cd1.year + k);
+                }
+            }
             years = 0;
         }
     }
 
-    const bym = balanceCalYearMonth(cd1.year + years, @as(i64, cd1.month) + months, miy);
+    const bym = balanceCompYearMonth(c.family, cd1.year + years, @as(i64, cd1.month) + months);
     const dim: i64 = compDaysInMonth(c.family, bym.year, @intCast(bym.month));
     const anchor = compToDays(c, bym.year, bym.month, @min(@as(i64, cd1.day), dim));
     var days: i64 = dn2 - anchor;

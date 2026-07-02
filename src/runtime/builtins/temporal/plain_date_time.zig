@@ -462,7 +462,8 @@ pub fn resolveDateTimeFieldsNoRange(realm: *Realm, f: RawDateTimeFields, overflo
     const max_mo = shared.monthsInYearForCalendar(f.calendar);
     var month: i64 = undefined;
     if (f.month_code_len) |len| {
-        month = try monthFromCodeBytes(realm, &f.month_code_buf, len, max_mo);
+        month = try monthFromCodeBytes(realm, f.calendar, &f.month_code_buf, len, max_mo);
+        month = try shared.resolveMonthOrdinal(realm, f.calendar, f.year, month, overflow == .reject);
         if (f.month_int_set and f.month_int != month) return throwRangeError(realm, "month and monthCode disagree");
     } else if (f.month_int_set) {
         month = f.month_int;
@@ -645,13 +646,18 @@ fn plainDateTimeWith(realm: *Realm, this_value: Value, args: []const Value) Nati
     if (shared.isComputedCalendar(base.calendar)) {
         const cf = shared.calendarFields(base.calendar, base.iso_year, base.iso_month, base.iso_day);
         var im: i64 = cf.month;
+        var im_is_code = false;
         if (month_code_len) |len| {
-            im = try monthFromCodeBytes(realm, &month_code_buf, len, max_mo);
-            if (month_int_set and month_int != im) return throwRangeError(realm, "month and monthCode disagree");
+            im = try monthFromCodeBytes(realm, base.calendar, &month_code_buf, len, max_mo);
+            im_is_code = true;
         } else if (month_int_set) {
             im = month_int;
         }
         const iy: i64 = if (!year_present) cf.year else year;
+        if (im_is_code) {
+            im = try shared.resolveMonthOrdinal(realm, base.calendar, iy, im, overflow == .reject);
+            if (month_int_set and month_int != im) return throwRangeError(realm, "month and monthCode disagree");
+        }
         const id: i64 = if (day_v.isUndefined()) cf.day else day;
         const iso = shared.computedToIso(base.calendar, iy, im, id, overflow == .reject) orelse
             return throwRangeError(realm, "PlainDateTime date is out of range");
@@ -667,7 +673,7 @@ fn plainDateTimeWith(realm: *Realm, this_value: Value, args: []const Value) Nati
     // validation.js); regulate then runs on the resolved month.
     var month: i64 = base.iso_month;
     if (month_code_len) |len| {
-        month = try monthFromCodeBytes(realm, &month_code_buf, len, max_mo);
+        month = try monthFromCodeBytes(realm, base.calendar, &month_code_buf, len, max_mo);
         if (month_int_set and month_int != month) return throwRangeError(realm, "month and monthCode disagree");
     } else if (month_int_set) {
         month = month_int;

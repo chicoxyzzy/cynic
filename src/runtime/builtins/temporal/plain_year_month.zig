@@ -252,7 +252,8 @@ fn toYearMonthFields(realm: *Realm, obj: *JSObject, options: Value) NativeError!
     const max_mo = shared.monthsInYearForCalendar(cal);
     var month: i64 = undefined;
     if (mc_len) |len| {
-        month = try monthFromCodeBytes(realm, &mc_buf, len, max_mo);
+        month = try monthFromCodeBytes(realm, cal, &mc_buf, len, max_mo);
+        month = try shared.resolveMonthOrdinal(realm, cal, year, month, overflow == .reject);
         if (month_present and month_val != month) return throwRangeError(realm, "month and monthCode disagree");
     } else if (month_present) {
         month = month_val;
@@ -378,13 +379,18 @@ fn plainYearMonthWith(realm: *Realm, this_value: Value, args: []const Value) Nat
     if (shared.isComputedCalendar(base.calendar)) {
         const cf = shared.calendarFields(base.calendar, base.iso_year, base.iso_month, base.ref_iso_day);
         var im: i64 = cf.month;
+        var im_is_code = false;
         if (mc_len) |len| {
-            im = try monthFromCodeBytes(realm, &mc_buf, len, max_mo);
-            if (month_present and month_val != im) return throwRangeError(realm, "month and monthCode disagree");
+            im = try monthFromCodeBytes(realm, base.calendar, &mc_buf, len, max_mo);
+            im_is_code = true;
         } else if (month_present) {
             im = month_val;
         }
         const iy: i64 = if (!year_present) cf.year else year;
+        if (im_is_code) {
+            im = try shared.resolveMonthOrdinal(realm, base.calendar, iy, im, overflow == .reject);
+            if (month_present and month_val != im) return throwRangeError(realm, "month and monthCode disagree");
+        }
         const iso = shared.computedToIso(base.calendar, iy, im, 1, overflow == .reject) orelse
             return throwRangeError(realm, "PlainYearMonth is out of range");
         if (!temporal.isoYearMonthWithinLimits(iso.year, @intCast(iso.month)))
@@ -392,7 +398,7 @@ fn plainYearMonthWith(realm: *Realm, this_value: Value, args: []const Value) Nat
         return createTemporalYearMonth(realm, .{ .iso_year = @intCast(iso.year), .iso_month = @intCast(iso.month), .ref_iso_day = @intCast(iso.day), .calendar = base.calendar });
     }
     if (mc_len) |len| {
-        month = try monthFromCodeBytes(realm, &mc_buf, len, max_mo);
+        month = try monthFromCodeBytes(realm, base.calendar, &mc_buf, len, max_mo);
         if (month_present and month_val != month) return throwRangeError(realm, "month and monthCode disagree");
     } else if (month_present) {
         month = month_val;

@@ -694,8 +694,9 @@ fn zonedDateTimeWith(realm: *Realm, this_value: Value, args: []const Value) Nati
     const month_given = month_code_len != null or month_int_set;
     const max_mo = shared.monthsInYearForCalendar(z.calendar);
     if (month_code_len) |len| {
-        month = try monthFromCodeBytes(realm, &month_code_buf, len, max_mo);
-        if (month_int_set and month_int != month) return throwRangeError(realm, "month and monthCode disagree");
+        month = try monthFromCodeBytes(realm, z.calendar, &month_code_buf, len, max_mo);
+        if (!shared.isComputedCalendar(z.calendar) and month_int_set and month_int != month)
+            return throwRangeError(realm, "month and monthCode disagree");
     } else if (month_int_set) {
         month = month_int;
     }
@@ -704,7 +705,11 @@ fn zonedDateTimeWith(realm: *Realm, this_value: Value, args: []const Value) Nati
         // Merge against the receiver's Islamic fields, then convert to ISO.
         const cf = shared.calendarFields(z.calendar, base.iso_year, base.iso_month, base.iso_day);
         const iy: i64 = if (year_present) year else cf.year;
-        const im: i64 = if (month_given) month else cf.month;
+        var im: i64 = if (month_given) month else cf.month;
+        if (month_code_len != null) {
+            im = try shared.resolveMonthOrdinal(realm, z.calendar, iy, im, overflow == .reject);
+            if (month_int_set and month_int != im) return throwRangeError(realm, "month and monthCode disagree");
+        }
         const id: i64 = if (day_present) day else cf.day;
         const iso = shared.computedToIso(z.calendar, iy, im, id, overflow == .reject) orelse
             return throwRangeError(realm, "ZonedDateTime date is out of range");

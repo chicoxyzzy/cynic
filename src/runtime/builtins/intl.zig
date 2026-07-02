@@ -3283,7 +3283,8 @@ fn dateTimeFormatResolvedOptions(realm: *Realm, this_value: Value, args: []const
 
 const CivilTime = struct {
     year: i64,
-    month: u32, // 1-12
+    month: u32, // 1-13 (calendar ordinal)
+    hebrew: bool = false, // month renders as a name, never numerically (CLDR-15510)
     day: u32, // 1-31
     hour: u32, // 0-23
     minute: u32,
@@ -3313,6 +3314,7 @@ fn breakDown(slots: *const intl.DateTimeFormatSlots, ms: f64) CivilTime {
         // Japanese renders the era-relative year (Reiwa 32), not the gregorian
         // 2050; for every other calendar year == era_year so this is a no-op.
         .year = if (std.ascii.eqlIgnoreCase(slots.calendar, "japanese")) (cf.era_year orelse cf.year) else cf.year,
+        .hebrew = std.ascii.eqlIgnoreCase(slots.calendar, "hebrew"),
         .month = cf.month,
         .day = cf.day,
         .hour = t.hour,
@@ -4123,7 +4125,9 @@ fn emitField(out: []Seg, letter: u8, count: usize, ct: CivilTime, dd: cldr.DateD
             if (count == 2) setNumberSeg(seg, "year", yv % 100, 2, digit_base) else setNumberSeg(seg, "year", yv, 1, digit_base);
         },
         'M', 'L' => {
-            if (count >= 4) setSeg(seg, "month", dd.months_wide[ct.month - 1]) else if (count == 3) setSeg(seg, "month", dd.months_abbr[ct.month - 1]) else setNumberSeg(seg, "month", ct.month, count, digit_base);
+            if (ct.hebrew) {
+                setSeg(seg, "month", tshared.hebrewMonthDisplayName(ct.year, ct.month));
+            } else if (count >= 4) setSeg(seg, "month", dd.months_wide[ct.month - 1]) else if (count == 3) setSeg(seg, "month", dd.months_abbr[ct.month - 1]) else setNumberSeg(seg, "month", ct.month, count, digit_base);
         },
         'd' => setNumberSeg(seg, "day", ct.day, count, digit_base),
         'E', 'c', 'e' => {
