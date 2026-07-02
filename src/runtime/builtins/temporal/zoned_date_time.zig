@@ -471,7 +471,10 @@ fn zonedDateTimeCompare(realm: *Realm, this_value: Value, args: []const Value) N
 fn zonedDateTimeEquals(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const z = try requireZonedDateTime(realm, this_value);
     const other = try toTemporalZonedDateTime(realm, argOr(args, 0, Value.undefined_), Value.undefined_);
-    const eq = z.epoch_ns == other.epoch_ns and timeZoneEquals(z.time_zone, other.time_zone);
+    // §6.3.x — same instant, equal time zones (by primary identifier), and
+    // the same calendar.
+    const eq = z.epoch_ns == other.epoch_ns and timeZoneEquals(z.time_zone, other.time_zone) and
+        z.calendar.eql(&other.calendar);
     return Value.fromBool(eq);
 }
 

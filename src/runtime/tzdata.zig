@@ -92,6 +92,28 @@ pub fn hasZone(name: []const u8) bool {
 /// lookup that returns the tzdb's stored (correctly-cased) identifier without
 /// canonicalizing aliases — "africa/abidjan" → "Africa/Abidjan", "Etc/UTC"
 /// stays "Etc/UTC" (not collapsed to "UTC"). Null when no zone matches.
+/// §GetAvailableNamedTimeZoneIdentifier [[PrimaryIdentifier]]: resolve an
+/// IANA link (alias) to its primary zone, folding the UTC-equivalent family
+/// (Etc/UTC, Etc/GMT, GMT) to "UTC" as ECMA-402 requires. Falls back to the
+/// input when it is already primary (or unknown).
+pub fn primaryZoneName(name: []const u8) []const u8 {
+    const links = @import("tzdata_links.zig").links;
+    var resolved = name;
+    for (links) |l| {
+        if (std.ascii.eqlIgnoreCase(l.alias, name)) {
+            resolved = l.primary;
+            break;
+        }
+    }
+    if (std.ascii.eqlIgnoreCase(resolved, "Etc/UTC") or
+        std.ascii.eqlIgnoreCase(resolved, "Etc/GMT") or
+        std.ascii.eqlIgnoreCase(resolved, "GMT"))
+    {
+        return "UTC";
+    }
+    return resolved;
+}
+
 pub fn canonicalZoneName(name: []const u8) ?[]const u8 {
     if (!available or !ensureInit()) return null;
     for (zoneTable()) |ent| {

@@ -2066,14 +2066,28 @@ pub fn requireToStringSmallestUnit(realm: *Realm, unit: ?temporal.LargestUnit) N
 /// (case-sensitive identifier compare; canonicalisation is not modelled
 /// without tzdata, so `Africa/Cairo` ≠ `africa/cairo` here).
 pub fn timeZoneEquals(a: temporal.TimeZone, b: temporal.TimeZone) bool {
+    const tzdata = @import("../../tzdata.zig");
     return switch (a) {
-        .utc => std.meta.activeTag(b) == .utc,
+        .utc => switch (b) {
+            .utc => true,
+            // A named zone whose primary identifier is UTC (Etc/GMT, GMT, …)
+            // equals the UTC zone once links resolve.
+            .named => |bn| tzdata.available and std.ascii.eqlIgnoreCase(tzdata.primaryZoneName(bn.slice()), "UTC"),
+            else => false,
+        },
         .offset_minutes => |am| switch (b) {
             .offset_minutes => |bm| am == bm,
             else => false,
         },
         .named => |an| switch (b) {
-            .named => |bn| std.mem.eql(u8, an.slice(), bn.slice()),
+            .named => |bn| blk: {
+                if (std.ascii.eqlIgnoreCase(an.slice(), bn.slice())) break :blk true;
+                // §11.x TimeZoneEquals compares primary identifiers, so IANA
+                // links (Asia/Calcutta ≡ Asia/Kolkata) compare equal.
+                if (!tzdata.available) break :blk false;
+                break :blk std.ascii.eqlIgnoreCase(tzdata.primaryZoneName(an.slice()), tzdata.primaryZoneName(bn.slice()));
+            },
+            .utc => tzdata.available and std.ascii.eqlIgnoreCase(tzdata.primaryZoneName(an.slice()), "UTC"),
             else => false,
         },
     };
