@@ -1577,6 +1577,21 @@ test "intl: Locale info methods return correct shapes" {
     );
 }
 
+test "intl: multi-subtag languageAlias keys (sgn-region, lang-variant, und-variant)" {
+    try requireIntlBuild();
+    try evalAssert1(
+        \\(Intl.getCanonicalLocales('sgn-GR')[0] === 'gss' &&
+        \\ Intl.getCanonicalLocales('sgn-de')[0] === 'gsg' &&
+        \\ Intl.getCanonicalLocales('cel-gaulish')[0] === 'xtg' &&
+        \\ Intl.getCanonicalLocales('zh-hakka')[0] === 'hak' &&
+        \\ Intl.getCanonicalLocales('zh-xiang')[0] === 'hsn' &&
+        \\ Intl.getCanonicalLocales('art-lojban')[0] === 'jbo' &&
+        \\ Intl.getCanonicalLocales('zh-guoyu')[0] === 'zh' &&
+        \\ Intl.getCanonicalLocales('hy-arevela')[0] === 'hy' &&
+        \\ Intl.getCanonicalLocales('ja-Latn-hepburn-heploc')[0] === 'ja-Latn-alalc97') ? 1 : 0
+    );
+}
+
 test "intl: rg/sd/tz keyword aliases, variant aliases, private-use opacity" {
     try requireIntlBuild();
     try evalAssert1(

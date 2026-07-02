@@ -385,8 +385,6 @@ fn toUpperAscii(c: u8) u8 {
 /// empty segments). Not a full UTS #35 parser.
 pub fn isStructurallyValidLanguageTag(tag: []const u8) bool {
     if (tag.len == 0 or tag.len > max_tag_bytes) return false;
-    // Grandfathered / irregular tags ECMA-402 / BCP 47 accept.
-    if (isGrandfathered(tag)) return true;
 
     var i: usize = 0;
     // Language subtag: 2-3 / 5-8 ALPHA (4 is reserved; we accept 2-8
@@ -412,8 +410,9 @@ pub fn isStructurallyValidLanguageTag(tag: []const u8) bool {
         i += 1;
         if (i >= tag.len) return false;
 
-        if (tag[i] == 'x' or tag[i] == 'X') {
-            // Private use: x-alphanum{1,8}(-alphanum{1,8})*
+        if ((tag[i] == 'x' or tag[i] == 'X') and i + 1 < tag.len and tag[i + 1] == '-') {
+            // Private use: x-alphanum{1,8}(-alphanum{1,8})* — the singleton
+            // only, not a longer subtag that merely starts with x ("zh-xiang").
             i += 1;
             if (i >= tag.len or tag[i] != '-') return false;
             i += 1;
@@ -510,9 +509,9 @@ pub fn isStructurallyValidLanguageTag(tag: []const u8) bool {
             continue;
         }
         // §unicode_language_id has no extlang production — a 3-ALPHA subtag
-        // after the language is not a valid script/region/variant, so the tag
-        // is structurally invalid (e.g. "en-els"). The BCP 47 grandfathered
-        // forms that look like this are accepted earlier via isGrandfathered.
+        // after the language is not a valid script/region/variant, so the
+        // tag is structurally invalid (e.g. "en-els", and the grandfathered
+        // BCP 47 forms like "zh-min-nan" with it).
         return false;
     }
     return validTExtension(tag);
@@ -621,25 +620,6 @@ fn allDigit(s: []const u8) bool {
     return true;
 }
 
-fn isGrandfathered(tag: []const u8) bool {
-    // Lowercase compare for common grandfathered tags.
-    var buf: [32]u8 = undefined;
-    if (tag.len > buf.len) return false;
-    for (tag, 0..) |c, idx| buf[idx] = toLowerAscii(c);
-    const t = buf[0..tag.len];
-    // Only the BCP 47 grandfathered tags that ALSO match unicode_language_id
-    // (language + a 5-8-char variant) are valid under ECMA-402; they are kept
-    // so canonicalizeUnicodeLocaleId can map them to their preferred forms.
-    // The irregular tags (i-*, sgn-*, en-GB-oed) and the regular ones with a
-    // 3-ALPHA subtag (no-bok / no-nyn / zh-min / zh-min-nan) are NOT valid
-    // unicode_locale_ids, so IsStructurallyValidLanguageTag must reject them.
-    const gf = [_][]const u8{
-        "art-lojban", "cel-gaulish", "zh-guoyu", "zh-hakka", "zh-xiang",
-    };
-    for (gf) |g| if (std.mem.eql(u8, t, g)) return true;
-    return false;
-}
-
 /// §3.2 UTS #35 `type` production —
 /// `(alphanum{3,8}) ("-" alphanum{3,8})*`. The value space for
 /// Unicode extension keys (`ca`, `co`, `nu`) and for any "type"
@@ -732,15 +712,6 @@ pub fn isUnicodeLanguageId(code: []const u8) bool {
 /// Caller owns the returned slice.
 pub fn canonicalizeUnicodeLocaleId(allocator: std.mem.Allocator, tag: []const u8) ![]const u8 {
     if (tag.len == 0 or tag.len > max_tag_bytes) return error.InvalidTag;
-
-    // Grandfathered tags: return canonical lowercase forms.
-    if (isGrandfathered(tag)) {
-        var buf: [32]u8 = undefined;
-        for (tag, 0..) |c, i| buf[i] = toLowerAscii(c);
-        const t = buf[0..tag.len];
-        const canon = grandfatheredCanonical(t) orelse t;
-        return try allocator.dupe(u8, canon);
-    }
 
     var out: std.ArrayListUnmanaged(u8) = .empty;
     errdefer out.deinit(allocator);
@@ -899,9 +870,6 @@ fn applyLanguageAlias(allocator: std.mem.Allocator, canon: []const u8) ![]const 
     }
     if (n == 0) return canon;
 
-    var repl: cldr.Subtags = .{};
-    const has_alias = cldr.languageAlias(subs[0], &repl);
-
     // Classify the input's script / region; everything else is a variant.
     var in_script: []const u8 = "";
     var in_region: []const u8 = "";
@@ -917,29 +885,45 @@ fn applyLanguageAlias(allocator: std.mem.Allocator, canon: []const u8) ![]const 
             vn += 1;
         }
     }
-    // §3.2.1 languageAlias und-hepburn-heploc → und-alalc97: a tag whose
-    // variants include BOTH hepburn and heploc replaces the pair with alalc97
-    // (the only variant-set alias in the CLDR data).
+    // §3.2.1 languageAlias, multi-subtag keys (sgn-BR → bzs, cel-gaulish →
+    // xtg, und-hepburn-heploc → und-alalc97, und-arevela → und, …): the first
+    // table row whose fields are all present in the input fires; its key
+    // fields are consumed and its replacement fields merged.
     var variants_aliased = false;
-    {
-        var has_hepburn = false;
-        var has_heploc = false;
-        for (variants[0..vn]) |v| {
-            if (std.mem.eql(u8, v, "hepburn")) has_hepburn = true;
-            if (std.mem.eql(u8, v, "heploc")) has_heploc = true;
-        }
-        if (has_hepburn and has_heploc) {
-            var w: usize = 0;
+    var cur_lang = subs[0];
+    multi: for (@import("intl_language_aliases.zig").multi_subtag_aliases) |row| {
+        if (!std.mem.eql(u8, row.lang, "und") and !std.mem.eql(u8, row.lang, cur_lang)) continue;
+        if (row.script.len != 0 and !std.ascii.eqlIgnoreCase(row.script, in_script)) continue;
+        if (row.region.len != 0 and !std.ascii.eqlIgnoreCase(row.region, in_region)) continue;
+        for (row.variants) |kv| {
             for (variants[0..vn]) |v| {
-                if (std.mem.eql(u8, v, "hepburn") or std.mem.eql(u8, v, "heploc")) continue;
+                if (std.ascii.eqlIgnoreCase(kv, v)) break;
+            } else continue :multi;
+        }
+        if (!std.mem.eql(u8, row.r_lang, "und")) cur_lang = row.r_lang;
+        if (row.script.len != 0) in_script = row.r_script;
+        if (row.region.len != 0) in_region = row.r_region;
+        if (row.variants.len != 0 or row.r_variants.len != 0) {
+            var w: usize = 0;
+            outer: for (variants[0..vn]) |v| {
+                for (row.variants) |kv| if (std.ascii.eqlIgnoreCase(kv, v)) continue :outer;
                 variants[w] = v;
                 w += 1;
             }
-            variants[w] = "alalc97";
-            vn = w + 1;
-            variants_aliased = true;
+            vn = w;
+            for (row.r_variants) |rv| {
+                if (vn >= variants.len) break;
+                variants[vn] = rv;
+                vn += 1;
+            }
         }
+        variants_aliased = true;
+        break;
     }
+    // §3.2.1 languageAlias, bare-language key — applied to the (possibly
+    // multi-subtag-rewritten) language.
+    var repl: cldr.Subtags = .{};
+    const has_alias = cldr.languageAlias(cur_lang, &repl);
     // §3.2.1 variantAlias — the two deprecated simple variants.
     for (variants[0..vn]) |*v| {
         if (std.mem.eql(u8, v.*, "heploc")) {
@@ -961,7 +945,7 @@ fn applyLanguageAlias(allocator: std.mem.Allocator, canon: []const u8) ![]const 
             break;
         }
     }
-    const out_lang = if (has_alias) repl.lang else subs[0];
+    const out_lang = if (has_alias) repl.lang else cur_lang;
     const out_script = if (in_script.len != 0) in_script else (if (has_alias) repl.script else "");
     // §3.2.1 territoryAlias — canonicalise the region (input's, else the
     // language alias's): a 1→1 alias replaces directly (554→NZ, UK→GB); a
@@ -1223,20 +1207,6 @@ fn appendUnicodeKeywords(
         try out.append(allocator, '-');
         try out.appendSlice(allocator, g);
     }
-}
-
-fn grandfatheredCanonical(t: []const u8) ?[]const u8 {
-    // A few preferred values.
-    if (std.mem.eql(u8, t, "art-lojban")) return "jbo";
-    if (std.mem.eql(u8, t, "zh-guoyu")) return "zh";
-    if (std.mem.eql(u8, t, "zh-hakka")) return "hak";
-    if (std.mem.eql(u8, t, "zh-min-nan")) return "nan";
-    if (std.mem.eql(u8, t, "zh-xiang")) return "hsn";
-    if (std.mem.eql(u8, t, "no-bok")) return "nb";
-    if (std.mem.eql(u8, t, "no-nyn")) return "nn";
-    if (std.mem.eql(u8, t, "i-klingon")) return "tlh";
-    if (std.mem.eql(u8, t, "i-default")) return "en-x-i-default";
-    return null;
 }
 
 /// §9.2.13 DefaultLocale.
