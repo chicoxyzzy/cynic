@@ -409,6 +409,19 @@ test "intl/temporal: chinese + dangi lunisolar calendars (table / leap months)" 
     );
 }
 
+test "intl/temporal: getTimeZoneTransition consults the POSIX TZ footer" {
+    try requireIntlBuild();
+    // Modern (slim) tzdata truncates the explicit transition table, so recent
+    // transitions come from the POSIX footer rule (America/New_York's 2019
+    // fall-back, Europe/London's 2020 spring-forward, both beyond the table).
+    try evalAssert1(
+        \\const ny = new Temporal.ZonedDateTime(1555448460000000000n, "America/New_York");
+        \\const ld = new Temporal.ZonedDateTime(1591909260000000000n, "Europe/London");
+        \\(ny.getTimeZoneTransition("next").epochNanoseconds === 1572760800000000000n &&
+        \\ ld.getTimeZoneTransition("previous").epochNanoseconds === 1585443600000000000n) ? 1 : 0
+    );
+}
+
 test "intl/temporal: ZonedDateTime start-of-day skips a midnight gap" {
     try requireIntlBuild();
     // Toronto 1919-03-31 sprang 23:30 -> 00:30, so the day starts at 00:30
