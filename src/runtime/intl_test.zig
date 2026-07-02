@@ -1787,6 +1787,14 @@ test "intl: -t- extension canonicalization + tlang structural validation" {
     );
 }
 
+test "intl: Locale duplicate -u- keyword keeps the first occurrence" {
+    try requireIntlBuild();
+    try evalAssert1(
+        \\(new Intl.Locale('da-u-ca-gregory-ca-buddhist').toString() === 'da-u-ca-gregory' &&
+        \\ new Intl.Locale('en-u-nu-latn-nu-arab').numberingSystem === 'latn') ? 1 : 0
+    );
+}
+
 test "intl: Locale multi-subtag -u- types + true elision + islamicc alias" {
     try requireIntlBuild();
     try evalAssert1(

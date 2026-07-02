@@ -1157,6 +1157,19 @@ fn appendUnicodeKeywords(
         // §3.2.1 — canonicalise the type values, then drop a default `true`
         // type on a boolean key. Build the surviving segment list (key first).
         const key = items[i];
+        // A duplicate keyword key keeps only its FIRST occurrence
+        // (`da-u-ca-gregory-ca-buddhist` → `da-u-ca-gregory`).
+        var dup = false;
+        for (groups.items) |g| {
+            if (g.len >= 2 and g[0] == key[0] and g[1] == key[1] and (g.len == 2 or g[2] == '-')) {
+                dup = true;
+                break;
+            }
+        }
+        if (dup) {
+            i = end;
+            continue;
+        }
         var segs: std.ArrayListUnmanaged([]const u8) = .empty;
         defer segs.deinit(allocator);
         try segs.append(allocator, key);
