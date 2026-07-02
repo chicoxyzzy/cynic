@@ -3091,6 +3091,27 @@ pub fn temporalToLocaleString(realm: *Realm, this_value: Value, args: []const Va
     // Shallow copy: the default literals below must never reach slots.deinit
     // (which frees only the allocated option fields the copy keeps sharing).
     var eff = slots;
+    // §6.3.x Temporal.ZonedDateTime.prototype.toLocaleString — the formatter
+    // takes the value's own time zone (a timeZone option is a TypeError), and
+    // the wall-clock fields come from the epoch instant in that zone.
+    var zdt_tz_buf: [64]u8 = undefined;
+    if (heap_mod.valueAsPlainObject(this_value)) |o| {
+        if (o.getTemporalRecord()) |rec| {
+            if (rec.* == .zoned_date_time) {
+                if (heap_mod.valueAsPlainObject(argOr(args, 1, Value.undefined_))) |ob| {
+                    if (!(try getPropertyChain(realm, ob, "timeZone")).isUndefined())
+                        return throwTypeError(realm, "timeZone option is not allowed when formatting a ZonedDateTime");
+                }
+                eff.time_zone = temporal.timeZoneIdentifierString(rec.zoned_date_time.time_zone, &zdt_tz_buf);
+                applyTemporalToLocaleDefaults(&eff, this_value);
+                const ms: f64 = @floatFromInt(@divFloor(rec.zoned_date_time.epoch_ns, 1_000_000));
+                var zsegs: [48]Seg = undefined;
+                const zn = try dtfRenderArg(realm, &eff, makeNumberValue(ms), &zsegs);
+                var zbuf: [256]u8 = undefined;
+                return makeStringValue(realm, flattenSegs(&zsegs, zn, &zbuf));
+            }
+        }
+    }
     applyTemporalToLocaleDefaults(&eff, this_value);
     var segs: [48]Seg = undefined;
     const n = try dtfRenderArg(realm, &eff, this_value, &segs);
@@ -3691,7 +3712,10 @@ fn requestedFieldToken(letter: u8, slots: *const intl.DateTimeFormatSlots, is_da
     return switch (letter) {
         'G' => if (slots.era.len > 0) "G" else "",
         'y', 'Y' => blk: {
-            const w = if (default_ymd) "numeric" else slots.year;
+            var w = if (default_ymd) "numeric" else slots.year;
+            // An era without a year still renders the year (CLDR era skeletons
+            // are Gy — "AD 1970" not a bare "AD").
+            if (w.len == 0 and slots.era.len > 0) w = "numeric";
             if (w.len == 0) break :blk "";
             break :blk if (std.mem.eql(u8, w, "2-digit")) "yy" else "y";
         },

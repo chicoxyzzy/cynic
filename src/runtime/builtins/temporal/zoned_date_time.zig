@@ -525,8 +525,12 @@ fn zonedDateTimeToJSON(realm: *Realm, this_value: Value, args: []const Value) Na
 /// §6.3.x Temporal.ZonedDateTime.prototype.toLocaleString ( ) — without an
 /// Intl build, this is the default ISO serialization (locale/options ignored).
 fn zonedDateTimeToLocaleString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = args;
+    // §6.3.x — brand-check first, then FormatDateTime via DateTimeFormat when
+    // CLDR is present (the formatter takes the value's own time zone); without
+    // it fall back to the ISO string.
     const z = try requireZonedDateTime(realm, this_value);
+    if (@import("../../cldr.zig").available)
+        return @import("../intl.zig").temporalToLocaleString(realm, this_value, args);
     var buf: [80]u8 = undefined;
     const out = temporal.zonedDateTimeToString(z, &buf, .{});
     const js = realm.heap.allocateString(out) catch return error.OutOfMemory;
