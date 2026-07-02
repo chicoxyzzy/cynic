@@ -228,11 +228,16 @@ fn toMonthDayFields(realm: *Realm, obj: *JSObject, options: Value) NativeError!P
     // (calendar month, day) pair; gregorian-month calendars keep the ISO
     // month/day with the 1972 reference and just carry the calendar.
     if (shared.isComputedCalendar(cal)) {
-        // A plain `month` integer without a code is an ordinal; the probe walk
-        // needs the year-independent CODE space, which for sub-Adar ordinals is
-        // the same number (hebrew codes only diverge from ordinals post-Adar in
-        // leap years, unreachable without a year).
-        const code_month: i64 = if (has_code) month else month;
+        // A plain `month` integer is an ordinal IN THE GIVEN YEAR (the
+        // leap-month calendars require a year alongside it), so it converts to
+        // the year-independent CODE space through that year — ordinal 5 of a
+        // chinese year whose leap month sits at 5 means "M04L", not "M05".
+        const code_month: i64 = if (has_code)
+            month
+        else if (!year_v.isUndefined())
+            shared.monthOrdinalToCode(cal, year_for_overflow, @intCast(month))
+        else
+            month;
         const ref = shared.computedMonthDayRef(cal, code_month, day, overflow == .reject) orelse
             return throwRangeError(realm, "PlainMonthDay day is out of range for the calendar");
         return .{ .ref_iso_year = @intCast(ref.iso_year), .iso_month = @intCast(ref.iso_month), .iso_day = @intCast(ref.iso_day), .calendar = cal };

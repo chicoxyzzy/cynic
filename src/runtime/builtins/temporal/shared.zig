@@ -1444,7 +1444,30 @@ pub fn computedMonthDayRef(cal: temporal.CalendarId, code_month: i64, day_in: i6
     var day = day_in;
     if (day > max_day) {
         if (reject) return null;
-        day = max_day;
+        // Constrain prefers keeping the exact DAY over the exact month code:
+        // when the base month can hold the day, fall to it (M02L-30 → M02-30);
+        // otherwise stay in the leap month with its clamped maximum
+        // (M03L-31 → M03L-30, hebrew M05L-31 → M05L-30).
+        if (code < 0) {
+            const base: i64 = -code;
+            var base_max: i64 = 0;
+            var p3: i64 = base_year;
+            while (p3 >= floor_year) : (p3 -= 1) {
+                if (compOrdForCode(c.family, p3, base)) |ord| {
+                    const dim: i64 = compDaysInMonth(c.family, p3, @intCast(ord));
+                    if (dim > base_max) base_max = dim;
+                }
+            }
+            // Fall to the base month only when it can hold MORE of the day
+            // than the leap month (M02L-30/31 → M02-30 since M02L caps at 29;
+            // M03L-31 stays M03L-30; hebrew M05L-31 stays M05L-30 since Adar
+            // is shorter than Adar I).
+            if (base_max > max_day) {
+                code = base;
+                max_day = base_max;
+            }
+        }
+        if (day > max_day) day = max_day;
     }
     if (day < 1) return null;
 
