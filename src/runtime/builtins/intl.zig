@@ -1424,6 +1424,14 @@ fn anySupportedLocalesOf(realm: *Realm, this_value: Value, args: []const Value) 
     return supportedLocalesOfImpl(realm, args);
 }
 
+/// §22.1.3.10 String.prototype.localeCompare step 4 — validate `locales` /
+/// `options` exactly as `new Intl.Collator(locales, options)` does, so
+/// localeCompare throws the same locale / option exceptions. The constructed
+/// collator is discarded (Cynic's localeCompare uses its own NFD comparison).
+pub fn validateCollatorArgs(realm: *Realm, locales: Value, options: Value) NativeError!void {
+    _ = try collatorConstructor(realm, Value.undefined_, &.{ locales, options });
+}
+
 fn collatorConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     // Callable without new? Spec allows legacy; we require new via is_class.
     const inst = try newIntlInstance(realm, this_value, realm.intrinsics.intl_collator_prototype.?, "Collator", false);

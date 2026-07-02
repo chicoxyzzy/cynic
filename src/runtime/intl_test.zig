@@ -347,6 +347,23 @@ test "intl: supportedValuesOf(numberingSystem) enumerates the CLDR accept-set (i
     );
 }
 
+test "string: localeCompare throws Collator's exceptions for bad locales/options" {
+    try requireIntlBuild();
+    // §22.1.3.10 — localeCompare constructs a Collator, so it throws the same
+    // locale / option exceptions, even for equal strings (test262
+    // throws-same-exceptions-as-Collator).
+    try evalAssert1(
+        \\const threw = (f) => { try { f(); return false; } catch (e) { return true; } };
+        \\if (!threw(() => "".localeCompare("", null))) throw 0; // null locales
+        \\if (!threw(() => "".localeCompare("", ["de_DE"]))) throw 1; // invalid tag
+        \\if (!threw(() => "".localeCompare("", ["i"]))) throw 2;
+        \\if (!threw(() => "a".localeCompare("b", [], { usage: "invalid" }))) throw 3;
+        \\if (!threw(() => "a".localeCompare("b", [], { sensitivity: "invalid" }))) throw 4;
+        \\"a".localeCompare("b", "en"); // valid — must not throw
+        \\1
+    );
+}
+
 test "intl: NumberFormat reads options in the §11.1.2 order" {
     try requireIntlBuild();
     // §11.1.2 / SetNumberFormatDigitOptions read order: numberingSystem is read

@@ -3032,6 +3032,18 @@ fn stringLocaleCompare(realm: *Realm, this_value: Value, args: []const Value) Na
     const s = try coerceThisStringRooted(realm, this_value, scope);
     const other_s = try intrinsics.stringifyArg(realm, argOr(args, 0, Value.undefined_));
 
+    // §22.1.3.10 step 4 — localeCompare constructs a Collator, so it must throw
+    // the same locale / option exceptions (bad locales → TypeError/RangeError,
+    // invalid usage/sensitivity → RangeError). Validate before the equal-string
+    // fast path so an invalid argument throws even for equal strings. Default
+    // construction (both absent) cannot throw, so skip it to keep the fast path.
+    const locales_arg = argOr(args, 1, Value.undefined_);
+    const options_arg = argOr(args, 2, Value.undefined_);
+    // Only when Intl.Collator is installed (-Dintl=stub|full); at -Dintl=off
+    // there is no Collator to construct, so the NFD fallback runs unvalidated.
+    if ((!locales_arg.isUndefined() or !options_arg.isUndefined()) and realm.intrinsics.intl_collator_prototype != null)
+        try @import("intl.zig").validateCollatorArgs(realm, locales_arg, options_arg);
+
     // Fast path — byte-identical strings are trivially equal and
     // skip the normalization round-trip entirely.
     if (std.mem.eql(u8, s.flatBytes(), other_s.flatBytes())) return Value.fromInt32(0);
