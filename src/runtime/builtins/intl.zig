@@ -5818,6 +5818,11 @@ fn durationBuildParts(s: *const intl.DurationFormatSlots, vals: *const [10]f64, 
     var i: usize = 0;
     while (i < 10) : (i += 1) {
         var value = vals[i];
+        // §1.1.9 — a -0 unit value carries no sign; normalise it to +0 so the
+        // formatter doesn't print a spurious leading minus. A genuinely negative
+        // duration re-forces -0 on the sign-bearing position below (gated on
+        // `any_negative`), so this does not suppress the real duration sign.
+        if (value == 0) value = 0;
         const style = s.unit_style[i];
         const display = s.unit_display[i];
         // Numeric seconds / sub-seconds fold their fraction when the next unit

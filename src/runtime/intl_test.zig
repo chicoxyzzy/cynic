@@ -347,6 +347,19 @@ test "intl: supportedValuesOf(numberingSystem) enumerates the CLDR accept-set (i
     );
 }
 
+test "intl: DurationFormat renders a negative-zero unit value without a sign" {
+    try requireIntlBuild();
+    if (!intl_config.has_locale_data) return error.SkipZigTest;
+    // §1.1.9 — a -0 unit value formats identically to +0 (no leading minus); the
+    // sign is shown only for a genuinely negative duration (test262 negative-zero).
+    try evalAssert1(
+        \\const df = new Intl.DurationFormat("en-US", { yearsDisplay: "always" });
+        \\if (df.format({ years: -0 }) !== df.format({ years: 0 })) throw 0;
+        \\if (!new Intl.DurationFormat("en-US").format({ years: -5 }).includes("-")) throw 1; // real negatives keep the sign
+        \\1
+    );
+}
+
 test "intl: DurationFormat rejects a word style after a numeric/2-digit unit" {
     try requireIntlBuild();
     // §1.1.5 GetDurationUnitOptions step 6 — a "long"/"short"/"narrow" unit
