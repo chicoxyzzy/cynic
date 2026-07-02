@@ -347,6 +347,29 @@ test "intl: supportedValuesOf(numberingSystem) enumerates the CLDR accept-set (i
     );
 }
 
+test "intl: NumberFormat currency fraction defaults apply only in standard notation" {
+    try requireIntlBuild();
+    if (!intl_config.has_locale_data) return error.SkipZigTest;
+    // §15.1.1 SetNumberFormatDigitOptions 19-20 — a currency's minor-unit fraction
+    // digits apply only to "standard" notation; compact/engineering/scientific use
+    // the generic defaults (test262 currency-digits-nonstandard-notation).
+    try evalAssert1(
+        \\function frac(cur, notation) {
+        \\  const r = new Intl.NumberFormat("en-US", { style: "currency", currency: cur, notation }).resolvedOptions();
+        \\  return r.minimumFractionDigits + "/" + r.maximumFractionDigits;
+        \\}
+        \\if (frac("JPY", "standard") !== "0/0") throw 0; // minor units apply
+        \\if (frac("USD", "standard") !== "2/2") throw 1;
+        \\if (frac("KWD", "standard") !== "3/3") throw 2;
+        \\for (const cur of ["JPY", "KWD", "USD"]) {
+        \\  if (frac(cur, "engineering") !== "0/3") throw 3; // minor units ignored
+        \\  if (frac(cur, "scientific") !== "0/3") throw 4;
+        \\  if (frac(cur, "compact") !== "0/0") throw 5; // compact overrides to 0/0
+        \\}
+        \\1
+    );
+}
+
 test "intl: DurationFormat renders a negative-zero unit value without a sign" {
     try requireIntlBuild();
     if (!intl_config.has_locale_data) return error.SkipZigTest;

@@ -1641,13 +1641,17 @@ fn numberFormatConstructor(realm: *Realm, this_value: Value, args: []const Value
     // otherwise (so compact omits grouping below ~10,000).
     slots.use_grouping = try getUseGroupingOwned(realm, opts, if (std.mem.eql(u8, slots.notation, "compact")) "min2" else "auto");
 
-    // §15.1.1 SetNumberFormatDigitOptions — fraction-digit defaults vary by
-    // style: percent → min 0 / max 0; decimal → min 0 / max 3; currency →
+    // §15.1.1 SetNumberFormatDigitOptions steps 19-20 — fraction-digit defaults
+    // vary by style: percent → min 0 / max 0; decimal → min 0 / max 3; currency →
     // min and max both cCurrencyDigits(currency) (2 for most, 0 for JPY, 3 for
-    // BHD, …), so an integer amount still shows the minor units ("$5.00").
-    const cur_digits: u32 = if (is_currency_style) cldr.currencyFractionDigits(slots.currency) else 0;
-    const mnfd_default: u32 = if (is_currency_style) cur_digits else 0;
-    const mxfd_default: u32 = if (is_currency_style) cur_digits else if (std.mem.eql(u8, slots.style, "percent")) 0 else 3;
+    // BHD, …), so an integer amount still shows the minor units ("$5.00"). The
+    // currency special-casing applies ONLY in "standard" notation; compact /
+    // engineering / scientific fall back to the generic decimal defaults (compact
+    // then overrides to its own 1-2 significant form in SetNumberFormatDigitOptions).
+    const cur_standard = is_currency_style and std.mem.eql(u8, slots.notation, "standard");
+    const cur_digits: u32 = if (cur_standard) cldr.currencyFractionDigits(slots.currency) else 0;
+    const mnfd_default: u32 = if (cur_standard) cur_digits else 0;
+    const mxfd_default: u32 = if (cur_standard) cur_digits else if (std.mem.eql(u8, slots.style, "percent")) 0 else 3;
     try setNumberFormatDigitOptions(realm, &slots, opts, mnfd_default, mxfd_default);
 
     slots.sign_display = try getOptionStringOwned(realm, opts, "signDisplay", &.{ "auto", "never", "always", "exceptZero", "negative" }, "auto");
