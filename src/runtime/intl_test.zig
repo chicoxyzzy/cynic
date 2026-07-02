@@ -347,6 +347,22 @@ test "intl: supportedValuesOf(numberingSystem) enumerates the CLDR accept-set (i
     );
 }
 
+test "intl: DateTimeFormat reads calendar before numberingSystem (§11.1.2)" {
+    try requireIntlBuild();
+    // §11.1.2 CreateDateTimeFormat read order: calendar precedes numberingSystem,
+    // both before hour12 (test262 constructor-calendar-numberingSystem-order).
+    try evalAssert1(
+        \\const log = [];
+        \\const opts = {};
+        \\for (const k of ["localeMatcher", "calendar", "numberingSystem", "hour12"])
+        \\  Object.defineProperty(opts, k, { get() { log.push(k); return undefined; } });
+        \\new Intl.DateTimeFormat("en", opts);
+        \\if (log.indexOf("calendar") > log.indexOf("numberingSystem")) throw 0;
+        \\if (log.indexOf("numberingSystem") > log.indexOf("hour12")) throw 1;
+        \\1
+    );
+}
+
 test "string: localeCompare throws Collator's exceptions for bad locales/options" {
     try requireIntlBuild();
     // §22.1.3.10 — localeCompare constructs a Collator, so it throws the same

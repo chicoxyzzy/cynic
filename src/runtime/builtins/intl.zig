@@ -3122,7 +3122,6 @@ fn buildDateTimeFormatSlots(realm: *Realm, locales: Value, options: Value) Nativ
     // The default calendar is the locale's — gregory across the locales Cynic
     // ships — never iso8601 (no locale has the ISO calendar as its default).
     slots.calendar = realm.allocator.dupe(u8, "gregory") catch return error.OutOfMemory;
-    slots.numbering_system = try resolveNumberingSystem(realm, resolved.locale, resolved.locale, opts);
     slots.time_zone = realm.allocator.dupe(u8, "UTC") catch return error.OutOfMemory;
     if (opts) |o| {
         const tz_v = try getPropertyChain(realm, o, "timeZone");
@@ -3175,7 +3174,12 @@ fn buildDateTimeFormatSlots(realm: *Realm, locales: Value, options: Value) Nativ
                 }
             }
         }
-
+    }
+    // §11.1.2 read order: numberingSystem is resolved after the calendar option
+    // (both after localeMatcher). Runs unconditionally so a locale's default
+    // system still applies when no options object is supplied.
+    slots.numbering_system = try resolveNumberingSystem(realm, resolved.locale, resolved.locale, opts);
+    if (opts) |o| {
         slots.date_style = try dupOptOwned(realm, try getOptionString(realm, opts, "dateStyle", &.{ "full", "long", "medium", "short" }, ""));
         slots.time_style = try dupOptOwned(realm, try getOptionString(realm, opts, "timeStyle", &.{ "full", "long", "medium", "short" }, ""));
 
