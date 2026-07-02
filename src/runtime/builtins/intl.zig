@@ -4243,7 +4243,11 @@ fn emitField(out: []Seg, letter: u8, count: usize, ct: CivilTime, dd: cldr.DateD
         'G' => setSeg(seg, "era", if (ct.year <= 0) dd.era_bc else dd.era_ad),
         'y', 'Y' => {
             const yv: u64 = @intCast(if (ct.year < 0) -ct.year else ct.year);
-            if (count == 2) setNumberSeg(seg, "year", yv % 100, 2, digit_base) else setNumberSeg(seg, "year", yv, 1, digit_base);
+            // The chinese/dangi year renders as the related Gregorian year
+            // (part type "relatedYear" per CLDR; the cyclic yearName is not
+            // modelled).
+            const ytype: []const u8 = if (ct.lunisolar_code != 0) "relatedYear" else "year";
+            if (count == 2) setNumberSeg(seg, ytype, yv % 100, 2, digit_base) else setNumberSeg(seg, ytype, yv, 1, digit_base);
         },
         'M', 'L' => {
             if (ct.hebrew) {
