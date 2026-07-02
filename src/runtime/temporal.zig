@@ -3078,7 +3078,9 @@ pub fn roundTime(t: PlainTimeRecord, unit: LargestUnit, increment: i128, mode: R
 pub fn roundISODateTime(dt: PlainDateTimeRecord, unit: LargestUnit, increment: i128, mode: RoundingMode) ?PlainDateTimeRecord {
     const rt = roundTime(dt.time(), unit, increment, mode);
     const new_date = addISODate(dt.date(), 0, 0, 0, rt.days, false) orelse return null;
-    return PlainDateTimeRecord.combine(new_date, rt.time);
+    var result = PlainDateTimeRecord.combine(new_date, rt.time);
+    result.calendar = dt.calendar; // rounding preserves the calendar (addISODate resets it to ISO)
+    return result;
 }
 
 /// §5.5.x CompareISODateTime — total order: date first, then wall-clock

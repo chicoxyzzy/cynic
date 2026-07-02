@@ -347,6 +347,22 @@ test "intl: supportedValuesOf(numberingSystem) enumerates the CLDR accept-set (i
     );
 }
 
+test "intl/temporal: PlainDateTime.toString preserves a non-ISO calendar" {
+    try requireIntlBuild();
+    // §5.3.x — the calendar constructor argument survives toString's internal
+    // rounding (roundISODateTime rebuilt the ISO date, dropping the calendar);
+    // calendarName:"auto" shows a non-ISO calendar (test262 toString/calendarname-*).
+    try evalAssert1(
+        \\const d = new Temporal.PlainDateTime(1976, 11, 18, 15, 23, 0, 0, 0, 0, "gregory");
+        \\if (d.toString({ calendarName: "always" }) !== "1976-11-18T15:23:00[u-ca=gregory]") throw 0;
+        \\if (d.toString() !== "1976-11-18T15:23:00[u-ca=gregory]") throw 1; // default auto shows non-ISO
+        \\const iso = new Temporal.PlainDateTime(1976, 11, 18, 15, 23);
+        \\if (iso.toString({ calendarName: "always" }) !== "1976-11-18T15:23:00[u-ca=iso8601]") throw 2;
+        \\if (iso.toString() !== "1976-11-18T15:23:00") throw 3; // auto hides ISO
+        \\1
+    );
+}
+
 test "intl: NumberFormat hanidec uses the non-contiguous ideograph digits" {
     try requireIntlBuild();
     if (!intl_config.has_locale_data) return error.SkipZigTest;
