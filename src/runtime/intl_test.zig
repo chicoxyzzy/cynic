@@ -347,6 +347,22 @@ test "intl: supportedValuesOf(numberingSystem) enumerates the CLDR accept-set (i
     );
 }
 
+test "intl: DateTimeFormat drops an unsupported -u-ca keyword from the resolved locale" {
+    try requireIntlBuild();
+    if (!intl_config.has_locale_data) return error.SkipZigTest;
+    // §9.2.7 — a -u-ca keyword naming an unsupported calendar is dropped from
+    // resolvedOptions().locale; a supported one is kept (test262
+    // resolved-calendar-unicode-extensions-and-options).
+    try evalAssert1(
+        \\function res(loc, cal) { const r = new Intl.DateTimeFormat(loc, { calendar: cal }).resolvedOptions(); return r.locale + "|" + r.calendar; }
+        \\if (res("en-u-ca-iso8601", "invalid") !== "en-u-ca-iso8601|iso8601") throw 0; // option unsupported → keyword used
+        \\if (res("en-u-ca-invalid", "invalid2") !== "en|gregory") throw 1; // both unsupported → default
+        \\if (res("en-u-ca-gregory", "iso8601") !== "en|iso8601") throw 2; // option overrides → keyword dropped
+        \\if (res("en-u-ca-iso8601", "iso8601") !== "en-u-ca-iso8601|iso8601") throw 3; // option equals keyword → kept
+        \\1
+    );
+}
+
 test "intl: DateTimeFormat era option inserts the era after the year" {
     try requireIntlBuild();
     if (!intl_config.has_locale_data) return error.SkipZigTest;

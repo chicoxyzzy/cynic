@@ -460,7 +460,13 @@ fn isValidExtValue(key: []const u8, value: []const u8) bool {
     if (std.mem.eql(u8, key, "hc")) return std.mem.eql(u8, value, "h11") or std.mem.eql(u8, value, "h12") or std.mem.eql(u8, value, "h23") or std.mem.eql(u8, value, "h24");
     if (std.mem.eql(u8, key, "kn")) return value.len == 0 or std.mem.eql(u8, value, "true") or std.mem.eql(u8, value, "false");
     if (std.mem.eql(u8, key, "kf")) return std.mem.eql(u8, value, "upper") or std.mem.eql(u8, value, "lower") or std.mem.eql(u8, value, "false");
-    if (std.mem.eql(u8, key, "ca")) return intl.isValidUnicodeType(value);
+    if (std.mem.eql(u8, key, "ca")) {
+        // A -u-ca keyword is kept only for a supported calendar (a structurally
+        // valid but unsupported id like "invalid" drops so the default applies).
+        if (!intl.isValidUnicodeType(value)) return false;
+        var buf: [40]u8 = undefined;
+        return temporal.isSupportedCalendarId(canonicalCalendarId(value, &buf));
+    }
     return true;
 }
 
@@ -3173,6 +3179,17 @@ fn buildDateTimeFormatSlots(realm: *Realm, locales: Value, options: Value) Nativ
                     slots.calendar = try realm.allocator.dupe(u8, canon2);
                 }
             }
+        }
+        // §9.2.7 — an explicit (supported) calendar option overrides the -u-ca
+        // keyword, which then drops from the resolved locale — UNLESS the option
+        // equals the keyword's calendar, in which case the keyword stays.
+        if (cal_set) {
+            var keep = false;
+            if (intl.unicodeExtensionValue(slots.base.locale, "ca")) |kw| {
+                var kbuf: [40]u8 = undefined;
+                keep = std.ascii.eqlIgnoreCase(canonicalCalendarId(kw, &kbuf), slots.calendar);
+            }
+            if (!keep) try stripExtKeyword(realm, &slots.base, "ca");
         }
     }
     // §11.1.2 read order: numberingSystem is resolved after the calendar option
