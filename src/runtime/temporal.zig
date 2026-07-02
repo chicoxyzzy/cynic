@@ -1777,11 +1777,7 @@ pub fn zonedDateTimeToString(rec: ZonedDateTimeRecord, buf: []u8, opts: ZonedToS
             w.byte(']');
         },
     }
-    switch (opts.calendar) {
-        .auto, .never => {},
-        .always => w.bytes("[u-ca=iso8601]"),
-        .critical => w.bytes("[!u-ca=iso8601]"),
-    }
+    writeCalendarAnnotation(&w, rec.calendar, opts.calendar);
     return w.buf[0..w.len];
 }
 
@@ -2494,6 +2490,28 @@ pub const CalendarDisplay = enum { auto, always, never, critical };
 /// §3.5.x TemporalDateToString — `YYYY-MM-DD` (expanded year when out of
 /// 0000..9999), with the ISO calendar annotation appended per
 /// `calendar` (auto/never omit it for the ISO calendar).
+fn writeCalendarAnnotation(w: *Writer, cal: CalendarId, display: CalendarDisplay) void {
+    const is_iso = cal.isIso();
+    switch (display) {
+        .never => {},
+        .auto => if (!is_iso) {
+            w.bytes("[u-ca=");
+            w.bytes(cal.slice());
+            w.byte(']');
+        },
+        .always => {
+            w.bytes("[u-ca=");
+            w.bytes(cal.slice());
+            w.byte(']');
+        },
+        .critical => {
+            w.bytes("[!u-ca=");
+            w.bytes(cal.slice());
+            w.byte(']');
+        },
+    }
+}
+
 pub fn isoDateToString(rec: PlainDateRecord, buf: []u8, calendar: CalendarDisplay) []const u8 {
     var w = Writer{ .buf = buf, .len = 0 };
     writeIsoYear(&w, rec.iso_year);
@@ -2501,11 +2519,7 @@ pub fn isoDateToString(rec: PlainDateRecord, buf: []u8, calendar: CalendarDispla
     w.pad2(rec.iso_month);
     w.byte('-');
     w.pad2(rec.iso_day);
-    switch (calendar) {
-        .auto, .never => {},
-        .always => w.bytes("[u-ca=iso8601]"),
-        .critical => w.bytes("[!u-ca=iso8601]"),
-    }
+    writeCalendarAnnotation(&w, rec.calendar, calendar);
     return w.buf[0..w.len];
 }
 
@@ -3562,11 +3576,7 @@ pub fn isoDateTimeToString(dt: PlainDateTimeRecord, buf: []u8, calendar: Calenda
     w.byte('T');
     const sub_ns: u32 = dt.millisecond * 1_000_000 + dt.microsecond * 1_000 + dt.nanosecond;
     writeTimeFields(&w, dt.hour, dt.minute, dt.second, sub_ns, precision);
-    switch (calendar) {
-        .auto, .never => {},
-        .always => w.bytes("[u-ca=iso8601]"),
-        .critical => w.bytes("[!u-ca=iso8601]"),
-    }
+    writeCalendarAnnotation(&w, dt.calendar, calendar);
     return w.buf[0..w.len];
 }
 
@@ -3705,19 +3715,18 @@ pub fn isoYearMonthToString(rec: PlainYearMonthRecord, buf: []u8, calendar: Cale
     writeIsoYear(&w, rec.iso_year);
     w.byte('-');
     w.pad2(rec.iso_month);
-    switch (calendar) {
-        .auto, .never => {},
-        .always => {
-            w.byte('-');
-            w.pad2(rec.ref_iso_day);
-            w.bytes("[u-ca=iso8601]");
-        },
-        .critical => {
-            w.byte('-');
-            w.pad2(rec.ref_iso_day);
-            w.bytes("[!u-ca=iso8601]");
-        },
+    // The reference day appears whenever the annotation does (always /
+    // critical, or a non-ISO calendar under auto).
+    const show_day = switch (calendar) {
+        .always, .critical => true,
+        .auto => !rec.calendar.isIso(),
+        .never => false,
+    };
+    if (show_day) {
+        w.byte('-');
+        w.pad2(rec.ref_iso_day);
     }
+    writeCalendarAnnotation(&w, rec.calendar, calendar);
     return w.buf[0..w.len];
 }
 
