@@ -3064,8 +3064,10 @@ fn localeDefaultHourCycle(locale: []const u8) []const u8 {
         for (dd.time_short) |ch| {
             if (ch == '\'') in_quote = !in_quote;
             if (in_quote) continue;
-            if (ch == 'h' or ch == 'K') return "h12";
-            if (ch == 'H' or ch == 'k') return "h23";
+            if (ch == 'h') return "h12";
+            if (ch == 'K') return "h11";
+            if (ch == 'H') return "h23";
+            if (ch == 'k') return "h24";
         }
     }
     return "h23";
@@ -3198,9 +3200,10 @@ fn buildDateTimeFormatSlots(realm: *Realm, locales: Value, options: Value) Nativ
     // After all option reads (which can throw): cache the maximized data-locale
     // so per-`format()` CLDR lookups skip the likelySubtags scan.
     try setDataLocale(realm, &slots.base);
-    // §11.1.1 — when the resolved format includes an hour, the hour cycle
-    // resolves to the locale's default (hcDefault, derived from the CLDR
-    // short time pattern: h/K → h12, H/k → h23).
+    // §11.1.1 — when the resolved format includes an hour, hourCycle defaults
+    // to the locale's hcDefault (from the CLDR short time pattern: h→h12,
+    // K→h11, H→h23, k→h24). resolvedOptions reports it as undefined when the
+    // format has no hour (dateStyle-only) — see dateTimeFormatResolvedOptions.
     if (slots.hour_cycle.len == 0 and (slots.hour.len > 0 or slots.time_style.len > 0)) {
         slots.hour_cycle = try realm.allocator.dupe(u8, localeDefaultHourCycle(slots.base.dataLocale()));
     }
@@ -3533,7 +3536,10 @@ fn dateTimeFormatResolvedOptions(realm: *Realm, this_value: Value, args: []const
     try setDataProp(realm, obj, "calendar", try makeStringValue(realm, if (s.calendar.len > 0) s.calendar else "iso8601"));
     try setDataProp(realm, obj, "numberingSystem", try makeStringValue(realm, if (s.numbering_system.len > 0) s.numbering_system else "latn"));
     try setDataProp(realm, obj, "timeZone", try makeStringValue(realm, if (s.time_zone.len > 0) s.time_zone else "UTC"));
-    if (s.hour_cycle.len > 0) {
+    // §11.3.7 — [[HourCycle]] (and hour12) are undefined when [[Hour]] is
+    // undefined: a dateStyle-only format, or components with no hour.
+    const has_hour = s.hour.len > 0 or s.time_style.len > 0;
+    if (s.hour_cycle.len > 0 and has_hour) {
         try setDataProp(realm, obj, "hourCycle", try makeStringValue(realm, s.hour_cycle));
         try setDataProp(realm, obj, "hour12", Value.fromBool(std.mem.eql(u8, s.hour_cycle, "h11") or std.mem.eql(u8, s.hour_cycle, "h12")));
     }

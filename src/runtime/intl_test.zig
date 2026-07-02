@@ -1798,6 +1798,18 @@ test "intl: Number/BigInt toLocaleString route through NumberFormat; Array forwa
     );
 }
 
+test "intl: DateTimeFormat hourCycle default (h11/h24) + undefined for dateStyle" {
+    try requireIntlBuild();
+    try evalAssert1(
+        \\const ro = (o) => new Intl.DateTimeFormat('en', o).resolvedOptions();
+        \\(ro({hour: 'numeric'}).hourCycle === 'h12' &&
+        \\ ro({hour: 'numeric', hourCycle: 'h11'}).hourCycle === 'h11' &&
+        \\ ro({hour: 'numeric', hourCycle: 'h24'}).hourCycle === 'h24' &&
+        \\ ro({dateStyle: 'long'}).hourCycle === undefined &&
+        \\ ro({dateStyle: 'long'}).hour12 === undefined) ? 1 : 0
+    );
+}
+
 test "intl: canonical form sorts extension sequences by singleton, x last" {
     try requireIntlBuild();
     try evalAssert1(
