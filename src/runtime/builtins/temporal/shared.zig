@@ -328,6 +328,14 @@ fn compOrdForCode(f: CompFamily, year: i64, code: i64) ?i64 {
     if (code <= 5) return code;
     return if (ly) code + 1 else code;
 }
+/// Total order over month CODES: M05 < M05L < M06 (a leap code sorts after
+/// its base month). Used by the whole-year candidate comparison in
+/// differenceComputedDate, which per the leap-months fixtures compares code
+/// positions, not resolved ordinals.
+fn compCodeKey(code: i64) i64 {
+    return if (code < 0) -code * 2 + 1 else code * 2;
+}
+
 /// Family-level ordinal→code (hebrew leap: ordinal 6 → -5 ("M05L"),
 /// ordinals 7+ shift down one).
 fn compCodeForOrd(f: CompFamily, year: i64, ordinal: i64) i64 {
@@ -1448,13 +1456,22 @@ pub fn differenceComputedDate(cal: temporal.CalendarId, d1: temporal.PlainDateRe
     // (constraining a leap-only month to Adar), mirroring the code-preserving
     // year add.
     const code1 = compCodeForOrd(c.family, cd1.year, cd1.month);
+    const key1 = compCodeKey(code1);
+    const key2 = compCodeKey(compCodeForOrd(c.family, cd2.year, cd2.month));
     if (largest == .year or largest == .month) {
         var cand_years: i64 = @as(i64, cd2.year) - @as(i64, cd1.year);
         if (cand_years != 0) cand_years -= sign;
+        // A whole-year candidate is dead if it surpasses the target at EITHER
+        // granularity: by month-CODE position (M05 < M05L < M06 — Adar I
+        // carried backward into a common year surpasses that year's Adar even
+        // though constraining lands exactly on it), or by the constrained
+        // ordinal with the RAW start day (30 Adar I into a 29-day Adar
+        // overshoots by a day). Both mirror CalendarDateAdd's constrain.
         while (true) {
             const cy = cd1.year + cand_years;
-            const cm = compOrdForCode(c.family, cy, code1) orelse 6;
-            if (compDateSurpasses(sign, cy, cm, cd1.day, cd2.year, cd2.month, cd2.day)) break;
+            if (compDateSurpasses(sign, cy, key1, 0, cd2.year, key2, 0)) break;
+            const ord = compOrdForCode(c.family, cy, code1) orelse 6;
+            if (compDateSurpasses(sign, cy, ord, cd1.day, cd2.year, cd2.month, cd2.day)) break;
             years = cand_years;
             cand_years += sign;
         }

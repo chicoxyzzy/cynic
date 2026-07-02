@@ -522,14 +522,15 @@ fn differenceTemporalYearMonth(realm: *Realm, this_value: Value, args: []const V
     // weeks or days. Islamic tabular calendars difference in Islamic
     // year-months (ISO months don't align with Islamic months).
     var diff = if (shared.isComputedCalendar(this_ym.calendar)) blk: {
-        const a = shared.calendarFields(this_ym.calendar, this_ym.iso_year, this_ym.iso_month, this_ym.ref_iso_day);
-        const b = shared.calendarFields(other_ym.calendar, other_ym.iso_year, other_ym.iso_month, other_ym.ref_iso_day);
-        const miy: i64 = @intCast(a.months_in_year); // 13 for coptic-type
-        const total: i64 = (@as(i64, b.year) * miy + @as(i64, b.month) - 1) - (@as(i64, a.year) * miy + @as(i64, a.month) - 1);
-        break :blk if (largest == .month)
-            temporal.DurationRecord{ .months = @floatFromInt(total) }
-        else
-            temporal.DurationRecord{ .years = @floatFromInt(@divTrunc(total, miy)), .months = @floatFromInt(@rem(total, miy)) };
+        // Difference in the calendar's own year-months via the shared
+        // code-preserving walk (hebrew years alternate 12/13 months, so a
+        // flat year*monthsInYear index would miscount across leap years).
+        const d1 = temporal.PlainDateRecord{ .iso_year = this_ym.iso_year, .iso_month = this_ym.iso_month, .iso_day = this_ym.ref_iso_day, .calendar = this_ym.calendar };
+        const d2 = temporal.PlainDateRecord{ .iso_year = other_ym.iso_year, .iso_month = other_ym.iso_month, .iso_day = other_ym.ref_iso_day, .calendar = other_ym.calendar };
+        var dd = shared.differenceComputedDate(this_ym.calendar, d1, d2, if (largest == .month) .month else .year);
+        dd.weeks = 0;
+        dd.days = 0;
+        break :blk dd;
     } else blk: {
         var d = temporal.differenceISODate(this_anchor, other_anchor, largest);
         d.weeks = 0;
