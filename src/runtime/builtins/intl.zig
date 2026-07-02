@@ -3105,9 +3105,13 @@ pub fn temporalToLocaleString(realm: *Realm, this_value: Value, args: []const Va
 fn applyTemporalToLocaleDefaults(slots: *intl.DateTimeFormatSlots, v: Value) void {
     const o = heap_mod.valueAsPlainObject(v) orelse return;
     const rec = o.getTemporalRecord() orelse return;
+    // fractionalSecondDigits is a precision modifier, not a standalone
+    // component: alone it still takes the type's default component set (so a
+    // lone { fractionalSecondDigits } on a PlainTime renders h:m:s.fff rather
+    // than failing to overlap).
     const has_any = slots.weekday.len > 0 or slots.era.len > 0 or slots.year.len > 0 or
         slots.month.len > 0 or slots.day.len > 0 or slots.hour.len > 0 or slots.minute.len > 0 or
-        slots.second.len > 0 or slots.day_period.len > 0 or slots.fractional_second_digits != null or
+        slots.second.len > 0 or slots.day_period.len > 0 or
         slots.date_style.len > 0 or slots.time_style.len > 0;
     if (has_any) return;
     switch (rec.*) {
@@ -4034,13 +4038,14 @@ fn dtfRenderArg(realm: *Realm, slots: *const intl.DateTimeFormatSlots, arg: Valu
             const no_components = slots.weekday.len == 0 and slots.era.len == 0 and slots.year.len == 0 and
                 slots.month.len == 0 and slots.day.len == 0 and slots.hour.len == 0 and slots.minute.len == 0 and
                 slots.second.len == 0 and slots.day_period.len == 0 and slots.date_style.len == 0 and slots.time_style.len == 0;
-            if (rec.* == .plain_time and no_components) {
-                // Only the bare-defaults case: an explicit date component (e.g.
-                // {year}) must still fail to overlap a PlainTime, not be replaced.
+            if (no_components) {
+                // Only the bare-defaults case: an explicit component (e.g.
+                // {year} against a PlainTime) must still fail to overlap, not
+                // be replaced. The defaults are the same per-type sets
+                // toLocaleString applies, so a componentless formatter and
+                // toLocaleString agree on every Temporal type.
                 s2 = slots.*;
-                s2.hour = "numeric";
-                s2.minute = "numeric";
-                s2.second = "numeric";
+                applyTemporalToLocaleDefaults(&s2, arg);
                 pat_slots = &s2;
             }
             var pat_buf: [256]u8 = undefined;
