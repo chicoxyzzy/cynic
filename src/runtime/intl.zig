@@ -1408,8 +1408,9 @@ pub const supported_calendars = [_][]const u8{
 };
 
 pub const supported_collations = [_][]const u8{
-    "compat",   "dict",   "emoji", "eor",    "phonebk", "phonetic", "pinyin", "reformed",
-    "searchjl", "stroke", "trad",  "unihan", "zhuyin",
+    "big5han", "compat",  "dict",     "direct", "emoji",    "eor",
+    "gb2312",  "phonebk", "phonetic", "pinyin", "reformed", "searchjl",
+    "stroke",  "trad",    "unihan",   "zhuyin",
 };
 
 pub const supported_currencies = [_][]const u8{

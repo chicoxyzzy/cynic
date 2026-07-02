@@ -1577,6 +1577,25 @@ test "intl: Locale info methods return correct shapes" {
     );
 }
 
+test "intl: Collator collation option resolves against the locale" {
+    try requireIntlBuild();
+    try evalAssert1(
+        \\const r = (loc, o) => new Intl.Collator(loc, o).resolvedOptions();
+        \\const a = r('de-u-co-phonebk', {collation:'pinyin'});
+        \\const b = r('en-u-co-phonebk', {collation:'pinyin'});
+        \\const c = r('de-u-co-phonebk', {collation:'eor'});
+        \\const d = r('de-u-co-phonebk', {collation:'phonebk'});
+        \\(a.collation === 'phonebk' && a.locale === 'de-u-co-phonebk' &&
+        \\ b.collation === 'default' && b.locale === 'en' &&
+        \\ c.collation === 'eor' && c.locale === 'de' &&
+        \\ d.collation === 'phonebk' && d.locale === 'de-u-co-phonebk' &&
+        \\ (() => { try { new Intl.Collator('en', { get collation() { throw 42; } }); return false; } catch (e) { return e === 42; } })() &&
+        \\ Intl.supportedValuesOf('collation').includes('gb2312') &&
+        \\ r('en-u-co-phonebk-kn', {}).numeric === true &&
+        \\ r('en-u-co-phonebk-kn', {}).locale === 'en-u-kn') ? 1 : 0
+    );
+}
+
 test "intl: multi-subtag languageAlias keys (sgn-region, lang-variant, und-variant)" {
     try requireIntlBuild();
     try evalAssert1(

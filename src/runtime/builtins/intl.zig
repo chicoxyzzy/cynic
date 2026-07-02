@@ -25,6 +25,7 @@ const temporal = @import("../temporal.zig");
 const tshared = @import("temporal/shared.zig");
 const dtoa = @import("../dtoa.zig");
 const utf16 = @import("../utf16.zig");
+const uax29 = @import("../uax29.zig");
 
 const installConstructor = intrinsics.installConstructor;
 const installNativeMethod = intrinsics.installNativeMethod;
@@ -399,6 +400,36 @@ fn weekdayToFw(s: []const u8) ?[]const u8 {
     return null;
 }
 
+/// Per-language tailored collations (CLDR common/collation availability);
+/// "emoji" and "eor" are root collations available for every locale.
+fn languageCollations(lang: []const u8) []const []const u8 {
+    const Entry = struct { lang: []const u8, types: []const []const u8 };
+    const table = [_]Entry{
+        .{ .lang = "ar", .types = &.{"compat"} },
+        .{ .lang = "de", .types = &.{"phonebk"} },
+        .{ .lang = "es", .types = &.{"trad"} },
+        .{ .lang = "hi", .types = &.{"direct"} },
+        .{ .lang = "ko", .types = &.{"searchjl"} },
+        .{ .lang = "ln", .types = &.{"phonetic"} },
+        .{ .lang = "si", .types = &.{"dict"} },
+        .{ .lang = "sv", .types = &.{"reformed"} },
+        .{ .lang = "zh", .types = &.{ "big5han", "gb2312", "pinyin", "stroke", "unihan", "zhuyin" } },
+    };
+    for (table) |e| if (std.mem.eql(u8, e.lang, lang)) return e.types;
+    return &.{};
+}
+
+/// §9.2.7 ResolveLocale supportedness for the `co` key: a collation type is
+/// supported when the locale's language tailors it (or it is a root
+/// collation). "standard" / "search" are handled by the caller (never
+/// reported).
+fn collationSupportedFor(locale: []const u8, ty: []const u8) bool {
+    if (std.mem.eql(u8, ty, "emoji") or std.mem.eql(u8, ty, "eor")) return true;
+    const lang_end = std.mem.indexOfScalar(u8, locale, '-') orelse locale.len;
+    for (languageCollations(locale[0..lang_end])) |t| if (std.mem.eql(u8, t, ty)) return true;
+    return false;
+}
+
 fn isKnownCollation(s: []const u8) bool {
     const known = [_][]const u8{
         "big5han",  "compat", "dict",    "direct",   "ducet",  "emoji",
@@ -518,24 +549,24 @@ fn stripUnicodeExtensionKeyword(allocator: std.mem.Allocator, locale: []const u8
             const out = try allocator.alloc(u8, locale.len - (cut_end - cut_start));
             @memcpy(out[0..cut_start], locale[0..cut_start]);
             @memcpy(out[cut_start..], locale[cut_end..]);
-            // If the -u- now has no keywords left, drop it.
+            // If the -u- now has no keywords left, drop it. A dash after
+            // `u` is only "empty" when what follows is another singleton
+            // (1-char segment) — a longer segment is a remaining keyword
+            // ("en-u-kn" after stripping co keeps its -u-).
             const u_block_start = u_at;
             const u_after_dash = u_at + 2; // points at second '-' after `u`
             if (u_after_dash < out.len and out[u_after_dash] == '-') {
-                // Empty -u- (e.g. `en-u-en-US`): adjacent dash means no keyword followed.
-                if (u_after_dash + 1 < out.len) {
-                    // Singleton extension follows directly — drop the `-u`.
+                const n_start = u_after_dash + 1;
+                var n_end = n_start;
+                while (n_end < out.len and out[n_end] != '-') : (n_end += 1) {}
+                if (n_end - n_start <= 1) {
+                    // Singleton (or nothing) follows — drop the `-u`.
                     const drop = try allocator.alloc(u8, out.len - 2);
                     @memcpy(drop[0..u_block_start], out[0..u_block_start]);
                     @memcpy(drop[u_block_start..], out[u_block_start + 2 ..]);
                     allocator.free(out);
                     return drop;
                 }
-                // -u- at end of tag — drop trailing `-u`.
-                const trimmed = try allocator.alloc(u8, out.len - 2);
-                @memcpy(trimmed, out[0 .. out.len - 2]);
-                allocator.free(out);
-                return trimmed;
             }
             // Or if -u- is at end of tag now.
             if (u_after_dash >= out.len) {
@@ -1370,6 +1401,16 @@ fn collatorConstructor(realm: *Realm, this_value: Value, args: []const Value) Na
     slots.base.locale = resolved.locale;
     try retainRelevantUnicodeExtensions(realm, &slots.base, &.{ "co", "kf", "kn" }); // §9.2.7 Collator keys
     slots.usage = try getOptionStringOwned(realm, opts, "usage", &.{ "sort", "search" }, "sort");
+    // §10.1.2 collation option — any -u- type sequence is accepted here;
+    // supportedness is decided against the locale below.
+    var co_opt: []const u8 = "";
+    if (opts) |o| {
+        const v = try getPropertyChain(realm, o, "collation");
+        if (!v.isUndefined()) {
+            co_opt = try valueToStringSlice(realm, v);
+            if (!intl.isValidUnicodeType(co_opt)) return throwRangeError(realm, "invalid collation");
+        }
+    }
     slots.sensitivity = try getOptionStringOwned(realm, opts, "sensitivity", &.{ "base", "accent", "case", "variant" }, "variant");
     // §10.1.1 — ignorePunctuation's default is locale-dependent: Thai's root
     // collation shifts punctuation, so `th` defaults to true; other locales false.
@@ -1387,21 +1428,21 @@ fn collatorConstructor(realm: *Realm, this_value: Value, args: []const Value) Na
     } else null;
     const cf_opt = try getOptionString(realm, opts, "caseFirst", &.{ "upper", "lower", "false" }, "");
 
-    // collation (-u-co-): only a known BCP 47 collation type is reported;
-    // "standard"/"search" (never reported) and any unsupported value map to
-    // "default" and are dropped from [[Locale]].
-    var strip_co = false;
-    if (intl.unicodeExtensionValue(slots.base.locale, "co")) |co| {
-        if (isKnownCollation(co)) {
-            slots.collation = realm.allocator.dupe(u8, co) catch return error.OutOfMemory;
-        } else {
-            slots.collation = realm.allocator.dupe(u8, "default") catch return error.OutOfMemory;
-            strip_co = true;
+    // §9.2.7 co key: the option wins when the locale supports it, else the
+    // locale's -u-co keyword when supported, else "default". "standard" /
+    // "search" are never reported. [[Locale]] keeps the keyword only when it
+    // supplied the resolved value.
+    const never = struct {
+        fn reported(ty: []const u8) bool {
+            return std.mem.eql(u8, ty, "standard") or std.mem.eql(u8, ty, "search");
         }
-    } else {
-        slots.collation = realm.allocator.dupe(u8, "default") catch return error.OutOfMemory;
-    }
-    if (strip_co) try stripExtKeyword(realm, &slots.base, "co");
+    };
+    const kw_co = intl.unicodeExtensionValue(slots.base.locale, "co");
+    const kw_ok = if (kw_co) |k| k.len > 0 and !never.reported(k) and collationSupportedFor(slots.base.locale, k) else false;
+    const opt_ok = co_opt.len > 0 and !never.reported(co_opt) and collationSupportedFor(slots.base.locale, co_opt);
+    slots.collation = realm.allocator.dupe(u8, if (opt_ok) co_opt else if (kw_ok) kw_co.? else "default") catch return error.OutOfMemory;
+    const keep_kw = kw_ok and std.mem.eql(u8, slots.collation, kw_co.?);
+    if (kw_co != null and !keep_kw) try stripExtKeyword(realm, &slots.base, "co");
 
     // numeric (-u-kn): §9.2.7 — [[numeric]] takes the option, else the locale
     // keyword, else false; but [[locale]] reflects only the *locale* keyword,
@@ -5245,24 +5286,16 @@ fn makeSegmentData(realm: *Realm, sr: intl.SegmentsRecord, byte_start: usize, by
     try setDataProp(realm, obj, "index", makeNumberValue(@floatFromInt(utf16.codeUnitIndexForByte(sr.string, byte_start))));
     try setDataProp(realm, obj, "input", try makeStringValue(realm, sr.string));
     if (std.mem.eql(u8, sr.granularity, "word"))
-        try setDataProp(realm, obj, "isWordLike", makeBoolValue(codePointIsWord(sr.string, byte_start)));
+        try setDataProp(realm, obj, "isWordLike", makeBoolValue(uax29.segmentIsWordLike(sr.string[byte_start..byte_end])));
     return heap_mod.taggedObject(obj);
 }
 
 /// End (byte offset) of the segment starting at byte `start`, by granularity.
-/// Grapheme ≈ one code point; word ≈ a maximal run of one word/non-word class
-/// (UAX #29 simplified); sentence ≈ up to and including a terminator + spaces.
+/// Grapheme and word follow UAX #29 (src/runtime/uax29.zig); sentence is a
+/// terminator + trailing-spaces heuristic pending the §5.1 rules.
 fn segmentEndByte(bytes: []const u8, granularity: []const u8, start: usize) usize {
     if (start >= bytes.len) return bytes.len;
-    if (std.mem.eql(u8, granularity, "word")) {
-        const word0 = codePointIsWord(bytes, start);
-        var i = start + utf16.utf8SeqLen(bytes[start]);
-        while (i < bytes.len) {
-            if (codePointIsWord(bytes, i) != word0) break;
-            i += utf16.utf8SeqLen(bytes[i]);
-        }
-        return i;
-    }
+    if (std.mem.eql(u8, granularity, "word")) return uax29.wordEnd(bytes, start);
     if (std.mem.eql(u8, granularity, "sentence")) {
         var i = start;
         while (i < bytes.len) {
@@ -5275,23 +5308,7 @@ fn segmentEndByte(bytes: []const u8, granularity: []const u8, start: usize) usiz
         }
         return i;
     }
-    // grapheme (default): one code point.
-    return start + utf16.utf8SeqLen(bytes[start]);
-}
-
-/// Whether the code point at byte `i` is word-class (letters/digits — UAX #29
-/// simplified): ASCII alphanumerics or any non-ASCII code point, excluding the
-/// common Unicode space separators.
-fn codePointIsWord(bytes: []const u8, i: usize) bool {
-    const c = bytes[i];
-    if (c < 0x80) return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9');
-    const len = utf16.utf8SeqLen(bytes[i]);
-    const cp = std.unicode.utf8Decode(bytes[i..@min(i + len, bytes.len)]) catch return true;
-    return switch (cp) {
-        0x00A0, 0x1680, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000 => false,
-        0x2000...0x200A => false,
-        else => true,
-    };
+    return uax29.graphemeEnd(bytes, start);
 }
 
 fn segmenterResolvedOptions(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
