@@ -1542,6 +1542,23 @@ fn splitTag(tag: []const u8, lang_buf: []u8, script_buf: []u8, region_buf: []u8)
     return .{ .lang = lang, .script = script, .region = region };
 }
 
+/// §11.1.2 [[hourCycle12]] — the locale's 12-hour cycle. Per CLDR supplemental
+/// timeData, JP is the only region whose 12-hour clock prefers K (0-11 → "h11");
+/// every other region uses h (1-12 → "h12"). The tag's region is used directly,
+/// else derived from its likely region via addLikelySubtags.
+pub fn hourCycle12(locale: []const u8) []const u8 {
+    var lbuf: [16]u8 = undefined;
+    var sbuf: [8]u8 = undefined;
+    var rbuf: [8]u8 = undefined;
+    const parts = splitTag(locale, &lbuf, &sbuf, &rbuf);
+    var region = parts.region;
+    if (region.len == 0 and parts.lang.len != 0) {
+        var max: Subtags = .{};
+        if (addLikelySubtags(.{ .lang = parts.lang, .script = parts.script }, &max)) region = max.region;
+    }
+    return if (std.ascii.eqlIgnoreCase(region, "JP")) "h11" else "h12";
+}
+
 fn joinTag(buf: []u8, lang: []const u8, script: []const u8, region: []const u8) ?[]const u8 {
     var len: usize = 0;
     const append = struct {

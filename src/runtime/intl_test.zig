@@ -347,6 +347,21 @@ test "intl: supportedValuesOf(numberingSystem) enumerates the CLDR accept-set (i
     );
 }
 
+test "intl: DateTimeFormat hour12 resolves the locale's 12-hour cycle (ja=h11)" {
+    try requireIntlBuild();
+    if (!intl_config.has_locale_data) return error.SkipZigTest;
+    // §11.1.2 [[hourCycle12]] — h11 for JP-region locales, h12 elsewhere; h24 is
+    // h23 for every shipped locale (test262 resolvedOptions/hourCycle-default).
+    try evalAssert1(
+        \\const h12 = (loc) => new Intl.DateTimeFormat(loc, { hour: "numeric", hour12: true }).resolvedOptions().hourCycle;
+        \\const h24 = (loc) => new Intl.DateTimeFormat(loc, { hour: "numeric", hour12: false }).resolvedOptions().hourCycle;
+        \\for (const loc of ["en", "fr", "it", "zh", "ko", "ar", "hi"]) if (h12(loc) !== "h12") throw 0;
+        \\if (h12("ja") !== "h11") throw 1;
+        \\for (const loc of ["en", "fr", "ja", "zh"]) if (h24(loc) !== "h23") throw 2;
+        \\1
+    );
+}
+
 test "intl: DateTimeFormat resolves the -u-nu keyword against options (§9.2.7)" {
     try requireIntlBuild();
     if (!intl_config.has_locale_data) return error.SkipZigTest;

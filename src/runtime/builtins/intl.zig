@@ -3232,10 +3232,12 @@ fn buildDateTimeFormatSlots(realm: *Realm, locales: Value, options: Value) Nativ
         const hc = try getOptionString(realm, opts, "hourCycle", &.{ "h11", "h12", "h23", "h24" }, "");
         const h12_v = try getPropertyChain(realm, o, "hour12");
         if (!h12_v.isUndefined()) {
-            const dflt = localeDefaultHourCycle(slots.base.locale);
-            const dflt_is_12 = std.mem.eql(u8, dflt, "h11") or std.mem.eql(u8, dflt, "h12");
+            // §11.1.2 steps 24-25 — hour12:true selects the locale's [[hourCycle12]]
+            // (h11 for JP-region locales, h12 elsewhere); hour12:false selects
+            // [[hourCycle24]], which is h23 for every locale Cynic ships (none
+            // prefer the k / 1-24 cycle).
             slots.hour_cycle = try realm.allocator.dupe(u8, if (toBoolean(h12_v))
-                (if (dflt_is_12) dflt else "h11")
+                cldr.hourCycle12(slots.base.locale)
             else
                 "h23");
         } else if (hc.len > 0) {
