@@ -156,6 +156,47 @@ pub fn offsetNanosecondsFor(zone_name: []const u8, epoch_ns: i128) i64 {
     return tzifOffsetNs(data, epoch_ns) orelse 0;
 }
 
+/// The instant of the nearest UTC-offset CHANGE strictly after (`next`) or
+/// strictly before (else) `epoch_ns`, from the zone's explicit TZif
+/// transition list. Transitions that re-declare the same offset (a rule
+/// change without an offset change) are skipped, matching
+/// Temporal.ZonedDateTime.prototype.getTimeZoneTransition. Null for fixed
+/// zones, unusable payloads, or when no recorded transition qualifies.
+pub fn transitionFor(zone_name: []const u8, epoch_ns: i128, next: bool) ?i128 {
+    if (!available) return null;
+    const data = zoneTzif(zone_name) orelse return null;
+    const h = primarySection(data) orelse return null;
+    if (h.timecnt == 0) return null;
+    const times_off = h.section_start;
+    const types_off = times_off + h.timecnt * h.time_size;
+    const ttinfo_off = types_off + h.timecnt;
+    // Pre-first-transition offset: ttinfo[0] (RFC 8536 convention).
+    var prev_off: i64 = @as(i64, readBeI32(data, ttinfo_off) orelse return null);
+    var best: ?i128 = null;
+    var i: usize = 0;
+    while (i < h.timecnt) : (i += 1) {
+        const t_sec: i64 = if (h.time_size == 8)
+            readBeI64(data, times_off + i * 8) orelse return null
+        else
+            @as(i64, readBeI32(data, times_off + i * 4) orelse return null);
+        const type_idx_off = types_off + i;
+        if (type_idx_off >= data.len) return null;
+        const ti: usize = data[type_idx_off];
+        if (ti >= h.typecnt) return null;
+        const off = @as(i64, readBeI32(data, ttinfo_off + ti * 6) orelse return null);
+        if (off != prev_off) {
+            const t_ns: i128 = @as(i128, t_sec) * 1_000_000_000;
+            if (next) {
+                if (t_ns > epoch_ns) return t_ns;
+            } else if (t_ns < epoch_ns) {
+                best = t_ns;
+            }
+        }
+        prev_off = off;
+    }
+    return if (next) null else best;
+}
+
 // ── TZif (RFC 8536) ────────────────────────────────────────────────────────
 
 const TzifHeader = struct {

@@ -966,7 +966,7 @@ fn zonedDateTimeStartOfDay(realm: *Realm, this_value: Value, args: []const Value
 /// `direction` argument is still validated (required; "next" / "previous",
 /// as a bare string or a `{ direction }` bag).
 fn zonedDateTimeGetTimeZoneTransition(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = try requireZonedDateTime(realm, this_value);
+    const z = try requireZonedDateTime(realm, this_value);
     const arg = argOr(args, 0, Value.undefined_);
     // §6.3.x step 3 — a missing direction argument is a TypeError.
     if (arg.isUndefined()) return throwTypeError(realm, "getTimeZoneTransition requires a direction");
@@ -988,6 +988,15 @@ fn zonedDateTimeGetTimeZoneTransition(realm: *Realm, this_value: Value, args: []
     if (!std.mem.eql(u8, b, "next") and !std.mem.eql(u8, b, "previous")) {
         return throwRangeError(realm, "direction must be 'next' or 'previous'");
     }
-    // A UTC / fixed-offset zone never changes its offset — no transition.
-    return Value.null_;
+    // A UTC / fixed-offset zone never changes its offset; a named zone walks
+    // the embedded tzdb's explicit transition list for the nearest offset
+    // change in the requested direction.
+    switch (z.time_zone) {
+        .named => |n| {
+            const t = @import("../../tzdata.zig").transitionFor(n.slice(), z.epoch_ns, std.mem.eql(u8, b, "next")) orelse
+                return Value.null_;
+            return createTemporalZonedDateTime(realm, .{ .epoch_ns = t, .time_zone = z.time_zone, .calendar = z.calendar });
+        },
+        else => return Value.null_,
+    }
 }
