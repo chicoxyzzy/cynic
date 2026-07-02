@@ -3028,6 +3028,11 @@ fn buildDateTimeFormatSlots(realm: *Realm, locales: Value, options: Value) Nativ
             // retainRelevantUnicodeExtensions above) selects the hour cycle.
             if (isValidExtValue("hc", v)) slots.hour_cycle = try realm.allocator.dupe(u8, v);
         }
+        // §11.1.1 step 30 — an hourCycle / hour12 OPTION overrides (and
+        // removes) the locale's -u-hc keyword from the resolved locale.
+        if (!h12_v.isUndefined() or hc.len > 0) {
+            try retainRelevantUnicodeExtensions(realm, &slots.base, &.{ "ca", "nu" });
+        }
 
         // §11.1.1 formatMatcher — validated (RangeError on an invalid value);
         // the renderer doesn't yet branch on best-fit vs basic.
@@ -3046,6 +3051,26 @@ fn buildDateTimeFormatSlots(realm: *Realm, locales: Value, options: Value) Nativ
     // After all option reads (which can throw): cache the maximized data-locale
     // so per-`format()` CLDR lookups skip the likelySubtags scan.
     try setDataLocale(realm, &slots.base);
+    // §11.1.1 — when the resolved format includes an hour, the hour cycle
+    // resolves to the locale's default (hcDefault, derived from the CLDR
+    // short time pattern: h/K → h12, H/k → h23).
+    if (slots.hour_cycle.len == 0 and (slots.hour.len > 0 or slots.time_style.len > 0)) {
+        if (cldr.dateData(slots.base.dataLocale())) |dd| {
+            var in_quote = false;
+            for (dd.time_short) |ch| {
+                if (ch == '\'') in_quote = !in_quote;
+                if (in_quote) continue;
+                if (ch == 'h' or ch == 'K') {
+                    slots.hour_cycle = try realm.allocator.dupe(u8, "h12");
+                    break;
+                }
+                if (ch == 'H' or ch == 'k') {
+                    slots.hour_cycle = try realm.allocator.dupe(u8, "h23");
+                    break;
+                }
+            }
+        }
+    }
     return slots;
 }
 
