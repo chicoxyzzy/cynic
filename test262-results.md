@@ -1,16 +1,16 @@
 # test262 conformance — Cynic
 
-**Cynic passes 93.09 % of the 49895 test262 fixtures it runs**, scored binary pass/fail under a single posture (`--unhardened --allow=eval`):
+**Cynic passes 97.32 % of the 49895 test262 fixtures it runs**, scored binary pass/fail under a single posture (`--unhardened --allow=eval`):
 
-- **46448 passing** — Cynic produced the spec-expected result.
-- **3447 failing** — every other scored fixture. No "expected fail" category: an Annex-B / strict-only / SES / eval / not-yet-implemented-Intl miss counts as a plain fail, same as an engine bug. Honest, not flattering.
+- **48556 passing** — Cynic produced the spec-expected result.
+- **1339 failing** — every other scored fixture. No "expected fail" category: an Annex-B / strict-only / SES / eval / not-yet-implemented-Intl miss counts as a plain fail, same as an engine bug. Honest, not flattering.
 - **Excluded from the denominator**: the upstream `harness/` and `staging/` paths, the whole `annexB/` tree, every Stage ≤ 3 proposal (decorators, import-defer, …), and structurally-unrunnable fixtures (no / malformed frontmatter). Shipped pre-Stage-4 proposals (joint-iteration, ShadowRealm) get their own scoreboard below.
 
 ## Current scores
 
 | posture | passing | failing | total | pass% |
 |---|---:|---:|---:|---:|
-| **`--unhardened --allow=eval`** | 46448 | 3447 | 49895 | 93.09 % |
+| **`--unhardened --allow=eval`** | 48556 | 1339 | 49895 | 97.32 % |
 
 > **pass%** = `passing / (passing + failing)`. Every scored
 > fixture is a plain pass or fail — there is no "expected
@@ -64,7 +64,8 @@ count; the per-area table below it is the work list.
 |---|---:|---|
 | sloppy-mode-only fixtures | 1142 | `flags: [noStrict]` — Cynic is strict-only by design (`with`, sloppy direct-eval `arguments` bindings, legacy S11-era semantics, ...) |
 | Annex B builtins | 69 | `__proto__` accessor + `__define`/`__lookup{Getter,Setter}__` are not shipped by design |
-| **engine gaps** | 2236 | failures the policy classes do not explain — the work list. Includes in-scope `intl402/` surfaces not yet implemented at `-Dintl=full` (Segmenter, ListFormat, RelativeTimeFormat, DurationFormat, the Temporal-intl twins) plus implemented-surface Intl bugs; and an upper-bound residue of fixtures whose sloppy semantics hide inside dynamic `Function(...)` bodies, undetectable from frontmatter |
+| Intl normative-optional legacy | 8 | `features: [intl-normative-optional]` — the ECMA-402 §11.1.1/§11.1.2 legacy constructor `[[FallbackSymbol]]` shim (`Intl.NumberFormat.call(obj)` stashing a formatter on a user object). Optional in the spec; a legacy web-compat surface Cynic declines by design, like Annex B. Cynic ships the non-optional path (a fresh formatter, no fallback symbol) |
+| **engine gaps** | 120 | failures the policy classes do not explain — the work list. Includes in-scope `intl402/` surfaces not yet implemented at `-Dintl=full` plus implemented-surface Intl bugs; and an upper-bound residue of fixtures whose sloppy semantics hide inside dynamic `Function(...)` bodies, undetectable from frontmatter |
 
 **Failing areas.** Only areas with at least one failure are
 listed (everything else passes). `gaps` is the slice of the
@@ -90,25 +91,10 @@ that column is the engine work list. Sorted by area
 | `built-ins/TypedArray` | 1430 | 8 | 0 | 99 % |
 | `built-ins/TypedArrayConstructors` | 719 | 17 | 1 | 98 % |
 | `built-ins/undefined` | 5 | 3 | 0 | 63 % |
-| `intl402` | 16 | 6 | 6 | 73 % |
-| `intl402/Array` | 1 | 1 | 1 | 50 % |
-| `intl402/BigInt` | 7 | 4 | 4 | 64 % |
-| `intl402/Collator` | 48 | 17 | 17 | 74 % |
-| `intl402/Date` | 10 | 2 | 2 | 83 % |
-| `intl402/DateTimeFormat` | 117 | 127 | 127 | 48 % |
-| `intl402/DisplayNames` | 48 | 9 | 9 | 84 % |
-| `intl402/DurationFormat` | 41 | 69 | 69 | 37 % |
-| `intl402/FallbackSymbol` | 0 | 2 | 2 | 0 % |
-| `intl402/Intl` | 29 | 37 | 37 | 44 % |
-| `intl402/ListFormat` | 47 | 34 | 34 | 58 % |
-| `intl402/Locale` | 109 | 43 | 43 | 72 % |
-| `intl402/Number` | 5 | 2 | 2 | 71 % |
-| `intl402/NumberFormat` | 140 | 109 | 109 | 56 % |
-| `intl402/PluralRules` | 44 | 9 | 9 | 83 % |
-| `intl402/RelativeTimeFormat` | 49 | 31 | 31 | 61 % |
-| `intl402/Segmenter` | 54 | 25 | 25 | 68 % |
-| `intl402/String` | 8 | 11 | 11 | 42 % |
-| `intl402/Temporal` | 449 | 1580 | 1580 | 22 % |
+| `intl402/DateTimeFormat` | 240 | 4 | 1 | 98 % |
+| `intl402/FallbackSymbol` | 0 | 2 | 0 | 0 % |
+| `intl402/NumberFormat` | 246 | 3 | 0 | 99 % |
+| `intl402/Temporal` | 2028 | 1 | 1 | 100 % |
 | `language/arguments-object` | 225 | 38 | 0 | 86 % |
 | `language/comments` | 51 | 1 | 1 | 98 % |
 | `language/destructuring` | 18 | 1 | 0 | 95 % |
@@ -142,19 +128,25 @@ top-line score.
 
 ## History
 
+### 2026-07-03 — cynic `0c1f0965`, test262 `de8e621c`
+
+| passing | failing | total | pass% | Δ pass | elapsed |
+|---:|---:|---:|---:|---:|---:|
+| 48556 | 1339 | 49895 | 97.32 % | +2108 | 1m 25s |
+
+Biggest movers:
+
+- `intl402/Temporal` +1579
+- `built-ins/Date` +594
+- `built-ins/DataView` +550
+- `built-ins/Iterator` +432
+- `built-ins/Atomics` +381
+
 ### 2026-06-25 — cynic `882c0dc`, test262 `de8e621cdb`
 
 | passing | failing | total | pass% | Δ pass | elapsed |
 |---:|---:|---:|---:|---:|---:|
 | 46448 | 3447 | 49895 | 93.09 % | +1113 | 2m 05s |
-
-Biggest movers:
-
-- `built-ins/Temporal` +4589
-- `built-ins/Date` +594
-- `built-ins/DataView` +550
-- `built-ins/Iterator` +432
-- `built-ins/Atomics` +381
 
 ### 2026-06-24 — cynic `86ec52d`, test262 `de8e621cdb`
 
