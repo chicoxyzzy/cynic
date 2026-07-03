@@ -492,6 +492,22 @@ test "intl/temporal: ZonedDateTime.getTimeZoneTransition compares at ns precisio
     );
 }
 
+test "intl/temporal: ZonedDateTime.until day-smallest rounding is DST-aware" {
+    try requireIntlBuild();
+    if (!intl_config.has_locale_data) return error.SkipZigTest;
+    // §6.5.x — rounding a ZonedDateTime difference to the nearest day uses the
+    // real (23/25-h) day length, so a span across a spring-forward day rounds
+    // to -3 (halfExpand) and -2 (ceil toward zero), not the 24-h-day value
+    // (test262 ZonedDateTime/until/dst-rounding-result).
+    try evalAssert1(
+        \\const start = Temporal.PlainDateTime.from("2000-04-04T02:30").toZonedDateTime("America/Vancouver");
+        \\const end = Temporal.PlainDateTime.from("2000-04-01T14:15").toZonedDateTime("America/Vancouver");
+        \\if (start.until(end, { smallestUnit: "days", roundingMode: "halfExpand" }).days !== -3) throw 0;
+        \\if (start.until(end, { smallestUnit: "days", roundingMode: "ceil" }).days !== -2) throw 1;
+        \\1
+    );
+}
+
 test "intl/temporal: ZonedDateTime.since/until is DST-aware for a date largestUnit" {
     try requireIntlBuild();
     if (!intl_config.has_locale_data) return error.SkipZigTest;

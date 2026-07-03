@@ -875,18 +875,27 @@ fn differenceTemporalZonedDateTime(realm: *Realm, this_value: Value, args: []con
 
     // §6.5.x DifferenceZonedDateTime — a named zone can have a 23/25-h day at a
     // DST transition, so the fixed-offset fast paths below (which fold days at
-    // 24 h) give the wrong day/time split. Handle the *unrounded* date-unit
-    // difference exactly here; the rounded cases still route through the 24-h
-    // paths (a follow-up makes the nudge DST-aware).
+    // 24 h) give the wrong day/time split. Handle every date-unit largestUnit
+    // exactly here: the DST-aware base difference, rounded with the DST-aware
+    // nudge (NudgeToZonedTime for a time smallestUnit, NudgeToCalendarUnit for
+    // a day/calendar smallestUnit).
     const is_named = switch (z.time_zone) {
         .named => true,
         else => false,
     };
-    if (is_named and @intFromEnum(largest) <= @intFromEnum(temporal.LargestUnit.day) and
-        smallest == .nanosecond and increment == 1)
-    {
-        var dr = shared.differenceZonedDateTime(z.epoch_ns, other.epoch_ns, z.time_zone, z.calendar, largest) orelse
+    if (is_named and @intFromEnum(largest) <= @intFromEnum(temporal.LargestUnit.day)) {
+        const base_diff = shared.differenceZonedDateTime(z.epoch_ns, other.epoch_ns, z.time_zone, z.calendar, largest) orelse
             return throwRangeError(realm, "ZonedDateTime difference is outside the representable range");
+        const start_wall = temporal.getISODateTimeFor(z.time_zone, z.epoch_ns);
+        const end_wall = temporal.getISODateTimeFor(z.time_zone, other.epoch_ns);
+        var dr = if (smallest == .nanosecond and increment == 1)
+            base_diff
+        else if (@intFromEnum(smallest) > @intFromEnum(temporal.LargestUnit.day))
+            (temporal.nudgeToZonedTimeDateTime(start_wall, z.time_zone, base_diff, largest, smallest, increment, eff_mode) orelse
+                return throwRangeError(realm, "rounded ZonedDateTime is outside the representable range"))
+        else
+            (temporal.roundRelativeDateTime(start_wall, end_wall, base_diff, largest, smallest, increment, eff_mode, z.time_zone) orelse
+                return throwRangeError(realm, "rounded ZonedDateTime is outside the representable range"));
         if (is_since) {
             dr.years = negZero(dr.years);
             dr.months = negZero(dr.months);
