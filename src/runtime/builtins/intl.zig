@@ -3856,6 +3856,15 @@ fn dateTimeFormatFormatToParts(realm: *Realm, this_value: Value, args: []const V
     return heap_mod.taggedObject(arr);
 }
 
+/// §11.5.x ToDateTimeFormattable — a Temporal object passes through; anything
+/// else is coerced with ToNumber (which runs a legacy operand's valueOf). Called
+/// on both range endpoints before the same-kind check so the coercion's
+/// observable side effects happen first.
+fn toDateTimeFormattable(realm: *Realm, v: Value) NativeError!Value {
+    if (dtfArgTemporalKind(v) != null) return v;
+    return Value.fromDouble(numberToF64(try toNumber(realm, v)));
+}
+
 fn dateTimeFormatFormatRange(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const rec = try requireKind(realm, this_value, .date_time_format);
     // §11.5.5 — both arguments are required (TypeError when either is undefined),
@@ -3863,15 +3872,19 @@ fn dateTimeFormatFormatRange(realm: *Realm, this_value: Value, args: []const Val
     const av = argOr(args, 0, Value.undefined_);
     const bv = argOr(args, 1, Value.undefined_);
     if (av.isUndefined() or bv.isUndefined()) return throwTypeError(realm, "formatRange requires two arguments");
+    // §11.5.5 ToDateTimeFormattable runs on BOTH operands (a legacy operand's
+    // valueOf fires here) before the §11.5.6 same-kind check.
+    const x = try toDateTimeFormattable(realm, av);
+    const y = try toDateTimeFormattable(realm, bv);
     // §11.5.6 — both endpoints must be the same kind (both legacy, or the same
     // Temporal type); mixing throws TypeError.
-    if (!dtfSameKind(dtfArgTemporalKind(av), dtfArgTemporalKind(bv)))
+    if (!dtfSameKind(dtfArgTemporalKind(x), dtfArgTemporalKind(y)))
         return throwTypeError(realm, "formatRange endpoints must be the same type");
     if (!cldr.available) return makeStringValue(realm, "");
     var sega: [48]Seg = undefined;
     var segb: [48]Seg = undefined;
-    const na = try dtfRenderArg(realm, &rec.date_time_format, av, &sega);
-    const nb = try dtfRenderArg(realm, &rec.date_time_format, bv, &segb);
+    const na = try dtfRenderArg(realm, &rec.date_time_format, x, &sega);
+    const nb = try dtfRenderArg(realm, &rec.date_time_format, y, &segb);
     var bufa: [256]u8 = undefined;
     var bufb: [256]u8 = undefined;
     const sa = flattenSegs(&sega, na, &bufa);
@@ -3888,7 +3901,10 @@ fn dateTimeFormatFormatRangeToParts(realm: *Realm, this_value: Value, args: []co
     const av = argOr(args, 0, Value.undefined_);
     const bv = argOr(args, 1, Value.undefined_);
     if (av.isUndefined() or bv.isUndefined()) return throwTypeError(realm, "formatRangeToParts requires two arguments");
-    if (!dtfSameKind(dtfArgTemporalKind(av), dtfArgTemporalKind(bv)))
+    // §11.5.5 ToDateTimeFormattable on both operands (valueOf side effects) first.
+    const x = try toDateTimeFormattable(realm, av);
+    const y = try toDateTimeFormattable(realm, bv);
+    if (!dtfSameKind(dtfArgTemporalKind(x), dtfArgTemporalKind(y)))
         return throwTypeError(realm, "formatRangeToParts endpoints must be the same type");
     const arr = allocateArray(realm) catch return error.OutOfMemory;
     if (!cldr.available) {
@@ -3897,8 +3913,8 @@ fn dateTimeFormatFormatRangeToParts(realm: *Realm, this_value: Value, args: []co
     }
     var sa: [48]Seg = undefined;
     var sb: [48]Seg = undefined;
-    const na = try dtfRenderArg(realm, &rec.date_time_format, av, &sa);
-    const nb = try dtfRenderArg(realm, &rec.date_time_format, bv, &sb);
+    const na = try dtfRenderArg(realm, &rec.date_time_format, x, &sa);
+    const nb = try dtfRenderArg(realm, &rec.date_time_format, y, &sb);
     // Identical renderings → one date, every part sourced "shared".
     var same = na == nb;
     if (same) {
