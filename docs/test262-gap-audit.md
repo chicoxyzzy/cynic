@@ -111,3 +111,27 @@ instead of the Annex-B `.substr(-6)` would let the Temporal assertion it
 actually targets pass on strict-only engines) — an upstream-fixture
 observation, distinct from this repo's logs, so it stays with whoever
 owns the tc39 contribution rather than being filed as a Cynic gap.
+
+## Update 2026-07-04 — built-ins/Temporal (a real gap cluster, now closed)
+
+A test262 submodule bump surfaced 14 `built-ins/Temporal` failures that were
+**real** engine gaps — like the 2026-06-14 error-stack-accessor entry, not the
+by-design tail. Two clusters, both closed this session:
+
+- **`toLocaleString/branding` (6 fixtures; `1725af5f`).** The shared
+  `Temporal.*.prototype.toLocaleString` bridge (Instant, PlainTime, PlainDate,
+  PlainYearMonth, PlainMonthDay, PlainDateTime) formatted whatever receiver it
+  was handed, so a stolen method applied to a non-Temporal `this` returned a
+  string instead of throwing. §13.x RequireInternalSlot now guards the
+  receiver's `[[InitializedTemporal*]]` slot before any option processing.
+- **PlainYearMonth / PlainMonthDay string validation (8 fixtures; `e42220ac`).**
+  Two ParseTemporal{YearMonth,MonthDay}String gaps: a day-less year-month
+  can't re-anchor a non-ISO calendar (`1976-11[u-ca=gregory]` → RangeError),
+  and a non-ISO PlainMonthDay converts the full ISO date, so an out-of-range
+  year is rejected (`-999999-01-01[u-ca=gregory]`) while the ISO calendar keeps
+  discarding it (`-999999-10-01` valid).
+
+`built-ins/Temporal` → 100% (4589/14 → 4603/0). A fresh triage of the rest of
+the gap list re-confirms every by-design family above — no real engine gap
+remains in the class; the residue is the documented sloppy-via-dynamic-code,
+Annex-B-in-body, strict-only, and by-design / stale-`intl402` postures.

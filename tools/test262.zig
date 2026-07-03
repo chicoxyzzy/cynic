@@ -4153,8 +4153,14 @@ fn writeNotPassing(
         \\Every failure, classified. The policy classes are by-design
         \\fails under the binary posture — fixtures that need sloppy
         \\mode, Annex B surfaces, or ECMA-402, none of which Cynic
-        \\ships, on purpose. The **engine gaps** row is the real bug
-        \\count; the per-area table below it is the work list.
+        \\ships, on purpose. The **engine gaps** row is an *upper
+        \\bound* on real bugs, not a bug count: the classifier reads
+        \\only paths and frontmatter, so a fixture whose sloppy-mode
+        \\or Annex-B dependence lives in its *body* lands here even
+        \\when it is a by-design decline. The per-fixture body audit
+        \\in [docs/test262-gap-audit.md](docs/test262-gap-audit.md)
+        \\reads every one and assigns a verified reason — that file,
+        \\not this count, is the engine work list.
         \\
         \\| why | failing | detail |
         \\|---|---:|---|
@@ -4168,7 +4174,7 @@ fn writeNotPassing(
         .{ .idx = .annex_b, .label = "Annex B builtins", .detail = "`__proto__` accessor + `__define`/`__lookup{Getter,Setter}__` are not shipped by design" },
         .{ .idx = .can_block, .label = "cannot-block agent semantics", .detail = "`flags: [CanBlockIsFalse]` — fixtures requiring `Atomics.wait` to throw on a non-blocking agent" },
         .{ .idx = .norm_optional, .label = "Intl normative-optional legacy", .detail = "`features: [intl-normative-optional]` — the ECMA-402 §11.1.1/§11.1.2 legacy constructor `[[FallbackSymbol]]` shim (`Intl.NumberFormat.call(obj)` stashing a formatter on a user object). Optional in the spec; a legacy web-compat surface Cynic declines by design, like Annex B. Cynic ships the non-optional path (a fresh formatter, no fallback symbol)" },
-        .{ .idx = .gap, .label = "**engine gaps**", .detail = "failures the policy classes do not explain — the work list. Includes in-scope `intl402/` surfaces not yet implemented at `-Dintl=full` plus implemented-surface Intl bugs; and an upper-bound residue of fixtures whose sloppy semantics hide inside dynamic `Function(...)` bodies, undetectable from frontmatter" },
+        .{ .idx = .gap, .label = "**engine gaps**", .detail = "an *upper bound*, not a confirmed-bug count: failures the path/frontmatter classifier can't attribute to a policy class. Most are sloppy-mode semantics hiding inside dynamic `Function(...)` / `eval(...)` bodies, or Annex-B surfaces used in-body — by-design, but invisible to the classifier. The per-fixture audit in [docs/test262-gap-audit.md](docs/test262-gap-audit.md) reads each and is the real work list; a genuinely-unimplemented surface (including `intl402/` at `-Dintl=full`) would show here too" },
     };
     for (class_rows) |row| {
         const n = cls[@intFromEnum(row.idx)];
