@@ -2010,7 +2010,14 @@ fn numberFormatBigIntExact(realm: *Realm, slots: *const intl.NumberFormatSlots, 
 /// for anything outside the bounded grammar: an exponent, hex/Infinity, a
 /// fraction longer than maximumFractionDigits (would need rounding), or a
 /// non-decimal style / exact-ineligible option. `buf` backs the result.
-fn numberFormatDecimalStringExact(realm: *Realm, slots: *const intl.NumberFormatSlots, v: Value, buf: []u8) NativeError!?[]const u8 {
+const ExactOperand = struct { int: []const u8, frac: []const u8, negative: bool };
+
+/// Parse a plain decimal string into exact integer/fraction digit runs + sign,
+/// applying the exact-render eligibility guards. Returns null (f64 fallback) for
+/// an exponent/hex/Infinity, a fraction longer than maximumFractionDigits (needs
+/// rounding), or an exact-ineligible style/option. `int` aliases `raw`; `frac` is
+/// written into `frac_buf` (significant digits then min-fraction padding).
+fn parseExactDecimalOperand(slots: *const intl.NumberFormatSlots, raw: []const u8, frac_buf: []u8) ?ExactOperand {
     if (!std.mem.eql(u8, slots.rounding_type, "fractionDigits")) return null;
     if (slots.notation.len != 0 and !std.mem.eql(u8, slots.notation, "standard")) return null;
     if (slots.rounding_increment != 1) return null;
@@ -2018,7 +2025,6 @@ fn numberFormatDecimalStringExact(realm: *Realm, slots: *const intl.NumberFormat
     // Percent/currency/unit would need a decimal-point shift across the fraction.
     if (slots.style.len != 0 and !std.mem.eql(u8, slots.style, "decimal")) return null;
 
-    const raw = try valueToStringSlice(realm, v);
     const s = std.mem.trim(u8, raw, " \t\n\r\x0b\x0c");
     if (s.len == 0) return null;
 
@@ -2057,16 +2063,114 @@ fn numberFormatDecimalStringExact(realm: *Realm, slots: *const intl.NumberFormat
 
     // Assemble the exact fraction: significant digits then min-fraction padding.
     const min_frac = slots.minimum_fraction_digits orelse 0;
-    var frac_buf: [160]u8 = undefined;
     const fl_sig = @min(frac_digits.len, frac_buf.len);
     @memcpy(frac_buf[0..fl_sig], frac_digits[0..fl_sig]);
     var fl = fl_sig;
     while (fl < min_frac and fl < frac_buf.len) : (fl += 1) frac_buf[fl] = '0';
 
+    return .{ .int = int_digits, .frac = frac_buf[0..fl], .negative = negative };
+}
+
+fn numberFormatDecimalStringExact(realm: *Realm, slots: *const intl.NumberFormatSlots, v: Value, buf: []u8) NativeError!?[]const u8 {
+    const raw = try valueToStringSlice(realm, v);
+    var frac_buf: [160]u8 = undefined;
+    const d = parseExactDecimalOperand(slots, raw, &frac_buf) orelse return null;
     // renderNumber reads sign + zero-ness from `x` (magnitude irrelevant — the
     // digits are supplied exactly); is_zero is recomputed from the digit runs.
-    const x_sign: f64 = if (negative) -1 else 1;
-    return try formatNumericToBuf(realm, slots, x_sign, buf, .{ .int = int_digits, .frac = frac_buf[0..fl] });
+    const x_sign: f64 = if (d.negative) -1 else 1;
+    return try formatNumericToBuf(realm, slots, x_sign, buf, .{ .int = d.int, .frac = d.frac });
+}
+
+/// Render a formatRange operand to Segs — exact digits for a plain decimal string
+/// (so an operand past f64 precision keeps every digit), else the shared f64 path.
+fn renderRangeOperand(realm: *Realm, slots: *const intl.NumberFormatSlots, v: Value, segs: []Seg) NativeError!u32 {
+    if (cldr.available and v.isString()) {
+        const raw = try valueToStringSlice(realm, v);
+        var frac_buf: [160]u8 = undefined;
+        if (parseExactDecimalOperand(slots, raw, &frac_buf)) |d| {
+            const sign: f64 = if (d.negative) -1 else 1;
+            return renderNumber(slots, sign, segs, .{ .int = d.int, .frac = d.frac });
+        }
+    }
+    const f = try rangeOperandF64(realm, v);
+    return renderNumber(slots, f, segs, null);
+}
+
+const RangePart = struct { typ: []const u8, val: []const u8, source: []const u8 };
+
+fn isSignSegType(t: []const u8) bool {
+    return std.mem.eql(u8, t, "plusSign") or std.mem.eql(u8, t, "minusSign");
+}
+
+/// §15.5.19/§15.5.21 — partition x/y Segs into sourced range parts. Equal
+/// renderings collapse to an approximately-prefixed shared run; otherwise a
+/// shared trailing affix collapses always and a shared leading affix collapses
+/// only when it carries a sign, and the separator (en_dash) gains surrounding
+/// spaces unless a digit abuts it on both sides. Writes into `out`, returns count.
+fn partitionNumberRange(sx: []const Seg, sy: []const Seg, sep_buf: []u8, out: []RangePart) usize {
+    var n: usize = 0;
+    var same = sx.len == sy.len;
+    if (same) for (sx, 0..) |seg, k| {
+        if (!std.mem.eql(u8, seg.typ, sy[k].typ) or !std.mem.eql(u8, seg.bytes(), sy[k].bytes())) {
+            same = false;
+            break;
+        }
+    };
+    if (same) {
+        out[n] = .{ .typ = "approximatelySign", .val = "~", .source = "shared" };
+        n += 1;
+        for (sx) |*seg| {
+            out[n] = .{ .typ = seg.typ, .val = seg.bytes(), .source = "shared" };
+            n += 1;
+        }
+        return n;
+    }
+    var pfx: usize = 0;
+    while (pfx < sx.len and pfx < sy.len and
+        std.mem.eql(u8, sx[pfx].typ, sy[pfx].typ) and std.mem.eql(u8, sx[pfx].bytes(), sy[pfx].bytes())) pfx += 1;
+    var sfx: usize = 0;
+    while (sfx < sx.len - pfx and sfx < sy.len - pfx and
+        std.mem.eql(u8, sx[sx.len - 1 - sfx].typ, sy[sy.len - 1 - sfx].typ) and
+        std.mem.eql(u8, sx[sx.len - 1 - sfx].bytes(), sy[sy.len - 1 - sfx].bytes())) sfx += 1;
+    var collapse_pfx = false;
+    {
+        var k: usize = 0;
+        while (k < pfx) : (k += 1) if (isSignSegType(sx[k].typ)) {
+            collapse_pfx = true;
+            break;
+        };
+    }
+    const p = if (collapse_pfx) pfx else 0;
+    const s = sfx;
+    const x_end = sx.len - s;
+    const y_end = sy.len - s;
+    const last_start = if (x_end > p) sx[x_end - 1].typ else "";
+    const first_end = if (y_end > p) sy[p].typ else "";
+    const both_num = isNumericSegType(last_start) and isNumericSegType(first_end);
+    const sep = if (both_num) en_dash else padRangeSeparator(en_dash, sep_buf);
+    var k: usize = 0;
+    while (k < p) : (k += 1) {
+        out[n] = .{ .typ = sx[k].typ, .val = sx[k].bytes(), .source = "shared" };
+        n += 1;
+    }
+    k = p;
+    while (k < x_end) : (k += 1) {
+        out[n] = .{ .typ = sx[k].typ, .val = sx[k].bytes(), .source = "startRange" };
+        n += 1;
+    }
+    out[n] = .{ .typ = "literal", .val = sep, .source = "shared" };
+    n += 1;
+    k = p;
+    while (k < y_end) : (k += 1) {
+        out[n] = .{ .typ = sy[k].typ, .val = sy[k].bytes(), .source = "endRange" };
+        n += 1;
+    }
+    k = sx.len - s;
+    while (k < sx.len) : (k += 1) {
+        out[n] = .{ .typ = sx[k].typ, .val = sx[k].bytes(), .source = "shared" };
+        n += 1;
+    }
+    return n;
 }
 
 fn numberFormatFormatToParts(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
@@ -2122,18 +2226,34 @@ fn numberFormatFormatRange(realm: *Realm, this_value: Value, args: []const Value
     const xf = try rangeOperandF64(realm, xv);
     const yf = try rangeOperandF64(realm, yv);
     if (std.math.isNan(xf) or std.math.isNan(yf)) return throwRangeError(realm, "formatRange arguments must not be NaN");
-    var bufx: [256]u8 = undefined;
-    var bufy: [256]u8 = undefined;
-    const sx = try rangeFormatOne(realm, &rec.number_format, xf, &bufx);
-    const sy = try rangeFormatOne(realm, &rec.number_format, yf, &bufy);
-    // When the two operands format identically, collapse to the approximate
-    // form ("~{0}"); otherwise join with the range separator.
-    const out = if (std.mem.eql(u8, sx, sy))
-        std.fmt.allocPrint(realm.allocator, "~{s}", .{sx}) catch return error.OutOfMemory
-    else
-        std.fmt.allocPrint(realm.allocator, "{s}{s}{s}", .{ sx, en_dash, sy }) catch return error.OutOfMemory;
-    defer realm.allocator.free(out);
-    return makeStringValue(realm, out);
+    // Without CLDR, join the ToString-tier renderings directly.
+    if (!cldr.available) {
+        var bufx: [256]u8 = undefined;
+        var bufy: [256]u8 = undefined;
+        const sx = try rangeFormatOne(realm, &rec.number_format, xf, &bufx);
+        const sy = try rangeFormatOne(realm, &rec.number_format, yf, &bufy);
+        const out = if (std.mem.eql(u8, sx, sy))
+            std.fmt.allocPrint(realm.allocator, "~{s}", .{sx}) catch return error.OutOfMemory
+        else
+            std.fmt.allocPrint(realm.allocator, "{s}{s}{s}", .{ sx, en_dash, sy }) catch return error.OutOfMemory;
+        defer realm.allocator.free(out);
+        return makeStringValue(realm, out);
+    }
+    // §15.5.19 PartitionNumberRangePattern: render both operands (exactly for a
+    // decimal-string operand), collapse shared affixes + spaced separator, flatten.
+    var segx: [48]Seg = undefined;
+    var segy: [48]Seg = undefined;
+    const nx = try renderRangeOperand(realm, &rec.number_format, xv, &segx);
+    const ny = try renderRangeOperand(realm, &rec.number_format, yv, &segy);
+    var parts: [128]RangePart = undefined;
+    var sep_buf: [16]u8 = undefined;
+    const np = partitionNumberRange(segx[0..nx], segy[0..ny], &sep_buf, &parts);
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(realm.allocator);
+    var i: usize = 0;
+    while (i < np) : (i += 1) out.appendSlice(realm.allocator, parts[i].val) catch return error.OutOfMemory;
+    const str = realm.heap.allocateString(out.items) catch return error.OutOfMemory;
+    return Value.fromString(str);
 }
 
 fn pushPartSourced(realm: *Realm, arr: anytype, idx: u32, typ: []const u8, value: []const u8, source: []const u8) NativeError!void {
