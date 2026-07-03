@@ -20,6 +20,7 @@ const interpreter_arith = @import("../lantern/arith.zig");
 const utf16 = @import("../utf16.zig");
 const case_conv = @import("../../unicode/case_conv.zig");
 const normalization = @import("../../unicode/normalization.zig");
+const ucd_props = @import("../../unicode/properties.zig");
 
 const arith_toUint32 = interpreter_arith.toUint32;
 
@@ -3016,16 +3017,102 @@ fn stringToWellFormed(realm: *Realm, this_value: Value, args: []const Value) Nat
     return Value.fromString(out);
 }
 
-/// §22.1.3.10 String.prototype.localeCompare — without ICU there
-/// is no full locale-sensitive collation, but the method "must
-/// treat Strings that are canonically equivalent according to the
-/// Unicode standard as identical and must return 0 when comparing
-/// Strings that are considered canonically equivalent" (note in
-/// §22.1.3.10). Two strings are canonically equivalent iff they
-/// share the same §3.11 NFD form, so normalize both operands to
-/// NFD before the ordinal compare. The decomposed code-point
-/// sequences are compared directly; a tie under NFD means
-/// canonical equivalence and yields 0. Returns -1/0/+1 per spec.
+/// Canonical primary weight for a base code point — the least member of its
+/// case-folding orbit, so case variants share a primary weight while the rough
+/// code-point order is kept. Approximates the DUCET primary level for the Latin
+/// range without the full weight table.
+fn collationPrimary(cp: u32) u32 {
+    const c: u21 = @intCast(cp);
+    var m: u21 = c;
+    for (ucd_props.caseFoldPartners(c)) |p| {
+        if (p < m) m = p;
+    }
+    return m;
+}
+
+/// Uppercase ASCII sorts after its lowercase at the tertiary level.
+fn collationCaseWeight(cp: u32) u8 {
+    return if (cp >= 'A' and cp <= 'Z') 1 else 0;
+}
+
+/// UCA-style multi-level collation over the operands' §3.11 NFD forms — an
+/// approximation of the DUCET for the Latin range without the full weight table.
+/// Level 1 (primary) compares case-folded base letters; accents (combining
+/// marks) form level 2 (secondary) and letter case level 3 (tertiary). NFD makes
+/// canonically-equivalent strings compare equal, and decomposes accents out of
+/// the base letters so they weigh only at the secondary level. `secondary` /
+/// `tertiary` gate levels 2 / 3 for a Collator's sensitivity (base → primary
+/// only, accent → +secondary, case → +tertiary, variant → all). Returns the
+/// order of `a` relative to `b`.
+pub fn localeCollate(
+    allocator: std.mem.Allocator,
+    a_bytes: []const u8,
+    b_bytes: []const u8,
+    secondary: bool,
+    tertiary: bool,
+) std.mem.Allocator.Error!std.math.Order {
+    const a = try normalizeWtf8(allocator, a_bytes, .nfd);
+    defer allocator.free(a);
+    const b = try normalizeWtf8(allocator, b_bytes, .nfd);
+    defer allocator.free(b);
+
+    // Level 1 — primary: case-folded base letters (combining marks excluded).
+    var ap: std.ArrayListUnmanaged(u32) = .empty;
+    defer ap.deinit(allocator);
+    var bp: std.ArrayListUnmanaged(u32) = .empty;
+    defer bp.deinit(allocator);
+    for (a) |cp| {
+        if (ucd_ccc.combiningClass(@intCast(cp)) == 0) try ap.append(allocator, collationPrimary(cp));
+    }
+    for (b) |cp| {
+        if (ucd_ccc.combiningClass(@intCast(cp)) == 0) try bp.append(allocator, collationPrimary(cp));
+    }
+    switch (std.mem.order(u32, ap.items, bp.items)) {
+        .lt => return .lt,
+        .gt => return .gt,
+        .eq => {},
+    }
+
+    // Level 2 — secondary: the combining marks in canonical (NFD) order.
+    if (secondary) {
+        var as_: std.ArrayListUnmanaged(u32) = .empty;
+        defer as_.deinit(allocator);
+        var bs: std.ArrayListUnmanaged(u32) = .empty;
+        defer bs.deinit(allocator);
+        for (a) |cp| {
+            if (ucd_ccc.combiningClass(@intCast(cp)) != 0) try as_.append(allocator, cp);
+        }
+        for (b) |cp| {
+            if (ucd_ccc.combiningClass(@intCast(cp)) != 0) try bs.append(allocator, cp);
+        }
+        switch (std.mem.order(u32, as_.items, bs.items)) {
+            .lt => return .lt,
+            .gt => return .gt,
+            .eq => {},
+        }
+    }
+
+    // Level 3 — tertiary: letter case (lowercase before uppercase; ASCII).
+    if (tertiary) {
+        var at: std.ArrayListUnmanaged(u8) = .empty;
+        defer at.deinit(allocator);
+        var bt: std.ArrayListUnmanaged(u8) = .empty;
+        defer bt.deinit(allocator);
+        for (a) |cp| {
+            if (ucd_ccc.combiningClass(@intCast(cp)) == 0) try at.append(allocator, collationCaseWeight(cp));
+        }
+        for (b) |cp| {
+            if (ucd_ccc.combiningClass(@intCast(cp)) == 0) try bt.append(allocator, collationCaseWeight(cp));
+        }
+        return std.mem.order(u8, at.items, bt.items);
+    }
+
+    return .eq;
+}
+
+/// §22.1.3.10 String.prototype.localeCompare — the default (variant-sensitivity)
+/// collation via `localeCollate`: canonically-equivalent strings compare equal,
+/// case differs only at the tertiary level ("a" < "A"). Returns -1/0/+1.
 fn stringLocaleCompare(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const scope = realm.heap.openScope() catch return error.OutOfMemory;
     defer scope.close();
@@ -3044,16 +3131,10 @@ fn stringLocaleCompare(realm: *Realm, this_value: Value, args: []const Value) Na
     if ((!locales_arg.isUndefined() or !options_arg.isUndefined()) and realm.intrinsics.intl_collator_prototype != null)
         try @import("intl.zig").validateCollatorArgs(realm, locales_arg, options_arg);
 
-    // Fast path — byte-identical strings are trivially equal and
-    // skip the normalization round-trip entirely.
+    // Fast path — byte-identical strings are trivially equal.
     if (std.mem.eql(u8, s.flatBytes(), other_s.flatBytes())) return Value.fromInt32(0);
 
-    const lhs = normalizeWtf8(realm.allocator, s.flatBytes(), .nfd) catch return error.OutOfMemory;
-    defer realm.allocator.free(lhs);
-    const rhs = normalizeWtf8(realm.allocator, other_s.flatBytes(), .nfd) catch return error.OutOfMemory;
-    defer realm.allocator.free(rhs);
-
-    const cmp = std.mem.order(u32, lhs, rhs);
+    const cmp = localeCollate(realm.allocator, s.flatBytes(), other_s.flatBytes(), true, true) catch return error.OutOfMemory;
     return Value.fromInt32(switch (cmp) {
         .lt => -1,
         .eq => 0,

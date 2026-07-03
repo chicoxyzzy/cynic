@@ -1582,10 +1582,18 @@ fn collatorConstructor(realm: *Realm, this_value: Value, args: []const Value) Na
 }
 
 fn collatorCompare(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    _ = try requireKind(realm, this_value, .collator);
+    const rec = try requireKind(realm, this_value, .collator);
+    const s = rec.collator;
     const x = try valueToStringSlice(realm, argOr(args, 0, Value.undefined_));
     const y = try valueToStringSlice(realm, argOr(args, 1, Value.undefined_));
-    const ord = std.mem.order(u8, x, y);
+    // §10.3.3 — sensitivity selects the collation levels: base = primary only,
+    // accent = +secondary, case = +tertiary, variant (default) = all. Shares the
+    // multi-level NFD collation with String.prototype.localeCompare so the two
+    // agree (returns-same-results-as-Collator).
+    const sens = if (s.sensitivity.len > 0) s.sensitivity else "variant";
+    const secondary = std.mem.eql(u8, sens, "accent") or std.mem.eql(u8, sens, "variant");
+    const tertiary = std.mem.eql(u8, sens, "case") or std.mem.eql(u8, sens, "variant");
+    const ord = @import("string.zig").localeCollate(realm.allocator, x, y, secondary, tertiary) catch return error.OutOfMemory;
     const n: i32 = switch (ord) {
         .lt => -1,
         .eq => 0,
