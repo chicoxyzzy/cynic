@@ -894,7 +894,7 @@ fn differenceTemporalZonedDateTime(realm: *Realm, this_value: Value, args: []con
             (temporal.nudgeToZonedTimeDateTime(start_wall, z.time_zone, base_diff, largest, smallest, increment, eff_mode) orelse
                 return throwRangeError(realm, "rounded ZonedDateTime is outside the representable range"))
         else
-            (temporal.roundRelativeDateTime(start_wall, end_wall, base_diff, largest, smallest, increment, eff_mode, z.time_zone) orelse
+            (temporal.roundRelativeDateTime(start_wall, end_wall, base_diff, largest, smallest, increment, eff_mode, z.epoch_ns, other.epoch_ns, z.time_zone) orelse
                 return throwRangeError(realm, "rounded ZonedDateTime is outside the representable range"));
         if (is_since) {
             dr.years = negZero(dr.years);
@@ -927,7 +927,7 @@ fn differenceTemporalZonedDateTime(realm: *Realm, this_value: Value, args: []con
         var dr = if (smallest == .nanosecond and increment == 1)
             base_diff
         else
-            temporal.roundRelativeDateTime(start_wall, end_wall, base_diff, largest, smallest, increment, eff_mode, null) orelse
+            temporal.roundRelativeDateTime(start_wall, end_wall, base_diff, largest, smallest, increment, eff_mode, 0, 0, null) orelse
                 return throwRangeError(realm, "rounded ZonedDateTime is outside the representable range");
         if (is_since) {
             dr.years = negZero(dr.years);

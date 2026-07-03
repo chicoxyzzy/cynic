@@ -3227,6 +3227,7 @@ fn nudgeToCalendarUnitDateTime(
     mode: RoundingMode,
     sign: i32,
     dest_epoch: i128,
+    origin_epoch: i128,
     tz: ?TimeZone,
 ) ?DurationRecord {
     const start_date = start.date();
@@ -3270,7 +3271,11 @@ fn nudgeToCalendarUnitDateTime(
     // irregularity), recompute one increment further out.
     var r1: i64 = base;
     var r2: i64 = base + inc * sign;
-    var start_epoch = calendarWindowEpoch(start_date, smallest, hy, hm, hw, r1, start, tz) orelse return null;
+    // ComputeNudgeWindow step 7 (§6.5.6 / proposal-temporal#3149): when r1 = 0
+    // the window start anchors to the actual origin instant, not a
+    // re-disambiguated boundary — a fold origin's second occurrence would
+    // otherwise wrongly resolve to the first, stretching the span.
+    var start_epoch = if (r1 == 0 and tz != null) origin_epoch else (calendarWindowEpoch(start_date, smallest, hy, hm, hw, r1, start, tz) orelse return null);
     var end_epoch = calendarWindowEpoch(start_date, smallest, hy, hm, hw, r2, start, tz) orelse return null;
     var did_expand = false;
     if (!destInWindow(sign, start_epoch, end_epoch, dest_epoch)) {
@@ -3468,22 +3473,25 @@ pub fn roundRelativeDateTime(
     smallest: LargestUnit,
     increment: i128,
     mode: RoundingMode,
+    origin_epoch: i128,
+    zoned_dest_epoch: i128,
     tz: ?TimeZone,
 ) ?DurationRecord {
     const sign: i32 = durationSign(diff);
     if (sign == 0) return diff;
-    // A named zone measures progress toward the real ending instant, so the
-    // calendar-unit window/dest epochs are DST-aware; fixed/UTC uses the wall
-    // epoch. (Time / day-or-finer smallestUnit under a named zone routes
-    // through NudgeToZonedTime in the caller, not here.)
-    const dest_epoch = if (tz) |t| (getEpochNanosecondsFor(t, end) orelse return null) else utcEpochNsOf(end);
+    // A named zone measures progress toward the *actual* ending instant
+    // (passed in — never re-disambiguated, so a fold target keeps its
+    // occurrence); fixed/UTC uses the wall epoch. (Time / day-or-finer
+    // smallestUnit under a named zone routes through NudgeToZonedTime in the
+    // caller, not here.)
+    const dest_epoch = if (tz != null) zoned_dest_epoch else utcEpochNsOf(end);
 
     // IsCalendarUnit(smallest): year / month / week have irregular length and
     // route through NudgeToCalendarUnit. `day` is irregular too under a named
     // zone (23/25-h DST day), so it joins them there; a fixed-offset day is a
     // uniform 24 h and stays on NudgeToDayOrTime.
     if (@intFromEnum(smallest) < @intFromEnum(LargestUnit.day) or (tz != null and smallest == .day)) {
-        return nudgeToCalendarUnitDateTime(start, diff, largest, smallest, increment, mode, sign, dest_epoch, tz);
+        return nudgeToCalendarUnitDateTime(start, diff, largest, smallest, increment, mode, sign, dest_epoch, origin_epoch, tz);
     }
     return nudgeToDayOrTimeDateTime(start, diff, largest, smallest, increment, mode, sign, dest_epoch);
 }
@@ -5498,7 +5506,7 @@ fn roundDT(
     mode: RoundingMode,
 ) ?DurationRecord {
     const diff = differenceISODateTime(start, end, largest);
-    return roundRelativeDateTime(start, end, diff, largest, smallest, inc, mode, null);
+    return roundRelativeDateTime(start, end, diff, largest, smallest, inc, mode, 0, 0, null);
 }
 
 test "roundRelativeDateTime: year smallest rounds up past the half mark" {

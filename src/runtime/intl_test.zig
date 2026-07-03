@@ -492,6 +492,23 @@ test "intl/temporal: ZonedDateTime.getTimeZoneTransition compares at ns precisio
     );
 }
 
+test "intl/temporal: Duration.round anchors the window to a fold origin (§6.5.6 step 7)" {
+    try requireIntlBuild();
+    if (!intl_config.has_locale_data) return error.SkipZigTest;
+    // ComputeNudgeWindow step 7 (proposal-temporal#3149) — a relativeTo on the
+    // second occurrence of a fall-back fold anchors the r1=0 window start at
+    // that instant, not the re-disambiguated first occurrence, so 11h30m of the
+    // 25-h fall-back day rounds to 0 days, not 1 (test262
+    // Duration/round/relativeto-dst-back-transition).
+    try evalAssert1(
+        \\const origin = Temporal.ZonedDateTime.from("2025-11-02T01:00:00-08:00[America/Vancouver]");
+        \\const dur = Temporal.Duration.from({ hours: 11, minutes: 30 });
+        \\const r = dur.round({ largestUnit: "days", smallestUnit: "days", relativeTo: origin, roundingMode: "halfExpand" });
+        \\if (r.days !== 0) throw 0;
+        \\1
+    );
+}
+
 test "intl/temporal: ZonedDateTime.since handles a same-day fall-back fold" {
     try requireIntlBuild();
     if (!intl_config.has_locale_data) return error.SkipZigTest;
