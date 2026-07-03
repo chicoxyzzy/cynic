@@ -4217,10 +4217,37 @@ fn dateTimeFormatFormatRange(realm: *Realm, this_value: Value, args: []const Val
     const sb = flattenSegs(&segb, nb, &bufb);
     // Identical renderings collapse to a single date (no range separator).
     if (std.mem.eql(u8, sa, sb)) return makeStringValue(realm, sa);
+    // Share the common leading run (trimmed to the date/time boundary) as
+    // formatRangeToParts does, so a same-date time range shows the date once
+    // ("8/4/2021, 12:30 AM – 11:30 PM"). `sa` already holds the shared prefix +
+    // the first endpoint, so only the second endpoint's suffix is appended.
+    const prefix = rangeSegPrefix(&sega, na, &segb, nb);
     const sep = rangeFallbackSep(rec.date_time_format.base.dataLocale());
-    const joined = std.fmt.allocPrint(realm.allocator, "{s}{s}{s}", .{ sa, sep, sb }) catch return error.OutOfMemory;
+    var bufc: [256]u8 = undefined;
+    var clen: usize = 0;
+    var k: usize = prefix;
+    while (k < nb) : (k += 1) clen += copyClamp(&bufc, clen, segb[k].bytes());
+    const joined = std.fmt.allocPrint(realm.allocator, "{s}{s}{s}", .{ sa, sep, bufc[0..clen] }) catch return error.OutOfMemory;
     defer realm.allocator.free(joined);
     return makeStringValue(realm, joined);
+}
+
+/// The shared-prefix segment count for a formatRange pair: the common leading
+/// run, trimmed back to the last date/time boundary (a ", " literal) so a
+/// difference anywhere in the time run still shares the whole date. 0 when
+/// nothing collapses. Shared by the string + parts range paths.
+fn rangeSegPrefix(sega: []const Seg, na: u32, segb: []const Seg, nb: u32) usize {
+    var prefix: usize = 0;
+    while (prefix < na and prefix < nb and
+        std.mem.eql(u8, sega[prefix].typ, segb[prefix].typ) and
+        std.mem.eql(u8, sega[prefix].bytes(), segb[prefix].bytes())) : (prefix += 1)
+    {}
+    if (prefix >= na or prefix >= nb) return 0;
+    while (prefix > 0) : (prefix -= 1) {
+        const prev = &sega[prefix - 1];
+        if (std.mem.eql(u8, prev.typ, "literal") and std.mem.eql(u8, prev.bytes(), ", ")) break;
+    }
+    return prefix;
 }
 
 fn dateTimeFormatFormatRangeToParts(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
