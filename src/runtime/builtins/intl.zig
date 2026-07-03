@@ -2146,6 +2146,28 @@ fn pushPartSourced(realm: *Realm, arr: anytype, idx: u32, typ: []const u8, value
     arr.set(realm.allocator, std.fmt.bufPrint(&kb, "{d}", .{idx}) catch unreachable, heap_mod.taggedObject(part)) catch return error.OutOfMemory;
 }
 
+fn isNumericSegType(t: []const u8) bool {
+    return std.mem.eql(u8, t, "integer") or std.mem.eql(u8, t, "fraction");
+}
+
+/// Pad a range separator with a surrounding space on any side that lacks one
+/// (CLDR `miscPatterns.range` gives "–" for en; the fixtures want " – " when the
+/// separator abuts a non-digit part on either side).
+fn padRangeSeparator(sep: []const u8, buf: []u8) []const u8 {
+    var n: usize = 0;
+    if (sep.len == 0 or sep[0] != ' ') {
+        buf[n] = ' ';
+        n += 1;
+    }
+    @memcpy(buf[n .. n + sep.len], sep);
+    n += sep.len;
+    if (sep.len == 0 or sep[sep.len - 1] != ' ') {
+        buf[n] = ' ';
+        n += 1;
+    }
+    return buf[0..n];
+}
+
 fn numberFormatFormatRangeToParts(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const rec = try requireKind(realm, this_value, .number_format);
     const xv = argOr(args, 0, Value.undefined_);
@@ -2191,7 +2213,14 @@ fn numberFormatFormatRangeToParts(realm: *Realm, this_value: Value, args: []cons
                 try pushPartSourced(realm, arr, idx, segx[k].typ, segx[k].bytes(), "startRange");
                 idx += 1;
             }
-            try pushPartSourced(realm, arr, idx, "literal", en_dash, "shared");
+            // §15.5.21 (impl-defined) — the range separator gains surrounding
+            // spaces unless a digit part abuts it on both sides ("$3 – $5" but
+            // "…321–…322").
+            const both_num = nx > 0 and ny > 0 and
+                isNumericSegType(segx[nx - 1].typ) and isNumericSegType(segy[0].typ);
+            var sep_buf: [16]u8 = undefined;
+            const sep = if (both_num) en_dash else padRangeSeparator(en_dash, &sep_buf);
+            try pushPartSourced(realm, arr, idx, "literal", sep, "shared");
             idx += 1;
             k = 0;
             while (k < ny) : (k += 1) {
