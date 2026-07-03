@@ -1926,6 +1926,67 @@ pub fn differenceComputedDate(cal: temporal.CalendarId, d1: temporal.PlainDateRe
     };
 }
 
+/// §6.5.x DifferenceZonedDateTime — the DST-aware date+time duration from
+/// `ns1` to `ns2` in `tz` / `calendar`, with `largest` a date unit (day or
+/// larger). The wall-clock time-of-day difference is reconciled against the
+/// real epoch span by shifting the ending date up to `maxDayCorrection` days,
+/// so the time remainder is the true epoch gap to an intermediate instant — a
+/// DST day is 23 / 25 h, not 24. Null on epoch-range overflow.
+pub fn differenceZonedDateTime(
+    ns1: i128,
+    ns2: i128,
+    tz: temporal.TimeZone,
+    calendar: temporal.CalendarId,
+    largest: temporal.LargestUnit,
+) ?temporal.DurationRecord {
+    if (ns1 == ns2) return temporal.DurationRecord{};
+    const start_dt = temporal.getISODateTimeFor(tz, ns1);
+    const end_dt = temporal.getISODateTimeFor(tz, ns2);
+    const sign: i32 = if (ns2 < ns1) -1 else 1;
+    const max_day_correction: i32 = if (sign == 1) 2 else 1;
+    var day_correction: i32 = 0;
+
+    // DifferenceTime(start.time, end.time): if it points the other way from the
+    // instant sign, the ending date needs a one-day head start.
+    const start_time_ns = temporal.timeRecordToNanoseconds(start_dt.time());
+    const end_time_ns = temporal.timeRecordToNanoseconds(end_dt.time());
+    const time_diff_sign: i32 = if (end_time_ns < start_time_ns) -1 else if (end_time_ns > start_time_ns) 1 else 0;
+    if (time_diff_sign == -sign) day_correction += 1;
+
+    var intermediate_date: temporal.PlainDateRecord = undefined;
+    var time_ns: i128 = 0;
+    var success = false;
+    while (day_correction <= max_day_correction) : (day_correction += 1) {
+        intermediate_date = temporal.addISODate(end_dt.date(), 0, 0, 0, -@as(i64, day_correction) * sign, false) orelse return null;
+        const intermediate_dt = temporal.PlainDateTimeRecord.combine(intermediate_date, start_dt.time());
+        const intermediate_ns = temporal.getEpochNanosecondsFor(tz, intermediate_dt) orelse return null;
+        time_ns = ns2 - intermediate_ns;
+        const ts: i32 = if (time_ns < 0) -1 else if (time_ns > 0) 1 else 0;
+        if (sign != -ts) {
+            success = true;
+            break;
+        }
+    }
+    if (!success) return null;
+
+    // The date half is the calendar difference to the corrected intermediate
+    // date (start and intermediate share the start time-of-day, so the time
+    // fields cancel); overlay the true epoch remainder as the time half.
+    const inter_dt = temporal.PlainDateTimeRecord.combine(intermediate_date, start_dt.time());
+    var result = if (isComputedCalendar(calendar))
+        differenceComputedDateTime(calendar, start_dt, inter_dt, largest)
+    else
+        temporal.differenceISODateTime(start_dt, inter_dt, largest);
+    const time_dur = temporal.balanceTimeDuration(time_ns, .hour);
+    result.hours = time_dur.hours;
+    result.minutes = time_dur.minutes;
+    result.seconds = time_dur.seconds;
+    result.milliseconds = time_dur.milliseconds;
+    result.microseconds = time_dur.microseconds;
+    result.nanoseconds = time_dur.nanoseconds;
+    return result;
+}
+
 /// Calendar-aware DifferenceISODateTime for the computational calendars — the
 /// time half and the one-day borrow are calendar-independent; only the date
 /// difference is calendar-aware. Mirrors temporal.differenceISODateTime.

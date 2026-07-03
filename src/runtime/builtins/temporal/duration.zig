@@ -800,7 +800,19 @@ fn durationRound(realm: *Realm, this_value: Value, args: []const Value) NativeEr
                 }
                 const start_wall = temporal.getISODateTimeFor(z.time_zone, z.epoch_ns);
                 const end_wall = temporal.getISODateTimeFor(z.time_zone, target_epoch);
-                const base_diff = temporal.differenceISODateTime(start_wall, end_wall, largest_u);
+                // A named zone's day is 23/25 h at a DST transition, so the
+                // wall-clock date difference is wrong; DifferenceZonedDateTime
+                // reconciles the date half against the real epoch span. (The
+                // zoned relativeTo carries no calendar slot, so ISO applies.)
+                const is_named = switch (z.time_zone) {
+                    .named => true,
+                    else => false,
+                };
+                const base_diff = if (is_named)
+                    (shared.differenceZonedDateTime(z.epoch_ns, target_epoch, z.time_zone, temporal.CalendarId.iso8601(), largest_u) orelse
+                        return throwRangeError(realm, "duration is out of range relative to relativeTo"))
+                else
+                    temporal.differenceISODateTime(start_wall, end_wall, largest_u);
                 if (smallest_u == .nanosecond and increment == 1) break :blk base_diff;
                 if (@intFromEnum(smallest_u) > day_idx) {
                     // smallestUnit a time unit with a zoned anchor →
