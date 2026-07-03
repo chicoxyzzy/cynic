@@ -678,6 +678,20 @@ const sanctioned_units = [_]struct { simple: []const u8, key: []const u8 }{
     .{ .simple = "year", .key = "duration-year" },
 };
 
+/// Compound "X-per-Y" units that ECMA-402 §6.5.1 accepts (both sides sanctioned
+/// singles) AND CLDR carries a *precomposed* pattern for. These take precedence
+/// over the generic per-unit composition in `unitCombinedPattern` — e.g. ja
+/// speed-kilometer-per-hour short is literally "{0} km/h", not the decomposed
+/// "{0} km/時間". Packed under the ECMA compound name so a direct unitPattern
+/// lookup resolves them.
+const precomposed_compounds = [_]struct { simple: []const u8, key: []const u8 }{
+    .{ .simple = "kilometer-per-hour", .key = "speed-kilometer-per-hour" },
+    .{ .simple = "meter-per-second", .key = "speed-meter-per-second" },
+    .{ .simple = "mile-per-hour", .key = "speed-mile-per-hour" },
+    .{ .simple = "mile-per-gallon", .key = "consumption-mile-per-gallon" },
+    .{ .simple = "liter-per-kilometer", .key = "consumption-liter-per-kilometer" },
+};
+
 const UnitPat = struct { cat: u8, pat: []const u8 };
 /// One unit's patterns for one style: the plural unitPatterns + perUnitPattern
 /// (the divisor side of a compound "X-per-Y") + displayName (fallback).
@@ -731,6 +745,11 @@ fn loadUnits(arena: std.mem.Allocator, io: std.Io, json_root: []const u8) ![]Uni
 
         var entries: std.ArrayListUnmanaged(UnitEntry) = .empty;
         for (sanctioned_units) |su| {
+            var styles: [3]UnitStyle = undefined;
+            for (unit_styles, 0..) |st, i| styles[i] = loadUnitStyle(arena, units, st, su.key);
+            try entries.append(arena, .{ .simple = su.simple, .styles = styles });
+        }
+        for (precomposed_compounds) |su| {
             var styles: [3]UnitStyle = undefined;
             for (unit_styles, 0..) |st, i| styles[i] = loadUnitStyle(arena, units, st, su.key);
             try entries.append(arena, .{ .simple = su.simple, .styles = styles });

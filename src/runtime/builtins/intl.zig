@@ -2613,14 +2613,18 @@ fn renderNumber(slots: *const intl.NumberFormatSlots, x: f64, out: []Seg, exact:
         const prefix = combined[0..z];
         const suffix = if (z + 3 <= combined.len) combined[z + 3 ..] else "";
 
-        if (signShows(slots.sign_display, negative, is_zero))
-            append(out, &n, if (negative) "minusSign" else "plusSign", if (negative) nd.minus else nd.plus);
+        // §15.5.6 the sign belongs on the number at the "{0}" placeholder, not at
+        // the head of the whole pattern — so a precomposed compound whose pattern
+        // leads with a unit prefix ("時速 {0} キロメートル") renders "時速 -987
+        // キロメートル", not "-時速 987 キロメートル".
         if (prefix.len > 0) {
             var pe = prefix.len;
             while (pe > 0 and prefix[pe - 1] == ' ') pe -= 1;
             if (pe > 0) append(out, &n, "unit", prefix[0..pe]);
             if (pe < prefix.len) append(out, &n, "literal", prefix[pe..]);
         }
+        if (signShows(slots.sign_display, negative, is_zero))
+            append(out, &n, if (negative) "minusSign" else "plusSign", if (negative) nd.minus else nd.plus);
         if (non_finite) {
             append(out, &n, if (is_nan) "nan" else "infinity", if (is_nan) nd.nan else nd.infinity);
         } else {
@@ -2916,6 +2920,11 @@ fn subst01(template: []const u8, v0: []const u8, v1: []const u8, buf: []u8) []co
 /// ("{0} km" through hour's "{0}/h" → "{0} km/h"), falling back to the locale
 /// "per" compound pattern + the divisor displayName when no perUnitPattern.
 fn unitCombinedPattern(unit: []const u8, loc: []const u8, style_idx: u8, cat: cldr.PluralCategory, buf: []u8) ?[]const u8 {
+    // A precomposed compound (CLDR speed-kilometer-per-hour, consumption-mile-per-gallon,
+    // …) or a simple sanctioned unit resolves directly; only fall back to the generic
+    // "X-per-Y" decomposition when the locale carries no precomposed pattern — e.g. ja
+    // km/h is the literal "{0} km/h", not the decomposed "{0} km/時間".
+    if (cldr.unitPattern(loc, unit, style_idx, cat)) |direct| return direct;
     if (std.mem.indexOf(u8, unit, "-per-")) |p| {
         const num = unit[0..p];
         const den = unit[p + 5 ..];
@@ -2926,7 +2935,7 @@ fn unitCombinedPattern(unit: []const u8, loc: []const u8, style_idx: u8, cat: cl
         const den_disp = cldr.unitDisplay(loc, den, style_idx) orelse den;
         return subst01(comp, pat_num, den_disp, buf);
     }
-    return cldr.unitPattern(loc, unit, style_idx, cat);
+    return null;
 }
 
 const Affix = struct { prefix: []const u8, suffix: []const u8 };
