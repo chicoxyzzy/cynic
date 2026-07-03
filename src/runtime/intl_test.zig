@@ -492,6 +492,23 @@ test "intl/temporal: ZonedDateTime.getTimeZoneTransition compares at ns precisio
     );
 }
 
+test "intl/temporal: ZonedDateTime.round handles a day that starts twice" {
+    try requireIntlBuild();
+    if (!intl_config.has_locale_data) return error.SkipZigTest;
+    // §6.5.x — a backward transition larger than the wall time near midnight
+    // makes a day's midnight occur twice, so the round window uses the next-day
+    // midnight strictly after the instant. The second 23:10 of Antarctica/
+    // Casey's 27-hour 2010-03-04 floors to that day's start (test262
+    // ZonedDateTime/round/same-date-starts-twice).
+    try evalAssert1(
+        \\const zdt = Temporal.ZonedDateTime.from("2010-03-04T23:10:00+08:00[Antarctica/Casey]");
+        \\if (zdt.round({ smallestUnit: "days", roundingMode: "floor" }).toString() !== "2010-03-04T00:00:00+11:00[Antarctica/Casey]") throw 0;
+        \\// rounding up lands on the day's canonical start (the +11 occurrence)
+        \\if (zdt.round({ smallestUnit: "days", roundingMode: "halfExpand" }).toString() !== "2010-03-05T00:00:00+11:00[Antarctica/Casey]") throw 1;
+        \\1
+    );
+}
+
 test "intl/temporal: Duration.round anchors the window to a fold origin (§6.5.6 step 7)" {
     try requireIntlBuild();
     if (!intl_config.has_locale_data) return error.SkipZigTest;

@@ -1857,10 +1857,30 @@ pub fn roundZonedDateTime(epoch_ns: i128, tz: TimeZone, unit: LargestUnit, incre
         // capped at 1, so the rounding increment is the whole day length.
         const start_ns = startOfDayForDate(tz, wall.iso_year, wall.iso_month, wall.iso_day) orelse return null;
         const tomorrow = addISODate(wall.date(), 0, 0, 0, 1, false) orelse return null;
-        const end_ns = startOfDayForDate(tz, tomorrow.iso_year, tomorrow.iso_month, tomorrow.iso_day) orelse return null;
-        const day_len = end_ns - start_ns;
+        const canonical_end = startOfDayForDate(tz, tomorrow.iso_year, tomorrow.iso_month, tomorrow.iso_day) orelse return null;
+        // "Day starts twice": a backward transition larger than the wall time
+        // near midnight makes the next day's midnight occur twice, overlapping
+        // this day, so GetStartOfDay's earliest occurrence can precede
+        // `epoch_ns`. Widen the window's upper bound to the next-day midnight
+        // strictly after the instant (its later fold occurrence) so the span
+        // brackets it, but a round *up* still lands on the day's canonical
+        // start (the earlier occurrence).
+        var window_end = canonical_end;
+        if (window_end <= epoch_ns) {
+            var poss: [2]i128 = undefined;
+            const n = getPossibleEpochNanoseconds(tz, .{ .iso_year = tomorrow.iso_year, .iso_month = tomorrow.iso_month, .iso_day = tomorrow.iso_day }, &poss);
+            var k: u8 = 0;
+            while (k < n) : (k += 1) {
+                if (poss[k] > epoch_ns) {
+                    window_end = poss[k];
+                    break;
+                }
+            }
+        }
+        const day_len = window_end - start_ns;
         const rounded = roundToIncrement(epoch_ns - start_ns, day_len * increment, mode);
-        const result = start_ns + rounded;
+        const result_raw = start_ns + rounded;
+        const result = if (result_raw == window_end) canonical_end else result_raw;
         if (!isValidEpochNanoseconds(result)) return null;
         return result;
     }
