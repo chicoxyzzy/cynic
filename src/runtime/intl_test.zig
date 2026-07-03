@@ -473,6 +473,25 @@ test "intl/temporal: withCalendar accepts a time string with a calendar annotati
     );
 }
 
+test "intl: Collator caseFirst option overriding -u-kf drops the keyword (§9.2.7)" {
+    try requireIntlBuild();
+    // §9.2.7 ResolveLocale — the -u-kf keyword stays in the resolved locale
+    // only when it was the value actually used: an option that overrides it
+    // with a different value drops it; an equal option keeps it (test262
+    // Collator resolvedOptions/resolved-case-first-unicode-extensions).
+    try evalAssert1(
+        \\const over = new Intl.Collator("en-u-kf-lower", { caseFirst: "upper" }).resolvedOptions();
+        \\if (over.locale !== "en") throw 0; // option overrides → kf dropped
+        \\if (over.caseFirst !== "upper") throw 1;
+        \\const eq = new Intl.Collator("en-u-kf-lower", { caseFirst: "lower" }).resolvedOptions();
+        \\if (eq.locale !== "en-u-kf-lower") throw 2; // option equals extension → kf kept
+        \\if (eq.caseFirst !== "lower") throw 3;
+        \\const ext = new Intl.Collator("en-u-kf-lower").resolvedOptions();
+        \\if (ext.locale !== "en-u-kf-lower") throw 4; // no option → extension used, kf kept
+        \\1
+    );
+}
+
 test "intl: NumberFormat hanidec uses the non-contiguous ideograph digits" {
     try requireIntlBuild();
     if (!intl_config.has_locale_data) return error.SkipZigTest;

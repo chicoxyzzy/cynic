@@ -1514,7 +1514,12 @@ fn collatorConstructor(realm: *Realm, this_value: Value, args: []const Value) Na
     const kf_from_locale = if (kf_loc) |kf| (if (std.mem.eql(u8, kf, "upper") or std.mem.eql(u8, kf, "lower")) kf else "false") else "false";
     slots.case_first = realm.allocator.dupe(u8, if (cf_opt.len > 0) cf_opt else kf_from_locale) catch return error.OutOfMemory;
     if (kf_loc) |kf| {
-        if (!std.mem.eql(u8, kf, "lower") and !std.mem.eql(u8, kf, "upper")) try stripExtKeyword(realm, &slots.base, "kf");
+        const kf_valid = std.mem.eql(u8, kf, "lower") or std.mem.eql(u8, kf, "upper");
+        // §9.2.7 — the -u-kf keyword survives only when its value was the one
+        // used: an invalid value, or an option that overrides it with a
+        // different value, drops it from the resolved locale.
+        const overridden = cf_opt.len > 0 and !std.mem.eql(u8, cf_opt, kf_from_locale);
+        if (!kf_valid or overridden) try stripExtKeyword(realm, &slots.base, "kf");
     }
 
     try storeRecord(realm, inst, .{ .collator = slots });
