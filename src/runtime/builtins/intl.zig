@@ -4366,6 +4366,11 @@ const CivilTime = struct {
     // proleptic -271821 → 271822 BC). Null for era-less calendars (iso8601),
     // where `y` renders the signed astronomical `year`.
     era_year: ?i32 = null,
+    // The calendar's era id (calendarFields: gregory "ce"/"bce", japanese gengo
+    // "reiwa"/"heisei"/…, islamic "ah"/"bh"). Null for era-less calendars. The
+    // `G` field renders the japanese gengo name from it; other calendars keep
+    // the astronomical-year-sign heuristic.
+    era: ?[]const u8 = null,
     month: u32, // 1-13 (calendar ordinal)
     hebrew: bool = false, // month renders as a name, never numerically (CLDR-15510)
     named_cal: temporal.CalendarId = temporal.CalendarId.iso8601(), // named non-gregorian months (islamic/persian/...)
@@ -4400,6 +4405,7 @@ fn breakDown(slots: *const intl.DateTimeFormatSlots, ms: f64) CivilTime {
         // 2050; for every other calendar year == era_year so this is a no-op.
         .year = if (std.ascii.eqlIgnoreCase(slots.calendar, "japanese")) (cf.era_year orelse cf.year) else cf.year,
         .era_year = cf.era_year,
+        .era = cf.era,
         .hebrew = std.ascii.eqlIgnoreCase(slots.calendar, "hebrew"),
         .named_cal = cid,
         .lunisolar_code = if (std.ascii.eqlIgnoreCase(slots.calendar, "chinese") or std.ascii.eqlIgnoreCase(slots.calendar, "dangi"))
@@ -5152,6 +5158,7 @@ fn temporalIsoCivil(slots: *const intl.DateTimeFormatSlots, y: i64, mo: u32, da:
     return .{
         .year = if (std.ascii.eqlIgnoreCase(slots.calendar, "japanese")) (cf.era_year orelse cf.year) else cf.year,
         .era_year = cf.era_year,
+        .era = cf.era,
         .hebrew = std.ascii.eqlIgnoreCase(slots.calendar, "hebrew"),
         .named_cal = cid,
         .lunisolar_code = if (std.ascii.eqlIgnoreCase(slots.calendar, "chinese") or std.ascii.eqlIgnoreCase(slots.calendar, "dangi"))
@@ -5379,11 +5386,42 @@ fn flexibleDayPeriodEn(ct: CivilTime, count: usize) []const u8 {
     return "at night";
 }
 
+/// §11.5.4 era part — the display name for a calendar's era id (calendarFields).
+/// gregory ce/bce use the locale's own era names; the other calendars' eras are
+/// hardcoded en names (their CLDR era tables are not packed), with the raw id as
+/// a non-empty fallback so every era renders a distinct, stable label. Only the
+/// "long" width is modelled.
+fn eraDisplayName(era_id: []const u8, ad: []const u8, bc: []const u8) []const u8 {
+    const E = std.ascii.eqlIgnoreCase;
+    if (E(era_id, "ce") or E(era_id, "ad")) return ad;
+    if (E(era_id, "bce") or E(era_id, "bc")) return bc;
+    if (E(era_id, "reiwa")) return "Reiwa";
+    if (E(era_id, "heisei")) return "Heisei";
+    if (E(era_id, "showa")) return "Sh\u{014D}wa";
+    if (E(era_id, "taisho")) return "Taish\u{014D}";
+    if (E(era_id, "meiji")) return "Meiji";
+    if (E(era_id, "be")) return "BE"; // buddhist
+    if (E(era_id, "roc")) return "Minguo";
+    if (E(era_id, "broc")) return "Before R.O.C.";
+    if (E(era_id, "ah")) return "AH"; // islamic
+    if (E(era_id, "bh")) return "BH";
+    if (E(era_id, "aa")) return "AA"; // ethiopic Amete Alem
+    if (E(era_id, "am")) return "AM"; // hebrew / coptic / ethiopic Amete Mihret
+    if (E(era_id, "shaka")) return "Saka"; // indian
+    if (E(era_id, "ap")) return "AP"; // persian
+    return era_id;
+}
+
 fn emitField(out: []Seg, letter: u8, count: usize, ct: CivilTime, dd: cldr.DateData, digit_base: u32, tz_name: []const u8) u32 {
     if (out.len == 0) return 0;
     const seg = &out[0];
     switch (letter) {
-        'G' => setSeg(seg, "era", if (ct.year <= 0) dd.era_bc else dd.era_ad),
+        'G' => {
+            // An era-less calendar (chinese / dangi / iso8601) has no era to
+            // show — emit no part, even when the pattern carries a `G` because
+            // era was requested.
+            if (ct.era) |e| setSeg(seg, "era", eraDisplayName(e, dd.era_ad, dd.era_bc)) else return 0;
+        },
         'y', 'Y' => {
             // The chinese/dangi year renders as the related Gregorian year
             // (part type "relatedYear" per CLDR; the cyclic yearName is not
