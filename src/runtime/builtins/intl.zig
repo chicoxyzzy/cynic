@@ -5300,6 +5300,29 @@ fn numberToF64(v: Value) f64 {
     return if (v.isInt32()) @floatFromInt(v.asInt32()) else v.asDouble();
 }
 
+/// §16.5.6 — operands for a value formatted under compact notation. Per UTS #35
+/// Part 3, the compact operand `c`/`e` is the power-of-10 exponent of the locale's
+/// magnitude bucket, while n/i/v/f/t stay computed on the *full* value — so the
+/// "many" sample `1c6` has i = 1000000 (not the mantissa 1), keeping it clear of
+/// fr's `i = 0,1` "one" rule and matching its `e != 0..5` "many" rule. Only `e`
+/// changes vs standard notation; returns standard operands below 1000 or for a
+/// bucket the locale leaves uncompacted.
+fn compactPluralOperands(loc: []const u8, long: bool, value: f64, min_frac: u32, max_frac: u32) cldr.Operands {
+    var ops = cldr.computeOperands(value, min_frac, max_frac);
+    const m = @abs(value);
+    if (m < 1000) return ops;
+    const mag: i32 = @intFromFloat(@floor(std.math.log10(m)));
+    const bucket: u8 = @intCast(@min(mag, @as(i32, 14)));
+    const pat = cldr.compactPattern(loc, long, bucket, .other) orelse return ops;
+    var zeros: usize = 0;
+    for (pat) |c| {
+        if (c == '0') zeros += 1;
+    }
+    if (zeros == 0) return ops; // uncompacted bucket → e stays 0
+    ops.e = @intCast(mag - @as(i32, @intCast(zeros)) + 1);
+    return ops;
+}
+
 /// §16.5.6 ResolvePlural — operands from FormatNumericToString, then
 /// PluralRuleSelect against the locale's CLDR rules. Non-finite → "other".
 /// Without CLDR data (`-Dintl=stub`) every value is "other".
@@ -5310,7 +5333,10 @@ fn pluralRulesSelect(realm: *Realm, this_value: Value, args: []const Value) Nati
     const s = rec.plural_rules;
     if (!std.math.isFinite(x) or !cldr.available) return makeStringValue(realm, "other");
     const ordinal = std.mem.eql(u8, s.type_name, "ordinal");
-    const ops = cldr.computeOperands(x, s.minimum_fraction_digits, s.maximum_fraction_digits);
+    const ops = if (std.mem.eql(u8, s.notation, "compact"))
+        compactPluralOperands(s.base.dataLocale(), std.mem.eql(u8, s.compact_display, "long"), x, s.minimum_fraction_digits, s.maximum_fraction_digits)
+    else
+        cldr.computeOperands(x, s.minimum_fraction_digits, s.maximum_fraction_digits);
     const cat = cldr.selectPlural(s.base.dataLocale(), ordinal, ops);
     return makeStringValue(realm, cat.name());
 }
