@@ -830,6 +830,67 @@ fn zonedDateTimeSince(realm: *Realm, this_value: Value, args: []const Value) Nat
 /// only when both ZonedDateTimes share a time zone (a date unit spanning
 /// two zones is a RangeError per spec). Year / month / week units need the
 /// calendar-relative rounding that is not wired yet and throw a RangeError.
+/// §6.5.x DifferenceZonedDateTime — the DST-aware date+time duration from
+/// `ns1` to `ns2` in `tz` / `calendar`, with `largest` a date unit (day or
+/// larger). The wall-clock time-of-day difference is reconciled against the
+/// real epoch span by shifting the ending date up to `maxDayCorrection` days,
+/// so the time remainder is the true epoch gap to an intermediate instant — a
+/// DST day is 23 / 25 h, not 24. Null on epoch-range overflow.
+fn differenceZonedDateTime(
+    ns1: i128,
+    ns2: i128,
+    tz: temporal.TimeZone,
+    calendar: temporal.CalendarId,
+    largest: temporal.LargestUnit,
+) ?temporal.DurationRecord {
+    if (ns1 == ns2) return temporal.DurationRecord{};
+    const start_dt = temporal.getISODateTimeFor(tz, ns1);
+    const end_dt = temporal.getISODateTimeFor(tz, ns2);
+    const sign: i32 = if (ns2 < ns1) -1 else 1;
+    const max_day_correction: i32 = if (sign == 1) 2 else 1;
+    var day_correction: i32 = 0;
+
+    // DifferenceTime(start.time, end.time): if it points the other way from the
+    // instant sign, the ending date needs a one-day head start.
+    const start_time_ns = temporal.timeRecordToNanoseconds(start_dt.time());
+    const end_time_ns = temporal.timeRecordToNanoseconds(end_dt.time());
+    const time_diff_sign: i32 = if (end_time_ns < start_time_ns) -1 else if (end_time_ns > start_time_ns) 1 else 0;
+    if (time_diff_sign == -sign) day_correction += 1;
+
+    var intermediate_date: temporal.PlainDateRecord = undefined;
+    var time_ns: i128 = 0;
+    var success = false;
+    while (day_correction <= max_day_correction) : (day_correction += 1) {
+        intermediate_date = temporal.addISODate(end_dt.date(), 0, 0, 0, -@as(i64, day_correction) * sign, false) orelse return null;
+        const intermediate_dt = temporal.PlainDateTimeRecord.combine(intermediate_date, start_dt.time());
+        const intermediate_ns = temporal.getEpochNanosecondsFor(tz, intermediate_dt) orelse return null;
+        time_ns = ns2 - intermediate_ns;
+        const ts: i32 = if (time_ns < 0) -1 else if (time_ns > 0) 1 else 0;
+        if (sign != -ts) {
+            success = true;
+            break;
+        }
+    }
+    if (!success) return null;
+
+    // The date half is the calendar difference to the corrected intermediate
+    // date (start and intermediate share the start time-of-day, so the time
+    // fields cancel); overlay the true epoch remainder as the time half.
+    const inter_dt = temporal.PlainDateTimeRecord.combine(intermediate_date, start_dt.time());
+    var result = if (shared.isComputedCalendar(calendar))
+        shared.differenceComputedDateTime(calendar, start_dt, inter_dt, largest)
+    else
+        temporal.differenceISODateTime(start_dt, inter_dt, largest);
+    const time_dur = temporal.balanceTimeDuration(time_ns, .hour);
+    result.hours = time_dur.hours;
+    result.minutes = time_dur.minutes;
+    result.seconds = time_dur.seconds;
+    result.milliseconds = time_dur.milliseconds;
+    result.microseconds = time_dur.microseconds;
+    result.nanoseconds = time_dur.nanoseconds;
+    return result;
+}
+
 fn differenceTemporalZonedDateTime(realm: *Realm, this_value: Value, args: []const Value, is_since: bool) NativeError!Value {
     const z = try requireZonedDateTime(realm, this_value);
     const other = try toTemporalZonedDateTime(realm, argOr(args, 0, Value.undefined_), Value.undefined_);
@@ -872,6 +933,35 @@ fn differenceTemporalZonedDateTime(realm: *Realm, this_value: Value, args: []con
     }
 
     const eff_mode = if (is_since) negateRoundingMode(mode) else mode;
+
+    // §6.5.x DifferenceZonedDateTime — a named zone can have a 23/25-h day at a
+    // DST transition, so the fixed-offset fast paths below (which fold days at
+    // 24 h) give the wrong day/time split. Handle the *unrounded* date-unit
+    // difference exactly here; the rounded cases still route through the 24-h
+    // paths (a follow-up makes the nudge DST-aware).
+    const is_named = switch (z.time_zone) {
+        .named => true,
+        else => false,
+    };
+    if (is_named and @intFromEnum(largest) <= @intFromEnum(temporal.LargestUnit.day) and
+        smallest == .nanosecond and increment == 1)
+    {
+        var dr = differenceZonedDateTime(z.epoch_ns, other.epoch_ns, z.time_zone, z.calendar, largest) orelse
+            return throwRangeError(realm, "ZonedDateTime difference is outside the representable range");
+        if (is_since) {
+            dr.years = negZero(dr.years);
+            dr.months = negZero(dr.months);
+            dr.weeks = negZero(dr.weeks);
+            dr.days = negZero(dr.days);
+            dr.hours = negZero(dr.hours);
+            dr.minutes = negZero(dr.minutes);
+            dr.seconds = negZero(dr.seconds);
+            dr.milliseconds = negZero(dr.milliseconds);
+            dr.microseconds = negZero(dr.microseconds);
+            dr.nanoseconds = negZero(dr.nanoseconds);
+        }
+        return createTemporalDuration(realm, dr);
+    }
 
     // Calendar units (year/month/week as either bound): a constant offset
     // cancels in every epoch difference the Nudge/Bubble AOs use, so the

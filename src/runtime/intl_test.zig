@@ -452,6 +452,28 @@ test "intl/temporal: Instant.toString rounds a sub-minute zone offset to the nea
     );
 }
 
+test "intl/temporal: ZonedDateTime.since/until is DST-aware for a date largestUnit" {
+    try requireIntlBuild();
+    if (!intl_config.has_locale_data) return error.SkipZigTest;
+    // §6.5.x DifferenceZonedDateTime — across a spring-forward transition a
+    // calendar day is only 23 h, so 1:00 AM on the DST-start day to 2:00 AM the
+    // next day is P1DT1H (1 calendar day + 1 h of true epoch remainder), not the
+    // 24-h-day P1D. The pure-time (largestUnit "hours") result stays 1 h
+    // (test262 ZonedDateTime/since/dst).
+    try evalAssert1(
+        \\const a = Temporal.ZonedDateTime.from("2000-04-02T01:00:00-08:00[America/Vancouver]");
+        \\const b = Temporal.ZonedDateTime.from("2000-04-03T02:00:00-07:00[America/Vancouver]");
+        \\const d = b.since(a, { largestUnit: "days" });
+        \\if (d.days !== 1 || d.hours !== 1 || d.minutes !== 0) throw 0;
+        \\const u = a.until(b, { largestUnit: "days" });
+        \\if (u.days !== 1 || u.hours !== 1) throw 1;
+        \\// same-day spring gap: 1:00 -> 3:00 wall clock is only 1 h of epoch time
+        \\const c = Temporal.ZonedDateTime.from("2000-04-02T03:00:00-07:00[America/Vancouver]");
+        \\if (c.since(a, { largestUnit: "hours" }).hours !== 1) throw 2;
+        \\1
+    );
+}
+
 test "intl/temporal: withCalendar accepts a time string with a calendar annotation" {
     try requireIntlBuild();
     if (!intl_config.has_locale_data) return error.SkipZigTest;
