@@ -1,16 +1,16 @@
 # test262 conformance — Cynic
 
-**Cynic passes 97.32 % of the 49895 test262 fixtures it runs**, scored binary pass/fail under a single posture (`--unhardened --allow=eval`):
+**Cynic passes 97.34 % of the 49895 test262 fixtures it runs**, scored binary pass/fail under a single posture (`--unhardened --allow=eval`):
 
-- **48556 passing** — Cynic produced the spec-expected result.
-- **1339 failing** — every other scored fixture. No "expected fail" category: an Annex-B / strict-only / SES / eval / not-yet-implemented-Intl miss counts as a plain fail, same as an engine bug. Honest, not flattering.
+- **48570 passing** — Cynic produced the spec-expected result.
+- **1325 failing** — every other scored fixture. No "expected fail" category: an Annex-B / strict-only / SES / eval / not-yet-implemented-Intl miss counts as a plain fail, same as an engine bug. Honest, not flattering.
 - **Excluded from the denominator**: the upstream `harness/` and `staging/` paths, the whole `annexB/` tree, every Stage ≤ 3 proposal (decorators, import-defer, …), and structurally-unrunnable fixtures (no / malformed frontmatter). Shipped pre-Stage-4 proposals (joint-iteration, ShadowRealm) get their own scoreboard below.
 
 ## Current scores
 
 | posture | passing | failing | total | pass% |
 |---|---:|---:|---:|---:|
-| **`--unhardened --allow=eval`** | 48556 | 1339 | 49895 | 97.32 % |
+| **`--unhardened --allow=eval`** | 48570 | 1325 | 49895 | 97.34 % |
 
 > **pass%** = `passing / (passing + failing)`. Every scored
 > fixture is a plain pass or fail — there is no "expected
@@ -57,15 +57,21 @@ it's a lower bound on spec coverage.
 Every failure, classified. The policy classes are by-design
 fails under the binary posture — fixtures that need sloppy
 mode, Annex B surfaces, or ECMA-402, none of which Cynic
-ships, on purpose. The **engine gaps** row is the real bug
-count; the per-area table below it is the work list.
+ships, on purpose. The **engine gaps** row is an *upper
+bound* on real bugs, not a bug count: the classifier reads
+only paths and frontmatter, so a fixture whose sloppy-mode
+or Annex-B dependence lives in its *body* lands here even
+when it is a by-design decline. The per-fixture body audit
+in [docs/test262-gap-audit.md](docs/test262-gap-audit.md)
+reads every one and assigns a verified reason — that file,
+not this count, is the engine work list.
 
 | why | failing | detail |
 |---|---:|---|
 | sloppy-mode-only fixtures | 1142 | `flags: [noStrict]` — Cynic is strict-only by design (`with`, sloppy direct-eval `arguments` bindings, legacy S11-era semantics, ...) |
 | Annex B builtins | 69 | `__proto__` accessor + `__define`/`__lookup{Getter,Setter}__` are not shipped by design |
 | Intl normative-optional legacy | 8 | `features: [intl-normative-optional]` — the ECMA-402 §11.1.1/§11.1.2 legacy constructor `[[FallbackSymbol]]` shim (`Intl.NumberFormat.call(obj)` stashing a formatter on a user object). Optional in the spec; a legacy web-compat surface Cynic declines by design, like Annex B. Cynic ships the non-optional path (a fresh formatter, no fallback symbol) |
-| **engine gaps** | 120 | failures the policy classes do not explain — the work list. Includes in-scope `intl402/` surfaces not yet implemented at `-Dintl=full` plus implemented-surface Intl bugs; and an upper-bound residue of fixtures whose sloppy semantics hide inside dynamic `Function(...)` bodies, undetectable from frontmatter |
+| **engine gaps** | 106 | an *upper bound*, not a confirmed-bug count: failures the path/frontmatter classifier can't attribute to a policy class. Most are sloppy-mode semantics hiding inside dynamic `Function(...)` / `eval(...)` bodies, or Annex-B surfaces used in-body — by-design, but invisible to the classifier. The per-fixture audit in [docs/test262-gap-audit.md](docs/test262-gap-audit.md) reads each and is the real work list; a genuinely-unimplemented surface (including `intl402/` at `-Dintl=full`) would show here too |
 
 **Failing areas.** Only areas with at least one failure are
 listed (everything else passes). `gaps` is the slice of the
@@ -87,7 +93,6 @@ that column is the engine work list. Sorted by area
 | `built-ins/Set` | 382 | 1 | 0 | 100 % |
 | `built-ins/String` | 1219 | 4 | 2 | 100 % |
 | `built-ins/Symbol` | 96 | 2 | 0 | 98 % |
-| `built-ins/Temporal` | 4589 | 14 | 14 | 100 % |
 | `built-ins/TypedArray` | 1430 | 8 | 0 | 99 % |
 | `built-ins/TypedArrayConstructors` | 719 | 17 | 1 | 98 % |
 | `built-ins/undefined` | 5 | 3 | 0 | 63 % |
@@ -128,19 +133,19 @@ top-line score.
 
 ## History
 
-### 2026-07-03 — cynic `0c1f0965`, test262 `de8e621c`
+### 2026-07-03 — cynic `bb44d35f`, test262 `de8e621cdb`
 
 | passing | failing | total | pass% | Δ pass | elapsed |
 |---:|---:|---:|---:|---:|---:|
-| 48556 | 1339 | 49895 | 97.32 % | +2108 | 1m 25s |
+| 48570 | 1325 | 49895 | 97.34 % | +2122 | 2m 05s |
 
 Biggest movers:
 
-- `intl402/Temporal` +1579
 - `built-ins/Date` +594
 - `built-ins/DataView` +550
 - `built-ins/Iterator` +432
 - `built-ins/Atomics` +381
+- `built-ins/Number` +340
 
 ### 2026-06-25 — cynic `882c0dc`, test262 `de8e621cdb`
 
