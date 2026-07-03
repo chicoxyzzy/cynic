@@ -2139,7 +2139,21 @@ fn isSignSegType(t: []const u8) bool {
 /// shared trailing affix collapses always and a shared leading affix collapses
 /// only when it carries a sign, and the separator (en_dash) gains surrounding
 /// spaces unless a digit abuts it on both sides. Writes into `out`, returns count.
-fn partitionNumberRange(sx: []const Seg, sy: []const Seg, sep_buf: []u8, out: []RangePart) usize {
+/// The effective range separator: a CLDR pattern that already carries spaces
+/// ("{0} - {1}" → " - ") is used verbatim; a tight one ("–") stays tight between
+/// two numeric operands and gains surrounding spaces otherwise.
+fn rangeSeparator(raw_sep: []const u8, both_num: bool, buf: []u8) []const u8 {
+    const has_space = raw_sep.len > 0 and (raw_sep[0] == ' ' or raw_sep[raw_sep.len - 1] == ' ');
+    if (has_space) return raw_sep;
+    return if (both_num) raw_sep else padRangeSeparator(raw_sep, buf);
+}
+
+/// The locale's CLDR miscPatterns.range separator, or the en-dash default.
+fn localeRangeSep(locale: []const u8) []const u8 {
+    return if (cldr.numberData(locale)) |nd| nd.range_sep else en_dash;
+}
+
+fn partitionNumberRange(sx: []const Seg, sy: []const Seg, raw_sep: []const u8, sep_buf: []u8, out: []RangePart) usize {
     var n: usize = 0;
     var same = sx.len == sy.len;
     if (same) for (sx, 0..) |seg, k| {
@@ -2179,7 +2193,7 @@ fn partitionNumberRange(sx: []const Seg, sy: []const Seg, sep_buf: []u8, out: []
     const last_start = if (x_end > p) sx[x_end - 1].typ else "";
     const first_end = if (y_end > p) sy[p].typ else "";
     const both_num = isNumericSegType(last_start) and isNumericSegType(first_end);
-    const sep = if (both_num) en_dash else padRangeSeparator(en_dash, sep_buf);
+    const sep = rangeSeparator(raw_sep, both_num, sep_buf);
     var k: usize = 0;
     while (k < p) : (k += 1) {
         out[n] = .{ .typ = sx[k].typ, .val = sx[k].bytes(), .source = "shared" };
@@ -2279,7 +2293,7 @@ fn numberFormatFormatRange(realm: *Realm, this_value: Value, args: []const Value
     const ny = try renderRangeOperand(realm, &rec.number_format, yv, &segy);
     var parts: [128]RangePart = undefined;
     var sep_buf: [16]u8 = undefined;
-    const np = partitionNumberRange(segx[0..nx], segy[0..ny], &sep_buf, &parts);
+    const np = partitionNumberRange(segx[0..nx], segy[0..ny], localeRangeSep(rec.number_format.base.dataLocale()), &sep_buf, &parts);
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(realm.allocator);
     var i: usize = 0;
@@ -2371,7 +2385,7 @@ fn numberFormatFormatRangeToParts(realm: *Realm, this_value: Value, args: []cons
             const both_num = nx > 0 and ny > 0 and
                 isNumericSegType(segx[nx - 1].typ) and isNumericSegType(segy[0].typ);
             var sep_buf: [16]u8 = undefined;
-            const sep = if (both_num) en_dash else padRangeSeparator(en_dash, &sep_buf);
+            const sep = rangeSeparator(localeRangeSep(rec.number_format.base.dataLocale()), both_num, &sep_buf);
             try pushPartSourced(realm, arr, idx, "literal", sep, "shared");
             idx += 1;
             k = 0;

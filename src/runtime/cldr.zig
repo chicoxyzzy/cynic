@@ -492,6 +492,7 @@ pub const NumberData = struct {
     dec_pattern: []const u8,
     pct_pattern: []const u8,
     min_group: u8 = 1, // minimumGroupingDigits (UTS #35 grouping suppression)
+    range_sep: []const u8 = "\u{2013}", // miscPatterns.range separator (en "–", pt-PT " - ")
 };
 
 /// Look up the locale's number data (default numbering system), most- to
@@ -582,6 +583,7 @@ fn findNumber(key: []const u8) ?NumberData {
         d.dec_pattern = readStr16(num_payload, &off) orelse return null;
         d.pct_pattern = readStr16(num_payload, &off) orelse return null;
         d.min_group = readU8(num_payload, &off) orelse 1;
+        d.range_sep = readStr8(num_payload, &off) orelse return null;
         if (asciiEqlIgnoreCase(k, key)) return d;
     }
     return null;

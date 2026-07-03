@@ -76,19 +76,20 @@ fn pluralCatIndex(name: []const u8) ?u8 {
 /// language-only keys); region variants fall back to their base at runtime.
 /// "und" (root) is excluded. Keep sorted by the packer's own sort, not here.
 const modern_locales = [_][]const u8{
-    "af",    "ak",    "am",  "ar",  "as",  "az",      "ba",      "be",
-    "bg",    "bn",    "bs",  "ca",  "chr", "cs",      "cv",      "cy",
-    "da",    "de",    "dsb", "el",  "en",  "es",      "et",      "eu",
-    "fa",    "fi",    "fil", "fr",  "ga",  "gd",      "gl",      "gu",
-    "ha",    "he",    "hi",  "hr",  "hsb", "ht",      "hu",      "hy",
-    "id",    "ig",    "is",  "it",  "ja",  "jv",      "ka",      "kk",
-    "km",    "kn",    "ko",  "kok", "ky",  "lo",      "lt",      "lv",
-    "mk",    "ml",    "mn",  "mr",  "ms",  "my",      "nb",      "ne",
-    "nl",    "nn",    "no",  "or",  "pa",  "pcm",     "pl",      "ps",
-    "pt",    "qu",    "rm",  "ro",  "ru",  "sd",      "shn",     "si",
-    "sk",    "sl",    "so",  "sq",  "sr",  "sv",      "sw",      "ta",
-    "te",    "th",    "ti",  "tk",  "tr",  "uk",      "ur",      "uz",
-    "vi",    "yo",    "yue", "zh",  "zu",  "sr-Latn", "zh-Hans", "zh-Hant",
+    "af",      "ak",    "am",    "ar",  "as",  "az",  "ba",      "be",
+    "bg",      "bn",    "bs",    "ca",  "chr", "cs",  "cv",      "cy",
+    "da",      "de",    "dsb",   "el",  "en",  "es",  "et",      "eu",
+    "fa",      "fi",    "fil",   "fr",  "ga",  "gd",  "gl",      "gu",
+    "ha",      "he",    "hi",    "hr",  "hsb", "ht",  "hu",      "hy",
+    "id",      "ig",    "is",    "it",  "ja",  "jv",  "ka",      "kk",
+    "km",      "kn",    "ko",    "kok", "ky",  "lo",  "lt",      "lv",
+    "mk",      "ml",    "mn",    "mr",  "ms",  "my",  "nb",      "ne",
+    "nl",      "nn",    "no",    "or",  "pa",  "pcm", "pl",      "ps",
+    "pt",      "pt-PT", "qu",    "rm",  "ro",  "ru",  "sd",      "shn",
+    "si",      "sk",    "sl",    "so",  "sq",  "sr",  "sv",      "sw",
+    "ta",      "te",    "th",    "ti",  "tk",  "tr",  "uk",      "ur",
+    "uz",      "vi",    "yo",    "yue", "zh",  "zu",  "sr-Latn", "zh-Hans",
+    "zh-Hant",
     // Region variant: modern CLDR made generic `ar` default to latn digits, but
     // ar-EG keeps arab — packed so ar-EG resolves its own defaultNumberingSystem
     // instead of falling back to ar's latn.
@@ -365,6 +366,7 @@ const NumberLocale = struct {
     dec_pattern: []const u8,
     pct_pattern: []const u8,
     min_group: u8, // minimumGroupingDigits (1 for most, 2 for pl/es/…)
+    range_sep: []const u8, // miscPatterns.range separator (en "–", pt-PT " - ")
     fn lessThan(_: void, a: NumberLocale, b: NumberLocale) bool {
         return std.mem.lessThan(u8, a.key, b.key);
     }
@@ -979,7 +981,9 @@ fn loadNumbers(arena: std.mem.Allocator, io: std.Io, json_root: []const u8, ns_t
         const sym_key = try std.fmt.allocPrint(arena, "symbols-numberSystem-{s}", .{default_ns});
         const dec_key = try std.fmt.allocPrint(arena, "decimalFormats-numberSystem-{s}", .{default_ns});
         const pct_key = try std.fmt.allocPrint(arena, "percentFormats-numberSystem-{s}", .{default_ns});
+        const misc_key = try std.fmt.allocPrint(arena, "miscPatterns-numberSystem-{s}", .{default_ns});
         const syms = (n.get(sym_key) orelse continue).object;
+        const range_pat = if (n.get(misc_key)) |mp| strField(mp.object, "range", "{0}\u{2013}{1}") else "{0}\u{2013}{1}";
 
         try out.append(arena, .{
             .key = loc,
@@ -995,6 +999,7 @@ fn loadNumbers(arena: std.mem.Allocator, io: std.Io, json_root: []const u8, ns_t
             .dec_pattern = if (n.get(dec_key)) |d| strField(d.object, "standard", "#,##0.###") else "#,##0.###",
             .pct_pattern = if (n.get(pct_key)) |p| strField(p.object, "standard", "#,##0%") else "#,##0%",
             .min_group = if (n.get("minimumGroupingDigits")) |m| (std.fmt.parseInt(u8, m.string, 10) catch 1) else 1,
+            .range_sep = try arena.dupe(u8, rangeSepFromPattern(range_pat)),
         });
     }
     std.sort.block(NumberLocale, out.items, {}, NumberLocale.lessThan);
@@ -1003,6 +1008,15 @@ fn loadNumbers(arena: std.mem.Allocator, io: std.Io, json_root: []const u8, ns_t
 
 fn strField(obj: std.json.ObjectMap, key: []const u8, dflt: []const u8) []const u8 {
     return if (obj.get(key)) |v| (if (v == .string) v.string else dflt) else dflt;
+}
+
+/// The separator text between {0} and {1} in a CLDR range pattern
+/// ("{0}–{1}" → "–", "{0} - {1}" → " - "). Defaults to the en-dash.
+fn rangeSepFromPattern(pat: []const u8) []const u8 {
+    const a = std.mem.indexOf(u8, pat, "{0}") orelse return "\u{2013}";
+    const b = std.mem.indexOf(u8, pat, "{1}") orelse return "\u{2013}";
+    if (a + 3 > b) return "\u{2013}";
+    return pat[a + 3 .. b];
 }
 
 fn writeNumbersPayload(gpa: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), locales: []NumberLocale) !void {
@@ -1021,6 +1035,7 @@ fn writeNumbersPayload(gpa: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8),
         try appendStr16(gpa, buf, l.dec_pattern);
         try appendStr16(gpa, buf, l.pct_pattern);
         try buf.append(gpa, l.min_group);
+        try appendStr8(gpa, buf, l.range_sep);
     }
 }
 
