@@ -3763,6 +3763,13 @@ fn dateTimeFormatFormat(realm: *Realm, this_value: Value, args: []const Value) N
 /// Callers gate on `cldr.available`; ZonedDateTime is handled by its own
 /// method (it overrides the format's time zone) and is not routed here.
 pub fn temporalToLocaleString(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    // §13.x RequireInternalSlot — each Temporal type's toLocaleString brand-checks
+    // its receiver before any option processing, so a stolen method invoked on a
+    // non-Temporal `this` (undefined, a primitive, a plain object, the prototype)
+    // is a TypeError rather than a formatted string.
+    const receiver = heap_mod.valueAsPlainObject(this_value);
+    if (receiver == null or receiver.?.getTemporalRecord() == null)
+        return throwTypeError(realm, "Temporal.prototype.toLocaleString called on a receiver that is not a Temporal object");
     var slots = try buildDateTimeFormatSlots(realm, argOr(args, 0, Value.undefined_), argOr(args, 1, Value.undefined_));
     defer slots.deinit(realm.allocator);
     // Shallow copy: the default literals below must never reach slots.deinit

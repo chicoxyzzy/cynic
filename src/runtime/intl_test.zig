@@ -188,6 +188,28 @@ test "intl/temporal: toLocaleString formats Temporal types via DateTimeFormat" {
     );
 }
 
+test "intl/temporal: toLocaleString brand-checks its receiver (RequireInternalSlot)" {
+    if (!intl_config.has_locale_data) return error.SkipZigTest; // needs the Intl bridge
+    // §13.x — a Temporal type's toLocaleString, stolen and applied to a
+    // non-Temporal receiver, is a TypeError (RequireInternalSlot) before any
+    // option processing — not a formatted string. Covers the branding.js family.
+    try evalAssert1(
+        \\const rej = (f, arg) => { try { f.call(arg); return false; } catch (e) { return e instanceof TypeError; } };
+        \\const ctors = [
+        \\  Temporal.PlainDate, Temporal.PlainDateTime, Temporal.PlainTime,
+        \\  Temporal.PlainYearMonth, Temporal.PlainMonthDay, Temporal.Instant,
+        \\];
+        \\for (const C of ctors) {
+        \\  const m = C.prototype.toLocaleString;
+        \\  if (typeof m !== "function") throw "not-fn:" + C.name;
+        \\  for (const bad of [undefined, null, true, "", Symbol(), 1, {}, C, C.prototype]) {
+        \\    if (!rej(m, bad)) throw C.name;
+        \\  }
+        \\}
+        \\1
+    );
+}
+
 test "temporal: islamic tabular calendar conversion (calendarFields/computedToIso)" {
     // Pure calendar math — runs at every -Dintl flavour. Reference values
     // verified against V8 / JSC / SpiderMonkey via pragmatist engines.diff.
