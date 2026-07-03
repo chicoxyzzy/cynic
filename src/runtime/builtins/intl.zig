@@ -3495,28 +3495,9 @@ fn buildDateTimeFormatSlots(realm: *Realm, locales: Value, options: Value) Nativ
     // ships — never iso8601 (no locale has the ISO calendar as its default).
     slots.calendar = realm.allocator.dupe(u8, "gregory") catch return error.OutOfMemory;
     slots.time_zone = realm.allocator.dupe(u8, "UTC") catch return error.OutOfMemory;
+    // §11.1.1 read order: calendar → numberingSystem → hour12 → hourCycle →
+    // timeZone → components → formatMatcher → dateStyle → timeStyle.
     if (opts) |o| {
-        const tz_v = try getPropertyChain(realm, o, "timeZone");
-        if (!tz_v.isUndefined()) {
-            const tz = try valueToStringSlice(realm, tz_v);
-            if (tz.len == 0) return throwRangeError(realm, "invalid time zone");
-            // §11.1.1 — an offset zone normalizes to "±HH:MM"; a named zone is
-            // matched case-insensitively against the tzdb and stored with its
-            // available casing *without* alias collapse ("Etc/UTC" stays
-            // "Etc/UTC"). An unknown name (MEZ, ACT, a Unicode-minus offset) is a
-            // RangeError. At -Dintl=stub (no tzdb) the raw name is kept.
-            var tzbuf: [16]u8 = undefined;
-            const tzdata = @import("../tzdata.zig");
-            const canon: []const u8 = if (tz[0] == '+' or tz[0] == '-') blk: {
-                const parsed = temporal.parseTimeZoneIdentifier(tz) orelse return throwRangeError(realm, "invalid time zone");
-                break :blk temporal.timeZoneIdentifierString(parsed, &tzbuf);
-            } else if (tzdata.available)
-                (tzdata.canonicalZoneName(tz) orelse return throwRangeError(realm, "invalid time zone"))
-            else
-                tz;
-            realm.allocator.free(slots.time_zone); // release the default "UTC"
-            slots.time_zone = try realm.allocator.dupe(u8, canon);
-        }
         const cal_v = try getPropertyChain(realm, o, "calendar");
         var cal_set = false;
         if (!cal_v.isUndefined()) {
@@ -3568,28 +3549,12 @@ fn buildDateTimeFormatSlots(realm: *Realm, locales: Value, options: Value) Nativ
         if (!std.ascii.eqlIgnoreCase(kw, slots.numbering_system)) try stripExtKeyword(realm, &slots.base, "nu");
     }
     if (opts) |o| {
-        slots.date_style = try dupOptOwned(realm, try getOptionString(realm, opts, "dateStyle", &.{ "full", "long", "medium", "short" }, ""));
-        slots.time_style = try dupOptOwned(realm, try getOptionString(realm, opts, "timeStyle", &.{ "full", "long", "medium", "short" }, ""));
-
-        // Component options (§11.1.1 — the date/time field descriptors).
-        slots.weekday = try dupOptOwned(realm, try getOptionString(realm, opts, "weekday", &.{ "long", "short", "narrow" }, ""));
-        slots.era = try dupOptOwned(realm, try getOptionString(realm, opts, "era", &.{ "long", "short", "narrow" }, ""));
-        slots.year = try dupOptOwned(realm, try getOptionString(realm, opts, "year", &.{ "numeric", "2-digit" }, ""));
-        slots.month = try dupOptOwned(realm, try getOptionString(realm, opts, "month", &.{ "numeric", "2-digit", "long", "short", "narrow" }, ""));
-        slots.day = try dupOptOwned(realm, try getOptionString(realm, opts, "day", &.{ "numeric", "2-digit" }, ""));
-        slots.hour = try dupOptOwned(realm, try getOptionString(realm, opts, "hour", &.{ "numeric", "2-digit" }, ""));
-        slots.minute = try dupOptOwned(realm, try getOptionString(realm, opts, "minute", &.{ "numeric", "2-digit" }, ""));
-        slots.second = try dupOptOwned(realm, try getOptionString(realm, opts, "second", &.{ "numeric", "2-digit" }, ""));
-        slots.fractional_second_digits = try getNumberOptionOpt(realm, opts, "fractionalSecondDigits", 1, 3);
-        slots.day_period = try dupOptOwned(realm, try getOptionString(realm, opts, "dayPeriod", &.{ "long", "short", "narrow" }, ""));
-        slots.time_zone_name = try dupOptOwned(realm, try getOptionString(realm, opts, "timeZoneName", &.{ "long", "short", "shortOffset", "longOffset", "shortGeneric", "longGeneric" }, ""));
-
-        // hourCycle / hour12 → resolved hour cycle. hour12 maps through the
-        // locale's default cycle (§11.1.1): true keeps an h11/h12 default and
-        // turns h23/h24 into h11; false always lands on h23 here (Cynic's
-        // CLDR derivation never yields h24).
-        const hc = try getOptionString(realm, opts, "hourCycle", &.{ "h11", "h12", "h23", "h24" }, "");
+        // §11.1.1 hour12 (read first) then hourCycle → resolved hour cycle.
+        // hour12 maps through the locale's default cycle: true keeps an h11/h12
+        // default and turns h23/h24 into h11; false always lands on h23 here
+        // (Cynic's CLDR derivation never yields h24).
         const h12_v = try getPropertyChain(realm, o, "hour12");
+        const hc = try getOptionString(realm, opts, "hourCycle", &.{ "h11", "h12", "h23", "h24" }, "");
         if (!h12_v.isUndefined()) {
             // §11.1.2 steps 24-25 — hour12:true selects the locale's [[hourCycle12]]
             // (h11 for JP-region locales, h12 elsewhere); hour12:false selects
@@ -3615,12 +3580,51 @@ fn buildDateTimeFormatSlots(realm: *Realm, locales: Value, options: Value) Nativ
             if (!agrees) try retainRelevantUnicodeExtensions(realm, &slots.base, &.{ "ca", "nu" });
         }
 
+        // §11.1.1 timeZone — read after the hour-cycle options. An offset zone
+        // normalizes to "±HH:MM"; a named zone is matched case-insensitively
+        // against the tzdb and stored with its available casing *without* alias
+        // collapse ("Etc/UTC" stays "Etc/UTC"). An unknown name (MEZ, ACT, a
+        // Unicode-minus offset) is a RangeError. At -Dintl=stub the raw name is kept.
+        const tz_v = try getPropertyChain(realm, o, "timeZone");
+        if (!tz_v.isUndefined()) {
+            const tz = try valueToStringSlice(realm, tz_v);
+            if (tz.len == 0) return throwRangeError(realm, "invalid time zone");
+            var tzbuf: [16]u8 = undefined;
+            const tzdata = @import("../tzdata.zig");
+            const canon: []const u8 = if (tz[0] == '+' or tz[0] == '-') blk: {
+                const parsed = temporal.parseTimeZoneIdentifier(tz) orelse return throwRangeError(realm, "invalid time zone");
+                break :blk temporal.timeZoneIdentifierString(parsed, &tzbuf);
+            } else if (tzdata.available)
+                (tzdata.canonicalZoneName(tz) orelse return throwRangeError(realm, "invalid time zone"))
+            else
+                tz;
+            realm.allocator.free(slots.time_zone); // release the default "UTC"
+            slots.time_zone = try realm.allocator.dupe(u8, canon);
+        }
+
+        // §11.1.1 component options in spec order: weekday, era, year, month,
+        // day, dayPeriod, hour, minute, second, fractionalSecondDigits,
+        // timeZoneName.
+        slots.weekday = try dupOptOwned(realm, try getOptionString(realm, opts, "weekday", &.{ "long", "short", "narrow" }, ""));
+        slots.era = try dupOptOwned(realm, try getOptionString(realm, opts, "era", &.{ "long", "short", "narrow" }, ""));
+        slots.year = try dupOptOwned(realm, try getOptionString(realm, opts, "year", &.{ "numeric", "2-digit" }, ""));
+        slots.month = try dupOptOwned(realm, try getOptionString(realm, opts, "month", &.{ "numeric", "2-digit", "long", "short", "narrow" }, ""));
+        slots.day = try dupOptOwned(realm, try getOptionString(realm, opts, "day", &.{ "numeric", "2-digit" }, ""));
+        slots.day_period = try dupOptOwned(realm, try getOptionString(realm, opts, "dayPeriod", &.{ "long", "short", "narrow" }, ""));
+        slots.hour = try dupOptOwned(realm, try getOptionString(realm, opts, "hour", &.{ "numeric", "2-digit" }, ""));
+        slots.minute = try dupOptOwned(realm, try getOptionString(realm, opts, "minute", &.{ "numeric", "2-digit" }, ""));
+        slots.second = try dupOptOwned(realm, try getOptionString(realm, opts, "second", &.{ "numeric", "2-digit" }, ""));
+        slots.fractional_second_digits = try getNumberOptionOpt(realm, opts, "fractionalSecondDigits", 1, 3);
+        slots.time_zone_name = try dupOptOwned(realm, try getOptionString(realm, opts, "timeZoneName", &.{ "long", "short", "shortOffset", "longOffset", "shortGeneric", "longGeneric" }, ""));
+
         // §11.1.1 formatMatcher — validated (RangeError on an invalid value);
         // the renderer doesn't yet branch on best-fit vs basic.
         _ = try getOptionString(realm, opts, "formatMatcher", &.{ "basic", "best fit" }, "best fit");
 
-        // §11.1.1 — dateStyle/timeStyle may not be combined with explicit
-        // component options (TypeError).
+        // §11.1.1 dateStyle / timeStyle — read last; may not be combined with
+        // explicit component options (TypeError).
+        slots.date_style = try dupOptOwned(realm, try getOptionString(realm, opts, "dateStyle", &.{ "full", "long", "medium", "short" }, ""));
+        slots.time_style = try dupOptOwned(realm, try getOptionString(realm, opts, "timeStyle", &.{ "full", "long", "medium", "short" }, ""));
         const has_style = slots.date_style.len > 0 or slots.time_style.len > 0;
         const has_component = slots.weekday.len > 0 or slots.era.len > 0 or slots.year.len > 0 or
             slots.month.len > 0 or slots.day.len > 0 or slots.hour.len > 0 or slots.minute.len > 0 or
