@@ -3077,7 +3077,9 @@ fn phonebookExpand(allocator: std.mem.Allocator, nfd: []const u32) std.mem.Alloc
         const vowel = cp == 'a' or cp == 'o' or cp == 'u' or cp == 'A' or cp == 'O' or cp == 'U';
         if (vowel and i + 1 < nfd.len and nfd[i + 1] == 0x0308) {
             try out.append(allocator, 'e');
-            i += 1; // consume the diaeresis
+            // Keep the diaeresis (don't consume) so it still weighs at the
+            // secondary level: "ae" sorts before "ä" (= a-e + diaeresis) — the
+            // ICU de phonebook / search order, verified vs V8 / JSC / SpiderMonkey.
         }
     }
     return out.toOwnedSlice(allocator);

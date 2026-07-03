@@ -1509,7 +1509,7 @@ pub fn resolveCollateFlags(realm: *Realm, locales: Value, options: Value) Native
         .secondary = std.mem.eql(u8, sens, "accent") or std.mem.eql(u8, sens, "variant"),
         .tertiary = std.mem.eql(u8, sens, "case") or std.mem.eql(u8, sens, "variant"),
         .ignore_punct = s.ignore_punctuation,
-        .phonebook = std.mem.eql(u8, s.collation, "phonebk"),
+        .phonebook = collationUsesPhonebook(s.collation, s.usage, s.base.locale),
     };
 }
 
@@ -1601,6 +1601,16 @@ fn collatorConstructor(realm: *Realm, this_value: Value, args: []const Value) Na
     return heap_mod.taggedObject(inst);
 }
 
+/// The phonebook-style umlaut expansion (ä → "ae") applies for the explicit
+/// phonebook collation AND for German `usage:"search"` — ICU's de search collator
+/// shares the phonebook ordering, verified against V8 / JSC / SpiderMonkey. en /
+/// root search keep ä ≈ a, so this is gated on a German locale.
+fn collationUsesPhonebook(collation: []const u8, usage: []const u8, locale: []const u8) bool {
+    if (std.mem.eql(u8, collation, "phonebk")) return true;
+    return std.mem.eql(u8, usage, "search") and
+        (std.mem.eql(u8, locale, "de") or std.mem.startsWith(u8, locale, "de-"));
+}
+
 fn collatorCompare(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const rec = try requireKind(realm, this_value, .collator);
     const s = rec.collator;
@@ -1613,7 +1623,7 @@ fn collatorCompare(realm: *Realm, this_value: Value, args: []const Value) Native
     const sens = if (s.sensitivity.len > 0) s.sensitivity else "variant";
     const secondary = std.mem.eql(u8, sens, "accent") or std.mem.eql(u8, sens, "variant");
     const tertiary = std.mem.eql(u8, sens, "case") or std.mem.eql(u8, sens, "variant");
-    const phonebook = std.mem.eql(u8, s.collation, "phonebk");
+    const phonebook = collationUsesPhonebook(s.collation, s.usage, s.base.locale);
     const ord = @import("string.zig").localeCollate(realm.allocator, x, y, secondary, tertiary, s.ignore_punctuation, phonebook) catch return error.OutOfMemory;
     const n: i32 = switch (ord) {
         .lt => -1,
