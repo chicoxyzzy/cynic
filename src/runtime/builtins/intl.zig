@@ -5424,8 +5424,24 @@ fn emitField(out: []Seg, letter: u8, count: usize, ct: CivilTime, dd: cldr.DateD
         },
         'y', 'Y' => {
             // The chinese/dangi year renders as the related Gregorian year
-            // (part type "relatedYear" per CLDR; the cyclic yearName is not
-            // modelled).
+            // ("relatedYear") plus the sexagenary cyclic "yearName" (10 heavenly
+            // stems × 12 earthly branches, offset year-4) and the CLDR "年" year
+            // marker — "2019己亥年".
+            if (ct.lunisolar_code != 0 and out.len >= 3) {
+                const yv: u64 = @intCast(if (ct.year < 0) -ct.year else ct.year);
+                setNumberSeg(&out[0], "relatedYear", yv, 1, digit_base);
+                const stems = [_][]const u8{ "\u{7532}", "\u{4E59}", "\u{4E19}", "\u{4E01}", "\u{620A}", "\u{5DF1}", "\u{5E9A}", "\u{8F9B}", "\u{58EC}", "\u{7678}" };
+                const branches = [_][]const u8{ "\u{5B50}", "\u{4E11}", "\u{5BC5}", "\u{536F}", "\u{8FB0}", "\u{5DF3}", "\u{5348}", "\u{672A}", "\u{7533}", "\u{9149}", "\u{620C}", "\u{4EA5}" };
+                const idx = @mod(ct.year - 4, 60);
+                const stem = stems[@intCast(@mod(idx, 10))];
+                const branch = branches[@intCast(@mod(idx, 12))];
+                var yn: [8]u8 = undefined;
+                @memcpy(yn[0..stem.len], stem);
+                @memcpy(yn[stem.len .. stem.len + branch.len], branch);
+                setSeg(&out[1], "yearName", yn[0 .. stem.len + branch.len]);
+                setSeg(&out[2], "literal", "\u{5E74}");
+                return 3;
+            }
             const ytype: []const u8 = if (ct.lunisolar_code != 0) "relatedYear" else "year";
             if (ct.era_year) |ey| {
                 // Era calendar: the positive year-of-era (a BCE date counts up).
