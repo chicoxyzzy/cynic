@@ -3561,9 +3561,9 @@ fn buildDateTimeFormatSlots(realm: *Realm, locales: Value, options: Value) Nativ
     slots.time_zone = realm.allocator.dupe(u8, "UTC") catch return error.OutOfMemory;
     // §11.1.1 read order: calendar → numberingSystem → hour12 → hourCycle →
     // timeZone → components → formatMatcher → dateStyle → timeStyle.
+    var cal_set = false;
     if (opts) |o| {
         const cal_v = try getPropertyChain(realm, o, "calendar");
-        var cal_set = false;
         if (!cal_v.isUndefined()) {
             // §11.1.1 — the calendar option must be a well-formed Unicode type
             // (RangeError otherwise); it is then ASCII-lowercased and its BCP-47
@@ -3581,27 +3581,31 @@ fn buildDateTimeFormatSlots(realm: *Realm, locales: Value, options: Value) Nativ
                 cal_set = true;
             }
         }
-        if (!cal_set) {
-            if (intl.unicodeExtensionValue(slots.base.locale, "ca")) |v| {
-                var lc_buf2: [40]u8 = undefined;
-                const canon2 = canonicalCalendarId(v, &lc_buf2);
-                if (temporal.isSupportedCalendarId(canon2)) {
-                    realm.allocator.free(slots.calendar);
-                    slots.calendar = try realm.allocator.dupe(u8, canon2);
-                }
+    }
+    // The locale's -u-ca extension applies when no explicit calendar option was
+    // set — run unconditionally so it also resolves when no options object is
+    // supplied (`new Intl.DateTimeFormat("en-u-ca-chinese")` is the chinese
+    // calendar, not the gregory default).
+    if (!cal_set) {
+        if (intl.unicodeExtensionValue(slots.base.locale, "ca")) |v| {
+            var lc_buf2: [40]u8 = undefined;
+            const canon2 = canonicalCalendarId(v, &lc_buf2);
+            if (temporal.isSupportedCalendarId(canon2)) {
+                realm.allocator.free(slots.calendar);
+                slots.calendar = try realm.allocator.dupe(u8, canon2);
             }
         }
-        // §9.2.7 — an explicit (supported) calendar option overrides the -u-ca
-        // keyword, which then drops from the resolved locale — UNLESS the option
-        // equals the keyword's calendar, in which case the keyword stays.
-        if (cal_set) {
-            var keep = false;
-            if (intl.unicodeExtensionValue(slots.base.locale, "ca")) |kw| {
-                var kbuf: [40]u8 = undefined;
-                keep = std.ascii.eqlIgnoreCase(canonicalCalendarId(kw, &kbuf), slots.calendar);
-            }
-            if (!keep) try stripExtKeyword(realm, &slots.base, "ca");
+    }
+    // §9.2.7 — an explicit (supported) calendar option overrides the -u-ca
+    // keyword, which then drops from the resolved locale — UNLESS the option
+    // equals the keyword's calendar, in which case the keyword stays.
+    if (cal_set) {
+        var keep = false;
+        if (intl.unicodeExtensionValue(slots.base.locale, "ca")) |kw| {
+            var kbuf: [40]u8 = undefined;
+            keep = std.ascii.eqlIgnoreCase(canonicalCalendarId(kw, &kbuf), slots.calendar);
         }
+        if (!keep) try stripExtKeyword(realm, &slots.base, "ca");
     }
     // §11.1.2 read order: numberingSystem is resolved after the calendar option
     // (both after localeMatcher). Runs unconditionally so a locale's default
