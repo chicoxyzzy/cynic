@@ -5353,20 +5353,24 @@ test "interpretISODateTimeOffset: behaviour + offset option matrix" {
     const o: i128 = 19_800_000_000_000; // +05:30
     const plus530 = TimeZone{ .offset_minutes = 330 };
 
+    // Trailing args: dis = .compatible (spec default; irrelevant here — a fixed
+    // offset zone has no fold/gap at 2020-01-01), match_minutes = true (as a
+    // parsed minute-precision offset supplies; irrelevant too — the offsets are
+    // whole minutes that match exactly before any rounding).
     // wall — the zone places the instant (offset arg irrelevant).
-    try testing.expectEqual(w, try interpretISODateTimeOffset(dt, .wall, 0, .utc, .reject));
-    try testing.expectEqual(w - o, try interpretISODateTimeOffset(dt, .wall, 0, plus530, .reject));
+    try testing.expectEqual(w, try interpretISODateTimeOffset(dt, .wall, 0, .utc, .reject, .compatible, true));
+    try testing.expectEqual(w - o, try interpretISODateTimeOffset(dt, .wall, 0, plus530, .reject, .compatible, true));
     // exact (`Z`) — wall time is UTC, shifted by the parsed offset (0 here).
-    try testing.expectEqual(w, try interpretISODateTimeOffset(dt, .exact, 0, plus530, .reject));
+    try testing.expectEqual(w, try interpretISODateTimeOffset(dt, .exact, 0, plus530, .reject, .compatible, true));
     // option + reject — must match the zone's offset, else OffsetMismatch.
-    try testing.expectEqual(w - o, try interpretISODateTimeOffset(dt, .option, o, plus530, .reject));
-    try testing.expectError(error.OffsetMismatch, interpretISODateTimeOffset(dt, .option, 0, plus530, .reject));
+    try testing.expectEqual(w - o, try interpretISODateTimeOffset(dt, .option, o, plus530, .reject, .compatible, true));
+    try testing.expectError(error.OffsetMismatch, interpretISODateTimeOffset(dt, .option, 0, plus530, .reject, .compatible, true));
     // option + use — take the supplied offset verbatim.
-    try testing.expectEqual(w, try interpretISODateTimeOffset(dt, .option, 0, plus530, .use));
+    try testing.expectEqual(w, try interpretISODateTimeOffset(dt, .option, 0, plus530, .use, .compatible, true));
     // option + ignore — discard the supplied offset, defer to the zone.
-    try testing.expectEqual(w - o, try interpretISODateTimeOffset(dt, .option, 0, plus530, .ignore));
+    try testing.expectEqual(w - o, try interpretISODateTimeOffset(dt, .option, 0, plus530, .ignore, .compatible, true));
     // option + prefer — mismatch falls back to the zone offset (no throw).
-    try testing.expectEqual(w - o, try interpretISODateTimeOffset(dt, .option, 0, plus530, .prefer));
+    try testing.expectEqual(w - o, try interpretISODateTimeOffset(dt, .option, 0, plus530, .prefer, .compatible, true));
 }
 
 test "parseTemporalZonedDateTimeString: offset / Z / bare-date forms" {
