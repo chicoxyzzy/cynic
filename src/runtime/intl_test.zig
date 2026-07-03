@@ -3496,3 +3496,39 @@ test "intl: BigInt.prototype.toLocaleString formats exact digits past 2^53 (§15
         \\ (5n).toLocaleString('en-US', {style: 'percent'}) === '500%') ? 1 : 0
     );
 }
+
+test "intl/temporal: DST arithmetic + Intl format paths are allocation-clean" {
+    try requireFullBuild();
+    // Not a behavioural assertion — a memory-safety net. The testing allocator
+    // fails at realm.deinit if any allocation orphaned across these loops, so
+    // exercising the session's DST-arithmetic and Intl format paths in bulk
+    // catches an object/record leak that --leak-check (bytes-only) can't see.
+    try evalAssert1(
+        \\const zoneA = "America/Vancouver", zoneB = "Antarctica/Casey";
+        \\for (let i = 0; i < 10; i++) {
+        \\  const z1 = new Temporal.ZonedDateTime(BigInt(1267704000 + i * 5000) * 1000000000n, zoneA);
+        \\  const z2 = z1.add({ hours: 25, minutes: 30 });
+        \\  z1.until(z2, { largestUnit: "day", smallestUnit: "hour", roundingIncrement: 2 });
+        \\  const d2 = z2.since(z1, { largestUnit: "year", smallestUnit: "minute" });
+        \\  z1.round({ smallestUnit: "day" });
+        \\  z2.round({ smallestUnit: "hour", roundingIncrement: 3 });
+        \\  d2.total({ unit: "day", relativeTo: z1 });
+        \\  d2.round({ largestUnit: "day", smallestUnit: "minute", relativeTo: z2 });
+        \\}
+        \\for (let i = 0; i < 10; i++) {
+        \\  const zb = new Temporal.ZonedDateTime(BigInt(1267704000 + i * 900) * 1000000000n, zoneB);
+        \\  zb.round({ smallestUnit: "day" });
+        \\  zb.getTimeZoneTransition("next");
+        \\  zb.getTimeZoneTransition("previous");
+        \\  zb.add({ days: 2, hours: 5 }).since(zb, { largestUnit: "day", smallestUnit: "minute" });
+        \\}
+        \\for (let i = 0; i < 10; i++) {
+        \\  (90071992547409910n + BigInt(i)).toLocaleString("en-US");
+        \\  new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(i * 1000);
+        \\  new Intl.DateTimeFormat("en-US", { dateStyle: "long", timeStyle: "medium" }).format(new Date(i * 1e9));
+        \\  new Intl.Collator("de", { sensitivity: "base" }).compare("äpfel", "apfel");
+        \\  "straße".localeCompare("strasse", "de");
+        \\}
+        \\1
+    );
+}
