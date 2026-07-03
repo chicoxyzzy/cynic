@@ -518,7 +518,7 @@ pub fn calendarStringIsSupported(bytes: []const u8) ?temporal.CalendarId {
     if (temporal.parseTemporalDateString(bytes)) |r| return r.calendar else |_| {}
     if (temporal.parseTemporalYearMonthString(bytes)) |r| return r.calendar else |_| {}
     if (temporal.parseTemporalMonthDayString(bytes)) |r| return r.calendar else |_| {}
-    if (temporal.parseTemporalTimeString(bytes)) |_| return temporal.CalendarId.iso8601() else |_| {}
+    if (temporal.parseTemporalTimeString(bytes)) |_| return (temporal.parseTimeStringCalendarId(bytes) catch null) else |_| {}
     if (temporal.parseInstantString(bytes)) |_| return temporal.CalendarId.iso8601() else |_| {}
     return null;
 }

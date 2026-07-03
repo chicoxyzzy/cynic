@@ -452,6 +452,27 @@ test "intl/temporal: Instant.toString rounds a sub-minute zone offset to the nea
     );
 }
 
+test "intl/temporal: withCalendar accepts a time string with a calendar annotation" {
+    try requireIntlBuild();
+    if (!intl_config.has_locale_data) return error.SkipZigTest;
+    // §3.3.x withCalendar / ToTemporalCalendarIdentifier — a Temporal *time*
+    // string is a valid calendar identifier; its [u-ca=…] annotation names the
+    // calendar, even though a PlainTime carries no calendar slot (test262
+    // PlainDate|PlainDateTime withCalendar/calendar-time-string).
+    try evalAssert1(
+        \\const d = Temporal.PlainDate.from({ year: 1976, month: 11, day: 18 });
+        \\if (d.withCalendar("T11:30[u-ca=buddhist]").calendarId !== "buddhist") throw 0;
+        \\if (d.withCalendar("T11:30[u-ca=hebrew]").calendarId !== "hebrew") throw 1;
+        \\if (d.withCalendar("T11:30").calendarId !== "iso8601") throw 2; // no annotation → ISO
+        \\const dt = new Temporal.PlainDateTime(1976, 11, 18, 15, 0);
+        \\if (dt.withCalendar("T09:00[u-ca=gregory]").calendarId !== "gregory") throw 3;
+        \\let threw = false;
+        \\try { d.withCalendar("T11:30[u-ca=bogus]"); } catch (e) { threw = e instanceof RangeError; }
+        \\if (!threw) throw 4; // unsupported calendar annotation still rejects
+        \\1
+    );
+}
+
 test "intl: NumberFormat hanidec uses the non-contiguous ideograph digits" {
     try requireIntlBuild();
     if (!intl_config.has_locale_data) return error.SkipZigTest;

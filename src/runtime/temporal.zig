@@ -990,6 +990,23 @@ pub fn parseTemporalTimeString(input: []const u8) TimeParseError!PlainTimeRecord
     return parseBareTime(time_part, had_designator) catch error.Invalid;
 }
 
+/// Recover the calendar id from a Temporal *time* string's RFC 9557
+/// annotation (`T11:30[u-ca=buddhist]` → buddhist; no annotation → ISO).
+/// `parseTemporalTimeString` validates the time value but returns a
+/// `PlainTimeRecord`, which carries no calendar slot, so callers that treat
+/// a time string as a calendar identifier (withCalendar /
+/// ToTemporalCalendarIdentifier) use this to read the annotation. Returns
+/// `error.Invalid` when the annotation names an unsupported calendar.
+pub fn parseTimeStringCalendarId(input: []const u8) error{Invalid}!CalendarId {
+    if (std.mem.indexOfScalar(u8, input, '[')) |ann_start| {
+        var c = Cursor{ .s = input[ann_start..] };
+        const cal = consumeAnnotations(&c) catch return error.Invalid;
+        if (!c.done()) return error.Invalid;
+        return calendarIdFromAnnotation(cal);
+    }
+    return CalendarId.iso8601();
+}
+
 /// Validate a UTC offset suffix `[+-]HH`, `[+-]HH:MM`,
 /// `[+-]HH:MM:SS`, `[+-]HH:MM:SS(.|,)fff`, or the compact colon-free
 /// forms — and require it to consume the whole slice. Hours ≤ 23,
