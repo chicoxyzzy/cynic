@@ -3497,6 +3497,24 @@ test "intl: BigInt.prototype.toLocaleString formats exact digits past 2^53 (§15
     );
 }
 
+test "intl: NumberFormat formats a decimal string exactly (§15.5.8 ToIntlMathematicalValue)" {
+    try requireFullBuild();
+    // A string argument is a mathematical value parsed digit-for-digit, not an
+    // f64 that would round 1.0000000000000001 to 1 or lose the low digits of an
+    // 18-digit integer. Anything not a plain signed decimal (exponent, hex,
+    // Infinity) still takes the f64 path.
+    try evalAssert1(
+        \\const nf = new Intl.NumberFormat('en-US', { maximumFractionDigits: 20 });
+        \\(nf.format('100000') === '100,000' &&
+        \\ nf.format('-100000') === '-100,000' &&
+        \\ nf.format('1.0000000000000001') === '1.0000000000000001' &&
+        \\ nf.format('-1.0000000000000001') === '-1.0000000000000001' &&
+        \\ nf.format('987654321987654321') === '987,654,321,987,654,321' &&
+        \\ nf.format('-987654321987654321') === '-987,654,321,987,654,321' &&
+        \\ nf.format('1000') === '1,000') ? 1 : 0
+    );
+}
+
 test "intl/temporal: DST arithmetic + Intl format paths are allocation-clean" {
     try requireFullBuild();
     // Not a behavioural assertion — a memory-safety net. The testing allocator

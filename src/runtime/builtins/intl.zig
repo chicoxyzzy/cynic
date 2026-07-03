@@ -1947,6 +1947,13 @@ fn numberFormatFormat(realm: *Realm, this_value: Value, args: []const Value) Nat
         const s = try formatNumericToBuf(realm, &rec.number_format, heap_mod.valueAsBigInt(v).?.toF64(), &buf, null);
         return makeStringValue(realm, s);
     }
+    // §15.5.8 — a string argument is a mathematical value: format a plain decimal
+    // string from its exact digits so precision past f64 survives. Exotic forms
+    // (exponent, hex, Infinity) fall through to the f64 path below.
+    if (v.isString()) {
+        if (try numberFormatDecimalStringExact(realm, &rec.number_format, v, &buf)) |s|
+            return makeStringValue(realm, s);
+    }
     const x = numberToF64(try toNumber(realm, v));
     const s = try formatNumericToBuf(realm, &rec.number_format, x, &buf, null);
     return makeStringValue(realm, s);
@@ -1995,6 +2002,71 @@ fn numberFormatBigIntExact(realm: *Realm, slots: *const intl.NumberFormatSlots, 
     // are supplied exactly, so the f64's lost low bits never reach the output.
     const x_sign = heap_mod.valueAsBigInt(v).?.toF64();
     return try formatNumericToBuf(realm, slots, x_sign, buf, .{ .int = int_buf[0..il], .frac = frac_buf[0..fl] });
+}
+
+/// §15.5.8 ToIntlMathematicalValue for a plain decimal string — parse the exact
+/// digits so a value past f64 precision (1.0000000000000001, an 18-digit
+/// integer) formats digit-for-digit. Returns null (deferring to the f64 path)
+/// for anything outside the bounded grammar: an exponent, hex/Infinity, a
+/// fraction longer than maximumFractionDigits (would need rounding), or a
+/// non-decimal style / exact-ineligible option. `buf` backs the result.
+fn numberFormatDecimalStringExact(realm: *Realm, slots: *const intl.NumberFormatSlots, v: Value, buf: []u8) NativeError!?[]const u8 {
+    if (!std.mem.eql(u8, slots.rounding_type, "fractionDigits")) return null;
+    if (slots.notation.len != 0 and !std.mem.eql(u8, slots.notation, "standard")) return null;
+    if (slots.rounding_increment != 1) return null;
+    if (slots.trailing_zero_display.len != 0 and !std.mem.eql(u8, slots.trailing_zero_display, "auto")) return null;
+    // Percent/currency/unit would need a decimal-point shift across the fraction.
+    if (slots.style.len != 0 and !std.mem.eql(u8, slots.style, "decimal")) return null;
+
+    const raw = try valueToStringSlice(realm, v);
+    const s = std.mem.trim(u8, raw, " \t\n\r\x0b\x0c");
+    if (s.len == 0) return null;
+
+    const negative = s[0] == '-';
+    var i: usize = if (s[0] == '+' or s[0] == '-') 1 else 0;
+
+    const int_start = i;
+    while (i < s.len and std.ascii.isDigit(s[i])) i += 1;
+    const int_raw = s[int_start..i];
+
+    var frac_raw: []const u8 = "";
+    if (i < s.len and s[i] == '.') {
+        i += 1;
+        const f_start = i;
+        while (i < s.len and std.ascii.isDigit(s[i])) i += 1;
+        frac_raw = s[f_start..i];
+    }
+    // The whole string must be a bare decimal — no exponent, hex, Infinity, or
+    // trailing junk — with at least one digit; otherwise the f64 path handles it.
+    if (i != s.len) return null;
+    if (int_raw.len == 0 and frac_raw.len == 0) return null;
+
+    // Strip insignificant zeros: leading integer zeros (keep one), trailing
+    // fraction zeros (not part of the mathematical value).
+    var int_lo: usize = 0;
+    while (int_lo + 1 < int_raw.len and int_raw[int_lo] == '0') int_lo += 1;
+    const int_digits = if (int_raw.len == 0) "0" else int_raw[int_lo..];
+    var frac_hi: usize = frac_raw.len;
+    while (frac_hi > 0 and frac_raw[frac_hi - 1] == '0') frac_hi -= 1;
+    const frac_digits = frac_raw[0..frac_hi];
+
+    // A fraction longer than maximumFractionDigits needs rounding — defer.
+    const max_frac = slots.maximum_fraction_digits orelse 3;
+    if (frac_digits.len > max_frac) return null;
+    if (int_digits.len > 120) return null;
+
+    // Assemble the exact fraction: significant digits then min-fraction padding.
+    const min_frac = slots.minimum_fraction_digits orelse 0;
+    var frac_buf: [160]u8 = undefined;
+    const fl_sig = @min(frac_digits.len, frac_buf.len);
+    @memcpy(frac_buf[0..fl_sig], frac_digits[0..fl_sig]);
+    var fl = fl_sig;
+    while (fl < min_frac and fl < frac_buf.len) : (fl += 1) frac_buf[fl] = '0';
+
+    // renderNumber reads sign + zero-ness from `x` (magnitude irrelevant — the
+    // digits are supplied exactly); is_zero is recomputed from the digit runs.
+    const x_sign: f64 = if (negative) -1 else 1;
+    return try formatNumericToBuf(realm, slots, x_sign, buf, .{ .int = int_digits, .frac = frac_buf[0..fl] });
 }
 
 fn numberFormatFormatToParts(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
