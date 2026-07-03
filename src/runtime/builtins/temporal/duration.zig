@@ -918,8 +918,11 @@ fn durationTotal(realm: *Realm, this_value: Value, args: []const Value) NativeEr
                 // boundaries are re-anchored through the zone — a next-day
                 // boundary past the Instant range throws.
                 const start_wall = temporal.getISODateTimeFor(z.time_zone, z.epoch_ns);
-                const end_wall = temporal.getISODateTimeFor(z.time_zone, target_epoch);
-                const base_diff = temporal.differenceISODateTime(start_wall, end_wall, unit);
+                // DST-aware base difference: a 23/25-h fold day makes the
+                // wall-clock date diff wrong (ISO calendar — a zoned relativeTo
+                // carries no calendar slot).
+                const base_diff = shared.differenceZonedDateTime(z.epoch_ns, target_epoch, z.time_zone, temporal.CalendarId.iso8601(), unit) orelse
+                    return throwRangeError(realm, "duration is out of range relative to relativeTo");
                 break :blk temporal.totalRelativeZonedDateTime(start_wall, z.time_zone, z.epoch_ns, base_diff, target_epoch, unit) orelse
                     return throwRangeError(realm, "duration is out of range relative to relativeTo");
             },
