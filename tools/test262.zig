@@ -4167,7 +4167,7 @@ fn writeNotPassing(
         \\
     );
 
-    var buf: [512]u8 = undefined;
+    var buf: [1024]u8 = undefined; // detail cells are long-form prose — headroom over 512
     const cls = stats.fail_by_class;
     const class_rows = [_]struct { idx: FailClass, label: []const u8, detail: []const u8 }{
         .{ .idx = .no_strict, .label = "sloppy-mode-only fixtures", .detail = "`flags: [noStrict]` — Cynic is strict-only by design (`with`, sloppy direct-eval `arguments` bindings, legacy S11-era semantics, ...)" },
