@@ -68,9 +68,20 @@ const SectionKind = enum(u8) {
     territory_aliases = 15,
 };
 
-// ── container parse (lazy, single-threaded init is fine: idempotent) ──────────
+// ── container parse (lazy; thread-safe one-shot init) ────────────────────────
+//
+// The test262 harness runs one Realm per worker thread and every intl
+// formatting path funnels through `ensureInit`, so the first CLDR access races
+// across workers. A plain `init_done` flag let a racer observe it `true` before
+// the payload slices were published, then read an empty payload set and fall
+// back to structural / Latin-numeral output — a nondeterministic wrong result
+// (never a crash). Init is now an atomic `uninit → building → done` one-shot:
+// the CAS winner parses the blob and publishes `done` with a release store;
+// racers spin on an acquire load until the payloads are visible. Mirrors the
+// pattern in `unicode/perlex_props.zig`.
 
-var init_done: bool = false;
+const InitState = enum(u8) { uninit, building, done };
+var init_state = std.atomic.Value(u8).init(@intFromEnum(InitState.uninit));
 var init_ok: bool = false;
 var card_payload: []const u8 = &.{};
 var ord_payload: []const u8 = &.{};
@@ -93,9 +104,38 @@ fn embedBlob() []const u8 {
     return @embedFile("cynic_cldr.bin");
 }
 
+/// Parse the embedded CLDR container into the payload slices exactly once
+/// across threads, then report whether the data is usable. The winner of the
+/// `uninit`→`building` CAS runs `parseContainer` and publishes `done`; racers
+/// spin until the payloads are visible (`release`/`acquire` pair the parse's
+/// writes to the reading thread).
 fn ensureInit() bool {
-    if (init_done) return init_ok;
-    init_done = true;
+    if (init_state.load(.acquire) != @intFromEnum(InitState.done)) initOnce();
+    return init_ok;
+}
+
+fn initOnce() void {
+    if (init_state.cmpxchgStrong(
+        @intFromEnum(InitState.uninit),
+        @intFromEnum(InitState.building),
+        .acq_rel,
+        .acquire,
+    ) == null) {
+        init_ok = parseContainer();
+        init_state.store(@intFromEnum(InitState.done), .release);
+        return;
+    }
+    while (init_state.load(.acquire) != @intFromEnum(InitState.done)) {
+        std.atomic.spinLoopHint();
+    }
+}
+
+/// The container walk. Runs on exactly one thread (the CAS winner), so its
+/// writes to the module-level payload slices need no atomics — `initOnce`
+/// publishes them with a release store once this returns. Reports whether the
+/// blob parsed cleanly; on any structural error the payloads stay empty and
+/// callers fall back to structural formatting.
+fn parseContainer() bool {
     if (!available) return false;
     const blob = embedBlob();
     if (blob.len < 12) return false;
@@ -132,7 +172,6 @@ fn ensureInit() bool {
             else => {}, // unknown/future section — ignore
         }
     }
-    init_ok = true;
     return true;
 }
 
@@ -1622,4 +1661,42 @@ fn asciiEqlIgnoreCase(a: []const u8, b: []const u8) bool {
     if (a.len != b.len) return false;
     for (a, b) |x, y| if (std.ascii.toLower(x) != std.ascii.toLower(y)) return false;
     return true;
+}
+
+// ── concurrency regression test ──────────────────────────────────────────────
+
+const testing = std.testing;
+
+fn hammerNumberingSystem(out: *bool) void {
+    // The digit-substitution read path the `ar-EG` Arabic-Indic numerals
+    // fixture depends on: a half-published `ns_payload` returns null here and
+    // the formatter silently falls back to Latin digits (a wrong result).
+    out.* = numberingSystemDigitBase("arab") != null;
+}
+
+// Hammer the lazy init from many first-callers at once, re-opening the race
+// window each round, and assert every caller agrees with a post-join read. This
+// guards the atomic one-shot (`initOnce`) against a regression to unsynchronized
+// init. The race is timing-dependent, so this is a best-effort net, not a
+// deterministic reproducer — the authoritative gate is a threaded test262
+// intl402 sweep.
+test "cldr: concurrent first-callers see a consistent numbering-system table" {
+    const rounds = 64;
+    const n_threads = 8;
+    var round: usize = 0;
+    while (round < rounds) : (round += 1) {
+        // Force a cold state so the CAS election runs again this round.
+        init_state.store(@intFromEnum(InitState.uninit), .seq_cst);
+        init_ok = false;
+        var threads: [n_threads]std.Thread = undefined;
+        var results: [n_threads]bool = undefined;
+        for (0..n_threads) |i|
+            threads[i] = try std.Thread.spawn(.{}, hammerNumberingSystem, .{&results[i]});
+        for (0..n_threads) |i| threads[i].join();
+        const want = numberingSystemDigitBase("arab") != null;
+        for (results) |r| try testing.expectEqual(want, r);
+        // When the CLDR blob is linked, "arab" must resolve — a null here would
+        // mean a caller read the empty payload set.
+        if (available) try testing.expect(want);
+    }
 }

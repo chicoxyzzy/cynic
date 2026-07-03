@@ -31,7 +31,15 @@ const max_zones: usize = 1024;
 var zone_storage: [max_zones]ZoneEntry = undefined;
 var zone_count: usize = 0;
 var body_base: []const u8 = &.{};
-var init_done: bool = false;
+// Thread-safe one-shot init: the tzdb is parsed once across all worker
+// threads. A plain `init_done` flag let a racer observe it `true` before
+// `zone_storage` / `zone_count` were published, resolving IANA zones against a
+// half-filled table — a nondeterministic wrong offset (never a crash). The CAS
+// winner fills the table and publishes `done` with a release store; racers spin
+// on an acquire load until it is visible. Mirrors `cldr.zig` /
+// `unicode/perlex_props.zig`.
+const InitState = enum(u8) { uninit, building, done };
+var init_state = std.atomic.Value(u8).init(@intFromEnum(InitState.uninit));
 var init_ok: bool = false;
 
 fn embedBlob() []const u8 {
@@ -40,9 +48,37 @@ fn embedBlob() []const u8 {
     return @embedFile("cynic_tzdb.bin");
 }
 
+/// Parse the embedded tzdb index into `zone_storage` exactly once across
+/// threads, then report whether the data is usable. The winner of the
+/// `uninit`→`building` CAS runs `parseIndex` and publishes `done`; racers spin
+/// until the zone table is visible (`release`/`acquire` pair the parse's writes
+/// to the reading thread).
 fn ensureInit() bool {
-    if (init_done) return init_ok;
-    init_done = true;
+    if (init_state.load(.acquire) != @intFromEnum(InitState.done)) initOnce();
+    return init_ok;
+}
+
+fn initOnce() void {
+    if (init_state.cmpxchgStrong(
+        @intFromEnum(InitState.uninit),
+        @intFromEnum(InitState.building),
+        .acq_rel,
+        .acquire,
+    ) == null) {
+        init_ok = parseIndex();
+        init_state.store(@intFromEnum(InitState.done), .release);
+        return;
+    }
+    while (init_state.load(.acquire) != @intFromEnum(InitState.done)) {
+        std.atomic.spinLoopHint();
+    }
+}
+
+/// The index walk. Runs on exactly one thread (the CAS winner), so its writes
+/// to `zone_storage` / `zone_count` / `body_base` need no atomics — `initOnce`
+/// publishes them with a release store once this returns. Reports whether the
+/// blob parsed cleanly; on any structural error the table stays empty.
+fn parseIndex() bool {
     if (!available) return false;
     const blob = embedBlob();
     if (blob.len < 12) return false;
@@ -73,7 +109,6 @@ fn ensureInit() bool {
         const end = @as(usize, z.data_off) + @as(usize, z.data_len);
         if (end > body_base.len) return false;
     }
-    init_ok = true;
     return true;
 }
 
@@ -680,4 +715,36 @@ test "tzdata: Asia/Tokyo fixed offset" {
     if (!available) return error.SkipZigTest;
     const any: i128 = 0;
     try testing.expectEqual(@as(i64, 9 * 3600) * 1_000_000_000, offsetNanosecondsFor("Asia/Tokyo", any));
+}
+
+fn hammerHasZone(out: *bool) void {
+    // Full gated read path: `ensureInit` then a `zone_storage` scan. A racer
+    // reading a half-filled table would miss the zone and return false.
+    out.* = hasZone("America/New_York");
+}
+
+// Hammer the lazy init from many first-callers at once, re-opening the race
+// window each round, and assert every caller agrees with a post-join read.
+// Guards the atomic one-shot against a regression to unsynchronized init; see
+// the companion test in `cldr.zig` for the rationale. Best-effort net — the
+// authoritative gate is a threaded test262 intl402 sweep.
+test "tzdata: concurrent first-callers resolve zones consistently" {
+    const rounds = 64;
+    const n_threads = 8;
+    var round: usize = 0;
+    while (round < rounds) : (round += 1) {
+        // Force a cold table so the CAS election runs again this round.
+        init_state.store(@intFromEnum(InitState.uninit), .seq_cst);
+        init_ok = false;
+        zone_count = 0;
+        body_base = &.{};
+        var threads: [n_threads]std.Thread = undefined;
+        var results: [n_threads]bool = undefined;
+        for (0..n_threads) |i|
+            threads[i] = try std.Thread.spawn(.{}, hammerHasZone, .{&results[i]});
+        for (0..n_threads) |i| threads[i].join();
+        const want = hasZone("America/New_York");
+        for (results) |r| try testing.expectEqual(want, r);
+        if (available) try testing.expect(want);
+    }
 }
