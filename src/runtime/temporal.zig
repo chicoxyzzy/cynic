@@ -3998,7 +3998,7 @@ pub fn isoYearMonthToString(rec: PlainYearMonthRecord, buf: []u8, calendar: Cale
 /// cursor — the DateSpecYearMonth (`YYYY-MM`, `YYYYMM`) grammar plus the
 /// full-date form an AnnotatedDateTime allows. A `±YYYYYY` expanded year
 /// is accepted in either separator style.
-fn parseIsoYearMonth(c: *Cursor) error{Invalid}!ParsedDate {
+fn parseIsoYearMonth(c: *Cursor, day_present: *bool) error{Invalid}!ParsedDate {
     var year: i64 = undefined;
     const lead = c.peek() orelse return error.Invalid;
     if (lead == '+' or lead == '-') {
@@ -4015,10 +4015,17 @@ fn parseIsoYearMonth(c: *Cursor) error{Invalid}!ParsedDate {
     const month: u32 = @intCast(c.fixedDigits(2) orelse return error.Invalid);
     if (month < 1 or month > 12) return error.Invalid;
     var day: u32 = 1;
+    // Whether the string carried a reference day (`YYYY-MM-DD` / `YYYYMMDD`)
+    // vs. a bare year-month — a non-ISO calendar annotation needs one.
+    day_present.* = false;
     if (extended) {
-        if (c.eat('-')) day = @intCast(c.fixedDigits(2) orelse return error.Invalid);
+        if (c.eat('-')) {
+            day = @intCast(c.fixedDigits(2) orelse return error.Invalid);
+            day_present.* = true;
+        }
     } else if (c.isDigit()) {
         day = @intCast(c.fixedDigits(2) orelse return error.Invalid);
+        day_present.* = true;
     }
     if (day < 1 or day > daysInIsoMonth(year, month)) return error.Invalid;
     return .{ .year = year, .month = month, .day = day };
@@ -4030,7 +4037,8 @@ fn parseIsoYearMonth(c: *Cursor) error{Invalid}!ParsedDate {
 /// UTC designator is rejected (a year-month has no time zone).
 pub fn parseTemporalYearMonthString(input: []const u8) error{Invalid}!PlainYearMonthRecord {
     var c = Cursor{ .s = input };
-    const date = try parseIsoYearMonth(&c);
+    var day_present = false;
+    const date = try parseIsoYearMonth(&c, &day_present);
     if (c.eatAny("Tt ")) {
         _ = try parseIsoTime(&c);
         if (c.eatAny("Zz")) {
@@ -4043,6 +4051,11 @@ pub fn parseTemporalYearMonthString(input: []const u8) error{Invalid}!PlainYearM
     if (!c.done()) return error.Invalid;
     const cal_id = try calendarIdFromAnnotation(calendar);
     if (!isoYearMonthWithinLimits(date.year, date.month)) return error.Invalid;
+    // §9.5.x — a day-less year-month (`YYYY-MM`) carries no reference day to
+    // convert, so it can't re-anchor a non-ISO calendar: "1976-11[u-ca=gregory]"
+    // is a RangeError while the full-date "1976-11-10[u-ca=gregory]" is valid.
+    // Mirrors the PlainMonthDay year-less rule in parseTemporalMonthDayString.
+    if (!day_present and !cal_id.isIso()) return error.Invalid;
     return .{
         .iso_year = @intCast(date.year),
         .iso_month = @intCast(date.month),
@@ -4155,6 +4168,11 @@ pub fn parseTemporalMonthDayString(input: []const u8) error{Invalid}!PlainMonthD
     if (!c.done()) return error.Invalid;
     const cal_id = try calendarIdFromAnnotation(calendar);
     if (year_less and !cal_id.isIso()) return error.Invalid;
+    // §10.5.x — a non-ISO calendar computes the month-day by converting the
+    // FULL ISO date, so that date must be representable: "-999999-01-01[u-ca=
+    // gregory]" is past the ISO limits and rejected. The ISO calendar discards
+    // the year (only the day was validated) so "-999999-10-01" stays valid.
+    if (!cal_id.isIso() and !isoDateWithinLimits(date.year, date.month, date.day)) return error.Invalid;
     // Carry the parsed ISO year (1972 for the year-less forms) so a non-ISO
     // calendar annotation on a full-date string re-anchors on the CORRECT date
     // ("2023-01-01[u-ca=hebrew]" is 8 Tevet, not the 1972-01-01 conversion). The
@@ -5154,6 +5172,14 @@ test "parseTemporalYearMonthString: optional day → reference day, default 1" {
     try testing.expectError(error.Invalid, parseTemporalYearMonthString("2020-13")); // month out of range
     try testing.expectError(error.Invalid, parseTemporalYearMonthString("2020-06-31")); // June has 30 days
     try testing.expectError(error.Invalid, parseTemporalYearMonthString("2020-06X")); // trailing junk
+    // §9.5.x — a day-less year-month can't re-anchor a non-ISO calendar, so
+    // "1976-11[u-ca=gregory]" is a RangeError; the full-date form (day present)
+    // is fine. Non-ISO calendars only exist at the stub/full intl tier.
+    if (intl_config.temporal_intl_extras) {
+        try testing.expectError(error.Invalid, parseTemporalYearMonthString("1976-11[u-ca=gregory]"));
+        try testing.expectError(error.Invalid, parseTemporalYearMonthString("2022-09[u-ca=hebrew]"));
+        _ = try parseTemporalYearMonthString("1976-11-10[u-ca=gregory]"); // day present → ok
+    }
 }
 
 test "isoMonthDayToString: reference year prepended only for always/critical" {
@@ -5190,6 +5216,14 @@ test "parseTemporalMonthDayString: year-less forms anchor to 1972, full dates ke
     try testing.expectError(error.Invalid, parseTemporalMonthDayString("13-01")); // month out of range
     try testing.expectError(error.Invalid, parseTemporalMonthDayString("06-31")); // June has 30 days
     try testing.expectError(error.Invalid, parseTemporalMonthDayString("06-15Z")); // trailing junk
+    _ = try parseTemporalMonthDayString("-999999-10-01"); // ISO: year discarded, in-range day
+    // §10.5.x — a non-ISO calendar converts the FULL ISO date, so a year past
+    // the ISO limits is rejected; the in-range full date is accepted.
+    if (intl_config.temporal_intl_extras) {
+        try testing.expectError(error.Invalid, parseTemporalMonthDayString("-999999-01-01[u-ca=gregory]"));
+        try testing.expectError(error.Invalid, parseTemporalMonthDayString("+999999-01-01[u-ca=chinese]"));
+        _ = try parseTemporalMonthDayString("1972-11-18[u-ca=gregory]"); // in-range full date → ok
+    }
 }
 
 test "parseTimeZoneIdentifier: UTC is ASCII case-insensitive" {
