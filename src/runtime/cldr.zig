@@ -67,6 +67,7 @@ const SectionKind = enum(u8) {
     language_aliases = 14,
     territory_aliases = 15,
     interval_formats = 16,
+    metazones = 17,
 };
 
 // ── container parse (lazy; thread-safe one-shot init) ────────────────────────
@@ -100,6 +101,7 @@ var un_payload: []const u8 = &.{};
 var lang_alias_payload: []const u8 = &.{};
 var territory_alias_payload: []const u8 = &.{};
 var iv_payload: []const u8 = &.{};
+var mz_payload: []const u8 = &.{};
 
 fn embedBlob() []const u8 {
     if (!available) return &.{};
@@ -172,6 +174,7 @@ fn parseContainer() bool {
             @intFromEnum(SectionKind.language_aliases) => lang_alias_payload = payload,
             @intFromEnum(SectionKind.territory_aliases) => territory_alias_payload = payload,
             @intFromEnum(SectionKind.interval_formats) => iv_payload = payload,
+            @intFromEnum(SectionKind.metazones) => mz_payload = payload,
             else => {}, // unknown/future section — ignore
         }
     }
@@ -1397,6 +1400,86 @@ pub fn intervalFallback(locale: []const u8) ?[]const u8 {
     if (!ensureInit()) return null;
     var off = withCandidates(locale, findIntervalLocale) orelse return null;
     return readStr16(iv_payload, &off);
+}
+
+// ── metazones (Intl.DateTimeFormat timeZoneName long/short) ───────────────────
+
+/// The current metazone id for an IANA zone ("Europe/Vienna" → "Europe_Central"),
+/// or null.
+pub fn zoneToMetazone(zone: []const u8) ?[]const u8 {
+    if (!ensureInit() or mz_payload.len < 4) return null;
+    const count = std.mem.readInt(u32, mz_payload[0..4], .little);
+    var off: usize = 4;
+    var i: u32 = 0;
+    while (i < count) : (i += 1) {
+        const zlen = readU8(mz_payload, &off) orelse return null;
+        const z = readBytes(mz_payload, &off, zlen) orelse return null;
+        const mlen = readU8(mz_payload, &off) orelse return null;
+        const m = readBytes(mz_payload, &off, mlen) orelse return null;
+        if (std.mem.eql(u8, z, zone)) return m;
+    }
+    return null;
+}
+
+fn mzSkipName(off: *usize) bool {
+    const mlen = readU8(mz_payload, off) orelse return false;
+    _ = readBytes(mz_payload, off, mlen) orelse return false;
+    var k: u8 = 0;
+    while (k < 6) : (k += 1) _ = readStr16(mz_payload, off) orelse return false;
+    return true;
+}
+
+/// Offset of the per-locale metazone-name section (skips the zone→metazone map).
+fn mzLocalesStart() ?usize {
+    if (mz_payload.len < 4) return null;
+    const count = std.mem.readInt(u32, mz_payload[0..4], .little);
+    var off: usize = 4;
+    var i: u32 = 0;
+    while (i < count) : (i += 1) {
+        const zlen = readU8(mz_payload, &off) orelse return null;
+        _ = readBytes(mz_payload, &off, zlen) orelse return null;
+        const mlen = readU8(mz_payload, &off) orelse return null;
+        _ = readBytes(mz_payload, &off, mlen) orelse return null;
+    }
+    return off;
+}
+
+fn findMetazoneLocale(key: []const u8) ?usize {
+    var off = mzLocalesStart() orelse return null;
+    const lcount = readU32(mz_payload, &off) orelse return null;
+    var i: u32 = 0;
+    while (i < lcount) : (i += 1) {
+        const klen = readU8(mz_payload, &off) orelse return null;
+        const k = readBytes(mz_payload, &off, klen) orelse return null;
+        const data_off = off; // at name_count
+        const ncount = readU32(mz_payload, &off) orelse return null;
+        var n: u32 = 0;
+        while (n < ncount) : (n += 1) if (!mzSkipName(&off)) return null;
+        if (asciiEqlIgnoreCase(k, key)) return data_off;
+    }
+    return null;
+}
+
+/// The metazone display name for (locale, metazone, kind), kind 0-5 =
+/// {long,short} × {generic,standard,daylight}. Null when absent/empty.
+pub fn metazoneName(locale: []const u8, meta: []const u8, kind: u8) ?[]const u8 {
+    if (!ensureInit() or kind >= 6) return null;
+    var off = withCandidates(locale, findMetazoneLocale) orelse return null;
+    const ncount = readU32(mz_payload, &off) orelse return null;
+    var n: u32 = 0;
+    while (n < ncount) : (n += 1) {
+        const mlen = readU8(mz_payload, &off) orelse return null;
+        const m = readBytes(mz_payload, &off, mlen) orelse return null;
+        if (std.mem.eql(u8, m, meta)) {
+            var k: u8 = 0;
+            while (k < kind) : (k += 1) _ = readStr16(mz_payload, &off) orelse return null;
+            const s = readStr16(mz_payload, &off) orelse return null;
+            return if (s.len == 0) null else s;
+        }
+        var k: u8 = 0;
+        while (k < 6) : (k += 1) _ = readStr16(mz_payload, &off) orelse return null;
+    }
+    return null;
 }
 
 fn readU16(buf: []const u8, off: *usize) ?u16 {

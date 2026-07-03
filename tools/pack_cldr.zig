@@ -51,6 +51,7 @@ const SectionKind = enum(u8) {
     language_aliases = 14,
     territory_aliases = 15,
     interval_formats = 16,
+    metazones = 17,
 };
 
 /// RTF units in fixed order (year … second); each packs 3 styles (long /
@@ -177,13 +178,14 @@ pub fn main(init: std.process.Init) !void {
     const lang_aliases = try loadLanguageAliases(arena, io, json_root);
     const territory_aliases = try loadTerritoryAliases(arena, io, json_root);
     const interval_formats = try loadIntervalFormats(arena, io, json_root);
+    const metazones = try loadMetazones(arena, io, json_root);
 
-    const blob = try pack(allocator, cardinal, ordinal, numbers, ns_table, dates, display, currencies, likely, list_patterns, relative_time, compact, units, lang_aliases, territory_aliases, interval_formats);
+    const blob = try pack(allocator, cardinal, ordinal, numbers, ns_table, dates, display, currencies, likely, list_patterns, relative_time, compact, units, lang_aliases, territory_aliases, interval_formats, metazones);
     defer allocator.free(blob);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = out_path, .data = blob });
 
-    var buf: [600]u8 = undefined;
-    const msg = try std.fmt.bufPrint(&buf, "pack_cldr: wrote {s} ({d} bytes) — cardinal {d}, ordinal {d}, numbers {d}, ns {d}, dates {d}, display {d}, currencies {d}, likely {d}, list_patterns {d}, relative_time {d}, compact {d}, units {d}, lang_aliases {d}, territory_aliases {d}, interval_formats {d}\n", .{ out_path, blob.len, cardinal.len, ordinal.len, numbers.len, ns_table.len, dates.len, display.len, currencies.locales.len, likely.len, list_patterns.len, relative_time.len, compact.len, units.len, lang_aliases.len, territory_aliases.len, interval_formats.len });
+    var buf: [680]u8 = undefined;
+    const msg = try std.fmt.bufPrint(&buf, "pack_cldr: wrote {s} ({d} bytes) — cardinal {d}, ordinal {d}, numbers {d}, ns {d}, dates {d}, display {d}, currencies {d}, likely {d}, list_patterns {d}, relative_time {d}, compact {d}, units {d}, lang_aliases {d}, territory_aliases {d}, interval_formats {d}, metazones {d}/{d}\n", .{ out_path, blob.len, cardinal.len, ordinal.len, numbers.len, ns_table.len, dates.len, display.len, currencies.locales.len, likely.len, list_patterns.len, relative_time.len, compact.len, units.len, lang_aliases.len, territory_aliases.len, interval_formats.len, metazones.map.len, metazones.locales.len });
     try std.Io.File.stdout().writeStreamingAll(io, msg);
 }
 
@@ -257,12 +259,13 @@ fn pack(
     lang_aliases: []LangAliasEntry,
     territory_aliases: []TerritoryAliasEntry,
     interval_formats: []IntervalLocale,
+    metazones: MetaZoneData,
 ) ![]u8 {
     var payloads: std.ArrayListUnmanaged(u8) = .empty;
     defer payloads.deinit(gpa);
 
     const SectionDir = struct { kind: SectionKind, off: u32, len: u32 };
-    var dirs: [16]SectionDir = undefined;
+    var dirs: [17]SectionDir = undefined;
 
     const card_start: u32 = @intCast(payloads.items.len);
     try writePluralPayload(gpa, &payloads, cardinal);
@@ -327,6 +330,10 @@ fn pack(
     const iv_start: u32 = @intCast(payloads.items.len);
     try writeIntervalFormatsPayload(gpa, &payloads, interval_formats);
     dirs[15] = .{ .kind = .interval_formats, .off = iv_start, .len = @as(u32, @intCast(payloads.items.len)) - iv_start };
+
+    const mz_start: u32 = @intCast(payloads.items.len);
+    try writeMetazonesPayload(gpa, &payloads, metazones);
+    dirs[16] = .{ .kind = .metazones, .off = mz_start, .len = @as(u32, @intCast(payloads.items.len)) - mz_start };
 
     // Header + directory size, so we can fix up payload offsets to be absolute.
     const header_len: u32 = 4 + 1 + 3 + 4; // magic, ver, reserved, section_count
@@ -1456,6 +1463,95 @@ fn writeIntervalFormatsPayload(gpa: std.mem.Allocator, buf: *std.ArrayListUnmana
             try appendStr8(gpa, buf, e.skeleton);
             try buf.append(gpa, e.field);
             try appendStr16(gpa, buf, e.pattern);
+        }
+    }
+}
+
+// ── metazones (Intl.DateTimeFormat timeZoneName long/short) ───────────────────
+
+const MetaZoneMapEntry = struct { zone: []const u8, meta: []const u8 };
+const MetaZoneName = struct {
+    meta: []const u8,
+    // long / short × generic / standard / daylight ("" when absent).
+    names: [6][]const u8,
+};
+const MetaZoneLocale = struct {
+    key: []const u8,
+    names: []MetaZoneName,
+    fn lessThan(_: void, a: MetaZoneLocale, b: MetaZoneLocale) bool {
+        return std.mem.lessThan(u8, a.key, b.key);
+    }
+};
+const MetaZoneData = struct { map: []MetaZoneMapEntry, locales: []MetaZoneLocale };
+
+/// The current IANA-zone → metazone map (metaZones.json; entries with a `_to`
+/// end date are historical and skipped) + per-locale metazone display names
+/// (timeZoneNames.json).
+fn loadMetazones(arena: std.mem.Allocator, io: std.Io, json_root: []const u8) !MetaZoneData {
+    var map: std.ArrayListUnmanaged(MetaZoneMapEntry) = .empty;
+    {
+        const path = try std.fmt.allocPrint(arena, "{s}/cldr-core/supplemental/metaZones.json", .{json_root});
+        if (std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(4 * 1024 * 1024))) |bytes| {
+            const root = try std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{});
+            const arr = root.object.get("supplemental").?.object.get("metaZones").?.object.get("metazones").?.array;
+            for (arr.items) |item| {
+                const mz = item.object.get("mapZone").?.object;
+                if (mz.get("_to") != null) continue; // historical mapping
+                const zone = (mz.get("_type") orelse continue).string;
+                const meta = (mz.get("_other") orelse continue).string;
+                try map.append(arena, .{ .zone = try arena.dupe(u8, zone), .meta = try arena.dupe(u8, meta) });
+            }
+        } else |_| {}
+    }
+
+    const kinds = [6][2][]const u8{
+        .{ "long", "generic" },  .{ "long", "standard" },  .{ "long", "daylight" },
+        .{ "short", "generic" }, .{ "short", "standard" }, .{ "short", "daylight" },
+    };
+    var out: std.ArrayListUnmanaged(MetaZoneLocale) = .empty;
+    for (modern_locales) |loc| {
+        const path = try std.fmt.allocPrint(arena, "{s}/cldr-dates-full/main/{s}/timeZoneNames.json", .{ json_root, loc });
+        const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(4 * 1024 * 1024)) catch continue;
+        const root = std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{}) catch continue;
+        var mit = root.object.get("main").?.object.iterator();
+        const le = mit.next() orelse continue;
+        const tzn = le.value_ptr.*.object.get("dates").?.object.get("timeZoneNames").?.object;
+        const meta_obj = if (tzn.get("metazone")) |v| v.object else continue;
+        var names: std.ArrayListUnmanaged(MetaZoneName) = .empty;
+        var it = meta_obj.iterator();
+        while (it.next()) |e| {
+            if (e.value_ptr.* != .object) continue;
+            var n: MetaZoneName = .{ .meta = try arena.dupe(u8, e.key_ptr.*), .names = .{ "", "", "", "", "", "" } };
+            var any = false;
+            for (kinds, 0..) |k, i| {
+                if (e.value_ptr.*.object.get(k[0])) |w| {
+                    if (w == .object) if (w.object.get(k[1])) |v| if (v == .string) {
+                        n.names[i] = try arena.dupe(u8, v.string);
+                        any = true;
+                    };
+                }
+            }
+            if (any) try names.append(arena, n);
+        }
+        if (names.items.len > 0) try out.append(arena, .{ .key = loc, .names = names.items });
+    }
+    std.sort.block(MetaZoneLocale, out.items, {}, MetaZoneLocale.lessThan);
+    return .{ .map = map.items, .locales = out.items };
+}
+
+fn writeMetazonesPayload(gpa: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), data: MetaZoneData) !void {
+    try appendU32(gpa, buf, data.map.len);
+    for (data.map) |m| {
+        try appendStr8(gpa, buf, m.zone);
+        try appendStr8(gpa, buf, m.meta);
+    }
+    try appendU32(gpa, buf, data.locales.len);
+    for (data.locales) |l| {
+        try appendStr8(gpa, buf, l.key);
+        try appendU32(gpa, buf, l.names.len);
+        for (l.names) |n| {
+            try appendStr8(gpa, buf, n.meta);
+            for (n.names) |s| try appendStr16(gpa, buf, s);
         }
     }
 }

@@ -3894,8 +3894,10 @@ fn applyTemporalToLocaleDefaults(slots: *intl.DateTimeFormatSlots, v: Value) voi
             slots.hour = "numeric";
             slots.minute = "numeric";
             slots.second = "numeric";
-            // §6.3.x — the ZonedDateTime defaults also show the zone.
-            slots.time_zone_name = "short";
+            // §6.3.x — the ZonedDateTime defaults also show the zone, but only
+            // when the caller gave no explicit timeZoneName (else "long" here
+            // would be clobbered back to "short").
+            if (slots.time_zone_name.len == 0) slots.time_zone_name = "short";
         },
         .plain_year_month => {
             slots.year = "numeric";
@@ -4548,11 +4550,43 @@ fn tzDisplay(slots: *const intl.DateTimeFormatSlots, epoch_ns: i128, style: []co
         if (std.mem.eql(u8, style, "long") or std.mem.eql(u8, style, "longGeneric")) return "Coordinated Universal Time";
         return "UTC"; // short / shortGeneric
     }
-    // Name-style fallback for a named zone without display data: the localized
-    // GMT offset, in the width matching the requested style (short → GMT+1,
-    // long → GMT+01:00) so the styles stay distinguishable.
+    // §11.5.x — the metazone display name ("Central European Standard Time")
+    // for the name styles: long/short × its DST state (generic when the style
+    // is *Generic, else daylight/standard from the offset). CLDR falls generic
+    // back to standard, and a missing name (no short entry) drops to the GMT
+    // offset below so the styles stay distinguishable.
     const long_form = std.mem.eql(u8, style, "long") or std.mem.eql(u8, style, "longGeneric");
+    const short_form = std.mem.eql(u8, style, "short") or std.mem.eql(u8, style, "shortGeneric");
+    if (long_form or short_form) {
+        // Resolve links to the primary IANA id (Asia/Calcutta → Asia/Kolkata) so
+        // an alias picks up the same metazone name; the resolved-options id keeps
+        // the original (uncanonicalized) zone.
+        const canon = @import("../tzdata.zig").primaryZoneName(slots.time_zone);
+        if (cldr.zoneToMetazone(canon)) |meta| {
+            const loc = slots.base.dataLocale();
+            const base: u8 = if (long_form) 0 else 3;
+            const generic = std.mem.endsWith(u8, style, "Generic");
+            const sub: u8 = if (generic) 0 else if (tzIsDst(slots.time_zone, epoch_ns)) 2 else 1;
+            if (cldr.metazoneName(loc, meta, base + sub)) |name| return name;
+            if (generic) { // generic → standard fallback
+                if (cldr.metazoneName(loc, meta, base + 1)) |name| return name;
+            }
+        }
+    }
+    // Name-style fallback for a zone without a metazone name: the localized GMT
+    // offset, in the width matching the requested style (short → GMT+1,
+    // long → GMT+01:00) so the styles stay distinguishable.
     return fmtGmtOffset(off_ns, long_form, buf);
+}
+
+/// Whether an instant is in daylight-saving time in the zone: its offset exceeds
+/// the standard (minimum) offset sampled half a year to either side.
+fn tzIsDst(tz: []const u8, epoch_ns: i128) bool {
+    const half_year: i128 = 183 * 24 * 3600 * 1_000_000_000;
+    const off = tzOffsetNs(tz, epoch_ns);
+    const off_a = tzOffsetNs(tz, epoch_ns + half_year);
+    const off_b = tzOffsetNs(tz, epoch_ns - half_year);
+    return off > @min(off_a, off_b);
 }
 
 /// The pattern hour-field letter for a resolved hour cycle (0 = leave as-is).
