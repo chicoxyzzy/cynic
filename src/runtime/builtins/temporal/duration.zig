@@ -778,7 +778,7 @@ fn durationRound(realm: *Realm, this_value: Value, args: []const Value) NativeEr
                 }
                 const base_diff = temporal.differenceISODateTime(s, target, largest_u);
                 if (smallest_u == .nanosecond and increment == 1) break :blk base_diff;
-                break :blk temporal.roundRelativeDateTime(s, target, base_diff, largest_u, smallest_u, increment, mode) orelse
+                break :blk temporal.roundRelativeDateTime(s, target, base_diff, largest_u, smallest_u, increment, mode, null) orelse
                     return throwRangeError(realm, "rounded duration is outside the representable range");
             },
             // §7.3.21 zonedRelativeTo: DifferenceZonedDateTimeWithRounding.
@@ -822,9 +822,10 @@ fn durationRound(realm: *Realm, this_value: Value, args: []const Value) NativeEr
                         return throwRangeError(realm, "rounded duration is outside the representable range");
                 }
                 // smallestUnit a calendar unit or day → NudgeToCalendarUnit /
-                // NudgeToDayOrTime; under a fixed offset every day is 24 h, so
-                // the wall-clock nudge is exact.
-                break :blk temporal.roundRelativeDateTime(start_wall, end_wall, base_diff, largest_u, smallest_u, increment, mode) orelse
+                // NudgeToDayOrTime. A named zone makes the calendar-unit window
+                // boundaries DST-aware (a month is 30 d ± 1 h at a transition);
+                // a fixed offset keeps the uniform 24-h wall nudge.
+                break :blk temporal.roundRelativeDateTime(start_wall, end_wall, base_diff, largest_u, smallest_u, increment, mode, if (is_named) z.time_zone else null) orelse
                     return throwRangeError(realm, "rounded duration is outside the representable range");
             },
         };

@@ -452,6 +452,30 @@ test "intl/temporal: Instant.toString rounds a sub-minute zone offset to the nea
     );
 }
 
+test "intl/temporal: Duration.round months smallest is DST-aware for a zoned relativeTo" {
+    try requireIntlBuild();
+    if (!intl_config.has_locale_data) return error.SkipZigTest;
+    // §7.3.20 Duration.round — the month-boundary span is DST-aware for a zoned
+    // relativeTo (NudgeToCalendarUnit measures progress against the real
+    // instant), so a 1.5-month duration rounds against the true month length,
+    // not a uniform 24-h/day (test262 Duration/round/dst-rounding-result).
+    try evalAssert1(
+        \\const d = new Temporal.Duration(0, 1, 0, 15, 11, 30);
+        \\const rel = new Temporal.ZonedDateTime(950868000000000000n, "America/Vancouver");
+        \\const up = d.round({ smallestUnit: "months", relativeTo: rel });
+        \\if (up.months !== 2 || up.days !== 0) throw 0;
+        \\const down = d.round({ smallestUnit: "months", roundingMode: "halfTrunc", relativeTo: rel });
+        \\if (down.months !== 1 || down.days !== 0) throw 1;
+        \\// day rounding: 11h30m of a 23-h spring-forward day is 0.5 → 1 day
+        \\// (halfExpand) or 0 (halfTrunc); a uniform 24-h day would truncate to 0.
+        \\const dd = new Temporal.Duration(0, 0, 0, 0, 11, 30);
+        \\const rel2 = new Temporal.PlainDateTime(2000, 4, 2).toZonedDateTime("America/Vancouver");
+        \\if (dd.round({ relativeTo: rel2, smallestUnit: "days" }).days !== 1) throw 2;
+        \\if (dd.round({ relativeTo: rel2, smallestUnit: "days", roundingMode: "halfTrunc" }).days !== 0) throw 3;
+        \\1
+    );
+}
+
 test "intl/temporal: ZonedDateTime.getTimeZoneTransition compares at ns precision" {
     try requireIntlBuild();
     if (!intl_config.has_locale_data) return error.SkipZigTest;

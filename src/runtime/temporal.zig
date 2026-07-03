@@ -2906,11 +2906,14 @@ pub fn differenceISODate(d1: PlainDateRecord, d2: PlainDateRecord, largest: Larg
 /// Advance `start` by the held coarser units plus `r` of the `smallest`
 /// calendar unit — the candidate end date NudgeToCalendarUnit measures
 /// against. Returns null when the result leaves the representable range.
-fn addCalendarUnit(start: PlainDateRecord, smallest: LargestUnit, hy: i64, hm: i64, r: i64) ?PlainDateRecord {
+fn addCalendarUnit(start: PlainDateRecord, smallest: LargestUnit, hy: i64, hm: i64, hw: i64, r: i64) ?PlainDateRecord {
     return switch (smallest) {
         .year => addISODate(start, hy + r, 0, 0, 0, false),
         .month => addISODate(start, hy, hm + r, 0, 0, false),
         .week => addISODate(start, hy, hm, r, 0, false),
+        // Day is irregular only under a named zone (a 23/25-h DST day); the
+        // held year/month/week units carry it to the day-count boundary.
+        .day => addISODate(start, hy, hm, hw, r, false),
         else => unreachable, // irregular-length calendar units only.
     };
 }
@@ -2982,8 +2985,8 @@ pub fn roundRelativeDate(
     const r1: i64 = @divTrunc(unit_val, inc) * inc;
     const r2: i64 = r1 + inc * sign;
 
-    const end1 = addCalendarUnit(start, smallest, hy, hm, r1) orelse return null;
-    const end2 = addCalendarUnit(start, smallest, hy, hm, r2) orelse return null;
+    const end1 = addCalendarUnit(start, smallest, hy, hm, 0, r1) orelse return null;
+    const end2 = addCalendarUnit(start, smallest, hy, hm, 0, r2) orelse return null;
 
     // Progress of `dest` between the candidates, in epoch days, normalised so
     // the denominator is positive regardless of travel direction. `dest`
@@ -3025,7 +3028,7 @@ pub fn roundRelativeDate(
             .iso_month = start.iso_month,
             .iso_day = start.iso_day,
         };
-        return bubbleRelativeDateTime(start_dt, result, e2 * ns_per_day, largest, smallest, @intCast(sign));
+        return bubbleRelativeDateTime(start_dt, result, e2 * ns_per_day, largest, smallest, @intCast(sign), null);
     }
     return result;
 }
@@ -3188,9 +3191,13 @@ fn utcEpochNsOf(dt: PlainDateTimeRecord) i128 {
 /// §7.5.x ComputeNudgeWindow candidate epoch: `start.date` advanced by the
 /// held coarser units (`hy`, `hm`) plus `r` of the `smallest` calendar
 /// unit, recombined with `start`'s time-of-day. Null on range overflow.
-fn calendarWindowEpoch(start_date: PlainDateRecord, smallest: LargestUnit, hy: i64, hm: i64, r: i64, time_ns: i128) ?i128 {
-    const d = addCalendarUnit(start_date, smallest, hy, hm, r) orelse return null;
-    return @as(i128, daysFromCivil(d.iso_year, d.iso_month, d.iso_day)) * ns_per_day + time_ns;
+fn calendarWindowEpoch(start_date: PlainDateRecord, smallest: LargestUnit, hy: i64, hm: i64, hw: i64, r: i64, start: PlainDateTimeRecord, tz: ?TimeZone) ?i128 {
+    const d = addCalendarUnit(start_date, smallest, hy, hm, hw, r) orelse return null;
+    // A named zone: the calendar-unit boundary is a real instant, so its span
+    // from `start` is DST-aware (a month can be 30 d ± 1 h). Fixed / UTC: the
+    // boundary is the UTC wall epoch, a uniform 24-h/day.
+    if (tz) |t| return getEpochNanosecondsFor(t, PlainDateTimeRecord.combine(d, start.time()));
+    return @as(i128, daysFromCivil(d.iso_year, d.iso_month, d.iso_day)) * ns_per_day + timeRecordToNanoseconds(start.time());
 }
 
 /// Does `dest` lie within the inclusive [start, end] candidate window,
@@ -3220,9 +3227,9 @@ fn nudgeToCalendarUnitDateTime(
     mode: RoundingMode,
     sign: i32,
     dest_epoch: i128,
+    tz: ?TimeZone,
 ) ?DurationRecord {
     const start_date = start.date();
-    const start_time_ns = timeRecordToNanoseconds(start.time());
 
     const dy: i64 = @intFromFloat(diff.years);
     const dm: i64 = @intFromFloat(diff.months);
@@ -3231,6 +3238,7 @@ fn nudgeToCalendarUnitDateTime(
 
     var hy: i64 = 0;
     var hm: i64 = 0;
+    var hw: i64 = 0;
     var unit_val: i64 = 0;
     switch (smallest) {
         .year => unit_val = dy,
@@ -3243,6 +3251,14 @@ fn nudgeToCalendarUnitDateTime(
             hm = dm;
             unit_val = @divTrunc(dw * 7 + dd, 7);
         },
+        // Day is a NudgeToCalendarUnit unit only for a named zone (irregular
+        // DST-day length); the coarser year/month/week are held.
+        .day => {
+            hy = dy;
+            hm = dm;
+            hw = dw;
+            unit_val = dd;
+        },
         else => unreachable, // irregular-length calendar units only.
     }
 
@@ -3254,14 +3270,14 @@ fn nudgeToCalendarUnitDateTime(
     // irregularity), recompute one increment further out.
     var r1: i64 = base;
     var r2: i64 = base + inc * sign;
-    var start_epoch = calendarWindowEpoch(start_date, smallest, hy, hm, r1, start_time_ns) orelse return null;
-    var end_epoch = calendarWindowEpoch(start_date, smallest, hy, hm, r2, start_time_ns) orelse return null;
+    var start_epoch = calendarWindowEpoch(start_date, smallest, hy, hm, hw, r1, start, tz) orelse return null;
+    var end_epoch = calendarWindowEpoch(start_date, smallest, hy, hm, hw, r2, start, tz) orelse return null;
     var did_expand = false;
     if (!destInWindow(sign, start_epoch, end_epoch, dest_epoch)) {
         r1 = base + inc * sign;
         r2 = r1 + inc * sign;
-        start_epoch = calendarWindowEpoch(start_date, smallest, hy, hm, r1, start_time_ns) orelse return null;
-        end_epoch = calendarWindowEpoch(start_date, smallest, hy, hm, r2, start_time_ns) orelse return null;
+        start_epoch = calendarWindowEpoch(start_date, smallest, hy, hm, hw, r1, start, tz) orelse return null;
+        end_epoch = calendarWindowEpoch(start_date, smallest, hy, hm, hw, r2, start, tz) orelse return null;
         did_expand = true; // the retry shift is itself a calendar expansion.
     }
 
@@ -3287,6 +3303,7 @@ fn nudgeToCalendarUnitDateTime(
         .year => .{ .years = @floatFromInt(rounded_unit) },
         .month => .{ .years = @floatFromInt(hy), .months = @floatFromInt(rounded_unit) },
         .week => .{ .years = @floatFromInt(hy), .months = @floatFromInt(hm), .weeks = @floatFromInt(rounded_unit) },
+        .day => .{ .years = @floatFromInt(hy), .months = @floatFromInt(hm), .weeks = @floatFromInt(hw), .days = @floatFromInt(rounded_unit) },
         else => unreachable,
     };
 
@@ -3295,7 +3312,7 @@ fn nudgeToCalendarUnitDateTime(
     // with months). Per NudgeToCalendarUnit the nudged epoch when expanded is
     // always the window end (`didExpandCalendarUnit ? endEpochNs : …`).
     if (did_expand and smallest != .week) {
-        return bubbleRelativeDateTime(start, result, end_epoch, largest, smallest, sign);
+        return bubbleRelativeDateTime(start, result, end_epoch, largest, smallest, sign, tz);
     }
     return result;
 }
@@ -3317,6 +3334,7 @@ fn bubbleRelativeDateTime(
     largest: LargestUnit,
     smallest_bubble: LargestUnit,
     sign: i32,
+    tz: ?TimeZone,
 ) ?DurationRecord {
     const largest_idx: i64 = @intFromEnum(largest);
     const start_unit_idx: i64 = @intFromEnum(smallest_bubble);
@@ -3353,7 +3371,10 @@ fn bubbleRelativeDateTime(
             else => unreachable,
         }
         const end_date = end_date_opt orelse return null;
-        const end_epoch = @as(i128, daysFromCivil(end_date.iso_year, end_date.iso_month, end_date.iso_day)) * ns_per_day + start_time_ns;
+        const end_epoch = if (tz) |t|
+            (getEpochNanosecondsFor(t, PlainDateTimeRecord.combine(end_date, start.time())) orelse return null)
+        else
+            @as(i128, daysFromCivil(end_date.iso_year, end_date.iso_month, end_date.iso_day)) * ns_per_day + start_time_ns;
         const beyond = nudged_epoch - end_epoch;
         const beyond_sign: i32 = if (beyond < 0) -1 else if (beyond > 0) 1 else 0;
         if (beyond_sign != -sign) {
@@ -3425,7 +3446,7 @@ fn nudgeToDayOrTimeDateTime(
     // it is never week → always bubble-eligible. Bubbling only has an
     // effect when `largest` is a date unit (else it is a no-op).
     if (did_expand_days and date_category) {
-        result = bubbleRelativeDateTime(start, result, nudged_epoch, largest, .day, sign) orelse return null;
+        result = bubbleRelativeDateTime(start, result, nudged_epoch, largest, .day, sign, null) orelse return null;
     }
     return result;
 }
@@ -3447,17 +3468,22 @@ pub fn roundRelativeDateTime(
     smallest: LargestUnit,
     increment: i128,
     mode: RoundingMode,
+    tz: ?TimeZone,
 ) ?DurationRecord {
     const sign: i32 = durationSign(diff);
     if (sign == 0) return diff;
-    const dest_epoch = utcEpochNsOf(end);
+    // A named zone measures progress toward the real ending instant, so the
+    // calendar-unit window/dest epochs are DST-aware; fixed/UTC uses the wall
+    // epoch. (Time / day-or-finer smallestUnit under a named zone routes
+    // through NudgeToZonedTime in the caller, not here.)
+    const dest_epoch = if (tz) |t| (getEpochNanosecondsFor(t, end) orelse return null) else utcEpochNsOf(end);
 
-    // IsCalendarUnit(smallest): year / month / week have irregular length
-    // and route through NudgeToCalendarUnit; day-or-finer through
-    // NudgeToDayOrTime. (Day is irregular only under a real time zone,
-    // which the fixed-offset scope never has.)
-    if (@intFromEnum(smallest) < @intFromEnum(LargestUnit.day)) {
-        return nudgeToCalendarUnitDateTime(start, diff, largest, smallest, increment, mode, sign, dest_epoch);
+    // IsCalendarUnit(smallest): year / month / week have irregular length and
+    // route through NudgeToCalendarUnit. `day` is irregular too under a named
+    // zone (23/25-h DST day), so it joins them there; a fixed-offset day is a
+    // uniform 24 h and stays on NudgeToDayOrTime.
+    if (@intFromEnum(smallest) < @intFromEnum(LargestUnit.day) or (tz != null and smallest == .day)) {
+        return nudgeToCalendarUnitDateTime(start, diff, largest, smallest, increment, mode, sign, dest_epoch, tz);
     }
     return nudgeToDayOrTimeDateTime(start, diff, largest, smallest, increment, mode, sign, dest_epoch);
 }
@@ -3538,7 +3564,7 @@ pub fn nudgeToZonedTimeDateTime(
         const start_time_ns = timeRecordToNanoseconds(start.time());
         const end_wall_epoch = @as(i128, daysFromCivil(end_date.iso_year, end_date.iso_month, end_date.iso_day)) * ns_per_day + start_time_ns;
         const nudged_epoch = end_wall_epoch + rounded;
-        result = bubbleRelativeDateTime(start, result, nudged_epoch, largest, .day, sign) orelse return null;
+        result = bubbleRelativeDateTime(start, result, nudged_epoch, largest, .day, sign, null) orelse return null;
     }
     return result;
 }
@@ -3577,7 +3603,6 @@ pub fn dateDurationDays(anchor: PlainDateRecord, dur: DurationRecord) ?i128 {
 /// linearly between them. Null on range overflow.
 pub fn totalRelativeDateTime(start: PlainDateTimeRecord, diff: DurationRecord, dest_epoch: i128, unit: LargestUnit) ?f64 {
     const start_date = start.date();
-    const start_time_ns = timeRecordToNanoseconds(start.time());
     const sign: i32 = if (durationSign(diff) < 0) -1 else 1;
 
     const dy: i64 = @intFromFloat(diff.years);
@@ -3605,12 +3630,12 @@ pub fn totalRelativeDateTime(start: PlainDateTimeRecord, diff: DurationRecord, d
     // ComputeNudgeWindow at increment 1, then the spec's retry when `dest`
     // is not bracketed by the truncated window (a calendar irregularity).
     var r1: i64 = unit_val;
-    var start_epoch = calendarWindowEpoch(start_date, unit, hy, hm, r1, start_time_ns) orelse return null;
-    var end_epoch = calendarWindowEpoch(start_date, unit, hy, hm, r1 + sign, start_time_ns) orelse return null;
+    var start_epoch = calendarWindowEpoch(start_date, unit, hy, hm, 0, r1, start, null) orelse return null;
+    var end_epoch = calendarWindowEpoch(start_date, unit, hy, hm, 0, r1 + sign, start, null) orelse return null;
     if (!destInWindow(sign, start_epoch, end_epoch, dest_epoch)) {
         r1 = unit_val + sign;
-        start_epoch = calendarWindowEpoch(start_date, unit, hy, hm, r1, start_time_ns) orelse return null;
-        end_epoch = calendarWindowEpoch(start_date, unit, hy, hm, r1 + sign, start_time_ns) orelse return null;
+        start_epoch = calendarWindowEpoch(start_date, unit, hy, hm, 0, r1, start, null) orelse return null;
+        end_epoch = calendarWindowEpoch(start_date, unit, hy, hm, 0, r1 + sign, start, null) orelse return null;
     }
 
     // total = r1 + sign·(dest − start)/(end − start), formed as the single
@@ -5473,7 +5498,7 @@ fn roundDT(
     mode: RoundingMode,
 ) ?DurationRecord {
     const diff = differenceISODateTime(start, end, largest);
-    return roundRelativeDateTime(start, end, diff, largest, smallest, inc, mode);
+    return roundRelativeDateTime(start, end, diff, largest, smallest, inc, mode, null);
 }
 
 test "roundRelativeDateTime: year smallest rounds up past the half mark" {

@@ -918,7 +918,7 @@ fn differenceTemporalZonedDateTime(realm: *Realm, this_value: Value, args: []con
         var dr = if (smallest == .nanosecond and increment == 1)
             base_diff
         else
-            temporal.roundRelativeDateTime(start_wall, end_wall, base_diff, largest, smallest, increment, eff_mode) orelse
+            temporal.roundRelativeDateTime(start_wall, end_wall, base_diff, largest, smallest, increment, eff_mode, null) orelse
                 return throwRangeError(realm, "rounded ZonedDateTime is outside the representable range");
         if (is_since) {
             dr.years = negZero(dr.years);

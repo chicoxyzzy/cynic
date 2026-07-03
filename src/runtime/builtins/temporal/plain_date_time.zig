@@ -810,7 +810,7 @@ fn differenceTemporalDateTime(realm: *Realm, this_value: Value, args: []const Va
         var dr = if (smallest == .nanosecond and increment == 1)
             base_diff
         else
-            temporal.roundRelativeDateTime(this_dt, other_dt, base_diff, largest, smallest, increment, eff_mode) orelse
+            temporal.roundRelativeDateTime(this_dt, other_dt, base_diff, largest, smallest, increment, eff_mode, null) orelse
                 return throwRangeError(realm, "rounded PlainDateTime is outside the representable range");
         if (is_since) {
             dr.years = negZero(dr.years);
