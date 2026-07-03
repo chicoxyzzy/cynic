@@ -436,6 +436,22 @@ test "intl/temporal: PlainYearMonth.toString shows the reference day for a non-I
     );
 }
 
+test "intl/temporal: Instant.toString rounds a sub-minute zone offset to the nearest minute" {
+    try requireIntlBuild();
+    if (!intl_config.has_locale_data) return error.SkipZigTest;
+    // §11.1.x FormatDateTimeUTCOffsetRounded — the printed ±HH:MM offset rounds
+    // to the nearest minute (ties away from zero); the wall-clock keeps the
+    // exact offset. Africa/Monrovia was -00:44:30 at the epoch, so the offset
+    // prints -00:45 while the local time stays 23:15:30 (test262
+    // Instant/toString/timezone-offset).
+    try evalAssert1(
+        \\const i = new Temporal.Instant(0n);
+        \\if (i.toString({ timeZone: "Africa/Monrovia" }) !== "1969-12-31T23:15:30-00:45") throw 0;
+        \\if (i.toString({ timeZone: "America/New_York" }) !== "1969-12-31T19:00:00-05:00") throw 1;
+        \\1
+    );
+}
+
 test "intl: NumberFormat hanidec uses the non-contiguous ideograph digits" {
     try requireIntlBuild();
     if (!intl_config.has_locale_data) return error.SkipZigTest;

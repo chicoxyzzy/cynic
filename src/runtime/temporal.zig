@@ -1918,7 +1918,7 @@ pub fn zonedDateTimeToString(rec: ZonedDateTimeRecord, buf: []u8, opts: ZonedToS
     const sub_ns: u32 = local.millisecond * 1_000_000 + local.microsecond * 1_000 + local.nanosecond;
     writeTimeFields(&w, local.hour, local.minute, local.second, sub_ns, opts.precision);
     if (opts.show_offset) {
-        const off_min: i32 = @intCast(@divTrunc(getOffsetNanosecondsFor(rec.time_zone, rec.epoch_ns), 60_000_000_000));
+        const off_min: i32 = roundOffsetNsToMinutes(getOffsetNanosecondsFor(rec.time_zone, rec.epoch_ns));
         writeOffsetMinutes(&w, off_min);
     }
     switch (opts.time_zone_name) {
@@ -1937,6 +1937,19 @@ pub fn zonedDateTimeToString(rec: ZonedDateTimeRecord, buf: []u8, opts: ZonedToS
 }
 
 /// Write a `±HH:MM` numeric UTC offset (whole-minute precision).
+/// FormatDateTimeUTCOffsetRounded (§11.1.x) — round a UTC offset in
+/// nanoseconds to the nearest minute, ties away from zero (halfExpand), for
+/// the ±HH:MM offset Instant / ZonedDateTime serialize. Only the printed
+/// offset rounds; the wall-clock fields keep the exact offset (so an IANA
+/// zone with a sub-minute historical offset — Africa/Monrovia's -00:44:30 at
+/// the epoch — prints -00:45 while the local time stays 23:15:30).
+fn roundOffsetNsToMinutes(off_ns: i64) i32 {
+    const minute_ns: i64 = 60_000_000_000;
+    const half = @divTrunc(minute_ns, 2);
+    const biased = if (off_ns < 0) off_ns - half else off_ns + half;
+    return @intCast(@divTrunc(biased, minute_ns));
+}
+
 fn writeOffsetMinutes(w: *Writer, off_min: i32) void {
     w.byte(if (off_min < 0) '-' else '+');
     const abs: u32 = @intCast(if (off_min < 0) -off_min else off_min);
@@ -2002,7 +2015,7 @@ pub fn instantToString(epoch_ns: i128, buf: []u8, precision: Precision, time_zon
     if (time_zone == null) {
         w.byte('Z');
     } else {
-        const off_min: i32 = @intCast(@divTrunc(getOffsetNanosecondsFor(tz, epoch_ns), 60_000_000_000));
+        const off_min: i32 = roundOffsetNsToMinutes(getOffsetNanosecondsFor(tz, epoch_ns));
         writeOffsetMinutes(&w, off_min);
     }
     return w.buf[0..w.len];
