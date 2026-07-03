@@ -2752,8 +2752,17 @@ fn renderNumber(slots: *const intl.NumberFormatSlots, x: f64, out: []Seg, exact:
                     append(out, &n, "fraction", substituteDigits(cf[0..cfl], digit_base, &sub2));
                 }
                 if (suffix.len > 0) {
+                    // The leading space between the number and the compact suffix
+                    // is a separate "literal" part — a plain space (long form) or
+                    // U+00A0 no-break space (short form, e.g. de "988 Mio.").
                     var ss: usize = 0;
-                    while (ss < suffix.len and suffix[ss] == ' ') ss += 1;
+                    while (ss < suffix.len) {
+                        if (suffix[ss] == ' ') {
+                            ss += 1;
+                        } else if (ss + 1 < suffix.len and suffix[ss] == 0xC2 and suffix[ss + 1] == 0xA0) {
+                            ss += 2;
+                        } else break;
+                    }
                     if (ss > 0) append(out, &n, "literal", suffix[0..ss]);
                     if (ss < suffix.len) append(out, &n, "compact", unquoteCldr(suffix[ss..], &uq));
                 }
