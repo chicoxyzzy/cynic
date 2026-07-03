@@ -3477,3 +3477,22 @@ test "intl: CanonicalizeLocaleList HasProperty + element type (§9.2.1)" {
         \\ }) === 'RangeError') ? 1 : 0
     );
 }
+
+test "intl: BigInt.prototype.toLocaleString formats exact digits past 2^53 (§15.5)" {
+    try requireFullBuild();
+    // §15.5.x — a BigInt is a mathematical integer, so its digits must survive
+    // formatting exactly. Routing 90071992547409910n (> 2^53) through an f64
+    // rounds it to ...904; the exact-integer path keeps every digit. The
+    // significant-digit and zero cases exercise the untouched f64 fallback.
+    try evalAssert1(
+        \\const b = 90071992547409910n;
+        \\(b.toLocaleString('en-US') === '90,071,992,547,409,910' &&
+        \\ b.toLocaleString('de-DE') === '90.071.992.547.409.910' &&
+        \\ (0n).toLocaleString('en-US') === '0' &&
+        \\ (-0n).toLocaleString('en-US') === '0' &&
+        \\ (88776655n).toLocaleString('en-US', {minimumFractionDigits: 3}) === '88,776,655.000' &&
+        \\ (88776655n).toLocaleString('en-US', {maximumSignificantDigits: 4}) === '88,780,000' &&
+        \\ (-90071992547409910n).toLocaleString('en-US') === '-90,071,992,547,409,910' &&
+        \\ (5n).toLocaleString('en-US', {style: 'percent'}) === '500%') ? 1 : 0
+    );
+}

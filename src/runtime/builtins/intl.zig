@@ -1935,17 +1935,66 @@ fn numberFormatFormat(realm: *Realm, this_value: Value, args: []const Value) Nat
         const n = if (heap_mod.isBigInt(v)) v else try toNumber(realm, v);
         return makeStringValue(realm, try valueToStringSlice(realm, n));
     }
-    // §15.5.x — a BigInt formats as its (approximated) numeric value: convert
-    // to f64 and run the same CLDR path as a Number, so grouping / digit
-    // symbols apply. (Exact-decimal digits for a > 2^53 BigInt await the
-    // mathematical-value pipeline.)
-    const x = if (heap_mod.valueAsBigInt(v)) |b|
-        b.toF64()
-    else
-        numberToF64(try toNumber(realm, v));
     var buf: [256]u8 = undefined;
-    const s = try formatNumericToBuf(realm, &rec.number_format, x, &buf);
+    // §15.5.x — a BigInt is a mathematical integer. In the default fraction-
+    // rounding mode its digits are exact, so format them straight from ToString
+    // rather than an f64 that would round away everything past 2^53. Exotic
+    // options (significant digits, scientific/compact notation, rounding
+    // increments, trailing-zero stripping) fall through to the shared f64 path.
+    if (heap_mod.isBigInt(v)) {
+        if (try numberFormatBigIntExact(realm, &rec.number_format, v, &buf)) |s|
+            return makeStringValue(realm, s);
+        const s = try formatNumericToBuf(realm, &rec.number_format, heap_mod.valueAsBigInt(v).?.toF64(), &buf, null);
+        return makeStringValue(realm, s);
+    }
+    const x = numberToF64(try toNumber(realm, v));
+    const s = try formatNumericToBuf(realm, &rec.number_format, x, &buf, null);
     return makeStringValue(realm, s);
+}
+
+/// §15.5.x — format a BigInt exactly when the resolved options permit a pure
+/// integer render (the default fraction-rounding mode, standard notation, unit
+/// rounding increment, no trailing-zero stripping). Returns null when any exotic
+/// option is active so the caller falls back to the shared f64 path; `buf` backs
+/// the returned string. A BigInt is an integer, so `maximumFractionDigits` never
+/// trims its integer part — the digits are exact by construction.
+fn numberFormatBigIntExact(realm: *Realm, slots: *const intl.NumberFormatSlots, v: Value, buf: []u8) NativeError!?[]const u8 {
+    if (!std.mem.eql(u8, slots.rounding_type, "fractionDigits")) return null;
+    if (slots.notation.len != 0 and !std.mem.eql(u8, slots.notation, "standard")) return null;
+    if (slots.rounding_increment != 1) return null;
+    if (slots.trailing_zero_display.len != 0 and !std.mem.eql(u8, slots.trailing_zero_display, "auto")) return null;
+
+    // Exact decimal ToString(BigInt): magnitude digits, with a leading '-' sign.
+    const dec = try valueToStringSlice(realm, v);
+    const negative = dec.len > 0 and dec[0] == '-';
+    const mag = if (negative) dec[1..] else dec;
+
+    // Buffer/segment-safety cap: renderNumber's fixed digit and Seg buffers bound
+    // the digit count. A pathological huge BigInt (far past any i128) falls back
+    // to the f64 path rather than risk a truncated render.
+    const is_percent = std.mem.eql(u8, slots.style, "percent");
+    const pct_extra: usize = if (is_percent) 2 else 0;
+    if (mag.len + pct_extra > 120) return null;
+
+    var int_buf: [128]u8 = undefined;
+    @memcpy(int_buf[0..mag.len], mag);
+    var il = mag.len;
+    if (is_percent) { // percent scales ×100 — an exact append for an integer
+        int_buf[il] = '0';
+        int_buf[il + 1] = '0';
+        il += 2;
+    }
+
+    // A BigInt has no fraction; minimumFractionDigits pads trailing zeros.
+    const min_frac = slots.minimum_fraction_digits orelse 0;
+    var frac_buf: [160]u8 = undefined;
+    const fl = @min(@as(usize, min_frac), frac_buf.len);
+    @memset(frac_buf[0..fl], '0');
+
+    // Sign is read from the f64 approximation (finite, correct sign); the digits
+    // are supplied exactly, so the f64's lost low bits never reach the output.
+    const x_sign = heap_mod.valueAsBigInt(v).?.toF64();
+    return try formatNumericToBuf(realm, slots, x_sign, buf, .{ .int = int_buf[0..il], .frac = frac_buf[0..fl] });
 }
 
 fn numberFormatFormatToParts(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
@@ -1960,7 +2009,7 @@ fn numberFormatFormatToParts(realm: *Realm, this_value: Value, args: []const Val
     }
     const x = numberToF64(try toNumber(realm, v));
     var segs: [48]Seg = undefined;
-    const n = renderNumber(&rec.number_format, x, &segs);
+    const n = renderNumber(&rec.number_format, x, &segs, null);
     var i: u32 = 0;
     while (i < n) : (i += 1) {
         const part = realm.heap.allocateObject() catch return error.OutOfMemory;
@@ -1988,7 +2037,7 @@ const en_dash = "\u{2013}";
 /// else ToString) — shared by formatRange / formatRangeToParts.
 fn rangeFormatOne(realm: *Realm, slots: *const intl.NumberFormatSlots, f: f64, buf: []u8) NativeError![]const u8 {
     if (!cldr.available) return valueToStringSlice(realm, Value.fromDouble(f));
-    return formatNumericToBuf(realm, slots, f, buf);
+    return formatNumericToBuf(realm, slots, f, buf, null);
 }
 
 fn numberFormatFormatRange(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
@@ -2043,8 +2092,8 @@ fn numberFormatFormatRangeToParts(realm: *Realm, this_value: Value, args: []cons
     } else {
         var segx: [48]Seg = undefined;
         var segy: [48]Seg = undefined;
-        const nx = renderNumber(&rec.number_format, xf, &segx);
-        const ny = renderNumber(&rec.number_format, yf, &segy);
+        const nx = renderNumber(&rec.number_format, xf, &segx, null);
+        const ny = renderNumber(&rec.number_format, yf, &segy, null);
         // Equal renderings collapse to a "shared"-sourced approximate run.
         var same = nx == ny;
         if (same) {
@@ -2176,9 +2225,16 @@ const default_number_data = cldr.NumberData{
     .pct_pattern = "#,##0%",
 };
 
+/// §15.5.x — pre-rounded exact integer/fraction digit runs supplied by a caller
+/// that must not go through the f64 magnitude path (a BigInt keeps every digit
+/// past 2^53). `int`/`frac` are magnitude-only ASCII digit runs; sign and style
+/// affixes are still derived from `x` / `slots`.
+const ExactDigits = struct { int: []const u8, frac: []const u8 };
+
 /// Render `x` into typed segments per the resolved NumberFormat options.
-/// Returns the number of segments written into `out`.
-fn renderNumber(slots: *const intl.NumberFormatSlots, x: f64, out: []Seg) u32 {
+/// Returns the number of segments written into `out`. When `exact` is non-null
+/// its digit runs replace the f64 rounding (used for exact BigInt formatting).
+fn renderNumber(slots: *const intl.NumberFormatSlots, x: f64, out: []Seg, exact: ?ExactDigits) u32 {
     const nd = if (cldr.numberData(slots.base.dataLocale())) |d| d else default_number_data;
     const digit_base: u32 = if (slots.base.numbering_system.len > 0 and !std.mem.eql(u8, slots.base.numbering_system, nd.ns))
         (cldr.numberingSystemDigitBase(slots.base.numbering_system) orelse nd.digit_base)
@@ -2206,9 +2262,19 @@ fn renderNumber(slots: *const intl.NumberFormatSlots, x: f64, out: []Seg) u32 {
     var ip_len: usize = 0;
     var is_zero = is_nan; // NaN groups with zero for signDisplay selection
     if (!non_finite) {
-        const scale: f64 = if (is_percent) 100 else 1;
-        const magnitude = @abs(x) * scale;
-        roundDigits(slots, magnitude, negative, &int_ascii, &int_len, &frac_ascii, &frac_len);
+        if (exact) |e| {
+            // Caller supplied exact digit runs (BigInt): copy them verbatim and
+            // skip the f64 rounding entirely. The runs are pre-scaled (percent
+            // ×100) and fit int_ascii/frac_ascii by the caller's length guard.
+            @memcpy(int_ascii[0..e.int.len], e.int);
+            int_len = e.int.len;
+            @memcpy(frac_ascii[0..e.frac.len], e.frac);
+            frac_len = e.frac.len;
+        } else {
+            const scale: f64 = if (is_percent) 100 else 1;
+            const magnitude = @abs(x) * scale;
+            roundDigits(slots, magnitude, negative, &int_ascii, &int_len, &frac_ascii, &frac_len);
+        }
 
         is_zero = blk: {
             for (int_ascii[0..int_len]) |c| if (c != '0') break :blk false;
@@ -3086,10 +3152,10 @@ fn int_buf_is_zero(int_buf: []const u8, len: usize) bool {
 }
 
 /// Render `x` into `buf` as a flat string (concatenation of segments).
-fn formatNumericToBuf(realm: *Realm, slots: *const intl.NumberFormatSlots, x: f64, buf: []u8) NativeError![]const u8 {
+fn formatNumericToBuf(realm: *Realm, slots: *const intl.NumberFormatSlots, x: f64, buf: []u8, exact: ?ExactDigits) NativeError![]const u8 {
     _ = realm;
     var segs: [48]Seg = undefined;
-    const n = renderNumber(slots, x, &segs);
+    const n = renderNumber(slots, x, &segs, exact);
     var len: usize = 0;
     var i: u32 = 0;
     while (i < n) : (i += 1) {
@@ -5142,7 +5208,7 @@ fn rtfApplyPattern(realm: *Realm, s: intl.RelativeTimeFormatSlots, pat: []const 
     nfs.rounding_increment = 1;
     nfs.rounding_mode = "halfExpand";
     nfs.trailing_zero_display = "auto";
-    const cnt = renderNumber(&nfs, abs_v, &segs);
+    const cnt = renderNumber(&nfs, abs_v, &segs, null);
 
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(realm.allocator);
@@ -5206,7 +5272,7 @@ fn rtfFormatToParts(realm: *Realm, this_value: Value, args: []const Value) Nativ
             nfs.rounding_increment = 1;
             nfs.rounding_mode = "halfExpand";
             nfs.trailing_zero_display = "auto";
-            const cnt = renderNumber(&nfs, abs_v, &segs);
+            const cnt = renderNumber(&nfs, abs_v, &segs, null);
             const idx = std.mem.indexOf(u8, pat, "{0}") orelse pat.len;
             if (idx > 0) try rtfEmitPart(realm, arr, &pn, "literal", pat[0..idx], null);
             var i: u32 = 0;
@@ -6080,7 +6146,7 @@ fn durationBuildParts(s: *const intl.DurationFormatSlots, vals: *const [10]f64, 
                 nf.rounding_mode = "trunc";
             }
             var segs: [48]Seg = undefined;
-            const nseg = renderNumber(&nf, value, &segs);
+            const nseg = renderNumber(&nf, value, &segs, null);
             if (!need_separator) {
                 elem_start[nitems] = nparts;
                 nitems += 1;
