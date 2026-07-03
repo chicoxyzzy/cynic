@@ -452,6 +452,22 @@ test "intl/temporal: Instant.toString rounds a sub-minute zone offset to the nea
     );
 }
 
+test "intl/temporal: ZonedDateTime.getTimeZoneTransition compares at ns precision" {
+    try requireIntlBuild();
+    if (!intl_config.has_locale_data) return error.SkipZigTest;
+    // §6.5.x getTimeZoneTransition — the POSIX-footer transition search must
+    // compare at nanosecond precision, not whole seconds: one ns after a
+    // spring-forward instant, "previous" is that instant, not the transition
+    // before it (test262 getTimeZoneTransition/nanoseconds-subtracted-or-added).
+    try evalAssert1(
+        \\const dt = Temporal.ZonedDateTime.from("2021-03-28T01:00:00Z[Europe/Berlin]");
+        \\if (dt.getTimeZoneTransition("previous").toString() !== "2020-10-25T02:00:00+01:00[Europe/Berlin]") throw 0;
+        \\if (dt.add({ nanoseconds: +1 }).getTimeZoneTransition("previous").toString() !== "2021-03-28T03:00:00+02:00[Europe/Berlin]") throw 1;
+        \\if (dt.add({ nanoseconds: -1 }).getTimeZoneTransition("previous").toString() !== "2020-10-25T02:00:00+01:00[Europe/Berlin]") throw 2;
+        \\1
+    );
+}
+
 test "intl/temporal: ZonedDateTime.since/until is DST-aware for a date largestUnit" {
     try requireIntlBuild();
     if (!intl_config.has_locale_data) return error.SkipZigTest;

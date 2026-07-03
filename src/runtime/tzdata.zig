@@ -249,10 +249,8 @@ pub fn transitionFor(zone_name: []const u8, epoch_ns: i128, next: bool) ?i128 {
     // Modern (slim) tzdata truncates the explicit transition table and leaves
     // recurring DST to the POSIX TZ footer (RFC 8536 §3.3). Compute the
     // footer's transitions for instants at or after the last explicit one.
-    const epoch_sec_i = @divFloor(epoch_ns, 1_000_000_000);
-    const epoch_sec: i64 = if (epoch_sec_i > std.math.maxInt(i64)) std.math.maxInt(i64) else if (epoch_sec_i < std.math.minInt(i64)) std.math.minInt(i64) else @intCast(epoch_sec_i);
     if (posixTzFooter(data)) |footer| {
-        if (posixTransitionSec(footer, epoch_sec, next)) |t| {
+        if (posixTransitionSec(footer, epoch_ns, next)) |t| {
             const t_ns: i128 = @as(i128, t) * 1_000_000_000;
             // The transition must stay within the representable Instant range
             // (±8.64×10^21 ns); beyond it there is no reportable transition.
@@ -268,9 +266,12 @@ pub fn transitionFor(zone_name: []const u8, epoch_ns: i128, next: bool) ?i128 {
 }
 
 /// The nearest POSIX-footer DST transition strictly after (`next`) or before
-/// (else) `epoch_sec`, or null when the footer has no recurring rule. Probes
+/// (else) `epoch_ns`, or null when the footer has no recurring rule. Probes
 /// the spring-forward and fall-back instants of the surrounding civil years.
-fn posixTransitionSec(tz_str: []const u8, epoch_sec: i64, next: bool) ?i64 {
+/// The comparison is in nanoseconds: a transition is a whole-second instant,
+/// so an `epoch_ns` a fraction of a second past it still counts it as the
+/// previous transition (whole-second truncation would drop it).
+fn posixTransitionSec(tz_str: []const u8, epoch_ns: i128, next: bool) ?i64 {
     const comma1 = std.mem.indexOfScalar(u8, tz_str, ',') orelse return null;
     const sd = parsePosixStdDst(tz_str[0..comma1]) orelse return null;
     if (sd.dst_off == null) return null;
@@ -278,6 +279,8 @@ fn posixTransitionSec(tz_str: []const u8, epoch_sec: i64, next: bool) ?i64 {
     const comma2 = std.mem.indexOfScalar(u8, rules, ',') orelse return null;
     const start_rule = rules[0..comma2];
     const end_rule = rules[comma2 + 1 ..];
+    const epoch_sec_i = @divFloor(epoch_ns, 1_000_000_000);
+    const epoch_sec: i64 = if (epoch_sec_i > std.math.maxInt(i64)) std.math.maxInt(i64) else if (epoch_sec_i < std.math.minInt(i64)) std.math.minInt(i64) else @intCast(epoch_sec_i);
     const y0 = civilYmdFromEpochSec(epoch_sec).year;
     var best: ?i64 = null;
     var yr: i32 = y0 - 1;
@@ -285,10 +288,11 @@ fn posixTransitionSec(tz_str: []const u8, epoch_sec: i64, next: bool) ?i64 {
         const start = ruleToUtcSec(start_rule, yr, sd.std_off) orelse continue;
         const end = ruleToUtcSec(end_rule, yr, sd.dst_off.?) orelse continue;
         for ([2]i64{ start, end }) |t| {
+            const t_ns: i128 = @as(i128, t) * 1_000_000_000;
             if (next) {
-                if (t > epoch_sec and (best == null or t < best.?)) best = t;
+                if (t_ns > epoch_ns and (best == null or t < best.?)) best = t;
             } else {
-                if (t < epoch_sec and (best == null or t > best.?)) best = t;
+                if (t_ns < epoch_ns and (best == null or t > best.?)) best = t;
             }
         }
     }
