@@ -1670,7 +1670,12 @@ fn numberFormatConstructor(realm: *Realm, this_value: Value, args: []const Value
     // §11.1.2 read order: numberingSystem is read right after localeMatcher,
     // before style. Explicit option wins, else the locale's CLDR default, else
     // latn. (The -u-nu- extension is resolved into the locale upstream.)
-    slots.base.numbering_system = try resolveNumberingSystem(realm, slots.base.dataLocale(), slots.base.locale, opts, false);
+    slots.base.numbering_system = try resolveNumberingSystem(realm, slots.base.dataLocale(), slots.base.locale, opts, true);
+    // §9.2.7 — the -u-nu keyword stays in the resolved locale only when it equals
+    // the resolved system; an overriding option (or the default) drops it.
+    if (intl.unicodeExtensionValue(slots.base.locale, "nu")) |kw| {
+        if (!std.ascii.eqlIgnoreCase(kw, slots.base.numbering_system)) try stripExtKeyword(realm, &slots.base, "nu");
+    }
     slots.style = try getOptionStringOwned(realm, opts, "style", &.{ "decimal", "percent", "currency", "unit" }, "decimal");
     const is_currency_style = std.mem.eql(u8, slots.style, "currency");
     const is_unit_style = std.mem.eql(u8, slots.style, "unit");
@@ -1900,12 +1905,10 @@ fn resolveNumberingSystem(realm: *Realm, locale: []const u8, ext_locale: []const
         }
     }
     // §9.2.7 — the resolved locale's -u-nu keyword (a supported system) selects
-    // the numbering system. `honor_nu` gates this: DateTimeFormat / DurationFormat
-    // render only small component numbers and honour it, but NumberFormat opts
-    // OUT because honouring it there unmasks digit-substituted output for values
-    // whose exact decimal expansion the f64 render path cannot yet produce (the
-    // nu-arab big-value fixtures); RelativeTimeFormat stays off too so its digits
-    // match NumberFormat's (the en-us-numbering-systems cross-check).
+    // the numbering system. `honor_nu` gates this; every service honours it (the
+    // caller strips the keyword from the resolved locale when an option or the
+    // default overrides it). It is a parameter only so a future non-honouring
+    // caller stays expressible.
     if (honor_nu and cldr.available) {
         if (intl.unicodeExtensionValue(ext_locale, "nu")) |nu| {
             if (intl.isValidUnicodeType(nu) and cldr.numberingSystemDigitBase(nu) != null)
@@ -5388,7 +5391,12 @@ fn rtfConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeE
     // § read order: numberingSystem, style, numeric. RelativeTimeFormat does
     // NOT honour the -u-nu keyword — its digits must match NumberFormat's, which
     // stays on latn until the exact-decimal path lands (en-us-numbering-systems).
-    slots.numbering_system = try resolveNumberingSystem(realm, slots.base.locale, slots.base.locale, opts, false);
+    slots.numbering_system = try resolveNumberingSystem(realm, slots.base.locale, slots.base.locale, opts, true);
+    // §9.2.7 — the -u-nu keyword stays in the resolved locale only when it equals
+    // the resolved system; an overriding option (or the default) drops it.
+    if (intl.unicodeExtensionValue(slots.base.locale, "nu")) |kw| {
+        if (!std.ascii.eqlIgnoreCase(kw, slots.numbering_system)) try stripExtKeyword(realm, &slots.base, "nu");
+    }
     slots.style = try getOptionStringOwned(realm, opts, "style", &.{ "long", "short", "narrow" }, "long");
     slots.numeric = try getOptionStringOwned(realm, opts, "numeric", &.{ "always", "auto" }, "always");
     try storeRecord(realm, inst, .{ .relative_time_format = slots });
