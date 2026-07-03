@@ -786,5 +786,7 @@ fn plainDateToZonedDateTime(realm: *Realm, this_value: Value, args: []const Valu
         break :blk temporal.getEpochNanosecondsFor(tz, wall) orelse
             return throwRangeError(realm, "ZonedDateTime is out of range");
     };
-    return createTemporalZonedDateTime(realm, .{ .epoch_ns = epoch, .time_zone = tz });
+    // §3.3.x — the result carries the receiver's calendar (a buddhist PlainDate
+    // yields a buddhist ZonedDateTime, not iso8601).
+    return createTemporalZonedDateTime(realm, .{ .epoch_ns = epoch, .time_zone = tz, .calendar = d.calendar });
 }
