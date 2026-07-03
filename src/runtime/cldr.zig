@@ -66,6 +66,7 @@ const SectionKind = enum(u8) {
     units = 13,
     language_aliases = 14,
     territory_aliases = 15,
+    interval_formats = 16,
 };
 
 // ── container parse (lazy; thread-safe one-shot init) ────────────────────────
@@ -98,6 +99,7 @@ var cp_payload: []const u8 = &.{};
 var un_payload: []const u8 = &.{};
 var lang_alias_payload: []const u8 = &.{};
 var territory_alias_payload: []const u8 = &.{};
+var iv_payload: []const u8 = &.{};
 
 fn embedBlob() []const u8 {
     if (!available) return &.{};
@@ -169,6 +171,7 @@ fn parseContainer() bool {
             @intFromEnum(SectionKind.units) => un_payload = payload,
             @intFromEnum(SectionKind.language_aliases) => lang_alias_payload = payload,
             @intFromEnum(SectionKind.territory_aliases) => territory_alias_payload = payload,
+            @intFromEnum(SectionKind.interval_formats) => iv_payload = payload,
             else => {}, // unknown/future section — ignore
         }
     }
@@ -1341,6 +1344,57 @@ fn copySubtags(out: *Subtags, lang: []const u8, script: []const u8, region: []co
     const rn = @min(region.len, out.region_buf.len);
     @memcpy(out.region_buf[0..rn], region[0..rn]);
     out.region = out.region_buf[0..rn];
+}
+
+// ── interval formats (Intl.DateTimeFormat.formatRange) ───────────────────────
+
+fn findIntervalLocale(key: []const u8) ?usize {
+    if (iv_payload.len < 4) return null;
+    const count = std.mem.readInt(u32, iv_payload[0..4], .little);
+    var off: usize = 4;
+    var i: u32 = 0;
+    while (i < count) : (i += 1) {
+        const klen = readU8(iv_payload, &off) orelse return null;
+        const k = readBytes(iv_payload, &off, klen) orelse return null;
+        const data_off = off; // at the fallback str16
+        _ = readStr16(iv_payload, &off) orelse return null; // fallback
+        const ec = readU32(iv_payload, &off) orelse return null;
+        var e: u32 = 0;
+        while (e < ec) : (e += 1) {
+            const slen = readU8(iv_payload, &off) orelse return null;
+            _ = readBytes(iv_payload, &off, slen) orelse return null; // skeleton
+            _ = readU8(iv_payload, &off) orelse return null; // field
+            _ = readStr16(iv_payload, &off) orelse return null; // pattern
+        }
+        if (asciiEqlIgnoreCase(k, key)) return data_off;
+    }
+    return null;
+}
+
+/// The interval pattern for (locale, skeleton, greatest-difference field), or
+/// null when that combination is absent. The pattern duplicates the field so the
+/// range renderer can split it (yMMMd.d = "MMM d – d, y").
+pub fn intervalPattern(locale: []const u8, skeleton: []const u8, field: u8) ?[]const u8 {
+    if (!ensureInit()) return null;
+    var off = withCandidates(locale, findIntervalLocale) orelse return null;
+    _ = readStr16(iv_payload, &off) orelse return null; // fallback
+    const ec = readU32(iv_payload, &off) orelse return null;
+    var e: u32 = 0;
+    while (e < ec) : (e += 1) {
+        const slen = readU8(iv_payload, &off) orelse return null;
+        const sk = readBytes(iv_payload, &off, slen) orelse return null;
+        const fc = readU8(iv_payload, &off) orelse return null;
+        const pat = readStr16(iv_payload, &off) orelse return null;
+        if (fc == field and std.mem.eql(u8, sk, skeleton)) return pat;
+    }
+    return null;
+}
+
+/// The locale's intervalFormatFallback ("{0} – {1}"), or null without data.
+pub fn intervalFallback(locale: []const u8) ?[]const u8 {
+    if (!ensureInit()) return null;
+    var off = withCandidates(locale, findIntervalLocale) orelse return null;
+    return readStr16(iv_payload, &off);
 }
 
 fn readU16(buf: []const u8, off: *usize) ?u16 {

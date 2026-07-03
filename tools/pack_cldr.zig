@@ -50,6 +50,7 @@ const SectionKind = enum(u8) {
     units = 13,
     language_aliases = 14,
     territory_aliases = 15,
+    interval_formats = 16,
 };
 
 /// RTF units in fixed order (year … second); each packs 3 styles (long /
@@ -174,13 +175,14 @@ pub fn main(init: std.process.Init) !void {
     const units = try loadUnits(arena, io, json_root);
     const lang_aliases = try loadLanguageAliases(arena, io, json_root);
     const territory_aliases = try loadTerritoryAliases(arena, io, json_root);
+    const interval_formats = try loadIntervalFormats(arena, io, json_root);
 
-    const blob = try pack(allocator, cardinal, ordinal, numbers, ns_table, dates, display, currencies, likely, list_patterns, relative_time, compact, units, lang_aliases, territory_aliases);
+    const blob = try pack(allocator, cardinal, ordinal, numbers, ns_table, dates, display, currencies, likely, list_patterns, relative_time, compact, units, lang_aliases, territory_aliases, interval_formats);
     defer allocator.free(blob);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = out_path, .data = blob });
 
-    var buf: [540]u8 = undefined;
-    const msg = try std.fmt.bufPrint(&buf, "pack_cldr: wrote {s} ({d} bytes) — cardinal {d}, ordinal {d}, numbers {d}, ns {d}, dates {d}, display {d}, currencies {d}, likely {d}, list_patterns {d}, relative_time {d}, compact {d}, units {d}, lang_aliases {d}, territory_aliases {d}\n", .{ out_path, blob.len, cardinal.len, ordinal.len, numbers.len, ns_table.len, dates.len, display.len, currencies.locales.len, likely.len, list_patterns.len, relative_time.len, compact.len, units.len, lang_aliases.len, territory_aliases.len });
+    var buf: [600]u8 = undefined;
+    const msg = try std.fmt.bufPrint(&buf, "pack_cldr: wrote {s} ({d} bytes) — cardinal {d}, ordinal {d}, numbers {d}, ns {d}, dates {d}, display {d}, currencies {d}, likely {d}, list_patterns {d}, relative_time {d}, compact {d}, units {d}, lang_aliases {d}, territory_aliases {d}, interval_formats {d}\n", .{ out_path, blob.len, cardinal.len, ordinal.len, numbers.len, ns_table.len, dates.len, display.len, currencies.locales.len, likely.len, list_patterns.len, relative_time.len, compact.len, units.len, lang_aliases.len, territory_aliases.len, interval_formats.len });
     try std.Io.File.stdout().writeStreamingAll(io, msg);
 }
 
@@ -253,12 +255,13 @@ fn pack(
     units: []UnitsLocale,
     lang_aliases: []LangAliasEntry,
     territory_aliases: []TerritoryAliasEntry,
+    interval_formats: []IntervalLocale,
 ) ![]u8 {
     var payloads: std.ArrayListUnmanaged(u8) = .empty;
     defer payloads.deinit(gpa);
 
     const SectionDir = struct { kind: SectionKind, off: u32, len: u32 };
-    var dirs: [15]SectionDir = undefined;
+    var dirs: [16]SectionDir = undefined;
 
     const card_start: u32 = @intCast(payloads.items.len);
     try writePluralPayload(gpa, &payloads, cardinal);
@@ -319,6 +322,10 @@ fn pack(
     const ta_start: u32 = @intCast(payloads.items.len);
     try writeTerritoryAliasPayload(gpa, &payloads, territory_aliases);
     dirs[14] = .{ .kind = .territory_aliases, .off = ta_start, .len = @as(u32, @intCast(payloads.items.len)) - ta_start };
+
+    const iv_start: u32 = @intCast(payloads.items.len);
+    try writeIntervalFormatsPayload(gpa, &payloads, interval_formats);
+    dirs[15] = .{ .kind = .interval_formats, .off = iv_start, .len = @as(u32, @intCast(payloads.items.len)) - iv_start };
 
     // Header + directory size, so we can fix up payload offsets to be absolute.
     const header_len: u32 = 4 + 1 + 3 + 4; // magic, ver, reserved, section_count
@@ -1361,6 +1368,80 @@ fn writeDatesPayload(gpa: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), l
         try appendStr16(gpa, buf, d.dt_long);
         try appendStr16(gpa, buf, d.dt_medium);
         try appendStr16(gpa, buf, d.dt_short);
+    }
+}
+
+// ── interval formats (Intl.DateTimeFormat.formatRange) ───────────────────────
+
+/// One (skeleton, greatest-difference field) → interval pattern. The field is
+/// the single UTS #35 letter CLDR keys the pattern by (d / M / y / H / h / m /
+/// a / B / G / …); the pattern duplicates that field so the range renderer can
+/// split it (e.g. yMMMd.d = "MMM d – d, y").
+const IntervalEntry = struct { skeleton: []const u8, field: u8, pattern: []const u8 };
+const IntervalLocale = struct {
+    key: []const u8,
+    fallback: []const u8,
+    entries: []IntervalEntry,
+    fn lessThan(_: void, a: IntervalLocale, b: IntervalLocale) bool {
+        return std.mem.lessThan(u8, a.key, b.key);
+    }
+};
+
+/// Per modern locale: the gregorian `dateTimeFormats.intervalFormats` — the
+/// per-skeleton greatest-difference range patterns plus intervalFormatFallback.
+fn loadIntervalFormats(arena: std.mem.Allocator, io: std.Io, json_root: []const u8) ![]IntervalLocale {
+    var out: std.ArrayListUnmanaged(IntervalLocale) = .empty;
+    for (modern_locales) |loc| {
+        const path = try std.fmt.allocPrint(arena, "{s}/cldr-dates-full/main/{s}/ca-gregorian.json", .{ json_root, loc });
+        const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(4 * 1024 * 1024)) catch continue;
+        const root = std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{}) catch continue;
+        const main_obj = root.object.get("main").?.object;
+        var mit = main_obj.iterator();
+        const le = mit.next() orelse continue;
+        const g = le.value_ptr.*.object.get("dates").?.object
+            .get("calendars").?.object.get("gregorian").?.object;
+        const dtf = g.get("dateTimeFormats") orelse continue;
+        if (dtf != .object) continue;
+        const ifmt_v = dtf.object.get("intervalFormats") orelse continue;
+        if (ifmt_v != .object) continue;
+
+        var fallback: []const u8 = "{0} – {1}";
+        var entries: std.ArrayListUnmanaged(IntervalEntry) = .empty;
+        var it = ifmt_v.object.iterator();
+        while (it.next()) |e| {
+            const k = e.key_ptr.*;
+            if (std.mem.eql(u8, k, "intervalFormatFallback")) {
+                if (e.value_ptr.* == .string) fallback = e.value_ptr.*.string;
+                continue;
+            }
+            if (e.value_ptr.* != .object) continue;
+            var fit = e.value_ptr.*.object.iterator();
+            while (fit.next()) |fe| {
+                if (fe.value_ptr.* != .string or fe.key_ptr.*.len == 0) continue;
+                try entries.append(arena, .{
+                    .skeleton = try arena.dupe(u8, k),
+                    .field = fe.key_ptr.*[0],
+                    .pattern = try arena.dupe(u8, fe.value_ptr.*.string),
+                });
+            }
+        }
+        try out.append(arena, .{ .key = loc, .fallback = try arena.dupe(u8, fallback), .entries = entries.items });
+    }
+    std.sort.block(IntervalLocale, out.items, {}, IntervalLocale.lessThan);
+    return out.items;
+}
+
+fn writeIntervalFormatsPayload(gpa: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), locales: []IntervalLocale) !void {
+    try appendU32(gpa, buf, locales.len);
+    for (locales) |l| {
+        try appendStr8(gpa, buf, l.key);
+        try appendStr16(gpa, buf, l.fallback);
+        try appendU32(gpa, buf, l.entries.len);
+        for (l.entries) |e| {
+            try appendStr8(gpa, buf, e.skeleton);
+            try buf.append(gpa, e.field);
+            try appendStr16(gpa, buf, e.pattern);
+        }
     }
 }
 

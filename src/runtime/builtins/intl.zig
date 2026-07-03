@@ -3919,6 +3919,248 @@ fn toDateTimeFormattable(realm: *Realm, v: Value) NativeError!Value {
     return Value.fromDouble(numberToF64(try toNumber(realm, v)));
 }
 
+/// §11.1.7 — derive the CLDR interval-format skeleton from the resolved
+/// component options. Only the plain date/time component case is handled (no
+/// weekday / era / dayPeriod / timeZoneName / dateStyle / timeStyle); anything
+/// else returns empty so the caller falls back to the per-endpoint path. Year /
+/// day / hour / minute / second normalise to a single letter (matching the CLDR
+/// keys yMd, Hm, …); month and hour carry their width / cycle.
+fn dtfSkeleton(slots: *const intl.DateTimeFormatSlots, buf: []u8) []const u8 {
+    if (slots.weekday.len > 0 or slots.era.len > 0 or slots.day_period.len > 0 or
+        slots.time_zone_name.len > 0 or slots.date_style.len > 0 or slots.time_style.len > 0)
+        return &.{};
+    var n: usize = 0;
+    const put = struct {
+        fn f(b: []u8, i: *usize, s: []const u8) void {
+            for (s) |c| if (i.* < b.len) {
+                b[i.*] = c;
+                i.* += 1;
+            };
+        }
+    }.f;
+    if (slots.year.len > 0) put(buf, &n, "y");
+    if (slots.month.len > 0) {
+        if (std.mem.eql(u8, slots.month, "2-digit")) put(buf, &n, "MM") else if (std.mem.eql(u8, slots.month, "short")) put(buf, &n, "MMM") else if (std.mem.eql(u8, slots.month, "long")) put(buf, &n, "MMMM") else if (std.mem.eql(u8, slots.month, "narrow")) put(buf, &n, "MMMMM") else put(buf, &n, "M");
+    }
+    if (slots.day.len > 0) put(buf, &n, "d");
+    if (slots.hour.len > 0) {
+        const hc = slots.hour_cycle;
+        const letter: u8 = if (std.mem.eql(u8, hc, "h12")) 'h' else if (std.mem.eql(u8, hc, "h11")) 'K' else if (std.mem.eql(u8, hc, "h24")) 'k' else 'H';
+        put(buf, &n, &.{letter});
+    }
+    if (slots.minute.len > 0) put(buf, &n, "m");
+    if (slots.second.len > 0) put(buf, &n, "s");
+    return buf[0..n];
+}
+
+/// The skeleton's field letter for the given letter set, or null when the
+/// skeleton omits the field (so the range renderer skips it).
+fn skeletonHasAny(sk: []const u8, letters: []const u8) ?u8 {
+    for (sk) |sc| for (letters) |lc| {
+        if (sc == lc) return sc;
+    };
+    return null;
+}
+
+/// §11.1.7 — the most-significant field that differs between the two endpoints,
+/// as the skeleton's own letter (year > month > day > hour > minute > second).
+/// Null when nothing displayed differs (→ single date) or the field is absent.
+fn greatestDiffFieldChar(a: CivilTime, b: CivilTime, sk: []const u8) ?u8 {
+    if (skeletonHasAny(sk, "yY")) |c| {
+        if (a.year != b.year) return c;
+    }
+    if (skeletonHasAny(sk, "ML")) |c| {
+        if (a.month != b.month) return c;
+    }
+    if (skeletonHasAny(sk, "d")) |c| {
+        if (a.day != b.day) return c;
+    }
+    if (skeletonHasAny(sk, "hHKk")) |c| {
+        if (a.hour != b.hour) return c;
+    }
+    if (skeletonHasAny(sk, "m")) |c| {
+        if (a.minute != b.minute) return c;
+    }
+    if (skeletonHasAny(sk, "s")) |c| {
+        if (a.second != b.second) return c;
+    }
+    return null;
+}
+
+/// Significance rank of a pattern field letter (era 0 → sub-second 8), most to
+/// least significant — decides which fields collapse to "shared".
+fn fieldSig(letter: u8) u8 {
+    return switch (letter) {
+        'G' => 0,
+        'y', 'Y', 'u', 'U', 'r' => 1,
+        'M', 'L' => 2,
+        'd', 'D', 'F', 'g' => 3,
+        'E', 'c', 'e' => 4,
+        'a', 'b', 'B' => 5,
+        'h', 'H', 'K', 'k' => 6,
+        'm' => 7,
+        's', 'S', 'A' => 8,
+        else => 100,
+    };
+}
+
+const IvTok = struct { off: usize, is_field: bool, letter: u8, count: usize, lit: []const u8, src: []const u8 };
+
+/// Render a CLDR interval pattern (e.g. "MMM d – d, y") into `segs` with a
+/// parallel `srcs` array of §11.5.4 part sources. `gdiff` is the greatest-
+/// difference field letter; the pattern duplicates it, and the split is the
+/// first field run whose letter already appeared. Per ICU: a field more
+/// significant than `gdiff` (equal on both endpoints) is "shared"; `gdiff` and
+/// less-significant fields render "startRange" in the first half and "endRange"
+/// in the second; a literal is start/end only when both neighbouring fields
+/// agree, else "shared". Null when the pattern has no duplicated field.
+fn renderIntervalPattern(dd: cldr.DateData, pattern: []const u8, gdiff: u8, civ_a: CivilTime, civ_b: CivilTime, digit_base: u32, segs: []Seg, srcs: [][]const u8) ?u32 {
+    var seen: [128]bool = @splat(false);
+    var switch_off: usize = 0;
+    var found_switch = false;
+    {
+        var i: usize = 0;
+        while (i < pattern.len) {
+            const c = pattern[i];
+            if (c == '\'') {
+                i += 1;
+                if (i < pattern.len and pattern[i] == '\'') {
+                    i += 1;
+                    continue;
+                }
+                while (i < pattern.len and pattern[i] != '\'') i += 1;
+                if (i < pattern.len) i += 1;
+            } else if (std.ascii.isAlphabetic(c)) {
+                var j = i;
+                while (j < pattern.len and pattern[j] == c) j += 1;
+                if (c < 128 and seen[c]) {
+                    switch_off = i;
+                    found_switch = true;
+                    break;
+                }
+                if (c < 128) seen[c] = true;
+                i = j;
+            } else i += 1;
+        }
+    }
+    if (!found_switch) return null;
+
+    // Tokenise; assign each field its source by significance + half.
+    const g_sig = fieldSig(gdiff);
+    var toks: [48]IvTok = undefined;
+    var nt: usize = 0;
+    {
+        var i: usize = 0;
+        while (i < pattern.len and nt < toks.len) {
+            const off = i;
+            const c = pattern[i];
+            if (c == '\'') {
+                i += 1;
+                if (i < pattern.len and pattern[i] == '\'') {
+                    toks[nt] = .{ .off = off, .is_field = false, .letter = 0, .count = 0, .lit = "'", .src = "" };
+                    nt += 1;
+                    i += 1;
+                    continue;
+                }
+                const start = i;
+                while (i < pattern.len and pattern[i] != '\'') i += 1;
+                toks[nt] = .{ .off = off, .is_field = false, .letter = 0, .count = 0, .lit = pattern[start..i], .src = "" };
+                nt += 1;
+                if (i < pattern.len) i += 1;
+            } else if (std.ascii.isAlphabetic(c)) {
+                var j = i;
+                while (j < pattern.len and pattern[j] == c) j += 1;
+                const src: []const u8 = if (fieldSig(c) < g_sig) "shared" else if (off < switch_off) "startRange" else "endRange";
+                toks[nt] = .{ .off = off, .is_field = true, .letter = c, .count = j - i, .lit = "", .src = src };
+                nt += 1;
+                i = j;
+            } else {
+                const start = i;
+                while (i < pattern.len and !std.ascii.isAlphabetic(pattern[i]) and pattern[i] != '\'') i += 1;
+                toks[nt] = .{ .off = off, .is_field = false, .letter = 0, .count = 0, .lit = pattern[start..i], .src = "" };
+                nt += 1;
+            }
+        }
+    }
+
+    // Literal source: the source both neighbouring fields agree on, else "shared".
+    var t: usize = 0;
+    while (t < nt) : (t += 1) {
+        if (toks[t].is_field) continue;
+        var left: ?[]const u8 = null;
+        var k: isize = @as(isize, @intCast(t)) - 1;
+        while (k >= 0) : (k -= 1) if (toks[@intCast(k)].is_field) {
+            left = toks[@intCast(k)].src;
+            break;
+        };
+        var right: ?[]const u8 = null;
+        k = @as(isize, @intCast(t)) + 1;
+        while (k < nt) : (k += 1) if (toks[@intCast(k)].is_field) {
+            right = toks[@intCast(k)].src;
+            break;
+        };
+        toks[t].src = if (left != null and right != null and std.mem.eql(u8, left.?, right.?)) left.? else "shared";
+    }
+
+    // Emit. A "shared" field is equal on both endpoints, so either civ renders it.
+    var n: u32 = 0;
+    t = 0;
+    while (t < nt and n < segs.len) : (t += 1) {
+        const tk = toks[t];
+        if (tk.is_field) {
+            const civ = if (tk.off >= switch_off) civ_b else civ_a;
+            const got = emitField(segs[n..], tk.letter, tk.count, civ, dd, digit_base, "");
+            if (got == 1) {
+                srcs[n] = tk.src;
+                n += 1;
+            }
+        } else {
+            setSeg(&segs[n], "literal", tk.lit);
+            srcs[n] = tk.src;
+            n += 1;
+        }
+    }
+    return n;
+}
+
+/// §11.1.7 FormatDateTimeRange, CLDR interval-pattern path: for two legacy Date
+/// endpoints whose resolved gregorian skeleton + greatest-difference field has a
+/// CLDR interval pattern, render the collapsed range into `segs`/`srcs`. Null →
+/// the caller keeps the per-endpoint rendering + fallback join.
+fn dtfTryRangeInterval(slots: *const intl.DateTimeFormatSlots, x: Value, y: Value, segs: []Seg, srcs: [][]const u8) ?u32 {
+    if (dtfArgTemporalKind(x) != null or dtfArgTemporalKind(y) != null) return null;
+    if (slots.calendar.len > 0 and !std.mem.eql(u8, slots.calendar, "gregory") and !std.mem.eql(u8, slots.calendar, "iso8601")) return null;
+    const ms_x = numberToF64(x);
+    const ms_y = numberToF64(y);
+    if (!std.math.isFinite(ms_x) or !std.math.isFinite(ms_y)) return null;
+    const dd = cldr.dateData(slots.base.dataLocale()) orelse return null;
+    var sk_buf: [24]u8 = undefined;
+    const skeleton = dtfSkeleton(slots, &sk_buf);
+    if (skeleton.len == 0) return null;
+    const civ_x = breakDown(slots, ms_x);
+    const civ_y = breakDown(slots, ms_y);
+    const field = greatestDiffFieldChar(civ_x, civ_y, skeleton) orelse return null;
+    const pattern = cldr.intervalPattern(slots.base.dataLocale(), skeleton, field) orelse return null;
+    const digit_base: u32 = if (cldr.numberData(slots.base.dataLocale())) |nd|
+        (if (!std.mem.eql(u8, slots.numbering_system, nd.ns)) (cldr.numberingSystemDigitBase(slots.numbering_system) orelse nd.digit_base) else nd.digit_base)
+    else
+        (cldr.numberingSystemDigitBase(slots.numbering_system) orelse '0');
+    return renderIntervalPattern(dd, pattern, field, civ_x, civ_y, digit_base, segs, srcs);
+}
+
+/// The locale's interval "shared" separator — the text between {0} and {1} in
+/// CLDR intervalFormatFallback (en: U+2009 en-dash U+2009) — used by the
+/// per-endpoint fallback join so it agrees with the interval-pattern path (a
+/// fixture derives its expected separator from one and applies it to the other).
+/// Falls back to " – " without CLDR data.
+fn rangeFallbackSep(locale: []const u8) []const u8 {
+    const fb = cldr.intervalFallback(locale) orelse return " – ";
+    const a = std.mem.indexOf(u8, fb, "{0}") orelse return " – ";
+    const b = std.mem.indexOf(u8, fb, "{1}") orelse return " – ";
+    if (a + 3 > b) return " – ";
+    return fb[a + 3 .. b];
+}
+
 fn dateTimeFormatFormatRange(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const rec = try requireKind(realm, this_value, .date_time_format);
     // §11.5.5 — both arguments are required (TypeError when either is undefined),
@@ -3935,6 +4177,18 @@ fn dateTimeFormatFormatRange(realm: *Realm, this_value: Value, args: []const Val
     if (!dtfSameKind(dtfArgTemporalKind(x), dtfArgTemporalKind(y)))
         return throwTypeError(realm, "formatRange endpoints must be the same type");
     if (!cldr.available) return makeStringValue(realm, "");
+    {
+        // §11.1.7 CLDR interval-pattern collapse (legacy Dates, gregorian).
+        var iseg: [64]Seg = undefined;
+        var isrc: [64][]const u8 = undefined;
+        if (dtfTryRangeInterval(&rec.date_time_format, x, y, &iseg, &isrc)) |ni| {
+            var buf: [512]u8 = undefined;
+            var len: usize = 0;
+            var k: u32 = 0;
+            while (k < ni) : (k += 1) len += copyClamp(&buf, len, iseg[k].bytes());
+            return makeStringValue(realm, buf[0..len]);
+        }
+    }
     var sega: [48]Seg = undefined;
     var segb: [48]Seg = undefined;
     const na = try dtfRenderArg(realm, &rec.date_time_format, x, &sega);
@@ -3945,7 +4199,8 @@ fn dateTimeFormatFormatRange(realm: *Realm, this_value: Value, args: []const Val
     const sb = flattenSegs(&segb, nb, &bufb);
     // Identical renderings collapse to a single date (no range separator).
     if (std.mem.eql(u8, sa, sb)) return makeStringValue(realm, sa);
-    const joined = std.fmt.allocPrint(realm.allocator, "{s} – {s}", .{ sa, sb }) catch return error.OutOfMemory;
+    const sep = rangeFallbackSep(rec.date_time_format.base.dataLocale());
+    const joined = std.fmt.allocPrint(realm.allocator, "{s}{s}{s}", .{ sa, sep, sb }) catch return error.OutOfMemory;
     defer realm.allocator.free(joined);
     return makeStringValue(realm, joined);
 }
@@ -3964,6 +4219,21 @@ fn dateTimeFormatFormatRangeToParts(realm: *Realm, this_value: Value, args: []co
     if (!cldr.available) {
         arr.setArrayLength(realm.allocator, 0) catch return error.OutOfMemory;
         return heap_mod.taggedObject(arr);
+    }
+    {
+        // §11.1.7 CLDR interval-pattern collapse (legacy Dates, gregorian).
+        var iseg: [64]Seg = undefined;
+        var isrc: [64][]const u8 = undefined;
+        if (dtfTryRangeInterval(&rec.date_time_format, x, y, &iseg, &isrc)) |ni| {
+            var idx: u32 = 0;
+            var k: u32 = 0;
+            while (k < ni) : (k += 1) {
+                try pushPartSourced(realm, arr, idx, iseg[k].typ, iseg[k].bytes(), isrc[k]);
+                idx += 1;
+            }
+            arr.setArrayLength(realm.allocator, idx) catch return error.OutOfMemory;
+            return heap_mod.taggedObject(arr);
+        }
     }
     var sa: [48]Seg = undefined;
     var sb: [48]Seg = undefined;
@@ -4018,7 +4288,7 @@ fn dateTimeFormatFormatRangeToParts(realm: *Realm, this_value: Value, args: []co
             try pushPartSourced(realm, arr, idx, sa[k].typ, sa[k].bytes(), "startRange");
             idx += 1;
         }
-        try pushPartSourced(realm, arr, idx, "literal", " – ", "shared");
+        try pushPartSourced(realm, arr, idx, "literal", rangeFallbackSep(rec.date_time_format.base.dataLocale()), "shared");
         idx += 1;
         k = prefix;
         while (k < nb) : (k += 1) {
