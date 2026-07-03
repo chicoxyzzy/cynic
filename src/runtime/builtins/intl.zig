@@ -475,6 +475,9 @@ fn isValidExtValue(key: []const u8, value: []const u8) bool {
 /// relevant keyword whose value Cynic doesn't support, so neither surfaces in
 /// resolvedOptions().locale.
 fn retainRelevantUnicodeExtensions(realm: *Realm, base: *intl.ServiceLocaleSlots, relevant: []const []const u8) NativeError!void {
+    // §9.2.7 — attributes are not keywords, so they never surface in the
+    // resolved locale; drop them before pruning irrelevant keys.
+    try dropUnicodeExtensionAttributes(realm, base);
     // Strip one irrelevant key per pass (stripExtKeyword re-canonicalizes, so
     // re-scan from the start) until none remain.
     while (true) {
@@ -505,6 +508,58 @@ fn retainRelevantUnicodeExtensions(realm: *Realm, base: *intl.ServiceLocaleSlots
         }
         if (strip) |k| try stripExtKeyword(realm, base, &k) else return;
     }
+}
+
+/// Drop Unicode-extension *attributes* — the subtags in the `-u-` block that
+/// precede the first 2-char key (`de-u-attrval-co-phonebk`). §9.2.7
+/// ResolveLocale rebuilds the resolved extension from keywords only, so every
+/// service ignores attributes (test262 Collator/unicode-ext-seq-with-attribute).
+/// A no-op when the first `-u-` subtag is already a key.
+fn dropUnicodeExtensionAttributes(realm: *Realm, base: *intl.ServiceLocaleSlots) NativeError!void {
+    const locale = base.locale;
+    const search_end = std.mem.indexOf(u8, locale, "-x-") orelse locale.len;
+    const u_at = std.mem.indexOf(u8, locale[0..search_end], "-u-") orelse return;
+    const attr_start = u_at + 3;
+    // Scan the -u- subtags: attributes (len ≥ 3) run until the first 2-char
+    // key, a singleton extension (len 1), or the end of the -u- block.
+    var i = attr_start;
+    var first_key_start: ?usize = null;
+    var block_end = search_end;
+    while (i < search_end) {
+        const seg_start = i;
+        while (i < search_end and locale[i] != '-') i += 1;
+        const seg_len = i - seg_start;
+        if (seg_len == 2) {
+            first_key_start = seg_start;
+            break;
+        }
+        if (seg_len == 1) {
+            block_end = seg_start - 1; // a singleton begins; the -u- block ends before its dash
+            break;
+        }
+        if (i < search_end) i += 1; // dash between attribute subtags
+    }
+    if (first_key_start) |fk| if (fk == attr_start) return; // first subtag is the key → no attributes
+    if (first_key_start == null and attr_start >= block_end) return; // empty -u- block
+
+    const owned = locale;
+    const out = if (first_key_start) |fk| blk: {
+        // Keep "…-u-" and the key onward; splice out the leading attributes.
+        const o = realm.allocator.alloc(u8, locale.len - (fk - attr_start)) catch return error.OutOfMemory;
+        @memcpy(o[0..attr_start], locale[0..attr_start]);
+        @memcpy(o[attr_start..], locale[fk..]);
+        break :blk o;
+    } else blk: {
+        // Only attributes (no keyword) — drop the whole "-u-…" block.
+        const o = realm.allocator.alloc(u8, locale.len - (block_end - u_at)) catch return error.OutOfMemory;
+        @memcpy(o[0..u_at], locale[0..u_at]);
+        @memcpy(o[u_at..], locale[block_end..]);
+        break :blk o;
+    };
+    realm.allocator.free(owned);
+    const canon = intl.canonicalizeUnicodeLocaleId(realm.allocator, out) catch out;
+    if (canon.ptr != out.ptr) realm.allocator.free(out);
+    base.locale = canon;
 }
 
 fn stripExtKeyword(realm: *Realm, base: *intl.ServiceLocaleSlots, key: []const u8) NativeError!void {

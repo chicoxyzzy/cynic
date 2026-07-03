@@ -473,6 +473,22 @@ test "intl/temporal: withCalendar accepts a time string with a calendar annotati
     );
 }
 
+test "intl: Collator ignores -u extension attributes in the resolved locale (§9.2.7)" {
+    try requireIntlBuild();
+    // §9.2.7 ResolveLocale rebuilds the resolved -u extension from keywords
+    // only, so a leading attribute subtag ("attrval") is ignored — the resolved
+    // locale matches the attribute-free form (test262
+    // Collator/unicode-ext-seq-with-attribute).
+    try evalAssert1(
+        \\const withAttr = new Intl.Collator("de-u-attrval-co-phonebk").resolvedOptions();
+        \\const plain = new Intl.Collator("de-u-co-phonebk").resolvedOptions();
+        \\if (withAttr.locale !== plain.locale) throw 0;
+        \\if (withAttr.locale !== "de-u-co-phonebk") throw 1;
+        \\if (withAttr.collation !== plain.collation) throw 2;
+        \\1
+    );
+}
+
 test "intl: Collator caseFirst option overriding -u-kf drops the keyword (§9.2.7)" {
     try requireIntlBuild();
     // §9.2.7 ResolveLocale — the -u-kf keyword stays in the resolved locale
