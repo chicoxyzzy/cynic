@@ -84,3 +84,30 @@ and is shared with `Iterator.prototype.constructor`) brings
 A fresh triage of the rest of the current gap list re-confirmed every
 by-design family above (sloppy-via-dynamic-code, Annex-B-in-body) — no
 new real engine gaps surfaced; the verdict stands.
+
+## Update 2026-07-03 — the intl402 by-design tail (a separate denominator)
+
+The audit above covers the **main-sweep** engine-gap class, which by
+construction excludes `intl402/`. But `intl402/` is scored in-scope at
+`-Dintl=full`, and its residual fails land in the same "engine gaps"
+column of `test262-results.md` — so the same body-level blind spot
+applies there. After the 2026-07-03 ECMA-402 push closed every winnable
+`intl402/` fixture, the phase sits at **10 remaining, all by-design**;
+none is an engine gap, and two classes need a body read the classifier
+can't do:
+
+| class | count | what it means |
+|---|---:|---|
+| legacy `[[FallbackSymbol]]` (`intl-normative-optional`) | 8 | `FallbackSymbol/*` (2) + `{NumberFormat,DateTimeFormat}/intl-legacy-constructed-symbol*` (6). The §11.1.1/§11.1.2 legacy constructor shim (`Intl.NumberFormat.call(obj)` stashing the formatter under a well-known symbol) is legacy web-compat Cynic declines like Annex B. Already pinned by the harness `FailClass.norm_optional` on the `intl-normative-optional` feature tag. |
+| Annex-B / stale in the body | 2 | `Temporal/Instant/prototype/toString/timezone-string-datetime` fails **only** on `result.substr(-6)` — Annex-B `String.prototype.substr`, which Cynic ships no Annex B for; the Temporal IANA-annotation parse it actually tests is correct (verified: the same value read with `.slice(-6)` is `"-08:00"`). `DateTimeFormat/prototype/format/numbering-system` is a **stale** fixture — Cynic emits the CLDR-42 narrow-no-break space (U+202F) before the dayPeriod, the fixture still expects the pre-42 U+0020. |
+
+So the `intl402/` gap count is a pile of deliberate postures + one
+outdated fixture, not a work list — same conclusion as the main-sweep
+tail. Don't re-triage these: the FallbackSymbol six are policy declines,
+the substr one is Annex B, the numbering-system one is a fixture that
+predates the CLDR bump Cynic tracks (§3, `unicode.org/versions/latest`).
+The substr case is a fixture-portability nit (reading `.slice(-6)`
+instead of the Annex-B `.substr(-6)` would let the Temporal assertion it
+actually targets pass on strict-only engines) — an upstream-fixture
+observation, distinct from this repo's logs, so it stays with whoever
+owns the tc39 contribution rather than being filed as a Cynic gap.
