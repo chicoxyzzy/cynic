@@ -3058,6 +3058,31 @@ fn compactIgnorable(cps: []u32) []const u32 {
     return cps[0..n];
 }
 
+/// German phonebook (`-u-co-phonebk`) tailoring over an NFD code-point run: an
+/// umlaut — a base a/o/u followed by a combining diaeresis (U+0308) — expands to
+/// "<vowel>e" and ß to "ss", so Ä sorts as "ae" (between "Ab" and "Af"). Returns
+/// a fresh allocation the caller frees.
+fn phonebookExpand(allocator: std.mem.Allocator, nfd: []const u32) std.mem.Allocator.Error![]u32 {
+    var out: std.ArrayListUnmanaged(u32) = .empty;
+    errdefer out.deinit(allocator);
+    var i: usize = 0;
+    while (i < nfd.len) : (i += 1) {
+        const cp = nfd[i];
+        if (cp == 0x00DF) { // ß → ss
+            try out.append(allocator, 's');
+            try out.append(allocator, 's');
+            continue;
+        }
+        try out.append(allocator, cp);
+        const vowel = cp == 'a' or cp == 'o' or cp == 'u' or cp == 'A' or cp == 'O' or cp == 'U';
+        if (vowel and i + 1 < nfd.len and nfd[i + 1] == 0x0308) {
+            try out.append(allocator, 'e');
+            i += 1; // consume the diaeresis
+        }
+    }
+    return out.toOwnedSlice(allocator);
+}
+
 /// UCA-style multi-level collation over the operands' §3.11 NFD forms — an
 /// approximation of the DUCET for the Latin range without the full weight table.
 /// Level 1 (primary) compares case-folded base letters; accents (combining
@@ -3074,15 +3099,27 @@ pub fn localeCollate(
     secondary: bool,
     tertiary: bool,
     ignore_punct: bool,
+    phonebook: bool,
 ) std.mem.Allocator.Error!std.math.Order {
     const a_nfd = try normalizeWtf8(allocator, a_bytes, .nfd);
     defer allocator.free(a_nfd);
     const b_nfd = try normalizeWtf8(allocator, b_bytes, .nfd);
     defer allocator.free(b_nfd);
+    // The German phonebook collation expands umlauts (Ä → "ae") before weighting.
+    var a_owned: ?[]u32 = null;
+    var b_owned: ?[]u32 = null;
+    defer if (a_owned) |o| allocator.free(o);
+    defer if (b_owned) |o| allocator.free(o);
+    if (phonebook) {
+        a_owned = try phonebookExpand(allocator, a_nfd);
+        b_owned = try phonebookExpand(allocator, b_nfd);
+    }
+    const a_work: []u32 = a_owned orelse a_nfd;
+    const b_work: []u32 = b_owned orelse b_nfd;
     // §10.3.3 ignorePunctuation:true fully drops UCA variable elements
     // (punctuation, whitespace, symbols) from every collation level.
-    const a = if (ignore_punct) compactIgnorable(a_nfd) else a_nfd;
-    const b = if (ignore_punct) compactIgnorable(b_nfd) else b_nfd;
+    const a = if (ignore_punct) compactIgnorable(a_work) else a_work;
+    const b = if (ignore_punct) compactIgnorable(b_work) else b_work;
 
     // Level 1 — primary: case-folded base letters (combining marks excluded).
     var ap: std.ArrayListUnmanaged(u32) = .empty;
@@ -3138,31 +3175,40 @@ pub fn localeCollate(
     return .eq;
 }
 
-/// §22.1.3.10 String.prototype.localeCompare — the default (variant-sensitivity)
-/// collation via `localeCollate`: canonically-equivalent strings compare equal,
-/// case differs only at the tertiary level ("a" < "A"). Returns -1/0/+1.
+/// §22.1.3.10 String.prototype.localeCompare — constructs the Collator the
+/// (locales, options) imply and shares its multi-level NFD collation, so the two
+/// return the same results. Canonically-equivalent strings compare equal; case
+/// differs only at the tertiary level ("a" < "A"). Returns -1/0/+1.
 fn stringLocaleCompare(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const scope = realm.heap.openScope() catch return error.OutOfMemory;
     defer scope.close();
     const s = try coerceThisStringRooted(realm, this_value, scope);
     const other_s = try intrinsics.stringifyArg(realm, argOr(args, 0, Value.undefined_));
 
-    // §22.1.3.10 step 4 — localeCompare constructs a Collator, so it must throw
-    // the same locale / option exceptions (bad locales → TypeError/RangeError,
-    // invalid usage/sensitivity → RangeError). Validate before the equal-string
-    // fast path so an invalid argument throws even for equal strings. Default
-    // construction (both absent) cannot throw, so skip it to keep the fast path.
+    // §22.1.3.10 step 4 — resolve the collation the equivalent Collator would use
+    // (which also validates the args: bad locales → TypeError/RangeError, invalid
+    // usage/sensitivity → RangeError), so localeCompare matches Collator.compare.
+    // Resolve before the equal-string fast path so an invalid argument throws even
+    // for equal strings. With no args (or no Collator at -Dintl=off) the default
+    // variant collation runs.
     const locales_arg = argOr(args, 1, Value.undefined_);
     const options_arg = argOr(args, 2, Value.undefined_);
-    // Only when Intl.Collator is installed (-Dintl=stub|full); at -Dintl=off
-    // there is no Collator to construct, so the NFD fallback runs unvalidated.
-    if ((!locales_arg.isUndefined() or !options_arg.isUndefined()) and realm.intrinsics.intl_collator_prototype != null)
-        try @import("intl.zig").validateCollatorArgs(realm, locales_arg, options_arg);
+    var secondary = true;
+    var tertiary = true;
+    var ignore_punct = false;
+    var phonebook = false;
+    if ((!locales_arg.isUndefined() or !options_arg.isUndefined()) and realm.intrinsics.intl_collator_prototype != null) {
+        const flags = try @import("intl.zig").resolveCollateFlags(realm, locales_arg, options_arg);
+        secondary = flags.secondary;
+        tertiary = flags.tertiary;
+        ignore_punct = flags.ignore_punct;
+        phonebook = flags.phonebook;
+    }
 
     // Fast path — byte-identical strings are trivially equal.
     if (std.mem.eql(u8, s.flatBytes(), other_s.flatBytes())) return Value.fromInt32(0);
 
-    const cmp = localeCollate(realm.allocator, s.flatBytes(), other_s.flatBytes(), true, true, false) catch return error.OutOfMemory;
+    const cmp = localeCollate(realm.allocator, s.flatBytes(), other_s.flatBytes(), secondary, tertiary, ignore_punct, phonebook) catch return error.OutOfMemory;
     return Value.fromInt32(switch (cmp) {
         .lt => -1,
         .eq => 0,

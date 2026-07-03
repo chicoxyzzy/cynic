@@ -1493,6 +1493,26 @@ pub fn validateCollatorArgs(realm: *Realm, locales: Value, options: Value) Nativ
     _ = try collatorConstructor(realm, Value.undefined_, &.{ locales, options });
 }
 
+pub const CollateFlags = struct { secondary: bool, tertiary: bool, ignore_punct: bool, phonebook: bool };
+
+/// §22.1.3.10 step 4 — resolve the collation levels / tailoring a
+/// `String.prototype.localeCompare(locales, options)` call implies, by
+/// constructing the Collator it would and reading its resolved options, so
+/// localeCompare shares the equivalent Collator's collation (their
+/// return-same-results contract).
+pub fn resolveCollateFlags(realm: *Realm, locales: Value, options: Value) NativeError!CollateFlags {
+    const obj = try collatorConstructor(realm, Value.undefined_, &.{ locales, options });
+    const rec = try requireKind(realm, obj, .collator);
+    const s = rec.collator;
+    const sens = if (s.sensitivity.len > 0) s.sensitivity else "variant";
+    return .{
+        .secondary = std.mem.eql(u8, sens, "accent") or std.mem.eql(u8, sens, "variant"),
+        .tertiary = std.mem.eql(u8, sens, "case") or std.mem.eql(u8, sens, "variant"),
+        .ignore_punct = s.ignore_punctuation,
+        .phonebook = std.mem.eql(u8, s.collation, "phonebk"),
+    };
+}
+
 fn collatorConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     // Callable without new? Spec allows legacy; we require new via is_class.
     const inst = try newIntlInstance(realm, this_value, realm.intrinsics.intl_collator_prototype.?, "Collator", false);
@@ -1593,7 +1613,8 @@ fn collatorCompare(realm: *Realm, this_value: Value, args: []const Value) Native
     const sens = if (s.sensitivity.len > 0) s.sensitivity else "variant";
     const secondary = std.mem.eql(u8, sens, "accent") or std.mem.eql(u8, sens, "variant");
     const tertiary = std.mem.eql(u8, sens, "case") or std.mem.eql(u8, sens, "variant");
-    const ord = @import("string.zig").localeCollate(realm.allocator, x, y, secondary, tertiary, s.ignore_punctuation) catch return error.OutOfMemory;
+    const phonebook = std.mem.eql(u8, s.collation, "phonebk");
+    const ord = @import("string.zig").localeCollate(realm.allocator, x, y, secondary, tertiary, s.ignore_punctuation, phonebook) catch return error.OutOfMemory;
     const n: i32 = switch (ord) {
         .lt => -1,
         .eq => 0,
