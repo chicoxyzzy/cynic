@@ -920,6 +920,14 @@ fn arrayToLocaleString(realm: *Realm, this_value: Value, args: []const Value) Na
     }
     const obj = try toObjectThis(realm, this_value);
     const len = try intrinsics.clampArrayLengthR(realm, try toLengthOf(realm, obj));
+    // ECMA-402 §1.4.4 replaces §23.1.3.32 step 6.c.i with
+    // Invoke(nextElement, "toLocaleString", « locales, options ») — always the
+    // two forwarded arguments (padded with undefined, extras truncated), never
+    // this method's raw variadic argument list.
+    const fwd_args = [2]Value{
+        if (args.len > 0) args[0] else Value.undefined_,
+        if (args.len > 1) args[1] else Value.undefined_,
+    };
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(realm.allocator);
     var i: i64 = 0;
@@ -949,7 +957,7 @@ fn arrayToLocaleString(realm: *Realm, this_value: Value, args: []const Value) Na
         const method_v = try getPropertyChain(realm, boxed, "toLocaleString");
         var str_v: Value = v;
         if (heap_mod.valueAsFunction(method_v)) |_| {
-            const outcome = lantern.callValue(realm.allocator, realm, realm.active_native_fn_realm orelse realm, method_v, v, args) catch |err| switch (err) {
+            const outcome = lantern.callValue(realm.allocator, realm, realm.active_native_fn_realm orelse realm, method_v, v, &fwd_args) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => return error.NativeThrew,
             };

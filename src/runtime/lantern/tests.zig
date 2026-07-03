@@ -11559,6 +11559,27 @@ test "Object.prototype.toLocaleString: primitive 'this' reaches Boolean.prototyp
     , "boolean");
 }
 
+test "Array.prototype.toLocaleString forwards (locales, options) to each element" {
+    // ECMA-402 §1.4.4 replaces §23.1.3.32 step 6.c.i with
+    // Invoke(nextElement, "toLocaleString", « locales, options ») — an element
+    // observes exactly two arguments, padded with undefined and truncated from
+    // any extras, never the raw variadic list.
+    try expectScriptIntWithBuiltins(
+        \\let seen = null;
+        \\const spy = { toLocaleString(...a) { seen = a; return "ok"; } };
+        \\const r0 = [spy].toLocaleString();
+        \\const c0 = seen.length === 2 && seen[0] === undefined && seen[1] === undefined;
+        \\[spy].toLocaleString("ar");
+        \\const c1 = seen.length === 2 && seen[0] === "ar" && seen[1] === undefined;
+        \\const opt = {};
+        \\[spy].toLocaleString("zh", opt);
+        \\const c2 = seen.length === 2 && seen[0] === "zh" && seen[1] === opt;
+        \\[spy].toLocaleString("a", opt, "extra");
+        \\const c3 = seen.length === 2 && seen[1] === opt;
+        \\(r0 === "ok" && c0 && c1 && c2 && c3) ? 1 : 0
+    , 1);
+}
+
 test "String.prototype.includes: position is code-unit indexed" {
     // "a\u{1F600}c".includes("c", 3) — should find c at code-unit
     // index 3. A byte-counting impl would translate pos=3 → byte=3,
