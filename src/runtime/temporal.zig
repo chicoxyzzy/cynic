@@ -4155,8 +4155,12 @@ pub fn parseTemporalMonthDayString(input: []const u8) error{Invalid}!PlainMonthD
     if (!c.done()) return error.Invalid;
     const cal_id = try calendarIdFromAnnotation(calendar);
     if (year_less and !cal_id.isIso()) return error.Invalid;
+    // Carry the parsed ISO year (1972 for the year-less forms) so a non-ISO
+    // calendar annotation on a full-date string re-anchors on the CORRECT date
+    // ("2023-01-01[u-ca=hebrew]" is 8 Tevet, not the 1972-01-01 conversion). The
+    // non-computed month-day path resets the reference to the 1972 ISO leap year.
     return .{
-        .ref_iso_year = 1972,
+        .ref_iso_year = @intCast(date.year),
         .iso_month = @intCast(date.month),
         .iso_day = @intCast(date.day),
         .calendar = cal_id,
@@ -5161,7 +5165,7 @@ test "isoMonthDayToString: reference year prepended only for always/critical" {
     try testing.expectEqualStrings("1972-06-15[!u-ca=iso8601]", isoMonthDayToString(rec, &buf, .critical));
 }
 
-test "parseTemporalMonthDayString: reference year always 1972" {
+test "parseTemporalMonthDayString: year-less forms anchor to 1972, full dates keep the year" {
     {
         const r = try parseTemporalMonthDayString("06-15");
         try testing.expectEqual(@as(i32, 1972), r.ref_iso_year);
@@ -5174,10 +5178,11 @@ test "parseTemporalMonthDayString: reference year always 1972" {
     try testing.expectEqual(@as(u8, 15), (try parseTemporalMonthDayString("--0615")).iso_day);
     // Feb 29 is representable against the 1972 leap reference.
     try testing.expectEqual(@as(u8, 29), (try parseTemporalMonthDayString("02-29")).iso_day);
-    // A full date: the year validates the day, then is discarded (refYear stays 1972).
+    // A full date keeps its year so a non-ISO annotation re-anchors correctly;
+    // ToTemporalMonthDay resets the reference to 1972 for the non-computed path.
     {
         const r = try parseTemporalMonthDayString("2020-02-29"); // 2020 is leap → day valid
-        try testing.expectEqual(@as(i32, 1972), r.ref_iso_year);
+        try testing.expectEqual(@as(i32, 2020), r.ref_iso_year);
         try testing.expectEqual(@as(u8, 2), r.iso_month);
         try testing.expectEqual(@as(u8, 29), r.iso_day);
     }

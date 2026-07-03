@@ -325,7 +325,9 @@ pub fn toTemporalMonthDay(realm: *Realm, item: Value, options: Value) NativeErro
             return throwRangeError(realm, "PlainMonthDay day is out of range for the calendar");
         return .{ .ref_iso_year = @intCast(ref.iso_year), .iso_month = @intCast(ref.iso_month), .iso_day = @intCast(ref.iso_day), .calendar = parsed.calendar };
     }
-    return parsed;
+    // §10.5.x — a non-computed (ISO / gregorian-family) month-day keeps the ISO
+    // month/day against the 1972 leap reference, whatever year the string named.
+    return .{ .ref_iso_year = 1972, .iso_month = parsed.iso_month, .iso_day = parsed.iso_day, .calendar = parsed.calendar };
 }
 
 /// §10.2.2 Temporal.PlainMonthDay.from ( item [, options] ).
