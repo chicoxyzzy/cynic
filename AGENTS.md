@@ -226,8 +226,11 @@ These are project rules — they apply to everyone.
   / `getNumberingSystems` / `getTextInfo` / `getWeekInfo` + `variants`) resolve
   structurally from the parsed locale (no blob).
   NumberFormat unit/compact output, DateTimeFormat skeleton best-fit /
-  non-gregorian calendars / tz names, and DisplayNames calendar/dateTimeField
-  types stay structural until their CLDR sections land. The display-name tables
+  non-gregorian calendars, and DisplayNames calendar/dateTimeField
+  types stay structural until their CLDR sections land — but DateTimeFormat
+  timeZoneName now renders CLDR metazone names (long / short, standard vs
+  daylight via a DST-from-offset probe), falling back to the localized GMT
+  offset for a zone with no metazone name at the requested width. The display-name tables
   (singular + the per-currency plural long names) dominate the blob (~3.6 MiB
   total at `full`); trim `modern_locales` in
   `tools/pack_cldr.zig` if a smaller footprint is needed. Do **not** add

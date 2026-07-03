@@ -656,9 +656,11 @@ automatically on the next full sweep.
   `of(code)` resolves language / region / script / currency codes to their
   localized names (with per-type canonicalisation + RangeError on malformed
   codes); these tables dominate the blob (~2.8 MiB at `full`). DateTimeFormat
-  skeleton best-fit + non-gregorian calendars + time-zone names, and
-  DisplayNames calendar/dateTimeField types stay structural until their CLDR
-  sections are packed.
+  skeleton best-fit + non-gregorian calendars, and DisplayNames
+  calendar/dateTimeField types stay structural until their CLDR sections are
+  packed; timeZoneName renders CLDR metazone names (long / short, standard vs
+  daylight via a DST-from-offset probe), falling back to the localized GMT
+  offset for a zone with no metazone name at the requested width.
 
   Seams are kept clean so `full` can deepen without a rewrite —
   Temporal funnels every zone-offset lookup through
