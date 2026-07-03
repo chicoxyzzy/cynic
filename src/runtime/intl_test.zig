@@ -492,6 +492,24 @@ test "intl/temporal: ZonedDateTime.getTimeZoneTransition compares at ns precisio
     );
 }
 
+test "intl/temporal: ZonedDateTime.since handles a same-day fall-back fold" {
+    try requireIntlBuild();
+    if (!intl_config.has_locale_data) return error.SkipZigTest;
+    // §6.5.6 step 4 (proposal-temporal#3141) — a same-ISO-date span whose
+    // wall-clock reverses across a fall-back fold is the exact epoch time
+    // difference, not a day-corrected split (test262
+    // ZonedDateTime/since|until/same-date-reverse-wallclock).
+    try evalAssert1(
+        \\const later = Temporal.ZonedDateTime.from("2025-11-02T01:00:00-08:00[America/Vancouver]");
+        \\const earlier = Temporal.ZonedDateTime.from("2025-11-02T01:01:00-07:00[America/Vancouver]");
+        \\const s = later.since(earlier, { largestUnit: "year", smallestUnit: "millisecond" });
+        \\if (s.minutes !== 59 || s.days !== 0) throw 0;
+        \\const u = later.until(earlier, { largestUnit: "year", smallestUnit: "millisecond" });
+        \\if (u.minutes !== -59 || u.days !== 0) throw 1;
+        \\1
+    );
+}
+
 test "intl/temporal: ZonedDateTime.until day-smallest rounding is DST-aware" {
     try requireIntlBuild();
     if (!intl_config.has_locale_data) return error.SkipZigTest;

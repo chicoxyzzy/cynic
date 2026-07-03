@@ -1942,6 +1942,13 @@ pub fn differenceZonedDateTime(
     if (ns1 == ns2) return temporal.DurationRecord{};
     const start_dt = temporal.getISODateTimeFor(tz, ns1);
     const end_dt = temporal.getISODateTimeFor(tz, ns2);
+    // §6.5.6 step 4 (tc39/proposal-temporal#3141) — start and end on the same
+    // ISO date: the whole difference is the exact epoch time span, no date
+    // half. This is the fall-back fold where wall-clock time reverses but the
+    // instant advances, which the day-correction below would mishandle.
+    if (start_dt.iso_year == end_dt.iso_year and start_dt.iso_month == end_dt.iso_month and start_dt.iso_day == end_dt.iso_day) {
+        return temporal.balanceTimeDuration(ns2 - ns1, .hour);
+    }
     const sign: i32 = if (ns2 < ns1) -1 else 1;
     const max_day_correction: i32 = if (sign == 1) 2 else 1;
     var day_correction: i32 = 0;
