@@ -3035,6 +3035,29 @@ fn collationCaseWeight(cp: u32) u8 {
     return if (cp >= 'A' and cp <= 'Z') 1 else 0;
 }
 
+/// A UCA "variable" element ignored under ignorePunctuation — whitespace and the
+/// ASCII punctuation / symbol ranges (a proxy for the P*/Z*/S* categories).
+fn isCollationIgnorable(cp: u32) bool {
+    return switch (cp) {
+        0x09...0x0D, 0x20, 0x85, 0xA0 => true, // whitespace
+        0x21...0x2F, 0x3A...0x40, 0x5B...0x60, 0x7B...0x7E => true, // ASCII punct/symbols
+        else => false,
+    };
+}
+
+/// Compact `cps` in place, dropping ignorable code points; returns the prefix
+/// slice. The caller still owns (and frees) the original full allocation.
+fn compactIgnorable(cps: []u32) []const u32 {
+    var n: usize = 0;
+    for (cps) |cp| {
+        if (!isCollationIgnorable(cp)) {
+            cps[n] = cp;
+            n += 1;
+        }
+    }
+    return cps[0..n];
+}
+
 /// UCA-style multi-level collation over the operands' §3.11 NFD forms — an
 /// approximation of the DUCET for the Latin range without the full weight table.
 /// Level 1 (primary) compares case-folded base letters; accents (combining
@@ -3050,11 +3073,16 @@ pub fn localeCollate(
     b_bytes: []const u8,
     secondary: bool,
     tertiary: bool,
+    ignore_punct: bool,
 ) std.mem.Allocator.Error!std.math.Order {
-    const a = try normalizeWtf8(allocator, a_bytes, .nfd);
-    defer allocator.free(a);
-    const b = try normalizeWtf8(allocator, b_bytes, .nfd);
-    defer allocator.free(b);
+    const a_nfd = try normalizeWtf8(allocator, a_bytes, .nfd);
+    defer allocator.free(a_nfd);
+    const b_nfd = try normalizeWtf8(allocator, b_bytes, .nfd);
+    defer allocator.free(b_nfd);
+    // §10.3.3 ignorePunctuation:true fully drops UCA variable elements
+    // (punctuation, whitespace, symbols) from every collation level.
+    const a = if (ignore_punct) compactIgnorable(a_nfd) else a_nfd;
+    const b = if (ignore_punct) compactIgnorable(b_nfd) else b_nfd;
 
     // Level 1 — primary: case-folded base letters (combining marks excluded).
     var ap: std.ArrayListUnmanaged(u32) = .empty;
@@ -3134,7 +3162,7 @@ fn stringLocaleCompare(realm: *Realm, this_value: Value, args: []const Value) Na
     // Fast path — byte-identical strings are trivially equal.
     if (std.mem.eql(u8, s.flatBytes(), other_s.flatBytes())) return Value.fromInt32(0);
 
-    const cmp = localeCollate(realm.allocator, s.flatBytes(), other_s.flatBytes(), true, true) catch return error.OutOfMemory;
+    const cmp = localeCollate(realm.allocator, s.flatBytes(), other_s.flatBytes(), true, true, false) catch return error.OutOfMemory;
     return Value.fromInt32(switch (cmp) {
         .lt => -1,
         .eq => 0,

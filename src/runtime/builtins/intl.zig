@@ -1593,7 +1593,7 @@ fn collatorCompare(realm: *Realm, this_value: Value, args: []const Value) Native
     const sens = if (s.sensitivity.len > 0) s.sensitivity else "variant";
     const secondary = std.mem.eql(u8, sens, "accent") or std.mem.eql(u8, sens, "variant");
     const tertiary = std.mem.eql(u8, sens, "case") or std.mem.eql(u8, sens, "variant");
-    const ord = @import("string.zig").localeCollate(realm.allocator, x, y, secondary, tertiary) catch return error.OutOfMemory;
+    const ord = @import("string.zig").localeCollate(realm.allocator, x, y, secondary, tertiary, s.ignore_punctuation) catch return error.OutOfMemory;
     const n: i32 = switch (ord) {
         .lt => -1,
         .eq => 0,
