@@ -81,39 +81,39 @@ that column is the engine work list. Sorted by area
 
 | area | passing | failing | gaps | pass% |
 |---|---:|---:|---:|---:|
-| `built-ins/Array` | 3054 | 27 | 0 | 99 % |
-| `built-ins/Function` | 428 | 81 | 50 | 84 % |
-| `built-ins/Infinity` | 4 | 2 | 0 | 67 % |
-| `built-ins/Map` | 203 | 1 | 0 | 100 % |
-| `built-ins/NaN` | 4 | 2 | 0 | 67 % |
-| `built-ins/Object` | 3329 | 82 | 2 | 98 % |
-| `built-ins/Promise` | 637 | 3 | 0 | 100 % |
-| `built-ins/Proxy` | 300 | 11 | 0 | 96 % |
-| `built-ins/RegExp` | 1878 | 1 | 0 | 100 % |
-| `built-ins/Set` | 382 | 1 | 0 | 100 % |
-| `built-ins/String` | 1219 | 4 | 2 | 100 % |
-| `built-ins/Symbol` | 96 | 2 | 0 | 98 % |
-| `built-ins/TypedArray` | 1430 | 8 | 0 | 99 % |
-| `built-ins/TypedArrayConstructors` | 719 | 17 | 1 | 98 % |
-| `built-ins/undefined` | 5 | 3 | 0 | 63 % |
-| `intl402/DateTimeFormat` | 240 | 4 | 1 | 98 % |
-| `intl402/FallbackSymbol` | 0 | 2 | 0 | 0 % |
-| `intl402/NumberFormat` | 246 | 3 | 0 | 99 % |
-| `intl402/Temporal` | 2028 | 1 | 1 | 100 % |
-| `language/arguments-object` | 225 | 38 | 0 | 86 % |
-| `language/comments` | 51 | 1 | 1 | 98 % |
-| `language/destructuring` | 18 | 1 | 0 | 95 % |
-| `language/directive-prologue` | 37 | 25 | 0 | 60 % |
-| `language/eval-code` | 164 | 183 | 2 | 47 % |
-| `language/expressions` | 10308 | 395 | 23 | 96 % |
-| `language/function-code` | 155 | 62 | 4 | 71 % |
-| `language/future-reserved-words` | 48 | 7 | 0 | 87 % |
-| `language/global-code` | 37 | 5 | 0 | 88 % |
-| `language/identifier-resolution` | 9 | 5 | 0 | 64 % |
-| `language/literals` | 527 | 7 | 2 | 99 % |
-| `language/module-code` | 590 | 5 | 5 | 99 % |
-| `language/statements` | 8996 | 327 | 12 | 96 % |
-| `language/types` | 104 | 9 | 0 | 92 % |
+| `built-ins/Array` | 3054 | 27 | 0 | 99.1 % |
+| `built-ins/Function` | 428 | 81 | 50 | 84.0 % |
+| `built-ins/Infinity` | 4 | 2 | 0 | 66.6 % |
+| `built-ins/Map` | 203 | 1 | 0 | 99.5 % |
+| `built-ins/NaN` | 4 | 2 | 0 | 66.6 % |
+| `built-ins/Object` | 3329 | 82 | 2 | 97.5 % |
+| `built-ins/Promise` | 637 | 3 | 0 | 99.5 % |
+| `built-ins/Proxy` | 300 | 11 | 0 | 96.4 % |
+| `built-ins/RegExp` | 1878 | 1 | 0 | 99.9 % |
+| `built-ins/Set` | 382 | 1 | 0 | 99.7 % |
+| `built-ins/String` | 1219 | 4 | 2 | 99.6 % |
+| `built-ins/Symbol` | 96 | 2 | 0 | 97.9 % |
+| `built-ins/TypedArray` | 1430 | 8 | 0 | 99.4 % |
+| `built-ins/TypedArrayConstructors` | 719 | 17 | 1 | 97.6 % |
+| `built-ins/undefined` | 5 | 3 | 0 | 62.5 % |
+| `intl402/DateTimeFormat` | 240 | 4 | 1 | 98.3 % |
+| `intl402/FallbackSymbol` | 0 | 2 | 0 | 0.0 % |
+| `intl402/NumberFormat` | 246 | 3 | 0 | 98.7 % |
+| `intl402/Temporal` | 2028 | 1 | 1 | 99.9 % |
+| `language/arguments-object` | 225 | 38 | 0 | 85.5 % |
+| `language/comments` | 51 | 1 | 1 | 98.0 % |
+| `language/destructuring` | 18 | 1 | 0 | 94.7 % |
+| `language/directive-prologue` | 37 | 25 | 0 | 59.6 % |
+| `language/eval-code` | 164 | 183 | 2 | 47.2 % |
+| `language/expressions` | 10308 | 395 | 23 | 96.3 % |
+| `language/function-code` | 155 | 62 | 4 | 71.4 % |
+| `language/future-reserved-words` | 48 | 7 | 0 | 87.2 % |
+| `language/global-code` | 37 | 5 | 0 | 88.0 % |
+| `language/identifier-resolution` | 9 | 5 | 0 | 64.2 % |
+| `language/literals` | 527 | 7 | 2 | 98.6 % |
+| `language/module-code` | 590 | 5 | 5 | 99.1 % |
+| `language/statements` | 8996 | 327 | 12 | 96.4 % |
+| `language/types` | 104 | 9 | 0 | 92.0 % |
 
 
 ## Pre-Stage-4 proposals shipped
@@ -127,25 +127,31 @@ top-line score.
 
 | feature | passing | failing | total | pass% |
 |---|---:|---:|---:|---:|
-| `joint-iteration` | 82 | 0 | 82 | 100 % |
-| `ShadowRealm` | 63 | 1 | 64 | 98 % |
+| `joint-iteration` | 82 | 0 | 82 | 100.0 % |
+| `ShadowRealm` | 63 | 1 | 64 | 98.4 % |
 
 
 ## History
+
+### 2026-07-04 — cynic `fae6ea70`, test262 `de8e621cdb`
+
+| passing | failing | total | pass% | Δ pass | elapsed |
+|---:|---:|---:|---:|---:|---:|
+| 48570 | 1325 | 49895 | 97.34 % | ±0 | 2m 15s |
+
+Biggest movers:
+
+- `built-ins/Temporal` +4603
+- `built-ins/Date` +594
+- `built-ins/DataView` +550
+- `built-ins/Iterator` +432
+- `built-ins/Atomics` +381
 
 ### 2026-07-03 — cynic `bb44d35f`, test262 `de8e621cdb`
 
 | passing | failing | total | pass% | Δ pass | elapsed |
 |---:|---:|---:|---:|---:|---:|
 | 48570 | 1325 | 49895 | 97.34 % | +2122 | 2m 05s |
-
-Biggest movers:
-
-- `built-ins/Date` +594
-- `built-ins/DataView` +550
-- `built-ins/Iterator` +432
-- `built-ins/Atomics` +381
-- `built-ins/Number` +340
 
 ### 2026-06-25 — cynic `882c0dc`, test262 `de8e621cdb`
 
