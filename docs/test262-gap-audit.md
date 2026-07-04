@@ -150,13 +150,24 @@ The manual verdicts above are now encoded as data in
 methodology at the top), and the harness applies them: the 104 by-design
 fixtures reclassify out of `engine gaps` into named classes on every sweep,
 so the number auto-maintains and a new by-design fixture surfaces for triage
-instead of rotting this doc. `test262-results.md` engine gaps: **106 → 2**.
+instead of rotting this doc. `test262-results.md` engine gaps: **106 → 1**.
 
-The two survivors are real, and the exercise **corrected the record**: both
-are `built-ins/String/prototype/split` fixtures the 2026-06-11 audit had
-grouped under "Annex-B escapes in patterns", but reading the bodies shows
-`separator-regexp` uses plain ECMAScript regex (`/^/`, `/.{1,2}/`) — a
-genuine split/regex gap — and `checking-by-using-eval` throws an unexpected
-`ReferenceError` binding `String.prototype.split` to top-level `this`. Both
-stay unregistered as engine gaps for a real fix. Exactly the safe default:
-pattern-matching the path would have hidden them.
+Populating the registry meant reading every body, which **found a real bug**.
+Of the two `built-ins/String/prototype/split` fixtures the 2026-06-11 audit had
+grouped under "Annex-B escapes in patterns", a per-case `engines_diff` probe
+shows they split cleanly:
+
+- `separator-regexp` — its first 13 cases are plain regex, but it continues
+  into Annex-B identity/legacy escapes (`/\x/`, `/\X/`, `/\XA0/`, `/\k<x>/`)
+  that Perlex rejects by design (engine262 fails it too). So it **is** Annex-B —
+  the original audit was right; it's registered `annex_b_body`, not a gap.
+- `checking-by-using-eval` — a **genuine engine gap**: it reads the bare
+  identifier `toString` (an *inherited* global property), which every reference
+  engine and engine262 resolve to `Object.prototype.toString`, but Cynic throws
+  `ReferenceError`. `slowLdaGlobal` resolves globals through the global object's
+  *own* slots only, never its prototype chain — diverging from `in` /
+  member-access / §9.1.1.2.6 ObjectEnvironmentRecord.GetBindingValue. Left
+  unregistered as the one real gap.
+
+The lesson holds either way: confirm by reading the body, not by path — the
+first read of `separator-regexp` was truncated and briefly mis-called it a gap.

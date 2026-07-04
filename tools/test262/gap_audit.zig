@@ -55,6 +55,11 @@ pub const entries = [_]Entry{
     // ── Annex-B surface used inside the fixture body ───────────────────────
     .{ .path = "intl402/Temporal/Instant/prototype/toString/timezone-string-datetime.js", .reason = .annex_b_body },
     .{ .path = "built-ins/TypedArrayConstructors/ctors/no-species.js", .reason = .annex_b_body },
+    // The first 13 cases are plain regex, but the fixture continues into
+    // Annex-B identity/legacy escapes (`/\x/`, `/\X/`, `/\XA0/`, `/\k<x>/`)
+    // that Perlex rejects by design; engine262 fails it too. Verified via
+    // engines_diff — not a real gap.
+    .{ .path = "built-ins/String/prototype/split/separator-regexp.js", .reason = .annex_b_body },
     .{ .path = "language/expressions/class/elements/private-getter-is-not-a-own-property.js", .reason = .annex_b_body },
     .{ .path = "language/expressions/class/elements/private-setter-is-not-a-own-property.js", .reason = .annex_b_body },
     .{ .path = "language/literals/regexp/S7.8.5_A1.4_T2.js", .reason = .annex_b_body },
@@ -175,6 +180,7 @@ test "gap_audit: registered paths resolve, unregistered do not" {
     try std.testing.expectEqual(Reason.stale_fixture, lookup("intl402/DateTimeFormat/prototype/format/numbering-system.js").?);
     try std.testing.expectEqual(Reason.sloppy_body, lookup("language/comments/hashbang/use-strict.js").?);
     try std.testing.expectEqual(Reason.annex_b_body, lookup("built-ins/TypedArrayConstructors/ctors/no-species.js").?);
-    // Real / uncertain gaps are intentionally NOT registered — they stay a gap.
-    try std.testing.expect(lookup("built-ins/String/prototype/split/separator-regexp.js") == null);
+    // A real bug is intentionally NOT registered — it stays an engine gap.
+    // (checking-by-using-eval hits a genuine global-identifier-resolution bug.)
+    try std.testing.expect(lookup("built-ins/String/prototype/split/checking-by-using-eval.js") == null);
 }
