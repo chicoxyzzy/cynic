@@ -12571,7 +12571,22 @@ fn slowLdaGlobal(
                 if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
                 return .handled;
             },
-            .none => return .not_found,
+            .none => {
+                // §9.1.1.2.6 ObjectEnvironmentRecord.GetBindingValue — the
+                // global env resolves through the binding object's PROTOTYPE
+                // CHAIN (HasProperty → Get), so a bare identifier naming an
+                // inherited global property (`Object.prototype.toString` /
+                // `.valueOf` / …) resolves rather than throwing a spurious
+                // ReferenceError, matching `in` / member access. Hardened
+                // realms already resolve these via the override-mistake
+                // synthetic accessors above; this is the unhardened
+                // plain-inherited-data-property path. Not IC-cached — the value
+                // lives on the prototype, not `gt`'s own slots, so the fast
+                // path stays own-only. A genuinely-unbound name is not on the
+                // chain, so `hasProperty` is false and it still `.not_found`s.
+                if (gt.hasProperty(key)) return .{ .value = gt.get(key) };
+                return .not_found;
+            },
         }
     }
     // Pre-`bindToObject` bootstrap — `target` not yet wired.

@@ -2404,6 +2404,19 @@ test "later: ReferenceError on unresolved global is a real object" {
     , "ref");
 }
 
+// §9.1.1.2.6 ObjectEnvironmentRecord.GetBindingValue — the global env resolves
+// a bare identifier through the global object's PROTOTYPE CHAIN (HasProperty),
+// so an inherited global property (Object.prototype.toString / .valueOf / …)
+// resolves rather than throwing a spurious ReferenceError, matching `in` and
+// member access. A genuinely-unbound name (above) still throws. Runs
+// UNHARDENED: a hardened realm resolves these through the override-mistake
+// synthetic accessors, so it would mask the plain-inherited-data-property bug.
+test "later: bare inherited global identifier resolves through the prototype chain" {
+    try expectScriptStringUnhardened(
+        \\typeof toString + "|" + typeof valueOf + "|" + typeof hasOwnProperty;
+    , "function|function|function");
+}
+
 // §13.15.2 step 1.a — Evaluation of the LHS Reference happens
 // *before* the RHS, so a side-effecting RHS that creates a
 // matching global must not mask the unresolvable LHS Reference.
