@@ -4217,7 +4217,12 @@ fn writeNotPassing(
     for (rows_buf[0..nrows]) |b| {
         const den: u32 = b.pass + b.fail;
         const pct: f64 = if (den == 0) 0.0 else 100.0 * @as(f64, @floatFromInt(b.pass)) / @as(f64, @floatFromInt(den));
-        const line = try std.fmt.bufPrint(&buf, "| `{s}` | {d} | {d} | {d} | {d:.0} % |\n", .{ b.name, b.pass, b.fail, b.gap_fail, pct });
+        // Floor to one decimal so 100.0 % prints only at zero failures. Every
+        // area listed here has at least one failure, so rounding 99.5 %+ up to
+        // 100 % would misread as "perfect" — honest, not flattering. (Plain
+        // {d:.1} still rounds 99.96 → 100.0, hence the explicit floor.)
+        const shown: f64 = @floor(pct * 10.0) / 10.0;
+        const line = try std.fmt.bufPrint(&buf, "| `{s}` | {d} | {d} | {d} | {d:.1} % |\n", .{ b.name, b.pass, b.fail, b.gap_fail, shown });
         try out.appendSlice(gpa, line);
     }
     try out.appendSlice(gpa, "\n");
@@ -4261,7 +4266,10 @@ fn writePreStage4Scoreboard(
         const den: u32 = s.pass + s.fail;
         if (den == 0) continue;
         const pct: f64 = 100.0 * @as(f64, @floatFromInt(s.pass)) / @as(f64, @floatFromInt(den));
-        try out.appendSlice(gpa, try std.fmt.bufPrint(&buf, "| `{s}` | {d} | {d} | {d} | {d:.0} % |\n", .{ name, s.pass, s.fail, den, pct }));
+        // Floor to one decimal, matching the per-area table: 100.0 % only at
+        // zero failures, no rounding a near-perfect score up to a false 100.
+        const shown: f64 = @floor(pct * 10.0) / 10.0;
+        try out.appendSlice(gpa, try std.fmt.bufPrint(&buf, "| `{s}` | {d} | {d} | {d} | {d:.1} % |\n", .{ name, s.pass, s.fail, den, shown }));
     }
     try out.appendSlice(gpa, "\n");
 }
