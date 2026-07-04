@@ -50,6 +50,12 @@
 //!                           phase + every tracked feature phase.
 //!   --list-failures=<n>     After the tally, print up to N failing test paths
 //!                           (main phase only).
+//!   --list-gaps             After the tally, print every `engine gaps`
+//!                           fixture — the real triage list (failures not
+//!                           explained by a policy class or the body-audit
+//!                           registry `test262/gap_audit.zig`). Run on a full
+//!                           sweep; each path is a bug to fix or a by-design
+//!                           fixture to register.
 //!   --min-pass-pct=<f>      Headline floor. Exit 2 if `pass%`
 //!                           (= passing / (passing + failing)) falls below <f>.
 //!                           Ignored when `--filter=` narrows the corpus. Used
@@ -99,6 +105,7 @@ const cynic = @import("cynic");
 const frontmatter = @import("test262/frontmatter.zig");
 const skip_rules = @import("test262/skip.zig");
 const harness_mod = @import("test262/harness.zig");
+const gap_audit = @import("test262/gap_audit.zig");
 
 /// Per-worker loader state. Set by `classifyAndRun` before
 /// running a module-flagged test; consulted by
@@ -1174,6 +1181,10 @@ const Options = struct {
     /// cache. Null disables.
     pass_list_out: ?[]const u8 = null,
     list_failures: u32 = 0,
+    /// After the tally, print every `engine gaps` fixture path — the real
+    /// work list (failures not explained by a policy class or the body-audit
+    /// registry). Each is a bug to fix or a new by-design fixture to register.
+    list_gaps: bool = false,
     quiet: bool = false,
     verbose: bool = false,
     write_results: bool = false,
@@ -1370,12 +1381,19 @@ const Bucket = struct {
 /// its failures fall into `gap` (an implemented-surface bug or a
 /// not-yet-implemented in-scope Intl surface), visible per area in
 /// the failing-areas table.
-const FailClass = enum(u3) {
+const FailClass = enum(u4) {
     gap, // engine work list — bugs + not-yet-implemented in-scope surfaces (incl. intl402)
     no_strict, // flags: [noStrict] — sloppy-mode-only, strict-only by design
     annex_b, // Annex B builtins (__proto__ accessor, __define/__lookup{Getter,Setter}__)
     can_block, // flags: [CanBlockIsFalse] — non-blocking-agent semantics
     norm_optional, // features: [intl-normative-optional] — legacy ECMA-402 web-compat Cynic declines
+    // The next three are body-audited by-design reasons (see
+    // `test262/gap_audit.zig`) — a fixture's failure explained by its body,
+    // not its path/frontmatter, so the classifier can only apply them via the
+    // registry. They keep the raw `gap` count honest.
+    sloppy_body, // sloppy-mode semantics via dynamic Function()/eval(), `-non-strict`, in-body `with`
+    annex_b_body, // an Annex-B surface used inside the fixture body
+    stale_fixture, // an outdated upstream fixture — Cynic is spec-correct, the fixture predates a bump
 
     const count = std.enums.values(FailClass).len;
 };
@@ -1398,6 +1416,15 @@ fn failClassOf(rel: []const u8, flags: frontmatter.Flags, features: []const []co
     for ([_][]const u8{ "__proto__", "__defineGetter__", "__defineSetter__", "__lookupGetter__", "__lookupSetter__" }) |marker| {
         if (std.mem.indexOf(u8, rel, marker) != null) return .annex_b;
     }
+    // Body-audited by-design registry (test262/gap_audit.zig): the manual
+    // verdicts as data, so the by-design tail auto-maintains and a NEW
+    // unregistered gap surfaces for triage instead of inflating the count.
+    // Consulted last — only a would-be `gap` reaches here.
+    if (gap_audit.lookup(rel)) |reason| return switch (reason) {
+        .sloppy_body => .sloppy_body,
+        .annex_b_body => .annex_b_body,
+        .stale_fixture => .stale_fixture,
+    };
     return .gap;
 }
 
@@ -2227,6 +2254,9 @@ fn runSweep(
         if (opts.list_failures > 0) {
             try printFailureList(io, failures.items, opts.list_failures);
         }
+        if (opts.list_gaps) {
+            try printGapList(io, failures.items);
+        }
         if (opts.top_slow > 0 and slow.items.len > 0) {
             try printTopSlow(io, slow.items, opts.top_slow);
         }
@@ -2257,6 +2287,8 @@ fn runSweep(
 const Failure = struct {
     path: []const u8,
     kind: Outcome,
+    /// Why it failed — lets `--list-gaps` filter to the engine work list.
+    fail_class: FailClass = .gap,
 };
 
 /// `--top-slow=N` capture. Each entry pairs a per-fixture wall-clock
@@ -2455,6 +2487,7 @@ fn recordOutcome(
             try failures.append(gpa, .{
                 .path = try gpa.dupe(u8, rel),
                 .kind = .fail_false_reject,
+                .fail_class = outcome.fail_class,
             });
         },
         .fail_false_accept => {
@@ -2463,6 +2496,7 @@ fn recordOutcome(
             try failures.append(gpa, .{
                 .path = try gpa.dupe(u8, rel),
                 .kind = .fail_false_accept,
+                .fail_class = outcome.fail_class,
             });
         },
         .skip => {
@@ -3566,6 +3600,31 @@ fn printFailureList(io: std.Io, failures: []const Failure, n: u32) !void {
     }
 }
 
+/// Print every `engine gaps` fixture — the failures NOT explained by a policy
+/// class or the body-audit registry (`test262/gap_audit.zig`). This is the
+/// real triage list: each path is either a genuine engine bug to fix, or a new
+/// by-design fixture to confirm and add to the registry. Sorted for a stable,
+/// diffable dump. Use `--list-gaps` on a full (unfiltered) sweep.
+fn printGapList(io: std.Io, failures: []const Failure) !void {
+    var buf: [1024]u8 = undefined;
+    var gaps: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer gaps.deinit(std.heap.page_allocator);
+    for (failures) |f| {
+        if (f.fail_class == .gap) gaps.append(std.heap.page_allocator, f.path) catch continue;
+    }
+    std.mem.sort([]const u8, gaps.items, {}, struct {
+        fn lt(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.order(u8, a, b) == .lt;
+        }
+    }.lt);
+    const hdr = try std.fmt.bufPrint(&buf, "\nengine gaps ({d}) — triage each: fix the engine, or register it in test262/gap_audit.zig:\n", .{gaps.items.len});
+    try std.Io.File.stdout().writeStreamingAll(io, hdr);
+    for (gaps.items) |p| {
+        const msg = try std.fmt.bufPrint(&buf, "  {s}\n", .{p});
+        try std.Io.File.stdout().writeStreamingAll(io, msg);
+    }
+}
+
 /// Sort the captured slow-fixture entries descending and print
 /// the top N. Long-tail outliers dominate harness wall-time —
 /// surfacing them post-tally is the cheapest way to focus
@@ -4153,14 +4212,16 @@ fn writeNotPassing(
         \\Every failure, classified. The policy classes are by-design
         \\fails under the binary posture — fixtures that need sloppy
         \\mode, Annex B surfaces, or ECMA-402, none of which Cynic
-        \\ships, on purpose. The **engine gaps** row is an *upper
-        \\bound* on real bugs, not a bug count: the classifier reads
-        \\only paths and frontmatter, so a fixture whose sloppy-mode
-        \\or Annex-B dependence lives in its *body* lands here even
-        \\when it is a by-design decline. The per-fixture body audit
-        \\in [docs/test262-gap-audit.md](docs/test262-gap-audit.md)
-        \\reads every one and assigns a verified reason — that file,
-        \\not this count, is the engine work list.
+        \\ships, on purpose. Two classes below are **body-audited**:
+        \\a fixture can fail for a by-design reason that lives only in
+        \\its *body* (a `Function(...)` / `eval(...)` that runs as
+        \\sloppy code, an Annex-B surface used in the test), which the
+        \\path/frontmatter classifier can't see. The registry in
+        \\[tools/test262/gap_audit.zig](tools/test262/gap_audit.zig)
+        \\attributes those per fixture, so the **engine gaps** row is
+        \\left as the real work list — a genuine bug, or a NEW
+        \\by-design fixture not yet audited (run `--list-gaps` to
+        \\triage; add a line to the registry or fix the engine).
         \\
         \\| why | failing | detail |
         \\|---|---:|---|
@@ -4174,7 +4235,10 @@ fn writeNotPassing(
         .{ .idx = .annex_b, .label = "Annex B builtins", .detail = "`__proto__` accessor + `__define`/`__lookup{Getter,Setter}__` are not shipped by design" },
         .{ .idx = .can_block, .label = "cannot-block agent semantics", .detail = "`flags: [CanBlockIsFalse]` — fixtures requiring `Atomics.wait` to throw on a non-blocking agent" },
         .{ .idx = .norm_optional, .label = "Intl normative-optional legacy", .detail = "`features: [intl-normative-optional]` — the ECMA-402 §11.1.1/§11.1.2 legacy constructor `[[FallbackSymbol]]` shim (`Intl.NumberFormat.call(obj)` stashing a formatter on a user object). Optional in the spec; a legacy web-compat surface Cynic declines by design, like Annex B. Cynic ships the non-optional path (a fresh formatter, no fallback symbol)" },
-        .{ .idx = .gap, .label = "**engine gaps**", .detail = "an *upper bound*, not a confirmed-bug count: failures the path/frontmatter classifier can't attribute to a policy class. Most are sloppy-mode semantics hiding inside dynamic `Function(...)` / `eval(...)` bodies, or Annex-B surfaces used in-body — by-design, but invisible to the classifier. The per-fixture audit in [docs/test262-gap-audit.md](docs/test262-gap-audit.md) reads each and is the real work list; a genuinely-unimplemented surface (including `intl402/` at `-Dintl=full`) would show here too" },
+        .{ .idx = .sloppy_body, .label = "sloppy-mode (body-audited)", .detail = "sloppy-mode semantics the classifier can't see from frontmatter — a `Function(...)` / `eval(...)` body that runs as non-strict code, a `-non-strict` fixture, an in-body `with`. Cynic is strict-only by design. Attributed per fixture by the body-audit registry (`tools/test262/gap_audit.zig`)" },
+        .{ .idx = .annex_b_body, .label = "Annex B (body-audited)", .detail = "an Annex-B surface used inside the fixture body — an Annex-B regex form, a legacy `String.prototype.substr`, an `__proto__` / `__lookup*` poke in the test logic. Cynic ships no Annex B. Registry-attributed, same source as above" },
+        .{ .idx = .stale_fixture, .label = "outdated fixture", .detail = "an upstream fixture that predates a spec / data bump Cynic tracks (e.g. a CLDR version) — Cynic is spec-correct, the fixture should be refreshed upstream. Not a Cynic decline. Registry-attributed" },
+        .{ .idx = .gap, .label = "**engine gaps**", .detail = "the real engine work list: failures NOT explained by a policy class OR the body-audit registry. Each is either a genuine engine bug or a NEW by-design fixture not yet audited — triage the body (`--list-gaps` prints them), then fix the engine or add a line to `tools/test262/gap_audit.zig`. Includes any genuinely-unimplemented in-scope surface (e.g. `intl402/` at `-Dintl=full`)" },
     };
     for (class_rows) |row| {
         const n = cls[@intFromEnum(row.idx)];
@@ -4452,6 +4516,8 @@ fn parseArgs(gpa: std.mem.Allocator, args: std.process.Args) !Options {
             opts.pass_list_out = try gpa.dupe(u8, arg["--pass-list-out=".len..]);
         } else if (std.mem.startsWith(u8, arg, "--list-failures=")) {
             opts.list_failures = std.fmt.parseInt(u32, arg["--list-failures=".len..], 10) catch 0;
+        } else if (std.mem.eql(u8, arg, "--list-gaps")) {
+            opts.list_gaps = true;
         } else if (std.mem.startsWith(u8, arg, "--threads=")) {
             opts.threads = std.fmt.parseInt(u32, arg["--threads=".len..], 10) catch 0;
         } else if (std.mem.startsWith(u8, arg, "--timeout=")) {
