@@ -1,46 +1,61 @@
 # test262 engine-gap audit
 
-A per-fixture audit of the **engine gaps** class from
-[`test262-results.md`](../test262-results.md) — the failures that are
-not explained by the path/flag classifier (not `intl402/`, not
-`noStrict`/`CanBlockIsFalse`-flagged, not an Annex-B builtin named in
-the path). The classifier can only see paths and frontmatter; this
-audit reads fixture *bodies* and assigns each remaining failure a
-verified reason, so the gaps number is a real work list rather than a
-pile of "unknown".
+The **engine gaps** class in [`test262-results.md`](../test262-results.md)
+is the failures the harness classifier can't attribute to a policy class
+from a fixture's *path* and *frontmatter* alone. Much of that tail is still
+by-design — but the reason lives in the fixture *body*: a `Function(...)` /
+`eval(...)` that runs as sloppy code, an Annex-B surface used inside the
+test, an outdated upstream fixture. The classifier can't see any of that;
+deciding it takes reading the body.
 
-Audited 2026-06-11 against the pinned test262 submodule. Method: every
-gap-classified failing fixture was read (individually or as a
-generated family sharing one `_FIXTURE` / template), reproduced where
-the verdict wasn't obvious, and either **fixed in the same session**
-or classified below. Re-run the derivation with the harness's
-`--list-failures` output filtered by the classifier rules to refresh
-the list after a submodule bump.
+**That judgment is data now, not a dated snapshot.** It lives in the
+machine-readable registry
+[`tools/test262/gap_audit.zig`](../tools/test262/gap_audit.zig): one line
+per fixture, mapping an exact path to its by-design reason (`sloppy_body`
+/ `annex_b_body` / `stale_fixture`). `failClassOf` consults it during
+classification, reclassifies matched fixtures out of the raw gap count
+into their named reason, and **leaves anything NOT in the registry as an
+engine gap**. So:
 
-## Verdict: 104 remaining, all by-design
+- the by-design counts auto-maintain on every sweep — no stale numbers to
+  keep in this file;
+- a newly-added by-design fixture surfaces as an *unaudited gap* for triage
+  instead of silently inflating the number;
+- a real engine bug is never auto-hidden — matching is by exact path (not
+  glob), so a new fixture in an already-audited area still shows up.
 
-| class | count | what it means |
-|---|---:|---|
-| sloppy-via-dynamic-code | 95 | The fixture's *body* depends on `Function(...)` / `eval(...)` producing **non-strict** code: sloppy `this`-coercion (`Function('return this')()` reaching the global), `var eval` / `eval = 42` / duplicate parameter names being legal, or a shared `_FIXTURE.js` that pokes globals through sloppy `this`. Cynic is strict-only by design — dynamic code parses as strict — so these can never pass. The flags can't catch them: many are even `onlyStrict`-flagged, because the *outer* code is strict and the sloppiness arrives via CreateDynamicFunction. |
-| Annex-B surface in the body | 9 | The fixture calls an Annex-B builtin (`__lookupGetter__`, `__proto__`) or relies on Annex-B regex grammar (`\XA0`, bare `\x`, identity escapes of ID-continue chars) from inside the body, where the path classifier can't see it. Cynic ships no Annex B per AGENTS.md. |
+**The live count is in the results doc, not here.** `test262-results.md`
+regenerates the by-design breakdown + the residual **engine gaps** row on
+every sweep. To see the current triage list, run the harness with
+`--list-gaps` (on a full sweep): it prints every unregistered gap.
 
-Family breakdown of the 104 (areas with ≥2 fixtures):
+## Triaging a gap
 
-| family | n | verified reason |
-|---|---:|---|
-| `built-ins/Function/prototype/{call,apply}` `S15.3.4.*` | 28 | sloppy `this`-coercion inside `Function(...)` bodies (null/undefined→global, primitive boxing) |
-| `language/expressions/dynamic-import/**` | 20 | shared `_FIXTURE.js` files mutate globals via `Function('return this;')()` |
-| `built-ins/Function` root + `/length` | 22 | duplicate parameter names (sloppy-only), sloppy `this`, `Function.call(obj, body)` scope shapes |
-| `language/statements/variable/12.2.1-*-s` | 8 | assert `Function('var eval;')` / `'var arguments;'` parses — legal only in sloppy dynamic code |
-| `language/module-code` | 5 | `fnGlobalObject()` / sloppy-`this` `_FIXTURE`s |
-| `language/function-code/10.4.3-*` | 4 | assert dynamic functions are non-strict (`this` coerces) even when created from strict code |
-| class-elements `private-{getter,setter}-is-not-a-own-property` | 4 | body calls `__lookupGetter__` |
-| `language/literals/regexp` + `String/prototype/split` | 4 | Annex-B-only escapes in patterns (the documented Perlex strict-grammar posture) |
-| `language/statements/function/13.0-*` | 2 | `new Function('eval = 42;')` — sloppy-only assignment target |
-| `language/eval-code/indirect` | 2 | indirect eval of intrinsically sloppy source (`always-non-strict`, global-`with` env record) |
-| singles | 5 | one verified sloppy/Annex-B dependence each (`call-bind-this-realm-*`, `S11.1.1_A4.1`, `tamper-with-global-object` ×2, `no-species` via `__proto__`) |
+When `--list-gaps` names a fixture:
 
-## Fixed during the audit (6 fixtures, 5 commits' worth of bugs)
+1. **Read the body.** Is the failure a real engine bug, or by-design
+   (sloppy semantics arriving via dynamic code, an Annex-B surface, an
+   outdated fixture)?
+2. If it's a **bug** — fix the engine; the gap disappears on the next sweep.
+3. If it's **by-design** — add one line to `gap_audit.zig` with the matching
+   reason. Confirm by reading the body; don't pattern-match on the path. The
+   `String.prototype.split` pair is the cautionary tale: `separator-regexp`
+   *looks* like the Annex-B split fixtures but uses plain ECMAScript regex
+   (`/^/`, `/.{1,2}/`) and is a **real** gap, so it stays unregistered.
+
+The three reasons: **`sloppy_body`** — sloppy `this` reaching the global via
+`Function('return this')()`, `var eval` / `eval = 42`, a `-non-strict`
+fixture, an in-body `with` (Cynic is strict-only). **`annex_b_body`** — an
+Annex-B regex identity escape, legacy `substr`, `__proto__` / `__lookup*`
+in the test logic (Cynic ships no Annex B). **`stale_fixture`** — Cynic is
+spec-correct and the fixture predates a spec/data bump (refresh it upstream).
+
+## History
+
+The original 2026-06-11 manual audit and each subsequent re-triage, kept
+as a dated record. The registry above is the live source of truth.
+
+### 2026-06-11 — initial audit, fixed 6 fixtures (5 commits' worth of bugs)
 
 - `built-ins/Function/S15.3.2.1_A3_T{1,3}` — §20.2.1.1.1
   CreateDynamicFunction stringified the body before the parameter
@@ -60,15 +75,7 @@ Family breakdown of the 104 (areas with ≥2 fixtures):
   `Object.getOwnPropertyDescriptors` rejected function targets
   (§20.1.2.9 ToObject admits them).
 
-## What this means for the headline
-
-The engine-gap class is exhausted as a work list: every remaining
-member is pinned to a deliberate, documented posture (strict-only
-dynamic code; no Annex B). Further headline movement comes from the
-big policy buckets — ECMA-402 (`intl402/`, ~3.2k) being the only
-whole-point lever — not from chasing the gap tail.
-
-## Update 2026-06-14 — error-stack-accessor (a real gap, now closed)
+### Update 2026-06-14 — error-stack-accessor (a real gap, now closed)
 
 A test262 submodule bump after the 2026-06-11 audit added the
 `built-ins/Error/prototype/stack` family (34 fixtures, feature
@@ -85,7 +92,7 @@ A fresh triage of the rest of the current gap list re-confirmed every
 by-design family above (sloppy-via-dynamic-code, Annex-B-in-body) — no
 new real engine gaps surfaced; the verdict stands.
 
-## Update 2026-07-03 — the intl402 by-design tail (a separate denominator)
+### Update 2026-07-03 — the intl402 by-design tail (a separate denominator)
 
 The audit above covers the **main-sweep** engine-gap class, which by
 construction excludes `intl402/`. But `intl402/` is scored in-scope at
@@ -112,7 +119,7 @@ actually targets pass on strict-only engines) — an upstream-fixture
 observation, distinct from this repo's logs, so it stays with whoever
 owns the tc39 contribution rather than being filed as a Cynic gap.
 
-## Update 2026-07-04 — built-ins/Temporal (a real gap cluster, now closed)
+### Update 2026-07-04 — built-ins/Temporal (a real gap cluster, now closed)
 
 A test262 submodule bump surfaced 14 `built-ins/Temporal` failures that were
 **real** engine gaps — like the 2026-06-14 error-stack-accessor entry, not the
@@ -132,6 +139,24 @@ by-design tail. Two clusters, both closed this session:
   discarding it (`-999999-10-01` valid).
 
 `built-ins/Temporal` → 100% (4589/14 → 4603/0). A fresh triage of the rest of
-the gap list re-confirms every by-design family above — no real engine gap
-remains in the class; the residue is the documented sloppy-via-dynamic-code,
-Annex-B-in-body, strict-only, and by-design / stale-`intl402` postures.
+the gap list re-confirms every by-design family above — the residue is the
+documented sloppy-via-dynamic-code, Annex-B-in-body, strict-only, and
+by-design / stale-`intl402` postures.
+
+### Update 2026-07-04 — the audit became a registry
+
+The manual verdicts above are now encoded as data in
+[`tools/test262/gap_audit.zig`](../tools/test262/gap_audit.zig) (see the
+methodology at the top), and the harness applies them: the 104 by-design
+fixtures reclassify out of `engine gaps` into named classes on every sweep,
+so the number auto-maintains and a new by-design fixture surfaces for triage
+instead of rotting this doc. `test262-results.md` engine gaps: **106 → 2**.
+
+The two survivors are real, and the exercise **corrected the record**: both
+are `built-ins/String/prototype/split` fixtures the 2026-06-11 audit had
+grouped under "Annex-B escapes in patterns", but reading the bodies shows
+`separator-regexp` uses plain ECMAScript regex (`/^/`, `/.{1,2}/`) — a
+genuine split/regex gap — and `checking-by-using-eval` throws an unexpected
+`ReferenceError` binding `String.prototype.split` to top-level `this`. Both
+stay unregistered as engine gaps for a real fix. Exactly the safe default:
+pattern-matching the path would have hidden them.

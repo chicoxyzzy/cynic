@@ -57,21 +57,26 @@ it's a lower bound on spec coverage.
 Every failure, classified. The policy classes are by-design
 fails under the binary posture — fixtures that need sloppy
 mode, Annex B surfaces, or ECMA-402, none of which Cynic
-ships, on purpose. The **engine gaps** row is an *upper
-bound* on real bugs, not a bug count: the classifier reads
-only paths and frontmatter, so a fixture whose sloppy-mode
-or Annex-B dependence lives in its *body* lands here even
-when it is a by-design decline. The per-fixture body audit
-in [docs/test262-gap-audit.md](docs/test262-gap-audit.md)
-reads every one and assigns a verified reason — that file,
-not this count, is the engine work list.
+ships, on purpose. Two classes below are **body-audited**:
+a fixture can fail for a by-design reason that lives only in
+its *body* (a `Function(...)` / `eval(...)` that runs as
+sloppy code, an Annex-B surface used in the test), which the
+path/frontmatter classifier can't see. The registry in
+[tools/test262/gap_audit.zig](tools/test262/gap_audit.zig)
+attributes those per fixture, so the **engine gaps** row is
+left as the real work list — a genuine bug, or a NEW
+by-design fixture not yet audited (run `--list-gaps` to
+triage; add a line to the registry or fix the engine).
 
 | why | failing | detail |
 |---|---:|---|
 | sloppy-mode-only fixtures | 1142 | `flags: [noStrict]` — Cynic is strict-only by design (`with`, sloppy direct-eval `arguments` bindings, legacy S11-era semantics, ...) |
 | Annex B builtins | 69 | `__proto__` accessor + `__define`/`__lookup{Getter,Setter}__` are not shipped by design |
 | Intl normative-optional legacy | 8 | `features: [intl-normative-optional]` — the ECMA-402 §11.1.1/§11.1.2 legacy constructor `[[FallbackSymbol]]` shim (`Intl.NumberFormat.call(obj)` stashing a formatter on a user object). Optional in the spec; a legacy web-compat surface Cynic declines by design, like Annex B. Cynic ships the non-optional path (a fresh formatter, no fallback symbol) |
-| **engine gaps** | 106 | an *upper bound*, not a confirmed-bug count: failures the path/frontmatter classifier can't attribute to a policy class. Most are sloppy-mode semantics hiding inside dynamic `Function(...)` / `eval(...)` bodies, or Annex-B surfaces used in-body — by-design, but invisible to the classifier. The per-fixture audit in [docs/test262-gap-audit.md](docs/test262-gap-audit.md) reads each and is the real work list; a genuinely-unimplemented surface (including `intl402/` at `-Dintl=full`) would show here too |
+| sloppy-mode (body-audited) | 95 | sloppy-mode semantics the classifier can't see from frontmatter — a `Function(...)` / `eval(...)` body that runs as non-strict code, a `-non-strict` fixture, an in-body `with`. Cynic is strict-only by design. Attributed per fixture by the body-audit registry (`tools/test262/gap_audit.zig`) |
+| Annex B (body-audited) | 8 | an Annex-B surface used inside the fixture body — an Annex-B regex form, a legacy `String.prototype.substr`, an `__proto__` / `__lookup*` poke in the test logic. Cynic ships no Annex B. Registry-attributed, same source as above |
+| outdated fixture | 1 | an upstream fixture that predates a spec / data bump Cynic tracks (e.g. a CLDR version) — Cynic is spec-correct, the fixture should be refreshed upstream. Not a Cynic decline. Registry-attributed |
+| **engine gaps** | 2 | the real engine work list: failures NOT explained by a policy class OR the body-audit registry. Each is either a genuine engine bug or a NEW by-design fixture not yet audited — triage the body (`--list-gaps` prints them), then fix the engine or add a line to `tools/test262/gap_audit.zig`. Includes any genuinely-unimplemented in-scope surface (e.g. `intl402/` at `-Dintl=full`) |
 
 **Failing areas.** Only areas with at least one failure are
 listed (everything else passes). `gaps` is the slice of the
@@ -82,11 +87,11 @@ that column is the engine work list. Sorted by area
 | area | passing | failing | gaps | pass% |
 |---|---:|---:|---:|---:|
 | `built-ins/Array` | 3054 | 27 | 0 | 99.1 % |
-| `built-ins/Function` | 428 | 81 | 50 | 84.0 % |
+| `built-ins/Function` | 428 | 81 | 0 | 84.0 % |
 | `built-ins/Infinity` | 4 | 2 | 0 | 66.6 % |
 | `built-ins/Map` | 203 | 1 | 0 | 99.5 % |
 | `built-ins/NaN` | 4 | 2 | 0 | 66.6 % |
-| `built-ins/Object` | 3329 | 82 | 2 | 97.5 % |
+| `built-ins/Object` | 3329 | 82 | 0 | 97.5 % |
 | `built-ins/Promise` | 637 | 3 | 0 | 99.5 % |
 | `built-ins/Proxy` | 300 | 11 | 0 | 96.4 % |
 | `built-ins/RegExp` | 1878 | 1 | 0 | 99.9 % |
@@ -94,25 +99,25 @@ that column is the engine work list. Sorted by area
 | `built-ins/String` | 1219 | 4 | 2 | 99.6 % |
 | `built-ins/Symbol` | 96 | 2 | 0 | 97.9 % |
 | `built-ins/TypedArray` | 1430 | 8 | 0 | 99.4 % |
-| `built-ins/TypedArrayConstructors` | 719 | 17 | 1 | 97.6 % |
+| `built-ins/TypedArrayConstructors` | 719 | 17 | 0 | 97.6 % |
 | `built-ins/undefined` | 5 | 3 | 0 | 62.5 % |
-| `intl402/DateTimeFormat` | 240 | 4 | 1 | 98.3 % |
+| `intl402/DateTimeFormat` | 240 | 4 | 0 | 98.3 % |
 | `intl402/FallbackSymbol` | 0 | 2 | 0 | 0.0 % |
 | `intl402/NumberFormat` | 246 | 3 | 0 | 98.7 % |
-| `intl402/Temporal` | 2028 | 1 | 1 | 99.9 % |
+| `intl402/Temporal` | 2028 | 1 | 0 | 99.9 % |
 | `language/arguments-object` | 225 | 38 | 0 | 85.5 % |
-| `language/comments` | 51 | 1 | 1 | 98.0 % |
+| `language/comments` | 51 | 1 | 0 | 98.0 % |
 | `language/destructuring` | 18 | 1 | 0 | 94.7 % |
 | `language/directive-prologue` | 37 | 25 | 0 | 59.6 % |
-| `language/eval-code` | 164 | 183 | 2 | 47.2 % |
-| `language/expressions` | 10308 | 395 | 23 | 96.3 % |
-| `language/function-code` | 155 | 62 | 4 | 71.4 % |
+| `language/eval-code` | 164 | 183 | 0 | 47.2 % |
+| `language/expressions` | 10308 | 395 | 0 | 96.3 % |
+| `language/function-code` | 155 | 62 | 0 | 71.4 % |
 | `language/future-reserved-words` | 48 | 7 | 0 | 87.2 % |
 | `language/global-code` | 37 | 5 | 0 | 88.0 % |
 | `language/identifier-resolution` | 9 | 5 | 0 | 64.2 % |
-| `language/literals` | 527 | 7 | 2 | 98.6 % |
-| `language/module-code` | 590 | 5 | 5 | 99.1 % |
-| `language/statements` | 8996 | 327 | 12 | 96.4 % |
+| `language/literals` | 527 | 7 | 0 | 98.6 % |
+| `language/module-code` | 590 | 5 | 0 | 99.1 % |
+| `language/statements` | 8996 | 327 | 0 | 96.4 % |
 | `language/types` | 104 | 9 | 0 | 92.0 % |
 
 
@@ -133,11 +138,11 @@ top-line score.
 
 ## History
 
-### 2026-07-04 — cynic `fae6ea70`, test262 `de8e621cdb`
+### 2026-07-04 — cynic `a8f8007f`, test262 `de8e621cdb`
 
 | passing | failing | total | pass% | Δ pass | elapsed |
 |---:|---:|---:|---:|---:|---:|
-| 48570 | 1325 | 49895 | 97.34 % | ±0 | 2m 15s |
+| 48570 | 1325 | 49895 | 97.34 % | ±0 | 2m 05s |
 
 Biggest movers:
 
