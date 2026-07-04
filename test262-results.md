@@ -1,16 +1,16 @@
 # test262 conformance — Cynic
 
-**Cynic passes 97.34 % of the 49895 test262 fixtures it runs**, scored binary pass/fail under a single posture (`--unhardened --allow=eval`):
+**Cynic passes 97.35 % of the 49895 test262 fixtures it runs**, scored binary pass/fail under a single posture (`--unhardened --allow=eval`):
 
-- **48570 passing** — Cynic produced the spec-expected result.
-- **1325 failing** — every other scored fixture. No "expected fail" category: an Annex-B / strict-only / SES / eval / not-yet-implemented-Intl miss counts as a plain fail, same as an engine bug. Honest, not flattering.
+- **48571 passing** — Cynic produced the spec-expected result.
+- **1324 failing** — every other scored fixture. No "expected fail" category: an Annex-B / strict-only / SES / eval / not-yet-implemented-Intl miss counts as a plain fail, same as an engine bug. Honest, not flattering.
 - **Excluded from the denominator**: the upstream `harness/` and `staging/` paths, the whole `annexB/` tree, every Stage ≤ 3 proposal (decorators, import-defer, …), and structurally-unrunnable fixtures (no / malformed frontmatter). Shipped pre-Stage-4 proposals (joint-iteration, ShadowRealm) get their own scoreboard below.
 
 ## Current scores
 
 | posture | passing | failing | total | pass% |
 |---|---:|---:|---:|---:|
-| **`--unhardened --allow=eval`** | 48570 | 1325 | 49895 | 97.34 % |
+| **`--unhardened --allow=eval`** | 48571 | 1324 | 49895 | 97.35 % |
 
 > **pass%** = `passing / (passing + failing)`. Every scored
 > fixture is a plain pass or fail — there is no "expected
@@ -74,9 +74,8 @@ triage; add a line to the registry or fix the engine).
 | Annex B builtins | 69 | `__proto__` accessor + `__define`/`__lookup{Getter,Setter}__` are not shipped by design |
 | Intl normative-optional legacy | 8 | `features: [intl-normative-optional]` — the ECMA-402 §11.1.1/§11.1.2 legacy constructor `[[FallbackSymbol]]` shim (`Intl.NumberFormat.call(obj)` stashing a formatter on a user object). Optional in the spec; a legacy web-compat surface Cynic declines by design, like Annex B. Cynic ships the non-optional path (a fresh formatter, no fallback symbol) |
 | sloppy-mode (body-audited) | 95 | sloppy-mode semantics the classifier can't see from frontmatter — a `Function(...)` / `eval(...)` body that runs as non-strict code, a `-non-strict` fixture, an in-body `with`. Cynic is strict-only by design. Attributed per fixture by the body-audit registry (`tools/test262/gap_audit.zig`) |
-| Annex B (body-audited) | 8 | an Annex-B surface used inside the fixture body — an Annex-B regex form, a legacy `String.prototype.substr`, an `__proto__` / `__lookup*` poke in the test logic. Cynic ships no Annex B. Registry-attributed, same source as above |
+| Annex B (body-audited) | 9 | an Annex-B surface used inside the fixture body — an Annex-B regex form, a legacy `String.prototype.substr`, an `__proto__` / `__lookup*` poke in the test logic. Cynic ships no Annex B. Registry-attributed, same source as above |
 | outdated fixture | 1 | an upstream fixture that predates a spec / data bump Cynic tracks (e.g. a CLDR version) — Cynic is spec-correct, the fixture should be refreshed upstream. Not a Cynic decline. Registry-attributed |
-| **engine gaps** | 2 | the real engine work list: failures NOT explained by a policy class OR the body-audit registry. Each is either a genuine engine bug or a NEW by-design fixture not yet audited — triage the body (`--list-gaps` prints them), then fix the engine or add a line to `tools/test262/gap_audit.zig`. Includes any genuinely-unimplemented in-scope surface (e.g. `intl402/` at `-Dintl=full`) |
 
 **Failing areas.** Only areas with at least one failure are
 listed (everything else passes). `gaps` is the slice of the
@@ -96,7 +95,7 @@ that column is the engine work list. Sorted by area
 | `built-ins/Proxy` | 300 | 11 | 0 | 96.4 % |
 | `built-ins/RegExp` | 1878 | 1 | 0 | 99.9 % |
 | `built-ins/Set` | 382 | 1 | 0 | 99.7 % |
-| `built-ins/String` | 1219 | 4 | 2 | 99.6 % |
+| `built-ins/String` | 1220 | 3 | 0 | 99.7 % |
 | `built-ins/Symbol` | 96 | 2 | 0 | 97.9 % |
 | `built-ins/TypedArray` | 1430 | 8 | 0 | 99.4 % |
 | `built-ins/TypedArrayConstructors` | 719 | 17 | 0 | 97.6 % |
@@ -138,11 +137,11 @@ top-line score.
 
 ## History
 
-### 2026-07-04 — cynic `a8f8007f`, test262 `de8e621cdb`
+### 2026-07-04 — cynic `46e55786`, test262 `de8e621cdb`
 
 | passing | failing | total | pass% | Δ pass | elapsed |
 |---:|---:|---:|---:|---:|---:|
-| 48570 | 1325 | 49895 | 97.34 % | ±0 | 2m 05s |
+| 48571 | 1324 | 49895 | 97.35 % | +1 | 2m 05s |
 
 Biggest movers:
 
