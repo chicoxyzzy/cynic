@@ -61,6 +61,15 @@
 //!                           Ignored when `--filter=` narrows the corpus. Used
 //!                           by CI to gate on test262 regressions — see
 //!                           `.github/workflows/ci.yml`.
+//!   --max-gaps=<n>          Engine-gaps ceiling. Exit 2 if the engine-gaps
+//!                           count (failures neither a policy class nor the
+//!                           body-audit registry explain) exceeds <n>.
+//!                           `--max-gaps=0` locks in the zero-gap invariant:
+//!                           a new unaudited gap fails the build until it is
+//!                           triaged (fix the engine, or register it in
+//!                           `tools/test262/gap_audit.zig`). Unlike the pass%
+//!                           floor this gates filtered runs too (a gap count
+//!                           is meaningful at any granularity). CI-gated.
 //!
 //! Iteration / parallelism:
 //!   --only-failing          Skip-as-pass any fixture listed in
@@ -1308,6 +1317,16 @@ const Options = struct {
     /// pass% has no meaningful relation to the published row). Flag:
     /// `--min-pass-pct`.
     min_pass_pct: f64 = 0.0,
+    /// Maximum acceptable engine-gaps count (failures explained by
+    /// neither a policy class nor the body-audit registry). When set and
+    /// the run is unfiltered, a gap count above this exits 2 — so a new
+    /// unaudited gap (a real bug, or a by-design fixture from a submodule
+    /// bump not yet registered in `gap_audit.zig`) fails the build until
+    /// it is triaged. `null` (default) disables. `--max-gaps=0` locks in
+    /// the zero-gap invariant. Not filter-exempt (unlike `--min-pass-pct`):
+    /// a gap count is meaningful at any granularity, so `--filter=<area>
+    /// --max-gaps=0` gates just that area's gaps.
+    max_gaps: ?u32 = null,
 };
 
 /// Path of the pass-cache, written at the repo root after every
@@ -1930,6 +1949,27 @@ pub fn main(init: std.process.Init) !void {
                     );
                     std.process.exit(2);
                 }
+            }
+        }
+    }
+
+    // `--max-gaps` — gate on the engine-gaps count (failures explained by
+    // neither a policy class nor the body-audit registry). With `--max-gaps=0`
+    // any new unaudited gap — a real bug, or a by-design fixture from a
+    // submodule bump not yet in `gap_audit.zig` — fails the build until it is
+    // triaged, so the zero-gap state can't silently rot. Unlike the pass%
+    // floor this is NOT filter-exempt: an engine-gap count is meaningful at any
+    // granularity (it's the real gaps in whatever was scanned), so a focused
+    // `--filter=<area> --max-gaps=0` gates just that area.
+    if (opts.max_gaps) |budget| {
+        if (main_result) |*mr| {
+            const gaps = mr.stats.fail_by_class[@intFromEnum(FailClass.gap)];
+            if (gaps > budget) {
+                std.debug.print(
+                    "test262: {d} engine gaps exceed --max-gaps={d} — run --list-gaps to triage, then fix the engine or register the fixture in tools/test262/gap_audit.zig\n",
+                    .{ gaps, budget },
+                );
+                std.process.exit(2);
             }
         }
     }
@@ -4546,6 +4586,8 @@ fn parseArgs(gpa: std.mem.Allocator, args: std.process.Args) !Options {
             opts.top_gc_time = std.fmt.parseInt(u32, arg["--top-gc-time=".len..], 10) catch 0;
         } else if (std.mem.startsWith(u8, arg, "--min-pass-pct=")) {
             opts.min_pass_pct = parsePctOrExit(arg, "--min-pass-pct=", arg["--min-pass-pct=".len..]);
+        } else if (std.mem.startsWith(u8, arg, "--max-gaps=")) {
+            opts.max_gaps = std.fmt.parseInt(u32, arg["--max-gaps=".len..], 10) catch 0;
         } else if (std.mem.startsWith(u8, arg, "--phase=")) {
             const spec = arg["--phase=".len..];
             if (std.mem.eql(u8, spec, "main")) {
