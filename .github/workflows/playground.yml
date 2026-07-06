@@ -60,7 +60,7 @@ jobs:
         # the test262 corpus, which the deploy doesn't need.
 
       - name: Set up Zig
-        uses: xyzzylabs/setup-zig@a3314a10089c274dfb459f3afaf897d38b471914  # v1.0.0
+        uses: xyzzylabs/setup-zig@9e74c9ad42fc7d1769f5ea0cd18216fa693a609d  # v1.0.0
         # Version resolved from `build.zig.zon`'s
         # `minimum_zig_version` — single source of truth across
         # this workflow and `.github/workflows/ci.yml`.
