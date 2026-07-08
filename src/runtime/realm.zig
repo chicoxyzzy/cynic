@@ -1205,6 +1205,14 @@ pub const Realm = struct {
     /// teardown free. The realm owns the cells; the
     /// `JSFunction.synth_accessor` slot is a borrow.
     synth_accessor_cells: std.ArrayListUnmanaged(*@import("function.zig").SyntheticAccessor) = .empty,
+    /// CYSN snapshot restore — the realm-owned copy of the image's
+    /// content-interned KEYS blob. Every property-map key /
+    /// `own_key_order` entry / `SyntheticAccessor.key` restored by
+    /// `snapshot.Snapshot.restore` is a borrowed view into this
+    /// buffer, so restored objects need no `key_anchors` (the blob
+    /// is realm-lifetime, not GC-swept). `null` for realms built the
+    /// ordinary way. See docs/realm-snapshots.md §5.3.
+    snapshot_key_bytes: ?[]u8 = null,
 
     pub fn init(allocator: std.mem.Allocator) Realm {
         const heap_ptr = allocator.create(Heap) catch unreachable;
@@ -1441,6 +1449,9 @@ pub const Realm = struct {
         self.wasm_extern_roots.deinit(self.allocator);
         self.wasm_extern_tables.deinit(self.allocator);
         self.wasm_extern_global_cells.deinit(self.allocator);
+        // CYSN restore key blob — freed after the heap teardown
+        // above, since property maps borrowed key slices from it.
+        if (self.snapshot_key_bytes) |b| self.allocator.free(b);
     }
 
     /// Request the interpreter unwind on its next dispatch tick.

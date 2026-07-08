@@ -111,6 +111,7 @@ test {
     _ = @import("runtime/atomics_test.zig");
     _ = @import("runtime/multi_agent_test.zig");
     _ = @import("runtime/realm_test.zig");
+    _ = @import("runtime/snapshot.zig");
     _ = @import("runtime/module_test.zig");
     _ = @import("runtime/builtins/iterator.zig");
     _ = @import("runtime/builtins/date.zig");

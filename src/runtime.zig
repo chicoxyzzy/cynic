@@ -53,6 +53,9 @@ pub const JSBigInt = bigint.JSBigInt;
 pub const module = @import("runtime/module.zig");
 pub const ModuleRecord = module.ModuleRecord;
 
+pub const snapshot = @import("runtime/snapshot.zig");
+pub const Snapshot = snapshot.Snapshot;
+
 pub const lantern = @import("runtime/lantern/interpreter.zig");
 pub const run = lantern.run;
 pub const evaluateScript = lantern.evaluateScript;
