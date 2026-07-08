@@ -23,11 +23,6 @@
 const std = @import("std");
 
 pub const FeatureFlag = enum {
-    /// `Iterator.zip(iterables)` and
-    /// `Iterator.zipKeyed(iterables, options?)`. Stage 3 as of
-    /// 2026-05. Installer site: `src/runtime/builtins/iterator.zig`.
-    joint_iteration,
-
     /// `ShadowRealm` constructor + the §3.8 cross-realm callable
     /// boundary (`.evaluate` / `.importValue`). Stage 2.7 as of
     /// 2026-05. Installer site: `src/runtime/builtins/shadow_realm.zig`,
@@ -36,11 +31,10 @@ pub const FeatureFlag = enum {
 
     /// CLI flag / test262 `features:` frontmatter name. Case follows
     /// the upstream tc39/test262 tag, which varies by proposal —
-    /// kebab-case for newer tags (`joint-iteration`), PascalCase for
-    /// older ones (`ShadowRealm`).
+    /// kebab-case for newer tags (`joint-iteration`, graduated
+    /// 2026-07), PascalCase for older ones (`ShadowRealm`).
     pub fn name(self: FeatureFlag) []const u8 {
         return switch (self) {
-            .joint_iteration => "joint-iteration",
             .shadow_realm => "ShadowRealm",
         };
     }
@@ -48,7 +42,6 @@ pub const FeatureFlag = enum {
     /// One-line description for `cynic --list-features`.
     pub fn description(self: FeatureFlag) []const u8 {
         return switch (self) {
-            .joint_iteration => "Iterator.zip / Iterator.zipKeyed (Stage 3)",
             .shadow_realm => "ShadowRealm + cross-realm callable boundary (Stage 2.7)",
         };
     }

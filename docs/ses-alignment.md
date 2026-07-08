@@ -234,7 +234,8 @@ Why one umbrella switch instead of per-constraint flags:
 
 Two distinct CLI verbs to keep separate:
 - `--enable=<feature>` — turns on a not-yet-stable spec feature
-  (`joint-iteration`, `upsert`, etc.). Forward-looking.
+  (`ShadowRealm`, etc.; `upsert` and `joint-iteration` graduated
+  to default-on at Stage 4). Forward-looking.
 - `--unhardened` — the SES-posture toggle. Backward-compatible-
   with-legacy-JS.
 - `--allow=<relaxation>` — kept as a verb for restrictions that

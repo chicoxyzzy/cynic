@@ -558,35 +558,27 @@ Each shipped proposal carries a `PRE-STAGE-4 PROPOSAL` comment at
 the installer site so a future spec shift surfaces the right
 place to revisit. The current set:
 
-- **`joint-iteration`** (Stage 3) — `Iterator.zip(iterables)` and
-  `Iterator.zipKeyed(iterables, options?)` on the `Iterator`
-  global. Installer in `src/runtime/builtins/iterator.zig`.
-  Semantics of the `mode` option ("shortest" | "longest" |
-  "strict") and padding may still shift. The dedicated feature
-  phase is at 76 / 2: `Iterator.zip` and `Iterator.zipKeyed` are
-  conformant — the keyed-iterables walk routes through the spec
-  `[[OwnPropertyKeys]]` / `[[GetOwnProperty]]` / `[[Get]]`
-  operations (Proxy traps fire), padding is a keyed object for
-  `zipKeyed` and an iterable for `zip`, `IteratorClose` runs in
-  reverse, and the result tuples / per-input state live in typed
-  internal slots with no observable `__cynic_*` own property.
-  Helper results inherit `%IteratorHelperPrototype%`. The 2
-  remaining `result-is-iterator.js` fixtures are **environmentally
-  blocked, not an engine gap**: the test262 harness's
-  `getWellKnownIntrinsicObject` (`wellKnownIntrinsicObjects.js`)
-  populates every intrinsic by evaluating `new Function("return "
-  + source)()`, and Cynic deliberately ships no `new Function`
-  (SES alignment), so the helper can obtain no intrinsic at all.
-  Off by default in the CLI and excluded from headline
-  conformance.
+- **`ShadowRealm`** (Stage 2.7) — the `ShadowRealm` constructor
+  plus the §3.8 cross-realm callable boundary (`.evaluate` /
+  `.importValue`). Installer in
+  `src/runtime/builtins/shadow_realm.zig`, gated in
+  `intrinsics.install`. See [docs/multi-realm.md](multi-realm.md)
+  for the per-realm substrate and teardown story. Off by default
+  in the CLI and excluded from headline conformance.
+
+(`joint-iteration` — `Iterator.zip` / `Iterator.zipKeyed` —
+graduated out of this list on 2026-07-08 when the proposal
+advanced to Stage 4 (May 2026, ES2027 bucket); the methods
+install unconditionally now, same move as `upsert` in 2026-05.)
+
 Revisit this list each TC39 meeting cycle. If a proposal stalls,
 demotes, or its semantics flip, follow the comment trail in the
 installer and either back the change out or update.
 
 The conformance harness scores each tracked feature as its own
-**dedicated phase sweep** — a `joint-iteration` fixture runs in a
-realm where `Map.prototype.getOrInsert` is undefined, and vice
-versa, so each row reflects the proposal in honest isolation.
+**dedicated phase sweep** — each proposal's fixtures run in a
+realm with only that one flag enabled, so each row reflects the
+proposal in honest isolation.
 A `zig build test262 -- --write-results` invocation runs the
 main ECMA-262 sweep (pre-Stage-4 fixtures excluded entirely
 from `total` / cache / per-area buckets) followed by one

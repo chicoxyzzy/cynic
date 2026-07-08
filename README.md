@@ -174,7 +174,7 @@ your local `zig version` reports an older dev tag, bump it.
 
 - `--filter=<substring>` — run only matching paths.
 - `--list-failures=<n>` — print the first `n` failing paths after the tally.
-- `--phase=<spec>` — pin the harness to a single sweep. `--phase=main` is the headline ECMA-262 sweep (pre-Stage-4 fixtures excluded); `--phase=feature:<name>` (e.g. `feature:joint-iteration`, `feature:upsert`) runs only that proposal's dedicated isolated sweep. Default: just main, unless `--write-results` is set — then main + every tracked feature run in sequence.
+- `--phase=<spec>` — pin the harness to a single sweep. `--phase=main` is the headline ECMA-262 sweep (pre-Stage-4 fixtures excluded); `--phase=feature:<name>` (e.g. `feature:ShadowRealm`) runs only that proposal's dedicated isolated sweep. Default: just main, unless `--write-results` is set — then main + every tracked feature run in sequence.
 - `--quiet` / `--verbose` — progress noise dial.
 - `--no-harness` — skip the `sta.js` + `assert.js` preamble (for measuring the no-harness floor).
 - `--threads=<n>` — worker count (`0` = auto, `1` = sequential, `>1` = pool).
@@ -214,7 +214,7 @@ by default — embedders see only stable ECMA-262. Opt in:
 
 ```sh
 cynic --list-features                       # show available proposals
-cynic --enable=joint-iteration eval '...'   # one feature
+cynic --enable=ShadowRealm eval '...'       # one feature
 cynic --enable-experimental run foo.js      # all tracked features
 ```
 

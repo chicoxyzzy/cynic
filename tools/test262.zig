@@ -6,9 +6,8 @@
 //! Every fixture is scored a plain pass or fail under one posture
 //! (`--unhardened --allow=eval`); prints a final report.
 //!
-//! Pre-Stage-4 TC39 proposals Cynic ships (joint-iteration,
-//! ShadowRealm) are scored as their own dedicated phase sweeps — see
-//! `--phase`.
+//! Pre-Stage-4 TC39 proposals Cynic ships (ShadowRealm) are scored
+//! as their own dedicated phase sweeps — see `--phase`.
 //!
 //! Usage:
 //!   zig build test262 -- [flags]
@@ -1143,7 +1142,7 @@ const SkipReason = enum {
     /// compatibility but never produced by the current `classifyAndRun`.
     annex_b,
     /// Fixture is tagged with a pre-Stage-4 proposal — Cynic ships
-    /// shipped ones (joint-iteration, ShadowRealm) only in their
+    /// shipped ones (ShadowRealm) only in their
     /// dedicated feature phases, and unshipped ones (decorators,
     /// import-defer, …) drop here. Removed from `total` entirely;
     /// the headline only moves when Cynic does, not when TC39 lands
@@ -1307,7 +1306,7 @@ const Options = struct {
     /// run main + every tracked pre-Stage-4 feature in dedicated
     /// per-feature sweeps. Setting this pins the harness to one
     /// phase regardless of `--write-results`. Accepted spellings:
-    /// `--phase=main`, `--phase=feature:<flag>` (e.g. `feature:joint-iteration`).
+    /// `--phase=main`, `--phase=feature:<flag>` (e.g. `feature:ShadowRealm`).
     phase: ?Phase = null,
     /// Minimum acceptable `pass%` (= `passing / (passing + failing)`)
     /// for the headline sweep. When >0 and the run is unfiltered, a
@@ -1639,8 +1638,8 @@ const PreStage4Stats = struct {
 /// `stats`. Each `.feature` phase runs a dedicated sweep with
 /// only its one flag enabled, so the per-feature scoreboard
 /// reflects what each proposal looks like in isolation (a
-/// `joint-iteration` fixture runs in a realm where
-/// `Map.prototype.getOrInsert` is undefined, and vice versa).
+/// `ShadowRealm` fixture runs in a realm where only that one
+/// flag is enabled).
 const Phase = union(enum) {
     /// The headline sweep — runs every in-scope fixture under the
     /// single scored posture (`--unhardened --allow=eval`):
@@ -2883,7 +2882,7 @@ fn classifyAndRunInner(
     // policy reclassification.
     //
     // Pre-Stage-4 (Stage ≤ 3) proposals stay dropped: shipped ones
-    // (joint-iteration, ShadowRealm) are filtered above via the
+    // (ShadowRealm) are filtered above via the
     // `out_of_phase` gate so they only run in their dedicated feature
     // sweeps; unshipped ones (decorators, import-defer, …) drop here
     // via `.pre_stage4` — excluded from the corpus denominator.
@@ -4068,7 +4067,7 @@ fn writeFileBody(
                 "`staging/` paths, the whole `annexB/` tree, every Stage ≤ 3 proposal " ++
                 "(decorators, import-defer, …), and structurally-unrunnable fixtures " ++
                 "(no / malformed frontmatter). Shipped pre-Stage-4 proposals " ++
-                "(joint-iteration, ShadowRealm) get their own scoreboard below.\n\n",
+                "(ShadowRealm) get their own scoreboard below.\n\n",
             .{ r.pass_pct, r.total, r.passing, r.failing },
         );
         try out.appendSlice(gpa, tldr);

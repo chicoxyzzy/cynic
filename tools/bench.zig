@@ -150,8 +150,9 @@ fn runOnce(
 ) !Sample {
     const t0 = std.Io.Clock.now(.awake, io);
     // `--enable-experimental` flips every tracked pre-Stage-4
-    // proposal on (joint-iteration, upsert, tail-call-optimization)
-    // so fixtures gated on those flags execute the gated path. No
+    // proposal on (ShadowRealm today; joint-iteration and upsert
+    // graduated to default-on at Stage 4) so fixtures gated on
+    // those flags execute the gated path. No
     // effect on the older arith / alloc / promise fixtures, which
     // don't touch any gated surface. `--jit` (opt-in, mirroring the
     // engine default) measures the Bistromath posture with its
