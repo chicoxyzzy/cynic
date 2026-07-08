@@ -68,6 +68,10 @@ BIN="$DEST/$TARBALL_DIR/zig"
 # hashing). Refresh alongside every .minimum_zig_version bump.
 embedded_sha256() {
   case "$1" in
+    zig-x86_64-linux-0.17.0-dev.1275+59a628c6d.tar.xz)  echo "04e8baddd0497042889d3ee9ae53238e0655c2b9777039827b131487a7465d16" ;;
+    zig-aarch64-linux-0.17.0-dev.1275+59a628c6d.tar.xz) echo "8416c149489e644f81fcb517e9cf0a1e2975fbcc0e05639671054beddbbefcbb" ;;
+    zig-aarch64-macos-0.17.0-dev.1275+59a628c6d.tar.xz) echo "cabf8db92c381bda5a160fda8fa54ffa64f0964316c0d5b1dc385a7437e1691b" ;;
+    zig-x86_64-macos-0.17.0-dev.1275+59a628c6d.tar.xz)  echo "a4f73cfbdee89168eb493eb5df1fba4f1b7eead376d56a9f2a4c242ac13cc725" ;;
     zig-x86_64-linux-0.17.0-dev.813+2153f8143.tar.xz)  echo "b0d46ffc4587b9e8dd0b524ee5bc4da1e67f28bba55e7c534cec64af2f2d7a74" ;;
     zig-aarch64-linux-0.17.0-dev.813+2153f8143.tar.xz) echo "aa67b418d50bdde3043cfe765016d5387a2333b514ada2c57f24baae4005c331" ;;
     zig-aarch64-macos-0.17.0-dev.813+2153f8143.tar.xz) echo "36673d2513afa4a96c86780648ba504beedd7f0451389091cf9d53e38d5b4840" ;;

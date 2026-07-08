@@ -7,7 +7,7 @@
     // CI's setup-zig action resolves the same field, so keep this
     // pin as the single source of truth when a Zig parser/codegen
     // change forces a bump.
-    .minimum_zig_version = "0.17.0-dev.813+2153f8143",
+    .minimum_zig_version = "0.17.0-dev.1275+59a628c6d",
     .dependencies = .{},
     .paths = .{
         "build.zig",
