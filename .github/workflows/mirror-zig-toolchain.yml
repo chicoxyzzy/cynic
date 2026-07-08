@@ -1,0 +1,137 @@
+name: Mirror Zig toolchain
+
+# Publishes the exact Zig toolchain pinned in `build.zig.zon`
+# (`.minimum_zig_version`) as assets on the repo's rolling
+# `zig-toolchain` GitHub Release, so `tools/fetch-zig.sh` can
+# bootstrap the toolchain in environments where ziglang.org and
+# the community mirrors are unreachable (restricted-egress
+# sandboxes only allow a github.com-shaped hole).
+#
+# ziglang.org/builds only retains recent master builds; the
+# community mirrors keep them longer but not forever. Copying
+# the pinned tarball onto a Release the repo controls removes
+# the retention clock entirely: the bytes stay fetchable for as
+# long as the pin lives in `build.zig.zon`.
+#
+# Manual trigger only. Rerun it after every `.minimum_zig_version`
+# bump (the old version's assets stay on the release, so an
+# in-flight branch on the previous pin keeps working), then
+# refresh the embedded SHA-256 table in `tools/fetch-zig.sh`
+# from the uploaded SHA256SUMS.
+#
+# Every tarball is verified against upstream's minisign key
+# before upload — a compromised or lying mirror can't get bytes
+# into the release. The trusted-comment filename check stops a
+# signed-but-different tarball being passed off under the
+# requested name (same check mlugg/setup-zig performs).
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  mirror:
+    name: Fetch, verify, upload
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Audit egress (advisory)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411  # v2
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - name: Install minisign
+        run: sudo apt-get update && sudo apt-get install -y minisign
+
+      - name: Fetch + verify + upload pinned toolchain
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Upstream's minisign public key, from https://ziglang.org/download
+          # (same constant mlugg/setup-zig pins).
+          MINISIGN_KEY: RWSGOq2NVecA2UPNdBUZykf1CCb147pkmdtYxgb3Ti+JO/wCYvhbAb/U
+        run: |
+          set -euo pipefail
+
+          VERSION="$(grep -m1 '\.minimum_zig_version' build.zig.zon | sed 's/.*"\(.*\)".*/\1/')"
+          echo "Pinned Zig version: $VERSION"
+
+          # Live mirror list from ziglang.org, falling back to the
+          # hardcoded list (mlugg/setup-zig's fallback set) if the
+          # canonical host is down.
+          MIRRORS="$(curl -fsSL --max-time 15 https://ziglang.org/download/community-mirrors.txt || true)"
+          if [ -z "$MIRRORS" ]; then
+            MIRRORS="https://pkg.machengine.org/zig
+          https://zigmirror.hryx.net/zig
+          https://zig.linus.dev/zig
+          https://zig.squirl.dev
+          https://zig.florent.dev
+          https://zig.mirror.mschae23.de/zig
+          https://zigmirror.meox.dev
+          https://ziglang.freetls.fastly.net
+          https://zig.tilok.dev
+          https://zig-mirror.tsimnet.eu/zig
+          https://zig.karearl.com/zig
+          https://pkg.earth/zig
+          https://fs.liujiacai.net/zigbuilds"
+          fi
+          # Canonical host last: dev builds under /builds, tagged
+          # releases under /download/<version>.
+          case "$VERSION" in
+            *-dev*) CANONICAL="https://ziglang.org/builds" ;;
+            *)      CANONICAL="https://ziglang.org/download/$VERSION" ;;
+          esac
+          SOURCES="$(printf '%s\n%s\n' "$MIRRORS" "$CANONICAL" | sed 's/^[[:space:]]*//' | grep -v '^$')"
+
+          mkdir -p out && cd out
+          # The targets contributors + CI + sandboxes actually use.
+          for target in x86_64-linux aarch64-linux aarch64-macos x86_64-macos; do
+            fname="zig-$target-$VERSION.tar.xz"
+            got=""
+            while IFS= read -r src; do
+              echo "Trying $src/$fname"
+              if curl -fsSL --max-time 300 -o "$fname" "$src/$fname?source=github-chicoxyzzy-cynic-mirror" \
+                 && curl -fsSL --max-time 60 -o "$fname.minisig" "$src/$fname.minisig?source=github-chicoxyzzy-cynic-mirror"; then
+                # Verify content signature against upstream's key,
+                # then pin the trusted comment to the filename we
+                # asked for (anti tarball-swap).
+                if vout="$(minisign -Vm "$fname" -x "$fname.minisig" -P "$MINISIGN_KEY" 2>&1)" \
+                   && printf '%s\n' "$vout" | grep -q "file:$fname"; then
+                  echo "Verified $fname from $src"
+                  got=1
+                  break
+                fi
+                echo "Verification failed for $fname from $src, trying next source"
+                rm -f "$fname" "$fname.minisig"
+              fi
+            done <<< "$SOURCES"
+            if [ -z "$got" ]; then
+              echo "ERROR: could not fetch + verify $fname from any source" >&2
+              exit 1
+            fi
+          done
+
+          sha256sum zig-*.tar.xz > SHA256SUMS
+          cat SHA256SUMS
+
+          # Rolling release: create once, then upload/refresh assets.
+          gh release view zig-toolchain >/dev/null 2>&1 || \
+            gh release create zig-toolchain \
+              --title "Zig toolchain mirror" \
+              --notes "Minisign-verified copies of the Zig toolchain pinned in build.zig.zon, for environments that cannot reach ziglang.org or the community mirrors. Consumed by tools/fetch-zig.sh. Repopulated by the mirror-zig-toolchain workflow on every pin bump."
+          gh release upload zig-toolchain --clobber zig-*.tar.xz zig-*.tar.xz.minisig
+          # SHA256SUMS accumulates across pin bumps: merge with any
+          # previously-published sums (new entries win) so assets
+          # from an older pin stay verifiable.
+          if gh release download zig-toolchain --pattern SHA256SUMS --output SHA256SUMS.prev 2>/dev/null; then
+            awk '{print $2}' SHA256SUMS | sort > .new-names
+            grep -v -F -f .new-names SHA256SUMS.prev >> SHA256SUMS || true
+            rm -f .new-names SHA256SUMS.prev
+          fi
+          gh release upload zig-toolchain --clobber SHA256SUMS
+          echo "Uploaded to the zig-toolchain release:"
+          gh release view zig-toolchain --json assets --jq '.assets[].name'
