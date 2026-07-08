@@ -29,6 +29,70 @@ const PropertyFlags = @import("object.zig").PropertyFlags;
 /// keeps a data-property inline cache from firing on an accessor.
 pub const PropKind = enum(u1) { data, accessor };
 
+/// Chains shorter than this stay on the plain linear walk — a
+/// couple of `mem.eql`s beat a hash + probe at low depth. Same
+/// cutoff V8 uses for linear DescriptorArray search (8) and JSC
+/// for Structure lookup before the PropertyTable materialises.
+pub const index_min_depth: u32 = 8;
+
+/// Don't bother building a leaf index when the un-indexed tail
+/// above the nearest indexed ancestor is this short — the tail
+/// scan is already cheap and the ancestor probe does the rest.
+pub const index_min_tail: u32 = 4;
+
+/// Index-memory budget (in table slots) that lazy builds may
+/// consume freely: `base + per_node × node_count`. Within the
+/// budget every slow-lookup-hit shape gets its own index (tail
+/// collapses to zero); past it, only the geometric
+/// distance-doubling rule below builds, so total index memory
+/// stays O(node_count) even under an adversarial
+/// add-one-property-then-lookup loop (the never-unbounded-growth
+/// contract, docs/handbook/host-safety.md).
+pub const index_budget_base: u64 = 64;
+pub const index_budget_per_node: u64 = 8;
+
+/// Shapes wider than this never get an index (the table would be
+/// multi-MiB; a linear walk that long is a degenerate object the
+/// caller should have demoted to dictionary mode anyway).
+const index_max_indexed_props: u32 = 1 << 20;
+
+inline fn hashKey(key: []const u8) u32 {
+    return @truncate(std.hash.Wyhash.hash(0, key));
+}
+
+/// Tree-wide shared state: the (pointer-stable) arena every shape
+/// and index is allocated from, plus the counters the index-budget
+/// rule reads. One per `ShapeTree`, allocated from its own arena.
+pub const ShapeCtx = struct {
+    arena: *std.heap.ArenaAllocator,
+    node_count: u64 = 0,
+    index_slots_total: u64 = 0,
+};
+
+/// Open-addressed key→entry hash table over one shape's full
+/// chain (self → root), replacing the O(depth) parent walk with
+/// O(1) probes. Analogue of V8's hash-mode descriptor lookup /
+/// JSC's `PropertyTable` / SpiderMonkey's `PropertyMap` table.
+/// Immutable once published on the shape (shapes never change
+/// after creation; descendants layer a linear tail on top).
+/// Slots hold shape nodes — key, cached hash, slot, attrs, kind
+/// all live on the node. Load factor ≤ ~0.5, so a probe always
+/// terminates on an empty slot.
+pub const KeyIndex = struct {
+    slots: []?*const Shape,
+    mask: u32,
+
+    fn find(self: *const KeyIndex, key: []const u8, hash: u32) ?Shape.Entry {
+        var i: u32 = hash & self.mask;
+        while (self.slots[i]) |n| : (i = (i +% 1) & self.mask) {
+            if (n.key_hash == hash and std.mem.eql(u8, n.key, key)) {
+                return .{ .slot = n.slot, .attrs = n.attrs, .kind = n.kind };
+            }
+        }
+        return null;
+    }
+};
+
 /// A node in the transition tree. The root (`parent == null`)
 /// describes the empty object; every other node adds exactly one
 /// property — `key` with `attrs`/`kind` — at index `slot` to its
@@ -39,6 +103,9 @@ pub const Shape = struct {
     /// root. Owned by the `ShapeTree` arena (duped on transition)
     /// so it outlives any caller's key buffer.
     key: []const u8,
+    /// Wyhash of `key`, computed once at creation — feeds the
+    /// `KeyIndex` build and the probe's early-out compare.
+    key_hash: u32,
     attrs: PropertyFlags,
     kind: PropKind,
     /// Index into `JSObject.slots` where this property's value
@@ -47,6 +114,15 @@ pub const Shape = struct {
     /// Number of own properties this shape describes — also the
     /// slot count an object of this shape needs.
     property_count: u32,
+    /// Chain length from the root (root = 0). Counts redefine
+    /// nodes too, so it can exceed `property_count`.
+    depth: u32,
+    /// Tree-shared arena + index-budget counters (see `ShapeCtx`).
+    ctx: *ShapeCtx,
+    /// Lazily-built key→entry hash table covering the FULL chain
+    /// (this shape → root). Null until a slow lookup at this shape
+    /// crosses the build thresholds; immutable once set.
+    index: ?*KeyIndex,
     /// Forward-transition cache: the shapes reached by adding one
     /// more property to THIS shape. Append-only; scanned linearly
     /// — a given key is almost always added with a single
@@ -67,18 +143,103 @@ pub const Shape = struct {
         kind: PropKind,
     };
 
-    /// Resolve own property `key` by walking the transition chain
-    /// to the root. O(depth in the chain); an inline cache keyed
-    /// on the shape collapses the hot path to O(1).
-    pub fn lookup(self: *const Shape, key: []const u8) ?Entry {
-        var node: ?*const Shape = self;
-        while (node) |n| : (node = n.parent) {
-            if (n.parent == null) break; // root adds no property
-            if (std.mem.eql(u8, n.key, key)) {
-                return .{ .slot = n.slot, .attrs = n.attrs, .kind = n.kind };
+    /// Resolve own property `key`. Shallow chains walk the
+    /// transition chain linearly to the root (nearest node wins,
+    /// which is what makes redefine transitions shadow their
+    /// ancestor entry). Deep chains resolve through the lazily
+    /// built `KeyIndex` — either this shape's own, or the nearest
+    /// indexed ancestor's after a short linear tail scan (the tail
+    /// is scanned FIRST, so nearest-wins shadowing is preserved).
+    /// An inline cache keyed on the shape still collapses the hot
+    /// monomorphic path to O(1) before any of this runs; the index
+    /// is the megamorphic-miss path's rescue.
+    pub fn lookup(self: *Shape, key: []const u8) ?Entry {
+        if (self.index) |idx| return idx.find(key, hashKey(key));
+        var node: *Shape = self;
+        var anchor: ?*Shape = null;
+        var result: ?Entry = null;
+        var walked_full_tail = true;
+        while (true) {
+            if (node.parent == null) break; // root adds no property
+            if (node.index != null) {
+                anchor = node;
+                break;
             }
+            if (std.mem.eql(u8, node.key, key)) {
+                result = .{ .slot = node.slot, .attrs = node.attrs, .kind = node.kind };
+                walked_full_tail = false;
+                break;
+            }
+            node = node.parent.?;
         }
-        return null;
+        if (anchor) |a| result = a.index.?.find(key, hashKey(key));
+        // Only a lookup that paid for the whole un-indexed tail is
+        // evidence this shape is hot enough to index.
+        if (walked_full_tail) self.maybeBuildIndex(if (anchor) |a| a.depth else 0);
+        return result;
+    }
+
+    /// Decide whether the walk `lookup` just paid justifies
+    /// materialising an index at this shape. Two throttles keep
+    /// index memory O(node_count) under adversarial
+    /// add-then-lookup loops (never-unbounded-growth,
+    /// docs/handbook/host-safety.md): a tree-wide slot budget
+    /// linear in the node count, and past it a geometric rule —
+    /// only build when the un-indexed tail is more than half the
+    /// chain, so index depths at least double along any path.
+    fn maybeBuildIndex(self: *Shape, anchor_depth: u32) void {
+        if (self.depth < index_min_depth) return;
+        const tail = self.depth - anchor_depth;
+        if (tail < index_min_tail) return;
+        const cap = indexCapacity(self.property_count) orelse return;
+        const under_budget = self.ctx.index_slots_total + cap <=
+            index_budget_base + index_budget_per_node * self.ctx.node_count;
+        const geometric = 2 * @as(u64, tail) > self.depth;
+        if (!under_budget and !geometric) return;
+        // OOM → skip the index; the linear walk stays correct.
+        self.buildIndex(cap) catch return;
+    }
+
+    /// Power-of-two table size with load factor ≤ ~0.5. The chain
+    /// holds exactly `property_count` distinct keys (appends add a
+    /// new key; redefines re-add an existing one), so the table
+    /// always keeps empty slots and probes terminate.
+    fn indexCapacity(property_count: u32) ?u32 {
+        if (property_count >= index_max_indexed_props) return null;
+        const want = @max(16, (@as(u64, property_count) + 1) * 2);
+        return @intCast(std.math.ceilPowerOfTwoAssert(u64, want));
+    }
+
+    fn buildIndex(self: *Shape, cap: u32) !void {
+        const a = self.ctx.arena.allocator();
+        const slots = try a.alloc(?*const Shape, cap);
+        @memset(slots, null);
+        const mask: u32 = cap - 1;
+        var inserted: u32 = 0;
+        // Walk self → root inserting each key once; the FIRST
+        // (nearest) node wins, mirroring the linear walk's
+        // shadowing order for redefine transitions.
+        var node: ?*Shape = self;
+        walk: while (node) |n| : (node = n.parent) {
+            if (n.parent == null) break; // root adds no property
+            var i: u32 = n.key_hash & mask;
+            while (slots[i]) |occ| : (i = (i +% 1) & mask) {
+                if (occ.key_hash == n.key_hash and std.mem.eql(u8, occ.key, n.key)) {
+                    continue :walk; // nearer node already inserted
+                }
+            }
+            // Defensive load-factor guard — unreachable while the
+            // distinct-keys == property_count invariant holds, but
+            // a full table would make `find` spin, so bail to the
+            // linear walk instead.
+            if (2 * (@as(u64, inserted) + 1) > cap) return;
+            slots[i] = n;
+            inserted += 1;
+        }
+        const idx = try a.create(KeyIndex);
+        idx.* = .{ .slots = slots, .mask = mask };
+        self.index = idx;
+        self.ctx.index_slots_total += cap;
     }
 };
 
@@ -89,29 +250,44 @@ fn flagsEql(a: PropertyFlags, b: PropertyFlags) bool {
 }
 
 /// Owns one realm's transition tree: the root shape plus the arena
-/// every `Shape` (and its duped key bytes) is allocated from.
+/// every `Shape` (and its duped key bytes) is allocated from. The
+/// arena lives behind a stable heap pointer (not by value) so each
+/// `Shape.ctx` can reach it for lazy `KeyIndex` builds even though
+/// the `ShapeTree` struct itself moves by value into `Heap`.
 pub const ShapeTree = struct {
-    arena: std.heap.ArenaAllocator,
+    backing: std.mem.Allocator,
+    arena: *std.heap.ArenaAllocator,
+    ctx: *ShapeCtx,
     root: *Shape,
 
     pub fn init(backing: std.mem.Allocator) !ShapeTree {
-        var arena = std.heap.ArenaAllocator.init(backing);
+        const arena = try backing.create(std.heap.ArenaAllocator);
+        errdefer backing.destroy(arena);
+        arena.* = std.heap.ArenaAllocator.init(backing);
         errdefer arena.deinit();
-        const root = try arena.allocator().create(Shape);
+        const a = arena.allocator();
+        const ctx = try a.create(ShapeCtx);
+        ctx.* = .{ .arena = arena };
+        const root = try a.create(Shape);
         root.* = .{
             .parent = null,
             .key = "",
+            .key_hash = 0,
             .attrs = .{},
             .kind = .data,
             .slot = 0,
             .property_count = 0,
+            .depth = 0,
+            .ctx = ctx,
+            .index = null,
             .transitions = .empty,
         };
-        return .{ .arena = arena, .root = root };
+        return .{ .backing = backing, .arena = arena, .ctx = ctx, .root = root };
     }
 
     pub fn deinit(self: *ShapeTree) void {
         self.arena.deinit();
+        self.backing.destroy(self.arena);
     }
 
     /// Return the shape reached by adding (`key`, `attrs`, `kind`)
@@ -138,10 +314,14 @@ pub const ShapeTree = struct {
         child.* = .{
             .parent = from,
             .key = owned_key,
+            .key_hash = hashKey(owned_key),
             .attrs = attrs,
             .kind = kind,
             .slot = from.property_count,
             .property_count = from.property_count + 1,
+            .depth = from.depth + 1,
+            .ctx = self.ctx,
+            .index = null,
             .transitions = .empty,
         };
         try from.transitions.append(a, .{
@@ -150,6 +330,7 @@ pub const ShapeTree = struct {
             .kind = kind,
             .child = child,
         });
+        self.ctx.node_count += 1;
         return child;
     }
 
@@ -189,10 +370,14 @@ pub const ShapeTree = struct {
         child.* = .{
             .parent = from,
             .key = owned_key,
+            .key_hash = hashKey(owned_key),
             .attrs = attrs,
             .kind = .data,
             .slot = existing.slot,
             .property_count = from.property_count,
+            .depth = from.depth + 1,
+            .ctx = self.ctx,
+            .index = null,
             .transitions = .empty,
         };
         try from.transitions.append(a, .{
@@ -201,6 +386,7 @@ pub const ShapeTree = struct {
             .kind = .data,
             .child = child,
         });
+        self.ctx.node_count += 1;
         return child;
     }
 };
@@ -309,4 +495,160 @@ test "lookup resolves attributes and kind, not just the slot" {
     try testing.expectEqual(@as(u32, 0), e.slot);
     try testing.expect(!e.attrs.enumerable);
     try testing.expectEqual(PropKind.accessor, e.kind);
+}
+
+// —— key→slot hash index (the O(depth)-walk killer) ——————————————
+
+/// Build a linear chain of `n` data properties "p0" … "p{n-1}"
+/// off the root, returning the leaf shape.
+fn buildChain(tree: *ShapeTree, n: u32) !*Shape {
+    var s = tree.root;
+    var buf: [16]u8 = undefined;
+    var i: u32 = 0;
+    while (i < n) : (i += 1) {
+        const key = try std.fmt.bufPrint(&buf, "p{d}", .{i});
+        s = try tree.transition(s, key, .{}, .data);
+    }
+    return s;
+}
+
+test "deep shape builds a hash index on lookup and resolves through it" {
+    var tree = try ShapeTree.init(testing.allocator);
+    defer tree.deinit();
+
+    const leaf = try buildChain(&tree, 20);
+    try testing.expect(leaf.index == null);
+
+    // A full-walk lookup (miss) at an index-eligible depth builds
+    // the index lazily.
+    try testing.expect(leaf.lookup("absent") == null);
+    try testing.expect(leaf.index != null);
+
+    // Every key resolves to the same slot the linear walk gave,
+    // now via the index probe.
+    var buf: [16]u8 = undefined;
+    var i: u32 = 0;
+    while (i < 20) : (i += 1) {
+        const key = try std.fmt.bufPrint(&buf, "p{d}", .{i});
+        const e = leaf.lookup(key).?;
+        try testing.expectEqual(i, e.slot);
+        try testing.expectEqual(PropKind.data, e.kind);
+    }
+    try testing.expect(leaf.lookup("still-absent") == null);
+    try testing.expect(leaf.lookup("") == null);
+}
+
+test "shallow shapes never build an index" {
+    var tree = try ShapeTree.init(testing.allocator);
+    defer tree.deinit();
+
+    const leaf = try buildChain(&tree, index_min_depth - 1);
+    try testing.expect(leaf.lookup("absent") == null);
+    try testing.expect(leaf.lookup("p0") != null);
+    try testing.expect(leaf.index == null);
+    try testing.expect(tree.root.lookup("x") == null);
+    try testing.expect(tree.root.index == null);
+}
+
+test "redefine transition shadows correctly through the index" {
+    var tree = try ShapeTree.init(testing.allocator);
+    defer tree.deinit();
+
+    // Redefine BELOW the index build point: freeze p3, then look up
+    // at the leaf — the index must carry the redefined attrs, not
+    // the original ancestor entry.
+    const base = try buildChain(&tree, 10);
+    const frozen: PropertyFlags = .{ .writable = false, .enumerable = true, .configurable = false };
+    const leaf = try tree.redefineTransition(base, "p3", frozen);
+
+    try testing.expect(leaf.lookup("absent") == null); // builds index
+    try testing.expect(leaf.index != null);
+    const e = leaf.lookup("p3").?;
+    try testing.expectEqual(@as(u32, 3), e.slot);
+    try testing.expect(!e.attrs.writable);
+    try testing.expect(!e.attrs.configurable);
+    // A sibling key is untouched.
+    try testing.expect(leaf.lookup("p4").?.attrs.writable);
+    // The ancestor's own index (if any) still answers the ORIGINAL
+    // attrs at `base`.
+    try testing.expect(base.lookup("p3").?.attrs.writable);
+}
+
+test "descendant reuses an ancestor's index through the tail walk" {
+    var tree = try ShapeTree.init(testing.allocator);
+    defer tree.deinit();
+
+    const mid = try buildChain(&tree, 12);
+    try testing.expect(mid.lookup("absent") == null); // builds at depth 12
+    try testing.expect(mid.index != null);
+
+    // Two more appends + one redefine: short tail above the anchor.
+    var leaf = try tree.transition(mid, "q0", .{}, .data);
+    leaf = try tree.transition(leaf, "q1", .{ .enumerable = false }, .data);
+    const frozen: PropertyFlags = .{ .writable = false, .enumerable = true, .configurable = false };
+    leaf = try tree.redefineTransition(leaf, "p5", frozen);
+
+    // Tail keys (nearest) win; anchored keys resolve via the probe.
+    try testing.expectEqual(@as(u32, 12), leaf.lookup("q0").?.slot);
+    try testing.expect(!leaf.lookup("q1").?.attrs.enumerable);
+    try testing.expect(!leaf.lookup("p5").?.attrs.writable); // tail redefine shadows index
+    try testing.expectEqual(@as(u32, 0), leaf.lookup("p0").?.slot); // via ancestor index
+    try testing.expect(leaf.lookup("absent") == null);
+    // The short tail must NOT have built a fresh index at the leaf.
+    try testing.expect(leaf.index == null);
+}
+
+test "accessor kind survives the index" {
+    var tree = try ShapeTree.init(testing.allocator);
+    defer tree.deinit();
+
+    var s = try buildChain(&tree, 9);
+    s = try tree.transition(s, "getterProp", .{ .enumerable = false }, .accessor);
+    try testing.expect(s.lookup("absent") == null); // builds
+    const e = s.lookup("getterProp").?;
+    try testing.expectEqual(PropKind.accessor, e.kind);
+    try testing.expect(!e.attrs.enumerable);
+}
+
+test "index memory stays linearly bounded under add+lookup alternation" {
+    var tree = try ShapeTree.init(testing.allocator);
+    defer tree.deinit();
+
+    // Adversarial pattern from docs/handbook/host-safety.md's
+    // never-unbounded-growth contract: interleave one property add
+    // with one full-walk lookup, which would build an index at
+    // EVERY shape without the budget + geometric throttles
+    // (O(n²) slots). Pin the linear bound.
+    var s = tree.root;
+    var buf: [16]u8 = undefined;
+    var i: u32 = 0;
+    while (i < 400) : (i += 1) {
+        const key = try std.fmt.bufPrint(&buf, "k{d}", .{i});
+        s = try tree.transition(s, key, .{}, .data);
+        try testing.expect(s.lookup("absent") == null);
+        try testing.expect(s.lookup("k0") != null);
+    }
+    const bound = index_budget_base + (index_budget_per_node + 8) * tree.ctx.node_count;
+    try testing.expect(tree.ctx.index_slots_total <= bound);
+    // …and the index still answers correctly at the leaf.
+    try testing.expectEqual(@as(u32, 399), s.lookup("k399").?.slot);
+    try testing.expectEqual(@as(u32, 17), s.lookup("k17").?.slot);
+}
+
+test "hash collisions in the index still resolve by key bytes" {
+    var tree = try ShapeTree.init(testing.allocator);
+    defer tree.deinit();
+
+    // With a 400-key chain the table has plenty of same-bucket
+    // (masked) collisions; every key must still resolve to its own
+    // slot via the linear probe + byte-compare confirm.
+    const leaf = try buildChain(&tree, 400);
+    try testing.expect(leaf.lookup("absent") == null); // builds
+    try testing.expect(leaf.index != null);
+    var buf: [16]u8 = undefined;
+    var i: u32 = 0;
+    while (i < 400) : (i += 1) {
+        const key = try std.fmt.bufPrint(&buf, "p{d}", .{i});
+        try testing.expectEqual(i, leaf.lookup(key).?.slot);
+    }
 }
