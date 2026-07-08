@@ -646,9 +646,9 @@ thumb). Suggested surface:
 
 ```zig
 pub const Snapshot = struct {
-    pub const CaptureError = error{ OutOfMemory, RealmNotQuiescent, Unsnapshotable };
+    pub const CaptureError = error{ OutOfMemory, RealmNotQuiescent, SnapshotUnsupported };
     pub const RestoreError = error{ OutOfMemory, SnapshotCorrupt,
-        SnapshotVersionMismatch, SnapshotBuildMismatch, SnapshotPostureMismatch };
+        SnapshotVersionMismatch, SnapshotBuildMismatch };
 
     /// Serialize a quiescent, fully-installed realm. Caller owns the bytes.
     pub fn capture(realm: *Realm, allocator: std.mem.Allocator) CaptureError![]u8;
@@ -673,9 +673,11 @@ pub const Snapshot = struct {
 
 Posture: the snapshot header's flags are authoritative — `restore`
 stamps `hardened` / `allow_eval` / `feature_flags` from the header
-and returns `SnapshotPostureMismatch` if the embedder requests a
-conflicting posture (a hardened snapshot cannot be reopened
-unhardened; the freeze is baked into the object graph).
+unconditionally (a hardened snapshot cannot be reopened unhardened;
+the freeze is baked into the object graph). There is no
+posture-override parameter, so no `SnapshotPostureMismatch` error
+exists in the landed surface; an embedder that wants a different
+posture builds the realm the ordinary way.
 
 CLI integration (`cynic run --snapshot=…`, a `zig build gen-snapshot`
 step) is explicitly **after** the round-trip test lands; phase 1 is
