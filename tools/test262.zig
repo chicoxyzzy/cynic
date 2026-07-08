@@ -2610,10 +2610,22 @@ const idle_slot: usize = std.math.maxInt(usize);
 
 /// Per-worker host-interrupt flag pointer, set once at `workerLoop`
 /// entry. `classifyAndRun` (running on the worker thread) wires each
-/// fresh realm's `host_interrupt` to it, so the watchdog in
+/// fresh realm's metering interrupt hook to it, so the watchdog in
 /// `monitorLoop` can abort a wedged fixture from another thread.
 /// Null on the sequential path (which has no monitor).
 threadlocal var worker_abort_flag: ?*std.atomic.Value(bool) = null;
+
+/// Metering interrupt hook (docs/resource-metering.md) wired into
+/// every worker realm: polls the per-worker abort flag the watchdog
+/// flips. Runs on the worker thread at interpreter safe points; the
+/// acquire load pairs with the monitor's release store. A
+/// `.interrupt` verdict latches an uncatchable host termination, so
+/// even a fixture wedged inside `try { for(;;){} } catch {}`
+/// unwinds and the worker moves on.
+fn watchdogAbortHook(ctx: ?*anyopaque) cynic.runtime.Realm.InterruptAction {
+    const flag: *std.atomic.Value(bool) = @ptrCast(@alignCast(ctx.?));
+    return if (flag.load(.acquire)) .interrupt else .proceed;
+}
 
 /// Worker entry point. Pulls paths off the shared atomic index
 /// until drained, classifies + runs each test in its own arena,
@@ -2933,10 +2945,21 @@ fn classifyAndRunInner(
 
     var realm = cynic.runtime.Realm.initWithBytesAllocator(std.heap.c_allocator, bytes_allocator);
     defer realm.deinit();
-    // Wire the watchdog: on a worker thread, a wedged fixture can be
-    // aborted from `monitorLoop` via this worker's host-interrupt
-    // flag. Null on the sequential path — harmless.
-    realm.host_interrupt = worker_abort_flag;
+    // Wire the watchdog through the metering interrupt hook
+    // (docs/resource-metering.md): past `--timeout`, `monitorLoop`
+    // flips this worker's abort flag; the hook turns it into an
+    // UNCATCHABLE host termination, so even a fixture wedged inside
+    // a `try`/`catch` unwinds and the worker keeps moving. (The old
+    // `realm.host_interrupt` wiring aimed at the same flag but was
+    // never polled by the engine.) Null on the sequential path,
+    // which has no monitor — harmless.
+    //
+    // NOTE: `setInterruptHook` clears `jit_enabled` (the v1
+    // hook-vs-JIT rule); the `--jit` branch below re-enables it
+    // deliberately — compiled frames poll only the fuel counter and
+    // the interrupt byte at back-edges, and the 50M step budget
+    // below backstops a wedged compiled loop.
+    if (worker_abort_flag) |flag| realm.setInterruptHook(watchdogAbortHook, flag);
     // LIFO `defer`: runs BEFORE `realm.deinit()` above, so the heap
     // counters are still readable. One spot covers all 20+ returns
     // inside this block.
@@ -3464,9 +3487,13 @@ fn monitorLoop(
                     wd_ticks[wid] * tick_s >= timeout_s)
                 {
                     wd_warned[wid] = true;
-                    // Abort the wedged fixture: the worker's engine
-                    // polls this flag and unwinds with a RangeError,
-                    // so the sweep continues instead of hanging.
+                    // Abort the wedged fixture: the worker realm's
+                    // metering interrupt hook polls this flag at the
+                    // interpreter safe points and latches an
+                    // uncatchable host termination
+                    // (docs/resource-metering.md), so the sweep
+                    // continues instead of hanging — even when the
+                    // wedge sits inside a fixture's try/catch.
                     if (wid < abort_flags.len)
                         abort_flags[wid].store(true, .release);
                     var wb: [1024]u8 = undefined;
