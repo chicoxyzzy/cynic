@@ -1,8 +1,8 @@
 # test262 conformance — Cynic
 
-**Cynic passes 97.35 % of the 49895 test262 fixtures it runs**, scored binary pass/fail under a single posture (`--unhardened --allow=eval`):
+**Cynic passes 97.35 % of the 49977 test262 fixtures it runs**, scored binary pass/fail under a single posture (`--unhardened --allow=eval`):
 
-- **48571 passing** — Cynic produced the spec-expected result.
+- **48653 passing** — Cynic produced the spec-expected result.
 - **1324 failing** — every other scored fixture. No "expected fail" category: an Annex-B / strict-only / SES / eval / not-yet-implemented-Intl miss counts as a plain fail, same as an engine bug. Honest, not flattering.
 - **Excluded from the denominator**: the upstream `harness/` and `staging/` paths, the whole `annexB/` tree, every Stage ≤ 3 proposal (decorators, import-defer, …), and structurally-unrunnable fixtures (no / malformed frontmatter). Shipped pre-Stage-4 proposals (ShadowRealm) get their own scoreboard below.
 
@@ -10,7 +10,7 @@
 
 | posture | passing | failing | total | pass% |
 |---|---:|---:|---:|---:|
-| **`--unhardened --allow=eval`** | 48571 | 1324 | 49895 | 97.35 % |
+| **`--unhardened --allow=eval`** | 48653 | 1324 | 49977 | 97.35 % |
 
 > **pass%** = `passing / (passing + failing)`. Every scored
 > fixture is a plain pass or fail — there is no "expected
@@ -136,19 +136,25 @@ top-line score.
 
 ## History
 
-### 2026-07-04 — cynic `46e55786`, test262 `de8e621cdb`
+### 2026-07-08 — cynic `05c71887`, test262 `de8e621cdb`
 
 | passing | failing | total | pass% | Δ pass | elapsed |
 |---:|---:|---:|---:|---:|---:|
-| 48571 | 1324 | 49895 | 97.35 % | +1 | 2m 05s |
+| 48653 | 1324 | 49977 | 97.35 % | +82 | 2m 55s |
 
 Biggest movers:
 
 - `built-ins/Temporal` +4603
 - `built-ins/Date` +594
 - `built-ins/DataView` +550
-- `built-ins/Iterator` +432
+- `built-ins/Iterator` +514
 - `built-ins/Atomics` +381
+
+### 2026-07-04 — cynic `46e55786`, test262 `de8e621cdb`
+
+| passing | failing | total | pass% | Δ pass | elapsed |
+|---:|---:|---:|---:|---:|---:|
+| 48571 | 1324 | 49895 | 97.35 % | +1 | 2m 05s |
 
 ### 2026-07-03 — cynic `bb44d35f`, test262 `de8e621cdb`
 
