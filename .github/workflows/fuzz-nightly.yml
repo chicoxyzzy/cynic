@@ -112,7 +112,7 @@ jobs:
           submodules: false
 
       - name: Set up Zig
-        uses: xyzzylabs/setup-zig@a3314a10089c274dfb459f3afaf897d38b471914  # v1.0.0
+        uses: xyzzylabs/setup-zig@9e74c9ad42fc7d1769f5ea0cd18216fa693a609d  # v1.0.0
         with:
           cache-key: fuzz
 
@@ -165,7 +165,7 @@ jobs:
         # Deterministic for a given (rev, profile) pair, so a stable key: first
         # run misses and saves; later runs hit and `swift build` is a near-noop.
         # A profile edit changes the hash → fresh build of the changed file.
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: fuzzilli/.build
           key: fuzzilli-build-${{ env.FUZZILLI_REV }}-${{ hashFiles('docs/fuzzilli/CynicProfile.swift') }}-${{ runner.os }}
@@ -180,7 +180,7 @@ jobs:
         # fresh, grown corpus is saved every night; restore-keys falls back to
         # the most recent prior night with the SAME rev. A rev bump ⇒ key
         # miss ⇒ one cold start, then warm again under the new rev.
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: fuzz-storage
           key: fuzz-corpus-${{ env.FUZZILLI_REV }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -257,7 +257,7 @@ jobs:
         # early-exit run (build failed, fuzz step skipped) from tar-failing on
         # a non-existent fuzz-storage.
         if: always() && hashFiles('fuzz-storage/corpus/**') != ''
-        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: fuzz-storage
           key: fuzz-corpus-${{ env.FUZZILLI_REV }}-${{ github.run_id }}-${{ github.run_attempt }}
