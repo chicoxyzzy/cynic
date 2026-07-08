@@ -1046,7 +1046,25 @@ inline fn runSafePoint(realm: *Realm) RunError!?RunResult {
             realm.collectGarbageYoung();
         }
     }
+    // Host-termination latch (docs/resource-metering.md) — checked
+    // FIRST, before the budget and the cooperative interrupt, so a
+    // pending termination re-signals at every crossing no matter
+    // what a native path did with the previous surface (the sticky
+    // re-termination V8's TerminateExecution and QuickJS's
+    // interrupt handler both rely on). One load + one
+    // never-taken-predicted branch on the unmetered path.
+    if (realm.termination != null) {
+        return RunResult{ .thrown = try makeTerminationValue(realm) };
+    }
     if (realm.step_budget == 0) {
+        // `setFuel` posture: latch the uncatchable termination.
+        // Legacy posture (`.throw_range_error`, the default — the
+        // test262 harness's 50M backstop): the historical
+        // cooperative RangeError.
+        if (realm.fuel_exhaustion == .terminate) {
+            realm.terminate(.fuel_exhausted);
+            return RunResult{ .thrown = try makeTerminationValue(realm) };
+        }
         const ex = try makeRangeError(realm, "interpreter step budget exhausted");
         return RunResult{ .thrown = ex };
     }
@@ -1055,8 +1073,31 @@ inline fn runSafePoint(realm: *Realm) RunError!?RunResult {
         const ex = try makeRangeError(realm, "execution interrupted");
         return RunResult{ .thrown = ex };
     }
+    // Embedder interrupt hook (docs/resource-metering.md) — one
+    // null-check branch when no hook is armed. A `.interrupt`
+    // verdict latches the same uncatchable termination as fuel
+    // exhaustion.
+    if (realm.interrupt_hook) |hook| {
+        if (hook(realm.interrupt_hook_ctx) == .interrupt) {
+            realm.terminate(.host_interrupted);
+            return RunResult{ .thrown = try makeTerminationValue(realm) };
+        }
+    }
     realm.step_budget -|= 1;
     return null;
+}
+
+/// The synthetic value surfaced while a host termination is pending
+/// (docs/resource-metering.md). The value itself is an ordinary
+/// RangeError — uncatchability comes from the `realm.termination`
+/// latch that `unwindThrow` honours, not from the value's shape —
+/// so a host that prints an uncaught result gets a readable message.
+fn makeTerminationValue(realm: *Realm) RunError!Value {
+    const msg: []const u8 = if (realm.termination) |reason| switch (reason) {
+        .fuel_exhausted => "execution terminated: fuel exhausted",
+        .host_interrupted => "execution terminated: host interrupt",
+    } else "execution terminated";
+    return makeRangeError(realm, msg);
 }
 
 /// Loop back-edge safe point. A *taken* jump with a negative offset
@@ -11615,6 +11656,26 @@ pub fn unwindThrow(
     exception: Value,
 ) RunError!bool {
     const current_ex = exception;
+    // Host termination (docs/resource-metering.md): while the
+    // `realm.termination` latch is set the unwind is UNCATCHABLE —
+    // every handler, `catch` and `finally` alike, is skipped and the
+    // whole frame stack pops. Skipping `finally` is deliberate and
+    // matches V8's TerminateExecution: running arbitrary user JS
+    // after the host demanded cancellation would let a hostile
+    // `finally { while (true) {} }` defeat the watchdog (and a
+    // re-entered finally would only re-terminate at its first safe
+    // point anyway). The async-frame promise-wrap below is skipped
+    // too — a termination must not become a catchable rejection.
+    // Frames release their register files through the same path the
+    // no-handler walk below uses, so the pools stay consistent.
+    if (realm.termination != null) {
+        while (frames.items.len > 0) {
+            const frame = &frames.items[frames.items.len - 1];
+            frame.releaseRegisters(realm, allocator);
+            _ = frames.pop();
+        }
+        return false;
+    }
     // §27.5.1.3 — while a generator is being driven through its
     // pending finallys with a return-completion (set up by
     // `genReturn`), step past user `catch` clauses and stop

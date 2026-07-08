@@ -1685,6 +1685,13 @@ pub fn throwReferenceError(realm: *Realm, msg: []const u8) NativeError {
 /// fails. Cheap on the no-op path — one atomic load + one
 /// integer compare.
 pub fn checkInterruptInNative(realm: *Realm) NativeError!void {
+    // Host-termination latch first (docs/resource-metering.md) —
+    // mirrors the dispatch loop's `runSafePoint` ordering so a
+    // pending termination re-signals from native loops too. The
+    // NativeThrew rides `pending_exception` back to the dispatch
+    // loop, where `unwindThrow` sees the latch and skips every
+    // handler.
+    if (realm.termination != null) return raiseTermination(realm);
     if (realm.interrupt.load(.acquire)) {
         realm.clearInterrupt();
         const ex = newRangeError(realm, "execution interrupted") catch return error.OutOfMemory;
@@ -1692,10 +1699,38 @@ pub fn checkInterruptInNative(realm: *Realm) NativeError!void {
         return error.NativeThrew;
     }
     if (realm.step_budget == 0) {
+        // `setFuel` posture latches the uncatchable termination;
+        // the legacy default keeps the catchable RangeError.
+        if (realm.fuel_exhaustion == .terminate) {
+            realm.terminate(.fuel_exhausted);
+            return raiseTermination(realm);
+        }
         const ex = newRangeError(realm, "interpreter step budget exhausted") catch return error.OutOfMemory;
         realm.pending_exception = ex;
         return error.NativeThrew;
     }
+    // Embedder interrupt hook — same verdict handling as the
+    // dispatch loop's safe point.
+    if (realm.interrupt_hook) |hook| {
+        if (hook(realm.interrupt_hook_ctx) == .interrupt) {
+            realm.terminate(.host_interrupted);
+            return raiseTermination(realm);
+        }
+    }
+}
+
+/// Surface a pending host termination from a native poll. The value
+/// is an ordinary RangeError — uncatchability comes from the
+/// `realm.termination` latch that `unwindThrow` honours
+/// (docs/resource-metering.md), not from the value's shape.
+fn raiseTermination(realm: *Realm) NativeError {
+    const msg: []const u8 = if (realm.termination) |reason| switch (reason) {
+        .fuel_exhausted => "execution terminated: fuel exhausted",
+        .host_interrupted => "execution terminated: host interrupt",
+    } else "execution terminated";
+    const ex = newRangeError(realm, msg) catch return error.OutOfMemory;
+    realm.pending_exception = ex;
+    return error.NativeThrew;
 }
 
 // ── Globals: replacing the stub constructors with real natives ─────────────
