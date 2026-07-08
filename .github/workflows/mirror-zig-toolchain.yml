@@ -27,6 +27,12 @@ name: Mirror Zig toolchain
 
 on:
   workflow_dispatch:
+  # TEMPORARY bootstrap trigger: workflow_dispatch only registers once
+  # the file reaches the default branch, so the first population run
+  # fires on push to this branch. Removed before merge.
+  push:
+    branches: [toolchain-fetch-fix]
+    paths: ['.github/workflows/mirror-zig-toolchain.yml']
 
 permissions:
   contents: write
