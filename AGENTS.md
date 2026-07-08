@@ -181,9 +181,10 @@ These are project rules — they apply to everyone.
     primordials. Now shipped (§19.2.1 / §20.2.1.1.1) — see the
     `eval` bullet above and `docs/ses-alignment.md`.
   Three distinct CLI verbs to keep separate: **`--enable=<name>`**
-  turns on a not-yet-stable spec feature (`joint-iteration` is
-  the only one shipping today; `upsert` graduated to default-on
-  in 2026-05 when it advanced to Stage 4); **`--unhardened`** is
+  turns on a not-yet-stable spec feature (`ShadowRealm` is the
+  only one shipping today; `upsert` (2026-05) and
+  `joint-iteration` (2026-07) graduated to default-on when they
+  advanced to Stage 4); **`--unhardened`** is
   the SES-posture toggle;
   **`--allow=<name>`** relaxes a default-on restriction (only
   `--allow=eval` lives here today). See
@@ -383,8 +384,9 @@ Common commands:
     zig build run -- repl                           # interactive REPL (persistent realm)
 
 The `cynic` CLI defaults pre-Stage-4 / experimental TC39
-proposals (currently `joint-iteration`; `upsert` graduated
-to default-on when it advanced to Stage 4 in 2026-05) to off
+proposals (currently `ShadowRealm`; `upsert` (2026-05) and
+`joint-iteration` (2026-07) graduated to default-on when they
+advanced to Stage 4) to off
 so embedders see only stable ECMA-262. Opt in:
 
     cynic --enable=<name> run foo.js                # one feature
@@ -491,7 +493,7 @@ are only (a) the `harness/`, `staging/`, and `annexB/` walk-time
 prefixes; (b) pre-Stage-4 proposals (unshipped — decorators,
 import-defer, source-phase-imports, import-bytes,
 immutable-arraybuffer, await-dictionary — and shipped —
-joint-iteration, ShadowRealm; the shipped ones get their own
+ShadowRealm; the shipped ones get their own
 dedicated per-feature scoreboard); and (c) structurally-unrunnable
 fixtures (no / malformed frontmatter). Re-running for the same
 date replaces that day's row. Each row records `passing`,

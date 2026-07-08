@@ -17,8 +17,8 @@
 //!      hasn't implemented (decorators, import-defer, …). Dropped from
 //!      `total` so the headline can't decay as TC39 lands proposal
 //!      fixtures upstream. (Proposals Cynic *has* shipped —
-//!      joint-iteration, ShadowRealm — are kept out of the main rows
-//!      by the harness's per-phase feature-tag gate, not by this file,
+//!      ShadowRealm — are kept out of the main rows by the
+//!      harness's per-phase feature-tag gate, not by this file,
 //!      and get their own dedicated `feature:<name>` scoreboard.)
 
 const std = @import("std");
@@ -100,9 +100,9 @@ pub fn pathIsSkipped(rel_path: []const u8) bool {
 ///   - the proposal reaches **Stage 4** → it's specced, so it leaves
 ///     `stage_maturity_features` and re-enters `total`; or
 ///   - Cynic **implements** it → it graduates to a dedicated
-///     `feature:<name>` phase (a `FeatureFlag` — `joint-iteration`,
-///     `ShadowRealm`), kept out of the main rows by the harness's
-///     per-phase feature-tag gate.
+///     `feature:<name>` phase (a `FeatureFlag` — `ShadowRealm`),
+///     kept out of the main rows by the harness's per-phase
+///     feature-tag gate.
 pub fn featureIsUnimplementedProposal(feature: []const u8) bool {
     for (stage_maturity_features) |f| {
         if (std.mem.eql(u8, feature, f)) return true;
@@ -134,12 +134,14 @@ test "skip: pre-Stage-4 proposals dropped from total" {
     try testing.expect(featureIsUnimplementedProposal("source-phase-imports"));
     try testing.expect(featureIsUnimplementedProposal("await-dictionary"));
     try testing.expect(featureIsUnimplementedProposal("immutable-arraybuffer"));
-    // Shipped pre-Stage-4 proposals (joint-iteration, ShadowRealm) are
-    // NOT here — the harness keeps them out of the main rows via the
-    // per-phase feature-tag gate, and scores them in dedicated phases.
+    // Shipped pre-Stage-4 proposals (ShadowRealm) are NOT here —
+    // the harness keeps them out of the main rows via the per-phase
+    // feature-tag gate, and scores them in dedicated phases.
     try testing.expect(!featureIsUnimplementedProposal("ShadowRealm"));
+    // Shipped, specced features are runnable. `joint-iteration`
+    // reached Stage 4 in May 2026 and graduated to default-on
+    // (2026-07): its fixtures score in the main rollup now.
     try testing.expect(!featureIsUnimplementedProposal("joint-iteration"));
-    // Shipped, specced features are runnable.
     try testing.expect(!featureIsUnimplementedProposal("class"));
     try testing.expect(!featureIsUnimplementedProposal("regexp-modifiers"));
     try testing.expect(!featureIsUnimplementedProposal("explicit-resource-management"));

@@ -4,7 +4,7 @@
 
 - **48571 passing** — Cynic produced the spec-expected result.
 - **1324 failing** — every other scored fixture. No "expected fail" category: an Annex-B / strict-only / SES / eval / not-yet-implemented-Intl miss counts as a plain fail, same as an engine bug. Honest, not flattering.
-- **Excluded from the denominator**: the upstream `harness/` and `staging/` paths, the whole `annexB/` tree, every Stage ≤ 3 proposal (decorators, import-defer, …), and structurally-unrunnable fixtures (no / malformed frontmatter). Shipped pre-Stage-4 proposals (joint-iteration, ShadowRealm) get their own scoreboard below.
+- **Excluded from the denominator**: the upstream `harness/` and `staging/` paths, the whole `annexB/` tree, every Stage ≤ 3 proposal (decorators, import-defer, …), and structurally-unrunnable fixtures (no / malformed frontmatter). Shipped pre-Stage-4 proposals (ShadowRealm) get their own scoreboard below.
 
 ## Current scores
 
@@ -131,7 +131,6 @@ top-line score.
 
 | feature | passing | failing | total | pass% |
 |---|---:|---:|---:|---:|
-| `joint-iteration` | 82 | 0 | 82 | 100.0 % |
 | `ShadowRealm` | 63 | 1 | 64 | 98.4 % |
 
 

@@ -1040,10 +1040,10 @@ pub const Realm = struct {
     /// or `--enable-experimental`; the test262 harness sets this
     /// to `features.all()` so proposal fixtures actually exercise
     /// the surface they're testing. Read by gated installers (e.g.
-    /// `Iterator.zip`, `Map.prototype.getOrInsert`) before they
-    /// register their methods on the prototype, so a disabled
-    /// feature is invisible at the property-lookup level rather
-    /// than just throwing at call time.
+    /// the `ShadowRealm` constructor) before they register their
+    /// surface on the realm, so a disabled feature is invisible at
+    /// the property-lookup level rather than just throwing at call
+    /// time.
     feature_flags: FeatureSet = FeatureSet.empty,
     /// Heap-allocated bool cells tracking `[[ThisBindingStatus]]`
     /// for derived-class constructors that have outlived their
