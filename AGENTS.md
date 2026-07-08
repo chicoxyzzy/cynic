@@ -350,6 +350,22 @@ CI uses `xyzzylabs/setup-zig` with no explicit `version:`, so it
 resolves the same field. Keep the zon pin as the single source of
 truth when a Zig parser/codegen change forces a bump (use `anyzig`
 locally so `zig build` resolves to the pinned SHA).
+
+Restricted-egress environments (Claude Code cloud containers and
+similar sandboxes whose proxy only lets github.com through) can
+reach neither ziglang.org nor the community mirrors, so anyzig has
+nowhere to download from. `tools/fetch-zig.sh` bootstraps there:
+it reads the zon pin, tries the repo's `zig-toolchain` GitHub
+Release first (populated from the community mirrors —
+minisign-verified against upstream's key — by the manual
+`mirror-zig-toolchain` workflow; rerun that after every pin bump,
+then refresh the script's embedded SHA-256 table from the uploaded
+`SHA256SUMS`), then the mirrors, then ziglang.org, verifies the
+SHA-256, extracts under `~/.cache/cynic-zig/<version>/`, and
+prints the binary path — so
+`export PATH="$(dirname "$(tools/fetch-zig.sh)"):$PATH"` gets a
+working `zig`. Idempotent; a cached toolchain skips the network.
+
 One-time setup:
 
     git submodule update --init vendor/test262
