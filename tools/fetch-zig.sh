@@ -69,10 +69,10 @@ BIN="$DEST/$TARBALL_DIR/zig"
 # hashing). Refresh alongside every .minimum_zig_version bump.
 embedded_sha256() {
   case "$1" in
-    zig-x86_64-linux-0.17.0-dev.813+2153f8143.tar.xz)  echo "__SHA_X86_64_LINUX__" ;;
-    zig-aarch64-linux-0.17.0-dev.813+2153f8143.tar.xz) echo "__SHA_AARCH64_LINUX__" ;;
-    zig-aarch64-macos-0.17.0-dev.813+2153f8143.tar.xz) echo "__SHA_AARCH64_MACOS__" ;;
-    zig-x86_64-macos-0.17.0-dev.813+2153f8143.tar.xz)  echo "__SHA_X86_64_MACOS__" ;;
+    zig-x86_64-linux-0.17.0-dev.813+2153f8143.tar.xz)  echo "b0d46ffc4587b9e8dd0b524ee5bc4da1e67f28bba55e7c534cec64af2f2d7a74" ;;
+    zig-aarch64-linux-0.17.0-dev.813+2153f8143.tar.xz) echo "aa67b418d50bdde3043cfe765016d5387a2333b514ada2c57f24baae4005c331" ;;
+    zig-aarch64-macos-0.17.0-dev.813+2153f8143.tar.xz) echo "36673d2513afa4a96c86780648ba504beedd7f0451389091cf9d53e38d5b4840" ;;
+    zig-x86_64-macos-0.17.0-dev.813+2153f8143.tar.xz)  echo "3938c46ae4bca3c13f423b09503e3ef00bb4b7ef12b8bc1e5122ede366057a5b" ;;
     *) echo "" ;;
   esac
 }
@@ -131,7 +131,7 @@ verify() { # path-to-tarball source-base -> 0 if trusted
     fi
   fi
   if command -v minisign >/dev/null; then
-    if fetch "$2/$TARBALL.minisig" "$1.minisig" \
+    if fetch "$(asset_url "$2" "$TARBALL.minisig")" "$1.minisig" \
        && minisign -Vm "$1" -x "$1.minisig" -P "$MINISIGN_KEY" >/dev/null 2>&1; then
       log "fetch-zig: minisign OK"
       return 0
@@ -173,10 +173,20 @@ esac
 SOURCES="$(printf '%s\n%s\n%s\n' "$SOURCES" "$MIRRORS" "$CANONICAL" | grep -v '^$')"
 
 # ---- download + verify ------------------------------------------------------
+# GitHub release-asset URLs need the '+' in the version percent-encoded;
+# the community mirrors and ziglang.org take it literally.
+asset_url() {
+  if [ "$1" = "$RELEASE_BASE" ]; then
+    printf '%s/%s\n' "$1" "${2//+/%2B}"
+  else
+    printf '%s/%s\n' "$1" "$2"
+  fi
+}
+
 GOT=""
 while IFS= read -r src; do
   log "fetch-zig: trying $src/$TARBALL"
-  if fetch "$src/$TARBALL" "$WORK/$TARBALL"; then
+  if fetch "$(asset_url "$src" "$TARBALL")" "$WORK/$TARBALL"; then
     if verify "$WORK/$TARBALL" "$src"; then
       GOT=1
       break
