@@ -30,10 +30,17 @@ const PropertyFlags = @import("object.zig").PropertyFlags;
 pub const PropKind = enum(u1) { data, accessor };
 
 /// Chains shorter than this stay on the plain linear walk — a
-/// couple of `mem.eql`s beat a hash + probe at low depth. Same
-/// cutoff V8 uses for linear DescriptorArray search (8) and JSC
-/// for Structure lookup before the PropertyTable materialises.
-pub const index_min_depth: u32 = 8;
+/// few `mem.eql`s beat a hash + probe at low depth. V8 cuts over
+/// from linear DescriptorArray search at 8 descriptors, but its
+/// keys are interned Names with a *cached* hash; Cynic hashes the
+/// key bytes on every probe (atom interning was a measured
+/// dead-end — docs/interned-keys.md §11), which moves the
+/// break-even up. Measured on this codebase: indexing depth-8-12
+/// chains regressed deltablue ~9% (the probe's Wyhash matches the
+/// short walk it replaces, and the anchor bookkeeping taxes every
+/// lookup), while the depth-25+ global-object chain won ~30%
+/// (string_concat). 16 keeps both.
+pub const index_min_depth: u32 = 16;
 
 /// Don't bother building a leaf index when the un-indexed tail
 /// above the nearest indexed ancestor is this short — the tail
@@ -143,17 +150,36 @@ pub const Shape = struct {
         kind: PropKind,
     };
 
-    /// Resolve own property `key`. Shallow chains walk the
-    /// transition chain linearly to the root (nearest node wins,
-    /// which is what makes redefine transitions shadow their
-    /// ancestor entry). Deep chains resolve through the lazily
-    /// built `KeyIndex` — either this shape's own, or the nearest
-    /// indexed ancestor's after a short linear tail scan (the tail
-    /// is scanned FIRST, so nearest-wins shadowing is preserved).
-    /// An inline cache keyed on the shape still collapses the hot
-    /// monomorphic path to O(1) before any of this runs; the index
-    /// is the megamorphic-miss path's rescue.
+    /// Resolve own property `key`. Chains shallower than
+    /// `index_min_depth` take exactly the pre-index linear walk —
+    /// one extra `depth` compare is the whole cost of the feature
+    /// on small shapes (nearest node wins, which is what makes
+    /// redefine transitions shadow their ancestor entry). Deep
+    /// chains route to `lookupDeep`, which resolves through the
+    /// lazily built `KeyIndex`. An inline cache keyed on the shape
+    /// still collapses the hot monomorphic path to O(1) before any
+    /// of this runs; the index is the megamorphic-miss path's
+    /// rescue.
     pub fn lookup(self: *Shape, key: []const u8) ?Entry {
+        if (self.depth >= index_min_depth) return self.lookupDeep(key);
+        var node: *const Shape = self;
+        while (true) {
+            if (node.parent == null) return null; // root adds no property
+            if (std.mem.eql(u8, node.key, key)) {
+                return .{ .slot = node.slot, .attrs = node.attrs, .kind = node.kind };
+            }
+            node = node.parent.?;
+        }
+    }
+
+    /// Deep-chain resolution: probe this shape's own index, else
+    /// scan the un-indexed tail linearly (nearest-wins shadowing
+    /// is preserved because the tail is scanned FIRST) and probe
+    /// the nearest indexed ancestor. A lookup that paid for the
+    /// whole tail tries to materialise a leaf index so the next
+    /// one is a pure probe. Kept out of `lookup` so the shallow
+    /// path stays tight in the i-cache.
+    noinline fn lookupDeep(self: *Shape, key: []const u8) ?Entry {
         if (self.index) |idx| return idx.find(key, hashKey(key));
         var node: *Shape = self;
         var anchor: ?*Shape = null;
@@ -172,32 +198,37 @@ pub const Shape = struct {
             }
             node = node.parent.?;
         }
-        if (anchor) |a| result = a.index.?.find(key, hashKey(key));
         // Only a lookup that paid for the whole un-indexed tail is
-        // evidence this shape is hot enough to index.
-        if (walked_full_tail) self.maybeBuildIndex(if (anchor) |a| a.depth else 0);
+        // evidence this shape is hot enough to index. Build BEFORE
+        // probing the ancestor so the fresh leaf index serves this
+        // resolution too.
+        if (walked_full_tail and self.maybeBuildIndex(if (anchor) |a| a.depth else 0)) {
+            return self.index.?.find(key, hashKey(key));
+        }
+        if (anchor) |a| result = a.index.?.find(key, hashKey(key));
         return result;
     }
 
-    /// Decide whether the walk `lookup` just paid justifies
-    /// materialising an index at this shape. Two throttles keep
-    /// index memory O(node_count) under adversarial
-    /// add-then-lookup loops (never-unbounded-growth,
-    /// docs/handbook/host-safety.md): a tree-wide slot budget
-    /// linear in the node count, and past it a geometric rule —
-    /// only build when the un-indexed tail is more than half the
-    /// chain, so index depths at least double along any path.
-    fn maybeBuildIndex(self: *Shape, anchor_depth: u32) void {
-        if (self.depth < index_min_depth) return;
+    /// Decide whether the walk `lookupDeep` just paid justifies
+    /// materialising an index at this shape; returns true when one
+    /// was built. Two throttles keep index memory O(node_count)
+    /// under adversarial add-then-lookup loops
+    /// (never-unbounded-growth, docs/handbook/host-safety.md): a
+    /// tree-wide slot budget linear in the node count, and past it
+    /// a geometric rule — only build when the un-indexed tail is
+    /// more than half the chain, so index depths at least double
+    /// along any path.
+    fn maybeBuildIndex(self: *Shape, anchor_depth: u32) bool {
         const tail = self.depth - anchor_depth;
-        if (tail < index_min_tail) return;
-        const cap = indexCapacity(self.property_count) orelse return;
+        if (tail < index_min_tail) return false;
+        const cap = indexCapacity(self.property_count) orelse return false;
         const under_budget = self.ctx.index_slots_total + cap <=
             index_budget_base + index_budget_per_node * self.ctx.node_count;
         const geometric = 2 * @as(u64, tail) > self.depth;
-        if (!under_budget and !geometric) return;
+        if (!under_budget and !geometric) return false;
         // OOM → skip the index; the linear walk stays correct.
-        self.buildIndex(cap) catch return;
+        self.buildIndex(cap) catch return false;
+        return self.index != null;
     }
 
     /// Power-of-two table size with load factor ≤ ~0.5. The chain
@@ -557,7 +588,7 @@ test "redefine transition shadows correctly through the index" {
     // Redefine BELOW the index build point: freeze p3, then look up
     // at the leaf — the index must carry the redefined attrs, not
     // the original ancestor entry.
-    const base = try buildChain(&tree, 10);
+    const base = try buildChain(&tree, 18);
     const frozen: PropertyFlags = .{ .writable = false, .enumerable = true, .configurable = false };
     const leaf = try tree.redefineTransition(base, "p3", frozen);
 
@@ -578,8 +609,8 @@ test "descendant reuses an ancestor's index through the tail walk" {
     var tree = try ShapeTree.init(testing.allocator);
     defer tree.deinit();
 
-    const mid = try buildChain(&tree, 12);
-    try testing.expect(mid.lookup("absent") == null); // builds at depth 12
+    const mid = try buildChain(&tree, 20);
+    try testing.expect(mid.lookup("absent") == null); // builds at depth 20
     try testing.expect(mid.index != null);
 
     // Two more appends + one redefine: short tail above the anchor.
@@ -589,7 +620,7 @@ test "descendant reuses an ancestor's index through the tail walk" {
     leaf = try tree.redefineTransition(leaf, "p5", frozen);
 
     // Tail keys (nearest) win; anchored keys resolve via the probe.
-    try testing.expectEqual(@as(u32, 12), leaf.lookup("q0").?.slot);
+    try testing.expectEqual(@as(u32, 20), leaf.lookup("q0").?.slot);
     try testing.expect(!leaf.lookup("q1").?.attrs.enumerable);
     try testing.expect(!leaf.lookup("p5").?.attrs.writable); // tail redefine shadows index
     try testing.expectEqual(@as(u32, 0), leaf.lookup("p0").?.slot); // via ancestor index
@@ -602,7 +633,7 @@ test "accessor kind survives the index" {
     var tree = try ShapeTree.init(testing.allocator);
     defer tree.deinit();
 
-    var s = try buildChain(&tree, 9);
+    var s = try buildChain(&tree, 17);
     s = try tree.transition(s, "getterProp", .{ .enumerable = false }, .accessor);
     try testing.expect(s.lookup("absent") == null); // builds
     const e = s.lookup("getterProp").?;
