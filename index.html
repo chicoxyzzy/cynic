@@ -526,7 +526,7 @@
       <div class="mascot-panel">
         <div class="panel-note">
           <span class="pin"></span>
-          <span><b>Pre-alpha.</b> Parser, interpreter, and GC ship; a baseline JIT (Bistromath) hides behind <code>--jit</code>; spec coverage is still climbing. Read <code>docs/ROADMAP.md</code> before opening issues. Better yet, don't.</span>
+          <span><b>Pre-alpha.</b> Parser, interpreter, generational GC, and a baseline JIT ship — the JIT is on by default now; <code>--no-jit</code> if you miss the interpreter. Read <code>docs/ROADMAP.md</code> before opening issues. Better yet, don't.</span>
         </div>
         <div class="stage">
           <div class="head mascot-head">
@@ -612,7 +612,7 @@
           <div class="stamp">NOPE</div>
           <span class="feature">d.getYear()</span>
           <h3><code>Date.prototype.{getYear, setYear}</code></h3>
-          <p>The two-digit-year ones. Cynic keeps the normative aliases (<code>substr</code>, <code>trimLeft</code>, <code>toGMTString</code>) — these don't make the cut.</p>
+          <p>The two-digit-year ones. And no, the Annex B aliases (<code>substr</code>, <code>trimLeft</code>, <code>toGMTString</code>) didn't make the cut either. None of Annex B did.</p>
           <div class="quote">TypeError: 'getYear' is not on this Date.</div>
         </article>
 
@@ -640,7 +640,7 @@
     <section class="compare" id="status">
       <div class="section-num">§02 · WHERE WE ARE</div>
       <h2 class="section-title">Pre-alpha. <span class="accent">Not pretending otherwise.</span></h2>
-      <p class="section-sub">Lexer, parser, and bytecode interpreter ship. The runtime is filling in. Mark-sweep GC ships; a baseline JIT runs behind <code>--jit</code>, with the optimising tier and a generational GC still future. Below is what works, what kind-of works, and what Cynic refuses to pretend works yet.</p>
+      <p class="section-sub">Lexer, parser, bytecode interpreter, generational GC, and a baseline JIT all ship — the JIT on by default, the optimising tier still future. The runtime failures that remain are refusals, not gaps. Below is what works, what kind-of works, and what Cynic declines to do on purpose.</p>
 
       <div class="compare-table">
         <div class="compare-row compare-head">
@@ -661,10 +661,10 @@
         <div class="compare-row">
           <div>
             <div class="feature-name">test262 · runtime</div>
-            <div class="compare-note">parse → compile → execute</div>
+            <div class="compare-note">parse → compile → execute; every failure classified, CI gates on zero engine gaps</div>
           </div>
-          <div class="check">Getting there.</div>
-          <div>Bigger than last week. Smaller than next week.</div>
+          <div class="check">Done arguing.</div>
+          <div>Every remaining failure is a refusal — sloppy mode, Annex B — not a bug. The audit registry says so, and CI checks the registry.</div>
         </div>
 
         <div class="compare-row">
@@ -727,7 +727,7 @@
             <div class="compare-note">the <code>WebAssembly</code> JS API — <code>compile</code> / <code>instantiate</code>, <code>Module</code> / <code>Instance</code> / <code>Memory</code> / <code>Table</code> / <code>Global</code>; SIMD, reference types, memory64, multi-memory, tail calls, exception handling, cross-module linking</div>
           </div>
           <div class="check">Works.</div>
-          <div>Cynic does WebAssembly too. With Sarcasm — its own from-scratch engine, 100 % of the spec testsuite. Off by default; <code>--allow=wasm</code>.</div>
+          <div>Cynic does WebAssembly too. With Sarcasm — its own from-scratch engine, 100 % of the spec testsuite it scores — plus Spasm, its baseline JIT, on by default. Off unless <code>--allow=wasm</code>.</div>
         </div>
 
         <div class="compare-row">
@@ -795,6 +795,15 @@
 
         <div class="compare-row">
           <div>
+            <div class="feature-name"><code>Temporal</code></div>
+            <div class="compare-note">all eight types + <code>Temporal.Now</code>; ISO + UTC/offset by default, real calendars and IANA zones with <code>-Dintl=stub</code> / <code>full</code></div>
+          </div>
+          <div class="check">Works.</div>
+          <div>The Date replacement the spec spent a decade on. Nanoseconds, no mutation, no month-is-zero-indexed.</div>
+        </div>
+
+        <div class="compare-row">
+          <div>
             <div class="feature-name"><code>Map</code> / <code>WeakMap</code> <code>getOrInsert</code> (upsert)</div>
             <div class="compare-note">Stage 4 (2026-05); default-on, no flag</div>
           </div>
@@ -840,6 +849,15 @@
 
         <div class="compare-row">
           <div>
+            <div class="feature-name">Hardened by default</div>
+            <div class="compare-note">primordials frozen at realm init; native <code>harden()</code>; the override mistake fixed via synthetic accessors; <code>--unhardened</code> opts out</div>
+          </div>
+          <div class="check">Works.</div>
+          <div>No <code>lockdown()</code> call, no import. Your dependency's prototype patch throws before it ships a backdoor.</div>
+        </div>
+
+        <div class="compare-row">
+          <div>
             <div class="feature-name">Proper Tail Calls (PTC)</div>
             <div class="compare-note">ECMA-262 §15.10; <code>return f(x)</code> reuses the caller's frame instead of pushing a fresh one</div>
           </div>
@@ -859,10 +877,10 @@
         <div class="compare-row">
           <div>
             <div class="feature-name"><code>Intl</code> · the internationalization API</div>
-            <div class="compare-note">structural surface + embedded IANA tzdata behind <code>-Dintl=stub</code> / <code>-Dintl=full</code>; the default build still ships without a locale database</div>
+            <div class="compare-note">CLDR-backed NumberFormat / DateTimeFormat / PluralRules / DisplayNames / ListFormat behind <code>-Dintl=full</code>, with embedded IANA tzdata; the default build still ships without a locale database</div>
           </div>
           <div class="check">Opt-in.</div>
-          <div>Ten constructors structurally. Real IANA offsets with tzdata 2026b. CLDR-class formatter output is the missing piece.</div>
+          <div>Real CLDR output at <code>-Dintl=full</code> — currency accounting parentheses, metazone names, plural rules per locale. Segmenter and the lunisolar calendars are the tail.</div>
         </div>
 
         <div class="compare-row">
@@ -877,7 +895,7 @@
         <div class="compare-row">
           <div>
             <div class="feature-name">JIT tiers</div>
-            <div class="compare-note">Bistromath — a baseline JIT — on by default; <code>--no-jit</code> opts out. The optimising tier (Ohaimark) is still future.</div>
+            <div class="compare-note">Bistromath (JS) and Spasm (wasm) — baseline JITs — on by default; <code>--no-jit</code> opts out. The optimising tier (Ohaimark) is still future.</div>
           </div>
           <div class="check">In progress.</div>
           <div>There's a JIT now, and it's done hiding — on by default. The optimising tier is future Cynic's problem.</div>
