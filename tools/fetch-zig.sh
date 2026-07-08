@@ -18,7 +18,6 @@
 #   1. the repo's zig-toolchain GitHub Release   (works everywhere github.com does)
 #   2. the Zig community mirrors                  (live list, hardcoded fallback)
 #   3. ziglang.org itself                         (/builds for dev pins, /download for tagged)
-#   4. the `ziglang` PyPI wheel                   (tagged releases only — PyPI carries no dev builds)
 #
 # Verification: SHA-256 against the embedded known-good table below
 # (refreshed from the release's SHA256SUMS whenever the pin bumps);
@@ -195,28 +194,11 @@ while IFS= read -r src; do
   fi
 done <<< "$SOURCES"
 
-# ---- PyPI last resort (tagged releases only) --------------------------------
-if [ -z "$GOT" ] && [[ "$VERSION" != *-dev* ]] && command -v python3 >/dev/null; then
-  log "fetch-zig: trying the ziglang PyPI wheel ($VERSION)"
-  if python3 -m pip download --no-deps --dest "$WORK/wheel" "ziglang==$VERSION" >&2 2>/dev/null; then
-    whl="$(ls "$WORK/wheel"/ziglang-*.whl 2>/dev/null | head -1)"
-    if [ -n "$whl" ]; then
-      python3 -c "import zipfile,sys; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])" "$whl" "$WORK/wheel/x"
-      mkdir -p "$DEST/$TARBALL_DIR"
-      cp -R "$WORK/wheel/x/ziglang/." "$DEST/$TARBALL_DIR/"
-      chmod +x "$BIN"
-      GOT=wheel
-    fi
-  fi
-fi
-
-[ -n "$GOT" ] || die "could not obtain zig-$ARCH-$OS-$VERSION from any source (repo release, community mirrors, ziglang.org, PyPI). Check network/proxy policy; see .github/workflows/mirror-zig-toolchain.yml for repopulating the repo release."
+[ -n "$GOT" ] || die "could not obtain zig-$ARCH-$OS-$VERSION from any source (repo release, community mirrors, ziglang.org). Check network/proxy policy; see .github/workflows/mirror-zig-toolchain.yml for repopulating the repo release."
 
 # ---- extract ----------------------------------------------------------------
-if [ "$GOT" != "wheel" ]; then
-  mkdir -p "$DEST"
-  tar -C "$DEST" -xJf "$WORK/$TARBALL"
-fi
+mkdir -p "$DEST"
+tar -C "$DEST" -xJf "$WORK/$TARBALL"
 
 [ -x "$BIN" ] || die "extraction finished but $BIN is missing"
 ACTUAL="$("$BIN" version)"
