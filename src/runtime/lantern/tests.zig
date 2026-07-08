@@ -15516,3 +15516,210 @@ test "ctor initial shape: computed this-write before plain bails safely" {
         \\Object.keys(o).join(",") + ":" + o.a + ":" + o.b + ":" + o.c;
     , "a,b,c:1:2:3");
 }
+
+// ── Metering: embedder fuel / memory ceiling / interrupt hook ──────
+// docs/resource-metering.md — the per-realm resource-metering API.
+// Fuel exhaustion and an interrupt-hook verdict latch an UNCATCHABLE
+// host termination (`realm.termination`): the safe point surfaces a
+// synthetic throw, `unwindThrow` skips every handler — `catch` and
+// `finally` alike — and the latch is sticky until the host clears it
+// (`clearTermination`). The memory ceiling stays on the existing
+// catchable-OOM contract (host-safety §5) and never terminates.
+
+/// Interrupt hook used by the metering tests: counts polls into the
+/// `*u32` context and requests termination once the count crosses
+/// 100 — proving both the ctx plumbing and that safe-point polling
+/// actually recurs.
+fn meteringCountingHook(ctx: ?*anyopaque) Realm.InterruptAction {
+    const n: *u32 = @ptrCast(@alignCast(ctx.?));
+    n.* += 1;
+    return if (n.* >= 100) .interrupt else .proceed;
+}
+
+/// Interrupt hook that never fires — for the tier-up-gating test.
+fn meteringIdleHook(ctx: ?*anyopaque) Realm.InterruptAction {
+    _ = ctx;
+    return .proceed;
+}
+
+test "metering: fuel exhaustion terminates a while(true) loop" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.setFuel(10_000);
+    const result = try evaluateScriptResult(&realm, "while (true) {}");
+    try testing.expect(result == .thrown);
+    try testing.expectEqual(
+        Realm.TerminationReason.fuel_exhausted,
+        realm.terminationReason().?,
+    );
+}
+
+test "metering: user try/catch cannot swallow a fuel termination" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.setFuel(10_000);
+    const result = try evaluateScriptResult(&realm,
+        \\var caught = 0;
+        \\try { while (true) {} } catch (e) { caught = 1; }
+        \\caught;
+    );
+    try testing.expect(result == .thrown);
+    try testing.expect(realm.terminationReason() != null);
+    // The catch arm must never have run — and the realm is reusable
+    // once the host clears the latch and refuels.
+    realm.clearTermination();
+    realm.setFuel(1_000_000);
+    const after = try evaluateScriptValue(&realm, "caught;");
+    try testing.expectEqual(@as(i32, 0), after.asInt32());
+}
+
+test "metering: finally blocks do not run during a termination" {
+    // Documented behavior (docs/resource-metering.md): a pending
+    // termination skips `finally` bodies — running arbitrary user JS
+    // after the host demanded cancellation would let a hostile
+    // `finally { while (true) {} }` defeat the watchdog. Matches
+    // V8's TerminateExecution unwinding.
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.setFuel(10_000);
+    const result = try evaluateScriptResult(&realm,
+        \\var ranFinally = 0;
+        \\try { while (true) {} } finally { ranFinally = 1; }
+    );
+    try testing.expect(result == .thrown);
+    try testing.expect(realm.terminationReason() != null);
+    realm.clearTermination();
+    realm.setFuel(1_000_000);
+    const after = try evaluateScriptValue(&realm, "ranFinally;");
+    try testing.expectEqual(@as(i32, 0), after.asInt32());
+}
+
+test "metering: termination crosses a native re-entry uncaught" {
+    // A callback driven from a native (`forEach`) exhausts the fuel:
+    // the inner dispatch surfaces the termination, the native
+    // converts it to a NativeThrew, and the outer dispatch's
+    // unwindThrow must still skip the user's try/catch — the sticky
+    // latch, not the value's shape, carries uncatchability.
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try installBuiltinsAllFeatures(&realm);
+    realm.setFuel(100_000);
+    const result = try evaluateScriptResult(&realm,
+        \\var caught = 0;
+        \\try { [1].forEach(function () { while (true) {} }); }
+        \\catch (e) { caught = 1; }
+        \\caught;
+    );
+    try testing.expect(result == .thrown);
+    try testing.expect(realm.terminationReason() != null);
+    realm.clearTermination();
+    realm.setFuel(std.math.maxInt(u64));
+    const after = try evaluateScriptValue(&realm, "caught;");
+    try testing.expectEqual(@as(i32, 0), after.asInt32());
+}
+
+test "metering: a realm without a budget runs unmetered" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    const v = try evaluateScriptValue(&realm,
+        \\var s = 0;
+        \\for (var i = 0; i < 100000; i++) { s += 1; }
+        \\s;
+    );
+    try testing.expectEqual(@as(i32, 100_000), v.asInt32());
+    try testing.expect(realm.terminationReason() == null);
+}
+
+test "metering: memory ceiling trips a string-doubling bomb" {
+    // The ceiling is enforced at the allocation layer (Heap.charge):
+    // the bomb is stopped and the host survives, surfacing through
+    // the EXISTING OOM contract — a catchable throw where a builtin
+    // converts it, `error.OutOfMemory` where the allocation site
+    // propagates. Either way it is NOT a termination — the latch
+    // stays clear (docs/resource-metering.md "Memory ceiling").
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.setMemoryLimit(2 * 1024 * 1024);
+    const result = evaluateScriptResult(&realm,
+        \\var s = "xxxxxxxxxxxxxxxx";
+        \\for (var i = 0; i < 40; i++) { s = s + s; }
+        \\s.length;
+    );
+    if (result) |r| {
+        try testing.expect(r == .thrown);
+    } else |err| {
+        try testing.expect(err == error.OutOfMemory);
+    }
+    try testing.expect(realm.terminationReason() == null);
+}
+
+test "metering: memory ceiling caps a single huge ArrayBuffer" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try installBuiltinsAllFeatures(&realm);
+    // Set the ceiling AFTER installBuiltins — the cap is on live
+    // bytes and the intrinsics already charged theirs.
+    realm.setMemoryLimit(realm.heap.bytes_live + 8 * 1024 * 1024);
+    const result = evaluateScriptResult(&realm,
+        \\var hit = 0;
+        \\try { new ArrayBuffer(64 * 1024 * 1024); } catch (e) { hit = 1; }
+        \\hit;
+    );
+    if (result) |r| {
+        switch (r) {
+            .value, .yielded => |v| try testing.expectEqual(@as(i32, 1), v.asInt32()),
+            .thrown => {}, // OOM surfaced before the catch could run — acceptable
+        }
+    } else |err| {
+        try testing.expect(err == error.OutOfMemory);
+    }
+    try testing.expect(realm.terminationReason() == null);
+}
+
+test "metering: interrupt hook fires at safe points and terminates" {
+    var polls: u32 = 0;
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.setInterruptHook(meteringCountingHook, &polls);
+    const result = try evaluateScriptResult(&realm, "while (true) {}");
+    try testing.expect(result == .thrown);
+    try testing.expectEqual(
+        Realm.TerminationReason.host_interrupted,
+        realm.terminationReason().?,
+    );
+    try testing.expect(polls >= 100);
+}
+
+test "metering: interrupt-hook termination is uncatchable; realm reusable" {
+    var polls: u32 = 0;
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.setInterruptHook(meteringCountingHook, &polls);
+    const result = try evaluateScriptResult(&realm,
+        \\var caught = 0;
+        \\try { while (true) {} } catch (e) { caught = 1; }
+        \\caught;
+    );
+    try testing.expect(result == .thrown);
+    try testing.expect(realm.terminationReason() != null);
+    realm.clearTermination();
+    realm.clearInterruptHook();
+    const after = try evaluateScriptValue(&realm, "caught;");
+    try testing.expectEqual(@as(i32, 0), after.asInt32());
+}
+
+test "metering: installing an interrupt hook disables JIT tier-up (v1)" {
+    // docs/resource-metering.md "JIT interaction": compiled code
+    // polls the fuel counter and the interrupt byte at back-edges
+    // but cannot call out to the hook, so a hot compiled loop would
+    // escape hook polling. v1 rule: arming a hook turns tier-up off
+    // for the realm; clearing it does NOT silently re-enable (the
+    // embedder opts back in explicitly).
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+    realm.setInterruptHook(meteringIdleHook, null);
+    try testing.expect(!realm.jit_enabled);
+    realm.clearInterruptHook();
+    try testing.expect(!realm.jit_enabled);
+}

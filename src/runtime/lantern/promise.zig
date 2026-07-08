@@ -118,6 +118,13 @@ pub fn drainMicrotasks(allocator: std.mem.Allocator, realm: *Realm) RunError!voi
     // SpiderMonkey.
     realm.clearKeptObjects();
     while (realm.microtask_queue.items.len > 0) {
+        // Host termination (docs/resource-metering.md): stop the
+        // drain while the latch is set. Each remaining task would
+        // only re-terminate at its first safe point anyway; stopping
+        // here bounds that busy-work. Undrained tasks stay queued —
+        // after `clearTermination` the host decides whether to drain
+        // again or tear the realm down.
+        if (realm.termination != null) return;
         // Host-drive any §25.4.1.4 waitAsync timeout/wake whose moment
         // arrived during this drain (e.g. a main-agent `setTimeout` poll
         // loop keeps the queue non-empty while real time advances toward

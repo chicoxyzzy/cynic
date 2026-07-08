@@ -984,36 +984,51 @@ pub const Realm = struct {
     /// a SIGALRM-style watchdog or a host UI thread) can call
     /// `requestInterrupt`. The interpreter dispatch loop polls this
     /// between opcodes (the loop back-edge safe point) and throws
-    /// `RangeError("execution interrupted")` when set.
-    ///
-    /// NOTE: unlike V8's `Isolate::TerminateExecution` / JSC's
-    /// `Watchdog::fire`, this exception is currently **catchable** —
-    /// the thrown `RangeError` is an ordinary value that a user
-    /// `try`/`catch` (or `assert.throws`) can swallow, after which
-    /// execution resumes. A true watchdog abort needs uncatchable
-    /// termination (a "terminating" mode that `unwindThrow` honours
-    /// by skipping every handler, à la the existing
-    /// `gen_return_completion` step-past-catch path); that isn't
-    /// implemented yet, so a wedged fixture inside a `try` block
-    /// can't be force-unwound.
+    /// `RangeError("execution interrupted")` when set. This is the
+    /// *cooperative* surface — the thrown `RangeError` is an
+    /// ordinary value that user code crossing a native re-entry can
+    /// observe and swallow. For a watchdog abort that hostile code
+    /// must NOT be able to swallow, use the metering surface below
+    /// (`setInterruptHook` / `setFuel` → the `termination` latch),
+    /// which matches V8's `Isolate::TerminateExecution` / JSC's
+    /// watchdog. See docs/resource-metering.md.
     interrupt: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-    /// Optional host-supplied interrupt flag. Unlike `interrupt` (a
-    /// per-realm field), this points at storage the host keeps alive
-    /// longer than the realm — so a watchdog thread can flip it
-    /// without racing the realm's teardown. The test262 harness aims
-    /// it at a stable per-worker abort flag; null for ordinary
-    /// embeddings.
-    ///
-    /// NOTE: this flag is currently **not polled** anywhere in the
-    /// engine — only `interrupt` is checked at the safe points. Wiring
-    /// it in (the safe points should poll `interrupt OR (host_interrupt
-    /// and *host_interrupt)`) is a prerequisite for the test262
-    /// watchdog to abort a wedged worker, but is insufficient on its
-    /// own without the uncatchable-termination work noted on
-    /// `interrupt` above. Until both land, the harness relies on
-    /// `--exclude`ing the handful of fixtures that wedge under
-    /// `--gc-threshold=1` (see the gc-stress CI job).
+    /// Optional host-supplied interrupt flag. SUPERSEDED by the
+    /// metering interrupt hook (`setInterruptHook`), which the safe
+    /// points actually poll and which terminates uncatchably — the
+    /// test262 watchdog now wires its per-worker abort flag through
+    /// that hook. This field was never polled by the engine; it is
+    /// retained (and still copied by `initChild`) only so embedders
+    /// using it as agreed-upon storage don't break. New code should
+    /// use `setInterruptHook`.
     host_interrupt: ?*std.atomic.Value(bool) = null,
+    /// Host-termination latch (docs/resource-metering.md). Set by
+    /// `terminate` when the fuel budget (`setFuel`) exhausts or the
+    /// embedder interrupt hook returns `.interrupt`. While set,
+    /// every safe-point crossing surfaces a synthetic throw and
+    /// `unwindThrow` skips ALL handlers — `catch` and `finally`
+    /// alike — so user JS cannot observe or swallow the termination
+    /// (the V8 `Isolate::TerminateExecution` model). The latch is
+    /// sticky: a native path that swallows one thrown surface
+    /// re-terminates at its next safe point. Only the host clears
+    /// it (`clearTermination`); the engine never does.
+    termination: ?TerminationReason = null,
+    /// What exhausting `step_budget` does. `.throw_range_error`
+    /// (the default) preserves the historical catchable
+    /// `RangeError("interpreter step budget exhausted")` that the
+    /// test262 harness's 50M-step backstop scores against;
+    /// `.terminate` — the `setFuel` posture — latches an
+    /// uncatchable host termination instead.
+    fuel_exhaustion: FuelExhaustion = .throw_range_error,
+    /// Embedder interrupt hook + context (`setInterruptHook`).
+    /// Polled at the same safe points as `interrupt` (loop
+    /// back-edges, §15.10 PTC re-entries, fresh dispatch entries,
+    /// and the ~1024-iteration native-builtin poll). A `.interrupt`
+    /// verdict latches an uncatchable host termination. See
+    /// docs/resource-metering.md for the prior-art survey and the
+    /// JIT interaction (arming a hook disables tier-up — v1 rule).
+    interrupt_hook: ?InterruptHook = null,
+    interrupt_hook_ctx: ?*anyopaque = null,
     /// Stack of every live `runFrames` call's frame list. Each
     /// entry is the `*ArrayListUnmanaged(CallFrame)` that a
     /// `runFrames` invocation is currently dispatching against;
@@ -1251,6 +1266,19 @@ pub const Realm = struct {
             .heap = parent.heap,
             .owns_heap = false,
             .host_interrupt = parent.host_interrupt,
+            // Children inherit the metering posture
+            // (docs/resource-metering.md): the interrupt hook — so a
+            // watchdog covers `$262.createRealm()` / ShadowRealm
+            // evaluation too — plus the fuel-exhaustion mode and the
+            // parent's REMAINING step budget (a snapshot copy, not a
+            // shared counter; the memory ceiling needs no copying —
+            // it lives on the shared heap). The termination latch is
+            // deliberately not inherited: a child created after a
+            // cleared termination starts clean.
+            .interrupt_hook = parent.interrupt_hook,
+            .interrupt_hook_ctx = parent.interrupt_hook_ctx,
+            .fuel_exhaustion = parent.fuel_exhaustion,
+            .step_budget = parent.step_budget,
             // Children inherit the SES posture of their parent —
             // a hardened parent must not accidentally hand a
             // mutable-primordials surface to `$262.createRealm()`
@@ -1426,6 +1454,116 @@ pub const Realm = struct {
     /// dispatch loop throws the synthetic RangeError, but exposed
     /// so a host can cancel a pending request before it fires.
     pub fn clearInterrupt(self: *Realm) void {
+        self.interrupt.store(false, .release);
+    }
+
+    // ── Embedder resource metering — docs/resource-metering.md ──────
+
+    /// Why a host termination fired. Readable via
+    /// `terminationReason` after a run surfaces `.thrown`.
+    pub const TerminationReason = enum { fuel_exhausted, host_interrupted };
+
+    /// Verdict an interrupt hook returns from a safe-point poll.
+    pub const InterruptAction = enum { proceed, interrupt };
+
+    /// Surface of a spent `step_budget` — see the `fuel_exhaustion`
+    /// field.
+    pub const FuelExhaustion = enum { throw_range_error, terminate };
+
+    /// Embedder interrupt hook — polled on the running thread at the
+    /// interpreter's safe points. Must be cheap (it runs once per
+    /// loop back-edge); the canonical shape is one relaxed/acquire
+    /// atomic load of host state, as in the test262 watchdog.
+    pub const InterruptHook = *const fn (ctx: ?*anyopaque) InterruptAction;
+
+    /// Arm the fuel budget: `units` safe-point crossings (loop
+    /// back-edges, §15.10 PTC re-entries, fresh dispatch entries —
+    /// NOT per-opcode) before execution latches an uncatchable host
+    /// termination (`.fuel_exhausted`). Fuel rides `step_budget`, so
+    /// compiled Bistromath loops poll the same counter at their
+    /// back-edges (docs/jit.md §4.6) — fuel needs no JIT carve-out.
+    /// Call again (after `clearTermination`) to refuel a realm for
+    /// its next run.
+    pub fn setFuel(self: *Realm, units: u64) void {
+        self.step_budget = units;
+        self.fuel_exhaustion = .terminate;
+    }
+
+    /// Remaining fuel (= the step budget). Meaningful after `setFuel`.
+    pub fn remainingFuel(self: *const Realm) u64 {
+        return self.step_budget;
+    }
+
+    /// Cap the heap's live-byte budget. Enforced at the allocation
+    /// layer (`Heap.charge`): an allocation that would cross the cap
+    /// fails with `error.OutOfMemory`, surfacing through the existing
+    /// OOM contract (docs/handbook/host-safety.md §5) — a *catchable*
+    /// throw where a builtin converts it, a host-visible
+    /// `error.OutOfMemory` otherwise; never a termination. Hostile
+    /// catch-and-retry cannot defeat the cap: it bounds LIVE bytes,
+    /// so every retry re-fails until the script frees something.
+    /// Child realms (`initChild`) share the parent's heap and
+    /// therefore its ceiling. See docs/resource-metering.md
+    /// "Memory ceiling" for why this surface stays catchable.
+    pub fn setMemoryLimit(self: *Realm, bytes: usize) void {
+        self.heap.max_bytes = bytes;
+    }
+
+    /// Install the embedder interrupt hook. Polled at interpreter
+    /// safe points; a `.interrupt` verdict latches an uncatchable
+    /// host termination (`.host_interrupted`).
+    ///
+    /// v1 JIT interaction (docs/resource-metering.md): compiled
+    /// Bistromath code polls the fuel counter and the `interrupt`
+    /// byte at its back-edges but cannot call out to a hook, so a
+    /// hot compiled loop would escape hook polling. Arming a hook
+    /// therefore disables tier-up for this realm. An embedder that
+    /// re-enables `jit_enabled` afterwards accepts hook polling only
+    /// at interpreter safe points (the test262 harness does exactly
+    /// that under `--jit`, backstopped by its 50M step budget).
+    pub fn setInterruptHook(self: *Realm, hook: InterruptHook, ctx: ?*anyopaque) void {
+        self.interrupt_hook = hook;
+        self.interrupt_hook_ctx = ctx;
+        self.jit_enabled = false;
+    }
+
+    /// Remove the interrupt hook. Deliberately does NOT re-enable
+    /// `jit_enabled` — the embedder opts back into tier-up
+    /// explicitly if it wants it.
+    pub fn clearInterruptHook(self: *Realm) void {
+        self.interrupt_hook = null;
+        self.interrupt_hook_ctx = null;
+    }
+
+    /// Latch a host termination. The next safe-point crossing (and
+    /// every one after, until the host clears the latch) surfaces a
+    /// synthetic throw that `unwindThrow` refuses to hand to any
+    /// user handler. Also raises the `interrupt` byte so a compiled
+    /// Bistromath frame mid-loop bails to a Lantern safe point
+    /// (docs/jit.md §4.6) where the latch is honoured; the byte is
+    /// reset by `clearTermination`, so it never surfaces as the
+    /// cooperative catchable RangeError while the latch is set (the
+    /// safe point checks the latch first).
+    pub fn terminate(self: *Realm, reason: TerminationReason) void {
+        self.termination = reason;
+        self.interrupt.store(true, .release);
+    }
+
+    /// The pending (or last, if not yet cleared) termination reason;
+    /// null when no termination is latched. The host's way to tell a
+    /// terminated run from an ordinary uncaught exception — both
+    /// surface as `.thrown` (the V8 shape: empty result +
+    /// `IsExecutionTerminating`).
+    pub fn terminationReason(self: *const Realm) ?TerminationReason {
+        return self.termination;
+    }
+
+    /// Host-side reset after a termination has unwound. Clears the
+    /// latch and the JIT-kick interrupt byte. Refuel separately
+    /// (`setFuel`) — a cleared termination with zero remaining fuel
+    /// re-latches on the next crossing.
+    pub fn clearTermination(self: *Realm) void {
+        self.termination = null;
         self.interrupt.store(false, .release);
     }
 
