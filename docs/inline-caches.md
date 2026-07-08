@@ -546,6 +546,68 @@ optional type-system tightening if a coherence regression ever traces
 here. Phased plan + invariants in
 [docs/lazy-property-bag.md](lazy-property-bag.md).
 
+## The shape key index — killing the O(depth) miss walk
+
+`Shape.lookup` resolves an own property by walking the transition
+chain to the root, one `std.mem.eql` per node. That's fine on IC
+hits (the key is never consulted) and on small objects, but the
+megamorphic-miss path pays it in full — and callgrind put the walk
+plus its memcmp at ~16 % of `deltablue` and ~12 % of
+`string_concat` instructions, the exact residue the interned-keys
+post-mortem said future property work must target
+([interned-keys.md](interned-keys.md) §11: kill the walk length;
+atom identity alone was a measured dead-end).
+
+The fix is the standard one — V8 switches DescriptorArray search
+from linear to hash-based past a size threshold, JSC materialises
+a `PropertyTable` on its Structures, SpiderMonkey keeps a
+`PropertyMap` table — adapted to Cynic's substrate in
+`shape.zig`:
+
+- **`KeyIndex`** — an open-addressed key→entry table covering one
+  shape's FULL chain (self → root), built lazily by the first slow
+  lookup that pays for a whole un-indexed walk. Slots hold shape
+  nodes; each node caches its key's Wyhash (`key_hash`) for the
+  build and the probe's early-out. Nearest-node-wins insertion
+  reproduces the linear walk's shadowing order, so
+  `redefineTransition` chains (the SES freeze path) resolve
+  byte-identically.
+- **Depth gate at 16, not V8's 8.** V8's linear cutoff assumes
+  interned Names with a *cached* hash; Cynic hashes the key bytes
+  per probe, which moves the break-even up. Measured: indexing
+  depth-8-12 chains regressed `deltablue` ~9 % (the probe's
+  Wyhash matches the short walk it replaces, and the anchor
+  bookkeeping taxed every lookup); at 16 the sub-threshold path
+  is the exact pre-index walk — one u32 depth compare is the
+  whole feature cost — and the deep-chain machinery lives in a
+  `noinline` `lookupDeep` (the `slowLdaGlobal` i-cache lesson).
+- **Descendants reuse an ancestor's index**: scan the short
+  un-indexed tail linearly first (preserving nearest-wins), then
+  probe the nearest indexed ancestor; a leaf builds its own index
+  once its full-tail walks cross the thresholds, converging hot
+  shapes to a pure probe.
+- **Bounded under hostile input** (the never-unbounded-growth
+  contract, [handbook/host-safety.md](handbook/host-safety.md)):
+  builds draw from a tree-wide slot budget linear in the node
+  count, then fall back to a geometric distance-doubling rule, so
+  an adversarial add-one-property-then-lookup loop gets O(n)
+  total index memory, not O(n²). An OOM during a build just skips
+  the index — `lookup` itself cannot fail.
+- **No GC interaction.** Indexes and keys are `ShapeTree`-arena
+  allocations (realm-lifetime, untraced), same as the shapes
+  themselves. The arena moved behind a stable heap pointer so a
+  bare `*Shape` can reach it for lazy builds.
+
+Measured (interleaved A/B vs the pre-index baseline, with an A/A
+control at ±2-3 %): `string_concat` **−30 %** (its
+`(n).toString()` loop resolves the `Number` ctor through the
+~25-deep global-object shape every iteration — the walk was 252
+Ir/call, now a probe), `deltablue` +0.7 % Ir (neutral — its
+chains sit below the gate by design), every other micro/macro
+within noise. The dictionary-mode bag probes that share the
+`string_concat` cluster (`decl_env` + demoted primordial
+prototypes) are a separate, still-open target.
+
 ## Conformance risks (where IC changes can break test262)
 
 - **§10.1.11 enumeration order** — integer keys ascending, then
