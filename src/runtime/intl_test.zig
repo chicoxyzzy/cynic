@@ -756,6 +756,28 @@ test "intl: DateTimeFormat renders extreme Temporal years (iso signed, gregory e
     );
 }
 
+test "intl: DateTimeFormat calendar option keeps the locale's numbering system (ar-EG)" {
+    try requireIntlBuild();
+    if (!intl_config.has_locale_data) return error.SkipZigTest;
+    // §11.1.2 CreateDateTimeFormat / §9.2.7 ResolveLocale — the numbering
+    // system resolves from the resolved locale, and an explicit supported
+    // calendar option must not disturb it. Regression: an explicit calendar
+    // triggers stripExtKeyword("ca"), which frees the resolved-locale string;
+    // buildDateTimeFormatSlots then read the stale local through
+    // resolveNumberingSystem (use-after-free), flakily falling back to "latn"
+    // for ar-EG (test262 format/temporal-objects-no-time-clip-non-latin-
+    // numerals). std.testing.allocator poisons freed memory, so the stale
+    // read fails deterministically here.
+    try evalAssert1(
+        \\const withCal = new Intl.DateTimeFormat("ar-EG", { year: "numeric", month: "numeric", day: "numeric", calendar: "iso8601" });
+        \\if (withCal.resolvedOptions().numberingSystem !== "arab") throw 0;
+        \\if (!withCal.format(new Temporal.PlainDate(275760, 9, 13)).includes("١٣")) throw 1; // day 13 in Arabic-Indic digits
+        \\const control = new Intl.DateTimeFormat("ar-EG", { year: "numeric", month: "numeric", day: "numeric" });
+        \\if (control.resolvedOptions().numberingSystem !== "arab") throw 2;
+        \\1
+    );
+}
+
 test "intl: DateTimeFormat reads calendar before numberingSystem (§11.1.2)" {
     try requireIntlBuild();
     // §11.1.2 CreateDateTimeFormat read order: calendar precedes numberingSystem,
