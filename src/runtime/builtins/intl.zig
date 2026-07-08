@@ -3619,8 +3619,13 @@ fn buildDateTimeFormatSlots(realm: *Realm, locales: Value, options: Value) Nativ
     }
     // §11.1.2 read order: numberingSystem is resolved after the calendar option
     // (both after localeMatcher). Runs unconditionally so a locale's default
-    // system still applies when no options object is supplied.
-    slots.numbering_system = try resolveNumberingSystem(realm, resolved.locale, resolved.locale, opts, true);
+    // system still applies when no options object is supplied. Read the live
+    // `slots.base.locale`, not the local `resolved.locale`: ownership moved to
+    // the slots above, and the stripExtKeyword("ca") call an explicit calendar
+    // option triggers frees-and-replaces that string — the stale local would be
+    // a use-after-free (flaky "latn" fallback for e.g. ar-EG). §9.2.7 also
+    // wants the -u-nu keyword read off the post-strip resolved locale.
+    slots.numbering_system = try resolveNumberingSystem(realm, slots.base.locale, slots.base.locale, opts, true);
     // §9.2.7 — the -u-nu keyword stays in the resolved locale only when it equals
     // the resolved system; an overriding option (or the default) drops it.
     if (intl.unicodeExtensionValue(slots.base.locale, "nu")) |kw| {
