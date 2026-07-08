@@ -246,7 +246,7 @@ fn featureBits(set: features.FeatureSet) u64 {
 }
 
 fn featureSetFromBits(bits: u64) features.FeatureSet {
-    var set = features.FeatureSet.initEmpty();
+    var set = features.FeatureSet.empty;
     inline for (comptime std.meta.fieldNames(features.FeatureFlag)) |name| {
         const flag = @field(features.FeatureFlag, name);
         if (bits & (@as(u64, 1) << @intFromEnum(flag)) != 0) set.insert(flag);
