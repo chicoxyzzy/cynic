@@ -5318,7 +5318,15 @@ pub const Compiler = struct {
             if (self.tryGetSmiLiteralValue(b.rhs.*)) |imm| {
                 if (imm == 0) {
                     try self.compileExpression(b.lhs);
-                    try self.builder.emitOp(.to_int32, b.span);
+                    // Second-level fusion — when the LHS compiled to a
+                    // trailing `Add r`, collapse the `Add r; ToInt32`
+                    // pair into a single `add_to_int32 r` dispatch (the
+                    // `(a + b) | 0` idiom). `fuseAddToInt32` rewrites the
+                    // `add` in place; on any other LHS shape it declines
+                    // and we emit the standalone `to_int32`.
+                    if (!self.builder.fuseAddToInt32()) {
+                        try self.builder.emitOp(.to_int32, b.span);
+                    }
                     return;
                 }
             }

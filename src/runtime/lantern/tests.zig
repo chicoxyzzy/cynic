@@ -14841,6 +14841,135 @@ test "to_int32: 0 | 0 idiom" {
     , 0);
 }
 
+// ── add_to_int32 (`(a + b) | 0` fused super-instruction) ────────────
+//
+// When `compileBinary` lowers `expr | 0` and the just-emitted LHS is
+// a plain `Add r`, the two ops collapse into a single `add_to_int32
+// r` dispatch. Int32 fast path is the wrapping 32-bit sum — ToInt32
+// of `int32 + int32` IS that wrap, so no overflow branch and no
+// separate coercion. Every other operand shape (double, NaN, string,
+// object valueOf, BigInt) must stay observably identical to the
+// un-fused `Add r; ToInt32`, including both deopt throw sites (a
+// `valueOf` that throws during the add, and the BigInt TypeError at
+// the `| 0`).
+
+test "add_to_int32: emits fused op for (a + b) | 0" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try installBuiltinsAllFeatures(&realm);
+    const out = try compileAndDisassemble(&realm,
+        \\function f(a, b) { return (a + b) | 0; }
+        \\f(1, 2);
+    );
+    defer testing.allocator.free(out);
+    try testing.expect(std.mem.indexOf(u8, out, "AddToInt32") != null);
+    // The fused form replaces the `Add r; ToInt32` pair — neither the
+    // bare `Add ` nor a trailing ` ToInt32` survives in `f`'s body.
+    try testing.expect(std.mem.indexOf(u8, out, "ToInt32") != null); // substring of AddToInt32
+    try testing.expect(std.mem.indexOf(u8, out, " Add r") == null);
+}
+
+test "add_to_int32: non-add LHS keeps unfused ToInt32" {
+    // Only `+` fuses. `(a * b) | 0` must still emit a `Mul` followed
+    // by a standalone `ToInt32` — no `add_to_int32`.
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try installBuiltinsAllFeatures(&realm);
+    const out = try compileAndDisassemble(&realm,
+        \\function f(a, b) { return (a * b) | 0; }
+        \\f(3, 4);
+    );
+    defer testing.allocator.free(out);
+    try testing.expect(std.mem.indexOf(u8, out, "AddToInt32") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "Mul r") != null);
+}
+
+test "add_to_int32: int32 fast path" {
+    try expectScriptIntWithBuiltins(
+        \\function f(a, b) { return (a + b) | 0; }
+        \\f(3, 4);
+    , 7);
+}
+
+test "add_to_int32: overflow wraps modulo 2^32 (identical to Add;ToInt32)" {
+    // 2147483647 + 1 = 2147483648 → ToInt32 → -2147483648. The fused
+    // fast path must wrap, NOT deopt-then-double-then-truncate wrong.
+    try expectScriptIntWithBuiltins(
+        \\function f(a, b) { return (a + b) | 0; }
+        \\f(2147483647, 1);
+    , -2147483648);
+}
+
+test "add_to_int32: negative wrap boundary" {
+    // -2147483648 + -1 = -2147483649 → ToInt32 → 2147483647.
+    try expectScriptIntWithBuiltins(
+        \\function f(a, b) { return (a + b) | 0; }
+        \\f(-2147483648, -1);
+    , 2147483647);
+}
+
+test "add_to_int32: double operands truncate toward zero" {
+    // 2.9 + 0.5 = 3.4 → ToInt32 → 3. Non-int32 register routes to
+    // the addValues + ToInt32 slow path.
+    try expectScriptIntWithBuiltins(
+        \\function f(a, b) { return (a + b) | 0; }
+        \\f(2.9, 0.5);
+    , 3);
+}
+
+test "add_to_int32: NaN operand coerces to 0" {
+    // NaN + 1 = NaN → ToInt32 → +0.
+    try expectScriptIntWithBuiltins(
+        \\function f(a, b) { return (a + b) | 0; }
+        \\f(NaN, 1);
+    , 0);
+}
+
+test "add_to_int32: string operands concatenate then ToInt32" {
+    // "3" + "4" = "34" (string add) → ToInt32("34") = 34. Proves the
+    // slow path runs addValues (concat) BEFORE the | 0.
+    try expectScriptIntWithBuiltins(
+        \\function f(a, b) { return (a + b) | 0; }
+        \\f("3", "4");
+    , 34);
+}
+
+test "add_to_int32: object valueOf coercion" {
+    // {valueOf:5} + 3 = 8 → | 0 = 8. ToPrimitive on the object runs
+    // in the add step, exactly as the un-fused pair would.
+    try expectScriptIntWithBuiltins(
+        \\function f(a, b) { return (a + b) | 0; }
+        \\f({ valueOf() { return 5; } }, 3);
+    , 8);
+}
+
+test "add_to_int32: valueOf that throws propagates (add-step deopt)" {
+    // The add's ToPrimitive throws — a catchable JS exception, never
+    // a host abort. First slow-path throw site.
+    try expectScriptThrows(
+        \\function f(a, b) { return (a + b) | 0; }
+        \\f({ valueOf() { throw new Error("boom"); } }, 1);
+    );
+}
+
+test "add_to_int32: BigInt sum throws TypeError at the | 0 (ToInt32-step deopt)" {
+    // 1n + 2n = 3n succeeds; ToInt32(3n) throws TypeError. Second
+    // slow-path throw site — must surface as a catchable exception.
+    try expectScriptThrows(
+        \\function f(a, b) { return (a + b) | 0; }
+        \\f(1n, 2n);
+    );
+}
+
+test "add_to_int32: hot loop sanity ((sum + i) | 0 over 1000 iters)" {
+    try expectScriptIntWithBuiltins(
+        \\let sum = 0;
+        \\for (let i = 0; i < 1000; i++) sum = (sum + i) | 0;
+        \\sum;
+        // sum(0..999) = 499500
+    , 499500);
+}
+
 test "def_template_property: literal with mixed static + computed keys" {
     // Compiler bails template build on a literal that contains
     // any computed key (template build sees `.computed` and

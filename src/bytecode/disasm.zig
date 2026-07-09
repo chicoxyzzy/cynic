@@ -63,7 +63,7 @@ pub fn dump(allocator: std.mem.Allocator, chunk: *const Chunk) ![]u8 {
                 const dst = chunk.code[i + 2];
                 try buf.print(allocator, " r{d} r{d}", .{ src, dst });
             },
-            .add, .sub, .mul, .div, .mod, .pow, .bit_and, .bit_or, .bit_xor, .shl, .shr, .shr_u, .eq, .strict_eq, .neq, .strict_neq, .lt, .gt, .le, .ge, .instanceof_, .array_spread => {
+            .add, .add_to_int32, .sub, .mul, .div, .mod, .pow, .bit_and, .bit_or, .bit_xor, .shl, .shr, .shr_u, .eq, .strict_eq, .neq, .strict_neq, .lt, .gt, .le, .ge, .instanceof_, .array_spread => {
                 const r = chunk.code[i + 1];
                 try buf.print(allocator, " r{d}", .{r});
             },

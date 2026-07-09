@@ -118,6 +118,7 @@ pub fn effectOf(op: Op, code: []const u8, i: usize) Effect {
         // ── Register reads (one source register; acc is implicit) ──
         .ldar => Effect.read1(code[i + 1]),
         .add,
+        .add_to_int32,
         .sub,
         .mul,
         .div,
