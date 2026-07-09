@@ -815,7 +815,7 @@ const Compiler = struct {
                 .lda_zero, .lda_one,
                 .ldar_0, .ldar_1, .ldar_2, .ldar_3,
                 .star_0, .star_1, .star_2, .star_3,
-                .mov, .add, .sub, .mul, .add_smi, .to_int32,
+                .mov, .add, .add_to_int32, .sub, .mul, .add_smi, .to_int32,
                 .bit_and, .bit_or, .bit_xor,
                 .lt, .gt, .le, .ge, .eq, .neq, .strict_eq, .strict_neq,
                 .lda_property, .lda_property_reg, .sta_property,
@@ -939,6 +939,19 @@ const Compiler = struct {
                     else
                         a64.subsRegW(.x11, .x9, acc_reg));
                     try m.jumpCond(.vs, td);
+                    try m.emit(a64.orrReg(acc_reg, .x11, int32_tag_reg));
+                },
+                .add_to_int32 => {
+                    // `acc = ToInt32(reg + acc)`. Like `.add` but the
+                    // ToInt32 wrap is exactly the 32-bit add result, so
+                    // there is NO overflow bail — the wrapping `addsW`
+                    // low word IS the answer. Both operands must be
+                    // int32 (else deopt); the tagged retag follows.
+                    const td = try self.tdFor(bc);
+                    try m.emit(a64.ldrImm(.x9, regs_reg, regSlot(code[i + 1])));
+                    try self.checkInt32(.x9, td);
+                    try self.checkInt32(acc_reg, td);
+                    try m.emit(a64.addsRegW(.x11, .x9, acc_reg));
                     try m.emit(a64.orrReg(acc_reg, .x11, int32_tag_reg));
                 },
                 .mul => {

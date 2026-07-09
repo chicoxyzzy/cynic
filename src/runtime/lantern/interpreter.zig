@@ -1466,6 +1466,61 @@ pub fn runFrames(
             }
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
+        .add_to_int32 => {
+            // Fused `(reg + acc) | 0` — an `Add r` the compiler folded
+            // with the following `to_int32`. Int32 fast path:
+            // ToInt32(int32 + int32) is the wrapping 32-bit sum, so
+            // `@addWithOverflow`'s low result IS the answer whether or
+            // not it overflowed — no overflow branch, no double
+            // round-trip, no separate coercion. Slow path reproduces
+            // the un-fused `Add r; ToInt32` EXACTLY: `intArith`/
+            // `numArith`/`addValues` for the sum, then `intBitwise`/
+            // `bitwiseBinary(.bit_or, _, 0)` for the ToInt32 — so double
+            // truncate, NaN/±∞ → +0, string ToNumber, BigInt TypeError,
+            // and a throwing `valueOf` all behave bit-identically.
+            const r = code[ip];
+            ip += 1;
+            const lhs = registers[r];
+            if (lhs.isInt32() and acc.isInt32()) {
+                const ov = @addWithOverflow(lhs.asInt32(), acc.asInt32());
+                acc = Value.fromInt32(ov[0]);
+                continue :dispatch try decodeNext(code, &ip, &committed);
+            }
+            // Slow path — sum via the `.add` sequence (the both-int32
+            // case already returned above, so `intArith` would be dead
+            // here: only `numArith` (double operand) and `addValues`
+            // (string / object / BigInt) remain).
+            var sum: Value = undefined;
+            if (numArith(.add, lhs, acc)) |s| {
+                sum = s;
+            } else if (try addValues(realm, lhs, acc)) |s| {
+                sum = s;
+            } else {
+                const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
+                realm.pending_exception = null;
+                f.ip = ip;
+                f.accumulator = acc;
+                committed = true;
+                if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
+                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+            }
+            // ToInt32(sum) via the `.to_int32` sequence.
+            const zero = Value.fromInt32(0);
+            if (intBitwise(.bor, sum, zero)) |res| {
+                acc = res;
+            } else if (try bitwiseBinary(realm, .bit_or, sum, zero)) |res| {
+                acc = res;
+            } else {
+                const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
+                realm.pending_exception = null;
+                f.ip = ip;
+                f.accumulator = acc;
+                committed = true;
+                if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
+                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+            }
+            continue :dispatch try decodeNext(code, &ip, &committed);
+        },
         .sub => {
             const r = code[ip];
             ip += 1;

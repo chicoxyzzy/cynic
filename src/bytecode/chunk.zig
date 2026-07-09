@@ -931,6 +931,31 @@ pub const Builder = struct {
         return self.max_jump_target < self.here();
     }
 
+    /// Fuse a just-emitted `Add r` with the `ToInt32` about to be
+    /// emitted for the `expr | 0` idiom: rewrite the trailing `add`
+    /// opcode byte to `add_to_int32` in place and report success, so
+    /// the caller skips the separate `to_int32` op. The register
+    /// operand and encoding are unchanged (`add` and `add_to_int32`
+    /// share the `[op][r:u8]` shape), so nothing downstream shifts.
+    ///
+    /// Guards, mirroring `accStillHoldsRegister`:
+    ///   1. the last instruction is exactly `Add r` (2-byte, at the
+    ///      tail — `start + 2 == len` rejects a stale `last_op_start`);
+    ///   2. no jump targets the current position (`max_jump_target <
+    ///      here()`), so the `add`'s result reaches the fold point by
+    ///      fall-through only — a branch-in could arrive with a
+    ///      different accumulator (e.g. `(cond ? a + b : c) | 0`).
+    /// Returns false (caller emits the un-fused `to_int32`) otherwise.
+    pub fn fuseAddToInt32(self: *Builder) bool {
+        const start = self.last_op_start orelse return false;
+        const items = self.code.items;
+        if (@as(usize, start) + 2 != items.len) return false;
+        if (items[start] != @intFromEnum(Op.add)) return false;
+        if (self.max_jump_target >= self.here()) return false;
+        items[start] = @intFromEnum(Op.add_to_int32);
+        return true;
+    }
+
     /// True when the position after the last emitted instruction is
     /// provably unreachable — control can't fall off the end. Two
     /// conditions, both required:

@@ -113,6 +113,23 @@ pub const Op = enum(u8) {
     /// un-fused triple. Headline arith_loop / int-coerce
     /// hot-path win.
     to_int32,
+    /// `[op] [r:u8]` — `acc = ToInt32(reg + acc)`. Fused form of the
+    /// `(a + b) | 0` idiom: a plain `Add r` immediately followed by
+    /// the `to_int32` (`| 0`) op. The compiler collapses the pair by
+    /// rewriting the just-emitted `add` in place (see
+    /// `Builder.fuseAddToInt32`). Int32 fast path: ToInt32 of an
+    /// `int32 + int32` sum IS the wrapping 32-bit sum
+    /// (`@addWithOverflow`'s low result), so the fused op needs no
+    /// overflow branch and no separate coercion — strictly less work
+    /// than `add` alone. Anything else (double, string, object,
+    /// BigInt) routes through the exact `addValues` + `bitwiseBinary
+    /// (.bit_or, _, 0)` sequence the un-fused `Add r; ToInt32` pair
+    /// runs, so § 7.1.6 ToInt32 / § 13.15 semantics — double
+    /// truncate, NaN/±∞ → +0, string ToNumber, BigInt TypeError,
+    /// throwing `valueOf` — all stay bit-identical. The per-iteration
+    /// inner pair of the `arith_loop` micro (also array_iter /
+    /// construct_loop / array_literal_loop).
+    add_to_int32,
 
     // ── Bitwise (acc = reg OP acc, ToInt32 coercion) ─────────────────────
     /// `[op] [r:u8]` — acc = reg & acc. §13.12.
@@ -1272,6 +1289,7 @@ pub const Op = enum(u8) {
             .ldar,
             .star,
             .add,
+            .add_to_int32,
             .sub,
             .mul,
             .div,
@@ -1429,6 +1447,7 @@ pub const Op = enum(u8) {
             .pow => "Pow",
             .add_smi => "AddSmi",
             .to_int32 => "ToInt32",
+            .add_to_int32 => "AddToInt32",
             .bit_and => "BitAnd",
             .bit_or => "BitOr",
             .bit_xor => "BitXor",
@@ -1642,4 +1661,9 @@ test "Op: operandSize agrees with the documented encoding" {
     // item #6); fused increment + compare + back-jump for the
     // canonical `for (let i = INT; i < INT; i++)` shape.
     try testing.expectEqual(@as(u8, 4), Op.operandSize(.loop_inc_lt));
+    // `add_to_int32` is `[op] [r:u8]` — 1 byte of operand, same shape
+    // as `add`. Fuses the `Add r; ToInt32` pair (the `(a + b) | 0`
+    // idiom); a wrong size would walk the disassembler off the next
+    // instruction boundary.
+    try testing.expectEqual(@as(u8, 1), Op.operandSize(.add_to_int32));
 }
