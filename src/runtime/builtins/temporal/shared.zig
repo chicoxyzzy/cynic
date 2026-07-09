@@ -2231,10 +2231,17 @@ pub fn pow10(e: u4) i128 {
 }
 
 /// Reject a `smallestUnit` toString option coarser than `minute`
-/// (year..hour). Per GetTemporalUnitValuedOption's read-then-validate
-/// ordering this must run only after every other option has been read and
-/// cast — the order-of-operations fixtures observe `timeZoneName` /
-/// `timeZone` being read even when `smallestUnit` is an invalid date unit.
+/// (year..hour). Ordering (per Temporal.Instant/ZonedDateTime.prototype
+/// .toString): every option is first read and cast — including the raw
+/// `Get` of `timeZone` / `timeZoneName`, which the order-of-operations
+/// fixtures observe even when `smallestUnit` is an invalid date unit — and
+/// only then is this range check applied. But it must precede the timeZone
+/// *coercion* (ToTemporalTimeZoneIdentifier): the spec sequences the
+/// smallestUnit RangeError (GetTemporalUnitValuedOption's TIME group
+/// rejecting date units, plus the explicit "hour" rejection) ahead of the
+/// timeZone coercion, so a coarse `smallestUnit` paired with a non-string
+/// `timeZone` surfaces this RangeError rather than a coercion TypeError.
+/// Call it after the raw `timeZone` read but before the coercion.
 pub fn requireToStringSmallestUnit(realm: *Realm, unit: ?temporal.LargestUnit) NativeError!void {
     const u = unit orelse return;
     if (@intFromEnum(u) < @intFromEnum(temporal.LargestUnit.minute)) {
