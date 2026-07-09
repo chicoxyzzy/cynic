@@ -1207,6 +1207,23 @@ test "native reentry: recursive accessor is catchable" {
     , "RangeError");
 }
 
+test "Temporal.Instant toString: smallestUnit range check precedes timeZone coercion" {
+    // §8.4.10 Temporal.Instant.prototype.toString reads the options in
+    // order (fractionalSecondDigits, roundingMode, smallestUnit, then a raw
+    // Get of "timeZone") and only then validates: the smallestUnit range
+    // check (RangeError for "hour" and date units) runs BEFORE
+    // ToTemporalTimeZoneIdentifier coerces the timeZone value. So a coarse
+    // smallestUnit paired with a non-string timeZone must surface the
+    // smallestUnit RangeError, not the TypeError from the timeZone coercion.
+    try expectScriptStringWithBuiltins(
+        \\function cls(u) {
+        \\  try { new Temporal.Instant(0n).toString({ smallestUnit: u, timeZone: 5 }); return 'no throw'; }
+        \\  catch (e) { return e.constructor.name; }
+        \\}
+        \\cls('hour') + ',' + cls('day') + ',' + cls('month');
+    , "RangeError,RangeError,RangeError");
+}
+
 test "native reentry: recursive Array.prototype.map callback throws" {
     // `map`'s callback re-enters JS per element via the native
     // dispatch; an unbounded self-recursion through it must throw.

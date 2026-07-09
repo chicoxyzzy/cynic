@@ -292,12 +292,20 @@ fn instantToString(realm: *Realm, this_value: Value, args: []const Value) Native
     const opts_obj = try getOptionsObject(realm, options);
     const mode = try getRoundingModeOption(realm, opts_obj, .trunc);
     const smallest = try getTemporalUnitOption(realm, opts_obj, "smallestUnit");
-    var time_zone: ?temporal.TimeZone = null;
-    if (opts_obj) |o| {
-        const tz_val = try getPropertyChain(realm, o, "timeZone");
-        if (!tz_val.isUndefined()) time_zone = try toTimeZoneArg(realm, tz_val);
-    }
+    // §8.4.10: read "timeZone" (a raw Get) with the other options, before
+    // any validation — the order-of-operations fixtures observe this Get
+    // even when smallestUnit is an invalid date unit. The coercion via
+    // ToTemporalTimeZoneIdentifier is deferred until after the smallestUnit
+    // range check below.
+    var tz_val: Value = Value.undefined_;
+    if (opts_obj) |o| tz_val = try getPropertyChain(realm, o, "timeZone");
+    // §8.4.10: validate smallestUnit (RangeError for "hour" and date units)
+    // BEFORE ToTemporalTimeZoneIdentifier coerces the timeZone value, so a
+    // coarse smallestUnit with a non-string timeZone surfaces this
+    // RangeError rather than the timeZone-coercion TypeError.
     try requireToStringSmallestUnit(realm, smallest);
+    var time_zone: ?temporal.TimeZone = null;
+    if (!tz_val.isUndefined()) time_zone = try toTimeZoneArg(realm, tz_val);
 
     const prec = toSecondsStringPrecision(smallest, frac);
     const inc_ns = prec.increment * temporal.unitNanoseconds(prec.unit);
