@@ -1404,12 +1404,20 @@ const Restore = struct {
             child.* = .{
                 .parent = parent,
                 .key = owned_key,
+                .key_hash = shape_mod.hashKey(owned_key),
                 .attrs = attrs,
                 .kind = kind,
                 .slot = slot,
                 .property_count = property_count,
+                .depth = parent.depth + 1,
+                .ctx = parent.ctx,
+                .index = null,
                 .transitions = .empty,
             };
+            // Mirror the live transition path's node accounting so
+            // the lazy KeyIndex budget (§ shape.zig maybeBuildIndex)
+            // stays linear in the restored tree's node count.
+            parent.ctx.node_count += 1;
             // Register the transition edge so post-restore
             // transitions dedupe against this tree exactly as
             // against the original (doc §5.4).

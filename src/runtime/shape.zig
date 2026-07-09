@@ -63,7 +63,7 @@ pub const index_budget_per_node: u64 = 8;
 /// caller should have demoted to dictionary mode anyway).
 const index_max_indexed_props: u32 = 1 << 20;
 
-inline fn hashKey(key: []const u8) u32 {
+pub inline fn hashKey(key: []const u8) u32 {
     return @truncate(std.hash.Wyhash.hash(0, key));
 }
 
