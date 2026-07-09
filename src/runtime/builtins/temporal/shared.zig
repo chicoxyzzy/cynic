@@ -1582,17 +1582,29 @@ pub fn calendarFields(cal: temporal.CalendarId, iso_y: i32, iso_m: u32, iso_d: u
         const date = temporal.daysFromCivil(iso_y, iso_m, iso_d);
         const cd = compFromDays(c, date);
         const ev = computedEra(cal, c, cd.year);
+        // §12.5.x — these getters must stay total (host-safety: never trap on a
+        // user-reachable date). The lunisolar pair (chinese/dangi) saturates
+        // `compFromDays` to its tabulated [1850, 2150] window for an ISO year
+        // outside it, so the returned calendar year no longer corresponds to
+        // `date`; the raw `date - yearStart + 1` day-of-year then runs hugely
+        // negative and traps the `u32` cast. Clamp day-of-year into its valid
+        // [1, daysInYear] band — a no-op for every in-range date (the closed-
+        // form islamic/coptic/indian/persian/hebrew families never clamp), and
+        // a saturated-but-total value for the out-of-table lunisolar case.
+        const diy: i64 = compDaysInYear(c.family, cd.year);
+        const doy_raw = date - compToDays(c, cd.year, 1, 1) + 1;
+        const doy = std.math.clamp(doy_raw, 1, diy);
         return .{
-            .year = @intCast(cd.year),
+            .year = std.math.lossyCast(i32, cd.year),
             .month = cd.month,
             .day = cd.day,
             .days_in_month = compDaysInMonth(c.family, cd.year, cd.month),
-            .days_in_year = compDaysInYear(c.family, cd.year),
+            .days_in_year = @intCast(diy),
             .months_in_year = compMonthsInYear(c.family, cd.year),
-            .day_of_year = @intCast(date - compToDays(c, cd.year, 1, 1) + 1),
+            .day_of_year = @intCast(doy),
             .in_leap_year = compLeap(c.family, cd.year),
             .era = if (c.era.len == 0) null else ev.era,
-            .era_year = if (c.era.len == 0) null else @intCast(ev.era_year),
+            .era_year = if (c.era.len == 0) null else std.math.lossyCast(i32, ev.era_year),
         };
     }
     // Japanese: gregorian structure with a date-based era overlay.

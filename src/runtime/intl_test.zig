@@ -168,6 +168,30 @@ test "intl/temporal: roc + buddhist year-offset calendar arithmetic" {
     );
 }
 
+test "intl/temporal: lunisolar getters stay total for out-of-table ISO years (host-safety)" {
+    try requireIntlBuild();
+    // §12.5 host-safety: the chinese/dangi lunisolar calendars saturate
+    // `compFromDays` to their tabulated [1850, 2150] window, so a PlainDate on
+    // an ISO year outside it (here ISO year 1) yields a calendar year that no
+    // longer corresponds to the raw day count. The day-of-year subtraction then
+    // ran hugely negative and trapped the `u32` cast under ReleaseSafe — a
+    // host-abort. The getters must instead produce a total, saturated value.
+    // (Regression for the calendarFields day_of_year / year / eraYear casts.)
+    try evalAssert1(
+        \\for (const cal of ["chinese", "dangi"]) {
+        \\  const d = new Temporal.PlainDate(1, 1, 1, cal);
+        \\  // Reading every getter must not trap; values are saturated-but-total.
+        \\  const y = d.year, m = d.month, day = d.day, doy = d.dayOfYear;
+        \\  const diy = d.daysInYear, dim = d.daysInMonth, miy = d.monthsInYear;
+        \\  if (typeof y !== "number" || typeof m !== "number") throw 0;
+        \\  if (doy < 1 || doy > diy) throw 1;           // day-of-year in band
+        \\  if (day < 1 || day > dim) throw 2;
+        \\  if (d.era !== undefined || d.eraYear !== undefined) throw 3; // era-less
+        \\}
+        \\1
+    );
+}
+
 test "intl/temporal: toLocaleString formats Temporal types via DateTimeFormat" {
     if (!intl_config.has_locale_data) return error.SkipZigTest; // needs CLDR output
     // §13.x — each Temporal type's toLocaleString routes through a transient
