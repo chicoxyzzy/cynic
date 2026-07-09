@@ -3199,7 +3199,10 @@ test "intl: DateTimeFormat formatRange of Temporal objects (§11.5.6)" {
         \\const pd1 = new Temporal.PlainDate(2024, 1, 1), pd2 = new Temporal.PlainDate(2024, 1, 5);
         \\const pt = new Temporal.PlainTime(12, 0);
         \\const thrown = (f) => { try { f(); return ''; } catch (e) { return e.constructor.name; } };
-        \\(dtf.formatRange(pd1, pd2) === '1/1/24 – 1/5/24' &&
+        \\// §11.1.7 fallback join: the CLDR `intervalFormatFallback` for "en"
+        \\// separates the two endpoints with U+2009 THIN SPACE + en-dash (U+2013)
+        \\// + U+2009 (not ASCII spaces) — see rangeFallbackSep in intl.zig.
+        \\(dtf.formatRange(pd1, pd2) === '1/1/24\u2009\u2013\u20091/5/24' &&
         \\ // distinct Temporal types, and Temporal mixed with legacy → TypeError
         \\ thrown(() => dtf.formatRange(pd1, pt)) === 'TypeError' &&
         \\ thrown(() => dtf.formatRange(pd1, Date.now())) === 'TypeError') ? 1 : 0
