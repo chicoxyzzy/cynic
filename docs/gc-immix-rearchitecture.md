@@ -66,6 +66,45 @@ And the scope of even that win is narrow: it helps retained-set workloads
 interpreter/JIT, where GC changes do nothing. Cheap measurement, expensive
 mistake avoided — the same discipline that closed the generational major.
 
+## The memory axis — splay's RSS outlier is header size, not a leak
+
+The cross-engine RSS capture (bench-cross `--macros`) makes `splay` a ~5×
+peak-RSS outlier — Cynic ~357 MB vs jsc 55 / v8 71 / hermes 68. It reads
+like a GC retention bug (removed nodes kept alive by stale roots); it
+measurably is not. Three checks, ReleaseFast `--no-jit --unhardened
+--allow=eval`:
+
+1. **The live count plateaus exactly at the tree size.** A fixed 2000-node
+   tree driven through 40 rounds of 80 insert+remove (size held constant,
+   `__collectGarbage()` each round) holds the post-GC object count *flat* at
+   192,192 = `2000 × 96` objects/node, round after round. Removed nodes'
+   payloads are reclaimed; a false-root leak would grow the count ~304K over
+   the run. It grows by **zero**. The card-marking dirty list is clean.
+2. **RSS scales linearly with node count** — 2000→102 MB, 4000→195 MB,
+   8000→371 MB. A per-object cost with no fixed retained offset, not an
+   accumulating set.
+3. **The cost is the header.** `@sizeOf(JSObject) = 408 B`; splay's live set
+   is genuinely ~768K objects (`8000 × 96`: one `SplayTree.Node` + 63 payload
+   nodes + 32 array-exotics per tree node) → **313 MB of headers alone**,
+   +25 MB JSString headers +~20 MB string bytes ≈ the 357 MB observed. V8/JSC
+   hold the *identical* 768K-object tree in 55–71 MB because their object is
+   ~48 B: a fixed header plus out-of-line property/element stores reached by
+   one pointer each.
+
+So splay's RSS is bounded by the **inlined-everything `JSObject` layout** —
+two `StringArrayHashMap`s (empty in shape mode) + `inline_slots[4]` +
+`elements` + ~110 B of null-on-every-plain-object type-specific slots
+(Promise / RegExp / Proxy / iterator state) — not by anything the collector
+retains. **The lever is shrinking the header: object-layout / IC-substrate
+work, not GC.** Same shape as the CPU finding above — the collector is no more
+the bottleneck for splay's *memory* than the pools are for its *CPU*. Reaching
+the ~70 MB field needs the V8-style out-of-line redesign of property/element
+storage (the uniform-header + storage-substrate change Step 1 already
+contemplates — challenges #2/#3); the cold type-specific slots are a smaller,
+independent ~112 B win via the existing `extension` pointer. Neither is a
+collector change, so the generational/RC scoping below does not move this
+number.
+
 ## Why
 
 The shipped collector is a generational, **non-moving, per-object-pool**
