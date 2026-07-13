@@ -284,29 +284,51 @@ if command -v taskset >/dev/null 2>&1; then
   TASKSET="taskset -c 1"
 fi
 
-# run_once <env> <cmd> <fixture> -> echoes elapsed ms, or "FAIL"
+# run_once <env> <cmd> <fixture> -> echoes "<ms> <rss_kb>", or "FAIL".
+# rss_kb is the subprocess peak resident set in KiB (the memory axis of
+# the compass). The python path reads it from getrusage(RUSAGE_CHILDREN)
+# — free, since that path already forks python. The GNU-date path wraps
+# with /usr/bin/time when present, else reports rss_kb=0 (timing stays
+# valid). Callers split on the space.
 run_once() {
   local env="$1" cmd="$2" fixture="$3"
 
   if [ "$USE_GNU_DATE" -eq 1 ]; then
-    local t0 t1 rc
+    local t0 t1 rc rss=0 rssfile=""
+    [ -x /usr/bin/time ] && rssfile="$(mktemp)"
     t0="$(date +%s%3N)"
-    if [ "$env" = "-" ]; then
-      # shellcheck disable=SC2086
-      $TASKSET $cmd "$fixture" >/dev/null 2>&1
+    if [ -n "$rssfile" ]; then
+      # `/usr/bin/time -f '%M'` reports max-RSS in KiB. The wrapper fork
+      # is a small constant inside the timing bracket and cancels in the
+      # cross-engine comparison.
+      if [ "$env" = "-" ]; then
+        # shellcheck disable=SC2086
+        /usr/bin/time -f '%M' -o "$rssfile" $TASKSET $cmd "$fixture" >/dev/null 2>&1
+      else
+        # shellcheck disable=SC2086
+        /usr/bin/time -f '%M' -o "$rssfile" env $env $TASKSET $cmd "$fixture" >/dev/null 2>&1
+      fi
     else
-      # shellcheck disable=SC2086
-      env $env $TASKSET $cmd "$fixture" >/dev/null 2>&1
+      if [ "$env" = "-" ]; then
+        # shellcheck disable=SC2086
+        $TASKSET $cmd "$fixture" >/dev/null 2>&1
+      else
+        # shellcheck disable=SC2086
+        env $env $TASKSET $cmd "$fixture" >/dev/null 2>&1
+      fi
     fi
     rc=$?
     t1="$(date +%s%3N)"
-    if [ "$rc" -ne 0 ]; then echo "FAIL"; else echo $(( t1 - t0 )); fi
+    if [ -n "$rssfile" ]; then rss="$(tail -1 "$rssfile" 2>/dev/null)"; rm -f "$rssfile"; fi
+    case "$rss" in ''|*[!0-9]*) rss=0 ;; esac
+    if [ "$rc" -ne 0 ]; then echo "FAIL"; else echo "$(( t1 - t0 )) $rss"; fi
     return
   fi
 
   # macOS path: one python3 process spawns + times the engine with
-  # time.monotonic(), so the measured interval is exactly the
-  # engine's wall time — no double shell-spawn jitter.
+  # time.monotonic() (the measured interval is exactly the engine's
+  # wall time — no double shell-spawn jitter) and reads the child's
+  # peak RSS via getrusage.
   local argv
   if [ "$env" = "-" ]; then
     argv="$cmd $fixture"
@@ -314,13 +336,19 @@ run_once() {
     argv="env $env $cmd $fixture"
   fi
   python3 - "$argv" <<'PYEOF'
-import sys, time, subprocess, shlex
+import sys, time, subprocess, shlex, resource
 argv = shlex.split(sys.argv[1])
 t0 = time.monotonic()
 rc = subprocess.run(argv, stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL).returncode
 t1 = time.monotonic()
-print("FAIL" if rc != 0 else int(round((t1 - t0) * 1000)))
+if rc != 0:
+    print("FAIL")
+else:
+    # ru_maxrss is bytes on macOS, KiB on Linux — normalise to KiB.
+    ru = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
+    rss_kb = ru // 1024 if sys.platform == "darwin" else ru
+    print(f"{int(round((t1 - t0) * 1000))} {rss_kb}")
 PYEOF
 }
 
@@ -355,6 +383,7 @@ stats() {
 # A trailing * marks spread > SPREAD_LIMIT%.
 # ---------------------------------------------------------------------
 declare -A CELL
+declare -A RCELL
 FLAGGED=()
 
 for ei in "${!ENGINE_NAMES[@]}"; do
@@ -373,6 +402,7 @@ for ei in "${!ENGINE_NAMES[@]}"; do
     done
 
     samples=""
+    rss_samples=""
     failed=0
     r=0
     while [ "$r" -lt "$RUNS" ]; do
@@ -381,7 +411,8 @@ for ei in "${!ENGINE_NAMES[@]}"; do
         failed=1
         break
       fi
-      samples="$samples $v"
+      samples="$samples ${v%% *}"
+      rss_samples="$rss_samples ${v##* }"
       r=$(( r + 1 ))
     done
 
@@ -399,6 +430,14 @@ EOF
     else
       CELL["$name|$base"]="$med"
     fi
+
+    # Peak-RSS median (KiB) for the memory table. All-zero means the
+    # platform couldn't measure it (GNU-date path without /usr/bin/time)
+    # — the cell then renders "—".
+    read -r rmed _rs _rmn _rmx <<EOF
+$(stats "$rss_samples")
+EOF
+    if [ "$rmed" -gt 0 ]; then RCELL["$name|$base"]="$rmed"; fi
   done
 done
 
@@ -537,6 +576,36 @@ EOF
     echo "Noisy cells (>${SPREAD_LIMIT}% spread):"
     for f in "${FLAGGED[@]}"; do echo "- $f"; done
   fi
+
+  # ── Peak RSS: the memory axis ───────────────────────────────────────
+  # Median subprocess max-resident-set per cell, KiB (lower is better).
+  # No medals — the timing table above carries the podium; this is a
+  # shape check on where Cynic's memory footprint sits against the
+  # field. A `—` cell is an ERR run or a host that couldn't measure RSS
+  # (the GNU-date path without `/usr/bin/time`). Cold-start RSS includes
+  # the binary + runtime baseline, so read column-to-column deltas, not
+  # absolutes.
+  local have_rss=0
+  for _k in "${!RCELL[@]}"; do have_rss=1; break; done
+  if [ "$have_rss" -eq 1 ]; then
+    echo
+    echo "### Peak RSS — median KiB, N=$RUNS (lower is better)"
+    echo
+    printf '| fixture |'
+    for name in "${ENGINE_NAMES[@]}"; do printf ' %s |' "$name"; done
+    printf '\n|%s' '---|'
+    for _ in "${ENGINE_NAMES[@]}"; do printf '%s' '---:|'; done
+    printf '\n'
+    for fixture in "${FIXTURES[@]}"; do
+      base="$(basename "$fixture" .js)"
+      printf '| %s |' "$base"
+      for name in "${ENGINE_NAMES[@]}"; do
+        printf ' %s |' "${RCELL["$name|$base"]:-—}"
+      done
+      printf '\n'
+    done
+  fi
+
   echo
   if [ "$TIER" = "jit" ]; then
     echo "_Full-speed-tier, internal compass. Do not publish; do_"
