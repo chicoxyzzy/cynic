@@ -76,6 +76,11 @@ pub fn effectOf(op: Op, code: []const u8, i: usize) Effect {
         .lda_this,
         .lda_new_target,
         .lda_arguments,
+        // §10.4.4 arguments elision. Reads registers[0..argc] — but
+        // those are the pinned caller-arg / parameter slots the
+        // register-reuse passes never remap (same as `lda_arguments`),
+        // so no explicit read window is needed.
+        .arguments_snapshot,
         .import_meta,
         .lda_property,
         .lda_global,
@@ -196,6 +201,10 @@ pub fn effectOf(op: Op, code: []const u8, i: usize) Effect {
         // `[op][k:u16][r_recv:u8][argc:u8][ic:u16][callic:u16]` —
         // receiver plus the arg window placed after it (conservative).
         .call_property => .{ .win_base = code[i + 3], .win_len = @as(u16, code[i + 4]) + 1 },
+        // `[op][r_callee:u8][r_thisArg:u8]` — §10.4.4 forward site. The
+        // argument list comes from the frame's snapshot (pinned param
+        // slots), not a register window, so only the two operands read.
+        .call_forward_args => Effect.read2(code[i + 1], code[i + 2]),
 
         // ── Everything else: not modelled → fail safe. A function
         // containing one of these is not `fully_understood`, so P1

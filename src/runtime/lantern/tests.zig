@@ -15998,3 +15998,234 @@ test "arguments: wide call keeps indices past the interned-key range" {
         \\h.apply(null, big);
     , "x&105");
 }
+
+// ── §10.4.4 arguments elision — apply-forward transparency ───────────
+// A non-arrow function whose `arguments` is used ONLY as the 2nd
+// argument of `callee.apply(thisArg, arguments)` (the Prototype.js
+// `Class.create` idiom) never materialises the §10.4.4 unmapped
+// arguments object: the compiler snapshots the caller's argument list
+// and forwards it directly. These guards pin the observable contract
+// that the elision must preserve byte-for-byte — the argument list,
+// the `this` binding, the return value, and (critically) the §20.2.3.1
+// `Function.prototype.apply` identity: a shadowed or monkey-patched
+// `.apply` must still run, so the forward carries a runtime guard with
+// a slow-path fallback to the real apply on a freshly-built object.
+
+test "args-elision: forwards this and argument list (Class.create idiom)" {
+    try expectScriptStringWithBuiltins(
+        \\function Klass() { this.initialize.apply(this, arguments); }
+        \\Klass.prototype.initialize = function (x, y) { this.x = x; this.y = y; };
+        \\var k = new Klass(10, 20);
+        \\k.x + "," + k.y;
+    , "10,20");
+}
+
+test "args-elision: forwards more args than the forwarding fn declares" {
+    try expectScriptStringWithBuiltins(
+        \\function sink() { var s = 0; for (var i = 0; i < arguments.length; i++) s += arguments[i]; return s; }
+        \\function collect() { return sink.apply(null, arguments); }
+        \\"" + collect(1, 2, 3, 4, 5);
+    , "15");
+}
+
+test "args-elision: forwards an empty argument list" {
+    try expectScriptStringWithBuiltins(
+        \\function sink() { return arguments.length; }
+        \\function fwd() { return sink.apply(null, arguments); }
+        \\"" + fwd();
+    , "0");
+}
+
+test "args-elision: honours a non-this thisArg" {
+    try expectScriptStringWithBuiltins(
+        \\var target = { tag: "T" };
+        \\function reader() { return this.tag; }
+        \\function fwd() { return reader.apply(target, arguments); }
+        \\fwd();
+    , "T");
+}
+
+test "args-elision: multiple forward sites in one function" {
+    try expectScriptStringWithBuiltins(
+        \\function sink() { return arguments.length + ":" + arguments[0]; }
+        \\function fwd(cond) {
+        \\  if (cond) return sink.apply(null, arguments);
+        \\  return sink.apply(this, arguments);
+        \\}
+        \\fwd(1, 2, 3);
+    , "3:1");
+}
+
+test "args-elision: forward through a bound callee stays correct" {
+    // `bound.apply` is still %Function.prototype.apply% (fast path);
+    // §10.4.1 unwrap happens inside the forwarded call.
+    try expectScriptStringWithBuiltins(
+        \\function sink(a, b) { return a + b; }
+        \\var bound = sink.bind(null);
+        \\function fwd() { return bound.apply(null, arguments); }
+        \\"" + fwd(3, 4);
+    , "7");
+}
+
+test "args-elision: a shadowing own .apply still runs (guard slow path)" {
+    // §20.2.3.1 — `sink.apply` is an own data property, not the
+    // intrinsic; the forward must call it with the real arguments
+    // object, NOT bypass it.
+    try expectScriptStringWithBuiltins(
+        \\function sink() { return "real"; }
+        \\sink.apply = function (thisArg, argsObj) { return "own:" + argsObj.length; };
+        \\function fwd() { return sink.apply(null, arguments); }
+        \\fwd(1, 2);
+    , "own:2");
+}
+
+test "args-elision: monkey-patched Function.prototype.apply still runs" {
+    // The critical soundness guard. Under the scored --unhardened
+    // posture `Function.prototype.apply` is writable; an elided forward
+    // that bypassed it would silently change behaviour.
+    try expectScriptStringUnhardened(
+        \\var log = [];
+        \\Function.prototype.apply = function (thisArg, argsObj) {
+        \\  log.push("patched:" + argsObj.length);
+        \\  return "intercepted";
+        \\};
+        \\function sink() { return "real"; }
+        \\function fwd() { return sink.apply(null, arguments); }
+        \\var r = fwd(1, 2, 3);
+        \\r + "&" + log.join(",");
+    , "intercepted&patched:3");
+}
+
+test "args-elision: not-callable forward target throws TypeError" {
+    try expectScriptThrowsWithBuiltins(
+        \\var notAFunc = 42;
+        \\function fwd() { return notAFunc.apply(this, arguments); }
+        \\fwd();
+    );
+}
+
+test "args-elision: bails when arguments.length is also read" {
+    try expectScriptStringWithBuiltins(
+        \\function sink() { return arguments.length; }
+        \\function fwd() { var n = arguments.length; return sink.apply(null, arguments) + ":" + n; }
+        \\"" + fwd(1, 2, 3);
+    , "3:3");
+}
+
+test "args-elision: bails when an index is mutated before forwarding" {
+    // §10.4.4 — `arguments[0] = 99` mutates the object; the forward
+    // must observe the mutation, so the object cannot be elided.
+    try expectScriptStringWithBuiltins(
+        \\function sink() { return arguments[0]; }
+        \\function fwd() { arguments[0] = 99; return sink.apply(null, arguments); }
+        \\"" + fwd(1, 2);
+    , "99");
+}
+
+test "args-elision: bails when arguments escapes the function" {
+    try expectScriptStringWithBuiltins(
+        \\function sink() {}
+        \\function fwd() { var saved = arguments; sink.apply(null, arguments); return saved.length; }
+        \\"" + fwd(1, 2, 3);
+    , "3");
+}
+
+test "args-elision: bails on a spread forward (different shape)" {
+    try expectScriptStringWithBuiltins(
+        \\function sink() { return arguments.length; }
+        \\function fwd() { return sink(...arguments); }
+        \\"" + fwd(1, 2, 3);
+    , "3");
+}
+
+test "args-elision: bails when a nested arrow reads arguments" {
+    // The arrow inherits the enclosing `arguments` (§10.4.4 does not
+    // rebind it), so the object must exist.
+    try expectScriptStringWithBuiltins(
+        \\function sink() {}
+        \\function fwd() { var f = function () { return arguments.length; }; var g = () => arguments.length; sink.apply(null, arguments); return g(); }
+        \\"" + fwd(1, 2);
+    , "2");
+}
+
+test "args-elision: bails when the thisArg is itself arguments" {
+    try expectScriptStringWithBuiltins(
+        \\function sink() { return this.length; }
+        \\function fwd() { return sink.apply(arguments, arguments); }
+        \\"" + fwd(1, 2, 3);
+    , "3");
+}
+
+test "args-elision: generator with the forward shape is not elided" {
+    try expectScriptStringWithBuiltins(
+        \\function sink() { return arguments.length; }
+        \\function* gen() { yield sink.apply(null, arguments); }
+        \\var g = gen(1, 2, 3);
+        \\"" + g.next().value;
+    , "3");
+}
+
+test "args-elision: forward inside a loop replays the argument list" {
+    try expectScriptStringWithBuiltins(
+        \\function sink() { return arguments.length; }
+        \\function fwd() {
+        \\  var total = 0;
+        \\  for (var i = 0; i < 3; i++) total += sink.apply(null, arguments);
+        \\  return total;
+        \\}
+        \\"" + fwd(7, 8);
+    , "6");
+}
+
+test "args-elision: snapshot survives GC triggered by the .apply guard getter" {
+    // §10.4.4 host-safety — the argument snapshot must be a GC root.
+    // This exercises the exact window where it is the SOLE reference:
+    //   * `entry` TAIL-CALLS `forwarder`, so `entry`'s frame (the only
+    //     other holder of the fresh objects) is REUSED and disappears;
+    //   * the `call_forward_args` opcode overwrites `forwarder`'s
+    //     caller-arg registers with the receiver (`target`) and thisArg
+    //     BEFORE it runs the §20.2.3.1 apply-identity guard, so the
+    //     objects live only in `frame.args_snapshot`;
+    //   * `target.apply` is an accessor whose getter churns 80k
+    //     allocations, forcing a young GC right there.
+    // If the snapshot were not marked, the objects would be swept and
+    // the forwarded call would read freed memory (a 0xaa-poison crash
+    // under ReleaseSafe). The getter returns %Function.prototype.apply%
+    // so the guard still takes the fast path. "AB" proves survival.
+    try expectScriptStringWithBuiltins(
+        \\function target() { return arguments[0].tag + arguments[1].tag; }
+        \\Object.defineProperty(target, "apply", {
+        \\  configurable: true,
+        \\  get: function () {
+        \\    for (var i = 0; i < 80000; i++) { var junk = { n: i }; }
+        \\    return Function.prototype.apply;
+        \\  }
+        \\});
+        \\function forwarder() { return target.apply(null, arguments); }
+        \\function entry() { return forwarder({ tag: "A" }, { tag: "B" }); }
+        \\entry();
+    , "AB");
+}
+
+test "args-elision: snapshot survives guard GC on the slow (patched-apply) path" {
+    // As above, but the getter returns a CUSTOM apply, so the forward
+    // takes the slow path: it must build the real §10.4.4 object from
+    // the snapshot AFTER the getter's GC. A swept snapshot value would
+    // corrupt the rebuilt arguments object. Wider arg list exercises
+    // several snapshot slots.
+    try expectScriptStringWithBuiltins(
+        \\function target() { return "x"; }
+        \\Object.defineProperty(target, "apply", {
+        \\  configurable: true,
+        \\  get: function () {
+        \\    for (var i = 0; i < 80000; i++) { var junk = { n: i }; }
+        \\    return function (thisArg, argsObj) {
+        \\      return argsObj[0].v + argsObj[1].v + argsObj[2].v + ":" + argsObj.length;
+        \\    };
+        \\  }
+        \\});
+        \\function forwarder() { return target.apply(null, arguments); }
+        \\function entry() { return forwarder({ v: 1 }, { v: 2 }, { v: 4 }); }
+        \\entry();
+    , "7:3");
+}

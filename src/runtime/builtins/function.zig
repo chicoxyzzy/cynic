@@ -90,6 +90,9 @@ pub fn installPrototypeMethods(realm: *Realm) !void {
 
     try installNativeMethodOnProto(realm, fn_proto, "call", functionCall, 1);
     try installNativeMethodOnProto(realm, fn_proto, "apply", functionApply, 2);
+    // §10.4.4 arguments elision — pin the pristine `apply` for the
+    // `call_forward_args` identity guard (see `Intrinsics.function_apply`).
+    realm.intrinsics.function_apply = heap_mod.valueAsFunction(fn_proto.get("apply"));
     try installNativeMethodOnProto(realm, fn_proto, "bind", functionBind, 1);
     try installNativeMethodOnProto(realm, fn_proto, "toString", functionToString, 0);
 

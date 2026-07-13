@@ -47,6 +47,15 @@ const Realm = @import("realm.zig").Realm;
 pub const Intrinsics = struct {
     object_prototype: ?*JSObject = null,
     function_prototype: ?*JSObject = null,
+    /// §20.2.3.1 %Function.prototype.apply% — the pristine built-in,
+    /// captured at install before user code can shadow it. The §10.4.4
+    /// arguments-elision forward opcode (`call_forward_args`) guards on
+    /// this identity: only when `callee.apply` still resolves to it may
+    /// the forward bypass `apply` and call the callee directly. A
+    /// monkey-patched `Function.prototype.apply` (writable under
+    /// `--unhardened`) or an own `.apply` yields a different value, so
+    /// the guard falls back to invoking the resolved `.apply` verbatim.
+    function_apply: ?*JSFunction = null,
     array_prototype: ?*JSObject = null,
     string_prototype: ?*JSObject = null,
     /// §19.2.1 %eval% — the global `eval` function object. Recorded

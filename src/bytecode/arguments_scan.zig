@@ -192,4 +192,219 @@ pub fn expressionReferencesArguments(source: []const u8, e: *const Expression) b
     };
 }
 
+// ── §10.4.4 arguments elision — apply-forward analysis ───────────────
+// The prologue may skip materialising the unmapped arguments object
+// when EVERY `arguments` reference in the function is the second
+// argument of a `callee.apply(thisArg, arguments)` forward (the
+// Prototype.js `Class.create` idiom). These walkers mirror the
+// `…ReferencesArguments` set above with three differences:
+//   (a) the forwarded slot (`arguments` as arg 1 of an apply-forward
+//       call) is a SANCTIONED use — it does not force materialisation;
+//   (b) they DESCEND into nested arrow functions, whose `arguments`
+//       inherits ours (§10.4.4 does not rebind it) and so would need
+//       the real object — any read there is a non-forwarded use;
+//   (c) nested non-arrow functions / classes bind their own
+//       `arguments` and are skipped, exactly as above.
+// The decision is `refs && !hasNonForwardedArgumentsUse`: elide only
+// when `arguments` is referenced and every reference is forwarded.
+
+/// Peel `( … )` and test for the bare `arguments` identifier — the
+/// only forwardable second argument. `arguments[0]`, `...arguments`,
+/// or any member/computed form is NOT the whole object and so is not
+/// forwardable.
+fn isBareArgumentsIdent(source: []const u8, e: *const Expression) bool {
+    return switch (e.*) {
+        .identifier_reference => |id| std.mem.eql(u8, source[id.span.start..id.span.end], "arguments"),
+        .parenthesized => |p| isBareArgumentsIdent(source, p.expression),
+        else => false,
+    };
+}
+
+/// True when `c` is `receiver.apply(thisArg, arguments)` in the exact
+/// shape the forward opcode replaces: a non-optional call whose callee
+/// is a non-optional, non-computed `.apply` member, with two arguments
+/// whose second is the bare `arguments` identifier, and whose receiver
+/// and first argument do not themselves read `arguments`. The
+/// §20.2.3.1 IDENTITY of `.apply` (built-in vs shadowed / patched) is
+/// deliberately NOT decided here — that is a runtime guard on the
+/// forward opcode — only the syntactic shape.
+pub fn isApplyForwardCall(source: []const u8, c: *const ast.expression.CallExpr) bool {
+    if (c.optional) return false;
+    if (c.arguments.len != 2) return false;
+    var callee = c.callee;
+    while (callee.* == .parenthesized) callee = callee.parenthesized.expression;
+    if (callee.* != .member) return false;
+    const m = callee.member;
+    if (m.optional) return false;
+    switch (m.property) {
+        .ident => |span| if (!std.mem.eql(u8, source[span.start..span.end], "apply")) return false,
+        .computed => return false,
+    }
+    // `arguments.apply(...)` or `f.apply(arguments, arguments)` — the
+    // receiver / thisArg read the object, so it can't be elided.
+    if (expressionReferencesArguments(source, m.object)) return false;
+    if (expressionReferencesArguments(source, &c.arguments[0])) return false;
+    return isBareArgumentsIdent(source, &c.arguments[1]);
+}
+
+/// Any `arguments` reference in `params` defaults is non-forwarded
+/// (§10.2.10 evaluates them where `arguments` is already bound), so a
+/// default reading `arguments` blocks elision.
+pub fn hasNonForwardedArgumentsUse(source: []const u8, params: []const ast.statement.FunctionParam, body: []ast.statement.Statement) bool {
+    if (paramsReferenceArguments(source, params)) return true;
+    for (body) |*s| if (statementHasNonForwardedArgumentsUse(source, s)) return true;
+    return false;
+}
+
+fn blockHasNonForwardedArgumentsUse(source: []const u8, body: []ast.statement.Statement) bool {
+    for (body) |*s| if (statementHasNonForwardedArgumentsUse(source, s)) return true;
+    return false;
+}
+
+fn statementHasNonForwardedArgumentsUse(source: []const u8, s: *const ast.statement.Statement) bool {
+    return switch (s.*) {
+        .expression => |es| expressionHasNonForwardedArgumentsUse(source, &es.expression),
+        .block => |b| blockHasNonForwardedArgumentsUse(source, b.body),
+        .lexical => |ld| blk: {
+            for (ld.declarators) |d| {
+                if (d.init) |*e| if (expressionHasNonForwardedArgumentsUse(source, e)) break :blk true;
+            }
+            break :blk false;
+        },
+        .if_ => |s2| blk: {
+            if (expressionHasNonForwardedArgumentsUse(source, &s2.test_)) break :blk true;
+            if (statementHasNonForwardedArgumentsUse(source, s2.consequent)) break :blk true;
+            if (s2.alternate) |a| if (statementHasNonForwardedArgumentsUse(source, a)) break :blk true;
+            break :blk false;
+        },
+        .while_ => |s2| expressionHasNonForwardedArgumentsUse(source, &s2.test_) or statementHasNonForwardedArgumentsUse(source, s2.body),
+        .do_while => |s2| expressionHasNonForwardedArgumentsUse(source, &s2.test_) or statementHasNonForwardedArgumentsUse(source, s2.body),
+        .for_ => |s2| blk: {
+            if (s2.init) |head| switch (head) {
+                .expression => |*e| if (expressionHasNonForwardedArgumentsUse(source, e)) break :blk true,
+                .lexical => |ld| for (ld.declarators) |d| {
+                    if (d.init) |*e| if (expressionHasNonForwardedArgumentsUse(source, e)) break :blk true;
+                },
+            };
+            if (s2.test_) |*e| if (expressionHasNonForwardedArgumentsUse(source, e)) break :blk true;
+            if (s2.update) |*e| if (expressionHasNonForwardedArgumentsUse(source, e)) break :blk true;
+            if (statementHasNonForwardedArgumentsUse(source, s2.body)) break :blk true;
+            break :blk false;
+        },
+        .for_in_of => |s2| blk: {
+            switch (s2.left) {
+                .expression => |*e| if (expressionHasNonForwardedArgumentsUse(source, e)) break :blk true,
+                .lexical => |ld| for (ld.declarators) |d| {
+                    if (d.init) |*e| if (expressionHasNonForwardedArgumentsUse(source, e)) break :blk true;
+                },
+            }
+            if (expressionHasNonForwardedArgumentsUse(source, &s2.right)) break :blk true;
+            if (statementHasNonForwardedArgumentsUse(source, s2.body)) break :blk true;
+            break :blk false;
+        },
+        .labeled => |s2| statementHasNonForwardedArgumentsUse(source, s2.body),
+        .return_ => |s2| if (s2.argument) |*e| expressionHasNonForwardedArgumentsUse(source, e) else false,
+        .throw_ => |s2| expressionHasNonForwardedArgumentsUse(source, &s2.argument),
+        .try_ => |s2| blk: {
+            for (s2.block.body) |*inner| if (statementHasNonForwardedArgumentsUse(source, inner)) break :blk true;
+            if (s2.handler) |h| {
+                for (h.body.body) |*inner| if (statementHasNonForwardedArgumentsUse(source, inner)) break :blk true;
+            }
+            if (s2.finalizer) |fb| {
+                for (fb.body) |*inner| if (statementHasNonForwardedArgumentsUse(source, inner)) break :blk true;
+            }
+            break :blk false;
+        },
+        .switch_ => |s2| blk: {
+            if (expressionHasNonForwardedArgumentsUse(source, &s2.discriminant)) break :blk true;
+            for (s2.cases) |c| {
+                if (c.test_) |*e| if (expressionHasNonForwardedArgumentsUse(source, e)) break :blk true;
+                for (c.body) |*inner| if (statementHasNonForwardedArgumentsUse(source, inner)) break :blk true;
+            }
+            break :blk false;
+        },
+        // Nested non-arrow function / class declarations bind their own
+        // `arguments` — skip, matching `statementReferencesArguments`.
+        .function_decl, .class_decl => false,
+        else => false,
+    };
+}
+
+fn expressionHasNonForwardedArgumentsUse(source: []const u8, e: *const Expression) bool {
+    return switch (e.*) {
+        .identifier_reference => |id| std.mem.eql(u8, source[id.span.start..id.span.end], "arguments"),
+        .parenthesized => |p| expressionHasNonForwardedArgumentsUse(source, p.expression),
+        .unary => |u| expressionHasNonForwardedArgumentsUse(source, u.operand),
+        .binary => |b| expressionHasNonForwardedArgumentsUse(source, b.lhs) or expressionHasNonForwardedArgumentsUse(source, b.rhs),
+        .logical => |l| expressionHasNonForwardedArgumentsUse(source, l.lhs) or expressionHasNonForwardedArgumentsUse(source, l.rhs),
+        .conditional => |c| expressionHasNonForwardedArgumentsUse(source, c.test_) or expressionHasNonForwardedArgumentsUse(source, c.consequent) or expressionHasNonForwardedArgumentsUse(source, c.alternate),
+        .assignment => |a| expressionHasNonForwardedArgumentsUse(source, a.target) or expressionHasNonForwardedArgumentsUse(source, a.value),
+        .sequence => |s| blk: {
+            for (s.expressions) |*ex| if (expressionHasNonForwardedArgumentsUse(source, ex)) break :blk true;
+            break :blk false;
+        },
+        .member => |m| expressionHasNonForwardedArgumentsUse(source, m.object) or switch (m.property) {
+            .computed => |k| expressionHasNonForwardedArgumentsUse(source, k),
+            else => false,
+        },
+        // The one exemption: `receiver.apply(thisArg, arguments)` in the
+        // forward shape confines its only `arguments` reference to the
+        // sanctioned slot (the receiver + thisArg are proven
+        // arguments-free by `isApplyForwardCall`). Any other call is
+        // walked normally, so a bare `arguments` anywhere in it counts.
+        .call => |c| blk: {
+            if (isApplyForwardCall(source, &c)) break :blk false;
+            if (expressionHasNonForwardedArgumentsUse(source, c.callee)) break :blk true;
+            for (c.arguments) |*a| if (expressionHasNonForwardedArgumentsUse(source, a)) break :blk true;
+            break :blk false;
+        },
+        .new_expr => |n| blk: {
+            if (expressionHasNonForwardedArgumentsUse(source, n.callee)) break :blk true;
+            for (n.arguments) |*a| if (expressionHasNonForwardedArgumentsUse(source, a)) break :blk true;
+            break :blk false;
+        },
+        .array_literal => |al| blk: {
+            for (al.elements) |maybe_elem| {
+                if (maybe_elem) |*ex| if (expressionHasNonForwardedArgumentsUse(source, ex)) break :blk true;
+            }
+            break :blk false;
+        },
+        .object_literal => |o| blk: {
+            for (o.properties) |p| switch (p) {
+                .property => |prop| {
+                    if (expressionHasNonForwardedArgumentsUse(source, &prop.value)) break :blk true;
+                    if (prop.key == .computed and expressionHasNonForwardedArgumentsUse(source, prop.key.computed)) break :blk true;
+                },
+                .method => |m| if (m.key == .computed and expressionHasNonForwardedArgumentsUse(source, m.key.computed)) break :blk true,
+                .spread => |sp| if (expressionHasNonForwardedArgumentsUse(source, sp.argument)) break :blk true,
+            };
+            break :blk false;
+        },
+        .template_literal => |t| blk: {
+            for (t.expressions) |*ex| if (expressionHasNonForwardedArgumentsUse(source, ex)) break :blk true;
+            break :blk false;
+        },
+        .update => |u| expressionHasNonForwardedArgumentsUse(source, u.operand),
+        .spread => |s| expressionHasNonForwardedArgumentsUse(source, s.argument),
+        .yield => |y| if (y.argument) |a| expressionHasNonForwardedArgumentsUse(source, a) else false,
+        .await_ => |a| expressionHasNonForwardedArgumentsUse(source, a.argument),
+        .chain => |c| expressionHasNonForwardedArgumentsUse(source, c.expression),
+        .tagged_template => |t| expressionHasNonForwardedArgumentsUse(source, t.tag) or expressionHasNonForwardedArgumentsUse(source, t.quasi),
+        // §10.4.4 — an arrow inherits the enclosing `arguments`, so a
+        // read inside it (body or a param default) is a non-forwarded
+        // use of OUR object and blocks elision.
+        .arrow_function => |a| blk: {
+            if (paramsReferenceArguments(source, a.params)) break :blk true;
+            break :blk switch (a.body) {
+                .block => |b| blockHasNonForwardedArgumentsUse(source, b.body),
+                .expression => |ex| expressionHasNonForwardedArgumentsUse(source, ex),
+            };
+        },
+        // A non-arrow function / class expression binds its own
+        // `arguments` — skip it.
+        .function_expr, .class_expr => false,
+        else => false,
+    };
+}
+
 // PROBE LINE

@@ -600,6 +600,27 @@ pub const Op = enum(u8) {
     /// `length` slot, in `acc`. §10.4.4. Emitted by the function
     /// prologue when the body references `arguments`.
     lda_arguments,
+    /// `[op]` — §10.4.4 arguments elision. Snapshot the current
+    /// non-arrow frame's incoming argument list (registers[0..argc])
+    /// into a frame-owned buffer, so a later `call_forward_args` can
+    /// replay it after the body's temporaries have overwritten the
+    /// caller-arg registers. Emitted (in place of `lda_arguments`) by
+    /// the function prologue when EVERY `arguments` reference is the
+    /// second argument of a `callee.apply(thisArg, arguments)` forward
+    /// — the §10.4.4 arguments object is then never materialised.
+    arguments_snapshot,
+    /// `[op] [r_callee:u8] [r_thisArg:u8]` — §10.4.4 arguments-elision
+    /// forward site, replacing `callee.apply(thisArg, arguments)` when
+    /// the enclosing frame elided its arguments object. Guards that
+    /// `registers[r_callee].apply` still resolves to
+    /// %Function.prototype.apply% (§20.2.3.1): on a hit it calls the
+    /// callee directly with `this = registers[r_thisArg]` and the
+    /// frame's argument snapshot as the argument list; on a miss (a
+    /// shadowing own `.apply`, or a monkey-patched
+    /// `Function.prototype.apply`) it builds the real §10.4.4 arguments
+    /// object and invokes the resolved `.apply` verbatim. Result in
+    /// `acc`.
+    call_forward_args,
     /// `[op] [start:u8]` — §15.2.4 IteratorBindingInitialization
     /// for a rest parameter `function f(a, b,...rest) {}`. Build a
     /// fresh Array from the current frame's argument registers
@@ -1239,6 +1260,7 @@ pub const Op = enum(u8) {
             .super_call_forward,
             .init_instance_fields,
             .lda_arguments,
+            .arguments_snapshot,
             .gen_yield,
             .gen_yield_iter_result,
             .gen_initial_suspend,
@@ -1381,6 +1403,7 @@ pub const Op = enum(u8) {
             .jmp_if_not_lt, .jmp_if_not_le, .jmp_if_not_gt, .jmp_if_not_ge => 3, // r:u8 + off:i16
             .new_call => 4, // r_callee:u8 + argc:u8 + ic:u16
             .tail_call_method => 3, // r_recv:u8 + r_callee:u8 + argc:u8
+            .call_forward_args => 2, // r_callee:u8 + r_thisArg:u8
             .direct_eval => 4, // scope:u16 + r_callee:u8 + argc:u8
             .direct_eval_spread => 4, // scope:u16 + r_callee:u8 + r_args:u8
             .sta_private, .super_set, .def_property => 3, // k:u16 + r_obj:u8
@@ -1522,6 +1545,8 @@ pub const Op = enum(u8) {
             .set_home => "SetHome",
             .set_fn_name_from => "SetFnNameFrom",
             .lda_arguments => "LdaArguments",
+            .arguments_snapshot => "ArgumentsSnapshot",
+            .call_forward_args => "CallForwardArgs",
             .rest_args_from => "RestArgsFrom",
             .gen_yield => "GenYield",
             .gen_yield_iter_result => "GenYieldIterResult",

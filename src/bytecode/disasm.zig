@@ -165,6 +165,11 @@ pub fn dump(allocator: std.mem.Allocator, chunk: *const Chunk) ![]u8 {
                 const argc = chunk.code[i + 3];
                 try buf.print(allocator, " r{d}.r{d} ({d} args)", .{ r_recv, r_callee, argc });
             },
+            .call_forward_args => {
+                const r_callee = chunk.code[i + 1];
+                const r_thisarg = chunk.code[i + 2];
+                try buf.print(allocator, " r{d} this=r{d}", .{ r_callee, r_thisarg });
+            },
             .make_environment => {
                 const n = chunk.code[i + 1];
                 try buf.print(allocator, " {d} slots", .{n});

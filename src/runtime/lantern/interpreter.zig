@@ -339,6 +339,18 @@ pub const CallFrame = struct {
     /// which is every single-realm program).
     running_realm: ?*@import("../realm.zig").Realm = null,
 
+    /// §10.4.4 arguments elision — a snapshot of the frame's incoming
+    /// argument list (`registers[0..argc]`), captured by the prologue
+    /// `arguments_snapshot` opcode BEFORE the body's temporaries reuse
+    /// the caller-arg registers. A later `call_forward_args` replays it
+    /// as the argument list of a `callee.apply(thisArg, arguments)`
+    /// forward. `null` unless the compiler elided this frame's
+    /// arguments object (never for generators / async functions, which
+    /// the elision analysis declines) and `argc > 0`. Acquired from
+    /// `realm.frame_pool`; freed in `releaseRegisters` alongside the
+    /// register file, so it shares the register file's exact lifetime.
+    args_snapshot: ?[]Value = null,
+
     /// Release a frame's register file via the right helper for
     /// its storage. Generators leave `owns_registers = false`
     /// because the generator object outlives the frame and owns
@@ -349,6 +361,12 @@ pub const CallFrame = struct {
     /// through here so the storage choice stays a single-line
     /// branch local to this helper.
     pub fn releaseRegisters(self: *const CallFrame, realm: *Realm, allocator: std.mem.Allocator) void {
+        // §10.4.4 arguments-elision snapshot: always pool-backed (never
+        // on the value_stack), so it returns to the pool regardless of
+        // where the register file lives. Freed once per incarnation —
+        // the tail-call reuse path re-nulls the field after this call,
+        // and Return/unwind pop the frame, so it is never double-freed.
+        if (self.args_snapshot) |snap| realm.frame_pool.release(allocator, snap);
         if (!self.owns_registers) return;
         if (self.is_stack_alloc) {
             realm.freeStackRegisters(self.registers);
@@ -357,6 +375,73 @@ pub const CallFrame = struct {
         }
     }
 };
+
+/// §10.4.4 CreateUnmappedArgumentsObject — build the strict-mode
+/// unmapped arguments object for `values` (a frame's incoming argument
+/// list) using `arg_realm`'s intrinsics (§10.4.4 runs in the running
+/// function's realm; allocation still goes through the shared
+/// `realm.heap`). Shared by the `lda_arguments` opcode (values =
+/// `registers[0..argc]`) and the `call_forward_args` slow path (values
+/// = the frame's argument snapshot) — which materialises the object
+/// on demand only when a shadowed / patched `.apply` must receive it.
+fn buildUnmappedArgumentsObject(
+    realm: *Realm,
+    allocator: std.mem.Allocator,
+    arg_realm: *Realm,
+    values: []const Value,
+) error{OutOfMemory}!*JSObject {
+    // §10.4.4.7 step 5 — [[Prototype]] is %Object.prototype%; a plain
+    // (not Array-exotic) object so `arguments[N] = v` never triggers
+    // Array auto-length-extend.
+    const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
+    realm.heap.setObjectPrototype(obj, arg_realm.intrinsics.object_prototype);
+    obj.is_arguments_exotic = true;
+    var i: u32 = 0;
+    while (i < values.len) : (i += 1) {
+        // §10.4.4.7 step 3 — CreateDataProperty per index. Small
+        // indices key off comptime-interned decimal strings (no
+        // per-call JSString alloc, no GC anchor); wide calls fall back
+        // to an owned, anchored heap key.
+        if (JSObject.smallIndexKey(i)) |key| {
+            realm.heap.storePropertyStaticKey(obj, allocator, key, values[i]) catch return error.OutOfMemory;
+        } else {
+            var ibuf: [16]u8 = undefined;
+            const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
+            const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
+            realm.heap.storePropertyComputedOwned(obj, allocator, owned, values[i]) catch return error.OutOfMemory;
+        }
+    }
+    // §10.4.4.6 step 8 — `length` is `{ w:true, e:false, c:true }`.
+    realm.heap.storePropertyWithFlags(obj, allocator, "length", Value.fromInt32(@intCast(values.len)), .{
+        .writable = true,
+        .enumerable = false,
+        .configurable = true,
+    }) catch return error.OutOfMemory;
+    // §10.4.4.7 step 5 — the strict `callee` %ThrowTypeError% accessor.
+    if (arg_realm.intrinsics.throw_type_error) |thrower| {
+        const entry = obj.getOrPutAccessor(allocator, "callee") catch return error.OutOfMemory;
+        realm.heap.storeInternalSlot(.{ .object = obj }, heap_mod.taggedFunction(thrower));
+        entry.value_ptr.* = .{ .getter = thrower, .setter = thrower };
+        obj.property_flags.put(allocator, "callee", .{
+            .writable = false,
+            .enumerable = false,
+            .configurable = false,
+        }) catch return error.OutOfMemory;
+    }
+    // §10.4.4.7 step 7 — @@iterator = %Array.prototype.values% (the
+    // identity is intentional and spec-observable).
+    if (arg_realm.intrinsics.array_prototype) |arr_proto| {
+        const values_v = arr_proto.get("values");
+        if (heap_mod.valueAsFunction(values_v) != null) {
+            realm.heap.storePropertyWithFlags(obj, allocator, "@@iterator", values_v, .{
+                .writable = true,
+                .enumerable = false,
+                .configurable = true,
+            }) catch return error.OutOfMemory;
+        }
+    }
+    return obj;
+}
 
 pub const RunError = error{
     OutOfMemory,
@@ -4261,6 +4346,11 @@ pub fn runFrames(
             f.home_function = callee_fn.home_function;
             f.argc = argc;
             f.generator = null;
+            // §10.4.4 — the prior incarnation's arguments snapshot was
+            // freed by `releaseRegisters` above; clear the field so the
+            // reused frame starts without one (its own prologue, if it
+            // elides, re-snapshots).
+            f.args_snapshot = null;
             f.owns_registers = true;
             // Tail-call reallocated through `frame_pool` above,
             // so the reused frame is pool-backed regardless of
@@ -4519,6 +4609,11 @@ pub fn runFrames(
             f.home_function = callee_fn.home_function;
             f.argc = argc;
             f.generator = null;
+            // §10.4.4 — the prior incarnation's arguments snapshot was
+            // freed by `releaseRegisters` above; clear the field so the
+            // reused frame starts without one (its own prologue, if it
+            // elides, re-snapshots).
+            f.args_snapshot = null;
             f.owns_registers = true;
             // See `tail_call`: tail-call reallocates through
             // `frame_pool`, so the reused frame is pool-backed.
@@ -8137,95 +8232,104 @@ pub fn runFrames(
         },
 
         .lda_arguments => {
-            // §10.4.4 — synthesise an array-like with numeric-
-            // index entries and a `.length` slot. We don't
-            // model the §10.4.4.6 mapped-vs-unmapped distinction
-            // (mapped requires sloppy mode, which Cynic doesn't
-            // implement); strict-mode unmapped is a plain
-            // object whose [[Prototype]] is %Object.prototype%
-            // (§10.4.4.7 step 5). Earlier code chained it to
-            // %Array.prototype% for ergonomic
-            // `Array.prototype.X.call(arguments, …)`, but
-            // (a) the call form already works through
-            // ToObject + indexed access, and (b) the wrong
-            // chain made `arguments[N] = v` trigger Array
-            // exotic auto-length-extend.
-            // §10.4.4 CreateUnmappedArgumentsObject runs in the *running
-            // function's* execution context, so its %Object.prototype%,
-            // %ThrowTypeError% (callee trap), and %Array.prototype.values%
-            // (@@iterator) come from that function's [[Realm]], not the
-            // caller's. For a cross-realm call (`other.fn()`) the frame's
-            // `running_realm` is the callee's home realm; same-realm it is
-            // the dispatch realm (or null → fall back). The heap is shared,
-            // so allocation still goes through `realm.heap`.
+            // §10.4.4 CreateUnmappedArgumentsObject over the frame's
+            // incoming argument registers. Runs in the *running
+            // function's* realm (`running_realm`; cross-realm
+            // `other.fn()` uses the callee's home realm), so the
+            // %Object.prototype% / %ThrowTypeError% / %Array.prototype.
+            // values% come from there. See buildUnmappedArgumentsObject.
             const arg_realm = f.running_realm orelse realm;
-            const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
-            realm.heap.setObjectPrototype(obj, arg_realm.intrinsics.object_prototype);
-            obj.is_arguments_exotic = true;
-            var i: u32 = 0;
-            while (i < f.argc) : (i += 1) {
-                // §10.4.4.7 step 3 — CreateDataProperty per index.
-                // Small indices key off the comptime-interned decimal
-                // strings: no per-call JSString allocation and no GC
-                // anchor (static bytes can never be swept). Wide calls
-                // fall back to an owned, anchored heap key.
-                if (JSObject.smallIndexKey(i)) |key| {
-                    realm.heap.storePropertyStaticKey(obj, allocator, key, registers[i]) catch return error.OutOfMemory;
-                } else {
-                    var ibuf: [16]u8 = undefined;
-                    const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
-                    const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
-                    // The index key is a freshly heap-allocated JSString;
-                    // anchor it on the object so a GC sweep can't free the
-                    // key slice out from under `arguments[i]` lookups.
-                    realm.heap.storePropertyComputedOwned(obj, allocator, owned, registers[i]) catch return error.OutOfMemory;
-                }
-            }
-            // §10.4.4.6 step 8 — `length` is `{ writable: true,
-            // enumerable: false, configurable: true }`. Default
-            // `set` lands at all-true, so `Object.keys(arguments)`
-            // surfaced "length" as an enumerable own key.
-            realm.heap.storePropertyWithFlags(obj, allocator, "length", Value.fromInt32(@intCast(f.argc)), .{
-                .writable = true,
-                .enumerable = false,
-                .configurable = true,
-            }) catch return error.OutOfMemory;
-            // §10.4.4.7 step 5 — strict-mode unmapped arguments
-            // installs a `callee` accessor whose [[Get]] and
-            // [[Set]] are both %ThrowTypeError%. Cynic is
-            // strict-only, so every `arguments` object lands
-            // here. The thrower function is a per-realm
-            // singleton (§10.2.4); reuse the running function's.
-            if (arg_realm.intrinsics.throw_type_error) |thrower| {
-                const entry = obj.getOrPutAccessor(allocator, "callee") catch return error.OutOfMemory;
-                realm.heap.storeInternalSlot(.{ .object = obj }, heap_mod.taggedFunction(thrower));
-                entry.value_ptr.* = .{ .getter = thrower, .setter = thrower };
-                obj.property_flags.put(allocator, "callee", .{
-                    .writable = false,
-                    .enumerable = false,
-                    .configurable = false,
-                }) catch return error.OutOfMemory;
-            }
-            // §10.4.4.7 step 7 — DefinePropertyOrThrow on
-            // @@iterator pointing at %Array.prototype.values%.
-            // Without this, `[...arguments]` and
-            // `for (const x of arguments)` fall through the
-            // GetIterator path with a TypeError. Resolve the
-            // function via Array.prototype.values (its identity
-            // is intentional — `arguments[@@iterator] ===
-            // Array.prototype.values` per §10.4.4.7 step 7).
-            if (arg_realm.intrinsics.array_prototype) |arr_proto| {
-                const values_v = arr_proto.get("values");
-                if (heap_mod.valueAsFunction(values_v) != null) {
-                    realm.heap.storePropertyWithFlags(obj, allocator, "@@iterator", values_v, .{
-                        .writable = true,
-                        .enumerable = false,
-                        .configurable = true,
-                    }) catch return error.OutOfMemory;
-                }
-            }
+            const obj = buildUnmappedArgumentsObject(realm, allocator, arg_realm, registers[0..f.argc]) catch return error.OutOfMemory;
             acc = heap_mod.taggedObject(obj);
             continue :dispatch try decodeNext(code, &ip, &committed);
+        },
+
+        .arguments_snapshot => {
+            // §10.4.4 arguments elision — capture the incoming argument
+            // list before the body's temporaries reuse the caller-arg
+            // registers, so a later `call_forward_args` can replay it.
+            // No arguments object is materialised; `arguments` is used
+            // only as the forwarded slot. argc == 0 leaves the field
+            // null (the forward reads an empty slice). Pool-backed, so
+            // it shares the register file's lifetime — freed in
+            // `releaseRegisters`. `acquire` hands back a stale buffer,
+            // but the `@memcpy` overwrites every slot.
+            if (f.argc > 0) {
+                const snap = realm.frame_pool.acquire(allocator, f.argc) catch return error.OutOfMemory;
+                @memcpy(snap, registers[0..f.argc]);
+                f.args_snapshot = snap;
+            }
+            continue :dispatch try decodeNext(code, &ip, &committed);
+        },
+
+        .call_forward_args => {
+            // §10.4.4 arguments elision forward — replaces
+            // `registers[r_callee].apply(registers[r_thisArg], arguments)`.
+            const r_callee = code[ip];
+            const r_thisarg = code[ip + 1];
+            ip += 2;
+            const func_v = registers[r_callee];
+            const this_arg = registers[r_thisarg];
+            const args_slice: []const Value = f.args_snapshot orelse &[_]Value{};
+            const arg_realm = f.running_realm orelse realm;
+
+            // §20.2.3.1 apply-identity guard. Resolve `func.apply`
+            // exactly as the original member access would — firing a
+            // getter / proxy trap, and (for a nullish / primitive
+            // `func`) yielding null, which routes to the same
+            // "not callable" TypeError below. Only when it is the
+            // pristine %Function.prototype.apply% may the forward
+            // bypass `apply`.
+            const apply_v: ?Value = intrinsics_mod.getPropertyChainOnValue(realm, func_v, "apply") catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => {
+                    // A `.apply` getter / proxy trap threw.
+                    const ex = realm.pending_exception orelse try makeTypeError(realm, "exception resolving apply");
+                    realm.pending_exception = null;
+                    f.ip = ip;
+                    f.accumulator = acc;
+                    committed = true;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                },
+            };
+
+            const is_intrinsic_apply = realm.intrinsics.function_apply != null and
+                if (apply_v) |av| heap_mod.valueAsFunction(av) == realm.intrinsics.function_apply else false;
+
+            const cresult = if (is_intrinsic_apply)
+                // Fast path — call the callee directly with `this =
+                // this_arg` and the snapshot as the argument list.
+                // Equivalent to the built-in apply minus the §10.4.4
+                // object and the §7.3.18 list rebuild.
+                try callValue(allocator, realm, arg_realm, func_v, this_arg, args_slice)
+            else blk: {
+                // Slow path — a shadowing own `.apply` or a
+                // monkey-patched `Function.prototype.apply`. Reproduce
+                // the exact semantics: build the real §10.4.4 object and
+                // invoke the resolved `.apply` with `this = func` and
+                // args « this_arg, argsObj ». A non-callable `.apply`
+                // (undefined / primitive) makes `callValue` throw the
+                // same "not callable" TypeError the original
+                // `X.apply(...)` call would.
+                const args_obj = buildUnmappedArgumentsObject(realm, allocator, arg_realm, args_slice) catch return error.OutOfMemory;
+                const two = [_]Value{ this_arg, heap_mod.taggedObject(args_obj) };
+                break :blk try callValue(allocator, realm, arg_realm, apply_v orelse Value.undefined_, func_v, &two);
+            };
+
+            switch (cresult) {
+                .value, .yielded => |v| {
+                    acc = v;
+                    continue :dispatch try decodeNext(code, &ip, &committed);
+                },
+                .thrown => |ex| {
+                    f.ip = ip;
+                    f.accumulator = acc;
+                    committed = true;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                },
+            }
         },
 
         .rest_args_from => {

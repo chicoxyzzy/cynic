@@ -2113,6 +2113,14 @@ pub const Realm = struct {
                 self.heap.markValue(f.accumulator);
                 self.heap.markValue(f.this_value);
                 for (f.registers) |r| self.heap.markValue(r);
+                // §10.4.4 arguments-elision snapshot — a frame-owned copy
+                // of the incoming argument list. Once the body's
+                // temporaries overwrite the caller-arg registers, its
+                // Values (possibly heap objects) are reachable ONLY here,
+                // so they must be marked or a later `call_forward_args`
+                // would forward swept arguments (a UAF that surfaces only
+                // under allocation-pressure GC).
+                if (f.args_snapshot) |snap| for (snap) |r| self.heap.markValue(r);
                 if (f.env) |env| self.heap.markEnvironment(env);
                 if (f.home_object) |ho| self.heap.markValue(heap_mod.taggedObject(ho));
                 if (f.generator) |gen| self.heap.markGenerator(gen);

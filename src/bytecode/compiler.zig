@@ -207,6 +207,14 @@ pub const Compiler = struct {
     /// resume frame would dangle), so the PTC guard reads this
     /// to suppress `tail_call` emission.
     current_is_generator: bool = false,
+    /// §10.4.4 arguments elision — true while compiling the body of a
+    /// function whose prologue emitted `arguments_snapshot` instead of
+    /// materialising the arguments object (every `arguments` reference
+    /// is a `callee.apply(thisArg, arguments)` forward). Read by
+    /// `compileMethodCall` to emit `call_forward_args` at those sites.
+    /// Saved / restored across nested function compilation like
+    /// `current_is_async` — a nested function makes its own decision.
+    eliding_arguments: bool = false,
     /// Set by `compileFunctionTemplateExtNamed` when
     /// `paramsCanBeRegisters` says every param can stay in its
     /// caller-supplied register. Read by `declareParam` (marks
@@ -4125,12 +4133,49 @@ pub const Compiler = struct {
     /// forms `obj?.method(args)` (the `?.` short-circuits on
     /// nullish receiver) and `obj.method?.(args)` (the `?.()`
     /// short-circuits on nullish method).
+    /// §10.4.4 arguments elision — lower a `receiver.apply(thisArg,
+    /// arguments)` forward (already matched by `isApplyForwardCall`) to
+    /// `call_forward_args`. The receiver (`this.initialize`) and the
+    /// thisArg (arg 0) are evaluated into temps in source order; the
+    /// second argument — the bare `arguments` — is deliberately NOT
+    /// evaluated, since its value is the frame's argument snapshot the
+    /// opcode reads directly. Evaluation order matches the original
+    /// `receiver.apply` member access followed by thisArg.
+    fn compileArgumentsForward(
+        self: *Compiler,
+        c: ast.expression.CallExpr,
+        m: ast.expression.MemberExpr,
+    ) CompileError!void {
+        try self.compileExpression(m.object);
+        const r_callee = try self.reserveTemp();
+        defer self.releaseTemp();
+        try self.builder.emitStoreReg(c.span, r_callee);
+        try self.compileExpression(&c.arguments[0]);
+        const r_thisarg = try self.reserveTemp();
+        defer self.releaseTemp();
+        try self.builder.emitStoreReg(c.span, r_thisarg);
+        try self.builder.emitOp(.call_forward_args, c.span);
+        try self.builder.emitU8(r_callee);
+        try self.builder.emitU8(r_thisarg);
+    }
+
     fn compileMethodCall(
         self: *Compiler,
         c: ast.expression.CallExpr,
         m: ast.expression.MemberExpr,
         emit_tail: bool,
     ) CompileError!void {
+        // §10.4.4 arguments elision — when this frame elided its
+        // arguments object (`eliding_arguments`) and this call is the
+        // sanctioned `receiver.apply(thisArg, arguments)` forward,
+        // lower it to `call_forward_args`, which replays the frame's
+        // argument snapshot after a runtime §20.2.3.1 apply-identity
+        // guard. `isApplyForwardCall` is the SAME predicate the
+        // prologue scan used, so the sets agree exactly and no bare
+        // `arguments` load is ever emitted for an elided frame.
+        if (self.eliding_arguments and arguments_scan.isApplyForwardCall(self.source, &c)) {
+            return self.compileArgumentsForward(c, m);
+        }
         // Fused-emission gate: `obj.method(args)` where the property
         // is a plain identifier, not a private name (`#x`), no
         // optional chain on either side, and not in tail position.
@@ -8304,6 +8349,43 @@ pub const Compiler = struct {
     /// start of the user body; derived classes leave it to the
     /// `super_call` op to trigger (we patch it post-hoc by detecting
     /// super_call ops emitted from the body).
+    /// §10.4.4 — emit the implicit `arguments` prologue for a non-arrow
+    /// function body, choosing materialisation vs elision. Installed
+    /// BEFORE the param prologue so a default like `f(x = arguments[2])`
+    /// observes the full caller argumentsList (§10.2.10 step 22/27).
+    ///
+    /// When every `arguments` reference is the second argument of a
+    /// `callee.apply(thisArg, arguments)` forward — and the body is
+    /// neither a generator nor an async function (whose frame outlives
+    /// the synchronous call, so the register-file-tied snapshot cannot
+    /// model it) — emit `arguments_snapshot` and set `eliding_arguments`
+    /// so the forward sites lower to `call_forward_args` in
+    /// `compileMethodCall`. Otherwise declare the `arguments` binding
+    /// and materialise the object via `lda_arguments`.
+    fn emitArgumentsPrologue(
+        self: *Compiler,
+        params: []ast.statement.FunctionParam,
+        body_stmts: []ast.statement.Statement,
+        is_generator: bool,
+        is_async: bool,
+        span: Span,
+    ) CompileError!void {
+        if (!(paramsReferenceArguments(self.source, params) or
+            referencesArguments(self.source, body_stmts))) return;
+        if (!is_generator and !is_async and
+            !arguments_scan.hasNonForwardedArgumentsUse(self.source, params, body_stmts))
+        {
+            try self.builder.emitOp(.arguments_snapshot, span);
+            self.eliding_arguments = true;
+            return;
+        }
+        const slot = try self.declareBinding("arguments", .let_, span);
+        try self.builder.emitOp(.lda_arguments, span);
+        try self.builder.emitOp(.sta_env, span);
+        try self.builder.emitU8(0);
+        try self.builder.emitU8(slot);
+    }
+
     fn compileConstructorBody(
         self: *Compiler,
         params: []ast.statement.FunctionParam,
@@ -8313,6 +8395,13 @@ pub const Compiler = struct {
         span: Span,
     ) CompileError!@import("chunk.zig").Chunk {
         const saved_builder = self.builder;
+        // §10.4.4 arguments elision — reset for this function; the
+        // prologue flips it true when the body's `arguments` is fully
+        // forwarded. Restored on every exit so a nested function
+        // (compiled while this body compiles) can't corrupt ours.
+        const saved_eliding_arguments = self.eliding_arguments;
+        self.eliding_arguments = false;
+        defer self.eliding_arguments = saved_eliding_arguments;
         const saved_scope = self.scope;
         const saved_env_slot_count = self.env_slot_count;
         const saved_temps_in_use = self.temps_in_use;
@@ -8424,20 +8513,11 @@ pub const Compiler = struct {
             break :blk here;
         } else null;
 
-        // §10.4.4 + §10.2.10 step 22/27 — install `arguments`
-        // BEFORE the param prologue so default expressions like
-        // `constructor(x = arguments[2])` observe the full caller
-        // argumentsList. See `compileFunctionTemplateExt` for the
-        // spec citation.
-        if (paramsReferenceArguments(self.source, params) or
-            referencesArguments(self.source, body_stmts))
-        {
-            const slot = try self.declareBinding("arguments", .let_, span);
-            try self.builder.emitOp(.lda_arguments, span);
-            try self.builder.emitOp(.sta_env, span);
-            try self.builder.emitU8(0);
-            try self.builder.emitU8(slot);
-        }
+        // §10.4.4 + §10.2.10 step 22/27 — install `arguments` BEFORE
+        // the param prologue so a default like `constructor(x =
+        // arguments[2])` observes the full caller argumentsList. A
+        // class constructor is never a generator / async function.
+        try self.emitArgumentsPrologue(params, body_stmts, false, false, span);
 
         // §10.2.4 IteratorBindingInitialization — reserve the leading
         // register slots so temps allocated by default-expression
@@ -8591,6 +8671,11 @@ pub const Compiler = struct {
         _ = derived;
 
         const saved_builder = self.builder;
+        // §10.4.4 arguments elision — reset + restore (see
+        // `compileConstructorBody`).
+        const saved_eliding_arguments = self.eliding_arguments;
+        self.eliding_arguments = false;
+        defer self.eliding_arguments = saved_eliding_arguments;
         const saved_scope = self.scope;
         const saved_env_slot_count = self.env_slot_count;
         const saved_temps_in_use = self.temps_in_use;
@@ -8734,19 +8819,11 @@ pub const Compiler = struct {
         } else null;
 
         // §10.4.4 + §10.2.10 step 22/27 — install `arguments`
-        // BEFORE the param prologue so default expressions like
-        // `m(x = arguments[2])` observe the full caller
-        // argumentsList. See `compileFunctionTemplateExt` for the
-        // spec citation.
-        if (paramsReferenceArguments(self.source, params) or
-            referencesArguments(self.source, body_stmts))
-        {
-            const slot = try self.declareBinding("arguments", .let_, span);
-            try self.builder.emitOp(.lda_arguments, span);
-            try self.builder.emitOp(.sta_env, span);
-            try self.builder.emitU8(0);
-            try self.builder.emitU8(slot);
-        }
+        // BEFORE the param prologue so a default like `m(x =
+        // arguments[2])` observes the full caller argumentsList.
+        // §10.4.4 arguments elision honours the method's generator /
+        // async kind (a `*g()` / `async g()` body is never elided).
+        try self.emitArgumentsPrologue(params, body_stmts, is_generator, is_async, span);
 
         // Param prologue, same as compileFunctionTemplate. The
         // leading register slots are reserved so default-expression
@@ -14314,6 +14391,14 @@ fn compileFunctionTemplateExtNamed(
     const saved_completion_reg = self.completion_reg;
     const saved_is_async = self.current_is_async;
     const saved_is_generator = self.current_is_generator;
+    // §10.4.4 arguments elision — reset + restore (see
+    // `compileConstructorBody`). An arrow never sets it (arrows
+    // inherit `arguments` and are never the forward target), so an
+    // arrow body compiles with it false, restoring the enclosing
+    // value on exit.
+    const saved_eliding_arguments = self.eliding_arguments;
+    self.eliding_arguments = false;
+    defer self.eliding_arguments = saved_eliding_arguments;
     // §15.10 PTC — `in_tail_position` must reset across a
     // function boundary so a closure body doesn't inherit the
     // outer call site's tail flag, which would let a call inside
@@ -14536,17 +14621,13 @@ fn compileFunctionTemplateExtNamed(
     // bug that flips `arguments.length` and indexed access on
     // unbound trailing args.
     if (!is_arrow) {
-        const refs = paramsReferenceArguments(self.source, params) or switch (body) {
-            .block => |stmts| referencesArguments(self.source, stmts),
-            .expression => false, // concise-body arrows can't be reached here
+        // Non-arrow bodies are always blocks; the `.expression` arm is
+        // an unreachable concise-arrow shape, handled as an empty body.
+        const stmts: []ast.statement.Statement = switch (body) {
+            .block => |s| s,
+            .expression => &[_]ast.statement.Statement{},
         };
-        if (refs) {
-            const slot = try self.declareBinding("arguments", .let_, span);
-            try self.builder.emitOp(.lda_arguments, span);
-            try self.builder.emitOp(.sta_env, span);
-            try self.builder.emitU8(0);
-            try self.builder.emitU8(slot);
-        }
+        try self.emitArgumentsPrologue(params, stmts, is_generator, is_async, span);
     }
 
     // Declare params (env slots 0, 1,...) and emit the param-
