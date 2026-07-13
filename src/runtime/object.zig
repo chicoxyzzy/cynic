@@ -1531,6 +1531,11 @@ pub const JSObject = struct {
         // A setter installed at this key invalidates any transition
         // write IC whose receiver inherits from `self`.
         if (self.heap) |h| h.bumpProtoStructEpoch();
+        // Card-marking barrier: the caller writes a (possibly young)
+        // getter / setter into the returned entry; remember a mature
+        // instance (e.g. `Object.defineProperty` installing an accessor
+        // on a tenured object). The GC scan reads `accessor`.
+        self.noteInternalSlotWrite();
         return ext.accessors.getOrPut(allocator, key);
     }
 
@@ -1645,6 +1650,12 @@ pub const JSObject = struct {
         key: []const u8,
     ) !std.StringArrayHashMapUnmanaged(Accessor).GetOrPutResult {
         const ext = try self.getOrCreateExtension(allocator);
+        // Card-marking barrier: the caller writes a (possibly young)
+        // getter / setter into the returned entry. A private accessor
+        // is installed on `this` during construction, which may have
+        // tenured under allocation-pressure GC before the install. The
+        // GC scan reads `private_accessor`.
+        self.noteInternalSlotWrite();
         return ext.private_accessors.getOrPut(allocator, key);
     }
 
@@ -1677,6 +1688,12 @@ pub const JSObject = struct {
     ) !void {
         const ext = try self.getOrCreateExtension(allocator);
         try ext.namespace_redirects.put(allocator, key, r);
+        // Card-marking barrier: §15.2.1.16.3 — `r.target_ns` is a
+        // GC-marked namespace `*JSObject` that may be young while `self`
+        // (the `export *` importer's namespace) has already tenured
+        // across an async-import safepoint. Remember the write so the
+        // minor-cycle typed-slot scan visits `namespace_redirect`.
+        self.noteInternalSlotWrite();
     }
 
     pub fn removeNamespaceRedirect(self: *JSObject, key: []const u8) bool {
