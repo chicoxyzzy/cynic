@@ -1422,3 +1422,50 @@ the corpus under the relevant section's directory before adding.
   enough allocation pressure to expose the missing write barrier — the
   memory-safety contract on the generational-GC path goes untested by a
   normal run.
+
+### `Function.prototype.apply` / `Reflect.apply` / `Reflect.construct` — §7.3.18 per-element reads (holes, index accessors) go unexercised
+
+- **Surfaced by:** `c035f989` (the argument-list fast path) — **not a
+  Cynic bug fix.** Cynic's fast path already bails to the generic
+  §7.3.18 loop on these edges, so behaviour is correct; this logs a
+  genuine *corpus coverage* gap the optimization made visible. It fits
+  the second criterion above: a naive fast path (copying `elements[i]`
+  directly) would silently break it, and a positive fixture exercising
+  the same surface would have caught the broken engine.
+- **Spec:** §7.3.18 CreateListFromArrayLike — `len = ? ToLength(?
+  Get(obj, "length"))`, then for each index `? Get(obj, ! ToString(i))`.
+  Each per-index `Get` is an ordinary `[[Get]]`, so on a dense-array
+  argument it must honour holes (delegate up the prototype chain,
+  §10.4.2.1 step 2) and index accessors (fire the getter), in ascending
+  index order. Callers: §20.2.3.1 `Function.prototype.apply`, §28.1.1
+  `Reflect.apply`, §28.1.2 `Reflect.construct`.
+- **Reproducer:**
+  ```js
+  // (1) a hole delegates the read to Array.prototype
+  Array.prototype[1] = "inherited";
+  function f(a, b) { return a + "|" + b; }
+  assert.sameValue(f.apply(null, [7, ,]), "7|inherited");
+  delete Array.prototype[1];
+
+  // (2) an index accessor on the argument array fires, in order
+  var log = [];
+  var arr = [1, 2];
+  Object.defineProperty(arr, "1", { get() { log.push("g"); return 99; } });
+  assert.sameValue(f.apply(null, arr), "1|99");
+  assert.sameValue(log.join(","), "g");
+  ```
+- **Naive-fast-path behaviour (what the corpus fails to flag):** an
+  argument-list builder that reads packed elements directly returns
+  `undefined` for the hole (instead of the inherited `"inherited"`) and
+  the raw slot `2` for index 1 (instead of firing the getter → `99`).
+- **Spec-required behaviour:** each per-element `Get` delegates holes up
+  the prototype chain and fires index accessors, in ascending index
+  order, before the call dispatches. (A length getter is separately
+  exercised; the *element* reads are not.)
+- **Suggested fixture shape:** positive · runtime · one per caller under
+  `built-ins/Function/prototype/apply/`, `built-ins/Reflect/apply/`,
+  `built-ins/Reflect/construct/` — assert (a) a holey dense-array
+  argument reads inherited prototype elements and (b) an index accessor
+  on the argument array fires (value + order + count). The 48 / 9 / 10
+  existing fixtures cover only dense / `arguments` / empty happy paths;
+  none exercises the per-element `[[Get]]` observably.
