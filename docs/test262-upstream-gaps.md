@@ -1358,3 +1358,67 @@ the corpus under the relevant section's directory before adding.
   `features: [Symbol.species]`, assert the plain-object species
   result lacks own `length` and still receives the flattened
   elements.
+
+### Namespace-redirect and accessor extension writes skipped the GC card-marking barrier
+
+- **Fixed in:** `676b12be` (2026-07-13)
+- **Spec:** §15.2.1.16.3 Module Namespace exotic (the `export *`
+  redirect map); §10.1.6.3 ValidateAndApplyPropertyDescriptor /
+  §7.3.9 DefinePropertyOrThrow (accessor install). Cynic-internal:
+  the generational-GC card-marking invariant — a mature object
+  holding a *young* referent in a typed internal slot must be on the
+  heap dirty list so the minor cycle scans it. See
+  [docs/handbook/gc.md](handbook/gc.md).
+- **Reproducer:**
+
+  ```js
+  // Only observable under allocation-triggered GC (the harness'
+  // --gc-threshold=1); reproduces on the existing corpus at
+  // language/expressions/dynamic-import/namespace/*-no-strict.js.
+  // mod_a.js:   export var v = 1;
+  // mod_b.js:   export * from "./mod_a.js";
+  // Importing mod_b builds mod_b's namespace (which tenures across the
+  // async-import safepoints), then writes an `export *` redirect whose
+  // target is mod_a's still-young namespace. The write skipped the
+  // card-marking barrier, so a later minor cycle did not rescan mod_b's
+  // namespace, swept mod_a's namespace, and the mature holder then
+  // dereferenced freed memory.
+  import("./mod_b.js").then(m => m.v);
+  ```
+
+- **Before fix:** three extension-backed maps that store a GC-marked
+  referent — `namespace_redirects` (`target_ns`, a namespace
+  `*JSObject`), `accessors` and `private_accessors` (getter/setter
+  `*JSFunction`s) — were written without the card-marking barrier.
+  Because the extension flags `needs_internal_scan` only when it is
+  *first* created, a young referent written into an *already-present*
+  extension whose dirty flag was cleared by a prior minor cycle left the
+  holder off the dirty list; the next minor cycle skipped it and swept
+  the still-referenced young object, and the mature holder then
+  dereferenced freed memory (a card-mark verifier `unreachable` under
+  runtime-safety; a silent UAF in ReleaseFast). Three reachable shapes,
+  all fixed together: a tenured `export *` importer namespace gaining a
+  young source namespace across an async-import safepoint (the corpus
+  path above); `Object.defineProperty` installing a young accessor on a
+  tenured object that *already carries* extension state (so
+  `getOrCreateExtension` no longer sets the flag); a private accessor
+  installed on a `this` that tenured mid-construction under allocation
+  pressure.
+- **After fix:** each write runs `noteInternalSlotWrite()` (sets
+  `needs_internal_scan` *and* records the holder on the heap dirty
+  list), matching the sibling `putPrivateProperty` /
+  `getOrPutPrivateProperty` data-slot setters. The void-valued map
+  setters (`putPrivateMethod`, `putAmbiguousNamespaceKey`) store no GC
+  referent and correctly keep no barrier.
+- **Suggested fixture shape:** positive runtime fixtures a robust
+  engine (ASAN / GC-stress) would fault on. Accessor install:
+  `Object.defineProperty` / `Object.defineProperties` adding a getter to
+  a pre-existing object under `built-ins/Object/defineProperty/`. Star
+  re-export: a module-flagged fixture (`flags: [module]`) under
+  `language/module-code/` reading an `export * from` namespace after the
+  exporter's namespace is built. Private accessor: a `get`/`set #x()`
+  class under `language/statements/class/elements/`. The corpus
+  exercises all three code paths heavily, but none drives one under
+  enough allocation pressure to expose the missing write barrier — the
+  memory-safety contract on the generational-GC path goes untested by a
+  normal run.
