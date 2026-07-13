@@ -9656,8 +9656,8 @@ test "later: GetPrototypeFromConstructor remaps default proto through a Proxy ne
     // parent (active) realm — the newTarget the construct path sees.
     const handler = try parent.heap.allocateObject();
     const proxy = try parent.heap.allocateObject();
-    parent.heap.setProxyHandler(proxy, handler);
-    parent.heap.setProxyTargetFn(proxy, C);
+    try parent.heap.setProxyHandler(proxy, handler);
+    try parent.heap.setProxyTargetFn(proxy, C);
     proxy.proxy_callable = true;
 
     // The active-realm default the caller forwards is parent.Map.prototype

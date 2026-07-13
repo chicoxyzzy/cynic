@@ -153,7 +153,7 @@ fn regexpStringIterNext(realm: *Realm, this_value: Value, args: []const Value) N
     _ = args;
     const it = heap_mod.valueAsPlainObject(this_value) orelse
         return throwTypeError(realm, "RegExpStringIteratorPrototype.next called on non-object");
-    const st = it.regexp_string_iter orelse
+    const st = it.getRegexpStringIter() orelse
         return throwTypeError(realm, "RegExpStringIteratorPrototype.next called on incompatible receiver");
     if (st.done) {
         return iterResult(realm, Value.undefined_, true);
@@ -923,7 +923,7 @@ fn isRegExp(realm: *Realm, v: Value) NativeError!bool {
     const obj = heap_mod.valueAsPlainObject(v) orelse return false;
     const matcher = try intrinsics.getPropertyChain(realm, obj, "@@match");
     if (!matcher.isUndefined()) return matcher.toBooleanPrimitive();
-    return obj.regexp_source != null;
+    return obj.getRegexpSource() != null;
 }
 
 /// §7.3.10 GetMethod(V, P) — Let func = ? GetV(V, P). If func is

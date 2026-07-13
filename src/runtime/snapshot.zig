@@ -267,28 +267,29 @@ const object_serialized_fields = [_][]const u8{
     "inline_slots",          "slot_count",          "overflow_slots", "prototype",
     "prototype_fn",          "extensible",          "proxy_callable", "is_array_exotic",
     "array_length_writable", "is_arguments_exotic", "is_raw_json",    "has_error_data",
-    "elements",              "own_key_order",       "extension",      "regexp_source",
-    "regexp_flags",          "needs_internal_scan", "is_pristine",
+    "elements",              "own_key_order",       "extension",      "needs_internal_scan",
+    "is_pristine",
 };
 /// Fields recomputed / re-defaulted at restore (GC header, heap
-/// back-pointer, dropped-by-design anchors).
+/// back-pointer). Borrowed-key anchors are dropped-by-design too, but
+/// they live in the extension now — see `extension_recomputed_fields`.
 const object_recomputed_fields = [_][]const u8{
-    "heap", "mark_color", "generation", "dirty", "key_anchors",
+    "heap", "mark_color", "generation", "dirty",
 };
 /// Fields that must be at their default at capture — non-default
 /// means the object is outside the phase-1 envelope
 /// (`error.SnapshotUnsupported`).
 const object_asserted_fields = [_][]const u8{
-    "array_like_iter",          "map_set_iter",          "regexp_string_iter",  "iter_record",
-    "iter_helper",              "promise_store",         "promise_state",       "promise_value",
-    "promise_already_resolved", "proxy_target",          "proxy_handler",       "proxy_target_fn",
-    "proxy_revoked",            "regex_perlex",          "is_weak_ref",         "is_shadow_realm",
-    "is_module_namespace",      "is_sparse",             "sparse_elements",     "sparse_length",
+    "promise_store",            "promise_state",         "promise_value",
+    "promise_already_resolved", "is_proxy",              "proxy_revoked",
+    "is_weak_ref",              "is_shadow_realm",       "is_module_namespace",
+    "is_sparse",                "sparse_elements",       "sparse_length",
     "elements_pooled",          "has_array_buffer_data", "array_buffer_shared",
 };
 
 const extension_serialized_fields = [_][]const u8{
-    "accessors", "boxed_primitive", "boxed_string", "date_ms",
+    "accessors",     "boxed_primitive", "boxed_string", "date_ms",
+    "regexp_source", "regexp_flags",
 };
 const extension_asserted_fields = [_][]const u8{
     "private_properties",           "private_methods",          "private_accessors",
@@ -303,7 +304,17 @@ const extension_asserted_fields = [_][]const u8{
     "array_buffer_max_byte_length", "typed_view",               "data_view",
     "host_data",                    "shadow_realm_owner",       "disposable_state",
     "disposable_resources",         "async_dispose_walk",       "temporal_record",
-    "intl_record",
+    "intl_record",                  "array_like_iter",          "map_set_iter",
+    "regexp_string_iter",           "iter_record",              "iter_helper",
+    "regex_perlex",                 "proxy_target",             "proxy_handler",
+    "proxy_target_fn",
+};
+/// Extension fields recomputed / dropped at restore — never
+/// serialized, never asserted-default. `key_anchors` re-derives from
+/// the restored keys, exactly as it did when it lived on `JSObject`
+/// (see `object_recomputed_fields`).
+const extension_recomputed_fields = [_][]const u8{
+    "key_anchors",
 };
 
 const function_serialized_fields = [_][]const u8{
@@ -344,7 +355,7 @@ fn assertExhaustive(comptime T: type, comptime lists: []const []const []const u8
 
 comptime {
     assertExhaustive(JSObject, &.{ &object_serialized_fields, &object_recomputed_fields, &object_asserted_fields });
-    assertExhaustive(JSObjectExtension, &.{ &extension_serialized_fields, &extension_asserted_fields });
+    assertExhaustive(JSObjectExtension, &.{ &extension_serialized_fields, &extension_asserted_fields, &extension_recomputed_fields });
     assertExhaustive(JSFunction, &.{ &function_serialized_fields, &function_recomputed_fields, &function_asserted_fields });
 }
 
@@ -784,13 +795,18 @@ const Capture = struct {
     fn serializeObject(self: *Capture, w: *Writer, o: *JSObject) Snapshot.CaptureError!void {
         // Asserted-default fields (comptime-exhaustive contract):
         // any deviation puts the object outside the phase-1 envelope.
-        if (o.array_like_iter != null or o.map_set_iter != null or
-            o.regexp_string_iter != null or o.iter_record != null or
-            o.iter_helper != null or o.promise_store != null or
+        // Iterator-state slots (`array_like_iter` / `map_set_iter` /
+        // `regexp_string_iter` / `iter_record` / `iter_helper`) live
+        // in the extension now — their envelope check moved to
+        // `serializeExtension`.
+        // Proxy `[[ProxyTarget]]` / `[[ProxyHandler]]` / callable-target
+        // pointers live in the extension now — their envelope check
+        // moved to `serializeExtension`. The inline `is_proxy` brand
+        // (set with them) and `proxy_revoked` stay here.
+        if (o.promise_store != null or
             o.promise_state != .none or !o.promise_value.isUndefined() or
-            o.promise_already_resolved or o.proxy_target != null or
-            o.proxy_handler != null or o.proxy_target_fn != null or
-            o.proxy_revoked or o.regex_perlex != null or o.is_weak_ref or
+            o.promise_already_resolved or o.is_proxy or
+            o.proxy_revoked or o.is_weak_ref or
             o.is_shadow_realm or o.is_module_namespace or o.is_sparse or
             o.sparse_elements.count() != 0 or o.sparse_length != 0 or
             o.elements_pooled or o.has_array_buffer_data or o.array_buffer_shared)
@@ -847,15 +863,9 @@ const Capture = struct {
             try w.w8(obj_tag_own_key_order);
             try self.writeKeyList(w, o.own_key_order.items);
         }
+        // `regexp_source` / `regexp_flags` live in the extension now
+        // and are serialized inside `serializeExtension`.
         if (o.extension) |ext| try self.serializeExtension(w, ext);
-        if (o.regexp_source) |s| {
-            try w.w8(obj_tag_regexp_source);
-            try w.w32(@intCast(try self.stringRef(s)));
-        }
-        if (o.regexp_flags) |s| {
-            try w.w8(obj_tag_regexp_flags);
-            try w.w32(@intCast(try self.stringRef(s)));
-        }
         try w.w8(obj_tag_end);
     }
 
@@ -879,9 +889,29 @@ const Capture = struct {
             ext.typed_view != null or ext.data_view != null or ext.host_data != null or
             ext.shadow_realm_owner != null or ext.disposable_state != null or
             ext.disposable_resources.items.len != 0 or ext.async_dispose_walk != null or
-            ext.temporal_record != null or ext.intl_record != null)
+            ext.temporal_record != null or ext.intl_record != null or
+            ext.array_like_iter != null or ext.map_set_iter != null or
+            ext.regexp_string_iter != null or ext.iter_record != null or
+            ext.iter_helper != null or
+            // §10.5 Proxy pointers — a proxy is outside the capture
+            // envelope (the `is_proxy` brand is also checked object-side).
+            ext.proxy_target != null or ext.proxy_handler != null or
+            ext.proxy_target_fn != null or
+            // `regex_perlex` is a recomputed-on-demand compiled program,
+            // not serialized — a captured RegExp recompiles on first use.
+            ext.regex_perlex != null)
         {
             return error.SnapshotUnsupported;
+        }
+        // §22.2.4 `[[OriginalSource]]` / `[[OriginalFlags]]` — serialized
+        // (a RegExp instance round-trips through a snapshot).
+        if (ext.regexp_source) |s| {
+            try w.w8(obj_tag_regexp_source);
+            try w.w32(@intCast(try self.stringRef(s)));
+        }
+        if (ext.regexp_flags) |s| {
+            try w.w8(obj_tag_regexp_flags);
+            try w.w32(@intCast(try self.stringRef(s)));
         }
         if (ext.accessors.count() != 0) {
             try w.w8(obj_tag_accessors);
@@ -1565,8 +1595,14 @@ const Restore = struct {
                     const ext = try o.getOrCreateExtension(allocator);
                     try self.readAccessorMap(r, &ext.accessors);
                 },
-                obj_tag_regexp_source => o.regexp_source = try self.stringAt(try r.r32()),
-                obj_tag_regexp_flags => o.regexp_flags = try self.stringAt(try r.r32()),
+                obj_tag_regexp_source => {
+                    const ext = try o.getOrCreateExtension(allocator);
+                    ext.regexp_source = try self.stringAt(try r.r32());
+                },
+                obj_tag_regexp_flags => {
+                    const ext = try o.getOrCreateExtension(allocator);
+                    ext.regexp_flags = try self.stringAt(try r.r32());
+                },
                 obj_tag_boxed_primitive => {
                     const ext = try o.getOrCreateExtension(allocator);
                     ext.boxed_primitive = try self.readValue(r);

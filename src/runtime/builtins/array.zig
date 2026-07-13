@@ -535,7 +535,7 @@ pub fn setOrThrow(realm: *Realm, obj: *JSObject, key: []const u8, key_anchor: ?*
     // property-traps-order-with-species).
     const proxy_mod = @import("proxy.zig");
     var cur = obj;
-    while (cur.proxy_target != null or cur.proxy_revoked) {
+    while (cur.getProxyTarget() != null or cur.proxy_revoked) {
         const set_r = try proxy_mod.nativeProxySet(realm, cur, key, value, heap_mod.taggedObject(cur), null);
         switch (set_r) {
             .boolean => |b| {
@@ -692,7 +692,7 @@ pub fn setLengthOrThrow(realm: *Realm, obj: *JSObject, len: i64) NativeError!voi
 pub fn deletePropertyOrThrow(realm: *Realm, obj: *JSObject, key: []const u8) NativeError!void {
     const proxy_mod = @import("proxy.zig");
     var cur = obj;
-    while (cur.proxy_target != null or cur.proxy_revoked) {
+    while (cur.getProxyTarget() != null or cur.proxy_revoked) {
         const r = try proxy_mod.nativeProxyDelete(realm, cur, key, null);
         switch (r) {
             .boolean => |b| {
@@ -1158,7 +1158,7 @@ fn isArrayProxyAware(realm: *Realm, v: Value) NativeError!bool {
         if (cur_obj.proxy_revoked) {
             return throwTypeError(realm, "Cannot perform 'IsArray' on a proxy that has been revoked");
         }
-        if (cur_obj.proxy_target) |t| {
+        if (cur_obj.getProxyTarget()) |t| {
             cur_obj = t;
             continue;
         }
@@ -1180,7 +1180,7 @@ fn isObjectLike(v: Value) bool {
 /// internal methods). Otherwise delegates to `getPropertyChain`.
 fn getPropertyAny(realm: *Realm, v: Value, key: []const u8) NativeError!Value {
     if (heap_mod.valueAsPlainObject(v)) |obj| {
-        if (obj.proxy_target != null or obj.proxy_revoked) {
+        if (obj.getProxyTarget() != null or obj.proxy_revoked) {
             return getOnProxyChain(realm, obj, key, v);
         }
         return getPropertyChain(realm, obj, key);
@@ -1227,7 +1227,7 @@ fn getOnProxyChain(realm: *Realm, proxy: *JSObject, key: []const u8, receiver: V
                     // proxy with no target slot — bail out as undefined.
                     return Value.undefined_;
                 }
-                if (t.proxy_target != null or t.proxy_revoked) {
+                if (t.getProxyTarget() != null or t.proxy_revoked) {
                     cur = t;
                     continue;
                 }
@@ -1243,7 +1243,7 @@ fn getOnProxyChain(realm: *Realm, proxy: *JSObject, key: []const u8, receiver: V
 /// throw or undefined.
 fn hasPropertyAny(v: Value, key: []const u8) bool {
     if (heap_mod.valueAsPlainObject(v)) |obj| {
-        if (obj.proxy_target != null or obj.proxy_revoked) return true;
+        if (obj.getProxyTarget() != null or obj.proxy_revoked) return true;
         return obj.hasProperty(key);
     }
     if (heap_mod.valueAsFunction(v)) |fn_obj| {
@@ -2512,7 +2512,7 @@ fn createDataPropertyOrThrowGeneric(realm: *Realm, obj: *JSObject, key_str: *JSS
     // create-species-length-exceeding-integer-limit).
     const proxy_mod = @import("proxy.zig");
     var cur = obj;
-    while (cur.proxy_target != null or cur.proxy_revoked) {
+    while (cur.getProxyTarget() != null or cur.proxy_revoked) {
         const r = try proxy_mod.nativeProxyDefineProperty(realm, cur, key, value, null);
         switch (r) {
             .boolean => |b| {
@@ -2651,7 +2651,7 @@ fn copyWithinStep(realm: *Realm, obj: *JSObject, src: i64, dst: i64) NativeError
 fn hasPropertyP(realm: *Realm, obj: *JSObject, key: []const u8) NativeError!bool {
     const proxy_mod = @import("proxy.zig");
     var cur = obj;
-    while (cur.proxy_target != null or cur.proxy_revoked) {
+    while (cur.getProxyTarget() != null or cur.proxy_revoked) {
         const r = try proxy_mod.nativeProxyHas(realm, cur, key, null);
         switch (r) {
             .boolean => |b| return b,
@@ -4163,7 +4163,7 @@ fn createDataPropertyOrThrow(
     // `createDataPropertyOrThrowGeneric`.
     const proxy_mod = @import("proxy.zig");
     var cur = obj;
-    while (cur.proxy_target != null or cur.proxy_revoked) {
+    while (cur.getProxyTarget() != null or cur.proxy_revoked) {
         const r = try proxy_mod.nativeProxyDefineProperty(realm, cur, key, value, null);
         switch (r) {
             .boolean => |b| {

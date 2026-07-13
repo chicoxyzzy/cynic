@@ -3059,7 +3059,7 @@ pub fn runFrames(
                 // is a proxy, route through `callValue` which
                 // handles the apply trap and chained proxies.
                 if (heap_mod.valueAsPlainObject(callee_v)) |po| {
-                    if (po.proxy_target_fn != null or po.proxy_target != null or po.proxy_revoked) {
+                    if (po.is_proxy) {
                         const args_start = @as(usize, r_callee) + 1;
                         const args_slice = registers[args_start .. args_start + argc];
                         const cresult = try callValue(allocator, realm, f.running_realm orelse realm, callee_v, Value.undefined_, args_slice);
@@ -3127,9 +3127,10 @@ pub fn runFrames(
                 // First call returns undefined and clears the slot;
                 // subsequent calls no-op (slot is null).
                 if (fn_v.revocable_proxy) |rp| {
-                    realm.heap.setProxyTarget(rp, null);
-                    realm.heap.setProxyHandler(rp, null);
-                    realm.heap.setProxyTargetFn(rp, null);
+                    // null-clear short-circuits before any allocation
+                    rp.setProxyTarget(realm.allocator, null) catch {};
+                    rp.setProxyHandler(realm.allocator, null) catch {};
+                    rp.setProxyTargetFn(realm.allocator, null) catch {};
                     rp.proxy_revoked = true;
                     fn_v.revocable_proxy = null;
                     acc = Value.undefined_;
@@ -3441,7 +3442,7 @@ pub fn runFrames(
                 // §10.5.13 callable Proxy [[Call]] — route through
                 // `callValue` (handles apply trap + chained proxies).
                 if (heap_mod.valueAsPlainObject(callee_v)) |po| {
-                    if (po.proxy_target_fn != null or po.proxy_target != null or po.proxy_revoked) {
+                    if (po.is_proxy) {
                         const args_start = @as(usize, r_callee) + 1;
                         const args_slice = registers[args_start .. args_start + argc];
                         const cresult = try callValue(allocator, realm, f.running_realm orelse realm, callee_v, recv, args_slice);
@@ -3487,9 +3488,10 @@ pub fn runFrames(
 
                 // §28.2.2.1.1 — revocation function. See `.call`.
                 if (fn_v.revocable_proxy) |rp| {
-                    realm.heap.setProxyTarget(rp, null);
-                    realm.heap.setProxyHandler(rp, null);
-                    realm.heap.setProxyTargetFn(rp, null);
+                    // null-clear short-circuits before any allocation
+                    rp.setProxyTarget(realm.allocator, null) catch {};
+                    rp.setProxyHandler(realm.allocator, null) catch {};
+                    rp.setProxyTargetFn(realm.allocator, null) catch {};
                     rp.proxy_revoked = true;
                     fn_v.revocable_proxy = null;
                     acc = Value.undefined_;
@@ -3805,7 +3807,7 @@ pub fn runFrames(
                         } else if (!chainHasProxy(obj_in) and !obj_in.hasAccessor(key_s.flatBytes())) {
                             var cursor: ?*JSObject = obj_in.prototype;
                             while (cursor) |proto| : (cursor = proto.prototype) {
-                                if (proto.proxy_target != null or proto.proxy_revoked) break;
+                                if (proto.getProxyTarget() != null or proto.proxy_revoked) break;
                                 if (proto.is_module_namespace) break;
                                 if (proto.hasAccessor(key_s.flatBytes())) break;
                                 if (proto.shape) |proto_sh| {
@@ -3842,7 +3844,7 @@ pub fn runFrames(
 
                 // §10.5.13 callable Proxy [[Call]].
                 if (heap_mod.valueAsPlainObject(callee_v)) |po| {
-                    if (po.proxy_target_fn != null or po.proxy_target != null or po.proxy_revoked) {
+                    if (po.is_proxy) {
                         const args_start = @as(usize, r_recv) + 1;
                         const args_slice = registers[args_start .. args_start + argc];
                         const cresult = try callValue(allocator, realm, f.running_realm orelse realm, callee_v, recv, args_slice);
@@ -3881,9 +3883,10 @@ pub fn runFrames(
 
                 // §28.2.2.1.1 — revocation function.
                 if (fn_v.revocable_proxy) |rp| {
-                    realm.heap.setProxyTarget(rp, null);
-                    realm.heap.setProxyHandler(rp, null);
-                    realm.heap.setProxyTargetFn(rp, null);
+                    // null-clear short-circuits before any allocation
+                    rp.setProxyTarget(realm.allocator, null) catch {};
+                    rp.setProxyHandler(realm.allocator, null) catch {};
+                    rp.setProxyTargetFn(realm.allocator, null) catch {};
                     rp.proxy_revoked = true;
                     fn_v.revocable_proxy = null;
                     acc = Value.undefined_;
@@ -4097,7 +4100,7 @@ pub fn runFrames(
 
             // §10.5.13 callable Proxy [[Call]] — fall back.
             if (heap_mod.valueAsPlainObject(callee_v)) |po| {
-                if (po.proxy_target_fn != null or po.proxy_target != null or po.proxy_revoked) {
+                if (po.is_proxy) {
                     const args_start = @as(usize, r_callee) + 1;
                     const args_slice = registers[args_start .. args_start + argc];
                     const cresult = try callValue(allocator, realm, f.running_realm orelse realm, callee_v, Value.undefined_, args_slice);
@@ -4153,9 +4156,10 @@ pub fn runFrames(
 
             // §28.2.2.1.1 — revocation function (one-shot).
             if (callee_fn.revocable_proxy) |rp| {
-                realm.heap.setProxyTarget(rp, null);
-                realm.heap.setProxyHandler(rp, null);
-                realm.heap.setProxyTargetFn(rp, null);
+                // null-clear short-circuits before any allocation
+                rp.setProxyTarget(realm.allocator, null) catch {};
+                rp.setProxyHandler(realm.allocator, null) catch {};
+                rp.setProxyTargetFn(realm.allocator, null) catch {};
                 rp.proxy_revoked = true;
                 callee_fn.revocable_proxy = null;
                 acc = Value.undefined_;
@@ -4405,7 +4409,7 @@ pub fn runFrames(
 
             // §10.5.13 callable Proxy [[Call]] — fall back.
             if (heap_mod.valueAsPlainObject(callee_v)) |po| {
-                if (po.proxy_target_fn != null or po.proxy_target != null or po.proxy_revoked) {
+                if (po.is_proxy) {
                     const args_start = @as(usize, r_callee) + 1;
                     const args_slice = registers[args_start .. args_start + argc];
                     const cresult = try callValue(allocator, realm, f.running_realm orelse realm, callee_v, recv, args_slice);
@@ -4457,9 +4461,10 @@ pub fn runFrames(
             }
 
             if (callee_fn.revocable_proxy) |rp| {
-                realm.heap.setProxyTarget(rp, null);
-                realm.heap.setProxyHandler(rp, null);
-                realm.heap.setProxyTargetFn(rp, null);
+                // null-clear short-circuits before any allocation
+                rp.setProxyTarget(realm.allocator, null) catch {};
+                rp.setProxyHandler(realm.allocator, null) catch {};
+                rp.setProxyTargetFn(realm.allocator, null) catch {};
                 rp.proxy_revoked = true;
                 callee_fn.revocable_proxy = null;
                 acc = Value.undefined_;
@@ -4783,7 +4788,7 @@ pub fn runFrames(
             // target via `constructValue` (which handles
             // chained proxies).
             if (heap_mod.valueAsPlainObject(callee_v)) |po| {
-                if (po.proxy_target_fn != null or po.proxy_target != null or po.proxy_revoked) {
+                if (po.is_proxy) {
                     const args_start = @as(usize, r_callee) + 1;
                     const args_slice = registers[args_start .. args_start + argc];
                     const cresult = try constructValue(allocator, realm, callee_v, args_slice, callee_v);
@@ -4809,7 +4814,7 @@ pub fn runFrames(
             }
             var resolved_v = callee_v;
             if (heap_mod.valueAsPlainObject(callee_v)) |po| {
-                if (po.proxy_target_fn) |target_fn| resolved_v = heap_mod.taggedFunction(target_fn);
+                if (po.getProxyTargetFn()) |target_fn| resolved_v = heap_mod.taggedFunction(target_fn);
             }
             const callee_fn = heap_mod.valueAsFunction(resolved_v) orelse {
                 const ex = try makeTypeError(realm, "value is not a constructor");
@@ -5506,7 +5511,7 @@ pub fn runFrames(
                 // when the descriptor will ultimately be
                 // ignored.
                 const obj_mod_inner = @import("../builtins/object.zig");
-                const is_src_proxy = src_obj.proxy_target != null or src_obj.proxy_revoked;
+                const is_src_proxy = src_obj.getProxyTarget() != null or src_obj.proxy_revoked;
                 const key_scope = realm.heap.openScope() catch return error.OutOfMemory;
                 defer key_scope.close();
                 const keys_opt: ?[]const []const u8 = blk_pk: {
@@ -5674,7 +5679,7 @@ pub fn runFrames(
                 // `iteratorRecord.[[Done]]` is false. Cynic
                 // tracks this on the iter object's typed
                 // `iter_record` slot that `iter_step` maintains.
-                if (iter_obj.iter_record) |rec| {
+                if (iter_obj.getIterRecord()) |rec| {
                     if (rec.done) continue :dispatch try decodeNext(code, &ip, &committed);
                 }
                 // §7.4.6 IteratorClose step 4 → §7.3.10 GetMethod —
@@ -5873,7 +5878,7 @@ pub fn runFrames(
             var found_on_receiver = false;
             var handled_via_proxy = false;
             walk: while (cursor) |c| {
-                if (c.proxy_target != null or c.proxy_revoked) {
+                if (c.getProxyTarget() != null or c.proxy_revoked) {
                     const r2 = try proxyHasTrap(allocator, realm, frames, f, ip, c, key_slice, key_v);
                     switch (r2) {
                         .value => |v| {
@@ -5930,7 +5935,7 @@ pub fn runFrames(
             // `Proto.x = 1` on a shape-mode proto changes only the
             // proto's shape, bumping neither the realm's
             // proto_revision_counter nor proto_struct_epoch.
-            if (found_on_receiver and obj_in.shape != null and obj_in.proxy_target == null and
+            if (found_on_receiver and obj_in.shape != null and obj_in.getProxyTarget() == null and
                 key_slice.len >= 1 and key_slice.len <= chunk_mod.computed_key_cap and
                 JSObject.canonicalIntegerIndex(key_slice) == null and
                 obj_in.shape.?.lookup(key_slice) != null)
@@ -6781,7 +6786,7 @@ pub fn runFrames(
                             // freezes the instance and the second
                             // attempts to install on the frozen
                             // object.
-                            if (!inst.extensible and inst.proxy_target == null and inst.proxy_target_fn == null) {
+                            if (!inst.extensible and inst.getProxyTarget() == null and inst.getProxyTargetFn() == null) {
                                 const ex = try makeTypeError(realm, "Cannot add field to non-extensible object");
                                 f.ip = ip;
                                 f.accumulator = acc;
@@ -6801,7 +6806,7 @@ pub fn runFrames(
                             // `inst.set` would silently bypass the
                             // trap and the fixture would never see
                             // the field appear at the trap site.
-                            if (inst.proxy_target != null or inst.proxy_target_fn != null or inst.proxy_revoked) {
+                            if (inst.is_proxy) {
                                 // Build the descriptor object.
                                 const desc = realm.heap.allocateObject() catch return error.OutOfMemory;
                                 realm.heap.setObjectPrototype(desc, realm.intrinsics.object_prototype);
@@ -7341,12 +7346,11 @@ pub fn runFrames(
             // object's typed `iter_record` slot — off the
             // property bag, so a user-supplied iterator gains
             // no observable own property.
-            const iter_rec: *@import("../object.zig").IterRecord = iter_obj.iter_record orelse blk: {
+            const iter_rec: *@import("../object.zig").IterRecord = iter_obj.getIterRecord() orelse blk: {
                 const r = realm.allocator.create(@import("../object.zig").IterRecord) catch return error.OutOfMemory;
                 r.* = .{};
-                iter_obj.iter_record = r;
-                iter_obj.markNonPristine();
-                iter_obj.noteInternalSlotWrite(); // card-mark: holder may be a mature user object
+                // card-mark: holder may be a mature user object
+                iter_obj.setIterRecord(realm.allocator, r) catch return error.OutOfMemory;
                 break :blk r;
             };
             // Once the iter has surfaced `done: true` we stop
@@ -7491,7 +7495,7 @@ pub fn runFrames(
             // CreateIterResultObject allocation.
             fast: {
                 const iter_obj = heap_mod.valueAsPlainObject(iter_v) orelse break :fast;
-                const st = iter_obj.array_like_iter orelse break :fast;
+                const st = iter_obj.getArrayLikeIter() orelse break :fast;
                 // `entries` builds a [k,v] pair object — leave
                 // it to the spec slow path below.
                 if (st.kind == .entries) break :fast;
@@ -7696,7 +7700,7 @@ pub fn runFrames(
                 fill: {
                     const recv = heap_mod.valueAsPlainObject(recv_v) orelse break :fill;
                     if (recv.shape == null) break :fill;
-                    if (recv.proxy_target != null or recv.proxy_target_fn != null or recv.proxy_revoked) break :fill;
+                    if (recv.is_proxy) break :fill;
                     if (recv.is_array_exotic or recv.is_module_namespace or recv.getTypedView() != null) break :fill;
                     if (recv.elements.items.len != 0 or recv.is_sparse or recv.sparse_elements.count() != 0) break :fill;
                     const proto = recv.prototype orelse break :fill;
@@ -7710,7 +7714,7 @@ pub fn runFrames(
                     // structural funnels in object.zig bump it), but
                     // require the proto have no own integer elements
                     // it could re-enumerate, and no live proxy.
-                    if (proto.proxy_target != null or proto.proxy_revoked) break :fill;
+                    if (proto.getProxyTarget() != null or proto.proxy_revoked) break :fill;
                     if (proto.elements.items.len != 0 or proto.is_sparse or proto.sparse_elements.count() != 0) break :fill;
                     const cell = &local_chunk.inline_forin_caches[forin_ic_idx];
                     cell.recv_shape = recv.shape;
@@ -9632,7 +9636,7 @@ pub fn runFrames(
             // exotic, then iterate the trap result. When
             // `src` isn't a proxy this is just the ordinary
             // own-key walk.
-            const is_src_proxy = src_obj.proxy_target != null or src_obj.proxy_revoked;
+            const is_src_proxy = src_obj.getProxyTarget() != null or src_obj.proxy_revoked;
             const key_scope = realm.heap.openScope() catch return error.OutOfMemory;
             defer key_scope.close();
             const keys_opt: ?[]const []const u8 = blk_pk: {
@@ -9867,7 +9871,7 @@ pub fn runFrames(
                     if (!chainHasProxy(obj_in) and !obj_in.hasAccessor(key_s.flatBytes())) {
                         var cursor: ?*@import("../object.zig").JSObject = obj_in.prototype;
                         while (cursor) |proto| : (cursor = proto.prototype) {
-                            if (proto.proxy_target != null or proto.proxy_revoked) break;
+                            if (proto.getProxyTarget() != null or proto.proxy_revoked) break;
                             if (proto.is_module_namespace) break;
                             if (proto.hasAccessor(key_s.flatBytes())) break;
                             if (proto.shape) |proto_sh| {
@@ -9894,7 +9898,7 @@ pub fn runFrames(
                 // a missing trap falls through to default lookup
                 // on the target.
                 var obj = obj_in;
-                if (obj.proxy_target != null or obj.proxy_revoked) {
+                if (obj.getProxyTarget() != null or obj.proxy_revoked) {
                     const r = try proxyGetTrap(allocator, realm, frames, f, ip, obj, key_s.flatBytes(), key_v, acc);
                     switch (r) {
                         .value => |v| {
@@ -10621,7 +10625,7 @@ pub fn runFrames(
             if (heap_mod.valueAsPlainObject(recv)) |obj_in| {
                 var obj = obj_in;
                 // §10.5 Proxy [[Get]] — handler trap dispatch.
-                if (obj.proxy_target != null or obj.proxy_revoked) {
+                if (obj.getProxyTarget() != null or obj.proxy_revoked) {
                     const r = try proxyGetTrap(allocator, realm, frames, f, ip, obj, key_slice, key_v, recv);
                     switch (r) {
                         .value => |v| {
@@ -11123,7 +11127,7 @@ pub fn runFrames(
             const recv = registers[r_obj];
             // §10.5.10 Proxy [[Delete]] dispatch.
             if (heap_mod.valueAsPlainObject(recv)) |obj_in| {
-                if (obj_in.proxy_target != null or obj_in.proxy_revoked) {
+                if (obj_in.getProxyTarget() != null or obj_in.proxy_revoked) {
                     const r = try proxyDeleteTrap(allocator, realm, frames, f, ip, obj_in, key_s.flatBytes(), key_v);
                     switch (r) {
                         .value => |v| {
@@ -11202,7 +11206,7 @@ pub fn runFrames(
             var key_buf: [64]u8 = undefined;
             const key_slice = computedKeyToString(key_v, &key_buf);
             if (heap_mod.valueAsPlainObject(recv)) |obj_in| {
-                if (obj_in.proxy_target != null or obj_in.proxy_revoked) {
+                if (obj_in.getProxyTarget() != null or obj_in.proxy_revoked) {
                     const r = try proxyDeleteTrap(allocator, realm, frames, f, ip, obj_in, key_slice, key_v);
                     switch (r) {
                         .value => |v| {
@@ -12197,7 +12201,7 @@ fn strictSetPropertyAnchored(
         // dispatching down the chain (§10.5.6 step 7.a recurses
         // into target.[[Set]]).
         var obj = obj_in;
-        const receiver_is_proxy = obj_in.proxy_target != null or obj_in.proxy_target_fn != null or obj_in.proxy_revoked;
+        const receiver_is_proxy = obj_in.is_proxy;
         // Every Proxy `[[Set]]` path below — the `set` trap loop, the
         // trapless GetOwnPropertyDescriptor / DefineProperty pair —
         // re-enters JS and can GC. `key` is borrowed from `key_string`
@@ -12215,7 +12219,7 @@ fn strictSetPropertyAnchored(
             break :blk sc;
         } else null;
         defer if (px_root_scope) |sc| sc.close();
-        while (obj.proxy_target != null or obj.proxy_target_fn != null or obj.proxy_revoked) {
+        while (obj.is_proxy) {
             // §10.5.9 [[Set]] on a callable Proxy whose `[[ProxyTarget]]`
             // is a function (`proxy_target_fn`). The trap, if present,
             // fires with the function as the spec-target arg; absent,
@@ -12227,8 +12231,8 @@ fn strictSetPropertyAnchored(
             // the post-loop default-receiver path silently creates the
             // property on the outer proxy. See test262
             // built-ins/Proxy/set/trap-is-undefined-target-is-proxy.js.
-            if (obj.proxy_target == null and obj.proxy_target_fn != null and !obj.proxy_revoked) {
-                const handler = obj.proxy_handler orelse {
+            if (obj.getProxyTarget() == null and obj.getProxyTargetFn() != null and !obj.proxy_revoked) {
+                const handler = obj.getProxyHandler() orelse {
                     const ex = try makeTypeError(realm, "proxy handler slot is null");
                     f.ip = ip;
                     if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
@@ -12244,7 +12248,7 @@ fn strictSetPropertyAnchored(
                     };
                     const key_hint_v: ?Value = if (key_string) |ks| Value.fromString(ks) else null;
                     const key_v_t = try proxyTrapKeyValue(realm, key, key_hint_v);
-                    const trap_args = [_]Value{ heap_mod.taggedFunction(obj.proxy_target_fn.?), key_v_t, value, recv };
+                    const trap_args = [_]Value{ heap_mod.taggedFunction(obj.getProxyTargetFn().?), key_v_t, value, recv };
                     const trap_outcome = try callJSFunction(allocator, realm, trap_fn, heap_mod.taggedObject(handler), &trap_args);
                     switch (trap_outcome) {
                         .value, .yielded => |trap_ret| {
@@ -12266,7 +12270,7 @@ fn strictSetPropertyAnchored(
                 // Trap missing — §10.5.9 step 7.a: `Return ?
                 // target.[[Set]](P, V, Receiver)`. The target is the
                 // function; OrdinarySet writes through `setIfWritable`.
-                const fn_target = obj.proxy_target_fn.?;
+                const fn_target = obj.getProxyTargetFn().?;
                 const owned_k_fn = realm.heap.allocateString(key) catch return error.OutOfMemory;
                 const ok = realm.heap.storeFunctionPropertyIfWritable(fn_target, allocator, owned_k_fn.flatBytes(), value) catch return error.OutOfMemory;
                 if (!ok) {
@@ -12417,7 +12421,7 @@ fn strictSetPropertyAnchored(
         // trap (or recurses again per §10.5.6 step 7.a). Check the
         // chain for a proxy ancestor and route through it,
         // preserving the original `recv` as Receiver.
-        if (obj.proxy_target == null and !obj.proxy_revoked and chainHasProxy(obj)) {
+        if (obj.getProxyTarget() == null and !obj.proxy_revoked and chainHasProxy(obj)) {
             switch (try setThroughChain(allocator, realm, frames, f, ip, obj, key, value, recv)) {
                 .handled_set => |ok| {
                     if (ok) return .ok;
@@ -12671,7 +12675,7 @@ fn throwInSetter(
 fn chainHasProxy(obj: *JSObject) bool {
     var cursor: ?*JSObject = obj;
     while (cursor) |c| : (cursor = c.prototype) {
-        if (c.proxy_target != null or c.proxy_target_fn != null or c.proxy_revoked) return true;
+        if (c.is_proxy) return true;
     }
     return false;
 }
@@ -12867,7 +12871,7 @@ fn slowLookupForCallProperty(
     if (heap_mod.valueAsPlainObject(recv)) |obj_in| {
         var obj = obj_in;
         // §10.5 Proxy [[Get]].
-        if (obj.proxy_target != null or obj.proxy_revoked) {
+        if (obj.getProxyTarget() != null or obj.proxy_revoked) {
             const r = try proxyGetTrap(allocator, realm, frames, f, ip, obj, key, null, recv);
             switch (r) {
                 .value => |v| return .{ .value = v },
@@ -13038,7 +13042,7 @@ fn getThroughChain(
 ) RunError!GetChainOutcome {
     var cursor: ?*JSObject = obj;
     while (cursor) |c| {
-        if (c.proxy_target != null or c.proxy_revoked) {
+        if (c.getProxyTarget() != null or c.proxy_revoked) {
             // §10.5.5 Proxy [[Get]] — dispatch with `receiver`,
             // not the proxy itself. The trap helper already
             // recurses through proxy-target-is-proxy chains.
@@ -13063,8 +13067,8 @@ fn getThroughChain(
         // operate over Values not *JSObject), so apply the §10.5.5
         // step 7.a fallthrough directly when no handler.get is
         // installed.
-        if (c.proxy_target_fn) |target_fn| {
-            const handler_opt = c.proxy_handler;
+        if (c.getProxyTargetFn()) |target_fn| {
+            const handler_opt = c.getProxyHandler();
             const trap_v = if (handler_opt) |h| h.get("get") else Value.undefined_;
             if (trap_v.isUndefined() or trap_v.isNull()) {
                 // Forward to the function target's own get.
@@ -13149,7 +13153,7 @@ fn setThroughChain(
 ) RunError!SetChainOutcome {
     var cursor: ?*JSObject = obj;
     while (cursor) |c| {
-        if (c.proxy_target != null or c.proxy_revoked) {
+        if (c.getProxyTarget() != null or c.proxy_revoked) {
             switch (try proxySetTrap(allocator, realm, frames, f, ip, c, key, null, value, recv)) {
                 .value => return .{ .handled_set = true },
                 .fallthrough => |t| {
@@ -13306,13 +13310,13 @@ fn proxyGetTrap(
             }
             return .handled;
         }
-        const target = cur.proxy_target orelse return .{ .fallthrough = cur };
-        const handler = cur.proxy_handler orelse return .{ .fallthrough = target };
+        const target = cur.getProxyTarget() orelse return .{ .fallthrough = cur };
+        const handler = cur.getProxyHandler() orelse return .{ .fallthrough = target };
         const trap_v = handler.get("get");
         // §7.3.11 GetMethod — undefined/null fall through; any other
         // non-callable value throws TypeError before the trap runs.
         if (trap_v.isUndefined() or trap_v.isNull()) {
-            if (target.proxy_target != null or target.proxy_revoked) {
+            if (target.getProxyTarget() != null or target.proxy_revoked) {
                 cur = target;
                 continue;
             }
@@ -13415,9 +13419,9 @@ fn proxyDeleteTrap(
         // When the trap is missing we delete on the function
         // directly; when present we dispatch with the function as
         // the trap's `target` arg.
-        if (cur.proxy_target == null and cur.proxy_target_fn != null) {
-            const target_fn = cur.proxy_target_fn.?;
-            const handler_opt = cur.proxy_handler;
+        if (cur.getProxyTarget() == null and cur.getProxyTargetFn() != null) {
+            const target_fn = cur.getProxyTargetFn().?;
+            const handler_opt = cur.getProxyHandler();
             const trap_v = if (handler_opt) |h| h.get("deleteProperty") else Value.undefined_;
             if (trap_v.isUndefined() or trap_v.isNull()) {
                 // §10.1.10.1 [[Delete]] on a function — non-
@@ -13455,11 +13459,11 @@ fn proxyDeleteTrap(
             };
             return .{ .value = Value.fromBool(arith.toBoolean(v)) };
         }
-        const target = cur.proxy_target orelse return .{ .fallthrough = cur };
-        const handler = cur.proxy_handler orelse return .{ .fallthrough = target };
+        const target = cur.getProxyTarget() orelse return .{ .fallthrough = cur };
+        const handler = cur.getProxyHandler() orelse return .{ .fallthrough = target };
         const trap_v = handler.get("deleteProperty");
         if (trap_v.isUndefined() or trap_v.isNull()) {
-            if (target.proxy_target != null or target.proxy_target_fn != null or target.proxy_revoked) {
+            if (target.is_proxy) {
                 cur = target;
                 continue;
             }
@@ -13540,11 +13544,11 @@ fn proxyHasTrap(
             }
             return .handled;
         }
-        const target = cur.proxy_target orelse return .{ .fallthrough = cur };
-        const handler = cur.proxy_handler orelse return .{ .fallthrough = target };
+        const target = cur.getProxyTarget() orelse return .{ .fallthrough = cur };
+        const handler = cur.getProxyHandler() orelse return .{ .fallthrough = target };
         const trap_v = handler.get("has");
         if (trap_v.isUndefined() or trap_v.isNull()) {
-            if (target.proxy_target != null or target.proxy_revoked) {
+            if (target.getProxyTarget() != null or target.proxy_revoked) {
                 cur = target;
                 continue;
             }
@@ -13626,11 +13630,11 @@ fn proxySetTrap(
             }
             return .handled;
         }
-        const target = cur.proxy_target orelse return .{ .fallthrough = cur };
-        const handler = cur.proxy_handler orelse return .{ .fallthrough = target };
+        const target = cur.getProxyTarget() orelse return .{ .fallthrough = cur };
+        const handler = cur.getProxyHandler() orelse return .{ .fallthrough = target };
         const trap_v = handler.get("set");
         if (trap_v.isUndefined() or trap_v.isNull()) {
-            if (target.proxy_target != null or target.proxy_revoked) {
+            if (target.getProxyTarget() != null or target.proxy_revoked) {
                 cur = target;
                 continue;
             }

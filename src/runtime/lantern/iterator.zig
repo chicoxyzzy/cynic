@@ -260,9 +260,8 @@ pub fn openIteratorOpts(
     realm.heap.setObjectPrototype(iter, realm.intrinsics.object_prototype);
     const state = realm.allocator.create(object_mod.ArrayLikeIterState) catch return error.OutOfMemory;
     state.* = .{ .target = iterable };
-    iter.array_like_iter = state;
-    iter.markNonPristine();
-    iter.noteInternalSlotWrite(); // card-mark: array_like_iter holds young target/source
+    // card-mark: array_like_iter holds young target/source
+    iter.setArrayLikeIter(realm.allocator, state) catch return error.OutOfMemory;
     const next_fn = realm.heap.allocateFunctionNative(realm, arrayLikeIterNext, 0, "next") catch return error.OutOfMemory;
     next_fn.proto = realm.intrinsics.function_prototype;
     iter.set(realm.allocator, "next", heap_mod.taggedFunction(next_fn)) catch return error.OutOfMemory;
@@ -384,7 +383,7 @@ pub fn buildForInSnapshot(
             // (which dispatches the `getOwnPropertyDescriptor`
             // trap). We materialise both via the helpers in
             // builtins/object.zig.
-            if (cur.proxy_target != null or cur.proxy_target_fn != null or cur.proxy_revoked) {
+            if (cur.is_proxy) {
                 const obj_mod = @import("../builtins/object.zig");
                 const key_scope = realm.heap.openScope() catch return error.OutOfMemory;
                 defer key_scope.close();
@@ -636,9 +635,8 @@ pub fn wrapForInSnapshot(
     realm.heap.setObjectPrototype(iter, realm.intrinsics.object_prototype);
     const state = realm.allocator.create(@import("../object.zig").ArrayLikeIterState) catch return error.OutOfMemory;
     state.* = .{ .target = heap_mod.taggedObject(arr), .idx = 0, .done = false, .for_in_source = source_v };
-    iter.array_like_iter = state;
-    iter.markNonPristine();
-    iter.noteInternalSlotWrite(); // card-mark: array_like_iter holds young target/source
+    // card-mark: array_like_iter holds young target/source
+    iter.setArrayLikeIter(realm.allocator, state) catch return error.OutOfMemory;
     const next_fn = realm.heap.allocateFunctionNative(realm, arrayLikeIterNext, 0, "next") catch return error.OutOfMemory;
     next_fn.proto = realm.intrinsics.function_prototype;
     iter.set(realm.allocator, "next", heap_mod.taggedFunction(next_fn)) catch return error.OutOfMemory;
@@ -661,7 +659,7 @@ pub fn wrapForInSnapshot(
 fn arrayLikeIterNext(realm: *Realm, this_value: Value, args: []const Value) @import("../function.zig").NativeError!Value {
     _ = args;
     const iter_obj = heap_mod.valueAsPlainObject(this_value) orelse return error.NativeThrew;
-    const state = iter_obj.array_like_iter orelse return error.NativeThrew;
+    const state = iter_obj.getArrayLikeIter() orelse return error.NativeThrew;
     const target = state.target;
     const idx: u32 = state.idx;
 
@@ -740,7 +738,7 @@ fn arrayLikeIterNext(realm: *Realm, this_value: Value, args: []const Value) @imp
                     // observability. Trust the snapshot for proxies —
                     // user code can't safely delete-during-for-in on
                     // a proxy anyway (the trap controls visibility).
-                    const is_proxy = src.proxy_target != null or src.proxy_target_fn != null or src.proxy_revoked;
+                    const is_proxy = src.is_proxy;
                     if (!is_proxy and !src.hasProperty(key_str.flatBytes())) {
                         cursor += 1;
                         continue;

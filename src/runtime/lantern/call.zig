@@ -230,7 +230,7 @@ pub fn callValue(
     // callability marker, so `typeof` reports "function") yet is not
     // a proxy, and must reach the identity check below — not here.
     if (heap_mod.valueAsPlainObject(callee_v)) |po| {
-        if ((po.proxy_target_fn != null or po.proxy_target != null or po.proxy_revoked) and po.proxy_callable) {
+        if ((po.is_proxy) and po.proxy_callable) {
             if (po.proxy_revoked) {
                 // §10.5.12 step 1 ValidateNonRevokedProxy throws in
                 // the running execution context's realm — `running_realm`,
@@ -239,13 +239,13 @@ pub fn callValue(
                 const ex = try makeTypeError(running_realm, "Cannot perform 'apply' on a proxy that has been revoked");
                 return .{ .thrown = ex };
             }
-            const target_v: Value = if (po.proxy_target_fn) |tfn|
+            const target_v: Value = if (po.getProxyTargetFn()) |tfn|
                 heap_mod.taggedFunction(tfn)
-            else if (po.proxy_target) |t|
+            else if (po.getProxyTarget()) |t|
                 heap_mod.taggedObject(t)
             else
                 return .{ .thrown = try makeTypeError(realm, "proxy target slot is null") };
-            const handler = po.proxy_handler orelse return .{ .thrown = try makeTypeError(realm, "proxy handler slot is null") };
+            const handler = po.getProxyHandler() orelse return .{ .thrown = try makeTypeError(realm, "proxy handler slot is null") };
             const trap_v = handler.get("apply");
             if (!trap_v.isUndefined() and !trap_v.isNull()) {
                 const trap_fn = heap_mod.valueAsFunction(trap_v) orelse return .{ .thrown = try makeTypeError(realm, "proxy 'apply' trap is not callable") };
@@ -348,12 +348,12 @@ fn invokeProxyGetTrap(
     if (proxy.proxy_revoked) {
         return .{ .thrown = try makeTypeError(realm, "Cannot perform 'get' on a proxy that has been revoked") };
     }
-    const handler = proxy.proxy_handler orelse {
+    const handler = proxy.getProxyHandler() orelse {
         return .{ .thrown = try makeTypeError(realm, "proxy handler slot is null") };
     };
-    const target_v: Value = if (proxy.proxy_target_fn) |tfn|
+    const target_v: Value = if (proxy.getProxyTargetFn()) |tfn|
         heap_mod.taggedFunction(tfn)
-    else if (proxy.proxy_target) |t|
+    else if (proxy.getProxyTarget()) |t|
         heap_mod.taggedObject(t)
     else
         return .{ .thrown = try makeTypeError(realm, "proxy target slot is null") };
@@ -361,7 +361,7 @@ fn invokeProxyGetTrap(
     if (trap_v.isUndefined() or trap_v.isNull()) {
         // §10.5.5 step 6 — trap missing, recurse on the target.
         if (heap_mod.valueAsPlainObject(target_v)) |t_obj| {
-            if (t_obj.proxy_target_fn != null or t_obj.proxy_target != null or t_obj.proxy_revoked) {
+            if (t_obj.is_proxy) {
                 return try invokeProxyGetTrap(allocator, realm, t_obj, key, receiver);
             }
             return .{ .value = t_obj.get(key) };
@@ -401,13 +401,13 @@ pub fn getPrototypeFromConstructorValue(
         return try getPrototypeFromConstructor(allocator, realm, new_target_fn, intrinsic_default, default_owner_realm);
     }
     if (heap_mod.valueAsPlainObject(new_target)) |nt_proxy| {
-        if (nt_proxy.proxy_target_fn != null or nt_proxy.proxy_target != null or nt_proxy.proxy_revoked) {
+        if (nt_proxy.is_proxy) {
             const get_v = try invokeProxyGetTrap(allocator, realm, nt_proxy, "prototype", new_target);
             switch (get_v) {
                 .thrown => |ex| return .{ .thrown = ex },
                 .value => |v| {
                     if (heap_mod.valueAsPlainObject(v)) |po| return .{ .proto = po };
-                    if (nt_proxy.proxy_revoked or nt_proxy.proxy_handler == null) {
+                    if (nt_proxy.proxy_revoked or nt_proxy.getProxyHandler() == null) {
                         return .{ .thrown = try makeTypeError(realm, "Cannot retrieve realm from a revoked Proxy") };
                     }
                     // §10.1.14 GetPrototypeFromConstructor step 4 — the
@@ -527,8 +527,8 @@ fn proxyChainFunctionRealm(obj: *JSObject) ?*Realm {
     var cur: *JSObject = obj;
     var guard: usize = 0;
     while (guard < 100_000) : (guard += 1) {
-        if (cur.proxy_target_fn) |f| return f.getFunctionRealm();
-        if (cur.proxy_target) |t| {
+        if (cur.getProxyTargetFn()) |f| return f.getFunctionRealm();
+        if (cur.getProxyTarget()) |t| {
             cur = t;
             continue;
         }
@@ -647,17 +647,17 @@ pub fn constructValue(
     new_target: Value,
 ) RunError!RunResult {
     if (heap_mod.valueAsPlainObject(callee_v)) |po| {
-        if (po.proxy_target_fn != null or po.proxy_target != null or po.proxy_revoked) {
+        if (po.is_proxy) {
             if (po.proxy_revoked) {
                 return .{ .thrown = try makeTypeError(realm, "Cannot perform 'construct' on a proxy that has been revoked") };
             }
-            const target_v: Value = if (po.proxy_target_fn) |tfn|
+            const target_v: Value = if (po.getProxyTargetFn()) |tfn|
                 heap_mod.taggedFunction(tfn)
-            else if (po.proxy_target) |t|
+            else if (po.getProxyTarget()) |t|
                 heap_mod.taggedObject(t)
             else
                 return .{ .thrown = try makeTypeError(realm, "proxy target slot is null") };
-            const handler = po.proxy_handler orelse return .{ .thrown = try makeTypeError(realm, "proxy handler slot is null") };
+            const handler = po.getProxyHandler() orelse return .{ .thrown = try makeTypeError(realm, "proxy handler slot is null") };
             const trap_v = handler.get("construct");
             if (!trap_v.isUndefined() and !trap_v.isNull()) {
                 const trap_fn = heap_mod.valueAsFunction(trap_v) orelse return .{ .thrown = try makeTypeError(realm, "proxy 'construct' trap is not callable") };
@@ -739,7 +739,7 @@ pub fn constructValue(
             .thrown => |ex| return .{ .thrown = ex },
         };
     } else if (heap_mod.valueAsPlainObject(new_target)) |nt_proxy| {
-        if (nt_proxy.proxy_target_fn != null or nt_proxy.proxy_target != null or nt_proxy.proxy_revoked) {
+        if (nt_proxy.is_proxy) {
             // §10.5.5 Proxy [[Get]] on `prototype`. Run the trap (or
             // fall through to target.prototype). If a user-installed
             // get trap revokes the proxy here, the subsequent
@@ -755,7 +755,7 @@ pub fn constructValue(
                         // §10.1.14 step 4 — proto not an Object; the
                         // spec then calls GetFunctionRealm(new_target).
                         // If the proxy is now revoked, that throws.
-                        if (nt_proxy.proxy_revoked or nt_proxy.proxy_handler == null) {
+                        if (nt_proxy.proxy_revoked or nt_proxy.getProxyHandler() == null) {
                             return .{ .thrown = try makeTypeError(realm, "Cannot retrieve realm from a revoked Proxy") };
                         }
                         resolved_proto = base_default;

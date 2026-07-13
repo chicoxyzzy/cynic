@@ -105,6 +105,37 @@ independent ~112 B win via the existing `extension` pointer. Neither is a
 collector change, so the generational/RC scoping below does not move this
 number.
 
+### Stage A landed — the cold clusters are behind `extension`
+
+The ~112 B win is now realized. Four cold per-kind clusters moved off the
+base `JSObject` into `JSObjectExtension` (reached by the existing one
+pointer), each read only when a `get*`/`set*` helper or a cheap inline
+brand says the object is of that kind — a plain `{key,left,right,value}`
+data object (splay's `Node`) has no extension and pays nothing:
+
+- **Iterator state** (40 B) — `array_like_iter` / `map_set_iter` /
+  `regexp_string_iter` / `iter_record` / `iter_helper`.
+- **RegExp state** (24 B) — `regexp_source` / `regexp_flags` (GC-marked,
+  snapshot-serialized) + `regex_perlex` (recomputed on demand).
+- **Key anchors** (24 B) — the borrowed-key `JSString` roots; moving them
+  behind the extension also let the minor-cycle skip predicate
+  (`objectScanSkippable`) drop its direct `key_anchors` check, since every
+  anchor write now sets `needs_internal_scan`.
+- **Proxy pointers** (24 B) — `proxy_target` / `proxy_handler` /
+  `proxy_target_fn`, gated by a new cheap inline `is_proxy` bool brand so
+  the property-op hot path (a proxy is brand-checked on every get/set) stays
+  a single load rather than three pointer reads.
+
+Result: **`@sizeOf(JSObject)` 408 B → 296 B** (−112 B, −27.5%). Measured
+same-laptop, `splay` (8000-node tree) peak RSS **391 MB → 303 MB (−88 MB,
+−22.5 %)** — and the −88 MB drop equals the per-object header saving times
+splay's live-object count (768K × 112 B ≈ 86 MB), confirming the RSS is the
+header, exactly as diagnosed. test262 is byte-identical (0 regressions
+across the built-ins + language trees, ~45 k fixtures) and the
+`--gc-threshold=1` verifiers stay green. Reaching the ~70 MB field still
+needs the out-of-line property/element redesign (Step 1); Stage A is the
+self-contained down payment.
+
 ## Why
 
 The shipped collector is a generational, **non-moving, per-object-pool**

@@ -1227,7 +1227,7 @@ pub const Heap = struct {
         if (ik < 0) return null;
         const aobj = valueAsPlainObject(recv) orelse return null;
         if (!aobj.is_array_exotic or aobj.is_sparse or
-            aobj.proxy_target != null or aobj.proxy_revoked) return null;
+            aobj.getProxyTarget() != null or aobj.proxy_revoked) return null;
         const idx: usize = @intCast(ik);
         const els = aobj.elements.items;
         if (idx >= els.len or JSObject.isElementHole(els[idx])) return null;
@@ -1878,17 +1878,17 @@ pub const Heap = struct {
                         }
                     }
                 }
-                if (o.array_like_iter) |s| {
+                if (o.getArrayLikeIter()) |s| {
                     self.enqueue(s.target);
                     self.enqueue(s.for_in_source);
                 }
-                if (o.map_set_iter) |s| self.enqueue(s.source);
-                if (o.regexp_string_iter) |s| {
+                if (o.getMapSetIter()) |s| self.enqueue(s.source);
+                if (o.getRegexpStringIter()) |s| {
                     self.enqueue(s.regexp);
                     self.enqueue(s.string);
                 }
-                if (o.iter_record) |s| self.enqueue(s.next);
-                if (o.iter_helper) |s| {
+                if (o.getIterRecord()) |s| self.enqueue(s.next);
+                if (o.getIterHelper()) |s| {
                     self.enqueue(s.source);
                     self.enqueue(s.next_fn);
                     self.enqueue(s.payload);
@@ -1969,7 +1969,7 @@ pub const Heap = struct {
                 // anchor the JSString gets swept and the key
                 // dangles. Computed `obj[expr] = v` writes go
                 // through `setComputedOwned` which pushes here.
-                for (o.key_anchors.items) |s| s.mark_color = self.live_color;
+                for (o.keyAnchorItems()) |s| s.mark_color = self.live_color;
                 // §6.1.5.1 — JSSymbols used as property keys are
                 // stored flattened (`<sym:N>`), never reached as a
                 // Value; keep a symbol alive while it is a live
@@ -2043,8 +2043,8 @@ pub const Heap = struct {
                 // §22.2.4 `[[OriginalSource]]` / `[[OriginalFlags]]`
                 // for RegExp instances. Strings that the regular
                 // property walk wouldn't reach.
-                if (o.regexp_source) |s| s.mark_color = self.live_color;
-                if (o.regexp_flags) |s| s.mark_color = self.live_color;
+                if (o.getRegexpSource()) |s| s.mark_color = self.live_color;
+                if (o.getRegexpFlags()) |s| s.mark_color = self.live_color;
                 if (o.getInstanceFieldInits()) |inits| {
                     for (inits) |fi| {
                         if (fi.init_fn) |fnp| self.enqueue(taggedFunction(fnp));
@@ -2070,9 +2070,9 @@ pub const Heap = struct {
                 // §10.5 Proxy exotic — `[[ProxyTarget]]` /
                 // `[[ProxyHandler]]` are typed slots, not properties;
                 // a reachable Proxy must keep both alive.
-                if (o.proxy_target) |pt| self.enqueue(taggedObject(pt));
-                if (o.proxy_handler) |ph| self.enqueue(taggedObject(ph));
-                if (o.proxy_target_fn) |ptf| self.enqueue(taggedFunction(ptf));
+                if (o.getProxyTarget()) |pt| self.enqueue(taggedObject(pt));
+                if (o.getProxyHandler()) |ph| self.enqueue(taggedObject(ph));
+                if (o.getProxyTargetFn()) |ptf| self.enqueue(taggedFunction(ptf));
                 // §23.2 / §25.3 — TypedArray and DataView views
                 // borrow bytes from a sibling ArrayBuffer object via
                 // `viewed`. The ArrayBuffer is held only through this
@@ -3754,17 +3754,17 @@ pub const Heap = struct {
                 self.markValue(entry.value);
             }
         }
-        if (o.array_like_iter) |s| {
+        if (o.getArrayLikeIter()) |s| {
             self.markValue(s.target);
             self.markValue(s.for_in_source);
         }
-        if (o.map_set_iter) |s| self.markValue(s.source);
-        if (o.regexp_string_iter) |s| {
+        if (o.getMapSetIter()) |s| self.markValue(s.source);
+        if (o.getRegexpStringIter()) |s| {
             self.markValue(s.regexp);
             self.markValue(s.string);
         }
-        if (o.iter_record) |s| self.markValue(s.next);
-        if (o.iter_helper) |s| {
+        if (o.getIterRecord()) |s| self.markValue(s.next);
+        if (o.getIterHelper()) |s| {
             self.markValue(s.source);
             self.markValue(s.next_fn);
             self.markValue(s.payload);
@@ -3821,7 +3821,7 @@ pub const Heap = struct {
                 if (cell.has_token) self.markValue(cell.unregister_token);
             }
         }
-        for (o.key_anchors.items) |s| self.markString(s);
+        for (o.keyAnchorItems()) |s| self.markString(s);
         // §6.1.5.1 — symbol property keys, same rationale as the
         // `markValue` object arm. See `markSymbolKeys`.
         self.markSymbolKeys(o);
@@ -3836,8 +3836,8 @@ pub const Heap = struct {
             for (waiters.items) |w| self.markGenerator(w);
         }
         if (o.promise_state != .none) self.markValue(o.promise_value);
-        if (o.regexp_source) |s| self.markString(s);
-        if (o.regexp_flags) |s| self.markString(s);
+        if (o.getRegexpSource()) |s| self.markString(s);
+        if (o.getRegexpFlags()) |s| self.markString(s);
         if (o.getInstanceFieldInits()) |inits| {
             for (inits) |fi| {
                 if (fi.init_fn) |fnp| self.markValue(taggedFunction(fnp));
@@ -3855,9 +3855,9 @@ pub const Heap = struct {
             };
         }
         if (o.prototype_fn) |pf| self.markValue(taggedFunction(pf));
-        if (o.proxy_target) |pt| self.markValue(taggedObject(pt));
-        if (o.proxy_handler) |ph| self.markValue(taggedObject(ph));
-        if (o.proxy_target_fn) |ptf| self.markValue(taggedFunction(ptf));
+        if (o.getProxyTarget()) |pt| self.markValue(taggedObject(pt));
+        if (o.getProxyHandler()) |ph| self.markValue(taggedObject(ph));
+        if (o.getProxyTargetFn()) |ptf| self.markValue(taggedFunction(ptf));
         if (o.getTypedView()) |tv| self.markValue(taggedObject(tv.viewed));
         if (o.getDataView()) |dv| self.markValue(taggedObject(dv.viewed));
     }
@@ -3909,15 +3909,15 @@ pub const Heap = struct {
                 if (isYoungHeapValue(entry.value)) return "set_data";
             }
         }
-        if (o.array_like_iter) |s| {
+        if (o.getArrayLikeIter()) |s| {
             if (isYoungHeapValue(s.target) or isYoungHeapValue(s.for_in_source)) return "array_like_iter";
         }
-        if (o.map_set_iter) |s| if (isYoungHeapValue(s.source)) return "map_set_iter";
-        if (o.regexp_string_iter) |s| {
+        if (o.getMapSetIter()) |s| if (isYoungHeapValue(s.source)) return "map_set_iter";
+        if (o.getRegexpStringIter()) |s| {
             if (isYoungHeapValue(s.regexp) or isYoungHeapValue(s.string)) return "regexp_string_iter";
         }
-        if (o.iter_record) |s| if (isYoungHeapValue(s.next)) return "iter_record";
-        if (o.iter_helper) |s| {
+        if (o.getIterRecord()) |s| if (isYoungHeapValue(s.next)) return "iter_record";
+        if (o.getIterHelper()) |s| {
             if (isYoungHeapValue(s.source) or isYoungHeapValue(s.next_fn) or
                 isYoungHeapValue(s.payload) or isYoungHeapValue(s.active)) return "iter_helper";
             for (s.concat_inputs.items) |ci| {
@@ -3958,7 +3958,7 @@ pub const Heap = struct {
                     (cell.has_token and isYoungHeapValue(cell.unregister_token))) return "finalization.cell";
             }
         }
-        for (o.key_anchors.items) |s| if (s.generation == .young) return "key_anchor";
+        for (o.keyAnchorItems()) |s| if (s.generation == .young) return "key_anchor";
         // Symbol property keys: a `<sym:N>` slug resolving to a young
         // JSSymbol (the `markSymbolKeys` edge).
         if (objectHoldsYoungSymbolKey(o)) return "symbol_key";
@@ -3972,8 +3972,8 @@ pub const Heap = struct {
             for (waiters.items) |w| if (w.generation == .young) return "promise_waiter";
         }
         if (o.promise_state != .none and isYoungHeapValue(o.promise_value)) return "promise_value";
-        if (o.regexp_source) |s| if (s.generation == .young) return "regexp_source";
-        if (o.regexp_flags) |s| if (s.generation == .young) return "regexp_flags";
+        if (o.getRegexpSource()) |s| if (s.generation == .young) return "regexp_source";
+        if (o.getRegexpFlags()) |s| if (s.generation == .young) return "regexp_flags";
         if (o.getInstanceFieldInits()) |inits| {
             for (inits) |fi| if (fnYoungOpt(fi.init_fn)) return "instance_field_init";
         }
@@ -3982,9 +3982,9 @@ pub const Heap = struct {
         }
         if (o.prototype) |p| if (p.generation == .young) return "prototype";
         if (o.prototype_fn) |pf| if (pf.generation == .young) return "prototype_fn";
-        if (o.proxy_target) |pt| if (pt.generation == .young) return "proxy_target";
-        if (o.proxy_handler) |ph| if (ph.generation == .young) return "proxy_handler";
-        if (o.proxy_target_fn) |ptf| if (ptf.generation == .young) return "proxy_target_fn";
+        if (o.getProxyTarget()) |pt| if (pt.generation == .young) return "proxy_target";
+        if (o.getProxyHandler()) |ph| if (ph.generation == .young) return "proxy_handler";
+        if (o.getProxyTargetFn()) |ptf| if (ptf.generation == .young) return "proxy_target_fn";
         if (o.getTypedView()) |tv| if (tv.viewed.generation == .young) return "typed_view";
         if (o.getDataView()) |dv| if (dv.viewed.generation == .young) return "data_view";
         return null;
@@ -3995,15 +3995,15 @@ pub const Heap = struct {
     /// Debug/ReleaseSafe verifier gate in `collectYoung` so the two cannot
     /// drift (a skip more permissive than the gate would be an unverified
     /// use-after-free). Skippable iff: no typed slot flagged
-    /// (`needs_internal_scan`), no borrowed property-key anchors, and a
-    /// null / mature [[Prototype]] (object + function). `key_anchors` and
-    /// the prototype slots are set at too many scattered sites to flag, so
-    /// they ride this direct check; every other scanned slot rides the
-    /// flag and is double-checked by `objectYoungTypedSlot` for skippable
-    /// objects.
+    /// (`needs_internal_scan`) and a null / mature [[Prototype]] (object +
+    /// function). Borrowed property-key anchors now live in the extension,
+    /// so every anchor write sets `needs_internal_scan` (no direct check
+    /// needed); the prototype slots are set at too many scattered sites to
+    /// flag, so they ride this direct check. Every other scanned slot rides
+    /// the flag and is double-checked by `objectYoungTypedSlot` for
+    /// skippable objects.
     inline fn objectScanSkippable(o: *JSObject) bool {
         if (o.needs_internal_scan) return false;
-        if (o.key_anchors.items.len != 0) return false;
         if (o.prototype) |p| if (p.generation == .young) return false;
         if (o.prototype_fn) |pf| if (pf.generation == .young) return false;
         return true;
@@ -4687,33 +4687,23 @@ pub const Heap = struct {
     // `markFunctionInternalSlots`.
 
     /// §28.1.1 Proxy target. Set at construction (typically young)
-    /// and on revocation (`null`).
-    pub fn setProxyTarget(self: *Heap, o: *JSObject, target: ?*JSObject) void {
-        if (target) |t| {
-            self.writeBarrier(.{ .object = o }, taggedObject(t));
-            o.needs_internal_scan = true; // typed-slot scan reads proxy_target
-        }
-        o.proxy_target = target;
+    /// and cleared on revocation (`null`). The slot lives in the
+    /// extension now; `JSObject.setProxyTarget` stamps the inline
+    /// `is_proxy` brand and card-marks the holder.
+    pub fn setProxyTarget(self: *Heap, o: *JSObject, target: ?*JSObject) !void {
+        try o.setProxyTarget(self.allocator, target);
     }
 
     /// §28.1.1 Proxy handler. Set at construction and on revocation.
-    pub fn setProxyHandler(self: *Heap, o: *JSObject, handler: ?*JSObject) void {
-        if (handler) |h| {
-            self.writeBarrier(.{ .object = o }, taggedObject(h));
-            o.needs_internal_scan = true; // typed-slot scan reads proxy_handler
-        }
-        o.proxy_handler = handler;
+    pub fn setProxyHandler(self: *Heap, o: *JSObject, handler: ?*JSObject) !void {
+        try o.setProxyHandler(self.allocator, handler);
     }
 
     /// §28.1.1 Proxy target for the callable-function variant
     /// (proxy wraps a function). Set at construction; cleared on
     /// revocation.
-    pub fn setProxyTargetFn(self: *Heap, o: *JSObject, target_fn: ?*JSFunction) void {
-        if (target_fn) |f| {
-            self.writeBarrier(.{ .object = o }, taggedFunction(f));
-            o.needs_internal_scan = true; // typed-slot scan reads proxy_target_fn
-        }
-        o.proxy_target_fn = target_fn;
+    pub fn setProxyTargetFn(self: *Heap, o: *JSObject, target_fn: ?*JSFunction) !void {
+        try o.setProxyTargetFn(self.allocator, target_fn);
     }
 
     /// §6.1.6.1 / §6.1.5 / §6.1.3 — boxed primitive (Number /
@@ -4753,23 +4743,18 @@ pub const Heap = struct {
     }
 
     /// §22.2.4 — original source pattern JSString anchored on a
-    /// RegExp instance. Re-read by `.source`.
-    pub fn setRegexpSource(self: *Heap, o: *JSObject, s: ?*JSString) void {
-        if (s) |str| {
-            self.writeBarrier(.{ .object = o }, Value.fromString(str));
-            o.needs_internal_scan = true; // typed-slot scan reads regexp_source
-        }
-        o.regexp_source = s;
+    /// RegExp instance. Re-read by `.source`. The slot lives in the
+    /// extension now; `JSObject.setRegexpSource` allocates it and
+    /// card-marks the holder (the typed-slot analogue of the value
+    /// write barrier — see `rememberTypedSlotWrite`).
+    pub fn setRegexpSource(self: *Heap, o: *JSObject, s: ?*JSString) !void {
+        try o.setRegexpSource(self.allocator, s);
     }
 
     /// §22.2.4 — original flags JSString anchored on a RegExp
     /// instance.
-    pub fn setRegexpFlags(self: *Heap, o: *JSObject, s: ?*JSString) void {
-        if (s) |str| {
-            self.writeBarrier(.{ .object = o }, Value.fromString(str));
-            o.needs_internal_scan = true; // typed-slot scan reads regexp_flags
-        }
-        o.regexp_flags = s;
+    pub fn setRegexpFlags(self: *Heap, o: *JSObject, s: ?*JSString) !void {
+        try o.setRegexpFlags(self.allocator, s);
     }
 
     /// §10.4.2 Bound function — target (the inner callable).

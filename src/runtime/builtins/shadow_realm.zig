@@ -571,8 +571,8 @@ fn wrappedTrampoline(realm: *Realm, this_value: Value, args: []const Value) Nati
 fn targetRealmOf(target_v: Value) ?*Realm {
     if (heap_mod.valueAsFunction(target_v)) |f| return f.getFunctionRealm();
     if (heap_mod.valueAsPlainObject(target_v)) |obj| {
-        if (obj.proxy_target_fn) |tfn| return tfn.getFunctionRealm();
-        if (obj.proxy_target) |t| return targetRealmOf(heap_mod.taggedObject(t));
+        if (obj.getProxyTargetFn()) |tfn| return tfn.getFunctionRealm();
+        if (obj.getProxyTarget()) |t| return targetRealmOf(heap_mod.taggedObject(t));
     }
     return null;
 }

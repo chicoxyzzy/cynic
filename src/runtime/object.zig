@@ -700,8 +700,71 @@ pub const JSObjectExtension = struct {
     /// owned locale/option strings live in the record and are freed
     /// here. `null` for every non-Intl object.
     intl_record: ?*@import("intl.zig").IntlRecord = null,
+    /// Iterator-state pointers — present only on the synthetic
+    /// iterator wrapper objects the engine mints (never on a plain
+    /// `{a,b}` literal), so they moved off the base `JSObject`
+    /// (each cost 8 bytes on every object). The GC marks the heap
+    /// Values these state structs hold via the extension-marking
+    /// block in `heap.zig`; the owned state structs themselves are
+    /// freed in this `deinit`. Access via the `get*`/`set*` helpers
+    /// on `JSObject`.
+    ///   - `array_like_iter` — §7.4.1 fallback + Map/Set fromIterable
+    ///   - `map_set_iter` — Map/Set `.entries`/`.keys`/`.values`
+    ///   - `regexp_string_iter` — `String.prototype.matchAll`
+    ///   - `iter_record` — §7.4.1 lazily-cached `[[NextMethod]]`
+    ///   - `iter_helper` — `Iterator.prototype.*` lazy helpers
+    array_like_iter: ?*ArrayLikeIterState = null,
+    map_set_iter: ?*MapSetIterState = null,
+    regexp_string_iter: ?*RegExpStringIterState = null,
+    iter_record: ?*IterRecord = null,
+    iter_helper: ?*IteratorHelperState = null,
+    /// §22.2.4 RegExp instance state — present only on RegExp
+    /// instances (never on a plain literal), so they moved off the
+    /// base `JSObject` (each cost 8 bytes on every object).
+    ///   - `regexp_source` / `regexp_flags` — the `[[OriginalSource]]`
+    ///     / `[[OriginalFlags]]` JSStrings, GC-marked via the
+    ///     extension-marking block in `heap.zig` (surfaced through the
+    ///     `source` / `flags` accessors, and snapshot-serialized).
+    ///   - `regex_perlex` — the compiled Perlex `[[RegExpMatcher]]`
+    ///     program, lazily built on first `.exec`/`.test`. Holds no GC
+    ///     references (not traced); freed in this `deinit`.
+    regexp_source: ?*@import("string.zig").JSString = null,
+    regexp_flags: ?*@import("string.zig").JSString = null,
+    regex_perlex: ?*@import("../perlex/perlex.zig").Program = null,
+    /// Heap-allocated JSStrings whose `bytes` slice backs a
+    /// borrowed property key (see the field's former home on
+    /// `JSObject`). Present only on objects that anchor a computed /
+    /// bag-promoted key (`obj[expr] = v`, frozen template arrays),
+    /// so it moved off the base `JSObject` (24 bytes on every
+    /// object). GC-marked via the extension-marking block in
+    /// `heap.zig`; not serialized (recomputed at restore). Because
+    /// this field is reachable only through the extension, any
+    /// anchor write sets `needs_internal_scan`, so the minor-cycle
+    /// skip predicate no longer needs a direct key-anchor check.
+    key_anchors: std.ArrayListUnmanaged(*@import("string.zig").JSString) = .empty,
+    /// §10.5 Proxy exotic — `[[ProxyTarget]]` / `[[ProxyHandler]]`
+    /// internal slots (and the callable-function target variant).
+    /// Present only on Proxy instances, so they moved off the base
+    /// `JSObject` (24 bytes on every object). The base object keeps a
+    /// cheap inline `is_proxy` brand for the property-op hot path (a
+    /// proxy is checked on every get/set); these pointers are read
+    /// only once the brand says the object is a proxy. GC-marked via
+    /// the extension-marking block in `heap.zig`.
+    proxy_target: ?*JSObject = null,
+    proxy_handler: ?*JSObject = null,
+    proxy_target_fn: ?*@import("function.zig").JSFunction = null,
 
     pub fn deinit(self: *JSObjectExtension, allocator: std.mem.Allocator) void {
+        if (self.array_like_iter) |s| s.deinit(allocator);
+        if (self.map_set_iter) |s| s.deinit(allocator);
+        if (self.regexp_string_iter) |s| s.deinit(allocator);
+        if (self.iter_record) |s| s.deinit(allocator);
+        if (self.iter_helper) |s| s.deinit(allocator);
+        if (self.regex_perlex) |p| {
+            p.deinit();
+            allocator.destroy(p);
+        }
+        self.key_anchors.deinit(allocator);
         self.accessors.deinit(allocator);
         self.private_properties.deinit(allocator);
         self.private_methods.deinit(allocator);
@@ -975,34 +1038,14 @@ pub const JSObject = struct {
     // Map/Set/WeakMap/WeakSet instances populate them. Access via
     // `getMapData` / `setMapData` / `getSetData` / `setSetData`
     // helpers below.)
-    /// Array-like iterator state — present on the synthetic
-    /// iterator objects produced by the §7.4.1 fallback path
-    /// (`openIterator`) and the `Map` / `Set` `fromIterable`
-    /// helper. `null` for every other object. Hidden from JS;
-    /// mirrors the spec's [[IteratedObject]] + [[NextIndex]]
-    /// internal slots.
-    array_like_iter: ?*ArrayLikeIterState = null,
-    /// Map / Set iterator state — present on the objects returned
-    /// by `Map.prototype.{entries,keys,values}` /
-    /// `Set.prototype.{entries,values}` and the respective
-    /// `@@iterator`. `null` for every other object.
-    map_set_iter: ?*MapSetIterState = null,
-    /// RegExp String Iterator state — present on the object
-    /// returned by `String.prototype.matchAll` /
-    /// `RegExp.prototype[@@matchAll]`. `null` for every other
-    /// object.
-    regexp_string_iter: ?*RegExpStringIterState = null,
-    /// §7.4.1 Iterator Record — lazily attached by `iter_step` to
-    /// whatever object is being iterated (a destructuring /
-    /// for-of source). Caches `[[NextMethod]]` and `[[Done]]` off
-    /// the property bag. `null` until first stepped.
-    iter_record: ?*IterRecord = null,
-    /// `Iterator.prototype.*` helper state — present on the
-    /// lazy wrapper objects produced by `Iterator.from`, `.map`,
-    /// `.filter`, `.take`, `.drop`, `.flatMap`, and `Iterator.zip`.
-    /// Hidden from JS; mirrors §27.1.5's IteratorRecord internal
-    /// state.
-    iter_helper: ?*IteratorHelperState = null,
+    // Iterator-state pointers (`array_like_iter`, `map_set_iter`,
+    // `regexp_string_iter`, `iter_record`, `iter_helper`) moved to
+    // `JSObjectExtension` — present only on synthetic iterator
+    // wrapper objects, never on a plain literal (they were 40 bytes
+    // on every object). Access via `getArrayLikeIter` /
+    // `setArrayLikeIter` / `getMapSetIter` / `setMapSetIter` /
+    // `getRegexpStringIter` / `setRegexpStringIter` / `getIterRecord`
+    // / `setIterRecord` / `getIterHelper` / `setIterHelper` below.
     // `capability_record` (§27.2.1.5 PromiseCapability state) moved to
     // `JSObjectExtension` — set only on the transient capability
     // bound-this. Access via `getCapabilityRecord` / `setCapabilityRecord`.
@@ -1075,33 +1118,34 @@ pub const JSObject = struct {
     /// the executor already called resolve(thenable) (which leaves
     /// the Promise pending until the thenable job runs).
     promise_already_resolved: bool = false,
-    /// §22.2.4 `[[OriginalSource]]` — the source string a RegExp
-    /// instance was constructed from (the part between the
-    /// slashes in `/abc/i`). Hidden from JS; user-visible via
-    /// the `RegExp.prototype.source` accessor.
-    regexp_source: ?*@import("string.zig").JSString = null,
-    /// §22.2.4 `[[OriginalFlags]]` — the flag string ("gim", "u",
-    /// etc.) the instance carries. Hidden from JS; user-visible
-    /// via the `RegExp.prototype.flags` accessor.
-    regexp_flags: ?*@import("string.zig").JSString = null,
-    /// §10.5 Proxy exotic — `[[ProxyTarget]]` / `[[ProxyHandler]]`
-    /// internal slots when this object was constructed via
-    /// `new Proxy(target, handler)`. `null` for plain objects.
-    /// The interpreter's property opcodes detect this slot and
-    /// route through the handler's traps (`get`, `set`, `has`,
-    /// `deleteProperty`) before falling back to the target.
-    proxy_target: ?*JSObject = null,
-    proxy_handler: ?*JSObject = null,
-    /// For `new Proxy(fn, handler)` where the target is a
-    /// function — Cynic's JSFunction lives in a different tag
-    /// from JSObject so the proxy slot above can't hold it. The
-    /// call/new opcodes check this slot to make the proxy
-    /// itself callable.
-    proxy_target_fn: ?*@import("function.zig").JSFunction = null,
+    // RegExp instance state (`regexp_source`, `regexp_flags`,
+    // `regex_perlex`) moved to `JSObjectExtension` — present only on
+    // RegExp instances, never on a plain literal (they were 24 bytes
+    // on every object). Access via `getRegexpSource` / `setRegexpSource`
+    // / `getRegexpFlags` / `setRegexpFlags` / `getRegexPerlex` /
+    // `setRegexPerlex` below.
+    /// §10.5 Proxy exotic brand. `true` iff this object was created
+    /// via `new Proxy(target, handler)` (callable or not), and stays
+    /// `true` after revocation — exactly the disjunction
+    /// `proxy_target_fn != null or proxy_target != null or
+    /// proxy_revoked` that the property-op hot path tests on every
+    /// get/set. Kept as a cheap inline bool so that brand check is a
+    /// single load; the `[[ProxyTarget]]` / `[[ProxyHandler]]` /
+    /// callable-target pointers themselves live in the extension
+    /// (`getProxyTarget` / `getProxyHandler` / `getProxyTargetFn`),
+    /// read only once the brand says the object is a proxy. See
+    /// `is_proxy` usage in the interpreter's property opcodes.
+    is_proxy: bool = false,
+    // Proxy `[[ProxyTarget]]` / `[[ProxyHandler]]` / callable-target
+    // pointers moved to `JSObjectExtension` — access via
+    // `getProxyTarget` / `setProxyTarget` / `getProxyHandler` /
+    // `setProxyHandler` / `getProxyTargetFn` / `setProxyTargetFn`.
     /// §28.2.2.1 Proxy.revocable — a revoked proxy reports as
     /// revoked once `revoke()` clears its `[[ProxyTarget]]` /
     /// `[[ProxyHandler]]`. Every internal method on a revoked
-    /// proxy throws TypeError per §10.5.x step 1.
+    /// proxy throws TypeError per §10.5.x step 1. Kept inline
+    /// (a cheap bool, and the `is_proxy` brand stays set through
+    /// revocation regardless).
     proxy_revoked: bool = false,
     /// Callable-exotic flag on a plain JSObject. Set in two places:
     /// (a) §10.5 ProxyCreate — when the original target was callable,
@@ -1115,13 +1159,6 @@ pub const JSObject = struct {
     /// which rides this same flag (since Cynic represents
     /// `Function.prototype` as a JSObject, not a JSFunction).
     proxy_callable: bool = false,
-    /// §22.2.7 RegExp instance — the compiled Perlex (native engine)
-    /// program for this RegExp's [[RegExpMatcher]]. The first call to
-    /// `.exec`/`.test` parses the `source` + `flags` and caches the
-    /// program here. Allocated against the realm allocator and freed in
-    /// `deinitFields` (it holds no GC references, so the collector
-    /// doesn't trace it). Perlex is the sole regex engine.
-    regex_perlex: ?*@import("../perlex/perlex.zig").Program = null,
     // (`finalization_cells` + `weak_ref_target` moved to
     // `JSObjectExtension` — only `FinalizationRegistry` /
     // `WeakRef` instances populate them. Access via
@@ -1230,15 +1267,9 @@ pub const JSObject = struct {
     elements_pooled: bool = false,
     sparse_elements: std.AutoHashMapUnmanaged(u32, Value) = .empty,
     sparse_length: u32 = 0,
-    /// Heap-allocated JSStrings whose `bytes` slice backs a key
-    /// in `properties` / `accessors` / `private_properties` /
-    /// `property_flags`. The hash maps store `[]const u8` slices,
-    /// not pointers — so without this anchor the JSString gets
-    /// swept and the key slice dangles. Static-literal key strings
-    /// (constants pool, builtin installation) don't need anchoring;
-    /// only keys allocated for `obj[expr] = v` etc. via
-    /// `setComputedOwned` land here.
-    key_anchors: std.ArrayListUnmanaged(*@import("string.zig").JSString) = .empty,
+    // (`key_anchors` moved to `JSObjectExtension` — present only on
+    // objects that anchor a computed / bag-promoted key. Access via
+    // `anchorKey` (append) and `keyAnchorItems` (read) below.)
 
     /// §10.1.11 OrdinaryOwnPropertyKeys — unified insertion-order
     /// list across `properties` and `accessors`, so an object that
@@ -1385,8 +1416,16 @@ pub const JSObject = struct {
     /// key. Replaces the bare `key_anchors.append` at the scattered
     /// anchor sites so the anchor and the barrier can never drift.
     pub fn anchorKey(self: *JSObject, allocator: std.mem.Allocator, anchor_str: *@import("string.zig").JSString) !void {
-        try self.key_anchors.append(allocator, anchor_str);
+        const ext = try self.getOrCreateExtension(allocator);
+        try ext.key_anchors.append(allocator, anchor_str);
         self.noteInternalSlotWrite();
+    }
+
+    /// The borrowed-key anchor strings on this object (empty when it
+    /// has no extension). Read-only view for the GC markers; anchor
+    /// via `anchorKey`.
+    pub fn keyAnchorItems(self: *const JSObject) []const *@import("string.zig").JSString {
+        return if (self.extension) |ext| ext.key_anchors.items else &.{};
     }
 
     // ── §10.1.8 accessor descriptors — extension-backed cold map ─
@@ -1466,6 +1505,128 @@ pub const JSObject = struct {
     }
     pub fn setGeneratorRef(self: *JSObject, allocator: std.mem.Allocator, v: ?*@import("generator.zig").JSGenerator) !void {
         (try self.getOrCreateExtension(allocator)).generator_ref = v;
+    }
+
+    // ── Iterator-state pointers — extension-backed cold slots ─
+    //
+    // Present only on synthetic iterator wrapper objects; a plain
+    // object/array has no extension and reads `null` for free.
+    // Setters lazily allocate the extension and card-mark the
+    // holder (the state structs hold young heap Values the minor
+    // cycle reads — see `markObjectInternalSlots`). The wrapper is
+    // usually freshly allocated (young) at set time, but a lazy
+    // `iter_record` can attach to a mature user object, so the
+    // barrier is required.
+    pub fn getArrayLikeIter(self: *const JSObject) ?*ArrayLikeIterState {
+        return if (self.extension) |ext| ext.array_like_iter else null;
+    }
+    pub fn setArrayLikeIter(self: *JSObject, allocator: std.mem.Allocator, v: ?*ArrayLikeIterState) !void {
+        (try self.getOrCreateExtension(allocator)).array_like_iter = v;
+        self.noteInternalSlotWrite();
+    }
+    pub fn getMapSetIter(self: *const JSObject) ?*MapSetIterState {
+        return if (self.extension) |ext| ext.map_set_iter else null;
+    }
+    pub fn setMapSetIter(self: *JSObject, allocator: std.mem.Allocator, v: ?*MapSetIterState) !void {
+        (try self.getOrCreateExtension(allocator)).map_set_iter = v;
+        self.noteInternalSlotWrite();
+    }
+    pub fn getRegexpStringIter(self: *const JSObject) ?*RegExpStringIterState {
+        return if (self.extension) |ext| ext.regexp_string_iter else null;
+    }
+    pub fn setRegexpStringIter(self: *JSObject, allocator: std.mem.Allocator, v: ?*RegExpStringIterState) !void {
+        (try self.getOrCreateExtension(allocator)).regexp_string_iter = v;
+        self.noteInternalSlotWrite();
+    }
+    pub fn getIterRecord(self: *const JSObject) ?*IterRecord {
+        return if (self.extension) |ext| ext.iter_record else null;
+    }
+    pub fn setIterRecord(self: *JSObject, allocator: std.mem.Allocator, v: ?*IterRecord) !void {
+        (try self.getOrCreateExtension(allocator)).iter_record = v;
+        self.noteInternalSlotWrite();
+    }
+    pub fn getIterHelper(self: *const JSObject) ?*IteratorHelperState {
+        return if (self.extension) |ext| ext.iter_helper else null;
+    }
+    pub fn setIterHelper(self: *JSObject, allocator: std.mem.Allocator, v: ?*IteratorHelperState) !void {
+        (try self.getOrCreateExtension(allocator)).iter_helper = v;
+        self.noteInternalSlotWrite();
+    }
+
+    // ── §22.2.4 RegExp instance state — extension-backed cold slots ─
+    //
+    // Present only on RegExp instances; a plain object/array has no
+    // extension and reads `null` for free. `regexp_source` /
+    // `regexp_flags` hold GC-marked JSStrings, so their setters
+    // card-mark the holder (`noteInternalSlotWrite`). `regex_perlex`
+    // is a compiled program with no GC references — no card-mark
+    // needed, just the extension.
+    pub fn getRegexpSource(self: *const JSObject) ?*@import("string.zig").JSString {
+        return if (self.extension) |ext| ext.regexp_source else null;
+    }
+    pub fn setRegexpSource(self: *JSObject, allocator: std.mem.Allocator, v: ?*@import("string.zig").JSString) !void {
+        (try self.getOrCreateExtension(allocator)).regexp_source = v;
+        if (v != null) self.noteInternalSlotWrite();
+    }
+    pub fn getRegexpFlags(self: *const JSObject) ?*@import("string.zig").JSString {
+        return if (self.extension) |ext| ext.regexp_flags else null;
+    }
+    pub fn setRegexpFlags(self: *JSObject, allocator: std.mem.Allocator, v: ?*@import("string.zig").JSString) !void {
+        (try self.getOrCreateExtension(allocator)).regexp_flags = v;
+        if (v != null) self.noteInternalSlotWrite();
+    }
+    pub fn getRegexPerlex(self: *const JSObject) ?*@import("../perlex/perlex.zig").Program {
+        return if (self.extension) |ext| ext.regex_perlex else null;
+    }
+    pub fn setRegexPerlex(self: *JSObject, allocator: std.mem.Allocator, v: ?*@import("../perlex/perlex.zig").Program) !void {
+        (try self.getOrCreateExtension(allocator)).regex_perlex = v;
+    }
+
+    // ── §10.5 Proxy exotic pointers — extension-backed cold slots ─
+    //
+    // The base object keeps the inline `is_proxy` brand for the hot
+    // path; these pointers live in the extension and are read only
+    // once the brand says the object is a proxy. Setting a non-null
+    // target / handler stamps `is_proxy = true` and card-marks the
+    // holder (the pointers are GC-marked). Clearing to null (proxy
+    // revocation) leaves `is_proxy` set — a revoked proxy is still a
+    // proxy — and short-circuits before allocating, so it never
+    // fails when the extension already exists.
+    pub fn getProxyTarget(self: *const JSObject) ?*JSObject {
+        return if (self.extension) |ext| ext.proxy_target else null;
+    }
+    pub fn setProxyTarget(self: *JSObject, allocator: std.mem.Allocator, v: ?*JSObject) !void {
+        if (v == null) {
+            if (self.extension) |ext| ext.proxy_target = null;
+            return;
+        }
+        (try self.getOrCreateExtension(allocator)).proxy_target = v;
+        self.is_proxy = true;
+        self.noteInternalSlotWrite();
+    }
+    pub fn getProxyHandler(self: *const JSObject) ?*JSObject {
+        return if (self.extension) |ext| ext.proxy_handler else null;
+    }
+    pub fn setProxyHandler(self: *JSObject, allocator: std.mem.Allocator, v: ?*JSObject) !void {
+        if (v == null) {
+            if (self.extension) |ext| ext.proxy_handler = null;
+            return;
+        }
+        (try self.getOrCreateExtension(allocator)).proxy_handler = v;
+        self.is_proxy = true;
+        self.noteInternalSlotWrite();
+    }
+    pub fn getProxyTargetFn(self: *const JSObject) ?*@import("function.zig").JSFunction {
+        return if (self.extension) |ext| ext.proxy_target_fn else null;
+    }
+    pub fn setProxyTargetFn(self: *JSObject, allocator: std.mem.Allocator, v: ?*@import("function.zig").JSFunction) !void {
+        if (v == null) {
+            if (self.extension) |ext| ext.proxy_target_fn = null;
+            return;
+        }
+        (try self.getOrCreateExtension(allocator)).proxy_target_fn = v;
+        self.is_proxy = true;
+        self.noteInternalSlotWrite();
     }
     pub fn getFinallyCallback(self: *const JSObject) ?*@import("function.zig").JSFunction {
         return if (self.extension) |ext| ext.finally_callback else null;
@@ -2147,17 +2308,16 @@ pub const JSObject = struct {
         if (self.properties.count() != 0) std.debug.panic("pristine violated: properties.count={d}", .{self.properties.count()});
         if (self.property_flags.count() != 0) std.debug.panic("pristine violated: property_flags.count={d}", .{self.property_flags.count()});
         if (self.own_key_order.items.len != 0) std.debug.panic("pristine violated: own_key_order.len={d}", .{self.own_key_order.items.len});
-        if (self.key_anchors.items.len != 0) std.debug.panic("pristine violated: key_anchors.len={d}", .{self.key_anchors.items.len});
+        // `key_anchors` lives in the extension; the `extension != null`
+        // check below covers it.
         if (self.elements.items.len != 0) std.debug.panic("pristine violated: elements.len={d}", .{self.elements.items.len});
         if (self.sparse_elements.count() != 0) std.debug.panic("pristine violated: sparse_elements.count={d}", .{self.sparse_elements.count()});
         if (self.overflow_slots.items.len != 0) std.debug.panic("pristine violated: overflow_slots.len={d}", .{self.overflow_slots.items.len});
+        // A pristine object has no `extension`, which transitively
+        // guarantees its iterator-state slots (`array_like_iter` /
+        // `map_set_iter` / `regexp_string_iter` / `iter_record` /
+        // `iter_helper`) are null — they live in the extension.
         if (self.extension != null) std.debug.panic("pristine violated: extension is non-null", .{});
-        if (self.array_like_iter != null) std.debug.panic("pristine violated: array_like_iter is non-null", .{});
-        if (self.map_set_iter != null) std.debug.panic("pristine violated: map_set_iter is non-null", .{});
-        if (self.regexp_string_iter != null) std.debug.panic("pristine violated: regexp_string_iter is non-null", .{});
-        if (self.iter_record != null) std.debug.panic("pristine violated: iter_record is non-null", .{});
-        if (self.iter_helper != null) std.debug.panic("pristine violated: iter_helper is non-null", .{});
-        if (self.regex_perlex != null) std.debug.panic("pristine violated: regex_perlex is non-null", .{});
         if (self.promise_store != null) std.debug.panic("pristine violated: promise_store is non-null", .{});
     }
 
@@ -2176,18 +2336,12 @@ pub const JSObject = struct {
         self.property_flags.deinit(allocator);
         // `private_properties`, `private_methods`, `private_accessors`,
         // `accessors`, `namespace_redirects`, `ambiguous_namespace_keys`,
-        // `map_data`, `set_data` all live in the extension — freed
-        // when it is.
-        if (self.array_like_iter) |s| s.deinit(allocator);
-        if (self.map_set_iter) |s| s.deinit(allocator);
-        if (self.regexp_string_iter) |s| s.deinit(allocator);
-        if (self.iter_record) |s| s.deinit(allocator);
-        if (self.iter_helper) |s| s.deinit(allocator);
+        // `map_data`, `set_data`, and the iterator-state structs
+        // (`array_like_iter` / `map_set_iter` / `regexp_string_iter` /
+        // `iter_record` / `iter_helper`) all live in the extension —
+        // freed when it is.
         if (self.getCapabilityRecord()) |s| s.deinit(allocator);
-        if (self.regex_perlex) |p| {
-            p.deinit();
-            allocator.destroy(p);
-        }
+        // `regex_perlex` lives in the extension — freed when it is.
         // `finalization_cells`, `weak_ref_target`, `array_buffer`,
         // `typed_view`, `data_view`, `array_buffer_max_byte_length`
         // all live in the extension — freed when it is.
@@ -2196,7 +2350,7 @@ pub const JSObject = struct {
             s.deinit(allocator);
             if (self.heap) |h| h.promise_store_pool.destroy(s) else allocator.destroy(s);
         }
-        self.key_anchors.deinit(allocator);
+        // `key_anchors` lives in the extension — freed when it is.
         self.own_key_order.deinit(allocator);
         if (self.elements_pooled) {
             // Pool-owned buffer — must not reach `allocator.free`.
@@ -2948,7 +3102,7 @@ pub const JSObject = struct {
         if (self.shape != null) return true;
         if (self.accessorCount() != 0) return false;
         if (self.is_array_exotic or self.getTypedView() != null or
-            self.is_module_namespace or self.proxy_target != null)
+            self.is_module_namespace or self.getProxyTarget() != null)
         {
             return false;
         }
@@ -3022,7 +3176,7 @@ pub const JSObject = struct {
         self.noteSymbolKeyMaybe(key);
         // Exotics and engine-internal slots stay dictionary-mode.
         if (self.is_array_exotic or self.getTypedView() != null or
-            self.is_module_namespace or self.proxy_target != null or
+            self.is_module_namespace or self.getProxyTarget() != null or
             std.mem.startsWith(u8, key, "__cynic_"))
         {
             try self.demoteFromShape(allocator);
@@ -4217,6 +4371,14 @@ test "JSObjectExtension: footprint probe (size measurement, not an invariant)" {
     // `inline_slot_cap` raises it by 8 bytes per added slot.
     std.debug.print("[footprint] @sizeOf(JSObject)          = {d} bytes\n", .{@sizeOf(JSObject)});
     std.debug.print("[footprint] @sizeOf(JSObjectExtension) = {d} bytes\n", .{@sizeOf(JSObjectExtension)});
+    // Header-size regression guard. The cold per-kind clusters
+    // (iterator state, RegExp state, key anchors, Proxy pointers) live
+    // behind `extension`; moving them off the base object took the
+    // header from 408 B to 296 B (see docs/gc-immix-rearchitecture.md
+    // "The memory axis — splay's RSS outlier is header size"). This
+    // catches an accidental re-inlining of one of those clusters — the
+    // smallest is 24 B, which would push the header past this bound.
+    try testing.expect(@sizeOf(JSObject) <= 304);
 }
 
 test "JSObjectExtension: extension is null on a fresh object" {

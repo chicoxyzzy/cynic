@@ -2290,7 +2290,7 @@ pub const Compiler = struct {
             // by `idx_owned`'s borrowed byte slice. Anchor the
             // JSString or a GC frees it and the key dangles —
             // `String.raw` then reads the segment back as `undefined`.
-            raw_arr.key_anchors.append(self.allocator, idx_owned) catch return error.OutOfMemory;
+            raw_arr.anchorKey(self.allocator, idx_owned) catch return error.OutOfMemory;
         }
         raw_arr.setWithFlags(self.allocator, "length", Value.fromInt32(@intCast(lit.quasis.len)), meta_frozen) catch return error.OutOfMemory;
         raw_arr.extensible = false;
@@ -2321,7 +2321,7 @@ pub const Compiler = struct {
             strs_arr.setWithFlags(self.allocator, idx_owned.flatBytes(), cooked_v, indexed_frozen) catch return error.OutOfMemory;
             // See the `raw_arr` companion above — the bag-promoted
             // frozen index key needs its JSString anchored.
-            strs_arr.key_anchors.append(self.allocator, idx_owned) catch return error.OutOfMemory;
+            strs_arr.anchorKey(self.allocator, idx_owned) catch return error.OutOfMemory;
         }
         strs_arr.setWithFlags(self.allocator, "length", Value.fromInt32(@intCast(lit.quasis.len)), meta_frozen) catch return error.OutOfMemory;
         strs_arr.setWithFlags(self.allocator, "raw", heap_mod.taggedObject(raw_arr), meta_frozen) catch return error.OutOfMemory;

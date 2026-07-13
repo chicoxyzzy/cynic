@@ -65,9 +65,9 @@ fn proxyConstructor(realm: *Realm, this_value: Value, args: []const Value) Nativ
     // either target or handler at creation time; the resulting
     // proxy will eagerly throw on first internal-method dispatch.
     const proxy = realm.heap.allocateObject() catch return error.OutOfMemory;
-    realm.heap.setProxyHandler(proxy, handler);
+    realm.heap.setProxyHandler(proxy, handler) catch return error.OutOfMemory;
     if (heap_mod.valueAsPlainObject(args[0])) |target| {
-        realm.heap.setProxyTarget(proxy, target);
+        realm.heap.setProxyTarget(proxy, target) catch return error.OutOfMemory;
         realm.heap.setObjectPrototype(proxy, target.prototype);
         // §10.5 ProxyCreate — propagate callability from the
         // wrapped proxy. Wrapping a revoked-but-once-callable
@@ -83,7 +83,7 @@ fn proxyConstructor(realm: *Realm, this_value: Value, args: []const Value) Nativ
         // function that's `%Function.prototype%` (held in
         // JSFunction.proto), so `proxy.call` / `.apply` /
         // `.bind` resolve.
-        realm.heap.setProxyTargetFn(proxy, target_fn);
+        realm.heap.setProxyTargetFn(proxy, target_fn) catch return error.OutOfMemory;
         proxy.proxy_callable = true;
         realm.heap.setObjectPrototype(proxy, target_fn.proto orelse realm.intrinsics.function_prototype);
     } else {
@@ -155,7 +155,7 @@ fn raiseRevoked(realm: *Realm, op: []const u8) NativeError {
 /// handler never logs the trap-name lookups
 /// (test262 splice/property-traps-order-with-species).
 fn getTrap(realm: *Realm, handler: *JSObject, key: []const u8) NativeError!Value {
-    if (handler.proxy_target != null or handler.proxy_revoked) {
+    if (handler.getProxyTarget() != null or handler.proxy_revoked) {
         const r = try nativeProxyGet(realm, handler, key, heap_mod.taggedObject(handler), null);
         switch (r) {
             .value => |v| return v,
@@ -220,8 +220,8 @@ fn trapKeyValue(realm: *Realm, key: []const u8, hint: ?Value) NativeError!Value 
 /// existing Value through.
 pub fn nativeProxyGet(realm: *Realm, proxy: *JSObject, key: []const u8, receiver: Value, key_hint: ?Value) NativeError!NativeProxyOutcome {
     if (proxy.proxy_revoked) return raiseRevoked(realm, "Cannot perform 'get' on a proxy that has been revoked");
-    const target = proxy.proxy_target orelse return .{ .fallthrough = proxy };
-    const handler = proxy.proxy_handler orelse return raiseRevoked(realm, "proxy handler slot is null");
+    const target = proxy.getProxyTarget() orelse return .{ .fallthrough = proxy };
+    const handler = proxy.getProxyHandler() orelse return raiseRevoked(realm, "proxy handler slot is null");
     // §10.5.5 step 5 — `Let trap be ? GetMethod(handler, "get")`.
     // §7.3.11 GetMethod walks through §7.3.10 Get, which fires
     // accessor getters AND a nested Proxy handler's `get` trap.
@@ -269,8 +269,8 @@ pub fn nativeProxyGet(realm: *Realm, proxy: *JSObject, key: []const u8, receiver
 /// merely-falsy return.
 pub fn nativeProxySet(realm: *Realm, proxy: *JSObject, key: []const u8, value: Value, receiver: Value, key_hint: ?Value) NativeError!union(enum) { boolean: bool, fallthrough: *JSObject } {
     if (proxy.proxy_revoked) return raiseRevoked(realm, "Cannot perform 'set' on a proxy that has been revoked");
-    const target = proxy.proxy_target orelse return .{ .fallthrough = proxy };
-    const handler = proxy.proxy_handler orelse return raiseRevoked(realm, "proxy handler slot is null");
+    const target = proxy.getProxyTarget() orelse return .{ .fallthrough = proxy };
+    const handler = proxy.getProxyHandler() orelse return raiseRevoked(realm, "proxy handler slot is null");
     // §10.5.9 step 5 — `Let trap be ? GetMethod(handler, "set")`.
     // GetMethod chains through [[Get]], firing nested-Proxy handler
     // get traps (test262 Array.prototype.splice/
@@ -307,8 +307,8 @@ pub fn nativeProxySet(realm: *Realm, proxy: *JSObject, key: []const u8, value: V
 /// §10.5.7 [[HasProperty]] (P) — native dispatcher.
 pub fn nativeProxyHas(realm: *Realm, proxy: *JSObject, key: []const u8, key_hint: ?Value) NativeError!union(enum) { boolean: bool, fallthrough: *JSObject } {
     if (proxy.proxy_revoked) return raiseRevoked(realm, "Cannot perform 'has' on a proxy that has been revoked");
-    const target = proxy.proxy_target orelse return .{ .fallthrough = proxy };
-    const handler = proxy.proxy_handler orelse return raiseRevoked(realm, "proxy handler slot is null");
+    const target = proxy.getProxyTarget() orelse return .{ .fallthrough = proxy };
+    const handler = proxy.getProxyHandler() orelse return raiseRevoked(realm, "proxy handler slot is null");
     const trap_v = handler.get("has");
     if (trap_v.isUndefined() or trap_v.isNull()) return .{ .fallthrough = target };
     const trap_fn = heap_mod.valueAsFunction(trap_v) orelse return throwTypeError(realm, "Proxy 'has' trap is not callable");
@@ -348,8 +348,8 @@ pub fn nativeProxyHas(realm: *Realm, proxy: *JSObject, key: []const u8, key_hint
 /// (test262 Array.prototype.splice/property-traps-order-with-species).
 pub fn nativeProxyGetOwnPropertyDescriptor(realm: *Realm, proxy: *JSObject, key: []const u8, key_hint: ?Value) NativeError!union(enum) { value: Value, fallthrough: *JSObject } {
     if (proxy.proxy_revoked) return raiseRevoked(realm, "Cannot perform 'getOwnPropertyDescriptor' on a proxy that has been revoked");
-    const target = proxy.proxy_target orelse return .{ .fallthrough = proxy };
-    const handler = proxy.proxy_handler orelse return raiseRevoked(realm, "proxy handler slot is null");
+    const target = proxy.getProxyTarget() orelse return .{ .fallthrough = proxy };
+    const handler = proxy.getProxyHandler() orelse return raiseRevoked(realm, "proxy handler slot is null");
     const trap_v = try getTrap(realm, handler, "getOwnPropertyDescriptor");
     if (trap_v.isUndefined() or trap_v.isNull()) return .{ .fallthrough = target };
     const trap_fn = heap_mod.valueAsFunction(trap_v) orelse return throwTypeError(realm, "Proxy 'getOwnPropertyDescriptor' trap is not callable");
@@ -370,8 +370,8 @@ pub fn nativeProxyGetOwnPropertyDescriptor(realm: *Realm, proxy: *JSObject, key:
 /// — the descriptor shape CreateDataPropertyOrThrow requires (§7.3.6).
 pub fn nativeProxyDefineProperty(realm: *Realm, proxy: *JSObject, key: []const u8, value: Value, key_hint: ?Value) NativeError!union(enum) { boolean: bool, fallthrough: *JSObject } {
     if (proxy.proxy_revoked) return raiseRevoked(realm, "Cannot perform 'defineProperty' on a proxy that has been revoked");
-    const target = proxy.proxy_target orelse return .{ .fallthrough = proxy };
-    const handler = proxy.proxy_handler orelse return raiseRevoked(realm, "proxy handler slot is null");
+    const target = proxy.getProxyTarget() orelse return .{ .fallthrough = proxy };
+    const handler = proxy.getProxyHandler() orelse return raiseRevoked(realm, "proxy handler slot is null");
     // §10.5.6 step 5 — GetMethod(handler, "defineProperty"), which
     // is §7.3.11 over §7.3.10 Get(handler, "defineProperty"). When
     // `handler` is itself a Proxy, its `get` trap fires
@@ -398,8 +398,8 @@ pub fn nativeProxyDefineProperty(realm: *Realm, proxy: *JSObject, key: []const u
 /// §10.5.10 [[Delete]] (P) — native dispatcher.
 pub fn nativeProxyDelete(realm: *Realm, proxy: *JSObject, key: []const u8, key_hint: ?Value) NativeError!union(enum) { boolean: bool, fallthrough: *JSObject } {
     if (proxy.proxy_revoked) return raiseRevoked(realm, "Cannot perform 'deleteProperty' on a proxy that has been revoked");
-    const target = proxy.proxy_target orelse return .{ .fallthrough = proxy };
-    const handler = proxy.proxy_handler orelse return raiseRevoked(realm, "proxy handler slot is null");
+    const target = proxy.getProxyTarget() orelse return .{ .fallthrough = proxy };
+    const handler = proxy.getProxyHandler() orelse return raiseRevoked(realm, "proxy handler slot is null");
     const trap_v = handler.get("deleteProperty");
     if (trap_v.isUndefined() or trap_v.isNull()) return .{ .fallthrough = target };
     const trap_fn = heap_mod.valueAsFunction(trap_v) orelse return throwTypeError(realm, "Proxy 'deleteProperty' trap is not callable");

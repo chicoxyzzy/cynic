@@ -1151,7 +1151,7 @@ pub fn regExpExecGeneric(realm: *Realm, r: *JSObject, s: *JSString) NativeError!
         return v;
     }
     // No callable `exec` — require a [[RegExpMatcher]]-bearing object.
-    if (r.regexp_source == null) {
+    if (r.getRegexpSource() == null) {
         return throwTypeError(realm, "RegExpExec: receiver lacks [[RegExpMatcher]]");
     }
     // §22.2.7.2 RegExpBuiltinExec — invoke the engine-internal
@@ -1371,9 +1371,8 @@ fn regexpProtoMatchAll(realm: *Realm, this_value: Value, args: []const Value) Na
         .unicode = full_unicode,
         .done = false,
     };
-    iter.regexp_string_iter = ri_state;
-    iter.markNonPristine();
-    iter.noteInternalSlotWrite(); // card-mark: regexp_string_iter holds young regexp/string
+    // card-mark: regexp_string_iter holds young regexp/string
+    iter.setRegexpStringIter(realm.allocator, ri_state) catch return error.OutOfMemory;
     return heap_mod.taggedObject(iter);
 }
 
@@ -1387,7 +1386,7 @@ fn isRegExp(realm: *Realm, v: Value) NativeError!bool {
     const po = heap_mod.valueAsPlainObject(v) orelse return false;
     const matcher = try intrinsics.getPropertyChain(realm, po, "@@match");
     if (!matcher.isUndefined()) return intrinsics.toBoolean(matcher);
-    return po.regexp_source != null;
+    return po.getRegexpSource() != null;
 }
 
 fn regexpConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
@@ -1402,7 +1401,7 @@ fn regexpConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
     // internal slot — i.e. it really is a RegExp instance, not a
     // duck-typed object that happens to have a truthy @@match.
     const pattern_has_slot: ?*JSObject = if (heap_mod.valueAsPlainObject(pattern_v)) |po|
-        if (po.regexp_source != null) po else null
+        if (po.getRegexpSource() != null) po else null
     else
         null;
     const this_obj = heap_mod.valueAsPlainObject(this_value);
@@ -1441,7 +1440,7 @@ fn regexpConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
     // the explicit flags arg is undefined; the source read happens
     // unconditionally). Step 8 — else stringify pattern.
     const pat_s = if (pattern_has_slot) |po|
-        po.regexp_source.?
+        po.getRegexpSource().?
     else if (pattern_is_regex_like) blk: {
         const po = heap_mod.valueAsPlainObject(pattern_v).?;
         // step 7.a — `Let P be ? Get(pattern, "source")`.
@@ -1455,7 +1454,7 @@ fn regexpConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
     else
         try stringifyArg(realm, pattern_v);
     const flag_s = if (flags_v.isUndefined()) blk: {
-        if (pattern_has_slot) |po| if (po.regexp_flags) |f| break :blk f;
+        if (pattern_has_slot) |po| if (po.getRegexpFlags()) |f| break :blk f;
         if (pattern_is_regex_like) {
             const po = heap_mod.valueAsPlainObject(pattern_v).?;
             // step 7.c.i — `Let F be ? Get(pattern, "flags")`.
@@ -1479,8 +1478,8 @@ fn regexpConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
     // §22.2.4 `[[OriginalSource]]` / `[[OriginalFlags]]` — typed
     // JSObject slots, not properties. Surfaced to JS only through
     // the accessors on `RegExp.prototype`.
-    realm.heap.setRegexpSource(inst, pat_s);
-    realm.heap.setRegexpFlags(inst, flag_s);
+    realm.heap.setRegexpSource(inst, pat_s) catch return error.OutOfMemory;
+    realm.heap.setRegexpFlags(inst, flag_s) catch return error.OutOfMemory;
     // §22.2.4 step 13 — `lastIndex` is `{ w:true, e:false, c:false }`.
     // Default `set` lands at all-true, so JSON.stringify({toJSON: /re/})
     // surfaced "lastIndex" as an enumerable own key.
@@ -1571,9 +1570,9 @@ fn perlexFlags(s: []const u8) perlex.Flags {
 /// paths agree on which escapes are valid — and the `/iu`/`/iv`
 /// (§22.2.2.9 Canonicalize) case folder comes from that same seam.
 fn ensureCompiled(realm: *Realm, regex_obj: *JSObject) NativeError!bool {
-    if (regex_obj.regex_perlex != null) return true;
-    const src_s = regex_obj.regexp_source orelse return false;
-    const flag_str: []const u8 = if (regex_obj.regexp_flags) |f| f.flatBytes() else "";
+    if (regex_obj.getRegexPerlex() != null) return true;
+    const src_s = regex_obj.getRegexpSource() orelse return false;
+    const flag_str: []const u8 = if (regex_obj.getRegexpFlags()) |f| f.flatBytes() else "";
 
     const result = perlex.compileWithHooks(realm.allocator, src_s.flatBytes(), perlexFlags(flag_str), .{
         .resolver = perlex_props.resolve,
@@ -1588,8 +1587,7 @@ fn ensureCompiled(realm: *Realm, regex_obj: *JSObject) NativeError!bool {
                 return error.OutOfMemory;
             };
             boxed.* = program;
-            regex_obj.regex_perlex = boxed;
-            regex_obj.markNonPristine();
+            regex_obj.setRegexPerlex(realm.allocator, boxed) catch return error.OutOfMemory;
             return true;
         },
         .syntax_error => {
@@ -1698,14 +1696,14 @@ fn regexpExec(realm: *Realm, this_value: Value, args: []const Value) NativeError
     // The brand check reads the typed `regexp_source` slot, which
     // the RegExp constructor sets. Plain `{}` has it null →
     // TypeError, matching V8 / JSC / SpiderMonkey behavior.
-    if (regex_obj.regexp_source == null) {
+    if (regex_obj.getRegexpSource() == null) {
         return throwTypeError(realm, "RegExp.prototype.exec called on non-RegExp");
     }
     const input_s = try stringifyArg(realm, argOr(args, 0, Value.undefined_));
     if (!try ensureCompiled(realm, regex_obj)) return Value.null_;
     // Perlex is the sole engine: `ensureCompiled` either set `regex_perlex`
     // or threw, so the program is always present here.
-    return execPerlex(realm, regex_obj, regex_obj.regex_perlex.?, input_s);
+    return execPerlex(realm, regex_obj, regex_obj.getRegexPerlex().?, input_s);
 }
 
 // ── Capture view ────────────────────────────────────────────────────
@@ -2016,7 +2014,7 @@ fn matchOnlyPerlex(realm: *Realm, regex_obj: *JSObject, prog: *const perlex.Prog
 fn regexpBuiltinExecMatchOnly(realm: *Realm, regex_obj: *JSObject, input_s: *JSString) NativeError!bool {
     if (!try ensureCompiled(realm, regex_obj)) return false;
     // Perlex is the sole engine: `ensureCompiled` guarantees the program.
-    return matchOnlyPerlex(realm, regex_obj, regex_obj.regex_perlex.?, input_s);
+    return matchOnlyPerlex(realm, regex_obj, regex_obj.getRegexPerlex().?, input_s);
 }
 
 /// §22.2.6.15 RegExp.prototype.test ( S ).
@@ -2064,7 +2062,7 @@ fn regexpTest(realm: *Realm, this_value: Value, args: []const Value) NativeError
     }
 
     // §22.2.7.1 step 6 — no callable `exec`: require [[RegExpMatcher]].
-    if (regex_obj.regexp_source == null) {
+    if (regex_obj.getRegexpSource() == null) {
         return throwTypeError(realm, "RegExp.prototype.test called on non-RegExp");
     }
     const matched = try regexpBuiltinExecMatchOnly(realm, regex_obj, input_s);
@@ -2127,14 +2125,14 @@ fn isRegExpPrototypeReceiver(realm: *Realm, this_value: Value) bool {
 /// otherwise (e.g. `RegExp.prototype` itself, or a plain `{}`).
 fn regexpInternalSource(this_value: Value) ?[]const u8 {
     const obj = heap_mod.valueAsPlainObject(this_value) orelse return null;
-    const s = obj.regexp_source orelse return null;
+    const s = obj.getRegexpSource() orelse return null;
     return s.flatBytes();
 }
 
 /// Read `[[OriginalFlags]]`. Same shape as `regexpInternalSource`.
 fn regexpInternalFlagsStr(this_value: Value) ?[]const u8 {
     const obj = heap_mod.valueAsPlainObject(this_value) orelse return null;
-    const f = obj.regexp_flags orelse return null;
+    const f = obj.getRegexpFlags() orelse return null;
     return f.flatBytes();
 }
 

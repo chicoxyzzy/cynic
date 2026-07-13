@@ -491,7 +491,7 @@ pub fn ownPropertyKeysOrdered(
 /// that defines `ownKeys` as a getter (test262
 /// built-ins/Object/keys/proxy-keys.js) is observed.
 pub fn getHandlerProperty(realm: *Realm, handler: *JSObject, key: []const u8) NativeError!Value {
-    if (handler.proxy_target != null or handler.proxy_revoked) {
+    if (handler.getProxyTarget() != null or handler.proxy_revoked) {
         const proxy_mod = @import("proxy.zig");
         var cur = handler;
         while (true) {
@@ -500,7 +500,7 @@ pub fn getHandlerProperty(realm: *Realm, handler: *JSObject, key: []const u8) Na
                 .value => |v| return v,
                 .fallthrough => |t| {
                     if (t == cur) return Value.undefined_;
-                    if (t.proxy_target != null or t.proxy_revoked) {
+                    if (t.getProxyTarget() != null or t.proxy_revoked) {
                         cur = t;
                         continue;
                     }
@@ -528,7 +528,7 @@ pub fn getHandlerProperty(realm: *Realm, handler: *JSObject, key: []const u8) Na
 /// getOwnPropertyDescriptors}/observable-operations.js verify the
 /// trap was called with `proxy === receiver`).
 pub fn getPropertyValue(realm: *Realm, obj: *JSObject, key: []const u8, receiver: Value) NativeError!Value {
-    if (obj.proxy_target != null or obj.proxy_revoked) {
+    if (obj.getProxyTarget() != null or obj.proxy_revoked) {
         const proxy_mod = @import("proxy.zig");
         var cur = obj;
         while (true) {
@@ -537,7 +537,7 @@ pub fn getPropertyValue(realm: *Realm, obj: *JSObject, key: []const u8, receiver
                 .value => |v| return v,
                 .fallthrough => |t| {
                     if (t == cur) return Value.undefined_;
-                    if (t.proxy_target != null or t.proxy_revoked) {
+                    if (t.getProxyTarget() != null or t.proxy_revoked) {
                         cur = t;
                         continue;
                     }
@@ -560,11 +560,11 @@ pub fn proxyOwnKeysOrNull(
     obj: *JSObject,
     key_scope: *@import("../heap.zig").HandleScope,
 ) NativeError!?[]const []const u8 {
-    if (obj.proxy_target == null and !obj.proxy_revoked) return null;
+    if (obj.getProxyTarget() == null and !obj.proxy_revoked) return null;
     // §10.5.11 step 2 — revoked proxy throws TypeError.
     if (obj.proxy_revoked) return throwTypeError(realm, "Cannot perform 'ownKeys' on a revoked proxy");
-    const proxy_target = obj.proxy_target.?;
-    const handler = obj.proxy_handler orelse return throwTypeError(realm, "Cannot perform 'ownKeys' on a proxy with null handler");
+    const proxy_target = obj.getProxyTarget().?;
+    const handler = obj.getProxyHandler() orelse return throwTypeError(realm, "Cannot perform 'ownKeys' on a proxy with null handler");
     // §10.5.11 step 5 — `Let trap be ? GetMethod(handler, "ownKeys")`.
     // §7.3.11 GetMethod chains through §7.3.10 Get which fires
     // accessor getters AND nested-Proxy handler `get` traps.
@@ -583,7 +583,7 @@ pub fn proxyOwnKeysOrNull(
     // chain — value-object-proxy nested). Anything else
     // non-callable is a TypeError per IsCallable.
     if (trap_v.isUndefined() or trap_v.isNull()) {
-        if (proxy_target.proxy_target != null or proxy_target.proxy_revoked) {
+        if (proxy_target.getProxyTarget() != null or proxy_target.proxy_revoked) {
             return try proxyOwnKeysOrNull(realm, proxy_target, key_scope);
         }
         return try ownPropertyKeysOrdered(realm, proxy_target, key_scope);
@@ -766,7 +766,7 @@ fn objectKeys(realm: *Realm, this_value: Value, args: []const Value) NativeError
     scope.push(arg) catch return error.OutOfMemory;
     scope.push(heap_mod.taggedObject(result)) catch return error.OutOfMemory;
     var idx: usize = 0;
-    const is_proxy = obj.proxy_target != null or obj.proxy_revoked;
+    const is_proxy = obj.getProxyTarget() != null or obj.proxy_revoked;
     for (keys) |key| {
         // §7.3.21 EnumerableOwnProperties step 4.a.i calls
         // O.[[GetOwnProperty]](key) to read the descriptor — on a
@@ -1073,10 +1073,10 @@ pub fn objectGetPrototypeOf(realm: *Realm, this_value: Value, args: []const Valu
     // §10.5.1 Proxy [[GetPrototypeOf]] — dispatch through the
     // handler's `getPrototypeOf` trap before falling back.
     if (heap_mod.valueAsPlainObject(arg)) |obj| {
-        if (obj.proxy_target != null or obj.proxy_revoked) {
+        if (obj.getProxyTarget() != null or obj.proxy_revoked) {
             if (obj.proxy_revoked) return throwTypeError(realm, "Cannot perform 'getPrototypeOf' on a revoked proxy");
-            const proxy_target = obj.proxy_target.?;
-            const handler = obj.proxy_handler orelse return throwTypeError(realm, "Cannot perform 'getPrototypeOf' on a proxy with null handler");
+            const proxy_target = obj.getProxyTarget().?;
+            const handler = obj.getProxyHandler() orelse return throwTypeError(realm, "Cannot perform 'getPrototypeOf' on a proxy with null handler");
             const trap_v = handler.get("getPrototypeOf");
             // §10.5.1 step 5 — GetMethod: undefined/null → no trap.
             // A non-callable, non-nullish value throws TypeError.
@@ -1167,7 +1167,7 @@ fn objectHasOwn(realm: *Realm, this_value: Value, args: []const Value) NativeErr
         // Proxy that fires the `getOwnPropertyDescriptor` trap
         // (§10.5.5). Reuse Object.getOwnPropertyDescriptor which
         // walks the proxy chain and enforces target invariants.
-        if (obj.proxy_target != null or obj.proxy_revoked) {
+        if (obj.getProxyTarget() != null or obj.proxy_revoked) {
             const probe_args = [_]Value{ o, argOr(args, 1, Value.undefined_) };
             const desc_v = try objectGetOwnPropertyDescriptor(realm, Value.undefined_, &probe_args);
             return Value.fromBool(!desc_v.isUndefined());
@@ -1499,21 +1499,21 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
     // §10.5.6 Proxy [[DefineOwnProperty]] — dispatch through the
     // handler's `defineProperty` trap before falling back.
     if (heap_mod.valueAsPlainObject(target_v)) |obj_in| {
-        if (obj_in.proxy_target != null or obj_in.proxy_target_fn != null or obj_in.proxy_revoked) {
+        if (obj_in.is_proxy) {
             if (obj_in.proxy_revoked) return throwTypeError(realm, "Cannot perform 'defineProperty' on a revoked proxy");
             // Build the target value for the trap and the
             // proxy_target object pointer (for invariant checks).
             // For a callable-target proxy, the value is the
             // function; there's no plain-object target so the
             // invariant guards (which expect property bags) skip.
-            const proxy_target_v: Value = if (obj_in.proxy_target) |t|
+            const proxy_target_v: Value = if (obj_in.getProxyTarget()) |t|
                 heap_mod.taggedObject(t)
-            else if (obj_in.proxy_target_fn) |tfn|
+            else if (obj_in.getProxyTargetFn()) |tfn|
                 heap_mod.taggedFunction(tfn)
             else
                 unreachable;
-            const proxy_target_obj: ?*@import("../object.zig").JSObject = obj_in.proxy_target;
-            const handler = obj_in.proxy_handler orelse return throwTypeError(realm, "Cannot perform 'defineProperty' on a proxy with null handler");
+            const proxy_target_obj: ?*@import("../object.zig").JSObject = obj_in.getProxyTarget();
+            const handler = obj_in.getProxyHandler() orelse return throwTypeError(realm, "Cannot perform 'defineProperty' on a proxy with null handler");
             const trap_v = try intrinsics.getPropertyChain(realm, handler, "defineProperty");
             // §10.5.6 step 5 — IsCallable check. `undefined` /
             // `null` means "no trap; fall through". Anything else
@@ -2068,7 +2068,7 @@ fn objectDefineProperties(realm: *Realm, this_value: Value, args: []const Value)
     // ownPropertyKeysOrdered walks in spec order (integer-indexed
     // ascending, then string-keyed in insertion order); accessor-
     // backed keys are included so their getters fire per step 5.b.ii.
-    const props_is_proxy = props.proxy_target != null or props.proxy_revoked;
+    const props_is_proxy = props.getProxyTarget() != null or props.proxy_revoked;
     const keys = if (try proxyOwnKeysOrNull(realm, props, dps_scope)) |k| k else try ownPropertyKeysOrdered(realm, props, dps_scope);
     defer realm.allocator.free(keys);
     for (keys) |key| {
@@ -2225,15 +2225,15 @@ pub fn objectGetOwnPropertyDescriptor(realm: *Realm, this_value: Value, args: []
     // recurses into target.[[GetOwnProperty]]).
     if (heap_mod.valueAsPlainObject(target)) |obj_chain_root| {
         var cursor = obj_chain_root;
-        while (cursor.proxy_target != null or cursor.proxy_target_fn != null or cursor.proxy_revoked) {
+        while (cursor.is_proxy) {
             if (cursor.proxy_revoked) return throwTypeError(realm, "Cannot perform 'getOwnPropertyDescriptor' on a revoked proxy");
-            const handler = cursor.proxy_handler orelse return throwTypeError(realm, "Cannot perform 'getOwnPropertyDescriptor' on a proxy with null handler");
+            const handler = cursor.getProxyHandler() orelse return throwTypeError(realm, "Cannot perform 'getOwnPropertyDescriptor' on a proxy with null handler");
             // Build a Value for the proxy target — plain-object
             // target lives in `proxy_target`, callable target in
             // `proxy_target_fn`.
-            const target_value: Value = if (cursor.proxy_target) |t|
+            const target_value: Value = if (cursor.getProxyTarget()) |t|
                 heap_mod.taggedObject(t)
-            else if (cursor.proxy_target_fn) |tfn|
+            else if (cursor.getProxyTargetFn()) |tfn|
                 heap_mod.taggedFunction(tfn)
             else
                 unreachable;
@@ -2242,8 +2242,8 @@ pub fn objectGetOwnPropertyDescriptor(realm: *Realm, this_value: Value, args: []
                 // §10.5.5 step 7.a — fall through to target.
                 // [[GetOwnProperty]]. If target itself is a proxy,
                 // loop; otherwise recurse to the non-proxy path.
-                if (cursor.proxy_target) |proxy_target| {
-                    if (proxy_target.proxy_target != null or proxy_target.proxy_target_fn != null or proxy_target.proxy_revoked) {
+                if (cursor.getProxyTarget()) |proxy_target| {
+                    if (proxy_target.is_proxy) {
                         cursor = proxy_target;
                         continue;
                     }
@@ -2287,7 +2287,7 @@ pub fn objectGetOwnPropertyDescriptor(realm: *Realm, this_value: Value, args: []
                 // §10.5.5 step 9-17 — invariants only fire when the
                 // target is a plain object (callable-target invariants
                 // are subsumed by JSFunction's own ordinary [[GetOwnProperty]]).
-                if (cursor.proxy_target) |proxy_target| {
+                if (cursor.getProxyTarget()) |proxy_target| {
                     const target_had = proxy_target.hasOwn(key) or proxy_target.hasAccessor(key);
                     if (result_v.isUndefined()) {
                         // Trap reports "absent". The target's own
@@ -2971,7 +2971,7 @@ fn objectAssign(realm: *Realm, this_value: Value, args: []const Value) NativeErr
             // `ownKeys`-spoofing handler observes the read.
             const v = blk_v: {
                 var cur_get: *JSObject = src;
-                while (cur_get.proxy_target != null or cur_get.proxy_revoked) {
+                while (cur_get.getProxyTarget() != null or cur_get.proxy_revoked) {
                     const proxy_mod = @import("proxy.zig");
                     const r = try proxy_mod.nativeProxyGet(realm, cur_get, key, src_value, null);
                     switch (r) {
@@ -3144,7 +3144,7 @@ fn objectFreeze(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     // observable through the handler traps. Drive SetIntegrityLevel
     // via the public [[X]] methods instead of mutating the proxy's
     // own slots directly.
-    if (obj.proxy_target != null or obj.proxy_revoked) {
+    if (obj.getProxyTarget() != null or obj.proxy_revoked) {
         return setIntegrityLevelViaProxy(realm, arg, obj, true);
     }
     // §10.4.5.4 IntegerIndexedExoticObject [[PreventExtensions]] —
@@ -3294,7 +3294,7 @@ fn objectIsFrozen(realm: *Realm, this_value: Value, args: []const Value) NativeE
         return Value.true_;
     }
     const obj = heap_mod.valueAsPlainObject(arg) orelse return Value.true_; // primitives are frozen
-    if (obj.proxy_target != null or obj.proxy_revoked) {
+    if (obj.getProxyTarget() != null or obj.proxy_revoked) {
         return testIntegrityLevelViaProxy(realm, arg, obj, true);
     }
     if (obj.extensible) return Value.false_;
@@ -3352,7 +3352,7 @@ fn objectSeal(realm: *Realm, this_value: Value, args: []const Value) NativeError
         return arg;
     }
     const obj = heap_mod.valueAsPlainObject(arg) orelse return arg;
-    if (obj.proxy_target != null or obj.proxy_revoked) {
+    if (obj.getProxyTarget() != null or obj.proxy_revoked) {
         return setIntegrityLevelViaProxy(realm, arg, obj, false);
     }
     obj.extensible = false;
@@ -3411,7 +3411,7 @@ fn objectIsSealed(realm: *Realm, this_value: Value, args: []const Value) NativeE
         return Value.true_;
     }
     const obj = heap_mod.valueAsPlainObject(arg) orelse return Value.true_;
-    if (obj.proxy_target != null or obj.proxy_revoked) {
+    if (obj.getProxyTarget() != null or obj.proxy_revoked) {
         return testIntegrityLevelViaProxy(realm, arg, obj, false);
     }
     if (obj.extensible) return Value.false_;
@@ -3465,12 +3465,12 @@ fn hasUnlockedIndexedElements(obj: *JSObject) bool {
 /// it directly; `Object.preventExtensions` throws on `false`).
 pub fn proxyPreventExtensionsBool(realm: *Realm, obj: *JSObject) NativeError!bool {
     if (obj.proxy_revoked) return throwTypeError(realm, "Cannot perform 'preventExtensions' on a revoked proxy");
-    const proxy_target = obj.proxy_target.?;
-    const handler = obj.proxy_handler orelse return throwTypeError(realm, "Cannot perform 'preventExtensions' on a proxy with null handler");
+    const proxy_target = obj.getProxyTarget().?;
+    const handler = obj.getProxyHandler() orelse return throwTypeError(realm, "Cannot perform 'preventExtensions' on a proxy with null handler");
     const trap_v = handler.get("preventExtensions");
     if (trap_v.isUndefined() or trap_v.isNull()) {
         // Trap absent — forward to target.[[PreventExtensions]].
-        if (proxy_target.proxy_target != null or proxy_target.proxy_revoked) {
+        if (proxy_target.getProxyTarget() != null or proxy_target.proxy_revoked) {
             return try proxyPreventExtensionsBool(realm, proxy_target);
         }
         proxy_target.extensible = false;
@@ -3506,7 +3506,7 @@ pub fn objectPreventExtensions(realm: *Realm, this_value: Value, args: []const V
     _ = this_value;
     const arg = argOr(args, 0, Value.undefined_);
     if (heap_mod.valueAsPlainObject(arg)) |obj| {
-        if (obj.proxy_target != null or obj.proxy_revoked) {
+        if (obj.getProxyTarget() != null or obj.proxy_revoked) {
             const ok = try proxyPreventExtensionsBool(realm, obj);
             if (!ok) return throwTypeError(realm, "'preventExtensions' on proxy returned falsy");
             return arg;
@@ -3542,10 +3542,10 @@ pub fn objectIsExtensible(realm: *Realm, this_value: Value, args: []const Value)
     // §10.5.3 Proxy [[IsExtensible]] — trap dispatch with the
     // invariant that the result must match the target's actual
     // extensibility.
-    if (obj.proxy_target != null or obj.proxy_revoked) {
+    if (obj.getProxyTarget() != null or obj.proxy_revoked) {
         if (obj.proxy_revoked) return throwTypeError(realm, "Cannot perform 'isExtensible' on a revoked proxy");
-        const proxy_target = obj.proxy_target.?;
-        const handler = obj.proxy_handler orelse return throwTypeError(realm, "Cannot perform 'isExtensible' on a proxy with null handler");
+        const proxy_target = obj.getProxyTarget().?;
+        const handler = obj.getProxyHandler() orelse return throwTypeError(realm, "Cannot perform 'isExtensible' on a proxy with null handler");
         const trap_v = handler.get("isExtensible");
         // §10.5.3 step 5 — GetMethod: non-callable non-nullish → TypeError.
         if (!trap_v.isUndefined() and !trap_v.isNull()) {
@@ -3753,8 +3753,8 @@ fn propertyKeyForFromEntries(realm: *Realm, k: Value) NativeError!DescKey {
 /// non-callable trap / non-extensible invariant violation.
 pub fn proxySetPrototypeOfBool(realm: *Realm, obj: *JSObject, proto_v: Value) NativeError!bool {
     if (obj.proxy_revoked) return throwTypeError(realm, "Cannot perform 'setPrototypeOf' on a revoked proxy");
-    const proxy_target = obj.proxy_target.?;
-    const handler = obj.proxy_handler orelse return throwTypeError(realm, "Cannot perform 'setPrototypeOf' on a proxy with null handler");
+    const proxy_target = obj.getProxyTarget().?;
+    const handler = obj.getProxyHandler() orelse return throwTypeError(realm, "Cannot perform 'setPrototypeOf' on a proxy with null handler");
     // §7.3.11 GetMethod — uses [[Get]] which fires accessors. A
     // handler installed with `Object.defineProperty(h, "trapName",
     // {get})` must run that getter (which may throw).
@@ -3762,7 +3762,7 @@ pub fn proxySetPrototypeOfBool(realm: *Realm, obj: *JSObject, proto_v: Value) Na
     // §10.5.2 step 6 — GetMethod: undefined/null falls through.
     if (trap_v.isUndefined() or trap_v.isNull()) {
         // Recurse on the target as if [[SetPrototypeOf]] called directly.
-        if (proxy_target.proxy_target != null or proxy_target.proxy_revoked) {
+        if (proxy_target.getProxyTarget() != null or proxy_target.proxy_revoked) {
             return try proxySetPrototypeOfBool(realm, proxy_target, proto_v);
         }
         const inner_args = [_]Value{ heap_mod.taggedObject(proxy_target), proto_v };
@@ -3813,7 +3813,7 @@ pub fn objectSetPrototypeOf(realm: *Realm, this_value: Value, args: []const Valu
     }
     if (heap_mod.valueAsPlainObject(target_v)) |obj| {
         // §10.5.2 Proxy [[SetPrototypeOf]] — trap dispatch.
-        if (obj.proxy_target != null or obj.proxy_revoked) {
+        if (obj.getProxyTarget() != null or obj.proxy_revoked) {
             const ok = try proxySetPrototypeOfBool(realm, obj, proto_v);
             if (!ok) return throwTypeError(realm, "'setPrototypeOf' on proxy returned falsy");
             return target_v;
@@ -4058,7 +4058,7 @@ fn objectHasOwnProperty(realm: *Realm, this_value: Value, args: []const Value) N
         // in `proxy_target_fn`, not `proxy_target`, so include it —
         // otherwise `hasOwnProperty` on a callable proxy skips the
         // trap and reads the (empty) wrapper object directly.
-        if (obj.proxy_target != null or obj.proxy_target_fn != null or obj.proxy_revoked) {
+        if (obj.is_proxy) {
             const probe_args = [_]Value{ this_value, argOr(args, 0, Value.undefined_) };
             const desc_v = try objectGetOwnPropertyDescriptor(realm, Value.undefined_, &probe_args);
             return Value.fromBool(!desc_v.isUndefined());
@@ -4099,7 +4099,7 @@ fn objectProtoPropertyIsEnumerable(realm: *Realm, this_value: Value, args: []con
         // and returns the descriptor (or undefined). Reuse the
         // already-spec-faithful entry point. Include `proxy_target_fn`
         // so a callable proxy routes through the trap too.
-        if (obj.proxy_target != null or obj.proxy_target_fn != null or obj.proxy_revoked) {
+        if (obj.is_proxy) {
             const probe_args = [_]Value{ this_value, argOr(args, 0, Value.undefined_) };
             const desc_v = try objectGetOwnPropertyDescriptor(realm, Value.undefined_, &probe_args);
             if (desc_v.isUndefined()) return Value.false_;
@@ -4246,7 +4246,7 @@ pub fn objectProtoToString(realm: *Realm, this_value: Value, args: []const Value
             // slot: the matcher is lazy and engine-specific (Perlex
             // vs libregexp), so keying off it misclassifies regexes
             // the native engine owns.
-            if (obj.regexp_source != null) break :blk "RegExp";
+            if (obj.getRegexpSource() != null) break :blk "RegExp";
             if (obj.getArrayBuffer() != null) break :blk "Object"; // ArrayBuffer uses @@toStringTag
             if (obj.getBoxedPrimitive()) |bp| {
                 if (bp.isBool()) break :blk "Boolean";
@@ -4433,7 +4433,7 @@ fn isArrayWithProxyUnwrap(realm: *Realm, obj: *JSObject) NativeError!bool {
         if (cur.proxy_revoked) {
             return throwTypeError(realm, "Cannot perform 'IsArray' on a proxy that has been revoked");
         }
-        if (cur.proxy_target) |t| {
+        if (cur.getProxyTarget()) |t| {
             cur = t;
             continue;
         }
@@ -4472,11 +4472,11 @@ fn lookupToStringTag(realm: *Realm, this_value: Value) NativeError!?Value {
             if (cur.proxy_revoked) {
                 return throwTypeError(realm, "Cannot perform '[[Get]]' on a proxy that has been revoked");
             }
-            if (cur.proxy_target) |t| {
+            if (cur.getProxyTarget()) |t| {
                 cur = t;
                 continue;
             }
-            if (cur.proxy_target_fn) |fn_target| {
+            if (cur.getProxyTargetFn()) |fn_target| {
                 const v = fn_target.get("@@toStringTag");
                 if (v.isString()) return v;
                 return null;

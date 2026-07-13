@@ -1368,10 +1368,10 @@ pub fn getPropertyChain(realm: *Realm, obj: *JSObject, key: []const u8) NativeEr
     // saw `length === undefined` because the proxy has no own
     // `length` and the trapless fall-through never reached the
     // wrapped array.
-    if (obj.proxy_target != null or obj.proxy_revoked) {
+    if (obj.getProxyTarget() != null or obj.proxy_revoked) {
         const proxy_mod = @import("builtins/proxy.zig");
         var cur_proxy = obj;
-        while (cur_proxy.proxy_target != null or cur_proxy.proxy_revoked) {
+        while (cur_proxy.getProxyTarget() != null or cur_proxy.proxy_revoked) {
             const r = try proxy_mod.nativeProxyGet(realm, cur_proxy, key, heap_mod.taggedObject(obj), null);
             switch (r) {
                 .value => |v| return v,
@@ -1513,7 +1513,7 @@ pub fn tryCreateListFromArrayLikeFast(
 ) NativeError!bool {
     const o = heap_mod.valueAsPlainObject(args_v) orelse return false;
     // §10.5.5 — any Proxy layer must fire per-index get traps.
-    if (o.proxy_target != null or o.proxy_target_fn != null or o.proxy_revoked) return false;
+    if (o.is_proxy) return false;
     const start_len = out.items.len;
     if (o.is_array_exotic) {
         // Sparse (dictionary-mode) arrays keep hole/proto semantics
@@ -2128,7 +2128,7 @@ pub fn toPrimitive(realm: *Realm, value: Value, hint: ToPrimitiveHint) NativeErr
     // aliases derived from it) is reachable through nothing but this
     // native local, so under allocation pressure a sweep would reclaim
     // the receiver mid-coercion and the next slot read
-    // (`obj.proxy_target`, `fn_obj.get`) would hit freed memory.
+    // (`obj.getProxyTarget()`, `fn_obj.get`) would hit freed memory.
     const recv_scope = realm.heap.openScope() catch return error.OutOfMemory;
     defer recv_scope.close();
     recv_scope.push(value) catch return error.OutOfMemory;

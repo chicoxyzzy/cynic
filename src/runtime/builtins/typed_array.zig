@@ -1937,7 +1937,7 @@ fn taSourceGet(realm: *Realm, src: *JSObject, key: []const u8) NativeError!Value
     const proxy_mod = @import("proxy.zig");
     var cur = src;
     while (true) {
-        if (cur.proxy_target != null or cur.proxy_revoked) {
+        if (cur.getProxyTarget() != null or cur.proxy_revoked) {
             const outcome = try proxy_mod.nativeProxyGet(realm, cur, key, heap_mod.taggedObject(src), null);
             switch (outcome) {
                 .value => |v| return v,

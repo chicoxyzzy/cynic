@@ -251,11 +251,11 @@ fn appendExoticObject(
 ) FormatError!bool {
     // RegExp — `/source/flags`, read straight off the original-source
     // / original-flags slots (§22.2.4).
-    if (obj.regexp_source) |src| {
+    if (obj.getRegexpSource()) |src| {
         try buf.append(allocator, '/');
         try buf.appendSlice(allocator, src.flatBytes());
         try buf.append(allocator, '/');
-        if (obj.regexp_flags) |fl| try buf.appendSlice(allocator, fl.flatBytes());
+        if (obj.getRegexpFlags()) |fl| try buf.appendSlice(allocator, fl.flatBytes());
         return true;
     }
 

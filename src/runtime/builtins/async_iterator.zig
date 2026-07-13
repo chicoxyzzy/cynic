@@ -90,12 +90,11 @@ fn afsiNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!V
     // typed `iter_record` slot — shared with the `iter_step`
     // destructuring path, off the property bag, so wrapping a
     // user sync iterator leaves no observable own property.
-    const rec: *@import("../object.zig").IterRecord = sync_iter_obj.iter_record orelse blk: {
+    const rec: *@import("../object.zig").IterRecord = sync_iter_obj.getIterRecord() orelse blk: {
         const r = realm.allocator.create(@import("../object.zig").IterRecord) catch return error.OutOfMemory;
         r.* = .{};
-        sync_iter_obj.iter_record = r;
-        sync_iter_obj.markNonPristine();
-        sync_iter_obj.noteInternalSlotWrite(); // card-mark: holder may be a mature user object
+        // card-mark: holder may be a mature user object
+        sync_iter_obj.setIterRecord(realm.allocator, r) catch return error.OutOfMemory;
         break :blk r;
     };
     const next_v = if (rec.next_cached) rec.next else nv: {

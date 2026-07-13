@@ -46,7 +46,7 @@ fn jsonIsArrayValue(realm: *Realm, v: Value) NativeError!bool {
         if (cur_obj.proxy_revoked) {
             return throwTypeError(realm, "Cannot perform 'IsArray' on a proxy that has been revoked");
         }
-        if (cur_obj.proxy_target) |t| {
+        if (cur_obj.getProxyTarget()) |t| {
             cur_obj = t;
             continue;
         }
@@ -61,7 +61,7 @@ fn jsonIsArrayValue(realm: *Realm, v: Value) NativeError!bool {
 fn jsonGetValue(realm: *Realm, value: Value, key: []const u8) NativeError!Value {
     const obj = heap_mod.valueAsPlainObject(value) orelse return Value.undefined_;
     var cur = obj;
-    while (cur.proxy_target != null or cur.proxy_revoked) {
+    while (cur.getProxyTarget() != null or cur.proxy_revoked) {
         const outcome = try proxy_mod.nativeProxyGet(realm, cur, key, heap_mod.taggedObject(obj), null);
         switch (outcome) {
             .value => |v| return v,
@@ -764,7 +764,7 @@ fn serializeJSONObject(
     // hashmap probes, while preserving §7.3.23 snapshot + §25.5.2.4
     // live-read observability.
     if (state.property_list == null and
-        obj.proxy_target == null and !obj.proxy_revoked and
+        obj.getProxyTarget() == null and !obj.proxy_revoked and
         !obj.is_array_exotic and obj.getTypedView() == null and
         obj.properties.count() == 0 and obj.accessorCount() == 0)
     {
@@ -819,7 +819,7 @@ fn serializeJSONObject(
             // to be enumerated (the value-object-proxy fixture
             // covers this — its trap returns
             // `{enumerable: true}` for every probe anyway).
-            if (obj.proxy_target == null and !obj.proxy_revoked) {
+            if (obj.getProxyTarget() == null and !obj.proxy_revoked) {
                 if (!obj.flagsFor(key).enumerable) continue;
             }
         }
@@ -908,7 +908,7 @@ fn serializeJSONArray(
         // the index through ToString → Get → canonicalNumericIndex per
         // element. A hole / absent slot yields `null`, so the spec
         // `Get` (with its prototype walk) still runs for those.
-        const prefetched: ?Value = if (obj.proxy_target == null and !obj.proxy_revoked)
+        const prefetched: ?Value = if (obj.getProxyTarget() == null and !obj.proxy_revoked)
             obj.tryGetIndexedOwn(@intCast(i))
         else
             null;
@@ -1333,7 +1333,7 @@ fn jsonIsArray(realm: *Realm, v: Value) NativeError!bool {
         if (cur_obj.proxy_revoked) {
             return throwTypeError(realm, "Cannot perform 'IsArray' on a proxy that has been revoked");
         }
-        if (cur_obj.proxy_target) |t| {
+        if (cur_obj.getProxyTarget()) |t| {
             cur_obj = t;
             continue;
         }
@@ -1348,7 +1348,7 @@ fn jsonIsArray(realm: *Realm, v: Value) NativeError!bool {
 /// objects) at the end of the chain.
 fn jsonGet(realm: *Realm, obj: *JSObject, key: []const u8) NativeError!Value {
     var cur = obj;
-    while (cur.proxy_target != null or cur.proxy_revoked) {
+    while (cur.getProxyTarget() != null or cur.proxy_revoked) {
         const outcome = try proxy_mod.nativeProxyGet(realm, cur, key, heap_mod.taggedObject(obj), null);
         switch (outcome) {
             .value => |v| return v,
@@ -1368,7 +1368,7 @@ fn jsonGet(realm: *Realm, obj: *JSObject, key: []const u8) NativeError!Value {
 /// §25.5.1.1 step 2.b.iii.2.a / 2.c.ii.2.a).
 fn jsonDelete(realm: *Realm, obj: *JSObject, key: []const u8) NativeError!bool {
     var cur = obj;
-    while (cur.proxy_target != null or cur.proxy_revoked) {
+    while (cur.getProxyTarget() != null or cur.proxy_revoked) {
         const r = try proxy_mod.nativeProxyDelete(realm, cur, key, null);
         switch (r) {
             .boolean => |b| return b,
@@ -1407,7 +1407,7 @@ fn jsonCreateDataProperty(realm: *Realm, obj: *JSObject, key: []const u8, value:
     // catching the "trap returned falsy" TypeError and turning
     // it into a `false` result so we silently no-op (the spec
     // for CreateDataProperty discards the boolean here).
-    if (obj.proxy_target != null or obj.proxy_revoked) {
+    if (obj.getProxyTarget() != null or obj.proxy_revoked) {
         const desc = realm.heap.allocateObject() catch return error.OutOfMemory;
         realm.heap.setObjectPrototype(desc, realm.intrinsics.object_prototype);
         desc.set(realm.allocator, "value", value) catch return error.OutOfMemory;

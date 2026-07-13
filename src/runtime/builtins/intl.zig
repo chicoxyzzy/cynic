@@ -266,7 +266,7 @@ pub fn canonicalizeLocaleList(realm: *Realm, locales: Value) NativeError![]const
 fn hasPropertyP(realm: *Realm, obj: *JSObject, key: []const u8) NativeError!bool {
     const proxy_mod = @import("proxy.zig");
     var cur = obj;
-    while (cur.proxy_target != null or cur.proxy_revoked) {
+    while (cur.getProxyTarget() != null or cur.proxy_revoked) {
         switch (try proxy_mod.nativeProxyHas(realm, cur, key, null)) {
             .boolean => |b| return b,
             .fallthrough => |t| {

@@ -328,9 +328,8 @@ fn wrapIterator(realm: *Realm, source: Value) NativeError!Value {
     realm.heap.setObjectPrototype(wrap, proto);
     const state = realm.allocator.create(IteratorHelperState) catch return error.OutOfMemory;
     state.* = .{ .source = source, .next_fn = cached_next_v };
-    wrap.iter_helper = state;
-    wrap.markNonPristine();
-    wrap.noteInternalSlotWrite(); // card-mark: iter_helper state holds young source/next_fn
+    // card-mark: iter_helper state holds young source/next_fn
+    try wrap.setIterHelper(realm.allocator, state);
     return heap_mod.taggedObject(wrap);
 }
 
@@ -341,7 +340,7 @@ fn wrappedReturn(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     _ = args;
     // Step 2 — RequireInternalSlot(O, [[Iterated]]).
     const obj = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "WrapForValidIteratorPrototype.return called on non-object");
-    const state = obj.iter_helper orelse return throwTypeError(realm, "WrapForValidIteratorPrototype.return called on incompatible receiver");
+    const state = obj.getIterHelper() orelse return throwTypeError(realm, "WrapForValidIteratorPrototype.return called on incompatible receiver");
     const source = state.source;
     const src_obj = heap_mod.valueAsPlainObject(source) orelse return throwTypeError(realm, "wrapped iterator is not an object");
     // Step 5 — GetMethod(iterator, "return").
@@ -373,7 +372,7 @@ fn wrappedReturn(realm: *Realm, this_value: Value, args: []const Value) NativeEr
 fn wrappedNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const obj = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "Iterator next on non-object");
-    const state = obj.iter_helper orelse return throwTypeError(realm, "Iterator next on non-helper object");
+    const state = obj.getIterHelper() orelse return throwTypeError(realm, "Iterator next on non-helper object");
     const next_fn = try cachedNextFn(realm, obj, state.source);
     return invokeIterNextFn(realm, state.source, next_fn);
 }
@@ -435,7 +434,7 @@ fn snapshotNext(realm: *Realm, source: Value) NativeError!*JSFunction {
 /// slot is missing entirely (e.g. terminal helper called on a
 /// raw user iterator), snapshot now.
 fn cachedNextFn(realm: *Realm, wrapper: *JSObject, source: Value) NativeError!*JSFunction {
-    if (wrapper.iter_helper) |state| {
+    if (wrapper.getIterHelper()) |state| {
         if (!state.next_fn.isUndefined()) {
             return heap_mod.valueAsFunction(state.next_fn) orelse return throwTypeError(realm, "iterator has no callable next");
         }
@@ -455,7 +454,7 @@ fn cachedNextFn(realm: *Realm, wrapper: *JSObject, source: Value) NativeError!*J
 /// the spec mandates.
 fn iterGet(realm: *Realm, recv: Value, key: []const u8) NativeError!Value {
     const obj = heap_mod.valueAsPlainObject(recv) orelse return Value.undefined_;
-    if (obj.proxy_target != null or obj.proxy_revoked) {
+    if (obj.getProxyTarget() != null or obj.proxy_revoked) {
         const proxy_mod = @import("proxy.zig");
         var cur = obj;
         while (true) {
@@ -464,7 +463,7 @@ fn iterGet(realm: *Realm, recv: Value, key: []const u8) NativeError!Value {
                 .value => |v| return v,
                 .fallthrough => |t| {
                     if (t == cur) return Value.undefined_;
-                    if (t.proxy_target != null or t.proxy_revoked) {
+                    if (t.getProxyTarget() != null or t.proxy_revoked) {
                         cur = t;
                         continue;
                     }
@@ -695,9 +694,8 @@ fn iteratorFlatMap(realm: *Realm, this_value: Value, args: []const Value) Native
         .payload = cb_v,
         .kind = .flat_map,
     };
-    wrap.iter_helper = state;
-    wrap.markNonPristine();
-    wrap.noteInternalSlotWrite(); // card-mark: iter_helper state holds young source/next_fn
+    // card-mark: iter_helper state holds young source/next_fn
+    try wrap.setIterHelper(realm.allocator, state);
     return heap_mod.taggedObject(wrap);
 }
 
@@ -709,7 +707,7 @@ fn iteratorFlatMap(realm: *Realm, this_value: Value, args: []const Value) Native
 fn flatMapReturn(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const obj = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "Iterator return on non-object");
-    const state = obj.iter_helper orelse return iterResult(realm, Value.undefined_, true);
+    const state = obj.getIterHelper() orelse return iterResult(realm, Value.undefined_, true);
     if (state.done) {
         return iterResult(realm, Value.undefined_, true);
     }
@@ -730,7 +728,7 @@ fn flatMapReturn(realm: *Realm, this_value: Value, args: []const Value) NativeEr
 fn flatMapNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const obj = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "flatMap iter on non-object");
-    const state = obj.iter_helper orelse return doneResult(realm);
+    const state = obj.getIterHelper() orelse return doneResult(realm);
     try checkNotRunning(realm, state);
     if (state.done) return doneResult(realm);
     state.running = true;
@@ -921,9 +919,8 @@ fn buildLazy(realm: *Realm, source: Value, payload: Value, kind: IteratorHelperS
         .payload = payload,
         .kind = kind,
     };
-    wrap.iter_helper = state;
-    wrap.markNonPristine();
-    wrap.noteInternalSlotWrite(); // card-mark: iter_helper state holds young source/next_fn
+    // card-mark: iter_helper state holds young source/next_fn
+    try wrap.setIterHelper(realm.allocator, state);
     return heap_mod.taggedObject(wrap);
 }
 
@@ -934,7 +931,7 @@ fn buildLazy(realm: *Realm, source: Value, payload: Value, kind: IteratorHelperS
 fn lazyReturn(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const obj = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "Iterator return on non-object");
-    const state = obj.iter_helper orelse return iterResult(realm, Value.undefined_, true);
+    const state = obj.getIterHelper() orelse return iterResult(realm, Value.undefined_, true);
     if (state.done) {
         return iterResult(realm, Value.undefined_, true);
     }
@@ -949,7 +946,7 @@ fn lazyReturn(realm: *Realm, this_value: Value, args: []const Value) NativeError
 fn iteratorHelperNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const obj = heap_mod.valueAsPlainObject(this_value) orelse
         return throwTypeError(realm, "Iterator Helper.prototype.next called on non-object");
-    const state = obj.iter_helper orelse
+    const state = obj.getIterHelper() orelse
         return throwTypeError(realm, "Iterator Helper.prototype.next called on incompatible receiver");
     return switch (state.kind) {
         .map => mapNext(realm, this_value, args),
@@ -967,7 +964,7 @@ fn iteratorHelperNext(realm: *Realm, this_value: Value, args: []const Value) Nat
 fn iteratorHelperReturn(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const obj = heap_mod.valueAsPlainObject(this_value) orelse
         return throwTypeError(realm, "Iterator Helper.prototype.return called on non-object");
-    const state = obj.iter_helper orelse
+    const state = obj.getIterHelper() orelse
         return throwTypeError(realm, "Iterator Helper.prototype.return called on incompatible receiver");
     return switch (state.kind) {
         .map, .filter, .take, .drop => lazyReturn(realm, this_value, args),
@@ -994,7 +991,7 @@ fn checkNotRunning(realm: *Realm, state: *IteratorHelperState) NativeError!void 
 fn mapNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const obj = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "map iter on non-object");
-    const state = obj.iter_helper orelse return doneResult(realm);
+    const state = obj.getIterHelper() orelse return doneResult(realm);
     try checkNotRunning(realm, state);
     if (state.done) return doneResult(realm);
     state.running = true;
@@ -1051,7 +1048,7 @@ fn mapNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!Va
 fn filterNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const obj = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "filter iter on non-object");
-    const state = obj.iter_helper orelse return doneResult(realm);
+    const state = obj.getIterHelper() orelse return doneResult(realm);
     try checkNotRunning(realm, state);
     if (state.done) return doneResult(realm);
     state.running = true;
@@ -1104,7 +1101,7 @@ fn filterNext(realm: *Realm, this_value: Value, args: []const Value) NativeError
 fn takeNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const obj = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "take iter on non-object");
-    const state = obj.iter_helper orelse return doneResult(realm);
+    const state = obj.getIterHelper() orelse return doneResult(realm);
     try checkNotRunning(realm, state);
     if (state.done) return doneResult(realm);
     state.running = true;
@@ -1150,7 +1147,7 @@ fn takeNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!V
 fn dropNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const obj = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "drop iter on non-object");
-    const state = obj.iter_helper orelse return doneResult(realm);
+    const state = obj.getIterHelper() orelse return doneResult(realm);
     try checkNotRunning(realm, state);
     if (state.done) return doneResult(realm);
     state.running = true;
@@ -1605,7 +1602,7 @@ fn iteratorConcat(realm: *Realm, this_value: Value, args: []const Value) NativeE
     // own properties.
     //
     // Build the wrapper + its state first and wire
-    // `wrap.iter_helper = state` before the validation loop. The
+    // `wrap.setIterHelper(state)` before the validation loop. The
     // per-arg `@@iterator` GetMethod re-enters JS and can GC; once a
     // record is appended to `state.concat_inputs` the GC reaches it
     // through wrap → iter_helper, and the rooted `wrap` keeps the
@@ -1618,9 +1615,8 @@ fn iteratorConcat(realm: *Realm, this_value: Value, args: []const Value) NativeE
     realm.heap.setObjectPrototype(wrap, realm.intrinsics.iterator_helper_prototype orelse ctor.prototype);
     const state = realm.allocator.create(IteratorHelperState) catch return error.OutOfMemory;
     state.* = .{ .count = @intCast(args.len), .kind = .concat };
-    wrap.iter_helper = state;
-    wrap.markNonPristine();
-    wrap.noteInternalSlotWrite(); // card-mark: iter_helper state holds young source/next_fn
+    // card-mark: iter_helper state holds young source/next_fn
+    try wrap.setIterHelper(realm.allocator, state);
     const scope = realm.heap.openScope() catch return error.OutOfMemory;
     defer scope.close();
     scope.push(heap_mod.taggedObject(wrap)) catch return error.OutOfMemory;
@@ -1656,7 +1652,7 @@ fn iteratorConcat(realm: *Realm, this_value: Value, args: []const Value) NativeE
 fn concatReturn(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const obj = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "Iterator return on non-object");
-    const state = obj.iter_helper orelse return iterResult(realm, Value.undefined_, true);
+    const state = obj.getIterHelper() orelse return iterResult(realm, Value.undefined_, true);
     // §27.1.2.1.2 %IteratorHelperPrototype%.return → GeneratorResumeAbrupt
     // → GeneratorValidate step 6: if the generator is already executing,
     // throw TypeError. The inner iterator's `return()` may re-enter the
@@ -1682,7 +1678,7 @@ fn concatReturn(realm: *Realm, this_value: Value, args: []const Value) NativeErr
 fn concatNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const obj = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "concat iter on non-object");
-    const state = obj.iter_helper orelse return doneResult(realm);
+    const state = obj.getIterHelper() orelse return doneResult(realm);
     try checkNotRunning(realm, state);
     if (state.done) return doneResult(realm);
     state.running = true;
@@ -1957,9 +1953,8 @@ fn buildZipWrapper(
         .keyed = keys != null,
         .kind = .zip,
     };
-    wrap.iter_helper = state;
-    wrap.markNonPristine();
-    wrap.noteInternalSlotWrite(); // card-mark: iter_helper state holds young source/next_fn
+    // card-mark: iter_helper state holds young source/next_fn
+    try wrap.setIterHelper(realm.allocator, state);
     scope.push(heap_mod.taggedObject(wrap)) catch return error.OutOfMemory;
 
     // Per-input state — the sub-iterator, its §7.4.2
@@ -2116,7 +2111,7 @@ fn zipReturn(realm: *Realm, this_value: Value, args: []const Value) NativeError!
     //                  nested return() observes executing state
     //                  and throws TypeError per §27.5.1.4
     //                  GeneratorValidate step 6.
-    const state = obj.iter_helper orelse return iterResult(realm, Value.undefined_, true);
+    const state = obj.getIterHelper() orelse return iterResult(realm, Value.undefined_, true);
     const started = state.started;
     if (started) try checkNotRunning(realm, state);
     if (state.done) {
@@ -2173,7 +2168,7 @@ fn stepZipIter(realm: *Realm, state: *IteratorHelperState, i: i32) NativeError!V
 fn zipNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const obj = heap_mod.valueAsPlainObject(this_value) orelse return throwTypeError(realm, "zip iter on non-object");
-    const state = obj.iter_helper orelse return doneResult(realm);
+    const state = obj.getIterHelper() orelse return doneResult(realm);
     try checkNotRunning(realm, state);
     if (state.done) return doneResult(realm);
     // §27.5.1 — once next() has been entered, the helper transitions

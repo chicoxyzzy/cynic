@@ -867,7 +867,7 @@ fn functionToString(realm: *Realm, this_value: Value, args: []const Value) Nativ
             // `proxy_target_fn` implies the same; a plain object
             // target with no callability does NOT make the proxy
             // callable and `Function.prototype.toString` must throw.
-            if (obj.proxy_target_fn != null or obj.proxy_callable) {
+            if (obj.getProxyTargetFn() != null or obj.proxy_callable) {
                 receiver_is_proxy = true;
             }
         }

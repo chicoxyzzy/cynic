@@ -153,9 +153,8 @@ fn makeMapIterator(realm: *Realm, src: Value, kind: ObjMod.MapSetIterState.Kind)
     realm.heap.setObjectPrototype(it, realm.intrinsics.map_iterator_prototype orelse realm.intrinsics.object_prototype);
     const st = try realm.allocator.create(ObjMod.MapSetIterState);
     st.* = .{ .brand = .map, .source = src, .kind = kind };
-    it.map_set_iter = st;
-    it.markNonPristine();
-    it.noteInternalSlotWrite(); // card-mark: map_set_iter holds young source
+    // card-mark: map_set_iter holds young source
+    try it.setMapSetIter(realm.allocator, st);
     return heap_mod.taggedObject(it);
 }
 
@@ -225,7 +224,7 @@ fn arrayIteratorProtoNext(realm: *Realm, this_value: Value, args: []const Value)
     _ = args;
     const it = heap_mod.valueAsPlainObject(this_value) orelse
         return throwTypeError(realm, "Array Iterator method called on incompatible receiver");
-    const state = it.array_like_iter orelse
+    const state = it.getArrayLikeIter() orelse
         return throwTypeError(realm, "Array Iterator method called on incompatible receiver");
     switch (arrayLikeIterStep(realm, this_value)) {
         .step => |s| {
@@ -261,7 +260,7 @@ fn arrayIteratorProtoNext(realm: *Realm, this_value: Value, args: []const Value)
 /// a result-pair object.
 pub fn arrayIterStepFast(realm: *Realm, this_value: Value) NativeError!?Value {
     const it = heap_mod.valueAsPlainObject(this_value).?;
-    const state = it.array_like_iter.?;
+    const state = it.getArrayLikeIter().?;
     switch (arrayLikeIterStep(realm, this_value)) {
         .step => |s| return switch (state.kind) {
             .values => s.value,
@@ -312,7 +311,7 @@ fn stringIteratorProtoNext(realm: *Realm, this_value: Value, args: []const Value
     _ = args;
     const it = heap_mod.valueAsPlainObject(this_value) orelse
         return throwTypeError(realm, "%StringIteratorPrototype%.next called on non-object");
-    if (it.array_like_iter == null)
+    if (it.getArrayLikeIter() == null)
         return throwTypeError(realm, "%StringIteratorPrototype%.next called on incompatible receiver");
     switch (arrayLikeIterStep(realm, this_value)) {
         .step => |s| return iterResult(realm, s.value, false) catch return error.OutOfMemory,
@@ -343,9 +342,8 @@ fn makeArrayLikeIterator(realm: *Realm, src: Value, kind: enum { entries, keys, 
             .values => ArrayLikeIterState.Kind.values,
         },
     };
-    it.array_like_iter = state;
-    it.markNonPristine();
-    it.noteInternalSlotWrite(); // card-mark: array_like_iter holds young target
+    // card-mark: array_like_iter holds young target
+    try it.setArrayLikeIter(realm.allocator, state);
     // `next` lives on the prototype (see ensureArrayIteratorPrototype);
     // `@@iterator` similarly inherits from %IteratorPrototype% so
     // no own slots need to be wired here.
@@ -499,7 +497,7 @@ const StepOutcome = union(enum) {
 
 fn arrayLikeIterStep(realm: *Realm, this_value: Value) StepOutcome {
     const it = heap_mod.valueAsPlainObject(this_value) orelse return .done;
-    const state = it.array_like_iter orelse return .done;
+    const state = it.getArrayLikeIter() orelse return .done;
     if (state.done) return .done;
     const target = state.target;
     const idx: i32 = @intCast(state.idx);
@@ -695,7 +693,7 @@ fn mapIterNext(realm: *Realm, this_value: Value, args: []const Value) NativeErro
     _ = args;
     const it = heap_mod.valueAsPlainObject(this_value) orelse
         return throwTypeError(realm, "MapIteratorPrototype.next called on non-object");
-    const st = it.map_set_iter orelse
+    const st = it.getMapSetIter() orelse
         return throwTypeError(realm, "MapIteratorPrototype.next called on incompatible receiver");
     if (st.brand != .map)
         return throwTypeError(realm, "MapIteratorPrototype.next called on incompatible receiver");
@@ -1599,9 +1597,8 @@ fn makeSetIterator(realm: *Realm, src: Value, kind: ObjMod.MapSetIterState.Kind)
     realm.heap.setObjectPrototype(it, realm.intrinsics.set_iterator_prototype orelse realm.intrinsics.object_prototype);
     const st = try realm.allocator.create(ObjMod.MapSetIterState);
     st.* = .{ .brand = .set, .source = src, .kind = kind };
-    it.map_set_iter = st;
-    it.markNonPristine();
-    it.noteInternalSlotWrite(); // card-mark: map_set_iter holds young source
+    // card-mark: map_set_iter holds young source
+    try it.setMapSetIter(realm.allocator, st);
     return heap_mod.taggedObject(it);
 }
 
@@ -1640,7 +1637,7 @@ fn setIterNext(realm: *Realm, this_value: Value, args: []const Value) NativeErro
     _ = args;
     const it = heap_mod.valueAsPlainObject(this_value) orelse
         return throwTypeError(realm, "SetIteratorPrototype.next called on non-object");
-    const st = it.map_set_iter orelse
+    const st = it.getMapSetIter() orelse
         return throwTypeError(realm, "SetIteratorPrototype.next called on incompatible receiver");
     if (st.brand != .set)
         return throwTypeError(realm, "SetIteratorPrototype.next called on incompatible receiver");

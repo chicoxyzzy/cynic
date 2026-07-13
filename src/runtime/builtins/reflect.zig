@@ -70,7 +70,7 @@ fn reflectPreventExtensions(realm: *Realm, this_value: Value, args: []const Valu
         // Functions: no proxy path, no extensible bit modelled today.
         return Value.fromBool(true);
     };
-    if (obj.proxy_target != null or obj.proxy_revoked) {
+    if (obj.getProxyTarget() != null or obj.proxy_revoked) {
         const obj_mod = @import("object.zig");
         const ok = try obj_mod.proxyPreventExtensionsBool(realm, obj);
         return Value.fromBool(ok);
@@ -153,7 +153,7 @@ fn reflectHas(realm: *Realm, this_value: Value, args: []const Value) NativeError
     const key_slice = try toPropertyKeySpec(realm, key_v);
     if (heap_mod.valueAsPlainObject(arg)) |maybe_proxy| {
         var cur = maybe_proxy;
-        while (cur.proxy_target != null or cur.proxy_revoked) {
+        while (cur.getProxyTarget() != null or cur.proxy_revoked) {
             const r = try proxy_mod.nativeProxyHas(realm, cur, key_slice, key_v);
             switch (r) {
                 .boolean => |b| return Value.fromBool(b),
@@ -226,9 +226,9 @@ fn hasPropertyProxyAware(realm: *Realm, root: *JSObject, key: []const u8) Native
         // §10.1.7.1 step 4-5 — parent = [[GetPrototypeOf]]; if a
         // Proxy, dispatch its `has` trap before descending.
         const parent = c.prototype orelse return false;
-        if (parent.proxy_target != null or parent.proxy_revoked) {
+        if (parent.getProxyTarget() != null or parent.proxy_revoked) {
             var p = parent;
-            while (p.proxy_target != null or p.proxy_revoked) {
+            while (p.getProxyTarget() != null or p.proxy_revoked) {
                 const r = try proxy_mod.nativeProxyHas(realm, p, key, null);
                 switch (r) {
                     .boolean => |b| return b,
@@ -292,7 +292,7 @@ fn reflectGet(realm: *Realm, this_value: Value, args: []const Value) NativeError
     const target = heap_mod.valueAsPlainObject(arg) orelse return throwTypeError(realm, "Reflect.get target must be an object");
     // §10.5.5 Proxy [[Get]] dispatch.
     var proxy_cur = target;
-    while (proxy_cur.proxy_target != null or proxy_cur.proxy_revoked) {
+    while (proxy_cur.getProxyTarget() != null or proxy_cur.proxy_revoked) {
         const r = try proxy_mod.nativeProxyGet(realm, proxy_cur, key_slice, receiver, key_v);
         switch (r) {
             .value => |v| return v,
@@ -381,20 +381,20 @@ fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError
     // built-ins/Proxy/set/trap-is-{null,undefined}-target-is-proxy.js.
     {
         var proxy_cur = target;
-        while (proxy_cur.proxy_target != null or proxy_cur.proxy_target_fn != null or proxy_cur.proxy_revoked) {
+        while (proxy_cur.is_proxy) {
             // Callable Proxy of a function: §10.5.9 fires `set` if
             // present, otherwise `target.[[Set]]` against the wrapped
             // function. The function leg short-circuits through
             // `setIfWritable` per §10.1.9 OrdinarySet. Handled here
             // because `nativeProxySet` only knows the plain-object
             // target shape (`proxy_target`).
-            if (proxy_cur.proxy_target == null and proxy_cur.proxy_target_fn != null and !proxy_cur.proxy_revoked) {
-                const handler = proxy_cur.proxy_handler orelse return throwTypeError(realm, "proxy handler slot is null");
+            if (proxy_cur.getProxyTarget() == null and proxy_cur.getProxyTargetFn() != null and !proxy_cur.proxy_revoked) {
+                const handler = proxy_cur.getProxyHandler() orelse return throwTypeError(realm, "proxy handler slot is null");
                 const trap_v = handler.get("set");
                 if (!trap_v.isUndefined() and !trap_v.isNull()) {
                     const trap_fn = heap_mod.valueAsFunction(trap_v) orelse return throwTypeError(realm, "Proxy 'set' trap is not callable");
                     const key_str = realm.heap.allocateString(key_slice) catch return error.OutOfMemory;
-                    const trap_args = [_]Value{ heap_mod.taggedFunction(proxy_cur.proxy_target_fn.?), Value.fromString(key_str), v, receiver_v };
+                    const trap_args = [_]Value{ heap_mod.taggedFunction(proxy_cur.getProxyTargetFn().?), Value.fromString(key_str), v, receiver_v };
                     const interp = @import("../lantern/interpreter.zig");
                     const outcome = interp.callJSFunction(realm.allocator, realm, trap_fn, heap_mod.taggedObject(handler), &trap_args) catch |err| switch (err) {
                         error.OutOfMemory => return error.OutOfMemory,
@@ -417,7 +417,7 @@ fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError
                 // semantics still target Receiver, but no fixture in
                 // our scope exercises that asymmetry on a function
                 // through a callable-proxy chain.
-                const fn_target = proxy_cur.proxy_target_fn.?;
+                const fn_target = proxy_cur.getProxyTargetFn().?;
                 const owned = realm.heap.allocateString(key_slice) catch return error.OutOfMemory;
                 const ok = fn_target.setIfWritable(realm.allocator, owned.flatBytes(), v) catch return error.OutOfMemory;
                 return Value.fromBool(ok);
@@ -569,19 +569,19 @@ fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError
     // proxy.js's third block).
     var cursor: ?*@import("../object.zig").JSObject = target;
     walk: while (cursor) |o| {
-        if (o != target and (o.proxy_target != null or o.proxy_target_fn != null or o.proxy_revoked)) {
+        if (o != target and (o.is_proxy)) {
             // Walk the proxy chain to either hit a trap (which
             // settles the result) or reach a non-proxy ancestor we
             // can resume the ordinary cursor walk on.
             var proxy_cur = o;
-            while (proxy_cur.proxy_target != null or proxy_cur.proxy_target_fn != null or proxy_cur.proxy_revoked) {
-                if (proxy_cur.proxy_target == null and proxy_cur.proxy_target_fn != null and !proxy_cur.proxy_revoked) {
-                    const handler = proxy_cur.proxy_handler orelse return throwTypeError(realm, "proxy handler slot is null");
+            while (proxy_cur.is_proxy) {
+                if (proxy_cur.getProxyTarget() == null and proxy_cur.getProxyTargetFn() != null and !proxy_cur.proxy_revoked) {
+                    const handler = proxy_cur.getProxyHandler() orelse return throwTypeError(realm, "proxy handler slot is null");
                     const trap_v = handler.get("set");
                     if (!trap_v.isUndefined() and !trap_v.isNull()) {
                         const trap_fn = heap_mod.valueAsFunction(trap_v) orelse return throwTypeError(realm, "Proxy 'set' trap is not callable");
                         const key_str_t = realm.heap.allocateString(key_slice) catch return error.OutOfMemory;
-                        const trap_args = [_]Value{ heap_mod.taggedFunction(proxy_cur.proxy_target_fn.?), Value.fromString(key_str_t), v, receiver_v };
+                        const trap_args = [_]Value{ heap_mod.taggedFunction(proxy_cur.getProxyTargetFn().?), Value.fromString(key_str_t), v, receiver_v };
                         const interp = @import("../lantern/interpreter.zig");
                         const outcome = interp.callJSFunction(realm.allocator, realm, trap_fn, heap_mod.taggedObject(handler), &trap_args) catch |err| switch (err) {
                             error.OutOfMemory => return error.OutOfMemory,
@@ -600,7 +600,7 @@ fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError
                     }
                     // Trap missing on a callable proxy — fall through
                     // to the wrapped function's OrdinarySet.
-                    const fn_target = proxy_cur.proxy_target_fn.?;
+                    const fn_target = proxy_cur.getProxyTargetFn().?;
                     const owned = realm.heap.allocateString(key_slice) catch return error.OutOfMemory;
                     const ok = fn_target.setIfWritable(realm.allocator, owned.flatBytes(), v) catch return error.OutOfMemory;
                     return Value.fromBool(ok);
@@ -684,9 +684,9 @@ fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError
     // chain so a trapless proxy wrapping a preventExtensions'd
     // target reports the rejection correctly (test262
     // built-ins/Proxy/set/trap-is-{null,undefined}-target-is-proxy.js).
-    if (receiver_obj.proxy_target != null or receiver_obj.proxy_revoked) {
+    if (receiver_obj.getProxyTarget() != null or receiver_obj.proxy_revoked) {
         var proxy_cur = receiver_obj;
-        while (proxy_cur.proxy_target != null or proxy_cur.proxy_revoked) {
+        while (proxy_cur.getProxyTarget() != null or proxy_cur.proxy_revoked) {
             // §10.1.9.2 step 3.b — `existingDescriptor =
             // ? Receiver.[[GetOwnProperty]](P)`. When Receiver is a
             // Proxy this MUST fire its `getOwnPropertyDescriptor`
@@ -858,7 +858,7 @@ fn reflectDeleteProperty(realm: *Realm, this_value: Value, args: []const Value) 
     // [[Delete]] the trapless outer proxy ultimately invokes
     // (§10.5.10 step 7.a).
     var target = target_outer;
-    while (target.proxy_target != null or target.proxy_revoked) {
+    while (target.getProxyTarget() != null or target.proxy_revoked) {
         const r = try proxy_mod.nativeProxyDelete(realm, target, key_slice, key_v);
         switch (r) {
             .boolean => |b| return Value.fromBool(b),
@@ -989,7 +989,7 @@ fn reflectSetPrototypeOf(realm: *Realm, this_value: Value, args: []const Value) 
     }
     // §10.5.2 Proxy [[SetPrototypeOf]] — dispatch through the
     // handler trap if target is a proxy. Reflect returns the boolean.
-    if (target.proxy_target != null or target.proxy_revoked) {
+    if (target.getProxyTarget() != null or target.proxy_revoked) {
         const obj_mod = @import("object.zig");
         const ok = try obj_mod.proxySetPrototypeOfBool(realm, target, proto_v);
         return Value.fromBool(ok);
@@ -1037,7 +1037,7 @@ fn reflectIsExtensible(realm: *Realm, this_value: Value, args: []const Value) Na
     if (heap_mod.valueAsPlainObject(target_v)) |target| {
         // §10.5.3 Proxy [[IsExtensible]] — dispatch via the shared
         // Object.isExtensible path (handles trap + invariant).
-        if (target.proxy_target != null or target.proxy_revoked) {
+        if (target.getProxyTarget() != null or target.proxy_revoked) {
             const obj_mod = @import("object.zig");
             return obj_mod.objectIsExtensible(realm, this_value, args);
         }
@@ -1058,7 +1058,7 @@ fn reflectApply(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     // Allow callable Proxy (apply-trap dispatch via callValue).
     if (heap_mod.valueAsFunction(target_v) == null) {
         const po = heap_mod.valueAsPlainObject(target_v) orelse return throwTypeError(realm, "Reflect.apply target must be callable");
-        if (po.proxy_target_fn == null and po.proxy_target == null and !po.proxy_revoked) {
+        if (po.getProxyTargetFn() == null and po.getProxyTarget() == null and !po.proxy_revoked) {
             return throwTypeError(realm, "Reflect.apply target must be callable");
         }
     }
@@ -1120,8 +1120,8 @@ fn proxyChainTargetFn(obj: *JSObject) ?*JSFunction {
     var cur: *JSObject = obj;
     var guard: usize = 0;
     while (guard < 100_000) : (guard += 1) {
-        if (cur.proxy_target_fn) |f| return f;
-        if (cur.proxy_target) |t| {
+        if (cur.getProxyTargetFn()) |f| return f;
+        if (cur.getProxyTarget()) |t| {
             cur = t;
             continue;
         }
@@ -1165,7 +1165,7 @@ fn reflectConstruct(realm: *Realm, this_value: Value, args: []const Value) Nativ
     // dispatch the trap. Missing trap walks down the proxy chain
     // until we reach a real constructor.
     if (heap_mod.valueAsPlainObject(target_v)) |po| {
-        if (po.proxy_target_fn != null or po.proxy_target != null or po.proxy_revoked) {
+        if (po.is_proxy) {
             const newt: Value = if (new_target_v.isUndefined()) target_v else new_target_v;
             const outcome = lantern.constructValue(realm.allocator, realm, target_v, ctor_args.items, newt) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
