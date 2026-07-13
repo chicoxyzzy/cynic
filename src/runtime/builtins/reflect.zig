@@ -1076,7 +1076,11 @@ fn reflectApply(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     // dispatches); inherited / proxy-trapped lengths participate.
     var apply_args: std.ArrayListUnmanaged(Value) = .empty;
     defer apply_args.deinit(realm.allocator);
-    if (try intrinsics.getPropertyChainOnValue(realm, args_v, "length")) |len_v| {
+    if (try intrinsics.tryCreateListFromArrayLikeFast(realm, args_v, &apply_args)) {
+        // §7.3.18 fast path — dense array / unmapped arguments object
+        // whose reads are all pure own-data hits; bails to the
+        // generic loop below before anything observable.
+    } else if (try intrinsics.getPropertyChainOnValue(realm, args_v, "length")) |len_v| {
         const len_i = try intrinsics.toLengthValue(realm, len_v);
         const len = try clampArrayLength(len_i);
         var i: i64 = 0;

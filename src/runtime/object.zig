@@ -2427,6 +2427,63 @@ pub const JSObject = struct {
         }
     }
 
+    /// Decimal property keys for small integer indices ("0".."99"),
+    /// interned in static storage at comptime. Hot per-index stores
+    /// (the §10.4.4 arguments-object indices) key off these instead
+    /// of a freshly heap-allocated JSString — no allocation, and no
+    /// GC anchor needed because static bytes can never be swept.
+    const small_index_key_count = 100;
+    const small_index_keys: [small_index_key_count][]const u8 = blk: {
+        // One comptimePrint per key runs the full std formatter at
+        // comptime; 100 of them exceeds the default 1000-branch
+        // evaluation quota.
+        @setEvalBranchQuota(100_000);
+        var keys: [small_index_key_count][]const u8 = undefined;
+        for (0..small_index_key_count) |i| {
+            keys[i] = std.fmt.comptimePrint("{d}", .{i});
+        }
+        break :blk keys;
+    };
+
+    /// The interned decimal key for `i`, or `null` past the interned
+    /// range (callers fall back to an owned heap key).
+    pub fn smallIndexKey(i: usize) ?[]const u8 {
+        if (i < small_index_key_count) return small_index_keys[i];
+        return null;
+    }
+
+    /// `setComputedOwned` for a key backed by STATIC storage (the
+    /// interned `smallIndexKey` strings): the same `shadowSet` +
+    /// `recordKey` route with the same pristine / write-barrier
+    /// bookkeeping, minus the JSString anchoring — a static key can
+    /// never be swept, so neither `own_key_order` nor the bag can end
+    /// up borrowing freed bytes.
+    pub fn setStaticKeyOwned(
+        self: *JSObject,
+        allocator: std.mem.Allocator,
+        key: []const u8,
+        v: Value,
+    ) !void {
+        // §10.4.2 Array exotic — integer-indexed writes land in
+        // `elements`, same as `setComputedOwned`.
+        if (self.is_array_exotic) {
+            if (canonicalIntegerIndex(key)) |idx| {
+                return self.setIndexed(allocator, idx, v);
+            }
+        }
+        const absorbed = try self.shadowSet(allocator, key, v, PropertyFlags.default);
+        const newly_ordered = try self.recordKey(allocator, key);
+        if (absorbed) {
+            if (newly_ordered) self.markNonPristine();
+            return;
+        }
+        const gop = try self.properties.getOrPut(allocator, key);
+        gop.value_ptr.* = v;
+        self.markNonPristine();
+        // Generational write barrier — mirrors `setComputedOwned`.
+        if (self.heap) |h| h.writeBarrier(.{ .object = self }, v);
+    }
+
     /// Read the (possibly defaulted) descriptor flags for
     /// `key`. Returns `PropertyFlags.default` (all-true) when no
     /// override is recorded. Phase 3 of

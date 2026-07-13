@@ -8164,13 +8164,22 @@ pub fn runFrames(
             obj.is_arguments_exotic = true;
             var i: u32 = 0;
             while (i < f.argc) : (i += 1) {
-                var ibuf: [16]u8 = undefined;
-                const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
-                const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
-                // The index key is a freshly heap-allocated JSString;
-                // anchor it on the object so a GC sweep can't free the
-                // key slice out from under `arguments[i]` lookups.
-                realm.heap.storePropertyComputedOwned(obj, allocator, owned, registers[i]) catch return error.OutOfMemory;
+                // §10.4.4.7 step 3 — CreateDataProperty per index.
+                // Small indices key off the comptime-interned decimal
+                // strings: no per-call JSString allocation and no GC
+                // anchor (static bytes can never be swept). Wide calls
+                // fall back to an owned, anchored heap key.
+                if (JSObject.smallIndexKey(i)) |key| {
+                    realm.heap.storePropertyStaticKey(obj, allocator, key, registers[i]) catch return error.OutOfMemory;
+                } else {
+                    var ibuf: [16]u8 = undefined;
+                    const islice = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch unreachable;
+                    const owned = realm.heap.allocateString(islice) catch return error.OutOfMemory;
+                    // The index key is a freshly heap-allocated JSString;
+                    // anchor it on the object so a GC sweep can't free the
+                    // key slice out from under `arguments[i]` lookups.
+                    realm.heap.storePropertyComputedOwned(obj, allocator, owned, registers[i]) catch return error.OutOfMemory;
+                }
             }
             // §10.4.4.6 step 8 — `length` is `{ writable: true,
             // enumerable: false, configurable: true }`. Default

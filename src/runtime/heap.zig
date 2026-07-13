@@ -4416,6 +4416,21 @@ pub const Heap = struct {
         try obj.setComputedOwned(allocator, key_str, v);
     }
 
+    /// Store `v` under a key backed by STATIC storage (the interned
+    /// `JSObject.smallIndexKey` strings) — `setComputedOwned` minus
+    /// the JSString anchor, since static bytes can never be swept.
+    /// Stage 0: pass-through.
+    pub fn storePropertyStaticKey(
+        self: *Heap,
+        obj: *JSObject,
+        allocator: std.mem.Allocator,
+        key: []const u8,
+        v: Value,
+    ) !void {
+        self.writeBarrier(.{ .object = obj }, v);
+        try obj.setStaticKeyOwned(allocator, key, v);
+    }
+
     /// Store `v` into a function-object property `key`, honouring
     /// §10.2 writability (`JSFunction.setIfWritable`). Stage 0:
     /// pass-through.

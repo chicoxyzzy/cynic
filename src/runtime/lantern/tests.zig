@@ -15869,3 +15869,132 @@ test "metering: installing an interrupt hook disables JIT tier-up (v1)" {
     realm.clearInterruptHook();
     try testing.expect(!realm.jit_enabled);
 }
+
+// ── §7.3.18 CreateListFromArrayLike behavior guards ──────────────────
+// `Function.prototype.apply` (§20.2.3.1) and `Reflect.apply` (§28.1.1)
+// build their argument list via §7.3.18. These pin the observable read
+// sequence the dense argument-list fast path must preserve: own
+// accessors fire before indexed storage, holes and deleted indices
+// delegate to the prototype chain, `length` coerces exactly once, and
+// index mutation on the arguments object stays visible.
+
+test "apply: dense array argument list" {
+    try expectScriptStringWithBuiltins(
+        \\function f(a, b, c) { return a + "|" + b + "|" + c; }
+        \\f.apply(null, [1, "x", true]);
+    , "1|x|true");
+}
+
+test "apply: fewer args than params pads with undefined" {
+    try expectScriptStringWithBuiltins(
+        \\function f(a, b) { return a + "|" + b; }
+        \\f.apply(null, [1]);
+    , "1|undefined");
+}
+
+test "apply: arguments object passthrough sees index mutation" {
+    try expectScriptStringWithBuiltins(
+        \\function g(a, b) { return a + "-" + b; }
+        \\function h() { arguments[0] = 9; return g.apply(null, arguments); }
+        \\h(1, 2);
+    , "9-2");
+}
+
+test "apply: array hole reads inherited element from Array.prototype" {
+    // §10.4.2.1 step 2 — a hole delegates the read up the chain.
+    try expectScriptStringUnhardened(
+        \\Array.prototype[1] = "inherited";
+        \\function f(a, b) { return a + "|" + b; }
+        \\var arr = [7, ,];
+        \\f.apply(null, arr);
+    , "7|inherited");
+}
+
+test "apply: deleted arguments index reads through Object.prototype" {
+    try expectScriptStringUnhardened(
+        \\Object.prototype[0] = "proto0";
+        \\function g(a) { return String(a); }
+        \\function h() { delete arguments[0]; return g.apply(null, arguments); }
+        \\h("own");
+    , "proto0");
+}
+
+test "apply: accessor at array index fires instead of element" {
+    try expectScriptStringWithBuiltins(
+        \\var order = [];
+        \\var arr = [1, 2];
+        \\Object.defineProperty(arr, "1", { get: function () { order.push("g1"); return 99; } });
+        \\function f(a, b) { return a + "|" + b; }
+        \\f.apply(null, arr) + "&" + order.join(",");
+    , "1|99&g1");
+}
+
+test "apply: array-like object fires length getter then index getters" {
+    try expectScriptStringWithBuiltins(
+        \\var log = [];
+        \\var o = {
+        \\  get length() { log.push("len"); return 2; },
+        \\  get 0() { log.push("i0"); return "a"; },
+        \\  1: "b"
+        \\};
+        \\function f(a, b) { return "" + a + b; }
+        \\f.apply(null, o) + "&" + log.join(",");
+    , "ab&len,i0");
+}
+
+test "apply: array-like length valueOf coerces exactly once" {
+    try expectScriptStringWithBuiltins(
+        \\var called = 0;
+        \\var o = { 0: "x", length: { valueOf: function () { called++; return 1; } } };
+        \\function f(a) { return String(a); }
+        \\f.apply(null, o) + "&" + called;
+    , "x&1");
+}
+
+test "apply: frozen dense array" {
+    try expectScriptStringWithBuiltins(
+        \\var fr = Object.freeze([4, 5]);
+        \\function f(a, b) { return "" + a + b; }
+        \\f.apply(null, fr);
+    , "45");
+}
+
+test "Reflect.apply: dense array argument list" {
+    try expectScriptStringWithBuiltins(
+        \\String(Reflect.apply(Math.max, null, [3, 1, 2]));
+    , "3");
+}
+
+test "arguments: index descriptor and key order preserved" {
+    // §10.4.4.7 step 3 — indices are CreateDataProperty installs:
+    // {writable, enumerable, configurable} all true, ordinal order.
+    try expectScriptStringWithBuiltins(
+        \\function h(a, b) {
+        \\  var d = Object.getOwnPropertyDescriptor(arguments, "0");
+        \\  return Object.keys(arguments).join(",") + "&" + d.writable + d.enumerable + d.configurable;
+        \\}
+        \\h(5, 6);
+    , "0,1&truetruetrue");
+}
+
+test "arguments: write, has, delete cycle on an index" {
+    try expectScriptStringWithBuiltins(
+        \\function h(a) {
+        \\  arguments[0] = 42;
+        \\  var had = "0" in arguments;
+        \\  delete arguments[0];
+        \\  return "" + had + ("0" in arguments);
+        \\}
+        \\h(1);
+    , "truefalse");
+}
+
+test "arguments: wide call keeps indices past the interned-key range" {
+    try expectScriptStringWithBuiltins(
+        \\var big = new Array(105);
+        \\for (var i = 0; i < 105; i++) big[i] = 0;
+        \\big[103] = "x";
+        \\function h() { return arguments[103] + "&" + arguments.length; }
+        \\h.apply(null, big);
+    , "x&105");
+}

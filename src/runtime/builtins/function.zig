@@ -375,6 +375,10 @@ fn functionApply(realm: *Realm, this_value: Value, args: []const Value) NativeEr
         const arg_array = args[1];
         if (arg_array.isUndefined() or arg_array.isNull()) {
             // No extra args.
+        } else if (try intrinsics.tryCreateListFromArrayLikeFast(realm, arg_array, &apply_args)) {
+            // §7.3.18 fast path — dense array / unmapped arguments
+            // object whose reads are all pure own-data hits; bails
+            // to the generic loop below before anything observable.
         } else if (try intrinsics.getPropertyChainOnValue(realm, arg_array, "length")) |len_v| {
             // §20.2.3.1 step 4 → §7.3.18 CreateListFromArrayLike:
             // both `Get(O, "length")` and `Get(O, ! ToString(i))`

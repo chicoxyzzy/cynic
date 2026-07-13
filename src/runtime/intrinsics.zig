@@ -1484,6 +1484,85 @@ pub fn getPropertyChainOnValue(realm: *Realm, value: Value, key: []const u8) Nat
     return null;
 }
 
+/// §7.3.18 CreateListFromArrayLike — pure-probe fast path for the two
+/// hot argument-array shapes: a dense Array exotic and the strict-mode
+/// unmapped arguments object (§10.4.4). Fills `out` and returns true
+/// only when every read is a side-effect-free own-data hit: no
+/// accessor can fire (own accessors are consulted before indexed
+/// storage — see `getPropertyChain`), no Proxy trap, no
+/// prototype-chain read (a hole / deleted index delegates up the
+/// chain per §10.4.2.1 step 2), and no user-observable coercion
+/// (`length` must already be a Number — §7.1.20 ToLength on an object
+/// re-enters user code). Returns false with `out` untouched
+/// otherwise; the caller runs the generic per-index Get loop. The
+/// probe itself never calls JS, so falling back after a partial probe
+/// is unobservable.
+pub fn tryCreateListFromArrayLikeFast(
+    realm: *Realm,
+    args_v: Value,
+    out: *std.ArrayListUnmanaged(Value),
+) NativeError!bool {
+    const o = heap_mod.valueAsPlainObject(args_v) orelse return false;
+    // §10.5.5 — any Proxy layer must fire per-index get traps.
+    if (o.proxy_target != null or o.proxy_target_fn != null or o.proxy_revoked) return false;
+    const start_len = out.items.len;
+    if (o.is_array_exotic) {
+        // Sparse (dictionary-mode) arrays keep hole/proto semantics
+        // in the generic path; dense holes bail below.
+        if (o.is_sparse) return false;
+        // Any own accessor could shadow an index (or `length` cannot
+        // — it is virtual on an array exotic — but index accessors
+        // installed via defineProperty live in the accessor map and
+        // fire before `elements`).
+        if (o.accessorCount() != 0) return false;
+        const len = o.elements.items.len; // dense: mirrors the §23.1.4 virtual length
+        // Over the harness iteration cap the generic path raises the
+        // error; let it.
+        if (len > @as(usize, @intCast(max_iter_length))) return false;
+        try out.ensureUnusedCapacity(realm.allocator, len);
+        for (o.elements.items) |v| {
+            if (v.isHole()) {
+                // §10.4.2.1 step 2 — a hole delegates the read up the
+                // prototype chain; that walk is observable.
+                out.shrinkRetainingCapacity(start_len);
+                return false;
+            }
+            out.appendAssumeCapacity(v);
+        }
+        return true;
+    }
+    if (o.is_arguments_exotic) {
+        // Exactly the built-in `callee` accessor (§10.4.4.7 step 5)
+        // may exist; any other own accessor — a user defineProperty
+        // on an index or on `length` — must fire via the generic
+        // path.
+        if (o.accessorCount() != 1 or o.getAccessor("callee") == null) return false;
+        const len_v = o.ownDataLookup("length") orelse return false;
+        if (!len_v.isNumber()) return false;
+        const len_i = toLengthValue(realm, len_v) catch return false;
+        const len = clampArrayLength(len_i) catch return false;
+        try out.ensureUnusedCapacity(realm.allocator, @intCast(len));
+        var i: usize = 0;
+        while (i < len) : (i += 1) {
+            const key = JSObject.smallIndexKey(i) orelse {
+                // Past the interned-key range — rare wide call; the
+                // generic loop handles it.
+                out.shrinkRetainingCapacity(start_len);
+                return false;
+            };
+            const v = o.ownDataLookup(key) orelse {
+                // Deleted index — the read delegates up the prototype
+                // chain (observable); let the generic path do it.
+                out.shrinkRetainingCapacity(start_len);
+                return false;
+            };
+            out.appendAssumeCapacity(v);
+        }
+        return true;
+    }
+    return false;
+}
+
 /// Spec §7.1.20 ToLength on the receiver's `length` property.
 /// Uses `getPropertyChain` so accessor `length` getters fire,
 /// and `Object.defineProperty(obj, "length", {get: …})` style
