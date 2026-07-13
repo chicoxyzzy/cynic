@@ -2541,8 +2541,8 @@ fn createDataPropertyOrThrowGeneric(realm: *Realm, obj: *JSObject, key_str: *JSS
         // again rather than leaving the bag-promoted descriptor.
         // Demote first — the shadow shape can't encode a removal.
         try cur.demoteFromShape(realm.allocator);
-        _ = cur.properties.swapRemove(key);
-        _ = cur.property_flags.swapRemove(key);
+        if (cur.dictStore()) |d| _ = d.properties.swapRemove(key);
+        if (cur.dictStore()) |d| _ = d.property_flags.swapRemove(key);
     }
     // Generational write barrier — `setWithFlags` is a raw setter
     // (bypasses the routed `heap.storeProperty` / `storeIndexed`),

@@ -394,8 +394,8 @@ pub fn buildClass(
             // is at its slot while `properties` no longer has it
             // (`verifyShapeInvariant` panics under GC stress).
             try gp.demoteFromShape(realm.allocator);
-            _ = gp.properties.swapRemove("constructor");
-            _ = gp.property_flags.swapRemove("constructor");
+            if (gp.dictStore()) |d| _ = d.properties.swapRemove("constructor");
+            if (gp.dictStore()) |d| _ = d.property_flags.swapRemove("constructor");
             const interp_mod = @import("lantern/interpreter.zig");
             realm.heap.setObjectPrototype(gp, if (m.is_async)
                 interp_mod.ensureAsyncGeneratorPrototype(realm) catch realm.intrinsics.object_prototype
@@ -473,7 +473,7 @@ pub fn buildClass(
                 const entry = try proto.getOrPutAccessor(realm.allocator, runtime_name);
                 if (!entry.found_existing) entry.value_ptr.* = .{};
                 realm.heap.setAccessorGetter(.{ .object = proto }, entry.value_ptr, fn_obj);
-                try proto.property_flags.put(realm.allocator, runtime_name, .{
+                try (try proto.flagsMut(realm.allocator)).put(realm.allocator, runtime_name, .{
                     .writable = false,
                     .enumerable = false,
                     .configurable = true,
@@ -483,7 +483,7 @@ pub fn buildClass(
                 const entry = try proto.getOrPutAccessor(realm.allocator, runtime_name);
                 if (!entry.found_existing) entry.value_ptr.* = .{};
                 realm.heap.setAccessorSetter(.{ .object = proto }, entry.value_ptr, fn_obj);
-                try proto.property_flags.put(realm.allocator, runtime_name, .{
+                try (try proto.flagsMut(realm.allocator)).put(realm.allocator, runtime_name, .{
                     .writable = false,
                     .enumerable = false,
                     .configurable = true,
@@ -584,8 +584,8 @@ pub fn buildClass(
             // the inherited chain. Demote first (shadow shape can't
             // encode removals — see the matching site above).
             try gp.demoteFromShape(realm.allocator);
-            _ = gp.properties.swapRemove("constructor");
-            _ = gp.property_flags.swapRemove("constructor");
+            if (gp.dictStore()) |d| _ = d.properties.swapRemove("constructor");
+            if (gp.dictStore()) |d| _ = d.property_flags.swapRemove("constructor");
             const interp_mod = @import("lantern/interpreter.zig");
             realm.heap.setObjectPrototype(gp, if (m.is_async)
                 interp_mod.ensureAsyncGeneratorPrototype(realm) catch realm.intrinsics.object_prototype

@@ -346,7 +346,7 @@ pub fn truncateArrayAtLength(allocator: std.mem.Allocator, obj: *JSObject, targe
         var buf: [16]u8 = undefined;
         for (promoted.items) |idx| {
             const key = std.fmt.bufPrint(&buf, "{d}", .{idx}) catch continue;
-            const flags = obj.property_flags.get(key) orelse PropertyFlags.default;
+            const flags = obj.flagsConst().get(key) orelse PropertyFlags.default;
             if (!flags.configurable) {
                 floor = idx + 1;
                 break;
@@ -361,9 +361,9 @@ pub fn truncateArrayAtLength(allocator: std.mem.Allocator, obj: *JSObject, targe
             // don't corrupt. Caller's `final_length` still
             // matches what the caller asked for.
             obj.demoteFromShape(allocator) catch {};
-            _ = obj.properties.swapRemove(key);
+            if (obj.dictStore()) |d| _ = d.properties.swapRemove(key);
             _ = obj.removeAccessor(key);
-            _ = obj.property_flags.swapRemove(key);
+            if (obj.dictStore()) |d| _ = d.property_flags.swapRemove(key);
         }
         const final_len = floor orelse target_len;
         _ = obj.truncateIndexed(allocator, final_len) catch return .{ .final_length = final_len, .blocked = floor != null };
@@ -388,7 +388,7 @@ pub fn truncateArrayAtLength(allocator: std.mem.Allocator, obj: *JSObject, targe
     var buf: [16]u8 = undefined;
     for (indices.items) |idx| {
         const key = std.fmt.bufPrint(&buf, "{d}", .{idx}) catch continue;
-        if (obj.property_flags.get(key)) |flags| {
+        if (obj.flagsConst().get(key)) |flags| {
             if (!flags.configurable) {
                 return .{ .final_length = idx + 1, .blocked = true };
             }
@@ -398,8 +398,8 @@ pub fn truncateArrayAtLength(allocator: std.mem.Allocator, obj: *JSObject, targe
         // post-swap behaviour stays consistent with the spec
         // (delete succeeds, caller sees the configured length).
         obj.demoteFromShape(allocator) catch {};
-        _ = obj.properties.swapRemove(key);
-        _ = obj.property_flags.swapRemove(key);
+        if (obj.dictStore()) |d| _ = d.properties.swapRemove(key);
+        if (obj.dictStore()) |d| _ = d.property_flags.swapRemove(key);
     }
     return .{ .final_length = target_len, .blocked = false };
 }

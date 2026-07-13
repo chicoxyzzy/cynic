@@ -25,7 +25,7 @@
 //!   - Recursion uses the Zig stack; pathological depth would
 //!     overflow. Real-world capability graphs are shallow.
 //!   - Array-exotic indexed slots (§10.4.2) live in
-//!     `obj.elements`, not `obj.properties`, so the bag-only
+//!     `obj.elements`, not `obj.propsConst()`, so the bag-only
 //!     walk below misses them. The root array becomes non-
 //!     extensible and the *values* at each slot freeze
 //!     transitively (good), but `a[0] = …` doesn't throw on
@@ -157,7 +157,7 @@ pub fn hardenWalk(realm: *Realm, v: Value, visited: *std.AutoHashMap(usize, void
             while (it.next()) |e| {
                 const k = e.key_ptr.*;
                 const cur = obj.flagsFor(k);
-                obj.property_flags.put(realm.allocator, k, .{
+                (obj.flagsMut(realm.allocator) catch return error.OutOfMemory).put(realm.allocator, k, .{
                     .writable = false,
                     .enumerable = cur.enumerable,
                     .configurable = false,
@@ -177,7 +177,7 @@ pub fn hardenWalk(realm: *Realm, v: Value, visited: *std.AutoHashMap(usize, void
             while (ait_pre.next()) |e| {
                 const k = e.key_ptr.*;
                 const cur = obj.flagsFor(k);
-                obj.property_flags.put(realm.allocator, k, .{
+                (obj.flagsMut(realm.allocator) catch return error.OutOfMemory).put(realm.allocator, k, .{
                     .writable = false, // N/A on accessors; spec says omitted.
                     .enumerable = cur.enumerable,
                     .configurable = false,

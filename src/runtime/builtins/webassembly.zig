@@ -159,7 +159,7 @@ pub fn install(realm: *Realm) !void {
         const setter = try intrinsics.makeNativeFunction(realm, globalValueSet, 1, "set value");
         const entry = try global_ctor.proto.getOrPutAccessor(realm.allocator, "value");
         entry.value_ptr.* = .{ .getter = getter, .setter = setter };
-        try global_ctor.proto.property_flags.put(realm.allocator, "value", .{
+        try (try global_ctor.proto.flagsMut(realm.allocator)).put(realm.allocator, "value", .{
             .writable = false,
             .enumerable = false,
             .configurable = true,
@@ -182,7 +182,7 @@ pub fn install(realm: *Realm) !void {
         const getter = try intrinsics.makeNativeFunction(realm, tableLength, 0, "get length");
         const entry = try table_ctor.proto.getOrPutAccessor(realm.allocator, "length");
         entry.value_ptr.* = .{ .getter = getter, .setter = null };
-        try table_ctor.proto.property_flags.put(realm.allocator, "length", .{
+        try (try table_ctor.proto.flagsMut(realm.allocator)).put(realm.allocator, "length", .{
             .writable = false,
             .enumerable = false,
             .configurable = true,
@@ -203,7 +203,7 @@ pub fn install(realm: *Realm) !void {
         const getter = try intrinsics.makeNativeFunction(realm, memoryBufferGet, 0, "get buffer");
         const entry = try memory_ctor.proto.getOrPutAccessor(realm.allocator, "buffer");
         entry.value_ptr.* = .{ .getter = getter, .setter = null };
-        try memory_ctor.proto.property_flags.put(realm.allocator, "buffer", .{
+        try (try memory_ctor.proto.flagsMut(realm.allocator)).put(realm.allocator, "buffer", .{
             .writable = false,
             .enumerable = false,
             .configurable = true,

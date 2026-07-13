@@ -327,7 +327,7 @@ pub fn install(realm: *Realm) !void {
     // §19.3 globalThis — allocate the global object up front and
     // promote `realm.globals` to a live view over its properties.
     // Every subsequent `realm.globals.put(...)` lands directly on
-    // `gt.properties`, so `globalThis.X` and bare-identifier
+    // `gt.propsConst()`, so `globalThis.X` and bare-identifier
     // lookups stay in lockstep without a snapshot rebuild.
     const gt = try realm.heap.allocateObject();
     realm.heap.setObjectPrototype(gt, obj_proto);
@@ -422,14 +422,14 @@ pub fn install(realm: *Realm) !void {
         if (realm.intrinsics.function_prototype) |fn_proto| {
             const a_entry = fn_proto.getOrPutAccessor(realm.allocator, "arguments") catch return error.OutOfMemory;
             a_entry.value_ptr.* = .{ .getter = t, .setter = t };
-            try fn_proto.property_flags.put(realm.allocator, "arguments", .{
+            try (try fn_proto.flagsMut(realm.allocator)).put(realm.allocator, "arguments", .{
                 .writable = false,
                 .enumerable = false,
                 .configurable = true,
             });
             const c_entry = fn_proto.getOrPutAccessor(realm.allocator, "caller") catch return error.OutOfMemory;
             c_entry.value_ptr.* = .{ .getter = t, .setter = t };
-            try fn_proto.property_flags.put(realm.allocator, "caller", .{
+            try (try fn_proto.flagsMut(realm.allocator)).put(realm.allocator, "caller", .{
                 .writable = false,
                 .enumerable = false,
                 .configurable = true,
@@ -709,7 +709,7 @@ pub fn install(realm: *Realm) !void {
     // No catch-up pass needed — `realm.globals` is a live view
     // over the globalThis object's `properties`. Every binding
     // installed above (Map/Set/Date/Promise/__drainMicrotasks/…)
-    // already lives on `gt.properties`, so `globalThis.X` reads
+    // already lives on `gt.propsConst()`, so `globalThis.X` reads
     // hit them directly.
 }
 
@@ -881,7 +881,7 @@ fn installSyntheticAccessorPair(
     // install MUST demote first or the IC's shape lookup would
     // still serve the removed slot's stale value.
     try proto.demoteFromShape(realm.allocator);
-    _ = proto.properties.swapRemove(key);
+    if (proto.dictStore()) |d| _ = d.properties.swapRemove(key);
     const entry = try proto.getOrPutAccessor(realm.allocator, key);
     entry.value_ptr.* = .{ .getter = get_fn, .setter = set_fn };
     // Accessor descriptor — `writable` is ignored, `configurable`
@@ -889,7 +889,7 @@ fn installSyntheticAccessorPair(
     // slot; preserving non-configurable matches the spec's
     // observable shape and prevents the SES posture from being
     // unwound by `Object.defineProperty`).
-    try proto.property_flags.put(realm.allocator, key, .{
+    try (try proto.flagsMut(realm.allocator)).put(realm.allocator, key, .{
         .writable = false,
         .enumerable = enumerable,
         .configurable = false,
@@ -1141,7 +1141,7 @@ pub fn installNativeGetter(realm: *Realm, proto: *JSObject, name: []const u8, ge
     entry.value_ptr.* = .{ .getter = getter };
     // §17 — built-in accessor properties are { enumerable: false,
     // configurable: true }. `writable` is N/A on accessor descriptors.
-    try proto.property_flags.put(realm.allocator, name, .{
+    try (try proto.flagsMut(realm.allocator)).put(realm.allocator, name, .{
         .writable = false,
         .enumerable = false,
         .configurable = true,
@@ -1216,8 +1216,8 @@ pub fn objectFromThis(this_value: Value) ?*JSObject {
 /// `null` / `undefined`.
 ///
 /// The wrapper carries the primitive value:
-/// • String → `wrapper.properties["length"] = bytes.len`,
-/// wrapper.properties["0"], …, ["len-1"] = single-char
+/// • String → `wrapper.propsConst()["length"] = bytes.len`,
+/// wrapper.propsConst()["0"], …, ["len-1"] = single-char
 /// JSStrings. Lazy materialisation isn't worth it; the
 /// iteration paths read every index anyway.
 /// • Number / Boolean → no observable own properties; the

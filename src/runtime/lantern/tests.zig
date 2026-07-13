@@ -1780,7 +1780,7 @@ test "later: harden on Array reaches nested values but not indexed slots (known 
     //   `a.push(3)`     throws (root is non-extensible). ✓
     //   `a[0] = 9`      **does NOT throw** — the indexed slot
     //                   itself lives in `obj.elements`, not
-    //                   `obj.properties`, so harden's bag-only
+    //                   `obj.propsConst()`, so harden's bag-only
     //                   walk doesn't reach it. Object.freeze
     //                   handles this via `lowerArrayIndexedFlags`
     //                   which demotes each indexed slot into the
@@ -8825,7 +8825,7 @@ test "GC: computed-key class method survives gc_threshold=1" {
     // prototype to the mature generation mid-build. The subsequent
     // `proto.setWithFlags(method)` then forms a mature→young edge to
     // the freshly-allocated method JSFunction. The minor cycle walks
-    // only the remembered set (never `proto.properties`), so without
+    // only the remembered set (never `proto.propsConst()`), so without
     // a post-store write barrier the next sweep freed the young
     // method and `C.prototype.m1` read back "undefined". The
     // non-computed baseline above stays green because its proto never
@@ -11117,7 +11117,7 @@ test "globalThis: late-installed host binding is visible via globalThis.X" {
 test "globalThis: bare-identifier read sees a late-installed host binding" {
     // Sibling to the test above — the bare-identifier
     // (`lda_global`) path resolves against `realm.globals`, which
-    // is the same storage as `gt.properties`. A regression that
+    // is the same storage as `gt.propsConst()`. A regression that
     // forks the two would surface here too.
     var realm = Realm.init(testing.allocator);
     defer realm.deinit();

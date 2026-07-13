@@ -136,6 +136,64 @@ across the built-ins + language trees, ~45 k fixtures) and the
 needs the out-of-line property/element redesign (Step 1); Stage A is the
 self-contained down payment.
 
+### Stage B — the two remaining moves, split by a bright line (the JIT)
+
+Stage A moved the *cold* clusters (fields null on a plain object). The rest
+of the header is the *storage* fields — empty on a shape-mode object but
+still resident: `properties`/`property_flags` (40 B each), `own_key_order`
+(24 B), `elements` (24 B), `sparse_elements`+`is_sparse`+`sparse_length`
+(~28 B), `inline_slots[4]` (32 B), `overflow_slots` (24 B), `shape` (8 B).
+A survey of the property/element substrate splits these into two moves along
+one hard constraint: **Bistromath (the JIT) bakes header offsets into
+emitted machine code.**
+
+**B1 — the dict-mode representation (JIT-safe, object-layout lane). SHIPPED.**
+`properties`, `property_flags`, and `own_key_order` are the *dictionary*
+representation. They are empty on every shape-mode object (splay's `Node`s,
+all plain literals — a shaped object stores values in `inline_slots`, never
+the bag), and the JIT deopts to the interpreter for dict-mode objects and
+**never reads these fields**. So they moved into a lazily-allocated
+`DictStore` reached by one pointer (`dict_store`), allocated only on
+`demoteFromShape` / first bag write, read through `propsConst`/`propsMut`
+(and the flags/order pair). Shape-mode objects never allocate it, so the
+`is_pristine` fast-death and the shape/IC hot path are undisturbed — the
+same pattern as the `extension` sidecar. The global object is the one
+always-dict-backed exception: `GlobalBindings.bindToObject` eager-allocates
+its store so the allocator-free `map()` accessor stays valid.
+**Result: header 296 → 200 B (−96 B; 408 → 200 overall, −51%); measured
+same-laptop, `splay` peak RSS 303 → 229.5 MB (−73.5 MB, matching 768K ×
+96 B).** test262 byte-identical (0 regressions across the built-ins +
+language trees, ~45 k fixtures); test-fast + `--gc-threshold=1` verifiers
+green (no panic / poison / pristine violation). The gates held identically
+to Stage A: both GC markers (`markValue`'s `iterOwnNamedKeys` walk;
+`objectHoldsYoungSymbolKey` / `markSymbolKeys` reach the bag/shape keys),
+`verifyRememberedSet` (the write-barrier `dirty` contract on every bag
+write), `deinitFields`, the pristine assert, and the snapshot comptime
+classification + serialize. The array-sparse state (`sparse_elements` et
+al., array-exotic-only) is a smaller sibling move still to come (B1b).
+
+**B2 — the hot-field / uniform-header move (JIT lane, the actual ~75 MB
+target).** `shape` + `inline_slots` + `overflow_slots` (and `elements`) are
+the shape-mode value storage — the hot path. Moving them out-of-line to
+reach ~90 B is where the 4× RSS outlier actually closes, but it is
+**machine-code-coupled**: `src/runtime/jit/layout.zig` is the single source
+of truth for `object.shape` / `object.inline_slots` /
+`object.overflow_items_ptr` / `inline_slot_cap`, and `emitLoadSlot` /
+`emitStoreSlot` plus four shape-guard emit sites in `bistromath.zig` read
+them raw, guarded by an executable proof test (`layout.zig` "machine loads
+match Zig reads"). B2 must: (1) redefine `layout.object.*` relative to the
+out-of-line store, (2) rewrite the two slot-emit helpers + the shape-guard
+sites to dereference the store pointer first (one extra indirection on the
+hottest compiled read), (3) update the proof test, and (4) resolve the
+**pristine-death tension** — a *lazily*-allocated slot store makes every
+shape-mode object allocate on first property write, which would regress
+exactly the profiled hot workloads unless the "empty baseline store" is
+special-cased in `assertPristineFieldsClean` / `deinitFields` (mirroring how
+`elements_pooled` returns a pooled buffer rather than freeing). That
+JIT-substrate coupling plus the pristine redesign puts B2 in the JIT/IC
+lane, not the object-layout lane; B1 is the self-contained increment that
+ships first.
+
 ## Why
 
 The shipped collector is a generational, **non-moving, per-object-pool**

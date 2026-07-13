@@ -506,14 +506,56 @@ pub const FinalizationCell = struct {
     deleted: bool = false,
 };
 
+/// §10.1 dictionary-mode representation, moved out-of-line. A
+/// *shape-mode* object (`shape != null` — every plain `{a, b}`
+/// literal, `new Point(x, y)`, splay's `Node`) stores its values in
+/// `inline_slots` / `overflow_slots` and leaves all three of these
+/// EMPTY, so they cost 104 B on the header for nothing. This side
+/// allocation carries them only for the objects that actually go
+/// dictionary mode (`demoteFromShape`, or a runtime that writes the
+/// bag directly). Reached by `JSObject.dict_store`; allocated lazily
+/// by `ensureDictStore`. The JIT never reads these fields (it deopts
+/// to the interpreter for dict-mode receivers), so this move is
+/// invisible to emitted code — unlike `shape`/`inline_slots`, which
+/// must stay on the header (see the JIT layout SSoT).
+pub const DictStore = struct {
+    /// Property name → value map (dictionary mode). Names are borrowed
+    /// slices; the backing JSStrings are rooted via `key_anchors` (on
+    /// the extension) or the constant pool.
+    properties: std.StringArrayHashMapUnmanaged(Value) = .empty,
+    /// Parallel map of non-default §6.2.5 property flags.
+    property_flags: std.StringArrayHashMapUnmanaged(PropertyFlags) = .empty,
+    /// §10.1.11 OrdinaryOwnPropertyKeys insertion order (dictionary
+    /// mode; shape-mode objects derive order from the shape chain).
+    own_key_order: std.ArrayListUnmanaged([]const u8) = .empty,
+
+    pub fn deinit(self: *DictStore, allocator: std.mem.Allocator) void {
+        self.properties.deinit(allocator);
+        self.property_flags.deinit(allocator);
+        self.own_key_order.deinit(allocator);
+    }
+};
+
+/// Shared, never-mutated empty maps returned by the `*Const` dict
+/// accessors when an object has no `DictStore` (the common shape-mode
+/// case). Reads (`get` / `contains` / `count` / `iterator` / `values`)
+/// on these return empty results; every WRITE path routes through
+/// `propsMut` / `flagsMut` / `orderMut`, which allocate the store, so
+/// these constants are never written.
+const empty_props: std.StringArrayHashMapUnmanaged(Value) = .empty;
+const empty_flags: std.StringArrayHashMapUnmanaged(PropertyFlags) = .empty;
+const empty_order: std.ArrayListUnmanaged([]const u8) = .empty;
+
 /// Lazy side allocation for cold JSObject state. See the trailing
 /// scaffolding-tests block in this file for the contract; the
 /// short version is "things a plain `{a, b}` literal never reads
 /// or writes." Subsequent commits migrate the cold fields here
 /// one at a time. Anything the JIT will speculate on stays in the
 /// hot JSObject prefix and MUST NOT move here — keep `shape`,
-/// `slots`, `properties`, `elements`, `prototype` out of this
-/// struct forever.
+/// `slots`, `elements`, `prototype` out of this struct forever.
+/// (`properties` / `property_flags` / `own_key_order` are the
+/// dictionary representation — they live in `DictStore`, reached by
+/// a separate pointer, not here.)
 pub const JSObjectExtension = struct {
     /// §10.1.8 accessor descriptors — pairs of getter / setter
     /// functions installed via `Object.defineProperty` with a
@@ -887,17 +929,20 @@ pub const JSObject = struct {
     /// `Value` carrying the `Object` tag can read the first
     /// byte to decide which heap type it points to.
     kind: HeapKind = .object,
-    /// Property name → value map. Names are owned by the heap's
-    /// strings list (interned through allocation, not deduplicated
-    /// later). Lookups are O(1) on the hash.
-    properties: std.StringArrayHashMapUnmanaged(Value) = .empty,
-    /// Parallel map of non-default property flags (§6.2.5
-    /// PropertyDescriptor). Lazy: only properties that diverge
-    /// from `PropertyFlags.default` (all-true) have an entry.
-    /// Built-in proto methods (`Array.prototype.push`, etc.)
-    /// install with `enumerable: false`; user-level
-    /// `Object.defineProperty` populates here too.
-    property_flags: std.StringArrayHashMapUnmanaged(PropertyFlags) = .empty,
+    /// §10.1 dictionary-mode representation — `properties` (name →
+    /// value), `property_flags` (non-default §6.2.5 descriptor bits),
+    /// and `own_key_order` (§10.1.11 insertion order) — moved into a
+    /// lazily-allocated `DictStore` reached by this single pointer.
+    /// `null` on every shape-mode object (the hot case: plain
+    /// literals, `new Point(x,y)`, splay's `Node`), which stores its
+    /// values in `inline_slots` and never touches the bag. Allocated
+    /// only on `demoteFromShape` / a direct bag write. Access through
+    /// `propsConst`/`propsMut` / `flagsConst`/`flagsMut` /
+    /// `orderConst`/`orderMut` and the `dictStore`/`ensureDictStore`
+    /// helpers — never a raw field. The JIT never reads these (it
+    /// deopts for dict-mode receivers), so the move is invisible to
+    /// emitted code (unlike `shape`/`inline_slots`).
+    dict_store: ?*DictStore = null,
     /// §10.1 shape-based named-property storage — not yet the
     /// source of truth. `shape` describes this object's named-
     /// property layout (see `shape.zig`); `slots[shape.lookup(key)
@@ -1271,26 +1316,12 @@ pub const JSObject = struct {
     // objects that anchor a computed / bag-promoted key. Access via
     // `anchorKey` (append) and `keyAnchorItems` (read) below.)
 
-    /// §10.1.11 OrdinaryOwnPropertyKeys — unified insertion-order
-    /// list across `properties` and `accessors`, so an object that
-    /// installs `a` as an accessor, then `b` as data, then
-    /// redefines `a` reports `[a, b]` (not `[b, a]`). Each entry
-    /// is a borrowed slice — the backing bytes are pinned by the
-    /// matching `properties` / `accessors` entry (or by
-    /// `key_anchors` when the key originated from
-    /// `setComputedOwned`). Append-only on first insertion;
-    /// removed when the key is deleted. Only mutated through the
-    /// `recordKey` / `forgetKey` helpers below; the raw `put`
-    /// callsites in object.zig / lantern.zig / builtins/object.zig
-    /// route through them. Built-in proto installation that
-    /// bypasses the helpers (e.g. realm wiring) doesn't land in
-    /// this list; that's intentional — those keys are
-    /// non-enumerable and don't surface through
-    /// `Object.keys/values/entries` anyway, and the fallback in
-    /// `ownPropertyKeysOrdered` covers them by walking
-    /// `properties` + `accessors` directly when this list is
-    /// empty.
-    own_key_order: std.ArrayListUnmanaged([]const u8) = .empty,
+    // §10.1.11 OrdinaryOwnPropertyKeys insertion order (`own_key_order`)
+    // moved into `DictStore` with `properties` / `property_flags` — it is
+    // the dictionary representation's ordering list and is empty on
+    // shape-mode objects (which derive order from the shape chain).
+    // Access via `orderConst` / `orderMut` and the `recordKey` /
+    // `forgetKey` / `ownKeyOrderContains` / `ownKeyOrderIterator` helpers.
     /// Lazy side allocation for cold state — see `JSObjectExtension`
     /// above. `null` on every fresh JSObject; allocated on first
     /// `getOrCreateExtension` call. Owned by this JSObject; freed
@@ -1317,7 +1348,7 @@ pub const JSObject = struct {
         if (self.shape) |sh| {
             return .{ .mode = .{ .shape = .{ .obj = self, .leaf = sh } } };
         }
-        return .{ .mode = .{ .bag = self.properties.iterator() } };
+        return .{ .mode = .{ .bag = self.propsConst().iterator() } };
     }
 
     /// §10.1.1 OrdinaryGetOwnProperty (data half) — return the
@@ -1338,7 +1369,7 @@ pub const JSObject = struct {
                 }
             }
         }
-        return self.properties.get(key);
+        return self.propsConst().get(key);
     }
 
     /// §10.1.1 OrdinaryGetOwnProperty presence test (data half) —
@@ -1359,7 +1390,7 @@ pub const JSObject = struct {
                 if (entry.kind == .data) return true;
             }
         }
-        return self.properties.contains(key);
+        return self.propsConst().contains(key);
     }
 
     /// Number of own named DATA properties — shape's
@@ -1367,7 +1398,7 @@ pub const JSObject = struct {
     /// otherwise. Doesn't include accessors.
     pub fn ownDataCount(self: *const JSObject) usize {
         if (self.shape) |sh| return sh.property_count;
-        return self.properties.count();
+        return self.propsConst().count();
     }
 
     /// Return the extension if already allocated, otherwise allocate
@@ -1392,6 +1423,49 @@ pub const JSObject = struct {
         // population.
         self.needs_internal_scan = true;
         return ext;
+    }
+
+    // ── §10.1 dictionary-mode representation — out-of-line DictStore ─
+    //
+    // `properties` / `property_flags` / `own_key_order` live in a lazily
+    // allocated `DictStore`. Reads go through the `*Const` accessors,
+    // which return the store's map or a shared empty (so a shape-mode
+    // object with no store reads as empty for free). Writes go through
+    // the `*Mut` accessors, which allocate the store on demand. The
+    // dict values ride the *value* write barrier (folded into `bagPut` /
+    // `shadowSet`), not the typed-slot scan — so, unlike the extension,
+    // `ensureDictStore` sets `markNonPristine` but NOT
+    // `needs_internal_scan`.
+    pub fn dictStore(self: *const JSObject) ?*DictStore {
+        return self.dict_store;
+    }
+    pub fn ensureDictStore(self: *JSObject, allocator: std.mem.Allocator) !*DictStore {
+        if (self.dict_store) |d| return d;
+        const d = try allocator.create(DictStore);
+        d.* = .{};
+        self.dict_store = d;
+        self.markNonPristine();
+        return d;
+    }
+    /// Read view of the dict property bag (shared empty when no store).
+    pub fn propsConst(self: *const JSObject) *const std.StringArrayHashMapUnmanaged(Value) {
+        return if (self.dict_store) |d| &d.properties else &empty_props;
+    }
+    /// Mutable view; allocates the store on first use.
+    pub fn propsMut(self: *JSObject, allocator: std.mem.Allocator) !*std.StringArrayHashMapUnmanaged(Value) {
+        return &(try self.ensureDictStore(allocator)).properties;
+    }
+    pub fn flagsConst(self: *const JSObject) *const std.StringArrayHashMapUnmanaged(PropertyFlags) {
+        return if (self.dict_store) |d| &d.property_flags else &empty_flags;
+    }
+    pub fn flagsMut(self: *JSObject, allocator: std.mem.Allocator) !*std.StringArrayHashMapUnmanaged(PropertyFlags) {
+        return &(try self.ensureDictStore(allocator)).property_flags;
+    }
+    pub fn orderConst(self: *const JSObject) *const std.ArrayListUnmanaged([]const u8) {
+        return if (self.dict_store) |d| &d.own_key_order else &empty_order;
+    }
+    pub fn orderMut(self: *JSObject, allocator: std.mem.Allocator) !*std.ArrayListUnmanaged([]const u8) {
+        return &(try self.ensureDictStore(allocator)).own_key_order;
     }
 
     /// Note that a typed internal slot was populated on this object with
@@ -2305,9 +2379,10 @@ pub const JSObject = struct {
     /// Compiled out of ReleaseFast — only the runtime-safety builds
     /// (Debug, ReleaseSafe, test) run it.
     fn assertPristineFieldsClean(self: *const JSObject) void {
-        if (self.properties.count() != 0) std.debug.panic("pristine violated: properties.count={d}", .{self.properties.count()});
-        if (self.property_flags.count() != 0) std.debug.panic("pristine violated: property_flags.count={d}", .{self.property_flags.count()});
-        if (self.own_key_order.items.len != 0) std.debug.panic("pristine violated: own_key_order.len={d}", .{self.own_key_order.items.len});
+        // The dictionary representation (`properties` / `property_flags`
+        // / `own_key_order`) lives in `dict_store`; a pristine object
+        // never allocated one.
+        if (self.dict_store != null) std.debug.panic("pristine violated: dict_store is non-null", .{});
         // `key_anchors` lives in the extension; the `extension != null`
         // check below covers it.
         if (self.elements.items.len != 0) std.debug.panic("pristine violated: elements.len={d}", .{self.elements.items.len});
@@ -2332,8 +2407,12 @@ pub const JSObject = struct {
             return;
         }
         if (self.heap) |h| h.deinit_slowpath_count +%= 1;
-        self.properties.deinit(allocator);
-        self.property_flags.deinit(allocator);
+        // §10.1 dictionary representation (`properties` / `property_flags`
+        // / `own_key_order`) lives in `dict_store` — free it as a unit.
+        if (self.dict_store) |d| {
+            d.deinit(allocator);
+            allocator.destroy(d);
+        }
         // `private_properties`, `private_methods`, `private_accessors`,
         // `accessors`, `namespace_redirects`, `ambiguous_namespace_keys`,
         // `map_data`, `set_data`, and the iterator-state structs
@@ -2351,7 +2430,7 @@ pub const JSObject = struct {
             if (self.heap) |h| h.promise_store_pool.destroy(s) else allocator.destroy(s);
         }
         // `key_anchors` lives in the extension — freed when it is.
-        self.own_key_order.deinit(allocator);
+        // `own_key_order` lives in `dict_store` (freed above).
         if (self.elements_pooled) {
             // Pool-owned buffer — must not reach `allocator.free`.
             const heap_ty = @import("heap.zig");
@@ -2409,13 +2488,13 @@ pub const JSObject = struct {
         // path on death. Defer materialization to `demoteFromShape`
         // (the only path that breaks the shape's authority) so
         // typical `{a, b}` / `new Point(x, y)` literals stay pristine.
-        if (self.shape != null and self.own_key_order.items.len == 0) {
+        if (self.shape != null and self.orderConst().items.len == 0) {
             return false;
         }
-        for (self.own_key_order.items) |existing| {
+        for (self.orderConst().items) |existing| {
             if (std.mem.eql(u8, existing, key)) return false;
         }
-        try self.own_key_order.append(allocator, key);
+        try (try self.orderMut(allocator)).append(allocator, key);
         self.markNonPristine();
         return true;
     }
@@ -2424,8 +2503,8 @@ pub const JSObject = struct {
     /// insertion order, either via the materialized `own_key_order`
     /// list or implicitly via the shape chain (lazy mode).
     pub fn ownKeyOrderContains(self: *const JSObject, key: []const u8) bool {
-        if (self.own_key_order.items.len > 0) {
-            for (self.own_key_order.items) |k| {
+        if (self.orderConst().items.len > 0) {
+            for (self.orderConst().items) |k| {
                 if (std.mem.eql(u8, k, key)) return true;
             }
             return false;
@@ -2464,7 +2543,7 @@ pub const JSObject = struct {
         next_slot: u32 = 0,
 
         pub fn next(self: *OwnKeyOrderIterator) ?[]const u8 {
-            const items = self.obj.own_key_order.items;
+            const items = self.obj.orderConst().items;
             if (items.len > 0) {
                 if (self.list_idx >= items.len) return null;
                 const k = items[self.list_idx];
@@ -2508,10 +2587,13 @@ pub const JSObject = struct {
     /// away. Cheap linear scan — the list is bounded by the
     /// object's own-key count.
     pub fn forgetKey(self: *JSObject, key: []const u8) void {
+        // No store ⇒ no ordering list ⇒ nothing to forget. `orderedRemove`
+        // does not allocate, so mutate the store's list in place.
+        const d = self.dict_store orelse return;
         var i: usize = 0;
-        while (i < self.own_key_order.items.len) : (i += 1) {
-            if (std.mem.eql(u8, self.own_key_order.items[i], key)) {
-                _ = self.own_key_order.orderedRemove(i);
+        while (i < d.own_key_order.items.len) : (i += 1) {
+            if (std.mem.eql(u8, d.own_key_order.items[i], key)) {
+                _ = d.own_key_order.orderedRemove(i);
                 return;
             }
         }
@@ -2529,7 +2611,7 @@ pub const JSObject = struct {
     /// `set` / `setIfWritable` / `setWithFlags`, never the barriered
     /// interpreter store opcode.
     fn bagPut(self: *JSObject, allocator: std.mem.Allocator, key: []const u8, v: Value) std.mem.Allocator.Error!void {
-        try self.properties.put(allocator, key, v);
+        try (try self.propsMut(allocator)).put(allocator, key, v);
         self.markNonPristine();
         if (self.heap) |h| h.writeBarrier(.{ .object = self }, v);
     }
@@ -2583,7 +2665,7 @@ pub const JSObject = struct {
         // iteration once the `o[i]=…` keys dangled). Repeated writes to
         // an existing key (found_existing) skip the anchor so
         // `key_anchors` can't grow unboundedly.
-        const gop = try self.properties.getOrPut(allocator, key);
+        const gop = try (try self.propsMut(allocator)).getOrPut(allocator, key);
         gop.value_ptr.* = v;
         self.markNonPristine();
         // Generational write barrier — see `bagPut` (this site can't
@@ -2648,7 +2730,7 @@ pub const JSObject = struct {
             if (newly_ordered) self.markNonPristine();
             return;
         }
-        const gop = try self.properties.getOrPut(allocator, key);
+        const gop = try (try self.propsMut(allocator)).getOrPut(allocator, key);
         gop.value_ptr.* = v;
         self.markNonPristine();
         // Generational write barrier — mirrors `setComputedOwned`.
@@ -2678,7 +2760,7 @@ pub const JSObject = struct {
                 if (entry.kind == .data) return entry.attrs;
             }
         }
-        if (self.property_flags.get(key)) |f| return f;
+        if (self.flagsConst().get(key)) |f| return f;
         // §9.4.6.5 Module Namespace exotic — every exported binding
         // descriptor is `{writable: true, enumerable: true,
         // configurable: false}` regardless of when the binding was
@@ -2693,7 +2775,7 @@ pub const JSObject = struct {
             !std.mem.startsWith(u8, key, "@@") and
             !std.mem.startsWith(u8, key, "<sym:"))
         {
-            if (self.properties.contains(key) or self.hasNamespaceRedirect(key)) {
+            if (self.propsConst().contains(key) or self.hasNamespaceRedirect(key)) {
                 return .{
                     .writable = true,
                     .enumerable = true,
@@ -2809,15 +2891,15 @@ pub const JSObject = struct {
             // Shape encodes the attrs on the transition node —
             // no `property_flags` entry needed. Clear any stale
             // entry left behind by a prior dict-mode redefine.
-            _ = self.property_flags.swapRemove(key);
+            if (self.dict_store) |d| _ = d.property_flags.swapRemove(key);
             return;
         }
         // Dictionary-mode: bag is the source of truth.
         try self.bagPut(allocator, key, v);
         if (is_default) {
-            _ = self.property_flags.swapRemove(key);
+            if (self.dict_store) |d| _ = d.property_flags.swapRemove(key);
         } else {
-            try self.property_flags.put(allocator, key, flags);
+            try (try self.flagsMut(allocator)).put(allocator, key, flags);
             self.markNonPristine();
         }
     }
@@ -2884,7 +2966,7 @@ pub const JSObject = struct {
                 return; // non-length-shaped value: nothing to store
             }
             if (canonicalIntegerIndex(key)) |idx| {
-                if (self.properties.contains(key)) {
+                if (self.propsConst().contains(key)) {
                     try self.bagPut(allocator, key, v);
                     // Already-tracked key — no-op for recordKey.
                     return;
@@ -2968,13 +3050,13 @@ pub const JSObject = struct {
             // original append node deeper in the chain; without
             // this guard the deeper node re-puts the pre-freeze
             // attrs and `delete` sees configurable:true again.
-            if (self.properties.contains(n.key)) continue;
+            if (self.propsConst().contains(n.key)) continue;
             const v = self.slotAt(n.slot);
-            try self.properties.put(allocator, n.key, v);
+            try (try self.propsMut(allocator)).put(allocator, n.key, v);
             self.markNonPristine();
             const is_default = n.attrs.writable and n.attrs.enumerable and n.attrs.configurable;
             if (!is_default) {
-                try self.property_flags.put(allocator, n.key, n.attrs);
+                try (try self.flagsMut(allocator)).put(allocator, n.key, n.attrs);
             }
         }
         // Materialize `own_key_order` from the shape chain BEFORE
@@ -2984,9 +3066,9 @@ pub const JSObject = struct {
         // then reverse to get root→leaf (the actual insertion order).
         // Idempotent when the list is already populated (a partial
         // demote that already materialized).
-        if (self.own_key_order.items.len == 0) {
+        if (self.orderConst().items.len == 0) {
             var n2: ?*const @import("shape.zig").Shape = shape;
-            const before_len = self.own_key_order.items.len;
+            const before_len = self.orderConst().items.len;
             while (n2) |n| : (n2 = n.parent) {
                 if (n.parent == null) break;
                 if (n.kind != .data) continue;
@@ -2994,17 +3076,17 @@ pub const JSObject = struct {
                 // the leaf-most occurrence wins, same as the bag
                 // backfill above.
                 var dup = false;
-                for (self.own_key_order.items[before_len..]) |k| {
+                for (self.orderConst().items[before_len..]) |k| {
                     if (std.mem.eql(u8, k, n.key)) {
                         dup = true;
                         break;
                     }
                 }
                 if (dup) continue;
-                try self.own_key_order.append(allocator, n.key);
+                try (try self.orderMut(allocator)).append(allocator, n.key);
             }
-            if (self.own_key_order.items.len > before_len) {
-                std.mem.reverse([]const u8, self.own_key_order.items[before_len..]);
+            if (self.orderConst().items.len > before_len) {
+                std.mem.reverse([]const u8, self.orderConst().items[before_len..]);
                 self.markNonPristine();
             }
         }
@@ -3037,7 +3119,7 @@ pub const JSObject = struct {
             // mode object). Only check parity when the bag DOES
             // carry it (a stragger from a partial demote, or a
             // raw `properties.put` callsite we missed migrating).
-            if (self.properties.get(n.key)) |props_val| {
+            if (self.propsConst().get(n.key)) |props_val| {
                 const slot_val = self.slotAt(n.slot);
                 if (slot_val.bits != props_val.bits) {
                     std.debug.panic(
@@ -3056,7 +3138,7 @@ pub const JSObject = struct {
         // static. (Empty for pure shape-mode objects, so this loop is
         // free for them.) Element/index keys and the well-known-symbol
         // form are not shape-tracked, so they're exempt.
-        var bit = self.properties.iterator();
+        var bit = self.propsConst().iterator();
         while (bit.next()) |entry| {
             const key = entry.key_ptr.*;
             if (canonicalIntegerIndex(key) != null) continue;
@@ -3106,22 +3188,28 @@ pub const JSObject = struct {
         {
             return false;
         }
-        for (self.own_key_order.items) |k| {
+        for (self.orderConst().items) |k| {
             if (std.mem.startsWith(u8, k, "__cynic_")) return false;
-            if (!self.properties.contains(k)) return false;
+            if (!self.propsConst().contains(k)) return false;
         }
         var sh = heap.shapes.root;
-        for (self.own_key_order.items) |k| {
+        for (self.orderConst().items) |k| {
             sh = try heap.shapes.transition(sh, k, self.flagsFor(k), .data);
         }
         try self.resizeSlots(allocator, sh.property_count);
-        for (self.own_key_order.items) |k| {
+        for (self.orderConst().items) |k| {
             const e = sh.lookup(k).?;
-            self.setSlot(e.slot, self.properties.get(k).?);
+            self.setSlot(e.slot, self.propsConst().get(k).?);
         }
         self.shape = sh;
-        self.properties.clearRetainingCapacity();
-        self.property_flags.clearRetainingCapacity();
+        // Values now live in slots; drop the dict bag (own_key_order
+        // stays — the shape chain is the ordering authority now, but
+        // keeping the list matches the pre-shape behaviour). The store
+        // exists (promote runs on a dict-mode object).
+        if (self.dict_store) |d| {
+            d.properties.clearRetainingCapacity();
+            d.property_flags.clearRetainingCapacity();
+        }
         return true;
     }
 
@@ -3208,8 +3296,8 @@ pub const JSObject = struct {
         // object — no bag entries, no accessors, no `own_key_order`
         // residue from a prior demote.
         if (self.shape == null and
-            (self.properties.count() != 0 or
-                self.own_key_order.items.len != 0 or
+            (self.propsConst().count() != 0 or
+                self.orderConst().items.len != 0 or
                 self.accessorCount() != 0))
         {
             return false;
@@ -3257,7 +3345,7 @@ pub const JSObject = struct {
                 return true;
             }
             if (canonicalIntegerIndex(key)) |idx| {
-                if (self.properties.contains(key)) {
+                if (self.propsConst().contains(key)) {
                     const flags = self.flagsFor(key);
                     if (!flags.writable) return false;
                     try self.bagPut(allocator, key, v);
@@ -3362,7 +3450,7 @@ pub const JSObject = struct {
                     }
                 }
             }
-            if (cur.properties.get(key)) |v| return v;
+            if (cur.propsConst().get(key)) |v| return v;
             // Synthetic-accessor fast path — see the method-level
             // doc above for why this lives in the data-shaped
             // shortcut rather than as a realm-aware general
@@ -3414,7 +3502,7 @@ pub const JSObject = struct {
                 }
             }
         }
-        return self.properties.get(key);
+        return self.propsConst().get(key);
     }
 
     /// Own-property check — does NOT walk the prototype chain.
@@ -3435,7 +3523,7 @@ pub const JSObject = struct {
         if (self.shape) |sh| {
             if (sh.lookup(key)) |_| return true;
         }
-        if (self.properties.contains(key) or self.hasAccessor(key)) return true;
+        if (self.propsConst().contains(key) or self.hasAccessor(key)) return true;
         // §15.2.1.16.3 ResolveExport — re-export redirects make
         // the binding "own" on the Module Namespace exotic even
         // though the value lives elsewhere. `'X' in ns` /
@@ -3934,8 +4022,8 @@ pub const JSObject = struct {
                     // reverse / copyWithin / unshift) reach here
                     // for array-like generic-object receivers.
                     try self.demoteFromShape(allocator);
-                    _ = self.properties.swapRemove(key);
-                    _ = self.property_flags.swapRemove(key);
+                    if (self.dict_store) |d| _ = d.properties.swapRemove(key);
+                    if (self.dict_store) |d| _ = d.property_flags.swapRemove(key);
                 }
                 return true;
             }
@@ -3943,14 +4031,14 @@ pub const JSObject = struct {
         if (self.hasAccessor(key)) {
             try self.demoteFromShape(allocator);
             _ = self.removeAccessor(key);
-            _ = self.property_flags.swapRemove(key);
-            if (!self.properties.contains(key)) self.forgetKey(key);
+            if (self.dict_store) |d| _ = d.property_flags.swapRemove(key);
+            if (!self.propsConst().contains(key)) self.forgetKey(key);
             return true;
         }
         if (!self.ownDataContains(key)) return true;
         try self.demoteFromShape(allocator);
-        _ = self.properties.swapRemove(key);
-        _ = self.property_flags.swapRemove(key);
+        if (self.dict_store) |d| _ = d.properties.swapRemove(key);
+        if (self.dict_store) |d| _ = d.property_flags.swapRemove(key);
         if (!self.hasAccessor(key)) self.forgetKey(key);
         return true;
     }
@@ -4164,8 +4252,9 @@ test "JSObject: hasOwn prefers the shape when present" {
     try testing.expect(o.shape != null);
 
     // Strip the bag entry behind the shape's back; hasOwn must
-    // still report own.
-    _ = o.properties.swapRemove("x");
+    // still report own. (Shape-mode `o` keeps its value in the slot,
+    // not the bag; strip the bag entry if a dict store exists.)
+    if (o.dictStore()) |d| _ = d.properties.swapRemove("x");
     try testing.expect(o.hasOwn("x"));
 }
 
@@ -4371,14 +4460,15 @@ test "JSObjectExtension: footprint probe (size measurement, not an invariant)" {
     // `inline_slot_cap` raises it by 8 bytes per added slot.
     std.debug.print("[footprint] @sizeOf(JSObject)          = {d} bytes\n", .{@sizeOf(JSObject)});
     std.debug.print("[footprint] @sizeOf(JSObjectExtension) = {d} bytes\n", .{@sizeOf(JSObjectExtension)});
-    // Header-size regression guard. The cold per-kind clusters
-    // (iterator state, RegExp state, key anchors, Proxy pointers) live
-    // behind `extension`; moving them off the base object took the
-    // header from 408 B to 296 B (see docs/gc-immix-rearchitecture.md
-    // "The memory axis — splay's RSS outlier is header size"). This
-    // catches an accidental re-inlining of one of those clusters — the
-    // smallest is 24 B, which would push the header past this bound.
-    try testing.expect(@sizeOf(JSObject) <= 304);
+    // Header-size regression guard. Two moves took the header from
+    // 408 B down: the cold per-kind clusters (iterator / RegExp / key
+    // anchors / Proxy) went behind `extension` (Stage A → 296 B), then
+    // the dictionary representation (`properties` / `property_flags` /
+    // `own_key_order`) went into `dict_store` (Stage B1 → 200 B). See
+    // docs/gc-immix-rearchitecture.md "The memory axis". This catches
+    // an accidental re-inlining — the smallest moved field is 24 B,
+    // which would push the header past this bound.
+    try testing.expect(@sizeOf(JSObject) <= 208);
 }
 
 test "JSObjectExtension: extension is null on a fresh object" {

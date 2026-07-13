@@ -422,7 +422,7 @@ fn buildUnmappedArgumentsObject(
         const entry = obj.getOrPutAccessor(allocator, "callee") catch return error.OutOfMemory;
         realm.heap.storeInternalSlot(.{ .object = obj }, heap_mod.taggedFunction(thrower));
         entry.value_ptr.* = .{ .getter = thrower, .setter = thrower };
-        obj.property_flags.put(allocator, "callee", .{
+        (obj.flagsMut(allocator) catch return error.OutOfMemory).put(allocator, "callee", .{
             .writable = false,
             .enumerable = false,
             .configurable = false,
@@ -2728,8 +2728,8 @@ pub fn runFrames(
                     // still claims `constructor` is at its slot
                     // while `properties` no longer has the entry.
                     try proto.demoteFromShape(allocator);
-                    _ = proto.properties.swapRemove("constructor");
-                    _ = proto.property_flags.swapRemove("constructor");
+                    if (proto.dictStore()) |d| _ = d.properties.swapRemove("constructor");
+                    if (proto.dictStore()) |d| _ = d.property_flags.swapRemove("constructor");
                     realm.heap.setObjectPrototype(proto, if (tmpl.is_async)
                         ensureAsyncGeneratorPrototype(realm) catch realm.intrinsics.object_prototype
                     else
@@ -5617,7 +5617,7 @@ pub fn runFrames(
                     // `src_obj.key_anchors` (gone with src) or from the
                     // opcode-local `key_scope`'s integer-index strings
                     // (gone after `key_scope.close()`); plain
-                    // `storeProperty` would leave `out_obj.properties`
+                    // `storeProperty` would leave `out_obj.propsConst()`
                     // with dangling key slices the next sweep poisons.
                     key_scope.push(v) catch return error.OutOfMemory;
                     const k_anchor = realm.heap.allocateString(k) catch return error.OutOfMemory;
@@ -8115,7 +8115,7 @@ pub fn runFrames(
                     // in the way. Demote first: the shadow
                     // shape can't encode a removal.
                     mr.exports.demoteFromShape(allocator) catch return error.OutOfMemory;
-                    _ = mr.exports.properties.swapRemove(exp_s.flatBytes());
+                    if (mr.exports.dictStore()) |d| _ = d.properties.swapRemove(exp_s.flatBytes());
                 }
             }
             continue :dispatch try decodeNext(code, &ip, &committed);
@@ -9741,7 +9741,7 @@ pub fn runFrames(
                 // anchored store; see the matching note on
                 // `.object_rest_from`. Without this the integer-index
                 // keys synthesised for a TypedArray source dangle on
-                // `target.properties` after `key_scope.close()` and a
+                // `target.propsConst()` after `key_scope.close()` and a
                 // later `Object.getOwnPropertyNames(target)` poisons
                 // `orderListContains`.
                 key_scope.push(prop_value) catch return error.OutOfMemory;
@@ -10241,7 +10241,7 @@ pub fn runFrames(
                     // (4133c7f / 4b06eb4), so spec-surface reads
                     // resolve against `slots`. Skip the bag mirror
                     // entirely on the IC hot path. Any remaining
-                    // direct `obj.properties.get` reader that
+                    // direct `obj.propsConst().get` reader that
                     // sees a stale value is a migration target —
                     // route it through `JSObject.get` or accept
                     // the bag staleness as an audit-flagged
@@ -10345,7 +10345,7 @@ pub fn runFrames(
                                 // bag-append site (and they
                                 // invalidate the cell via the shape
                                 // pointer compare).
-                                if (obj_after.properties.getIndex(key_s.flatBytes())) |bi| {
+                                if (obj_after.propsConst().getIndex(key_s.flatBytes())) |bi| {
                                     cell.bag_index = @intCast(bi);
                                 } else {
                                     cell.bag_index = chunk_mod.bag_index_uncached;
@@ -10471,8 +10471,8 @@ pub fn runFrames(
                 // can't encode that, so demote and rebuild
                 // through `storePropertyWithFlags`.
                 obj.demoteFromShape(allocator) catch return error.OutOfMemory;
-                _ = obj.properties.swapRemove(key_s.flatBytes());
-                _ = obj.property_flags.swapRemove(key_s.flatBytes());
+                if (obj.dictStore()) |d| _ = d.properties.swapRemove(key_s.flatBytes());
+                if (obj.dictStore()) |d| _ = d.property_flags.swapRemove(key_s.flatBytes());
             }
             realm.heap.storePropertyWithFlags(obj, allocator, key_s.flatBytes(), acc, object_mod.PropertyFlags.default) catch return error.OutOfMemory;
             continue :dispatch try decodeNext(code, &ip, &committed);
@@ -10534,8 +10534,8 @@ pub fn runFrames(
                     continue :dispatch try decodeNext(code, &ip, &committed);
                 }
                 obj.demoteFromShape(allocator) catch return error.OutOfMemory;
-                _ = obj.properties.swapRemove(key_s.flatBytes());
-                _ = obj.property_flags.swapRemove(key_s.flatBytes());
+                if (obj.dictStore()) |d| _ = d.properties.swapRemove(key_s.flatBytes());
+                if (obj.dictStore()) |d| _ = d.property_flags.swapRemove(key_s.flatBytes());
             }
             realm.heap.storePropertyWithFlags(obj, allocator, key_s.flatBytes(), acc, object_mod.PropertyFlags.default) catch return error.OutOfMemory;
             continue :dispatch try decodeNext(code, &ip, &committed);
@@ -11108,8 +11108,8 @@ pub fn runFrames(
                 // Append-only shadow shape can't express a slot
                 // drop; demote so the next write rebuilds.
                 obj.demoteFromShape(allocator) catch return error.OutOfMemory;
-                _ = obj.properties.swapRemove(key_slice);
-                _ = obj.property_flags.swapRemove(key_slice);
+                if (obj.dictStore()) |d| _ = d.properties.swapRemove(key_slice);
+                if (obj.dictStore()) |d| _ = d.property_flags.swapRemove(key_slice);
             }
             realm.heap.storePropertyWithFlags(obj, allocator, key_slice, acc, object_mod.PropertyFlags.default) catch return error.OutOfMemory;
             obj.anchorKey(allocator, key_js) catch return error.OutOfMemory;
@@ -11991,7 +11991,7 @@ fn deleteOwnProperty(realm: *Realm, recv: Value, key: []const u8) error{OutOfMem
             const flags = obj.flagsFor(key);
             if (!flags.configurable) return .{ .throw_typeerror = "Cannot delete non-configurable property" };
             _ = obj.removeAccessor(key);
-            _ = obj.property_flags.swapRemove(key);
+            if (obj.dictStore()) |d| _ = d.property_flags.swapRemove(key);
             // §10.1.11 — drop the slot from the unified order list
             // unless the data half also exists (it shouldn't —
             // OrdinaryDefineOwnProperty wipes one when the other
@@ -12018,8 +12018,8 @@ fn deleteOwnProperty(realm: *Realm, recv: Value, key: []const u8) error{OutOfMem
         // Demote: shape can't express a removal — back-fill the
         // bag (Phase 3) so the swapRemove below has the entry.
         try obj.demoteFromShape(realm.allocator);
-        _ = obj.properties.swapRemove(key);
-        _ = obj.property_flags.swapRemove(key);
+        if (obj.dictStore()) |d| _ = d.properties.swapRemove(key);
+        if (obj.dictStore()) |d| _ = d.property_flags.swapRemove(key);
         if (!obj.hasAccessor(key)) obj.forgetKey(key);
         return .{ .ok = true };
     }
@@ -12207,7 +12207,7 @@ fn strictSetPropertyAnchored(
         // re-enters JS and can GC. `key` is borrowed from `key_string`
         // for a computed-key set (`o[expr] = v`), and the post-trap
         // invariant checks (`nativeProxySet` reads
-        // `target.property_flags.get(key)`) would then hash a dangling
+        // `target.flagsConst().get(key)`) would then hash a dangling
         // slice and miss. Root `key_string` / `value` / `recv` for the
         // whole proxy path; gated on `receiver_is_proxy` so a plain
         // object set pays nothing.

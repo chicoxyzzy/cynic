@@ -473,10 +473,10 @@ pub fn stringIteratorMethod(realm: *Realm, this_value: Value, args: []const Valu
         // `properties` no longer has them trips
         // `verifyShapeInvariant` under GC stress.
         try obj.demoteFromShape(realm.allocator);
-        _ = obj.properties.swapRemove("next");
-        _ = obj.property_flags.swapRemove("next");
-        _ = obj.properties.swapRemove("@@iterator");
-        _ = obj.property_flags.swapRemove("@@iterator");
+        if (obj.dictStore()) |d| _ = d.properties.swapRemove("next");
+        if (obj.dictStore()) |d| _ = d.property_flags.swapRemove("next");
+        if (obj.dictStore()) |d| _ = d.properties.swapRemove("@@iterator");
+        if (obj.dictStore()) |d| _ = d.property_flags.swapRemove("@@iterator");
     }
     return v;
 }

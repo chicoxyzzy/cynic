@@ -263,11 +263,12 @@ fn featureSetFromBits(bits: u64) features.FeatureSet {
 
 /// Fields `serializeObject` / `restoreObject` encode.
 const object_serialized_fields = [_][]const u8{
-    "kind",                  "properties",          "property_flags", "shape",
-    "inline_slots",          "slot_count",          "overflow_slots", "prototype",
-    "prototype_fn",          "extensible",          "proxy_callable", "is_array_exotic",
-    "array_length_writable", "is_arguments_exotic", "is_raw_json",    "has_error_data",
-    "elements",              "own_key_order",       "extension",      "needs_internal_scan",
+    "kind",                "dict_store",      "shape",
+    "inline_slots",        "slot_count",      "overflow_slots",
+    "prototype",           "prototype_fn",    "extensible",
+    "proxy_callable",      "is_array_exotic", "array_length_writable",
+    "is_arguments_exotic", "is_raw_json",     "has_error_data",
+    "elements",            "extension",       "needs_internal_scan",
     "is_pristine",
 };
 /// Fields recomputed / re-defaulted at restore (GC header, heap
@@ -828,13 +829,13 @@ const Capture = struct {
         try w.w8(flags0);
         try w.w8(flags1);
 
-        if (o.properties.count() != 0) {
+        if (o.propsConst().count() != 0) {
             try w.w8(obj_tag_properties);
-            try self.writeValueMap(w, &o.properties);
+            try self.writeValueMap(w, o.propsConst());
         }
-        if (o.property_flags.count() != 0) {
+        if (o.flagsConst().count() != 0) {
             try w.w8(obj_tag_property_flags);
-            try self.writeFlagsMap(w, &o.property_flags);
+            try self.writeFlagsMap(w, o.flagsConst());
         }
         if (o.shape) |s| {
             try w.w8(obj_tag_shape);
@@ -859,9 +860,9 @@ const Capture = struct {
             try w.w32(@intCast(o.elements.items.len));
             for (o.elements.items) |v| try w.w64(try self.encodeValue(v));
         }
-        if (o.own_key_order.items.len != 0) {
+        if (o.orderConst().items.len != 0) {
             try w.w8(obj_tag_own_key_order);
-            try self.writeKeyList(w, o.own_key_order.items);
+            try self.writeKeyList(w, o.orderConst().items);
         }
         // `regexp_source` / `regexp_flags` live in the extension now
         // and are serialized inside `serializeExtension`.
@@ -1573,8 +1574,8 @@ const Restore = struct {
             const tag = try r.r8();
             switch (tag) {
                 obj_tag_end => break,
-                obj_tag_properties => try self.readValueMap(r, &o.properties),
-                obj_tag_property_flags => try self.readFlagsMap(r, &o.property_flags),
+                obj_tag_properties => try self.readValueMap(r, try o.propsMut(allocator)),
+                obj_tag_property_flags => try self.readFlagsMap(r, try o.flagsMut(allocator)),
                 obj_tag_shape => o.shape = try self.shapeAt(try r.r32()),
                 obj_tag_slots => {
                     const n = try r.r32();
@@ -1590,7 +1591,7 @@ const Restore = struct {
                     try o.elements.ensureTotalCapacity(allocator, n);
                     for (0..n) |_| o.elements.appendAssumeCapacity(try self.readValue(r));
                 },
-                obj_tag_own_key_order => try self.readKeyList(r, &o.own_key_order),
+                obj_tag_own_key_order => try self.readKeyList(r, try o.orderMut(allocator)),
                 obj_tag_accessors => {
                     const ext = try o.getOrCreateExtension(allocator);
                     try self.readAccessorMap(r, &ext.accessors);

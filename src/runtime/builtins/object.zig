@@ -206,7 +206,7 @@ fn canonicalIntegerIndex(s: []const u8) ?u32 {
     return @intCast(n);
 }
 
-/// Linear scan of `obj.own_key_order` — used by the
+/// Linear scan of `obj.orderConst()` — used by the
 /// `ownPropertyKeysOrdered` fallback walks to dedupe entries
 /// that were already emitted via the unified order list. The
 /// list is bounded by the object's own-key count; a hash set
@@ -1830,7 +1830,7 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
             // keys, otherwise reads via `JSObject.get` would
             // see the (now-stale) element value instead of
             // firing the accessor.
-            _ = target.properties.swapRemove(key);
+            if (target.dictStore()) |d| _ = d.properties.swapRemove(key);
             if (target.is_array_exotic) {
                 if (ObjMod.JSObject.canonicalIntegerIndex(key)) |idx| {
                     target.holeIndexed(idx);
@@ -1870,7 +1870,7 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
             realm.proto_revision_counter +%= 1;
             // Accessors don't honor `writable`; clear that bit.
             flags.writable = false;
-            target.property_flags.put(realm.allocator, key, flags) catch return error.OutOfMemory;
+            (target.flagsMut(realm.allocator) catch return error.OutOfMemory).put(realm.allocator, key, flags) catch return error.OutOfMemory;
             // §10.1.11 — record this as an own key for enumeration
             // order. The matching `properties.swapRemove(key)` above
             // does NOT call `forgetKey` because data→accessor
@@ -1934,7 +1934,7 @@ pub fn objectDefineProperty(realm: *Realm, this_value: Value, args: []const Valu
 
         // Generic descriptor on an existing accessor — keep the
         // accessor pair, just update flags.
-        target.property_flags.put(realm.allocator, key, flags) catch return error.OutOfMemory;
+        (target.flagsMut(realm.allocator) catch return error.OutOfMemory).put(realm.allocator, key, flags) catch return error.OutOfMemory;
         return target_v;
     }
 
@@ -3190,7 +3190,7 @@ fn objectFreeze(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     while (it.next()) |entry| {
         const key = entry.key_ptr.*;
         const cur = obj.flagsFor(key);
-        obj.property_flags.put(realm.allocator, key, .{
+        (obj.flagsMut(realm.allocator) catch return error.OutOfMemory).put(realm.allocator, key, .{
             .writable = false,
             .enumerable = cur.enumerable,
             .configurable = false,
@@ -3201,7 +3201,7 @@ fn objectFreeze(realm: *Realm, this_value: Value, args: []const Value) NativeErr
         while (ait.next()) |entry| {
             const key = entry.key_ptr.*;
             const cur = obj.flagsFor(key);
-            obj.property_flags.put(realm.allocator, key, .{
+            (obj.flagsMut(realm.allocator) catch return error.OutOfMemory).put(realm.allocator, key, .{
                 .writable = false, // N/A on accessors; spec says omitted.
                 .enumerable = cur.enumerable,
                 .configurable = false,
@@ -3368,7 +3368,7 @@ fn objectSeal(realm: *Realm, this_value: Value, args: []const Value) NativeError
     while (it.next()) |entry| {
         const key = entry.key_ptr.*;
         const cur = obj.flagsFor(key);
-        obj.property_flags.put(realm.allocator, key, .{
+        (obj.flagsMut(realm.allocator) catch return error.OutOfMemory).put(realm.allocator, key, .{
             .writable = cur.writable,
             .enumerable = cur.enumerable,
             .configurable = false,
@@ -3379,7 +3379,7 @@ fn objectSeal(realm: *Realm, this_value: Value, args: []const Value) NativeError
         while (ait.next()) |entry| {
             const key = entry.key_ptr.*;
             const cur = obj.flagsFor(key);
-            obj.property_flags.put(realm.allocator, key, .{
+            (obj.flagsMut(realm.allocator) catch return error.OutOfMemory).put(realm.allocator, key, .{
                 .writable = cur.writable,
                 .enumerable = cur.enumerable,
                 .configurable = false,

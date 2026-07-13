@@ -77,8 +77,8 @@ pub fn installPrototypeMethods(realm: *Realm) !void {
     // a removal, so leaving it trips `verifyShapeInvariant` under
     // GC stress.
     try fn_proto.demoteFromShape(realm.allocator);
-    _ = fn_proto.properties.swapRemove("name");
-    _ = fn_proto.property_flags.swapRemove("name");
+    if (fn_proto.dictStore()) |d| _ = d.properties.swapRemove("name");
+    if (fn_proto.dictStore()) |d| _ = d.property_flags.swapRemove("name");
     const builtin_fn_flags: @import("../object.zig").PropertyFlags = .{
         .writable = false,
         .enumerable = false,

@@ -158,7 +158,7 @@ fn installIteratorPrototypeConstructorAccessor(realm: *Realm, proto: *JSObject) 
     // configurable: true }.
     const entry = try proto.getOrPutAccessor(realm.allocator, "constructor");
     entry.value_ptr.* = .{ .getter = getter, .setter = setter };
-    try proto.property_flags.put(realm.allocator, "constructor", .{
+    try (try proto.flagsMut(realm.allocator)).put(realm.allocator, "constructor", .{
         .writable = false,
         .enumerable = false,
         .configurable = true,
@@ -171,7 +171,7 @@ fn installIteratorPrototypeConstructorAccessor(realm: *Realm, proto: *JSObject) 
     // would return the stale slot value instead of routing
     // through the accessor we just installed.
     try proto.demoteFromShape(realm.allocator);
-    _ = proto.properties.swapRemove("constructor");
+    if (proto.dictStore()) |d| _ = d.properties.swapRemove("constructor");
     proto.forgetKey("constructor");
 }
 
@@ -184,7 +184,7 @@ fn installIteratorPrototypeToStringTagAccessor(realm: *Realm, proto: *JSObject) 
     const setter = try intrinsics.makeNativeFunction(realm, iteratorPrototypeToStringTagSet, 1, "set [Symbol.toStringTag]");
     const entry = try proto.getOrPutAccessor(realm.allocator, "@@toStringTag");
     entry.value_ptr.* = .{ .getter = getter, .setter = setter };
-    try proto.property_flags.put(realm.allocator, "@@toStringTag", .{
+    try (try proto.flagsMut(realm.allocator)).put(realm.allocator, "@@toStringTag", .{
         .writable = false,
         .enumerable = false,
         .configurable = true,
@@ -192,7 +192,7 @@ fn installIteratorPrototypeToStringTagAccessor(realm: *Realm, proto: *JSObject) 
     // Same shadow-shape hazard as the constructor cleanup above
     // — demote before stripping the data slot.
     try proto.demoteFromShape(realm.allocator);
-    _ = proto.properties.swapRemove("@@toStringTag");
+    if (proto.dictStore()) |d| _ = d.properties.swapRemove("@@toStringTag");
     proto.forgetKey("@@toStringTag");
 }
 

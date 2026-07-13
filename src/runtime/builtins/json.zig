@@ -766,7 +766,7 @@ fn serializeJSONObject(
     if (state.property_list == null and
         obj.getProxyTarget() == null and !obj.proxy_revoked and
         !obj.is_array_exotic and obj.getTypedView() == null and
-        obj.properties.count() == 0 and obj.accessorCount() == 0)
+        obj.propsConst().count() == 0 and obj.accessorCount() == 0)
     {
         if (obj.shape) |leaf| {
             if (try serializeShapeObject(state, obj_v, obj, leaf, buf, stepback)) return true;
@@ -1483,8 +1483,8 @@ fn jsonCreateDataProperty(realm: *Realm, obj: *JSObject, key: []const u8, value:
     // and a subsequent write would otherwise leave shape and
     // properties out of sync.
     obj.demoteFromShape(realm.allocator) catch return error.OutOfMemory;
-    _ = obj.properties.swapRemove(key);
-    _ = obj.property_flags.swapRemove(key);
+    if (obj.dictStore()) |d| _ = d.properties.swapRemove(key);
+    if (obj.dictStore()) |d| _ = d.property_flags.swapRemove(key);
     _ = obj.removeAccessor(key);
     if (obj.is_array_exotic) {
         if (@import("../object.zig").JSObject.canonicalIntegerIndex(key)) |idx| {

@@ -1352,7 +1352,8 @@ pub const Heap = struct {
             .enumerable = false,
             .configurable = true,
         };
-        // length always installs.
+        // length always installs. (`f` is a JSFunction — its dict maps
+        // stay inline, not in a JSObject DictStore.)
         try f.properties.put(self.allocator, "length", Value.fromInt32(param_count));
         try f.property_flags.put(self.allocator, "length", flags);
         // §10.2.9 SetFunctionName — every function gets a `name`
@@ -3667,7 +3668,7 @@ pub const Heap = struct {
                 self.markIfSymbolKey(n.key);
             }
         } else {
-            var it = o.properties.iterator();
+            var it = o.propsConst().iterator();
             while (it.next()) |entry| self.markIfSymbolKey(entry.key_ptr.*);
         }
         if (o.accessorIterator()) |ait_outer| {
@@ -4020,7 +4021,7 @@ pub const Heap = struct {
                 if (symbolKeyYoung(o, n.key)) return true;
             }
         } else {
-            var it = o.properties.iterator();
+            var it = o.propsConst().iterator();
             while (it.next()) |entry| if (symbolKeyYoung(o, entry.key_ptr.*)) return true;
         }
         if (o.accessorIterator()) |ait_outer| {

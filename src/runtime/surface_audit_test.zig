@@ -21,7 +21,7 @@
 //! method or accessor is missing here, expand the expected set in
 //! the matching `expect*` constant.
 //!
-//! Helpers walk `JSObject.properties` and `JSObject.accessors`
+//! Helpers walk `JSObject.propsConst()` and `JSObject.accessors`
 //! directly rather than calling `Object.getOwnPropertyNames` — JS
 //! side enumeration goes through the public surface, while this
 //! audit needs to *see* the raw storage so a forgotten internal
@@ -41,7 +41,7 @@ fn collectOwnNames(allocator: std.mem.Allocator, obj: *JSObject) ![]const []cons
     var list: std.ArrayListUnmanaged([]const u8) = .empty;
     defer list.deinit(allocator);
 
-    var p_it = obj.properties.iterator();
+    var p_it = obj.propsConst().iterator();
     while (p_it.next()) |entry| {
         try list.append(allocator, try allocator.dupe(u8, entry.key_ptr.*));
     }

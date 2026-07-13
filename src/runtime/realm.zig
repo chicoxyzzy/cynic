@@ -280,7 +280,7 @@ pub const ModuleLoader = *const fn (
 /// the host pre-installs a handful of bindings (`print`, `console`,
 /// the typed Error constructors) on a `fallback` hashmap. Once the
 /// globalThis object exists, `bindToObject` migrates the fallback
-/// into `gt.properties` and pins the pointer; every subsequent
+/// into `gt.propsConst()` and pins the pointer; every subsequent
 /// object-env operation routes through the object's own property
 /// bag. The `decl_env` is independent of bootstrap and unaffected
 /// by `bindToObject`.
@@ -347,11 +347,12 @@ pub const GlobalBindings = struct {
     decl_revision: u64 = 0,
 
     fn map(self: *GlobalBindings) *std.StringArrayHashMapUnmanaged(Value) {
-        if (self.target) |t| return &t.properties;
+        // `bindToObject` guarantees the target has a `dict_store`.
+        if (self.target) |t| return &t.dict_store.?.properties;
         return &self.fallback;
     }
     fn mapConst(self: *const GlobalBindings) *const std.StringArrayHashMapUnmanaged(Value) {
-        if (self.target) |t| return &t.properties;
+        if (self.target) |t| return t.propsConst();
         return &self.fallback;
     }
 
@@ -570,7 +571,7 @@ pub const GlobalBindings = struct {
         }
         // Pre-`bindToObject` bootstrap path. No flags map exists
         // yet; `bindToObject` copies entries straight onto
-        // `gt.properties`. The script-var hoist only runs from
+        // `gt.propsConst()`. The script-var hoist only runs from
         // user code, which is always after bootstrap, so this
         // branch is defensive — fall back to the fallback map
         // and let the migrating copy do the right thing.
@@ -672,7 +673,7 @@ pub const GlobalBindings = struct {
 
     /// Promote the JSObject to the live target. Any bindings the
     /// host already pushed into `fallback` (`print`, `console`,
-    /// `Error`, …) are copied onto `gt.properties` so identifier
+    /// `Error`, …) are copied onto `gt.propsConst()` so identifier
     /// lookups don't regress. `gt`'s own `properties` map is
     /// reused — `setWithFlags` on `gt` for the same key from
     /// inside `intrinsics.install` will overwrite the copy with
@@ -690,6 +691,11 @@ pub const GlobalBindings = struct {
         }
         self.fallback.deinit(allocator);
         self.fallback = .empty;
+        // The object env-record writes/reads the global's property bag
+        // through `map()` (a raw `*Map`, no allocator). The bag lives in
+        // the JSObject's lazily-allocated `dict_store` now, so ensure it
+        // exists here — the global is definitionally dict-backed.
+        _ = try gt.ensureDictStore(allocator);
         self.target = gt;
     }
 };
@@ -2240,7 +2246,7 @@ pub const Realm = struct {
                     "fuzzilli",
                 };
                 inline for (debug_keys) |k| {
-                    try gt.property_flags.put(self.allocator, k, .{
+                    try (try gt.flagsMut(self.allocator)).put(self.allocator, k, .{
                         .writable = false,
                         .enumerable = false,
                         .configurable = false,

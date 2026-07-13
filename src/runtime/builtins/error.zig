@@ -572,7 +572,7 @@ fn installErrorPrototypeStack(realm: *Realm, error_proto: *JSObject) !void {
     const setter = try intrinsics.makeNativeFunction(realm, errorPrototypeStackSet, 1, "set stack");
     const entry = try error_proto.getOrPutAccessor(realm.allocator, "stack");
     entry.value_ptr.* = .{ .getter = getter, .setter = setter };
-    try error_proto.property_flags.put(realm.allocator, "stack", .{
+    try (try error_proto.flagsMut(realm.allocator)).put(realm.allocator, "stack", .{
         .writable = false,
         .enumerable = false,
         .configurable = true,

@@ -883,9 +883,9 @@ fn reflectDeleteProperty(realm: *Realm, this_value: Value, args: []const Value) 
     // Demote: the shadow shape can't encode a removal — leaving it
     // would trip `verifyShapeInvariant` under GC stress.
     try target.demoteFromShape(realm.allocator);
-    _ = target.properties.swapRemove(key_slice);
+    if (target.dictStore()) |d| _ = d.properties.swapRemove(key_slice);
     _ = target.removeAccessor(key_slice);
-    _ = target.property_flags.swapRemove(key_slice);
+    if (target.dictStore()) |d| _ = d.property_flags.swapRemove(key_slice);
     target.forgetKey(key_slice);
     return Value.true_;
 }

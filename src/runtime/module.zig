@@ -209,7 +209,7 @@ pub fn getModuleNamespace(realm: *Realm, mr: *ModuleRecord) !*JSObject {
         // Skip the @@toStringTag installed above — it has different
         // flags.
         if (std.mem.eql(u8, key, "@@toStringTag")) continue;
-        try ns.property_flags.put(realm.allocator, key, .{
+        try (try ns.flagsMut(realm.allocator)).put(realm.allocator, key, .{
             .writable = true,
             .enumerable = true,
             .configurable = false,
@@ -219,7 +219,7 @@ pub fn getModuleNamespace(realm: *Realm, mr: *ModuleRecord) !*JSObject {
         var rit = rit_outer;
         while (rit.next()) |entry| {
             const key = entry.key_ptr.*;
-            try ns.property_flags.put(realm.allocator, key, .{
+            try (try ns.flagsMut(realm.allocator)).put(realm.allocator, key, .{
                 .writable = true,
                 .enumerable = true,
                 .configurable = false,
