@@ -281,11 +281,11 @@ const object_recomputed_fields = [_][]const u8{
 /// means the object is outside the phase-1 envelope
 /// (`error.SnapshotUnsupported`).
 const object_asserted_fields = [_][]const u8{
-    "promise_store",            "promise_state",         "promise_value",
-    "promise_already_resolved", "is_proxy",              "proxy_revoked",
-    "is_weak_ref",              "is_shadow_realm",       "is_module_namespace",
-    "is_sparse",                "sparse_elements",       "sparse_length",
-    "elements_pooled",          "has_array_buffer_data", "array_buffer_shared",
+    "promise_store",            "promise_state",       "promise_value",
+    "promise_already_resolved", "is_proxy",            "proxy_revoked",
+    "is_weak_ref",              "is_shadow_realm",     "is_module_namespace",
+    "is_sparse",                "sparse_length",       "elements_pooled",
+    "has_array_buffer_data",    "array_buffer_shared",
 };
 
 const extension_serialized_fields = [_][]const u8{
@@ -308,7 +308,7 @@ const extension_asserted_fields = [_][]const u8{
     "intl_record",                  "array_like_iter",          "map_set_iter",
     "regexp_string_iter",           "iter_record",              "iter_helper",
     "regex_perlex",                 "proxy_target",             "proxy_handler",
-    "proxy_target_fn",
+    "proxy_target_fn",              "sparse_elements",
 };
 /// Extension fields recomputed / dropped at restore — never
 /// serialized, never asserted-default. `key_anchors` re-derives from
@@ -809,7 +809,7 @@ const Capture = struct {
             o.promise_already_resolved or o.is_proxy or
             o.proxy_revoked or o.is_weak_ref or
             o.is_shadow_realm or o.is_module_namespace or o.is_sparse or
-            o.sparse_elements.count() != 0 or o.sparse_length != 0 or
+            o.sparse_length != 0 or
             o.elements_pooled or o.has_array_buffer_data or o.array_buffer_shared)
         {
             return error.SnapshotUnsupported;
@@ -900,7 +900,10 @@ const Capture = struct {
             ext.proxy_target_fn != null or
             // `regex_perlex` is a recomputed-on-demand compiled program,
             // not serialized — a captured RegExp recompiles on first use.
-            ext.regex_perlex != null)
+            ext.regex_perlex != null or
+            // §10.4.2 sparse arrays are outside the capture envelope
+            // (the `is_sparse` / `sparse_length` brand is checked object-side).
+            ext.sparse_elements.count() != 0)
         {
             return error.SnapshotUnsupported;
         }

@@ -7646,7 +7646,7 @@ pub fn runFrames(
                     // re-check liveness here. Plain shape-mode objects
                     // never carry these, so this is ~free in the common
                     // case.
-                    if (recv.elements.items.len != 0 or recv.is_sparse or recv.sparse_elements.count() != 0) break :forin_hit;
+                    if (recv.elements.items.len != 0 or recv.is_sparse or recv.sparseConst().count() != 0) break :forin_hit;
                     acc = wrapForInSnapshot(realm, snap, acc) catch return error.OutOfMemory;
                     continue :dispatch try decodeNext(code, &ip, &committed);
                 }
@@ -7702,7 +7702,7 @@ pub fn runFrames(
                     if (recv.shape == null) break :fill;
                     if (recv.is_proxy) break :fill;
                     if (recv.is_array_exotic or recv.is_module_namespace or recv.getTypedView() != null) break :fill;
-                    if (recv.elements.items.len != 0 or recv.is_sparse or recv.sparse_elements.count() != 0) break :fill;
+                    if (recv.elements.items.len != 0 or recv.is_sparse or recv.sparseConst().count() != 0) break :fill;
                     const proto = recv.prototype orelse break :fill;
                     if (proto.extensible) break :fill; // not frozen / sealed
                     if (proto.prototype != null) break :fill; // not a one-level chain
@@ -7715,7 +7715,7 @@ pub fn runFrames(
                     // require the proto have no own integer elements
                     // it could re-enumerate, and no live proxy.
                     if (proto.getProxyTarget() != null or proto.proxy_revoked) break :fill;
-                    if (proto.elements.items.len != 0 or proto.is_sparse or proto.sparse_elements.count() != 0) break :fill;
+                    if (proto.elements.items.len != 0 or proto.is_sparse or proto.sparseConst().count() != 0) break :fill;
                     const cell = &local_chunk.inline_forin_caches[forin_ic_idx];
                     cell.recv_shape = recv.shape;
                     cell.proto = proto;

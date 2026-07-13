@@ -189,7 +189,7 @@ pub fn hardenWalk(realm: *Realm, v: Value, visited: *std.AutoHashMap(usize, void
         while (rit.next()) |e| try hardenWalk(realm, e.value_ptr.*, visited);
         // Recurse into array indexed slots. `iterOwnNamedKeys`
         // skips these — they live in `obj.elements` /
-        // `obj.sparse_elements` per the array-exotic layout, not
+        // `obj.sparseConst()` per the array-exotic layout, not
         // in the named-property bag. The harden contract is
         // "deep-freeze every reachable value," and an array of
         // user-mutable objects would otherwise let a hardened
@@ -200,7 +200,7 @@ pub fn hardenWalk(realm: *Realm, v: Value, visited: *std.AutoHashMap(usize, void
         // freezing actually reaches them.
         if (obj.is_array_exotic) {
             for (obj.elements.items) |elem| try hardenWalk(realm, elem, visited);
-            var sit = obj.sparse_elements.iterator();
+            var sit = obj.sparseConst().iterator();
             while (sit.next()) |e| try hardenWalk(realm, e.value_ptr.*, visited);
         }
         // Recurse into accessor getters / setters.

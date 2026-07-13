@@ -1918,7 +1918,7 @@ pub const Heap = struct {
                 // slot to keep referenced values alive.
                 if (o.is_array_exotic) {
                     if (o.is_sparse) {
-                        var sit = o.sparse_elements.iterator();
+                        var sit = o.sparseConst().iterator();
                         while (sit.next()) |entry| self.enqueue(entry.value_ptr.*);
                     } else {
                         for (o.elements.items) |elem| self.enqueue(elem);
@@ -4191,7 +4191,7 @@ pub const Heap = struct {
             // Element vector.
             if (o.is_array_exotic) {
                 if (o.is_sparse) {
-                    var sit = o.sparse_elements.iterator();
+                    var sit = o.sparseConst().iterator();
                     while (sit.next()) |entry| {
                         if (isYoungHeapValue(entry.value_ptr.*) and !o.dirty) {
                             std.debug.print(

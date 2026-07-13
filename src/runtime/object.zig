@@ -545,6 +545,10 @@ pub const DictStore = struct {
 const empty_props: std.StringArrayHashMapUnmanaged(Value) = .empty;
 const empty_flags: std.StringArrayHashMapUnmanaged(PropertyFlags) = .empty;
 const empty_order: std.ArrayListUnmanaged([]const u8) = .empty;
+/// Shared empty sparse map for the `sparseConst` read path on a
+/// non-sparse object (no extension). Never mutated — writes go through
+/// `sparseMut`, which allocates the extension.
+const empty_sparse: std.AutoHashMapUnmanaged(u32, Value) = .empty;
 
 /// Lazy side allocation for cold JSObject state. See the trailing
 /// scaffolding-tests block in this file for the contract; the
@@ -795,8 +799,20 @@ pub const JSObjectExtension = struct {
     proxy_target: ?*JSObject = null,
     proxy_handler: ?*JSObject = null,
     proxy_target_fn: ?*@import("function.zig").JSFunction = null,
+    /// §10.4.2 Array-exotic *sparse* (dictionary-mode) indexed store —
+    /// `u32 index → Value`, populated only when a single write would
+    /// extend the dense `elements` vector past `sparse_gap_threshold`
+    /// (e.g. `a[2**32 - 2] = v`). Sparse arrays are rare, so this 24 B
+    /// map moved off the base `JSObject`; the hot `is_sparse` brand
+    /// stays inline so the dense element path never touches the
+    /// extension. GC-marked with the array-exotic values in `heap.zig`
+    /// (it rides the value write barrier + remembered set, like
+    /// `elements`, NOT the typed-slot scan). Access via
+    /// `sparseConst` / `sparseMut`.
+    sparse_elements: std.AutoHashMapUnmanaged(u32, Value) = .empty,
 
     pub fn deinit(self: *JSObjectExtension, allocator: std.mem.Allocator) void {
+        self.sparse_elements.deinit(allocator);
         if (self.array_like_iter) |s| s.deinit(allocator);
         if (self.map_set_iter) |s| s.deinit(allocator);
         if (self.regexp_string_iter) |s| s.deinit(allocator);
@@ -1310,7 +1326,11 @@ pub const JSObject = struct {
     /// arm; in-place reads/writes and shrinks need no special
     /// handling (`ArrayList.resize` within capacity never reallocs).
     elements_pooled: bool = false,
-    sparse_elements: std.AutoHashMapUnmanaged(u32, Value) = .empty,
+    // §10.4.2 sparse indexed store (`sparse_elements`) moved to
+    // `JSObjectExtension` — populated only on the rare sparse array
+    // exotic. The `is_sparse` brand + `sparse_length` stay inline (the
+    // brand gates the dense/sparse split on the hot element path, and
+    // both pack into padding). Access via `sparseConst` / `sparseMut`.
     sparse_length: u32 = 0,
     // (`key_anchors` moved to `JSObjectExtension` — present only on
     // objects that anchor a computed / bag-promoted key. Access via
@@ -1466,6 +1486,20 @@ pub const JSObject = struct {
     }
     pub fn orderMut(self: *JSObject, allocator: std.mem.Allocator) !*std.ArrayListUnmanaged([]const u8) {
         return &(try self.ensureDictStore(allocator)).own_key_order;
+    }
+
+    // ── §10.4.2 sparse array store — extension-backed cold map ─
+    //
+    // Only sparse array exotics populate it (rare). Reads via
+    // `sparseConst` return the extension's map or a shared empty;
+    // writes via `sparseMut` allocate the extension. Sparse values ride
+    // the value write barrier (`setIndexed` barriers on write), same as
+    // dense `elements`.
+    pub fn sparseConst(self: *const JSObject) *const std.AutoHashMapUnmanaged(u32, Value) {
+        return if (self.extension) |ext| &ext.sparse_elements else &empty_sparse;
+    }
+    pub fn sparseMut(self: *JSObject, allocator: std.mem.Allocator) !*std.AutoHashMapUnmanaged(u32, Value) {
+        return &(try self.getOrCreateExtension(allocator)).sparse_elements;
     }
 
     /// Note that a typed internal slot was populated on this object with
@@ -2386,7 +2420,8 @@ pub const JSObject = struct {
         // `key_anchors` lives in the extension; the `extension != null`
         // check below covers it.
         if (self.elements.items.len != 0) std.debug.panic("pristine violated: elements.len={d}", .{self.elements.items.len});
-        if (self.sparse_elements.count() != 0) std.debug.panic("pristine violated: sparse_elements.count={d}", .{self.sparse_elements.count()});
+        // `sparse_elements` lives in the extension; the `extension != null`
+        // check below covers it.
         if (self.overflow_slots.items.len != 0) std.debug.panic("pristine violated: overflow_slots.len={d}", .{self.overflow_slots.items.len});
         // A pristine object has no `extension`, which transitively
         // guarantees its iterator-state slots (`array_like_iter` /
@@ -2439,7 +2474,7 @@ pub const JSObject = struct {
         } else {
             self.elements.deinit(allocator);
         }
-        self.sparse_elements.deinit(allocator);
+        // `sparse_elements` lives in the extension — freed when it is.
         // `shape` itself is realm-lifetime arena memory (ShapeTree),
         // not freed per-object; only the overflow slot vector is
         // owned here (inline slots live in the header).
@@ -3699,7 +3734,7 @@ pub const JSObject = struct {
     /// compatible-redefine guard.
     pub fn tryGetIndexedOwn(self: *const JSObject, idx: u32) ?Value {
         if (self.is_sparse) {
-            if (self.sparse_elements.get(idx)) |v| {
+            if (self.sparseConst().get(idx)) |v| {
                 if (isElementHole(v)) return null;
                 return v;
             }
@@ -3752,7 +3787,7 @@ pub const JSObject = struct {
         const new_len: usize = @as(usize, idx) + 1;
         try self.ensureElementsLen(allocator, new_len);
         if (self.is_sparse) {
-            try self.sparse_elements.put(allocator, idx, v);
+            try (try self.sparseMut(allocator)).put(allocator, idx, v);
         } else {
             self.elements.items[idx] = v;
         }
@@ -3777,7 +3812,7 @@ pub const JSObject = struct {
     /// Does NOT sync length; caller is responsible.
     pub fn holeIndexed(self: *JSObject, idx: u32) void {
         if (self.is_sparse) {
-            _ = self.sparse_elements.remove(idx);
+            if (self.extension) |ext| _ = ext.sparse_elements.remove(idx);
         } else if (idx < self.elements.items.len) {
             self.elements.items[idx] = Value.hole_;
         }
@@ -3877,7 +3912,7 @@ pub const JSObject = struct {
         while (i < self.elements.items.len) : (i += 1) {
             const v = self.elements.items[i];
             if (isElementHole(v)) continue;
-            try self.sparse_elements.put(allocator, i, v);
+            try (try self.sparseMut(allocator)).put(allocator, i, v);
         }
         if (self.elements_pooled) {
             self.elementsFreePooled();
@@ -3908,13 +3943,15 @@ pub const JSObject = struct {
             // Collect keys to remove (can't mutate while iterating).
             var to_remove: std.ArrayListUnmanaged(u32) = .empty;
             defer to_remove.deinit(allocator);
-            var it = self.sparse_elements.iterator();
+            var it = self.sparseConst().iterator();
             while (it.next()) |entry| {
                 if (entry.key_ptr.* >= new_len) {
                     try to_remove.append(allocator, entry.key_ptr.*);
                 }
             }
-            for (to_remove.items) |k| _ = self.sparse_elements.remove(k);
+            if (self.extension) |ext| {
+                for (to_remove.items) |k| _ = ext.sparse_elements.remove(k);
+            }
             if (new_len < self.sparse_length) self.sparse_length = new_len;
             return true;
         }
@@ -3981,7 +4018,7 @@ pub const JSObject = struct {
     /// length alone, just removes the own property).
     pub fn removeIndexed(self: *JSObject, idx: u32) bool {
         if (self.is_sparse) {
-            _ = self.sparse_elements.remove(idx);
+            if (self.extension) |ext| _ = ext.sparse_elements.remove(idx);
             return true;
         }
         if (idx >= self.elements.items.len) return true; // already absent
@@ -4460,15 +4497,16 @@ test "JSObjectExtension: footprint probe (size measurement, not an invariant)" {
     // `inline_slot_cap` raises it by 8 bytes per added slot.
     std.debug.print("[footprint] @sizeOf(JSObject)          = {d} bytes\n", .{@sizeOf(JSObject)});
     std.debug.print("[footprint] @sizeOf(JSObjectExtension) = {d} bytes\n", .{@sizeOf(JSObjectExtension)});
-    // Header-size regression guard. Two moves took the header from
-    // 408 B down: the cold per-kind clusters (iterator / RegExp / key
-    // anchors / Proxy) went behind `extension` (Stage A → 296 B), then
+    // Header-size regression guard. Successive moves took the header
+    // from 408 B down: the cold per-kind clusters (iterator / RegExp /
+    // key anchors / Proxy) went behind `extension` (Stage A → 296 B),
     // the dictionary representation (`properties` / `property_flags` /
-    // `own_key_order`) went into `dict_store` (Stage B1 → 200 B). See
-    // docs/gc-immix-rearchitecture.md "The memory axis". This catches
-    // an accidental re-inlining — the smallest moved field is 24 B,
-    // which would push the header past this bound.
-    try testing.expect(@sizeOf(JSObject) <= 208);
+    // `own_key_order`) went into `dict_store` (B1a → 200 B), and the
+    // sparse indexed store (`sparse_elements`) went into `extension`
+    // (B1b → 176 B). See docs/gc-immix-rearchitecture.md "The memory
+    // axis". This catches an accidental re-inlining — the smallest
+    // moved field is 24 B, which would push the header past this bound.
+    try testing.expect(@sizeOf(JSObject) <= 184);
 }
 
 test "JSObjectExtension: extension is null on a fresh object" {

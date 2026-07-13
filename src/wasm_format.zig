@@ -149,7 +149,7 @@ fn appendArray(
         var i: u32 = 0;
         while (i < show_n) : (i += 1) {
             if (i > 0) try buf.appendSlice(allocator, ", ");
-            if (obj.sparse_elements.get(i)) |elem| {
+            if (obj.sparseConst().get(i)) |elem| {
                 try appendValueAt(allocator, buf, elem, depth + 1);
             } else {
                 try buf.appendSlice(allocator, "<empty>");

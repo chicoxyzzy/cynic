@@ -451,7 +451,7 @@ pub fn buildForInSnapshot(
             // up the latter, so we skip them here either way.
             if (cur.is_array_exotic) {
                 if (cur.is_sparse) {
-                    var sit = cur.sparse_elements.iterator();
+                    var sit = cur.sparseConst().iterator();
                     while (sit.next()) |entry| {
                         if (@import("../object.zig").JSObject.isElementHole(entry.value_ptr.*)) continue;
                         const idx = entry.key_ptr.*;

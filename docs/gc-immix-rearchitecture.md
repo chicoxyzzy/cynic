@@ -169,8 +169,22 @@ to Stage A: both GC markers (`markValue`'s `iterOwnNamedKeys` walk;
 `objectHoldsYoungSymbolKey` / `markSymbolKeys` reach the bag/shape keys),
 `verifyRememberedSet` (the write-barrier `dirty` contract on every bag
 write), `deinitFields`, the pristine assert, and the snapshot comptime
-classification + serialize. The array-sparse state (`sparse_elements` et
-al., array-exotic-only) is a smaller sibling move still to come (B1b).
+classification + serialize.
+
+**B1b — the sparse indexed store (SHIPPED).** `sparse_elements` (the
+`u32 → Value` dictionary-mode indexed map, populated only on the rare
+sparse array exotic) moved into the existing `extension` sidecar — reusing
+that pointer, so it saves the full 24 B with no new field. The hot
+`is_sparse` brand + `sparse_length` stay inline (they gate the dense/sparse
+split on the element hot path and pack into padding), so the dense element
+path never touches the extension. Sparse values ride the value write
+barrier (`setIndexed`) exactly as before. Header 200 → 176 B; test262
+byte-identical, `--gc-threshold=1` verifiers green. **The dense `elements`
+vector is deliberately NOT moved** — it is the array hot path (every dense
+index read/write) and belongs to a perf-sensitive "packed JSArray"
+redesign, not a cold move. So header now stands at 176 B (408 → 176 overall,
+−57 %); the remaining big fields — `inline_slots[4]`, `overflow_slots`,
+`shape` — are all JIT-baked and only move under B2.
 
 **B2 — the hot-field / uniform-header move (JIT lane, the actual ~75 MB
 target).** `shape` + `inline_slots` + `overflow_slots` (and `elements`) are

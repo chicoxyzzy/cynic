@@ -1791,7 +1791,7 @@ fn sparseReverseSearch(realm: *Realm, arr: *JSObject, start: i64, target: Value)
     const keys = try sparseDescendingKeys(realm, arr, start);
     defer realm.allocator.free(keys);
     for (keys) |k| {
-        const v = arr.sparse_elements.get(k) orelse continue;
+        const v = arr.sparseConst().get(k) orelse continue;
         if (strictEqualsLite(v, target)) return @as(i64, k);
     }
     return null;
@@ -1807,8 +1807,8 @@ fn sparseDescendingKeys(realm: *Realm, arr: *JSObject, start: i64) NativeError![
     const start_u32: u32 = if (start > std.math.maxInt(u32)) std.math.maxInt(u32) else @intCast(start);
     var keys: std.ArrayListUnmanaged(u32) = .empty;
     errdefer keys.deinit(realm.allocator);
-    keys.ensureTotalCapacity(realm.allocator, arr.sparse_elements.count()) catch return error.OutOfMemory;
-    var it = arr.sparse_elements.iterator();
+    keys.ensureTotalCapacity(realm.allocator, arr.sparseConst().count()) catch return error.OutOfMemory;
+    var it = arr.sparseConst().iterator();
     while (it.next()) |entry| {
         if (entry.key_ptr.* > start_u32) continue;
         if (JSObject.isElementHole(entry.value_ptr.*)) continue;
@@ -1956,14 +1956,14 @@ fn arrayReduceRight(realm: *Realm, this_value: Value, args: []const Value) Nativ
         var idx: usize = 0;
         if (!have_acc) {
             if (ks.len == 0) return throwTypeError(realm, "Reduce of empty array with no initial value");
-            acc = obj.sparse_elements.get(ks[0]) orelse Value.undefined_;
+            acc = obj.sparseConst().get(ks[0]) orelse Value.undefined_;
             have_acc = true;
             idx = 1;
         }
         while (idx < ks.len) : (idx += 1) {
             scope.handles.items[acc_slot] = acc;
             const k = ks[idx];
-            const elem = obj.sparse_elements.get(k) orelse continue;
+            const elem = obj.sparseConst().get(k) orelse continue;
             const cb_args = [_]Value{ acc, elem, numberFromI64(@as(i64, k)), heap_mod.taggedObject(obj) };
             const outcome = lantern.callJSFunction(realm.allocator, realm, callback, Value.undefined_, &cb_args) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,

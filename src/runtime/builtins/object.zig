@@ -247,7 +247,7 @@ pub fn ownPropertyKeysOrdered(
     // properties (§10.4.2.1 step 2) and are skipped here.
     if (obj.is_array_exotic) {
         if (obj.is_sparse) {
-            var sit = obj.sparse_elements.iterator();
+            var sit = obj.sparseConst().iterator();
             while (sit.next()) |entry| {
                 const idx = entry.key_ptr.*;
                 if (JSObject.isElementHole(entry.value_ptr.*)) continue;
@@ -3232,7 +3232,7 @@ fn lowerArrayIndexedFlags(realm: *Realm, obj: *JSObject, sealed_only: bool) Nati
     var indices: std.ArrayListUnmanaged(u32) = .empty;
     defer indices.deinit(realm.allocator);
     if (obj.is_sparse) {
-        var sit = obj.sparse_elements.iterator();
+        var sit = obj.sparseConst().iterator();
         while (sit.next()) |entry| {
             if (JSObject.isElementHole(entry.value_ptr.*)) continue;
             try indices.append(realm.allocator, entry.key_ptr.*);
@@ -3434,13 +3434,13 @@ fn objectIsSealed(realm: *Realm, this_value: Value, args: []const Value) NativeE
 /// `true` iff `obj` is an Array exotic with at least one
 /// present indexed slot whose descriptor hasn't been lowered
 /// into the property bag. Indexed slots in `obj.elements` /
-/// `obj.sparse_elements` default to `{w,e,c} = true` (per
+/// `obj.sparseConst()` default to `{w,e,c} = true` (per
 /// §10.4.2) — `isSealed` / `isFrozen` must observe that as
 /// "not sealed" until SetIntegrityLevel promotes the slots.
 fn hasUnlockedIndexedElements(obj: *JSObject) bool {
     if (!obj.is_array_exotic) return false;
     if (obj.is_sparse) {
-        var sit = obj.sparse_elements.iterator();
+        var sit = obj.sparseConst().iterator();
         while (sit.next()) |entry| {
             if (JSObject.isElementHole(entry.value_ptr.*)) continue;
             var ibuf: [16]u8 = undefined;
