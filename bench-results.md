@@ -17,6 +17,63 @@ new run against the previous section with the *same host*.
 
 ## History
 
+### 2026-07-13 — cynic `6bd673c4` (JSObject header shrink — cold clusters behind `extension`), host `Linux 6.8.0-117-generic x86_64` (remote bench box)
+
+Results-refresh snapshot at `origin/main` (no code change this session) — the
+companion to the `bench-cross-results.md` regen. Default tier (Bistromath),
+median of 12 on the shared-vCPU box, so absolute ms run several× slower and
+noisier than the Darwin rows below: the micros carry the usual 25–80 % shared-
+vCPU spread (informational — defer to the core-pinned cross-engine table),
+while the macros are the cleaner read (6–13 % spread; splay's 28 % is GC-pause
+variance).
+
+The headline is the memory axis. **splay peak RSS 371,918 → 281,088 KiB
+(≈ 363 → 274 MiB, −24 %, ~−89 MiB)** — the Stage A header shrink
+(`@sizeOf(JSObject)` 408 → 296 B; four cold per-kind clusters relocated behind
+the `JSObjectExtension` pointer, `6bd673c4`), where the drop is the per-object
+saving times splay's ~768 k live nodes. See `docs/gc-immix-rearchitecture.md`
+§"Stage A landed". The minimal-object micros corroborate — `arith_loop` /
+`prop_access` / `prop_write` / `tail_recursion` RSS 6912 → 5888 KiB (−15 %).
+Cross-engine (`bench-cross-results.md`): cynic splay 274 MiB vs jsc 54 /
+hermes 67 / v8 70 — still the field's heaviest by count of live headers, now
+much closer. Stage A is test262-byte-identical: a footprint change, not a
+throughput one.
+
+Timing deltas vs the last absolutes row (2026-06-21 `bf5951e1`, same host) are
+**cumulative over the three-week window** — GC-latency (incremental marking,
+lazy sweep), interpreter, and shape-index work, not this one commit: splay
+4569 → 783 ms (−83 %), raytrace 662 → 195 (−71 %), navier_stokes 831 → 573
+(−31 %), richards 660 → 521 (−21 %), crypto 684 → 561 (−18 %); deltablue flat
+(595 → 578).
+
+#### Macros (default tier)
+
+| bench | median_ms | min_ms | max_ms | rss_kb |
+|---|---:|---:|---:|---:|
+| richards | 521.19 | 509.49 | 576.66 | 7552 |
+| deltablue | 577.55 | 549.12 | 626.41 | 15360 |
+| crypto | 560.97 | 553.01 | 590.17 | 10752 |
+| raytrace | 195.13 | 182.52 | 207.55 | 9600 |
+| navier_stokes | 573.24 | 532.97 | 591.47 | 9088 |
+| splay | 782.71 | 737.30 | 958.44 | 281088 |
+
+#### Micros (default tier)
+
+| bench | median_ms | min_ms | max_ms | rss_kb |
+|---|---:|---:|---:|---:|
+| arith_loop | 78.23 | 71.34 | 92.90 | 5888 |
+| prop_access | 32.39 | 27.20 | 47.24 | 5888 |
+| prop_write | 30.91 | 23.43 | 37.56 | 5888 |
+| array_iter | 50.59 | 47.74 | 75.28 | 6912 |
+| string_concat | 64.73 | 60.88 | 92.94 | 27392 |
+| promise_chain | 25.97 | 21.25 | 41.91 | 22656 |
+| object_alloc | 27.50 | 24.28 | 33.37 | 8192 |
+| method_call | 40.59 | 38.95 | 44.48 | 6016 |
+| class_instantiate | 53.57 | 50.90 | 59.83 | 8320 |
+| ctor_array_build | 363.13 | 352.16 | 391.79 | 8832 |
+| json_stringify | 42.50 | 37.84 | 61.79 | 7936 |
+| tail_recursion | 44.83 | 42.83 | 50.33 | 5888 |
+
 ### 2026-06-28 — cynic `8563423b` (interpreter arithmetic + comparison fast paths), host `Linux 6.8.0-117-generic x86_64` (remote bench box)
 
 Same-runner A/B vs `290bc75f` (the commit just before the first fast path),
