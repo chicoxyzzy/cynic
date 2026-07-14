@@ -404,7 +404,7 @@ pub const JSFunction = struct {
     /// participate in `Object.preventExtensions` / `Object.seal` /
     /// `Object.freeze`. Flipping this to `false` makes
     /// PrivateFieldAdd (§7.3.32 step 1) throw on `static #x = …`
-    /// targeting this ctor, mirrors JSObject.extensible. Defaults
+    /// targeting this ctor, mirrors JSObject.brand.extensible. Defaults
     /// to `true` — every function starts out extensible.
     extensible: bool = true,
     /// Mark color. `f.mark_color == heap.live_color` means "live

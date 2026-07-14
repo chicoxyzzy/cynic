@@ -415,7 +415,7 @@ fn makeSuppressedError(realm: *Realm, err_v: Value, suppressed_v: Value) !Value 
     const instance = try realm.heap.allocateObject();
     scope.push(heap_mod.taggedObject(instance)) catch return error.OutOfMemory;
     realm.heap.setObjectPrototype(instance, proto);
-    instance.has_error_data = true;
+    instance.brand.has_error_data = true;
     try instance.setWithFlags(realm.allocator, "error", err_v, .{
         .writable = true,
         .enumerable = false,

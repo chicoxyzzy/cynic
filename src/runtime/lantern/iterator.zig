@@ -383,7 +383,7 @@ pub fn buildForInSnapshot(
             // (which dispatches the `getOwnPropertyDescriptor`
             // trap). We materialise both via the helpers in
             // builtins/object.zig.
-            if (cur.is_proxy) {
+            if (cur.brand.is_proxy) {
                 const obj_mod = @import("../builtins/object.zig");
                 const key_scope = realm.heap.openScope() catch return error.OutOfMemory;
                 defer key_scope.close();
@@ -449,8 +449,8 @@ pub fn buildForInSnapshot(
             // (sparse) or descriptor-flag-demoted to the named-
             // property bag; the property-bag walker below picks
             // up the latter, so we skip them here either way.
-            if (cur.is_array_exotic) {
-                if (cur.is_sparse) {
+            if (cur.brand.is_array_exotic) {
+                if (cur.brand.is_sparse) {
                     var sit = cur.sparseConst().iterator();
                     while (sit.next()) |entry| {
                         if (@import("../object.zig").JSObject.isElementHole(entry.value_ptr.*)) continue;
@@ -738,7 +738,7 @@ fn arrayLikeIterNext(realm: *Realm, this_value: Value, args: []const Value) @imp
                     // observability. Trust the snapshot for proxies —
                     // user code can't safely delete-during-for-in on
                     // a proxy anyway (the trap controls visibility).
-                    const is_proxy = src.is_proxy;
+                    const is_proxy = src.brand.is_proxy;
                     if (!is_proxy and !src.hasProperty(key_str.flatBytes())) {
                         cursor += 1;
                         continue;

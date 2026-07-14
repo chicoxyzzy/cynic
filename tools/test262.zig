@@ -3140,7 +3140,7 @@ fn classifyAndRunInner(
             // see the right shape even during a cycle through the
             // entry module.
             entry_ns.prototype = null;
-            entry_ns.is_module_namespace = true;
+            entry_ns.brand.is_module_namespace = true;
             const entry_mod = ModuleRecord.init(realm.allocator, rel, entry_ns) catch return error.OutOfMemory;
             entry_mod.state = .evaluating;
             realm.modules.put(realm.allocator, rel, entry_mod) catch return error.OutOfMemory;
@@ -3215,7 +3215,7 @@ fn classifyAndRunInner(
     if (is_module and !test_threw and run_result == .value) {
         if (entry_chunk_async) {
             if (cynic.runtime.heap.valueAsPlainObject(run_result.value)) |p_obj| {
-                if (p_obj.isPromise() and p_obj.promise_state == .rejected) {
+                if (p_obj.isPromise() and p_obj.brand.promise_state == .rejected) {
                     test_threw = true;
                 }
             }

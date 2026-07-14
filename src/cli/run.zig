@@ -352,7 +352,7 @@ fn printParseDiagnostics(
 fn printThrownStream(io: std.Io, out: std.Io.File, v: Value) !void {
     if (v.isObject()) {
         if (cynic.runtime.heap.valueAsPlainObject(v)) |obj| {
-            if (obj.has_error_data) {
+            if (obj.brand.has_error_data) {
                 const name_v = obj.get("name");
                 const message_v = obj.get("message");
                 if (name_v.isString()) {

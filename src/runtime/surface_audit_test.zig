@@ -48,7 +48,7 @@ fn collectOwnNames(allocator: std.mem.Allocator, obj: *JSObject) ![]const []cons
     // §23.1.4 — an array exotic's `length` is the virtual own slot
     // (synthesized, never in the bag this walk reads); mirror the
     // JS-visible surface so the spec-name diff stays truthful.
-    if (obj.is_array_exotic) {
+    if (obj.brand.is_array_exotic) {
         try list.append(allocator, try allocator.dupe(u8, "length"));
     }
     if (obj.accessorIterator()) |a_it_outer| {

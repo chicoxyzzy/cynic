@@ -874,7 +874,7 @@ pub const Heap = struct {
     /// arm draws from it instead of a libc malloc per array, and the
     /// sweep returns it on death; an array that outgrows the class
     /// migrates to a general-purpose buffer once (see
-    /// `JSObject.elements_pooled`). Most literal arrays live and die
+    /// `JSObject.brand.elements_pooled`). Most literal arrays live and die
     /// entirely inside the pool.
     element_buf_pool: std.heap.MemoryPool([element_buf_cap]Value) = .empty,
 
@@ -1202,7 +1202,7 @@ pub const Heap = struct {
         obj.markAsArrayExotic(self.allocator) catch return error.OutOfMemory;
         const buf = self.element_buf_pool.create(self.allocator) catch return error.OutOfMemory;
         obj.elements = .{ .items = buf[0..0], .capacity = element_buf_cap };
-        obj.elements_pooled = true;
+        obj.brand.elements_pooled = true;
         obj.elements.appendSliceAssumeCapacity(elems);
         obj.markNonPristine();
         return obj;
@@ -1226,8 +1226,8 @@ pub const Heap = struct {
         const ik = key.asInt32();
         if (ik < 0) return null;
         const aobj = valueAsPlainObject(recv) orelse return null;
-        if (!aobj.is_array_exotic or aobj.is_sparse or
-            aobj.getProxyTarget() != null or aobj.proxy_revoked) return null;
+        if (!aobj.brand.is_array_exotic or aobj.brand.is_sparse or
+            aobj.getProxyTarget() != null or aobj.brand.proxy_revoked) return null;
         const idx: usize = @intCast(ik);
         const els = aobj.elements.items;
         if (idx >= els.len or JSObject.isElementHole(els[idx])) return null;
@@ -1916,8 +1916,8 @@ pub const Heap = struct {
                 // §10.4.2 Array exotic — packed indexed elements
                 // are part of the JSObject's own state; mark each
                 // slot to keep referenced values alive.
-                if (o.is_array_exotic) {
-                    if (o.is_sparse) {
+                if (o.brand.is_array_exotic) {
+                    if (o.brand.is_sparse) {
                         var sit = o.sparseConst().iterator();
                         while (sit.next()) |entry| self.enqueue(entry.value_ptr.*);
                     } else {
@@ -1931,7 +1931,7 @@ pub const Heap = struct {
                 // the referent did not survive the trace. A minor
                 // cycle keeps strong-marking (the young target
                 // tenures and is handled weakly next `collectFull`).
-                if (o.is_weak_ref) {
+                if (o.brand.is_weak_ref) {
                     if (self.weak_aware_mark) {
                         self.weak_refs_seen.append(self.allocator, o) catch {};
                     } else {
@@ -2040,7 +2040,7 @@ pub const Heap = struct {
                 // a fulfilled / rejected Promise. Held in the typed
                 // `promise_value` slot rather than a property bag,
                 // so the regular property walk above misses it.
-                if (o.promise_state != .none) self.enqueue(o.promise_value);
+                if (o.brand.promise_state != .none) self.enqueue(o.promise_value);
                 // §22.2.4 `[[OriginalSource]]` / `[[OriginalFlags]]`
                 // for RegExp instances. Strings that the regular
                 // property walk wouldn't reach.
@@ -2178,7 +2178,7 @@ pub const Heap = struct {
     fn processWeakReferences(self: *Heap) void {
         // §26.1 WeakRef.
         for (self.weak_refs_seen.items) |wr| {
-            if (!wr.is_weak_ref) continue;
+            if (!wr.brand.is_weak_ref) continue;
             const slot = wr.weakRefTargetSlot() orelse continue;
             if (!self.isWeakReferentLive(slot.*)) {
                 slot.* = Value.undefined_;
@@ -2588,7 +2588,7 @@ pub const Heap = struct {
     /// freeing the child at parent `deinit` — never worse than the
     /// pre-finalizer behaviour.
     fn queueShadowRealmTeardown(obj: *JSObject, pending: *std.ArrayListUnmanaged(*Realm), allocator: std.mem.Allocator) void {
-        if (!obj.is_shadow_realm) return;
+        if (!obj.brand.is_shadow_realm) return;
         const hd = obj.getHostData() orelse return;
         pending.append(allocator, @ptrCast(@alignCast(hd))) catch {};
     }
@@ -3812,7 +3812,7 @@ pub const Heap = struct {
         self.markValue(o.getFinallyValue());
         if (o.getFinallyConstructor()) |f| self.markValue(taggedFunction(f));
         if (o.getGeneratorRef()) |gen| self.markGenerator(gen);
-        if (o.is_weak_ref) self.markValue(o.getWeakRefTarget());
+        if (o.brand.is_weak_ref) self.markValue(o.getWeakRefTarget());
         if (o.getFinalizationCells()) |fc| {
             self.markValue(fc.cleanup_callback);
             for (fc.cells.items) |cell| {
@@ -3836,7 +3836,7 @@ pub const Heap = struct {
         if (o.promiseWaitersConst()) |waiters| {
             for (waiters.items) |w| self.markGenerator(w);
         }
-        if (o.promise_state != .none) self.markValue(o.promise_value);
+        if (o.brand.promise_state != .none) self.markValue(o.promise_value);
         if (o.getRegexpSource()) |s| self.markString(s);
         if (o.getRegexpFlags()) |s| self.markString(s);
         if (o.getInstanceFieldInits()) |inits| {
@@ -3950,7 +3950,7 @@ pub const Heap = struct {
         if (isYoungHeapValue(o.getFinallyValue())) return "finally_value";
         if (o.getFinallyConstructor()) |f| if (f.generation == .young) return "finally_constructor";
         if (o.getGeneratorRef()) |gen| if (gen.generation == .young) return "generator_ref";
-        if (o.is_weak_ref and isYoungHeapValue(o.getWeakRefTarget())) return "weak_ref_target";
+        if (o.brand.is_weak_ref and isYoungHeapValue(o.getWeakRefTarget())) return "weak_ref_target";
         if (o.getFinalizationCells()) |fc| {
             if (isYoungHeapValue(fc.cleanup_callback)) return "finalization.cleanup";
             for (fc.cells.items) |cell| {
@@ -3972,7 +3972,7 @@ pub const Heap = struct {
         if (o.promiseWaitersConst()) |waiters| {
             for (waiters.items) |w| if (w.generation == .young) return "promise_waiter";
         }
-        if (o.promise_state != .none and isYoungHeapValue(o.promise_value)) return "promise_value";
+        if (o.brand.promise_state != .none and isYoungHeapValue(o.promise_value)) return "promise_value";
         if (o.getRegexpSource()) |s| if (s.generation == .young) return "regexp_source";
         if (o.getRegexpFlags()) |s| if (s.generation == .young) return "regexp_flags";
         if (o.getInstanceFieldInits()) |inits| {
@@ -4189,8 +4189,8 @@ pub const Heap = struct {
                 }
             }
             // Element vector.
-            if (o.is_array_exotic) {
-                if (o.is_sparse) {
+            if (o.brand.is_array_exotic) {
+                if (o.brand.is_sparse) {
                     var sit = o.sparseConst().iterator();
                     while (sit.next()) |entry| {
                         if (isYoungHeapValue(entry.value_ptr.*) and !o.dirty) {
@@ -5766,7 +5766,7 @@ test "Heap: WeakRef to a pinned symbol observes the live referent after GC" {
     // WeakRef itself rooted; the cycle's weak-aware pass reaches it
     // and decides whether to clear its target slot.
     const wr = try heap.allocateObject();
-    wr.is_weak_ref = true;
+    wr.brand.is_weak_ref = true;
     try wr.setWeakRefTarget(testing.allocator, sym_v);
 
     heap.collect(&.{taggedObject(wr)});

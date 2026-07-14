@@ -395,7 +395,7 @@ fn buildUnmappedArgumentsObject(
     // Array auto-length-extend.
     const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
     realm.heap.setObjectPrototype(obj, arg_realm.intrinsics.object_prototype);
-    obj.is_arguments_exotic = true;
+    obj.brand.is_arguments_exotic = true;
     var i: u32 = 0;
     while (i < values.len) : (i += 1) {
         // §10.4.4.7 step 3 — CreateDataProperty per index. Small
@@ -3059,7 +3059,7 @@ pub fn runFrames(
                 // is a proxy, route through `callValue` which
                 // handles the apply trap and chained proxies.
                 if (heap_mod.valueAsPlainObject(callee_v)) |po| {
-                    if (po.is_proxy) {
+                    if (po.brand.is_proxy) {
                         const args_start = @as(usize, r_callee) + 1;
                         const args_slice = registers[args_start .. args_start + argc];
                         const cresult = try callValue(allocator, realm, f.running_realm orelse realm, callee_v, Value.undefined_, args_slice);
@@ -3131,7 +3131,7 @@ pub fn runFrames(
                     rp.setProxyTarget(realm.allocator, null) catch {};
                     rp.setProxyHandler(realm.allocator, null) catch {};
                     rp.setProxyTargetFn(realm.allocator, null) catch {};
-                    rp.proxy_revoked = true;
+                    rp.brand.proxy_revoked = true;
                     fn_v.revocable_proxy = null;
                     acc = Value.undefined_;
                     // No frame pushed, no inline call — the active frame
@@ -3442,7 +3442,7 @@ pub fn runFrames(
                 // §10.5.13 callable Proxy [[Call]] — route through
                 // `callValue` (handles apply trap + chained proxies).
                 if (heap_mod.valueAsPlainObject(callee_v)) |po| {
-                    if (po.is_proxy) {
+                    if (po.brand.is_proxy) {
                         const args_start = @as(usize, r_callee) + 1;
                         const args_slice = registers[args_start .. args_start + argc];
                         const cresult = try callValue(allocator, realm, f.running_realm orelse realm, callee_v, recv, args_slice);
@@ -3492,7 +3492,7 @@ pub fn runFrames(
                     rp.setProxyTarget(realm.allocator, null) catch {};
                     rp.setProxyHandler(realm.allocator, null) catch {};
                     rp.setProxyTargetFn(realm.allocator, null) catch {};
-                    rp.proxy_revoked = true;
+                    rp.brand.proxy_revoked = true;
                     fn_v.revocable_proxy = null;
                     acc = Value.undefined_;
                     // No frame pushed, no inline call → decodeNext.
@@ -3807,8 +3807,8 @@ pub fn runFrames(
                         } else if (!chainHasProxy(obj_in) and !obj_in.hasAccessor(key_s.flatBytes())) {
                             var cursor: ?*JSObject = obj_in.prototype;
                             while (cursor) |proto| : (cursor = proto.prototype) {
-                                if (proto.getProxyTarget() != null or proto.proxy_revoked) break;
-                                if (proto.is_module_namespace) break;
+                                if (proto.getProxyTarget() != null or proto.brand.proxy_revoked) break;
+                                if (proto.brand.is_module_namespace) break;
                                 if (proto.hasAccessor(key_s.flatBytes())) break;
                                 if (proto.shape) |proto_sh| {
                                     if (proto_sh.lookup(key_s.flatBytes())) |entry| {
@@ -3844,7 +3844,7 @@ pub fn runFrames(
 
                 // §10.5.13 callable Proxy [[Call]].
                 if (heap_mod.valueAsPlainObject(callee_v)) |po| {
-                    if (po.is_proxy) {
+                    if (po.brand.is_proxy) {
                         const args_start = @as(usize, r_recv) + 1;
                         const args_slice = registers[args_start .. args_start + argc];
                         const cresult = try callValue(allocator, realm, f.running_realm orelse realm, callee_v, recv, args_slice);
@@ -3887,7 +3887,7 @@ pub fn runFrames(
                     rp.setProxyTarget(realm.allocator, null) catch {};
                     rp.setProxyHandler(realm.allocator, null) catch {};
                     rp.setProxyTargetFn(realm.allocator, null) catch {};
-                    rp.proxy_revoked = true;
+                    rp.brand.proxy_revoked = true;
                     fn_v.revocable_proxy = null;
                     acc = Value.undefined_;
                     continue :dispatch try decodeNext(code, &ip, &committed);
@@ -4100,7 +4100,7 @@ pub fn runFrames(
 
             // §10.5.13 callable Proxy [[Call]] — fall back.
             if (heap_mod.valueAsPlainObject(callee_v)) |po| {
-                if (po.is_proxy) {
+                if (po.brand.is_proxy) {
                     const args_start = @as(usize, r_callee) + 1;
                     const args_slice = registers[args_start .. args_start + argc];
                     const cresult = try callValue(allocator, realm, f.running_realm orelse realm, callee_v, Value.undefined_, args_slice);
@@ -4160,7 +4160,7 @@ pub fn runFrames(
                 rp.setProxyTarget(realm.allocator, null) catch {};
                 rp.setProxyHandler(realm.allocator, null) catch {};
                 rp.setProxyTargetFn(realm.allocator, null) catch {};
-                rp.proxy_revoked = true;
+                rp.brand.proxy_revoked = true;
                 callee_fn.revocable_proxy = null;
                 acc = Value.undefined_;
                 continue :dispatch try decodeNext(code, &ip, &committed);
@@ -4409,7 +4409,7 @@ pub fn runFrames(
 
             // §10.5.13 callable Proxy [[Call]] — fall back.
             if (heap_mod.valueAsPlainObject(callee_v)) |po| {
-                if (po.is_proxy) {
+                if (po.brand.is_proxy) {
                     const args_start = @as(usize, r_callee) + 1;
                     const args_slice = registers[args_start .. args_start + argc];
                     const cresult = try callValue(allocator, realm, f.running_realm orelse realm, callee_v, recv, args_slice);
@@ -4465,7 +4465,7 @@ pub fn runFrames(
                 rp.setProxyTarget(realm.allocator, null) catch {};
                 rp.setProxyHandler(realm.allocator, null) catch {};
                 rp.setProxyTargetFn(realm.allocator, null) catch {};
-                rp.proxy_revoked = true;
+                rp.brand.proxy_revoked = true;
                 callee_fn.revocable_proxy = null;
                 acc = Value.undefined_;
                 continue :dispatch try decodeNext(code, &ip, &committed);
@@ -4788,7 +4788,7 @@ pub fn runFrames(
             // target via `constructValue` (which handles
             // chained proxies).
             if (heap_mod.valueAsPlainObject(callee_v)) |po| {
-                if (po.is_proxy) {
+                if (po.brand.is_proxy) {
                     const args_start = @as(usize, r_callee) + 1;
                     const args_slice = registers[args_start .. args_start + argc];
                     const cresult = try constructValue(allocator, realm, callee_v, args_slice, callee_v);
@@ -5511,7 +5511,7 @@ pub fn runFrames(
                 // when the descriptor will ultimately be
                 // ignored.
                 const obj_mod_inner = @import("../builtins/object.zig");
-                const is_src_proxy = src_obj.getProxyTarget() != null or src_obj.proxy_revoked;
+                const is_src_proxy = src_obj.getProxyTarget() != null or src_obj.brand.proxy_revoked;
                 const key_scope = realm.heap.openScope() catch return error.OutOfMemory;
                 defer key_scope.close();
                 const keys_opt: ?[]const []const u8 = blk_pk: {
@@ -5878,7 +5878,7 @@ pub fn runFrames(
             var found_on_receiver = false;
             var handled_via_proxy = false;
             walk: while (cursor) |c| {
-                if (c.getProxyTarget() != null or c.proxy_revoked) {
+                if (c.getProxyTarget() != null or c.brand.proxy_revoked) {
                     const r2 = try proxyHasTrap(allocator, realm, frames, f, ip, c, key_slice, key_v);
                     switch (r2) {
                         .value => |v| {
@@ -6418,7 +6418,7 @@ pub fn runFrames(
                 // namespace [[Set]] reject (TypeError) only
                 // fires once that descriptor read succeeds.
                 if (heap_mod.valueAsPlainObject(f.this_value)) |this_obj| {
-                    if (this_obj.is_module_namespace and !std.mem.startsWith(u8, key_s.flatBytes(), "@@") and !std.mem.startsWith(u8, key_s.flatBytes(), "<sym:") and this_obj.hasOwn(key_s.flatBytes())) {
+                    if (this_obj.brand.is_module_namespace and !std.mem.startsWith(u8, key_s.flatBytes(), "@@") and !std.mem.startsWith(u8, key_s.flatBytes(), "<sym:") and this_obj.hasOwn(key_s.flatBytes())) {
                         _ = module_mod.namespaceGetThrowingOnHole(realm, this_obj, key_s.flatBytes()) catch |err| switch (err) {
                             error.OutOfMemory => return error.OutOfMemory,
                             error.NativeThrew => {
@@ -6443,7 +6443,7 @@ pub fn runFrames(
                     // says throw TypeError. Surface that here
                     // before the silent-write fallback.
                     if (!this_obj.hasOwn(key_s.flatBytes())) {
-                        if (!this_obj.extensible) {
+                        if (!this_obj.brand.extensible) {
                             const ex = try makeTypeError(realm, "Cannot add property, object is not extensible");
                             f.ip = ip;
                             f.accumulator = acc;
@@ -6570,7 +6570,7 @@ pub fn runFrames(
                     // [[Set]] would reject. Same gate as
                     // `.super_set`.
                     if (!this_obj.hasOwn(key_slice)) {
-                        if (!this_obj.extensible) {
+                        if (!this_obj.brand.extensible) {
                             const ex = try makeTypeError(realm, "Cannot add property, object is not extensible");
                             f.ip = ip;
                             f.accumulator = acc;
@@ -6644,7 +6644,7 @@ pub fn runFrames(
                             // ctor's `super(seal)` calls
                             // `Object.preventExtensions(this)`
                             // before instance elements install.
-                            if (!inst.extensible) {
+                            if (!inst.brand.extensible) {
                                 const ex = try makeTypeError(f.running_realm orelse realm, "Cannot install private element on non-extensible object");
                                 f.ip = ip;
                                 f.accumulator = acc;
@@ -6748,7 +6748,7 @@ pub fn runFrames(
                             // `Object.preventExtensions(this)`
                             // (base-class `#g = (prevent(this), …)`),
                             // so re-check before each put.
-                            if (!inst.extensible) {
+                            if (!inst.brand.extensible) {
                                 const ex = try makeTypeError(f.running_realm orelse realm, "Cannot add private field to non-extensible object");
                                 f.ip = ip;
                                 f.accumulator = acc;
@@ -6786,7 +6786,7 @@ pub fn runFrames(
                             // freezes the instance and the second
                             // attempts to install on the frozen
                             // object.
-                            if (!inst.extensible and inst.getProxyTarget() == null and inst.getProxyTargetFn() == null) {
+                            if (!inst.brand.extensible and inst.getProxyTarget() == null and inst.getProxyTargetFn() == null) {
                                 const ex = try makeTypeError(realm, "Cannot add field to non-extensible object");
                                 f.ip = ip;
                                 f.accumulator = acc;
@@ -6806,7 +6806,7 @@ pub fn runFrames(
                             // `inst.set` would silently bypass the
                             // trap and the fixture would never see
                             // the field appear at the trap site.
-                            if (inst.is_proxy) {
+                            if (inst.brand.is_proxy) {
                                 // Build the descriptor object.
                                 const desc = realm.heap.allocateObject() catch return error.OutOfMemory;
                                 realm.heap.setObjectPrototype(desc, realm.intrinsics.object_prototype);
@@ -7174,12 +7174,12 @@ pub fn runFrames(
                             // `constructor` getter threw — skip the
                             // ordinary settled/pending dispatch and
                             // resume the body with the thrown value.
-                        } else if (obj.promise_state == .pending) {
+                        } else if (obj.brand.promise_state == .pending) {
                             suspend_target = obj;
                             use_microtask = false;
                         } else {
                             resume_value = obj.promise_value;
-                            resume_throws = (obj.promise_state == .rejected);
+                            resume_throws = (obj.brand.promise_state == .rejected);
                         }
                         _ = ctor_v;
                     } else {
@@ -7638,7 +7638,7 @@ pub fn runFrames(
                     if (recv.shape == null or recv.shape != cell.recv_shape) break :forin_hit;
                     if (recv.prototype != cell.proto) break :forin_hit;
                     const proto = cell.proto orelse break :forin_hit;
-                    if (proto.extensible) break :forin_hit;
+                    if (proto.brand.extensible) break :forin_hit;
                     if (realm.heap.proto_struct_epoch != cell.guard_epoch) break :forin_hit;
                     // Integer-indexed elements are own enumerable keys
                     // (§10.4.2 / §10.1.11) the shape doesn't track; a
@@ -7646,7 +7646,7 @@ pub fn runFrames(
                     // re-check liveness here. Plain shape-mode objects
                     // never carry these, so this is ~free in the common
                     // case.
-                    if (recv.elements.items.len != 0 or recv.is_sparse or recv.sparseConst().count() != 0) break :forin_hit;
+                    if (recv.elements.items.len != 0 or recv.brand.is_sparse or recv.sparseConst().count() != 0) break :forin_hit;
                     acc = wrapForInSnapshot(realm, snap, acc) catch return error.OutOfMemory;
                     continue :dispatch try decodeNext(code, &ip, &committed);
                 }
@@ -7659,7 +7659,7 @@ pub fn runFrames(
                 // present; matches the spec's per-key probe
                 // before the loop body runs.
                 if (heap_mod.valueAsPlainObject(acc)) |ns_obj| {
-                    if (ns_obj.is_module_namespace) {
+                    if (ns_obj.brand.is_module_namespace) {
                         var ns_it = ns_obj.iterOwnNamedKeys();
                         const probe_outcome = blk_probe: while (ns_it.next()) |entry| {
                             const k = entry.key_ptr.*;
@@ -7700,11 +7700,11 @@ pub fn runFrames(
                 fill: {
                     const recv = heap_mod.valueAsPlainObject(recv_v) orelse break :fill;
                     if (recv.shape == null) break :fill;
-                    if (recv.is_proxy) break :fill;
-                    if (recv.is_array_exotic or recv.is_module_namespace or recv.getTypedView() != null) break :fill;
-                    if (recv.elements.items.len != 0 or recv.is_sparse or recv.sparseConst().count() != 0) break :fill;
+                    if (recv.brand.is_proxy) break :fill;
+                    if (recv.brand.is_array_exotic or recv.brand.is_module_namespace or recv.getTypedView() != null) break :fill;
+                    if (recv.elements.items.len != 0 or recv.brand.is_sparse or recv.sparseConst().count() != 0) break :fill;
                     const proto = recv.prototype orelse break :fill;
-                    if (proto.extensible) break :fill; // not frozen / sealed
+                    if (proto.brand.extensible) break :fill; // not frozen / sealed
                     if (proto.prototype != null) break :fill; // not a one-level chain
                     // The proto must itself be a fully integrity-locked
                     // object: non-extensible alone (preventExtensions)
@@ -7714,8 +7714,8 @@ pub fn runFrames(
                     // structural funnels in object.zig bump it), but
                     // require the proto have no own integer elements
                     // it could re-enumerate, and no live proxy.
-                    if (proto.getProxyTarget() != null or proto.proxy_revoked) break :fill;
-                    if (proto.elements.items.len != 0 or proto.is_sparse or proto.sparseConst().count() != 0) break :fill;
+                    if (proto.getProxyTarget() != null or proto.brand.proxy_revoked) break :fill;
+                    if (proto.elements.items.len != 0 or proto.brand.is_sparse or proto.sparseConst().count() != 0) break :fill;
                     const cell = &local_chunk.inline_forin_caches[forin_ic_idx];
                     cell.recv_shape = recv.shape;
                     cell.proto = proto;
@@ -8216,7 +8216,7 @@ pub fn runFrames(
             var dep_rejection: ?Value = null;
             for (mr.pending_async_deps.items) |dep| {
                 if (heap_mod.valueAsPlainObject(dep.evaluation_promise)) |p_obj| {
-                    if (p_obj.isPromise() and p_obj.promise_state == .rejected) {
+                    if (p_obj.isPromise() and p_obj.brand.promise_state == .rejected) {
                         dep_rejection = p_obj.promise_value;
                         break;
                     }
@@ -8712,7 +8712,7 @@ pub fn runFrames(
                 ip += 1;
                 const arr_v = registers[r_args_arr];
                 const arr_obj = heap_mod.valueAsPlainObject(arr_v) orelse return error.InvalidOpcode;
-                if (arr_obj.is_array_exotic) {
+                if (arr_obj.brand.is_array_exotic) {
                     // The compiler-built spread array is always
                     // dense, but route through the indexed API
                     // so the sparse path remains correct if a
@@ -9565,7 +9565,7 @@ pub fn runFrames(
                 // per index → the pathological iterator
                 // fixtures (16M-iter `spread-err-…`) no
                 // longer balloon the heap.
-                if (target.is_array_exotic and target_len <= 0xFFFFFFFE) {
+                if (target.brand.is_array_exotic and target_len <= 0xFFFFFFFE) {
                     realm.heap.storeElement(target, allocator, @intCast(target_len), elem) catch return error.OutOfMemory;
                 } else {
                     var db: [24]u8 = undefined;
@@ -9595,7 +9595,7 @@ pub fn runFrames(
             // assignment is a no-op, kept for parity with
             // pre-array-exotic objects (e.g. `Array.prototype`
             // itself) that still flow through this path.
-            if (target.is_array_exotic) {
+            if (target.brand.is_array_exotic) {
                 const u32_len: u32 = if (target_len < 0) 0 else if (target_len > 0xFFFFFFFE) 0xFFFFFFFE else @intCast(target_len);
                 target.setArrayLength(allocator, u32_len) catch return error.OutOfMemory;
             } else {
@@ -9636,7 +9636,7 @@ pub fn runFrames(
             // exotic, then iterate the trap result. When
             // `src` isn't a proxy this is just the ordinary
             // own-key walk.
-            const is_src_proxy = src_obj.getProxyTarget() != null or src_obj.proxy_revoked;
+            const is_src_proxy = src_obj.getProxyTarget() != null or src_obj.brand.proxy_revoked;
             const key_scope = realm.heap.openScope() catch return error.OutOfMemory;
             defer key_scope.close();
             const keys_opt: ?[]const []const u8 = blk_pk: {
@@ -9871,8 +9871,8 @@ pub fn runFrames(
                     if (!chainHasProxy(obj_in) and !obj_in.hasAccessor(key_s.flatBytes())) {
                         var cursor: ?*@import("../object.zig").JSObject = obj_in.prototype;
                         while (cursor) |proto| : (cursor = proto.prototype) {
-                            if (proto.getProxyTarget() != null or proto.proxy_revoked) break;
-                            if (proto.is_module_namespace) break;
+                            if (proto.getProxyTarget() != null or proto.brand.proxy_revoked) break;
+                            if (proto.brand.is_module_namespace) break;
                             if (proto.hasAccessor(key_s.flatBytes())) break;
                             if (proto.shape) |proto_sh| {
                                 if (proto_sh.lookup(key_s.flatBytes())) |entry| {
@@ -9898,7 +9898,7 @@ pub fn runFrames(
                 // a missing trap falls through to default lookup
                 // on the target.
                 var obj = obj_in;
-                if (obj.getProxyTarget() != null or obj.proxy_revoked) {
+                if (obj.getProxyTarget() != null or obj.brand.proxy_revoked) {
                     const r = try proxyGetTrap(allocator, realm, frames, f, ip, obj, key_s.flatBytes(), key_v, acc);
                     switch (r) {
                         .value => |v| {
@@ -9925,7 +9925,7 @@ pub fn runFrames(
                 // ordinary path. Accessors don't exist on a
                 // module namespace, so the lookupAccessor walk
                 // below is skipped for the namespace case.
-                if (obj.is_module_namespace and !std.mem.startsWith(u8, key_s.flatBytes(), "@@") and !std.mem.startsWith(u8, key_s.flatBytes(), "<sym:")) {
+                if (obj.brand.is_module_namespace and !std.mem.startsWith(u8, key_s.flatBytes(), "@@") and !std.mem.startsWith(u8, key_s.flatBytes(), "<sym:")) {
                     const v_ns = module_mod.namespaceGetThrowingOnHole(realm, obj, key_s.flatBytes()) catch |err| switch (err) {
                         error.OutOfMemory => return error.OutOfMemory,
                         error.NativeThrew => {
@@ -10428,7 +10428,7 @@ pub fn runFrames(
             // `setWithFlags`, and `setIndexed`'s redundant hole-fill +
             // duplicate write barrier. Falls through for sparse arrays or
             // out-of-order / overwriting indices.
-            if (obj.is_array_exotic) {
+            if (obj.brand.is_array_exotic) {
                 if (object_mod.JSObject.canonicalIntegerIndex(key_s.flatBytes())) |idx| {
                     if (obj.appendDenseSequential(allocator, idx, acc) catch return error.OutOfMemory) {
                         continue :dispatch try decodeNext(code, &ip, &committed);
@@ -10436,7 +10436,7 @@ pub fn runFrames(
                 }
             }
             const had_own = obj.hasOwn(key_s.flatBytes());
-            if (!had_own and !obj.extensible) {
+            if (!had_own and !obj.brand.extensible) {
                 const ex = try makeTypeError(realm, "Cannot define property on non-extensible object");
                 return .{ .thrown = ex };
             }
@@ -10511,7 +10511,7 @@ pub fn runFrames(
             if (!key_v.isString()) return error.InvalidOpcode;
             const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
             const had_own = obj.hasOwn(key_s.flatBytes());
-            if (!had_own and !obj.extensible) {
+            if (!had_own and !obj.brand.extensible) {
                 const ex = try makeTypeError(realm, "Cannot define property on non-extensible object");
                 return .{ .thrown = ex };
             }
@@ -10625,7 +10625,7 @@ pub fn runFrames(
             if (heap_mod.valueAsPlainObject(recv)) |obj_in| {
                 var obj = obj_in;
                 // §10.5 Proxy [[Get]] — handler trap dispatch.
-                if (obj.getProxyTarget() != null or obj.proxy_revoked) {
+                if (obj.getProxyTarget() != null or obj.brand.proxy_revoked) {
                     const r = try proxyGetTrap(allocator, realm, frames, f, ip, obj, key_slice, key_v, recv);
                     switch (r) {
                         .value => |v| {
@@ -10671,7 +10671,7 @@ pub fn runFrames(
                 // ReferenceError on the TDZ-Hole. Symbol keys
                 // (and Cynic's flattened `@@toStringTag`) take
                 // the ordinary path.
-                if (obj.is_module_namespace and !std.mem.startsWith(u8, key_slice, "@@") and !std.mem.startsWith(u8, key_slice, "<sym:")) {
+                if (obj.brand.is_module_namespace and !std.mem.startsWith(u8, key_slice, "@@") and !std.mem.startsWith(u8, key_slice, "<sym:")) {
                     const v_ns = module_mod.namespaceGetThrowingOnHole(realm, obj, key_slice) catch |err| switch (err) {
                         error.OutOfMemory => return error.OutOfMemory,
                         error.NativeThrew => {
@@ -11019,7 +11019,7 @@ pub fn runFrames(
             // `buildString` code-point accumulation) allocated one
             // throwaway JSString per iteration before this guard.
             const skip_key_anchor = key_v.isInt32() and key_v.asInt32() >= 0 and
-                if (heap_mod.valueAsPlainObject(recv)) |o| o.is_array_exotic else false;
+                if (heap_mod.valueAsPlainObject(recv)) |o| o.brand.is_array_exotic else false;
             const owned: ?*JSString =
                 if (skip_key_anchor) null else (realm.heap.allocateString(key_slice) catch return error.OutOfMemory);
             // Pre-write shape so the fill can tell a same-shape rewrite
@@ -11095,7 +11095,7 @@ pub fn runFrames(
             };
             const key_slice = key_js.flatBytes();
             const had_own = obj.hasOwn(key_slice);
-            if (!had_own and !obj.extensible) {
+            if (!had_own and !obj.brand.extensible) {
                 const ex = try makeTypeError(realm, "Cannot define property on non-extensible object");
                 return .{ .thrown = ex };
             }
@@ -11127,7 +11127,7 @@ pub fn runFrames(
             const recv = registers[r_obj];
             // §10.5.10 Proxy [[Delete]] dispatch.
             if (heap_mod.valueAsPlainObject(recv)) |obj_in| {
-                if (obj_in.getProxyTarget() != null or obj_in.proxy_revoked) {
+                if (obj_in.getProxyTarget() != null or obj_in.brand.proxy_revoked) {
                     const r = try proxyDeleteTrap(allocator, realm, frames, f, ip, obj_in, key_s.flatBytes(), key_v);
                     switch (r) {
                         .value => |v| {
@@ -11206,7 +11206,7 @@ pub fn runFrames(
             var key_buf: [64]u8 = undefined;
             const key_slice = computedKeyToString(key_v, &key_buf);
             if (heap_mod.valueAsPlainObject(recv)) |obj_in| {
-                if (obj_in.getProxyTarget() != null or obj_in.proxy_revoked) {
+                if (obj_in.getProxyTarget() != null or obj_in.brand.proxy_revoked) {
                     const r = try proxyDeleteTrap(allocator, realm, frames, f, ip, obj_in, key_slice, key_v);
                     switch (r) {
                         .value => |v| {
@@ -11961,7 +11961,7 @@ fn deleteOwnProperty(realm: *Realm, recv: Value, key: []const u8) error{OutOfMem
         // surfaces as TypeError. Non-exported keys (never installed
         // on the namespace) take the missing-key `true` branch
         // below — `delete ns.undef` must succeed.
-        if (obj.is_module_namespace and !std.mem.startsWith(u8, key, "@@") and !std.mem.startsWith(u8, key, "<sym:") and obj.hasOwn(key)) {
+        if (obj.brand.is_module_namespace and !std.mem.startsWith(u8, key, "@@") and !std.mem.startsWith(u8, key, "<sym:") and obj.hasOwn(key)) {
             return .{ .throw_typeerror = "Cannot delete module namespace export" };
         }
         // §10.4.5.6 [[Delete]] for Integer-Indexed Exotic Objects.
@@ -12005,7 +12005,7 @@ fn deleteOwnProperty(realm: *Realm, recv: Value, key: []const u8) error{OutOfMem
         // handles both: it holes the slot and, if the slot was
         // bag-promoted, removes the bag entry — failing on
         // non-configurable.
-        if (obj.is_array_exotic) {
+        if (obj.brand.is_array_exotic) {
             if (obj_mod.JSObject.canonicalIntegerIndex(key)) |_| {
                 if (!try obj.deleteOwn(realm.allocator, key)) return .{ .throw_typeerror = "Cannot delete non-configurable property" };
                 return .{ .ok = true };
@@ -12119,7 +12119,7 @@ noinline fn strictArraySetLength(
     // Check the existing length is writable. If a prior
     // `Object.defineProperty(arr, "length", {writable:false})`
     // froze it, any future length-write must throw.
-    if (!obj.array_length_writable) {
+    if (!obj.brand.array_length_writable) {
         const ex = try makeTypeError(realm, "Cannot assign to read-only property 'length'");
         return throwInSetter(realm, frames, f, ip, value, ex);
     }
@@ -12145,7 +12145,7 @@ noinline fn strictArraySetLength(
     // between the two ToNumber calls (§10.4.2.4 step 17.b
     // gates the actual write on the *current* writability,
     // not the pre-coercion state).
-    if (!obj.array_length_writable) {
+    if (!obj.brand.array_length_writable) {
         const ex = try makeTypeError(realm, "Cannot assign to read-only property 'length'");
         return throwInSetter(realm, frames, f, ip, value, ex);
     }
@@ -12185,13 +12185,13 @@ fn strictSetPropertyAnchored(
         // proxy / accessor / descriptor logic so that
         // `Reflect.set(ns, ...)` reads false and `ns.x = v`
         // throws.
-        if (obj_in.is_module_namespace) {
+        if (obj_in.brand.is_module_namespace) {
             const ex = try makeTypeError(realm, "Cannot assign to read-only module namespace property");
             return throwInSetter(realm, frames, f, ip, value, ex);
         }
         // §10.1.9.2 step 2 — the array exotic's own (virtual) `length`
         // wins before any prototype walk; see `strictArraySetLength`.
-        if (obj_in.is_array_exotic and std.mem.eql(u8, key, "length")) {
+        if (obj_in.brand.is_array_exotic and std.mem.eql(u8, key, "length")) {
             return strictArraySetLength(allocator, realm, frames, f, ip, obj_in, value);
         }
         // §10.5 Proxy [[Set]] — if `recv` is a proxy exotic,
@@ -12201,7 +12201,7 @@ fn strictSetPropertyAnchored(
         // dispatching down the chain (§10.5.6 step 7.a recurses
         // into target.[[Set]]).
         var obj = obj_in;
-        const receiver_is_proxy = obj_in.is_proxy;
+        const receiver_is_proxy = obj_in.brand.is_proxy;
         // Every Proxy `[[Set]]` path below — the `set` trap loop, the
         // trapless GetOwnPropertyDescriptor / DefineProperty pair —
         // re-enters JS and can GC. `key` is borrowed from `key_string`
@@ -12219,7 +12219,7 @@ fn strictSetPropertyAnchored(
             break :blk sc;
         } else null;
         defer if (px_root_scope) |sc| sc.close();
-        while (obj.is_proxy) {
+        while (obj.brand.is_proxy) {
             // §10.5.9 [[Set]] on a callable Proxy whose `[[ProxyTarget]]`
             // is a function (`proxy_target_fn`). The trap, if present,
             // fires with the function as the spec-target arg; absent,
@@ -12231,7 +12231,7 @@ fn strictSetPropertyAnchored(
             // the post-loop default-receiver path silently creates the
             // property on the outer proxy. See test262
             // built-ins/Proxy/set/trap-is-undefined-target-is-proxy.js.
-            if (obj.getProxyTarget() == null and obj.getProxyTargetFn() != null and !obj.proxy_revoked) {
+            if (obj.getProxyTarget() == null and obj.getProxyTargetFn() != null and !obj.brand.proxy_revoked) {
                 const handler = obj.getProxyHandler() orelse {
                     const ex = try makeTypeError(realm, "proxy handler slot is null");
                     f.ip = ip;
@@ -12421,7 +12421,7 @@ fn strictSetPropertyAnchored(
         // trap (or recurses again per §10.5.6 step 7.a). Check the
         // chain for a proxy ancestor and route through it,
         // preserving the original `recv` as Receiver.
-        if (obj.getProxyTarget() == null and !obj.proxy_revoked and chainHasProxy(obj)) {
+        if (obj.getProxyTarget() == null and !obj.brand.proxy_revoked and chainHasProxy(obj)) {
             switch (try setThroughChain(allocator, realm, frames, f, ip, obj, key, value, recv)) {
                 .handled_set => |ok| {
                     if (ok) return .ok;
@@ -12451,10 +12451,10 @@ fn strictSetPropertyAnchored(
         // up and runs the §10.5.5 writability gate against the
         // bag's flags. The §17 length-write-gating against
         // `length: { writable: false }` still applies.
-        if (obj.is_array_exotic) {
+        if (obj.brand.is_array_exotic) {
             if (canonicalIntegerIndexInterp(key)) |idx| {
                 if (idx <= 0xFFFFFFFE and !obj.ownDataContains(key)) {
-                    if (!obj.array_length_writable) {
+                    if (!obj.brand.array_length_writable) {
                         {
                             const cur_len: u32 = obj.arrayLength();
                             if (idx >= cur_len) {
@@ -12468,7 +12468,7 @@ fn strictSetPropertyAnchored(
                     // array is the §10.1.6.3 OrdinaryDefineOwnProperty
                     // step-2 reject (extensibility check). Strict
                     // assignment surfaces it as TypeError.
-                    if (!obj.extensible and !obj.hasOwnIndexedSlot(idx)) {
+                    if (!obj.brand.extensible and !obj.hasOwnIndexedSlot(idx)) {
                         const ex = try makeTypeError(realm, "Cannot add property, object is not extensible");
                         return throwInSetter(realm, frames, f, ip, value, ex);
                     }
@@ -12483,7 +12483,7 @@ fn strictSetPropertyAnchored(
         // so a heap-allocated key gets swept without the anchor.
         const had_entry = obj.ownDataContains(key);
         const had_indexed = blk_idx: {
-            if (obj.is_array_exotic) {
+            if (obj.brand.is_array_exotic) {
                 if (canonicalIntegerIndexInterp(key)) |idx| break :blk_idx obj.hasOwnIndexedSlot(idx);
             }
             break :blk_idx false;
@@ -12529,7 +12529,7 @@ fn strictSetPropertyAnchored(
             // calls [[DefineOwnProperty]], which fails (and so
             // strict-mode [[Set]] throws — §10.1.9.1 step 4) when
             // the receiver is non-extensible.
-            if (!had_indexed and !obj.extensible) {
+            if (!had_indexed and !obj.brand.extensible) {
                 const ex = try makeTypeError(realm, "Cannot add property, object is not extensible");
                 return throwInSetter(realm, frames, f, ip, value, ex);
             }
@@ -12675,7 +12675,7 @@ fn throwInSetter(
 fn chainHasProxy(obj: *JSObject) bool {
     var cursor: ?*JSObject = obj;
     while (cursor) |c| : (cursor = c.prototype) {
-        if (c.is_proxy) return true;
+        if (c.brand.is_proxy) return true;
     }
     return false;
 }
@@ -12871,7 +12871,7 @@ fn slowLookupForCallProperty(
     if (heap_mod.valueAsPlainObject(recv)) |obj_in| {
         var obj = obj_in;
         // §10.5 Proxy [[Get]].
-        if (obj.getProxyTarget() != null or obj.proxy_revoked) {
+        if (obj.getProxyTarget() != null or obj.brand.proxy_revoked) {
             const r = try proxyGetTrap(allocator, realm, frames, f, ip, obj, key, null, recv);
             switch (r) {
                 .value => |v| return .{ .value = v },
@@ -12881,7 +12881,7 @@ fn slowLookupForCallProperty(
             }
         }
         // §9.4.6.7 Module Namespace [[Get]] — string-key path.
-        if (obj.is_module_namespace and !std.mem.startsWith(u8, key, "@@") and !std.mem.startsWith(u8, key, "<sym:")) {
+        if (obj.brand.is_module_namespace and !std.mem.startsWith(u8, key, "@@") and !std.mem.startsWith(u8, key, "<sym:")) {
             const v_ns = module_mod.namespaceGetThrowingOnHole(realm, obj, key) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.NativeThrew => {
@@ -13042,7 +13042,7 @@ fn getThroughChain(
 ) RunError!GetChainOutcome {
     var cursor: ?*JSObject = obj;
     while (cursor) |c| {
-        if (c.getProxyTarget() != null or c.proxy_revoked) {
+        if (c.getProxyTarget() != null or c.brand.proxy_revoked) {
             // §10.5.5 Proxy [[Get]] — dispatch with `receiver`,
             // not the proxy itself. The trap helper already
             // recurses through proxy-target-is-proxy chains.
@@ -13108,7 +13108,7 @@ fn getThroughChain(
             }
             return .{ .value = Value.undefined_ };
         }
-        if (c.is_array_exotic) {
+        if (c.brand.is_array_exotic) {
             if (@import("../object.zig").JSObject.canonicalIntegerIndex(key)) |idx| {
                 if (c.tryGetIndexedOwn(idx)) |v| return .{ .value = v };
             }
@@ -13153,7 +13153,7 @@ fn setThroughChain(
 ) RunError!SetChainOutcome {
     var cursor: ?*JSObject = obj;
     while (cursor) |c| {
-        if (c.getProxyTarget() != null or c.proxy_revoked) {
+        if (c.getProxyTarget() != null or c.brand.proxy_revoked) {
             switch (try proxySetTrap(allocator, realm, frames, f, ip, c, key, null, value, recv)) {
                 .value => return .{ .handled_set = true },
                 .fallthrough => |t| {
@@ -13205,7 +13205,7 @@ fn setThroughChain(
             // Writable own data — break out; caller writes on recv.
             return .{ .handled_set = false };
         }
-        if (c.is_array_exotic) {
+        if (c.brand.is_array_exotic) {
             if (@import("../object.zig").JSObject.canonicalIntegerIndex(key)) |idx| {
                 if (c.tryGetIndexedOwn(idx) != null) {
                     // Writable by default; let caller handle the
@@ -13302,7 +13302,7 @@ fn proxyGetTrap(
     // trap.
     var cur = proxy;
     while (true) {
-        if (cur.proxy_revoked) {
+        if (cur.brand.proxy_revoked) {
             const ex = try makeTypeError(realm, "Cannot perform 'get' on a proxy that has been revoked");
             f.ip = ip;
             if (!try unwindThrow(allocator, realm, frames, ex)) {
@@ -13316,7 +13316,7 @@ fn proxyGetTrap(
         // §7.3.11 GetMethod — undefined/null fall through; any other
         // non-callable value throws TypeError before the trap runs.
         if (trap_v.isUndefined() or trap_v.isNull()) {
-            if (target.getProxyTarget() != null or target.proxy_revoked) {
+            if (target.getProxyTarget() != null or target.brand.proxy_revoked) {
                 cur = target;
                 continue;
             }
@@ -13406,7 +13406,7 @@ fn proxyDeleteTrap(
     // forwards correctly.
     var cur = proxy;
     while (true) {
-        if (cur.proxy_revoked) {
+        if (cur.brand.proxy_revoked) {
             const ex = try makeTypeError(realm, "Cannot perform 'deleteProperty' on a proxy that has been revoked");
             f.ip = ip;
             if (!try unwindThrow(allocator, realm, frames, ex)) {
@@ -13463,7 +13463,7 @@ fn proxyDeleteTrap(
         const handler = cur.getProxyHandler() orelse return .{ .fallthrough = target };
         const trap_v = handler.get("deleteProperty");
         if (trap_v.isUndefined() or trap_v.isNull()) {
-            if (target.is_proxy) {
+            if (target.brand.is_proxy) {
                 cur = target;
                 continue;
             }
@@ -13504,7 +13504,7 @@ fn proxyDeleteTrap(
                     if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
                     return .handled;
                 }
-                if (!target.extensible) {
+                if (!target.brand.extensible) {
                     const ex = try makeTypeError(realm, "proxy 'deleteProperty' trap reported success for own property of non-extensible target");
                     f.ip = ip;
                     if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
@@ -13536,7 +13536,7 @@ fn proxyHasTrap(
     // outer proxy forwards to the inner proxy's has trap.
     var cur = proxy;
     while (true) {
-        if (cur.proxy_revoked) {
+        if (cur.brand.proxy_revoked) {
             const ex = try makeTypeError(realm, "Cannot perform 'has' on a proxy that has been revoked");
             f.ip = ip;
             if (!try unwindThrow(allocator, realm, frames, ex)) {
@@ -13548,7 +13548,7 @@ fn proxyHasTrap(
         const handler = cur.getProxyHandler() orelse return .{ .fallthrough = target };
         const trap_v = handler.get("has");
         if (trap_v.isUndefined() or trap_v.isNull()) {
-            if (target.getProxyTarget() != null or target.proxy_revoked) {
+            if (target.getProxyTarget() != null or target.brand.proxy_revoked) {
                 cur = target;
                 continue;
             }
@@ -13587,7 +13587,7 @@ fn proxyHasTrap(
                     if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
                     return .handled;
                 }
-                if (!target.extensible) {
+                if (!target.brand.extensible) {
                     const ex = try makeTypeError(realm, "proxy 'has' trap returned false for own property of non-extensible target");
                     f.ip = ip;
                     if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
@@ -13622,7 +13622,7 @@ fn proxySetTrap(
     // forwards to the inner proxy's set trap.
     var cur = proxy;
     while (true) {
-        if (cur.proxy_revoked) {
+        if (cur.brand.proxy_revoked) {
             const ex = try makeTypeError(realm, "Cannot perform 'set' on a proxy that has been revoked");
             f.ip = ip;
             if (!try unwindThrow(allocator, realm, frames, ex)) {
@@ -13634,7 +13634,7 @@ fn proxySetTrap(
         const handler = cur.getProxyHandler() orelse return .{ .fallthrough = target };
         const trap_v = handler.get("set");
         if (trap_v.isUndefined() or trap_v.isNull()) {
-            if (target.getProxyTarget() != null or target.proxy_revoked) {
+            if (target.getProxyTarget() != null or target.brand.proxy_revoked) {
                 cur = target;
                 continue;
             }

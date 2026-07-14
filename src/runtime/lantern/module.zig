@@ -287,7 +287,7 @@ fn loadModuleInner(
     // until the body returns so module_export can still publish.
     const ns = realm.heap.allocateObject() catch return error.OutOfMemory;
     realm.heap.setObjectPrototype(ns, null);
-    ns.is_module_namespace = true;
+    ns.brand.is_module_namespace = true;
     const mr = ModuleRecord.init(realm.allocator, result.url, ns) catch return error.OutOfMemory;
     mr.state = .evaluating;
     realm.modules.put(realm.allocator, cache_key, mr) catch return error.OutOfMemory;

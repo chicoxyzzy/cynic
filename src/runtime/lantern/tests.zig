@@ -1841,7 +1841,7 @@ test "ses phase 1: hardened-default — Array.prototype assignment throws" {
 
 test "ses phase 1: hardened-default — globalThis is non-extensible" {
     // Adding a brand-new property to globalThis throws because
-    // the freeze pass set `globalThis.extensible = false`. This
+    // the freeze pass set `globalThis.brand.extensible = false`. This
     // is the property that locks the host surface against an
     // untrusted script smuggling capabilities through bare-
     // identifier assignment.
@@ -7521,7 +7521,7 @@ test "GC: Array.fromAsync with a mapfn survives gc_threshold=1" {
     // re-awaited via `awaitWithCbs` → `awaitAndThen` →
     // `wrapValueInPromise`. Before rooting the wrapper Promise across
     // the resolve re-entry, the awaited `source` was a dangling
-    // pointer and `switch (source.promise_state)` paniced on a
+    // pointer and `switch (source.brand.promise_state)` paniced on a
     // corrupt enum value under gc_threshold=1.
     try expectScriptIntUnderGcPressure(
         \\var acc = -1;
@@ -9658,7 +9658,7 @@ test "later: GetPrototypeFromConstructor remaps default proto through a Proxy ne
     const proxy = try parent.heap.allocateObject();
     try parent.heap.setProxyHandler(proxy, handler);
     try parent.heap.setProxyTargetFn(proxy, C);
-    proxy.proxy_callable = true;
+    proxy.brand.proxy_callable = true;
 
     // The active-realm default the caller forwards is parent.Map.prototype
     // (what `Reflect.construct(Map, …)` passes). The remap must swap it for
@@ -10007,7 +10007,7 @@ test "later: Array [[Construct]] derives result proto from newTarget's realm" {
     );
     try testing.expect(res == .value);
     const obj = heap_mod.valueAsPlainObject(res.value).?;
-    try testing.expect(obj.is_array_exotic);
+    try testing.expect(obj.brand.is_array_exotic);
     try testing.expectEqual(child_array.prototype, obj.prototype);
 }
 

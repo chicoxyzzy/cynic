@@ -82,7 +82,7 @@ fn weakRefConstructor(realm: *Realm, this_value: Value, args: []const Value) Nat
     const target = argOr(args, 0, Value.undefined_);
     if (!canBeHeldWeakly(target))
         return throwTypeError(realm, "WeakRef: target must be an object or non-registered symbol");
-    inst.is_weak_ref = true;
+    inst.brand.is_weak_ref = true;
     inst.setWeakRefTarget(realm.allocator, target) catch return error.OutOfMemory;
     // §26.1.1.1 step 4 — pin the target across the current job.
     realm.addToKeptObjects(target) catch return error.OutOfMemory;
@@ -104,7 +104,7 @@ fn weakRefDeref(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     _ = args;
     const inst = heap_mod.valueAsPlainObject(this_value) orelse
         return throwTypeError(realm, "WeakRef.prototype.deref called on non-object");
-    if (!inst.is_weak_ref)
+    if (!inst.brand.is_weak_ref)
         return throwTypeError(realm, "WeakRef.prototype.deref called on non-WeakRef");
     // §26.1.4.1 — `weak_ref_target` is `undefined` (the engine's
     // ~empty~ sentinel) once the major collector observed the

@@ -478,7 +478,7 @@ fn arrayBufferConstructor(realm: *Realm, this_value: Value, args: []const Value)
     const buf = realm.allocator.alloc(u8, len) catch return error.OutOfMemory;
     @memset(buf, 0);
     inst.setArrayBuffer(realm.allocator, buf) catch return error.OutOfMemory;
-    inst.has_array_buffer_data = true;
+    inst.brand.has_array_buffer_data = true;
     inst.setArrayBufferMaxByteLength(realm.allocator, max_byte_length_opt) catch return error.OutOfMemory;
     return heap_mod.taggedObject(inst);
 }
@@ -539,7 +539,7 @@ fn arrayBufferByteLength(realm: *Realm, this_value: Value, args: []const Value) 
     // when `this` is not an ArrayBuffer instance.
     const obj = heap_mod.valueAsPlainObject(this_value) orelse
         return throwTypeError(realm, "get ArrayBuffer.prototype.byteLength requires an ArrayBuffer receiver");
-    if (!obj.has_array_buffer_data or obj.isSharedArrayBuffer())
+    if (!obj.brand.has_array_buffer_data or obj.isSharedArrayBuffer())
         return throwTypeError(realm, "get ArrayBuffer.prototype.byteLength requires an ArrayBuffer receiver");
     if (obj.getArrayBuffer()) |ab| return Value.fromInt32(@intCast(ab.len));
     // Detached buffer — §25.1.5.1 step 5 says return 0 (the
@@ -554,7 +554,7 @@ fn arrayBufferDetached(realm: *Realm, this_value: Value, args: []const Value) Na
     _ = args;
     const obj = heap_mod.valueAsPlainObject(this_value) orelse
         return throwTypeError(realm, "get ArrayBuffer.prototype.detached requires an ArrayBuffer receiver");
-    if (!obj.has_array_buffer_data or obj.isSharedArrayBuffer())
+    if (!obj.brand.has_array_buffer_data or obj.isSharedArrayBuffer())
         return throwTypeError(realm, "get ArrayBuffer.prototype.detached requires an ArrayBuffer receiver");
     return Value.fromBool(obj.getArrayBuffer() == null);
 }
@@ -566,7 +566,7 @@ fn arrayBufferMaxByteLength(realm: *Realm, this_value: Value, args: []const Valu
     _ = args;
     const obj = heap_mod.valueAsPlainObject(this_value) orelse
         return throwTypeError(realm, "get ArrayBuffer.prototype.maxByteLength requires an ArrayBuffer receiver");
-    if (!obj.has_array_buffer_data or obj.isSharedArrayBuffer())
+    if (!obj.brand.has_array_buffer_data or obj.isSharedArrayBuffer())
         return throwTypeError(realm, "get ArrayBuffer.prototype.maxByteLength requires an ArrayBuffer receiver");
     if (obj.getArrayBuffer() == null) return Value.fromInt32(0);
     const max = obj.getArrayBufferMaxByteLength() orelse obj.getArrayBuffer().?.len;
@@ -578,7 +578,7 @@ fn arrayBufferResizable(realm: *Realm, this_value: Value, args: []const Value) N
     _ = args;
     const obj = heap_mod.valueAsPlainObject(this_value) orelse
         return throwTypeError(realm, "get ArrayBuffer.prototype.resizable requires an ArrayBuffer receiver");
-    if (!obj.has_array_buffer_data or obj.isSharedArrayBuffer())
+    if (!obj.brand.has_array_buffer_data or obj.isSharedArrayBuffer())
         return throwTypeError(realm, "get ArrayBuffer.prototype.resizable requires an ArrayBuffer receiver");
     return Value.fromBool(obj.getArrayBufferMaxByteLength() != null);
 }
@@ -590,7 +590,7 @@ fn arrayBufferResize(realm: *Realm, this_value: Value, args: []const Value) Nati
     // A fixed buffer doesn't carry the slot at all.
     const obj = heap_mod.valueAsPlainObject(this_value) orelse
         return throwTypeError(realm, "ArrayBuffer.prototype.resize requires a resizable ArrayBuffer receiver");
-    if (!obj.has_array_buffer_data or obj.isSharedArrayBuffer() or obj.getArrayBufferMaxByteLength() == null)
+    if (!obj.brand.has_array_buffer_data or obj.isSharedArrayBuffer() or obj.getArrayBufferMaxByteLength() == null)
         return throwTypeError(realm, "ArrayBuffer.prototype.resize requires a resizable ArrayBuffer receiver");
     // Step 5 — `Let newByteLength be ? ToIntegerOrInfinity(newLength)`.
     // The `coerced-new-length-detach.js` fixture asserts that
@@ -632,7 +632,7 @@ fn numberFromUsize(n: usize) Value {
 fn arrayBufferTransferImpl(realm: *Realm, this_value: Value, args: []const Value, preserve_resizability: bool) NativeError!Value {
     const src = heap_mod.valueAsPlainObject(this_value) orelse
         return throwTypeError(realm, "ArrayBuffer.prototype.transfer requires an ArrayBuffer receiver");
-    if (!src.has_array_buffer_data or src.isSharedArrayBuffer())
+    if (!src.brand.has_array_buffer_data or src.isSharedArrayBuffer())
         return throwTypeError(realm, "ArrayBuffer.prototype.transfer requires an ArrayBuffer receiver");
 
     // newLength defaults to source byteLength (or maxByteLength
@@ -671,7 +671,7 @@ fn arrayBufferTransferImpl(realm: *Realm, this_value: Value, args: []const Value
         realm.heap.setObjectPrototype(out, realm.intrinsics.object_prototype);
     }
     out.setArrayBuffer(realm.allocator, new_bytes) catch return error.OutOfMemory;
-    out.has_array_buffer_data = true;
+    out.brand.has_array_buffer_data = true;
     out.setArrayBufferMaxByteLength(realm.allocator, max_byte_length) catch return error.OutOfMemory;
     return heap_mod.taggedObject(out);
 }
@@ -794,7 +794,7 @@ fn arrayBufferSlice(realm: *Realm, this_value: Value, args: []const Value) Nativ
         const new_buf = realm.allocator.alloc(u8, new_len) catch return error.OutOfMemory;
         @memset(new_buf, 0);
         out.setArrayBuffer(realm.allocator, new_buf) catch return error.OutOfMemory;
-        out.has_array_buffer_data = true;
+        out.brand.has_array_buffer_data = true;
         break :err heap_mod.taggedObject(out);
     };
 
@@ -883,8 +883,8 @@ fn sharedArrayBufferConstructor(realm: *Realm, this_value: Value, args: []const 
         block.release();
         return error.OutOfMemory;
     };
-    inst.has_array_buffer_data = true;
-    inst.array_buffer_shared = true;
+    inst.brand.has_array_buffer_data = true;
+    inst.brand.array_buffer_shared = true;
     inst.setArrayBufferMaxByteLength(realm.allocator, max_byte_length_opt) catch return error.OutOfMemory;
     return heap_mod.taggedObject(inst);
 }
@@ -902,8 +902,8 @@ pub fn wrapSharedBlock(realm: *Realm, block: *@import("../shared_data_block.zig"
     realm.heap.setObjectPrototype(inst, proto);
     block.retain();
     try inst.setSharedBlock(realm.allocator, block);
-    inst.has_array_buffer_data = true;
-    inst.array_buffer_shared = true;
+    inst.brand.has_array_buffer_data = true;
+    inst.brand.array_buffer_shared = true;
     // Preserve the growable bit: a growable block has spare capacity.
     if (block.max_byte_length > block.byte_length.load(.acquire))
         try inst.setArrayBufferMaxByteLength(realm.allocator, block.max_byte_length);
@@ -1013,8 +1013,8 @@ fn sharedArrayBufferSlice(realm: *Realm, this_value: Value, args: []const Value)
         const new_buf = realm.allocator.alloc(u8, new_len) catch return error.OutOfMemory;
         @memset(new_buf, 0);
         out.setArrayBuffer(realm.allocator, new_buf) catch return error.OutOfMemory;
-        out.has_array_buffer_data = true;
-        out.array_buffer_shared = true;
+        out.brand.has_array_buffer_data = true;
+        out.brand.array_buffer_shared = true;
         break :err heap_mod.taggedObject(out);
     };
 
@@ -1121,7 +1121,7 @@ fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind, comptime ta_nam
                 const buf_bytes = realm.allocator.alloc(u8, byte_len) catch return error.OutOfMemory;
                 @memset(buf_bytes, 0);
                 buf_obj.setArrayBuffer(realm.allocator, buf_bytes) catch return error.OutOfMemory;
-                buf_obj.has_array_buffer_data = true;
+                buf_obj.brand.has_array_buffer_data = true;
 
                 inst.setTypedView(realm.allocator, .{ .kind = kind, .viewed = buf_obj, .byte_offset = 0, .length = length, .name = ta_name }) catch return error.OutOfMemory;
                 return heap_mod.taggedObject(inst);
@@ -1150,7 +1150,7 @@ fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind, comptime ta_nam
                 const inst_scope = realm.heap.openScope() catch return error.OutOfMemory;
                 defer inst_scope.close();
                 inst_scope.push(heap_mod.taggedObject(inst)) catch return error.OutOfMemory;
-                if (src.has_array_buffer_data) {
+                if (src.brand.has_array_buffer_data) {
                     // §23.2.5.1 InitializeTypedArrayFromArrayBuffer
                     // step 6 — `Let offset be ? ToIndex(byteOffset)`.
                     // ToIndex (§7.1.22) coerces NaN / undefined / -0.x
@@ -1271,7 +1271,7 @@ fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind, comptime ta_nam
                     const buf_bytes = realm.allocator.alloc(u8, byte_len) catch return error.OutOfMemory;
                     @memset(buf_bytes, 0);
                     buf_obj.setArrayBuffer(realm.allocator, buf_bytes) catch return error.OutOfMemory;
-                    buf_obj.has_array_buffer_data = true;
+                    buf_obj.brand.has_array_buffer_data = true;
                     inst.setTypedView(realm.allocator, .{ .kind = kind, .viewed = buf_obj, .byte_offset = 0, .length = length, .name = ta_name }) catch return error.OutOfMemory;
                     // §23.2.6.4 / §7.1.11 — Uint8ClampedArray's
                     // [[ContentType]] is still Number but writes
@@ -1331,7 +1331,7 @@ fn typedArrayConstructorBuilder(comptime kind: ObjMod.TypedKind, comptime ta_nam
                 const buf_bytes = realm.allocator.alloc(u8, byte_len) catch return error.OutOfMemory;
                 @memset(buf_bytes, 0);
                 buf_obj.setArrayBuffer(realm.allocator, buf_bytes) catch return error.OutOfMemory;
-                buf_obj.has_array_buffer_data = true;
+                buf_obj.brand.has_array_buffer_data = true;
                 inst.setTypedView(realm.allocator, .{ .kind = kind, .viewed = buf_obj, .byte_offset = 0, .length = length, .name = ta_name }) catch return error.OutOfMemory;
                 // Copy each element via Get + ToNumber/ToBigInt.
                 const bigint_mod = @import("bigint.zig");
@@ -1937,7 +1937,7 @@ fn taSourceGet(realm: *Realm, src: *JSObject, key: []const u8) NativeError!Value
     const proxy_mod = @import("proxy.zig");
     var cur = src;
     while (true) {
-        if (cur.getProxyTarget() != null or cur.proxy_revoked) {
+        if (cur.getProxyTarget() != null or cur.brand.proxy_revoked) {
             const outcome = try proxy_mod.nativeProxyGet(realm, cur, key, heap_mod.taggedObject(src), null);
             switch (outcome) {
                 .value => |v| return v,
@@ -2212,7 +2212,7 @@ fn taMakeNewNamed(realm: *Realm, kind: ObjMod.TypedKind, length: usize, name_hin
     const buf_bytes = realm.allocator.alloc(u8, byte_len) catch return error.OutOfMemory;
     @memset(buf_bytes, 0);
     buf_obj.setArrayBuffer(realm.allocator, buf_bytes) catch return error.OutOfMemory;
-    buf_obj.has_array_buffer_data = true;
+    buf_obj.brand.has_array_buffer_data = true;
     inst.setTypedView(realm.allocator, .{ .kind = kind, .viewed = buf_obj, .byte_offset = 0, .length = length, .name = ctor_name }) catch return error.OutOfMemory;
     return inst;
 }
@@ -3244,7 +3244,7 @@ fn dataViewConstructor(realm: *Realm, this_value: Value, args: []const Value) Na
     // throw lives further down per step 7 — after ToIndex has had
     // a chance to fire any user-observable `valueOf` on
     // `byteOffset`.
-    if (!buf_obj.has_array_buffer_data) return throwTypeError(realm, "DataView: first argument must be an ArrayBuffer");
+    if (!buf_obj.brand.has_array_buffer_data) return throwTypeError(realm, "DataView: first argument must be an ArrayBuffer");
 
     // §25.3.2.1 step 3 — ToIndex(byteOffset). Runs BEFORE the
     // detached check (step 7) so a `valueOf` side-effect on

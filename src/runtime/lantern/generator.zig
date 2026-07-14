@@ -848,7 +848,7 @@ pub fn rejectAsyncGenRequest(
 /// state. Used by async-gen yield's close-on-reject shim.
 pub fn isSyncRejectedPromise(v: Value) bool {
     const obj = heap_mod.valueAsPlainObject(v) orelse return false;
-    return obj.promise_state == .rejected;
+    return obj.brand.promise_state == .rejected;
 }
 
 /// §27.6.1 — async generators carry a brand on their wrapper
@@ -923,7 +923,7 @@ fn awaitForReturnCompletion(realm: *Realm, gen: *@import("../generator.zig").JSG
                 },
             };
             _ = ctor_v;
-            if (obj.promise_state == .pending) {
+            if (obj.brand.promise_state == .pending) {
                 // Register the gen as a waiter on the Promise,
                 // flagging it so `settlePromiseInternal` routes
                 // the resume through
@@ -936,7 +936,7 @@ fn awaitForReturnCompletion(realm: *Realm, gen: *@import("../generator.zig").JSG
                 try waiters.append(realm.allocator, gen);
                 return;
             }
-            try realm.enqueueAsyncGenReturnAfterAwait(gen, obj.promise_value, obj.promise_state == .rejected);
+            try realm.enqueueAsyncGenReturnAfterAwait(gen, obj.promise_value, obj.brand.promise_state == .rejected);
             return;
         }
         // Thenable check — §27.7.5.3 step 1 routes through
@@ -1065,7 +1065,7 @@ const SettledOutcome = union(enum) {
 /// caller can register a reaction.
 fn unwrapSettledPromise(v: Value) SettledOutcome {
     const obj = heap_mod.valueAsPlainObject(v) orelse return .none;
-    return switch (obj.promise_state) {
+    return switch (obj.brand.promise_state) {
         .fulfilled => .{ .fulfilled = obj.promise_value },
         .rejected => .{ .rejected = obj.promise_value },
         .pending => .{ .pending = obj },

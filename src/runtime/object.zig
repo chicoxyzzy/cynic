@@ -939,6 +939,129 @@ pub const OwnNamedIterator = struct {
 /// otherwise have `malloc`'d a slots buffer.
 pub const inline_slot_cap: u32 = 4;
 
+/// §10.1 / §10.4 / §27.2 object brand + exotic-kind flags, folded
+/// into one 32-bit word — the V8 `Map`-flags / JSC `Structure`-flags
+/// model. Read as a single masked load on the property-op and
+/// typed-array hot paths. The GC header bits and the `kind`
+/// discriminator are deliberately kept OUT of this word (see the
+/// `JSObject.brand` doc-comment).
+pub const BrandFlags = packed struct(u32) {
+    /// `[[Extensible]]` (§10.1.2). `false` after
+    /// `Object.preventExtensions` / `seal` / `freeze`. New
+    /// property writes silently fail when `false`.
+    extensible: bool = true,
+    /// §10.4.2 `length`.[[Writable]] for an array exotic — cleared
+    /// by `Object.defineProperty(arr, "length", {writable:false})`
+    /// (and `Object.freeze`); §10.4.2.4 step 17.b gates length
+    /// writes and §10.4.2.1 step 2 gates the implicit grow on
+    /// index-past-end writes against it. [[Enumerable]] /
+    /// [[Configurable]] are constant `false` per §23.1.4, so one
+    /// bit carries the whole mutable descriptor state.
+    array_length_writable: bool = true,
+    /// §10.5 Proxy exotic brand. `true` iff this object was created
+    /// via `new Proxy(target, handler)` (callable or not), and stays
+    /// `true` after revocation — exactly the disjunction the
+    /// property-op hot path tests on every get/set. Kept as a cheap
+    /// inline bool so the brand check is a single load; the
+    /// `[[ProxyTarget]]` / `[[ProxyHandler]]` / callable-target
+    /// pointers live in the extension (`getProxyTarget` /
+    /// `getProxyHandler` / `getProxyTargetFn`), read only once the
+    /// brand says the object is a proxy.
+    is_proxy: bool = false,
+    /// §28.2.2.1 Proxy.revocable — a revoked proxy reports as
+    /// revoked once `revoke()` clears its `[[ProxyTarget]]` /
+    /// `[[ProxyHandler]]`. Every internal method on a revoked proxy
+    /// throws TypeError per §10.5.x step 1 (the `is_proxy` brand
+    /// stays set through revocation regardless).
+    proxy_revoked: bool = false,
+    /// Callable-exotic flag on a plain JSObject. Set in two places:
+    /// (a) §10.5 ProxyCreate — when the original target was callable,
+    /// `[[Call]]` is exposed on the proxy regardless of whether
+    /// `proxy_target_fn` is currently set (after revocation that slot
+    /// is null but `typeof` / re-wraps still need "callable"); and
+    /// (b) §20.2.3 — %Function.prototype% is itself a built-in
+    /// function object whose JS-observable shape is "an object whose
+    /// typeof is function" (Cynic represents it as a JSObject, not a
+    /// JSFunction), which rides this same flag.
+    proxy_callable: bool = false,
+    /// §26.1 WeakRef brand — `deref.call(plainObj)` must throw a
+    /// TypeError per §26.1.3.2 even when the slot is empty, so the
+    /// brand is checked separately from the target slot.
+    is_weak_ref: bool = false,
+    /// §3.8 ShadowRealm brand — the prototype methods walk this flag
+    /// (and the `host_data` slot carrying the child `*Realm`) to
+    /// identify a ShadowRealm receiver and reject mismatched `this`
+    /// per §3.8.3.1 / §3.8.3.2 step 2 (`RequireInternalSlot(O,
+    /// [[ShadowRealm]])` throws on any non-ShadowRealm receiver).
+    is_shadow_realm: bool = false,
+    /// §10.4.2 Array exotic — `elements` is the source of truth for
+    /// integer-indexed reads / writes (§7.1.21 canonical array-index
+    /// range `[0, 2^32 - 2]`). `length` (§23.1.4) is a VIRTUAL own
+    /// property synthesized from `arrayLength()` plus
+    /// `array_length_writable` at every consult point — never
+    /// materialized in `properties`.
+    is_array_exotic: bool = false,
+    /// §10.4.4 Arguments exotic brand. `Object.prototype.toString`
+    /// reads this to produce `"[object Arguments]"` per §22.1.3.6
+    /// step 4; the `lda_arguments` opcode sets it on the strict-mode
+    /// unmapped arguments object.
+    is_arguments_exotic: bool = false,
+    /// §25.5.4 `[[IsRawJSON]]` — set on the frozen null-prototype
+    /// objects produced by `JSON.rawJSON(text)`. `JSON.isRawJSON`
+    /// brand-tests against it; `JSON.stringify` emits the branded
+    /// object's `rawJSON` bytes verbatim (json-parse-with-source,
+    /// Stage 4 ES2025).
+    is_raw_json: bool = false,
+    /// §9.4.6 Module Namespace exotic — set on a namespace produced
+    /// by `import(spec)` / `import * as ns`. The flag makes user
+    /// `[[Set]]` / `[[Delete]]` / `[[DefineOwnProperty]]` silently
+    /// fail (always `false`) per §9.4.6.4 / .7 / .8, distinguishing a
+    /// namespace (null proto + non-extensible) from a user
+    /// `Object.preventExtensions(Object.create(null))`.
+    is_module_namespace: bool = false,
+    /// §20.5.1.1 `[[ErrorData]]` — set on an Error / NativeError
+    /// instance (`new <X>Error(...)` / `<X>Error(...)`);
+    /// `Object.prototype.toString` emits `"[object Error]"`.
+    /// `<X>Error.prototype` does NOT carry it.
+    has_error_data: bool = false,
+    /// §10.4.2 Array exotic — dictionary (sparse) mode. When a single
+    /// indexed write would extend `elements` past
+    /// `sparse_gap_threshold`, demote to the `u32 → Value`
+    /// `sparse_elements` map (in the extension); `sparse_length` is
+    /// the logical length. Once sparse, stays sparse.
+    is_sparse: bool = false,
+    /// `elements.items.ptr` came from the heap's `element_buf_pool`
+    /// (capacity exactly `Heap.element_buf_cap`) rather than the GPA.
+    /// Growth past the class migrates to a GPA buffer
+    /// (`elementsUnpool`); frees/teardown return the buffer to the
+    /// pool — a pooled pointer must NEVER reach `allocator.free`.
+    elements_pooled: bool = false,
+    /// `[[ArrayBufferData]]` brand presence (§25.1.5.x
+    /// RequireInternalSlot) — true iff produced by the ArrayBuffer
+    /// constructor (or `.transfer` / `.slice`).
+    /// `getArrayBuffer() == null` with this set is the detached state.
+    has_array_buffer_data: bool = false,
+    /// §25.2 — true iff the byte block belongs to a
+    /// `SharedArrayBuffer` (vs a plain `ArrayBuffer`). The
+    /// `IsSharedArrayBuffer(O)` discriminator driving the §25.1.5.x
+    /// "throw if shared" guards; a shared buffer never detaches and
+    /// is grow-only.
+    array_buffer_shared: bool = false,
+    /// §27.2.1.3 alreadyResolved closure flag — set on the first
+    /// invocation of this Promise's resolve or reject function;
+    /// subsequent invocations no-op, and the executor-threw fallback
+    /// (§27.2.3.1 step 10) consults it to avoid double-settlement.
+    promise_already_resolved: bool = false,
+    /// §27.2.6 `[[PromiseState]]`. `.none` means this object is not a
+    /// Promise; the runtime brand-checks for `!= .none` rather than
+    /// walking the prototype chain. Hidden from JS. Carried at its
+    /// native `enum(u8)` width (the whole word is `u32`, so there is
+    /// no footprint benefit to a narrower tag).
+    promise_state: PromiseState = .none,
+    /// Reserved padding to fill the 32-bit word.
+    _padding: u7 = 0,
+};
+
 pub const JSObject = struct {
     /// Discriminator — must remain the first field. Mirrors the
     /// `kind` field on `JSFunction` so runtime dispatch on a
@@ -1085,10 +1208,17 @@ pub const JSObject = struct {
     /// touch) lets shape-mode `{a, b}` / `new Point(x, y)`
     /// instances qualify as pristine.
     is_pristine: bool = true,
-    /// `[[Extensible]]` (§10.1.2). `false` after
-    /// `Object.preventExtensions` / `seal` / `freeze`. New
-    /// property writes silently fail when `false`.
-    extensible: bool = true,
+    /// Packed brand + exotic-kind flags (§10.1 / §10.4 / §27.2) —
+    /// `[[Extensible]]`, the proxy / array / arguments / buffer /
+    /// promise brands, and friends. Folded into one 32-bit word
+    /// (see `BrandFlags`) and read as a single masked load on the
+    /// property-op and typed-array hot paths. The GC header bits
+    /// (`mark_color` / `generation` / `dirty` / `needs_internal_scan`
+    /// / `is_pristine`) and the `kind` discriminator stay separate —
+    /// they are written on collection paths / read on every heap
+    /// dispatch, so mixing them in would invite read-modify-write
+    /// hazards and defeat the single-load brand check.
+    brand: BrandFlags = .{},
     /// Boxed primitive — set on objects produced by
     /// `new Number(v)`, `new String(v)`, `new Boolean(v)`.
     // `boxed_primitive` (`[[NumberData]]`/`[[StringData]]`/
@@ -1131,22 +1261,6 @@ pub const JSObject = struct {
     // `setDataView` helpers below. `has_array_buffer_data` (brand
     // bool) stays on JSObject — flat byte-aligned with the other
     // brand flags and used in every typed-array hot path.)
-    /// `[[ArrayBufferData]]` brand presence (§25.1.5.x
-    /// RequireInternalSlot). True iff the object was produced by
-    /// the ArrayBuffer constructor (or `.transfer` / `.slice`).
-    /// `getArrayBuffer() == null && has_array_buffer_data == true`
-    /// is the detached state. Plain objects keep the default `false`
-    /// so the prototype-method brand checks `TypeError` correctly.
-    has_array_buffer_data: bool = false,
-    /// §25.2 — true iff the byte data block belongs to a
-    /// `SharedArrayBuffer` (vs a plain `ArrayBuffer`). Both carry
-    /// `[[ArrayBufferData]]` (`has_array_buffer_data`), so this flag
-    /// is the `IsSharedArrayBuffer(O)` discriminator: it drives the
-    /// §25.1.5.x "If IsSharedArrayBuffer(O) throw TypeError" guards on
-    /// `ArrayBuffer.prototype.*`, and the brand checks on
-    /// `SharedArrayBuffer.prototype.*`. A shared buffer never detaches
-    /// and is grow-only. Flat alongside the brand for the hot path.
-    array_buffer_shared: bool = false,
     // (`boxed_string` moved to `JSObjectExtension` — only
     // `new String(v)` / String-wrapper boxing populates it.
     // Access via `getBoxedString` / `setBoxedString` helpers.)
@@ -1162,170 +1276,30 @@ pub const JSObject = struct {
     /// queued a reaction or waiter. Access via the `promiseWaiters*`
     /// / `promiseReactions*` helpers below — never the field.
     promise_store: ?*PromiseReactionStore = null,
-    /// §27.2.6 `[[PromiseState]]`. `.none` means this object isn't
-    /// a Promise; the runtime brand-checks for `!= .none` rather
-    /// than walking the prototype chain. Hidden from JS — never
-    /// surfaces in `Object.keys` / `in` / property reads.
-    promise_state: PromiseState = .none,
     /// §27.2.6 `[[PromiseResult]]`. Read only when
     /// `promise_state` is fulfilled or rejected; pending Promises
     /// leave it at `undefined_`.
     promise_value: Value = Value.undefined_,
-    /// §27.2.1.3 alreadyResolved closure flag — set true on the
-    /// first invocation of either the resolve or reject function
-    /// for this Promise. Subsequent invocations no-op, and the
-    /// Promise constructor's executor-threw fallback (§27.2.3.1
-    /// step 10) consults this flag to avoid double-settlement when
-    /// the executor already called resolve(thenable) (which leaves
-    /// the Promise pending until the thenable job runs).
-    promise_already_resolved: bool = false,
     // RegExp instance state (`regexp_source`, `regexp_flags`,
     // `regex_perlex`) moved to `JSObjectExtension` — present only on
     // RegExp instances, never on a plain literal (they were 24 bytes
     // on every object). Access via `getRegexpSource` / `setRegexpSource`
     // / `getRegexpFlags` / `setRegexpFlags` / `getRegexPerlex` /
     // `setRegexPerlex` below.
-    /// §10.5 Proxy exotic brand. `true` iff this object was created
-    /// via `new Proxy(target, handler)` (callable or not), and stays
-    /// `true` after revocation — exactly the disjunction
-    /// `proxy_target_fn != null or proxy_target != null or
-    /// proxy_revoked` that the property-op hot path tests on every
-    /// get/set. Kept as a cheap inline bool so that brand check is a
-    /// single load; the `[[ProxyTarget]]` / `[[ProxyHandler]]` /
-    /// callable-target pointers themselves live in the extension
-    /// (`getProxyTarget` / `getProxyHandler` / `getProxyTargetFn`),
-    /// read only once the brand says the object is a proxy. See
-    /// `is_proxy` usage in the interpreter's property opcodes.
-    is_proxy: bool = false,
     // Proxy `[[ProxyTarget]]` / `[[ProxyHandler]]` / callable-target
     // pointers moved to `JSObjectExtension` — access via
     // `getProxyTarget` / `setProxyTarget` / `getProxyHandler` /
     // `setProxyHandler` / `getProxyTargetFn` / `setProxyTargetFn`.
-    /// §28.2.2.1 Proxy.revocable — a revoked proxy reports as
-    /// revoked once `revoke()` clears its `[[ProxyTarget]]` /
-    /// `[[ProxyHandler]]`. Every internal method on a revoked
-    /// proxy throws TypeError per §10.5.x step 1. Kept inline
-    /// (a cheap bool, and the `is_proxy` brand stays set through
-    /// revocation regardless).
-    proxy_revoked: bool = false,
-    /// Callable-exotic flag on a plain JSObject. Set in two places:
-    /// (a) §10.5 ProxyCreate — when the original target was callable,
-    /// `[[Call]]` is exposed on the proxy regardless of whether
-    /// `proxy_target_fn` is currently set. After revocation the
-    /// `proxy_target_fn` slot is null, but `typeof` and re-wraps
-    /// still need to know the proxy is "callable".
-    /// (b) §20.2.3 — %Function.prototype% is itself a built-in
-    /// function object that returns undefined when called; the JS-
-    /// observable shape is "an object whose typeof is function",
-    /// which rides this same flag (since Cynic represents
-    /// `Function.prototype` as a JSObject, not a JSFunction).
-    proxy_callable: bool = false,
     // (`finalization_cells` + `weak_ref_target` moved to
     // `JSObjectExtension` — only `FinalizationRegistry` /
     // `WeakRef` instances populate them. Access via
     // `getFinalizationCells` / `setFinalizationCells` /
     // `getWeakRefTarget` / `setWeakRefTarget` below.)
-    /// §26.1 WeakRef brand — `(deref.call(plainObj))` must throw
-    /// a TypeError per §26.1.3.2 even when the slot is empty, so
-    /// the brand is checked separately from the target slot.
-    is_weak_ref: bool = false,
-    /// §3.8 ShadowRealm brand — the prototype methods walk this
-    /// flag (and the `host_data` slot which carries the child
-    /// `*Realm` pointer) to identify a ShadowRealm receiver and
-    /// reject mismatched `this` values per §3.8.3.1 step 2 /
-    /// §3.8.3.2 step 2 (`RequireInternalSlot(O, [[ShadowRealm]])`
-    /// throws TypeError on any non-ShadowRealm receiver — like
-    /// `evaluate.call({}, "1")`).
-    is_shadow_realm: bool = false,
-    /// §10.4.2 Array exotic — packed indexed elements storage.
-    /// Array instances set `is_array_exotic = true` and use
-    /// `elements` as the source of truth for integer-indexed
-    /// reads / writes (§7.1.21 canonical array-index range
-    /// `[0, 2^32 - 2]`). Holes (sparse arrays) are represented as
-    /// `Value.undefined_` slots; the spec-faithful "hole bit" is
-    /// later (lookups via `hasOwnIndexed` currently treat any
-    /// in-bounds slot as an own property — correct for dense
-    /// arrays, off for sparse ones). String-keyed numeric writes
-    /// like `arr["3"] = v` route into this vector via the
-    /// canonical-integer-index dispatch in `set` / `get` / etc.,
-    /// so user code never needs to think about it.
-    ///
-    /// `length` (§23.1.4) is a VIRTUAL own property: synthesized
-    /// from `arrayLength()` (the indexed-storage size) plus the
-    /// `array_length_writable` bit below at every consult point
-    /// (`get` / `hasOwn` / `flagsFor` / key enumeration) — never
-    /// materialized in `properties`. This kills the per-element
-    /// `length` hashmap sync and the per-array bag allocation the
-    /// materialized form paid on every array literal, and makes
-    /// `a.length` reads O(1) with no hashing.
-    /// `Object.getOwnPropertyDescriptor(arr, "length")` still
-    /// returns the §23.1.4 data descriptor.
-    is_array_exotic: bool = false,
-    /// §10.4.2 `length`.[[Writable]] for an array exotic — cleared
-    /// by `Object.defineProperty(arr, "length", {writable:false})`
-    /// (and `Object.freeze`); §10.4.2.4 step 17.b gates length
-    /// writes and §10.4.2.1 step 2 gates the implicit grow on
-    /// index-past-end writes against it. [[Enumerable]] /
-    /// [[Configurable]] are constant `false` per §23.1.4, so one
-    /// bit carries the whole mutable descriptor state.
-    array_length_writable: bool = true,
-    /// §10.4.4 — Arguments exotic brand. `Object.prototype.toString`
-    /// reads this to produce `"[object Arguments]"` per §22.1.3.6
-    /// step 4 (the "Arguments" case keyed off the internal slot
-    /// presence). Cynic's `lda_arguments` opcode sets this when it
-    /// synthesises the strict-mode unmapped arguments object.
-    is_arguments_exotic: bool = false,
-    /// §25.5.4 `[[IsRawJSON]]` internal slot. Set on the frozen
-    /// null-prototype objects produced by `JSON.rawJSON(text)`.
-    /// `JSON.isRawJSON` brand-tests against it; `JSON.stringify`
-    /// reads the `rawJSON` data property on a branded object and
-    /// emits its bytes verbatim instead of re-serialising. The
-    /// json-parse-with-source proposal (Stage 4 ES2025) covers this.
-    is_raw_json: bool = false,
-    /// §9.4.6 Module Namespace exotic object — set when this object
-    /// is a Module Namespace produced by `import(spec)` / `import * as
-    /// ns from "…"`. The flag flips on `[[Set]]` / `[[Delete]]` /
-    /// `[[DefineOwnProperty]]` paths so user writes silently fail
-    /// (always return `false`) per §9.4.6.4 / 9.4.6.7 / 9.4.6.8. The
-    /// `extensible` slot is also flipped `false` and the `prototype`
-    /// slot is cleared to `null` at finalisation; this flag is the
-    /// brand that distinguishes "module namespace with `null`
-    /// proto + non-extensible" from "user object frozen via
-    /// `Object.preventExtensions(Object.create(null))`" which has
-    /// different `[[Set]]` semantics (writes are silently dropped
-    /// vs. always-`false`).
-    is_module_namespace: bool = false,
     // (`namespace_redirects`, `ambiguous_namespace_keys` moved to
     // `JSObjectExtension` — only Module Namespace exotics populate
     // them. Access via the `namespaceRedirect*` /
     // `ambiguousNamespaceKey*` helpers below.)
-    /// §20.5.1.1 [[ErrorData]] — set when this object is an Error
-    /// (or NativeError) instance produced via `new <X>Error(...)`
-    /// / `<X>Error(...)`. Object.prototype.toString uses this to
-    /// emit `"[object Error]"`; AggregateError init also flips it.
-    /// Plain `<X>Error.prototype` does NOT have this slot, which is
-    /// what `built-ins/NativeErrors/<X>/prototype/not-error-object.js`
-    /// asserts.
-    has_error_data: bool = false,
     elements: std.ArrayListUnmanaged(Value) = .empty,
-    /// §10.4.2 Array exotic — dictionary mode (V8-style). When a
-    /// single indexed write would extend `elements` by more than
-    /// `sparse_gap_threshold` slots (e.g. `arr[2**32 - 2] = v` on
-    /// an empty array), demote to a `u32 → Value` map keyed by
-    /// present indices. Absent keys are holes; `sparse_length`
-    /// is the logical array length (mirrors `elements.items.len`
-    /// in dense mode). Once sparse, stays sparse — no re-pack on
-    /// shrink. Off by default; only Array exotics flip this.
-    is_sparse: bool = false,
-    /// `elements.items.ptr` came from the heap's `element_buf_pool`
-    /// (capacity exactly `Heap.element_buf_cap`) rather than the
-    /// general-purpose allocator. Growth past the class migrates to a
-    /// GPA buffer (`elementsUnpool`) and frees/teardown return the
-    /// buffer to the pool — a pooled pointer must NEVER reach
-    /// `allocator.free`/realloc. Set only by the fused array-literal
-    /// arm; in-place reads/writes and shrinks need no special
-    /// handling (`ArrayList.resize` within capacity never reallocs).
-    elements_pooled: bool = false,
     // §10.4.2 sparse indexed store (`sparse_elements`) moved to
     // `JSObjectExtension` — populated only on the rare sparse array
     // exotic. The `is_sparse` brand + `sparse_length` stay inline (the
@@ -1709,7 +1683,7 @@ pub const JSObject = struct {
             return;
         }
         (try self.getOrCreateExtension(allocator)).proxy_target = v;
-        self.is_proxy = true;
+        self.brand.is_proxy = true;
         self.noteInternalSlotWrite();
     }
     pub fn getProxyHandler(self: *const JSObject) ?*JSObject {
@@ -1721,7 +1695,7 @@ pub const JSObject = struct {
             return;
         }
         (try self.getOrCreateExtension(allocator)).proxy_handler = v;
-        self.is_proxy = true;
+        self.brand.is_proxy = true;
         self.noteInternalSlotWrite();
     }
     pub fn getProxyTargetFn(self: *const JSObject) ?*@import("function.zig").JSFunction {
@@ -1733,7 +1707,7 @@ pub const JSObject = struct {
             return;
         }
         (try self.getOrCreateExtension(allocator)).proxy_target_fn = v;
-        self.is_proxy = true;
+        self.brand.is_proxy = true;
         self.noteInternalSlotWrite();
     }
     pub fn getFinallyCallback(self: *const JSObject) ?*@import("function.zig").JSFunction {
@@ -2192,7 +2166,7 @@ pub const JSObject = struct {
     /// §25.1.6 IsSharedArrayBuffer(O) — true iff `O` carries a byte
     /// data block that belongs to a `SharedArrayBuffer`.
     pub fn isSharedArrayBuffer(self: *const JSObject) bool {
-        return self.has_array_buffer_data and self.array_buffer_shared;
+        return self.brand.has_array_buffer_data and self.brand.array_buffer_shared;
     }
 
     pub fn getSharedBlock(self: *const JSObject) ?*@import("shared_data_block.zig").SharedDataBlock {
@@ -2466,7 +2440,7 @@ pub const JSObject = struct {
         }
         // `key_anchors` lives in the extension — freed when it is.
         // `own_key_order` lives in `dict_store` (freed above).
-        if (self.elements_pooled) {
+        if (self.brand.elements_pooled) {
             // Pool-owned buffer — must not reach `allocator.free`.
             const heap_ty = @import("heap.zig");
             const buf: *[heap_ty.Heap.element_buf_cap]Value = @ptrCast(self.elements.items.ptr);
@@ -2665,7 +2639,7 @@ pub const JSObject = struct {
         // §10.4.2 Array exotic — integer-indexed writes land in
         // `elements`. The JSString anchor is unnecessary because
         // the value isn't keyed by the string at all.
-        if (self.is_array_exotic) {
+        if (self.brand.is_array_exotic) {
             if (canonicalIntegerIndex(key_str.flatBytes())) |idx| {
                 return self.setIndexed(allocator, idx, v);
             }
@@ -2754,7 +2728,7 @@ pub const JSObject = struct {
     ) !void {
         // §10.4.2 Array exotic — integer-indexed writes land in
         // `elements`, same as `setComputedOwned`.
-        if (self.is_array_exotic) {
+        if (self.brand.is_array_exotic) {
             if (canonicalIntegerIndex(key)) |idx| {
                 return self.setIndexed(allocator, idx, v);
             }
@@ -2785,7 +2759,7 @@ pub const JSObject = struct {
         // [[Configurable]] are constant false.
         if (self.isVirtualLengthKey(key)) {
             return .{
-                .writable = self.array_length_writable,
+                .writable = self.brand.array_length_writable,
                 .enumerable = false,
                 .configurable = false,
             };
@@ -2806,7 +2780,7 @@ pub const JSObject = struct {
         // reports the spec descriptor. The `@@toStringTag` slot has
         // an explicit entry in `property_flags` so it stays
         // `{w:false, e:false, c:false}`.
-        if (self.is_module_namespace and
+        if (self.brand.is_module_namespace and
             !std.mem.startsWith(u8, key, "@@") and
             !std.mem.startsWith(u8, key, "<sym:"))
         {
@@ -2892,10 +2866,10 @@ pub const JSObject = struct {
         // calling down.)
         if (self.isVirtualLengthKey(key)) {
             if (valueToArrayLength(v)) |n| try self.setArrayLength(allocator, n);
-            self.array_length_writable = flags.writable;
+            self.brand.array_length_writable = flags.writable;
             return;
         }
-        if (self.is_array_exotic) {
+        if (self.brand.is_array_exotic) {
             if (canonicalIntegerIndex(key)) |idx| {
                 if (is_default) {
                     return self.setIndexed(allocator, idx, v);
@@ -2991,7 +2965,7 @@ pub const JSObject = struct {
         // demoted to the named-property bag (descriptor flags
         // override). The bypass `set` skips the writability gate
         // by design (internal installers).
-        if (self.is_array_exotic) {
+        if (self.brand.is_array_exotic) {
             // The virtual `length` slot — route to the indexed
             // storage (§10.4.2.4's storage effect). This bypass API
             // skips the writability gate by design, like every other
@@ -3218,8 +3192,8 @@ pub const JSObject = struct {
         const heap = self.heap orelse return false;
         if (self.shape != null) return true;
         if (self.accessorCount() != 0) return false;
-        if (self.is_array_exotic or self.getTypedView() != null or
-            self.is_module_namespace or self.getProxyTarget() != null)
+        if (self.brand.is_array_exotic or self.getTypedView() != null or
+            self.brand.is_module_namespace or self.getProxyTarget() != null)
         {
             return false;
         }
@@ -3298,8 +3272,8 @@ pub const JSObject = struct {
         // before the caller's `recordKey`.) See `needs_internal_scan`.
         self.noteSymbolKeyMaybe(key);
         // Exotics and engine-internal slots stay dictionary-mode.
-        if (self.is_array_exotic or self.getTypedView() != null or
-            self.is_module_namespace or self.getProxyTarget() != null or
+        if (self.brand.is_array_exotic or self.getTypedView() != null or
+            self.brand.is_module_namespace or self.getProxyTarget() != null or
             std.mem.startsWith(u8, key, "__cynic_"))
         {
             try self.demoteFromShape(allocator);
@@ -3371,11 +3345,11 @@ pub const JSObject = struct {
         // the packed `elements` vector unless the slot has been
         // descriptor-flag-demoted to the named-property bag, in
         // which case the bag's `writable` gate applies.
-        if (self.is_array_exotic) {
+        if (self.brand.is_array_exotic) {
             // The virtual `length` slot — §10.4.2.4 step 17.b gates
             // on the writability bit, then the storage effect.
             if (self.isVirtualLengthKey(key)) {
-                if (!self.array_length_writable) return false;
+                if (!self.brand.array_length_writable) return false;
                 if (valueToArrayLength(v)) |n| try self.setArrayLength(allocator, n);
                 return true;
             }
@@ -3437,7 +3411,7 @@ pub const JSObject = struct {
     /// `lda_property` (interpreter-hot).
     /// Whether `key` is the virtual `length` of an array exotic.
     pub inline fn isVirtualLengthKey(self: *const JSObject, key: []const u8) bool {
-        return self.is_array_exotic and key.len == 6 and std.mem.eql(u8, key, "length");
+        return self.brand.is_array_exotic and key.len == 6 and std.mem.eql(u8, key, "length");
     }
 
     /// §23.1.4 — the array exotic's `length` as a Value, computed
@@ -3464,7 +3438,7 @@ pub const JSObject = struct {
             // the indexed storage (packed `elements` or `sparse_elements`).
             // Holes (§10.4.2.1) fall through to the prototype chain.
             // `length` is the virtual §23.1.4 slot, synthesized here.
-            if (cur.is_array_exotic) {
+            if (cur.brand.is_array_exotic) {
                 if (canonicalIntegerIndex(key)) |idx| {
                     if (cur.tryGetIndexedOwn(idx)) |v| return v;
                 } else if (cur.isVirtualLengthKey(key)) {
@@ -3549,7 +3523,7 @@ pub const JSObject = struct {
         // entries (§15.2.1.18 step 3.c.ii); reflect that in
         // [[HasProperty]] / [[GetOwnProperty]] so `'X' in ns` is
         // `false` and `Object.keys(ns)` omits the key.
-        if (self.is_module_namespace and self.hasAmbiguousNamespaceKey(key)) return false;
+        if (self.brand.is_module_namespace and self.hasAmbiguousNamespaceKey(key)) return false;
         // Shape-first own-property check — `slots[entry.slot]` is
         // the authority for shape-stable objects (see the matching
         // ordering in `get` above). Same rationale: future
@@ -3564,8 +3538,8 @@ pub const JSObject = struct {
         // though the value lives elsewhere. `'X' in ns` /
         // `Object.keys(ns)` / `Reflect.has(ns, 'X')` must
         // include them.
-        if (self.is_module_namespace and self.hasNamespaceRedirect(key)) return true;
-        if (self.is_array_exotic) {
+        if (self.brand.is_module_namespace and self.hasNamespaceRedirect(key)) return true;
+        if (self.brand.is_array_exotic) {
             // §23.1.4 — the virtual `length` is an own property.
             if (self.isVirtualLengthKey(key)) return true;
             if (canonicalIntegerIndex(key)) |idx| {
@@ -3603,13 +3577,13 @@ pub const JSObject = struct {
         while (true) {
             // §15.2.1.16.3 / §15.2.1.18 — ambiguous star-export keys
             // are omitted from the namespace.
-            if (cur.is_module_namespace and cur.hasAmbiguousNamespaceKey(key)) return false;
+            if (cur.brand.is_module_namespace and cur.hasAmbiguousNamespaceKey(key)) return false;
             if (cur.ownDataContains(key)) return true;
             if (cur.hasAccessor(key)) return true;
             // §15.2.1.16.3 ResolveExport — re-export redirects appear
             // as own properties on a Module Namespace exotic.
-            if (cur.is_module_namespace and cur.hasNamespaceRedirect(key)) return true;
-            if (cur.is_array_exotic) {
+            if (cur.brand.is_module_namespace and cur.hasNamespaceRedirect(key)) return true;
+            if (cur.brand.is_array_exotic) {
                 if (canonicalIntegerIndex(key)) |idx| {
                     if (cur.hasOwnIndexedSlot(idx)) return true;
                 }
@@ -3698,7 +3672,7 @@ pub const JSObject = struct {
     /// any user-visible property; a user can't forge a Promise
     /// just by setting properties on a plain object.
     pub inline fn isPromise(self: *const JSObject) bool {
-        return self.promise_state != .none;
+        return self.brand.promise_state != .none;
     }
 
     /// Settle the promise's `[[PromiseState]]` / `[[PromiseResult]]`
@@ -3708,7 +3682,7 @@ pub const JSObject = struct {
     /// `.then` reactions resolve eagerly instead of registering
     /// for later.
     pub inline fn settlePromise(self: *JSObject, state: PromiseState, value: Value) void {
-        self.promise_state = state;
+        self.brand.promise_state = state;
         self.promise_value = value;
         // Card-marking barrier: a young settled value on a mature promise
         // must be remembered (the minor cycle no longer scans all mature
@@ -3722,7 +3696,7 @@ pub const JSObject = struct {
     /// sparse → `sparse_length`. Callers should prefer this
     /// helper over poking the underlying storage directly.
     pub fn arrayLength(self: *const JSObject) u32 {
-        if (self.is_sparse) return self.sparse_length;
+        if (self.brand.is_sparse) return self.sparse_length;
         return @intCast(self.elements.items.len);
     }
 
@@ -3733,7 +3707,7 @@ pub const JSObject = struct {
     /// distinction for callers like `defineProperty`'s
     /// compatible-redefine guard.
     pub fn tryGetIndexedOwn(self: *const JSObject, idx: u32) ?Value {
-        if (self.is_sparse) {
+        if (self.brand.is_sparse) {
             if (self.sparseConst().get(idx)) |v| {
                 if (isElementHole(v)) return null;
                 return v;
@@ -3786,7 +3760,7 @@ pub const JSObject = struct {
     ) !void {
         const new_len: usize = @as(usize, idx) + 1;
         try self.ensureElementsLen(allocator, new_len);
-        if (self.is_sparse) {
+        if (self.brand.is_sparse) {
             try (try self.sparseMut(allocator)).put(allocator, idx, v);
         } else {
             self.elements.items[idx] = v;
@@ -3811,7 +3785,7 @@ pub const JSObject = struct {
     /// to count as a hole for `[[Get]]` / `[[HasProperty]]`).
     /// Does NOT sync length; caller is responsible.
     pub fn holeIndexed(self: *JSObject, idx: u32) void {
-        if (self.is_sparse) {
+        if (self.brand.is_sparse) {
             if (self.extension) |ext| _ = ext.sparse_elements.remove(idx);
         } else if (idx < self.elements.items.len) {
             self.elements.items[idx] = Value.hole_;
@@ -3832,7 +3806,7 @@ pub const JSObject = struct {
     /// buffer is already GPA-owned. Must run before ANY operation that
     /// could grow the buffer past `Heap.element_buf_cap`.
     fn elementsUnpool(self: *JSObject, allocator: std.mem.Allocator, min_cap: usize) !void {
-        if (!self.elements_pooled) return;
+        if (!self.brand.elements_pooled) return;
         const heap_ty = @import("heap.zig");
         var fresh: std.ArrayListUnmanaged(Value) = .empty;
         try fresh.ensureTotalCapacity(allocator, @max(min_cap, self.elements.items.len));
@@ -3840,7 +3814,7 @@ pub const JSObject = struct {
         const buf: *[heap_ty.Heap.element_buf_cap]Value = @ptrCast(self.elements.items.ptr);
         if (self.heap) |h| h.element_buf_pool.destroy(buf);
         self.elements = fresh;
-        self.elements_pooled = false;
+        self.brand.elements_pooled = false;
     }
 
     /// Release pooled elements back to the pool and reset to empty.
@@ -3850,7 +3824,7 @@ pub const JSObject = struct {
         const buf: *[heap_ty.Heap.element_buf_cap]Value = @ptrCast(self.elements.items.ptr);
         if (self.heap) |h| h.element_buf_pool.destroy(buf);
         self.elements = .empty;
-        self.elements_pooled = false;
+        self.brand.elements_pooled = false;
     }
 
     pub fn appendDenseSequential(
@@ -3859,9 +3833,9 @@ pub const JSObject = struct {
         idx: u32,
         v: Value,
     ) !bool {
-        if (self.is_sparse) return false;
+        if (self.brand.is_sparse) return false;
         if (idx != self.elements.items.len) return false;
-        if (self.elements_pooled and self.elements.items.len == self.elements.capacity) {
+        if (self.brand.elements_pooled and self.elements.items.len == self.elements.capacity) {
             try self.elementsUnpool(allocator, self.elements.items.len + 1);
         }
         try self.elements.append(allocator, v);
@@ -3876,7 +3850,7 @@ pub const JSObject = struct {
     /// chain). Promotes dense → sparse when the growth gap
     /// exceeds `sparse_gap_threshold`. No-op if already big enough.
     pub fn ensureElementsLen(self: *JSObject, allocator: std.mem.Allocator, new_len: usize) !void {
-        if (self.is_sparse) {
+        if (self.brand.is_sparse) {
             if (new_len > self.sparse_length) {
                 if (new_len > std.math.maxInt(u32)) return error.OutOfMemory;
                 self.sparse_length = @intCast(new_len);
@@ -3890,7 +3864,7 @@ pub const JSObject = struct {
             try self.promoteToSparse(allocator, new_len);
             return;
         }
-        if (self.elements_pooled and new_len > self.elements.capacity) {
+        if (self.brand.elements_pooled and new_len > self.elements.capacity) {
             try self.elementsUnpool(allocator, new_len);
         }
         try self.elements.resize(allocator, new_len);
@@ -3906,7 +3880,7 @@ pub const JSObject = struct {
     /// `sparse_length` is set to `new_len`. Caller has already
     /// validated `new_len <= 2^32`.
     fn promoteToSparse(self: *JSObject, allocator: std.mem.Allocator, new_len: usize) !void {
-        std.debug.assert(!self.is_sparse);
+        std.debug.assert(!self.brand.is_sparse);
         std.debug.assert(new_len <= std.math.maxInt(u32));
         var i: u32 = 0;
         while (i < self.elements.items.len) : (i += 1) {
@@ -3914,13 +3888,13 @@ pub const JSObject = struct {
             if (isElementHole(v)) continue;
             try (try self.sparseMut(allocator)).put(allocator, i, v);
         }
-        if (self.elements_pooled) {
+        if (self.brand.elements_pooled) {
             self.elementsFreePooled();
         } else {
             self.elements.clearAndFree(allocator);
         }
         self.sparse_length = @intCast(new_len);
-        self.is_sparse = true;
+        self.brand.is_sparse = true;
     }
 
     /// Write `length === arrayLength()` into `properties`.
@@ -3939,7 +3913,7 @@ pub const JSObject = struct {
     /// the future when `Object.defineProperty(arr, "0", {configurable: false})`
     /// promotes a slot into the named-property bag.
     pub fn truncateIndexed(self: *JSObject, allocator: std.mem.Allocator, new_len: u32) !bool {
-        if (self.is_sparse) {
+        if (self.brand.is_sparse) {
             // Collect keys to remove (can't mutate while iterating).
             var to_remove: std.ArrayListUnmanaged(u32) = .empty;
             defer to_remove.deinit(allocator);
@@ -3968,7 +3942,7 @@ pub const JSObject = struct {
     /// length-writability gate (§10.4.2.4 step 4); this helper
     /// is the storage-level effect.
     pub fn setArrayLength(self: *JSObject, allocator: std.mem.Allocator, new_len: u32) !void {
-        if (!self.is_array_exotic) {
+        if (!self.brand.is_array_exotic) {
             // Plain object — length is just a data property. Route
             // through the shape-aware funnel (`shadowSet` then bag),
             // not a raw `properties.put`: a shape-mode receiver must
@@ -4003,8 +3977,8 @@ pub const JSObject = struct {
     /// no-op if already an array exotic.
     pub fn markAsArrayExotic(self: *JSObject, allocator: std.mem.Allocator) !void {
         _ = allocator;
-        if (self.is_array_exotic) return;
-        self.is_array_exotic = true;
+        if (self.brand.is_array_exotic) return;
+        self.brand.is_array_exotic = true;
         // `length` (§23.1.4) is the VIRTUAL slot — synthesized from the
         // indexed storage by `arrayLengthValue` / `flagsFor` / the key
         // walks — so there is nothing to install: no bag entry, no
@@ -4017,7 +3991,7 @@ pub const JSObject = struct {
     /// prototype chain (§13.5.1.2 [[Delete]] step 5: leaves
     /// length alone, just removes the own property).
     pub fn removeIndexed(self: *JSObject, idx: u32) bool {
-        if (self.is_sparse) {
+        if (self.brand.is_sparse) {
             if (self.extension) |ext| _ = ext.sparse_elements.remove(idx);
             return true;
         }
@@ -4041,7 +4015,7 @@ pub const JSObject = struct {
         if (canonicalIntegerIndex(key) == null) {
             if (self.heap) |h| h.bumpProtoStructEpoch();
         }
-        if (self.is_array_exotic) {
+        if (self.brand.is_array_exotic) {
             // §23.1.4 — `length` is non-configurable; the virtual
             // slot can never be deleted.
             if (self.isVirtualLengthKey(key)) return false;
@@ -4386,7 +4360,7 @@ test "JSObject: setIndexed past threshold promotes to sparse" {
     try o.markAsArrayExotic(testing.allocator);
 
     try o.setIndexed(testing.allocator, 4_294_967_294, Value.fromInt32(100));
-    try testing.expect(o.is_sparse);
+    try testing.expect(o.brand.is_sparse);
     try testing.expectEqual(@as(usize, 0), o.elements.items.len);
     try testing.expectEqual(@as(u32, 4_294_967_295), o.arrayLength());
     try testing.expectEqual(@as(i32, 100), o.getIndexed(4_294_967_294).asInt32());
@@ -4401,7 +4375,7 @@ test "JSObject: dense growth stays packed below threshold" {
     try o.markAsArrayExotic(testing.allocator);
 
     try o.setIndexed(testing.allocator, 4, Value.fromInt32(7));
-    try testing.expect(!o.is_sparse);
+    try testing.expect(!o.brand.is_sparse);
     try testing.expectEqual(@as(u32, 5), o.arrayLength());
     try testing.expect(!o.hasOwnIndexedSlot(0));
     try testing.expectEqual(@as(i32, 7), o.getIndexed(4).asInt32());
@@ -4415,7 +4389,7 @@ test "JSObject: setArrayLength truncates sparse entries" {
     try o.setIndexed(testing.allocator, 0, Value.fromInt32(10));
     try o.setIndexed(testing.allocator, 1, Value.fromInt32(11));
     try o.setIndexed(testing.allocator, 4_294_967_294, Value.fromInt32(12));
-    try testing.expect(o.is_sparse);
+    try testing.expect(o.brand.is_sparse);
 
     try o.setArrayLength(testing.allocator, 2);
     try testing.expectEqual(@as(u32, 2), o.arrayLength());
@@ -4431,7 +4405,7 @@ test "JSObject: setArrayLength grow on sparse just bumps length" {
     try o.markAsArrayExotic(testing.allocator);
 
     try o.setIndexed(testing.allocator, 4_294_967_294, Value.fromInt32(1));
-    try testing.expect(o.is_sparse);
+    try testing.expect(o.brand.is_sparse);
 
     try o.setArrayLength(testing.allocator, 4_294_967_295);
     try testing.expectEqual(@as(u32, 4_294_967_295), o.arrayLength());
@@ -4459,7 +4433,7 @@ test "JSObject: defineProperty-style flagged write past threshold goes sparse" {
         .enumerable = false,
         .configurable = true,
     });
-    try testing.expect(o.is_sparse);
+    try testing.expect(o.brand.is_sparse);
     try testing.expectEqual(@as(usize, 0), o.elements.items.len);
     try testing.expectEqual(@as(u32, 4_294_967_295), o.arrayLength());
     try testing.expectEqual(@as(i32, 100), o.get("4294967294").asInt32());
@@ -4499,14 +4473,17 @@ test "JSObjectExtension: footprint probe (size measurement, not an invariant)" {
     std.debug.print("[footprint] @sizeOf(JSObjectExtension) = {d} bytes\n", .{@sizeOf(JSObjectExtension)});
     // Header-size regression guard. Successive moves took the header
     // from 408 B down: the cold per-kind clusters (iterator / RegExp /
-    // key anchors / Proxy) went behind `extension` (Stage A → 296 B),
-    // the dictionary representation (`properties` / `property_flags` /
-    // `own_key_order`) went into `dict_store` (B1a → 200 B), and the
-    // sparse indexed store (`sparse_elements`) went into `extension`
-    // (B1b → 176 B). See docs/gc-immix-rearchitecture.md "The memory
-    // axis". This catches an accidental re-inlining — the smallest
-    // moved field is 24 B, which would push the header past this bound.
-    try testing.expect(@sizeOf(JSObject) <= 184);
+    // key anchors / Proxy) went behind `extension` (296 B), the
+    // dictionary representation (`properties` / `property_flags` /
+    // `own_key_order`) went into `dict_store` (200 B), the sparse
+    // indexed store (`sparse_elements`) went into `extension` (176 B),
+    // and the 18 scattered brand bool/enum fields folded into the
+    // single packed `BrandFlags` word (168 B — the V8 `Map`-flags /
+    // JSC `Structure`-flags model). See docs/gc-immix-rearchitecture.md
+    // "The memory axis". This catches an accidental re-inlining — the
+    // smallest moved field is 24 B, which would push the header past
+    // this bound.
+    try testing.expect(@sizeOf(JSObject) <= 172);
 }
 
 test "JSObjectExtension: extension is null on a fresh object" {

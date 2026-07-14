@@ -330,7 +330,7 @@ fn functionHasInstance(realm: *Realm, this_value: Value, args: []const Value) Na
 /// step 2 throws in the function's own realm).
 fn isCallableValue(v: Value) bool {
     if (heap_mod.valueAsFunction(v) != null) return true;
-    if (heap_mod.valueAsPlainObject(v)) |obj| return obj.proxy_callable;
+    if (heap_mod.valueAsPlainObject(v)) |obj| return obj.brand.proxy_callable;
     return false;
 }
 
@@ -859,7 +859,7 @@ fn functionToString(realm: *Realm, this_value: Value, args: []const Value) Nativ
     var receiver_is_proxy: bool = false;
     if (fn_obj_opt == null) {
         if (heap_mod.valueAsPlainObject(this_value)) |obj| {
-            if (obj.proxy_revoked) {
+            if (obj.brand.proxy_revoked) {
                 return throwTypeError(realm, "Function.prototype.toString called on revoked proxy");
             }
             // §10.5 — a proxy is callable only when its target was
@@ -867,7 +867,7 @@ fn functionToString(realm: *Realm, this_value: Value, args: []const Value) Nativ
             // `proxy_target_fn` implies the same; a plain object
             // target with no callability does NOT make the proxy
             // callable and `Function.prototype.toString` must throw.
-            if (obj.getProxyTargetFn() != null or obj.proxy_callable) {
+            if (obj.getProxyTargetFn() != null or obj.brand.proxy_callable) {
                 receiver_is_proxy = true;
             }
         }

@@ -139,7 +139,7 @@ fn aggregateErrorNative(realm: *Realm, this_value: Value, args: []const Value) N
         realm.heap.setObjectPrototype(fresh, proto);
         break :blk fresh;
     };
-    instance.has_error_data = true;
+    instance.brand.has_error_data = true;
 
     // §20.5.7.1.1 step 3 — if message ≠ undefined, ToString(message)
     // BEFORE step 4's IterableToList(errors). The fixture
@@ -216,7 +216,7 @@ fn suppressedErrorNative(realm: *Realm, this_value: Value, args: []const Value) 
         realm.heap.setObjectPrototype(fresh, proto);
         break :blk fresh;
     };
-    instance.has_error_data = true;
+    instance.brand.has_error_data = true;
 
     // §20.5.x.1 step 3 — if message ≠ undefined, ToString it
     // and stamp BEFORE the error/suppressed slots. The fixture
@@ -475,7 +475,7 @@ fn errorIsError(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     _ = this_value;
     const arg = argOr(args, 0, Value.undefined_);
     const obj = heap_mod.valueAsPlainObject(arg) orelse return Value.false_;
-    return Value.fromBool(obj.has_error_data);
+    return Value.fromBool(obj.brand.has_error_data);
 }
 
 /// 6. If msg === "" return name.
@@ -514,7 +514,7 @@ fn errorPrototypeToString(realm: *Realm, this_value: Value, args: []const Value)
 // ── `proposal-error-stacks` — Error.prototype.stack ─────────────────
 //
 // TC39 Stage 1 accessor pair on %Error.prototype%. The `[[ErrorData]]`
-// brand (`JSObject.has_error_data`) is the discriminator: only objects
+// brand (`JSObject.brand.has_error_data`) is the discriminator: only objects
 // created by an Error / NativeError / AggregateError / SuppressedError
 // constructor carry it, so the getter returns a string for those and
 // `undefined` for everything else. The stack content is
@@ -537,7 +537,7 @@ fn errorPrototypeStackGet(realm: *Realm, this_value: Value, args: []const Value)
     // [[ErrorData]] lives on plain JSObjects; a function / proxy / other
     // exotic receiver is an Object (step 2 passed) but has no brand.
     const obj = heap_mod.valueAsPlainObject(this_value) orelse return Value.undefined_;
-    if (!obj.has_error_data) return Value.undefined_;
+    if (!obj.brand.has_error_data) return Value.undefined_;
     return errorPrototypeToString(realm, this_value, &.{});
 }
 
@@ -598,7 +598,7 @@ pub fn constructErrorInstance(realm: *Realm, this_value: Value, proto: *JSObject
     // Object.prototype.toString picks the "Error" tag (and so
     // user-facing IsError-style introspection can distinguish a
     // real instance from `Error.prototype`).
-    instance.has_error_data = true;
+    instance.brand.has_error_data = true;
     // §20.5.1.1 step 4 — DefinePropertyOrThrow with descriptor
     // `{[[Value]]: msg, [[Writable]]: true, [[Enumerable]]: false,
     //  [[Configurable]]: true}`.
@@ -646,7 +646,7 @@ pub fn constructErrorInstance(realm: *Realm, this_value: Value, proto: *JSObject
 fn errorOptionsHasCause(realm: *Realm, opts: *JSObject) NativeError!bool {
     const proxy_mod = @import("proxy.zig");
     var cur = opts;
-    while (cur.getProxyTarget() != null or cur.proxy_revoked) {
+    while (cur.getProxyTarget() != null or cur.brand.proxy_revoked) {
         const r = try proxy_mod.nativeProxyHas(realm, cur, "cause", null);
         switch (r) {
             .boolean => |b| return b,
@@ -701,7 +701,7 @@ pub fn newEvalError(realm: *Realm, message: []const u8) !Value {
 fn makeError(realm: *Realm, proto: *JSObject, message: []const u8) !Value {
     const instance = try realm.heap.allocateObject();
     realm.heap.setObjectPrototype(instance, proto);
-    instance.has_error_data = true;
+    instance.brand.has_error_data = true;
     const msg_str = try realm.heap.allocateString(message);
     try instance.set(realm.allocator, "message", Value.fromString(msg_str));
     return heap_mod.taggedObject(instance);

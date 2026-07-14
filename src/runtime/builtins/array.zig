@@ -312,7 +312,7 @@ fn arrayConstructor(realm: *Realm, this_value: Value, args: []const Value) Nativ
     // built-ins/Array/prototype/concat/Array.prototype.concat_non-array.js.
     const reuse_this: bool = blk: {
         const obj = heap_mod.valueAsPlainObject(this_value) orelse break :blk false;
-        if (obj.is_array_exotic) break :blk true;
+        if (obj.brand.is_array_exotic) break :blk true;
         // §22.1.1.1 Array(...) construct path — `this_value` is the
         // fresh OrdinaryCreateFromConstructor instance whose
         // [[Prototype]] is the §10.1.14-resolved proto. For a subclass
@@ -337,7 +337,7 @@ fn arrayConstructor(realm: *Realm, this_value: Value, args: []const Value) Nativ
         // never gets `is_array_exotic` punched onto a user object.
         var cur = obj.prototype;
         while (cur) |p| : (cur = p.prototype) {
-            if (p.is_array_exotic) break :blk true;
+            if (p.brand.is_array_exotic) break :blk true;
         }
         break :blk false;
     };
@@ -348,7 +348,7 @@ fn arrayConstructor(realm: *Realm, this_value: Value, args: []const Value) Nativ
         realm.heap.setObjectPrototype(fresh, realm.intrinsics.array_prototype);
         break :blk fresh;
     };
-    if (!out.is_array_exotic) out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
+    if (!out.brand.is_array_exotic) out.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
 
     if (args.len == 1 and (args[0].isInt32() or args[0].isDouble())) {
         // §22.1.1.2 Array(len) — single Number arg sets length.
@@ -535,7 +535,7 @@ pub fn setOrThrow(realm: *Realm, obj: *JSObject, key: []const u8, key_anchor: ?*
     // property-traps-order-with-species).
     const proxy_mod = @import("proxy.zig");
     var cur = obj;
-    while (cur.getProxyTarget() != null or cur.proxy_revoked) {
+    while (cur.getProxyTarget() != null or cur.brand.proxy_revoked) {
         const set_r = try proxy_mod.nativeProxySet(realm, cur, key, value, heap_mod.taggedObject(cur), null);
         switch (set_r) {
             .boolean => |b| {
@@ -591,8 +591,8 @@ pub fn setOrThrow(realm: *Realm, obj: *JSObject, key: []const u8, key_anchor: ?*
     // exotic (or anything in the array-prototype chain) coerces
     // to u32, throws RangeError on invalid value, and truncates
     // descending indexed slots. Non-writable length blocks.
-    if (std.mem.eql(u8, key, "length") and o.is_array_exotic) {
-        if (!o.array_length_writable) {
+    if (std.mem.eql(u8, key, "length") and o.brand.is_array_exotic) {
+        if (!o.brand.array_length_writable) {
             return throwTypeError(realm, "Cannot assign to read-only property 'length'");
         }
         // §10.4.2.4 ArraySetLength — drives the spec-mandated TWO
@@ -603,7 +603,7 @@ pub fn setOrThrow(realm: *Realm, obj: *JSObject, key: []const u8, key_anchor: ?*
         };
         // Re-check writability — a user valueOf could have flipped
         // `length: { writable: false }` between the two coercions.
-        if (!o.array_length_writable) {
+        if (!o.brand.array_length_writable) {
             return throwTypeError(realm, "Cannot assign to read-only property 'length'");
         }
         const tr = lantern.truncateArrayAtLength(realm.allocator, o, new_len);
@@ -616,10 +616,10 @@ pub fn setOrThrow(realm: *Realm, obj: *JSObject, key: []const u8, key_anchor: ?*
     // §10.4.2.1 [[DefineOwnProperty]] — Array exotic indexed
     // writes go through `setIndexed`. Auto-extend length-gate
     // applies when `length: {writable:false}`.
-    if (o.is_array_exotic) {
+    if (o.brand.is_array_exotic) {
         if (JSObject.canonicalIntegerIndex(key)) |idx| {
             if (!o.ownDataContains(key)) {
-                if (!o.array_length_writable) {
+                if (!o.brand.array_length_writable) {
                     const cur_len: u32 = o.arrayLength();
                     if (idx >= cur_len) {
                         return throwTypeError(realm, "Cannot extend non-writable array length");
@@ -649,7 +649,7 @@ pub fn setOrThrow(realm: *Realm, obj: *JSObject, key: []const u8, key_anchor: ?*
         o.setWithFlags(realm.allocator, key, value, flags) catch return error.OutOfMemory;
         return;
     }
-    if (!o.extensible) {
+    if (!o.brand.extensible) {
         return throwTypeError(realm, "Cannot add property, object is not extensible");
     }
     o.set(realm.allocator, key, value) catch return error.OutOfMemory;
@@ -692,7 +692,7 @@ pub fn setLengthOrThrow(realm: *Realm, obj: *JSObject, len: i64) NativeError!voi
 pub fn deletePropertyOrThrow(realm: *Realm, obj: *JSObject, key: []const u8) NativeError!void {
     const proxy_mod = @import("proxy.zig");
     var cur = obj;
-    while (cur.getProxyTarget() != null or cur.proxy_revoked) {
+    while (cur.getProxyTarget() != null or cur.brand.proxy_revoked) {
         const r = try proxy_mod.nativeProxyDelete(realm, cur, key, null);
         switch (r) {
             .boolean => |b| {
@@ -1155,14 +1155,14 @@ fn isConcatSpreadable(realm: *Realm, v: Value) NativeError!bool {
 fn isArrayProxyAware(realm: *Realm, v: Value) NativeError!bool {
     var cur_obj = heap_mod.valueAsPlainObject(v) orelse return false;
     while (true) {
-        if (cur_obj.proxy_revoked) {
+        if (cur_obj.brand.proxy_revoked) {
             return throwTypeError(realm, "Cannot perform 'IsArray' on a proxy that has been revoked");
         }
         if (cur_obj.getProxyTarget()) |t| {
             cur_obj = t;
             continue;
         }
-        return cur_obj.is_array_exotic;
+        return cur_obj.brand.is_array_exotic;
     }
 }
 
@@ -1180,7 +1180,7 @@ fn isObjectLike(v: Value) bool {
 /// internal methods). Otherwise delegates to `getPropertyChain`.
 fn getPropertyAny(realm: *Realm, v: Value, key: []const u8) NativeError!Value {
     if (heap_mod.valueAsPlainObject(v)) |obj| {
-        if (obj.getProxyTarget() != null or obj.proxy_revoked) {
+        if (obj.getProxyTarget() != null or obj.brand.proxy_revoked) {
             return getOnProxyChain(realm, obj, key, v);
         }
         return getPropertyChain(realm, obj, key);
@@ -1227,7 +1227,7 @@ fn getOnProxyChain(realm: *Realm, proxy: *JSObject, key: []const u8, receiver: V
                     // proxy with no target slot — bail out as undefined.
                     return Value.undefined_;
                 }
-                if (t.getProxyTarget() != null or t.proxy_revoked) {
+                if (t.getProxyTarget() != null or t.brand.proxy_revoked) {
                     cur = t;
                     continue;
                 }
@@ -1243,7 +1243,7 @@ fn getOnProxyChain(realm: *Realm, proxy: *JSObject, key: []const u8, receiver: V
 /// throw or undefined.
 fn hasPropertyAny(v: Value, key: []const u8) bool {
     if (heap_mod.valueAsPlainObject(v)) |obj| {
-        if (obj.getProxyTarget() != null or obj.proxy_revoked) return true;
+        if (obj.getProxyTarget() != null or obj.brand.proxy_revoked) return true;
         return obj.hasProperty(key);
     }
     if (heap_mod.valueAsFunction(v)) |fn_obj| {
@@ -1706,7 +1706,7 @@ fn arrayLastIndexOf(realm: *Realm, this_value: Value, args: []const Value) Nativ
     // if the result is < 0 the loop never runs and we return -1.
     const start = (try lastStartIndexFrom(realm, args, raw_len)) orelse return Value.fromInt32(-1);
     // Sparse fast path — see `sparseReverseSearch`.
-    if (obj.is_array_exotic and obj.is_sparse) {
+    if (obj.brand.is_array_exotic and obj.brand.is_sparse) {
         if (try sparseReverseSearch(realm, obj, start, target)) |found| return numberFromI64(found);
         return Value.fromInt32(-1);
     }
@@ -1718,7 +1718,7 @@ fn arrayLastIndexOf(realm: *Realm, this_value: Value, args: []const Value) Nativ
     // checking only the keys that actually exist. Inherited
     // indexed accessors on the prototype chain are skipped
     // (matches the sparseReverseSearch trade-off).
-    if (!obj.is_array_exotic and start + 1 > max_iter_length) {
+    if (!obj.brand.is_array_exotic and start + 1 > max_iter_length) {
         if (try plainObjectReverseSearch(realm, obj, start, target)) |found| return numberFromI64(found);
         return Value.fromInt32(-1);
     }
@@ -1945,7 +1945,7 @@ fn arrayReduceRight(realm: *Realm, this_value: Value, args: []const Value) Nativ
     // rightmost present element), the descending sort means the
     // first iteration produces the initial acc when no explicit
     // one was passed.
-    if (obj.is_array_exotic and obj.is_sparse) {
+    if (obj.brand.is_array_exotic and obj.brand.is_sparse) {
         const raw_len = try toLengthOf(realm, obj);
         if (raw_len <= 0) {
             if (have_acc) return acc;
@@ -1987,7 +1987,7 @@ fn arrayReduceRight(realm: *Realm, this_value: Value, args: []const Value) Nativ
     // and a small set of own integer-indexed properties: walk those
     // own keys descending instead of running a linear loop. Fixture
     // `reduceRight/length-near-integer-limit` is the motivating case.
-    if (!obj.is_array_exotic and raw_len > max_iter_length) {
+    if (!obj.brand.is_array_exotic and raw_len > max_iter_length) {
         return reduceRightOwnIndicesDescending(realm, obj, raw_len - 1, callback, acc, have_acc);
     }
     const len = try intrinsics.clampArrayLengthR(realm, raw_len);
@@ -2164,7 +2164,7 @@ fn arrayFlat(realm: *Realm, this_value: Value, args: []const Value) NativeError!
     // object) the spec never writes `length` — stamping it added a
     // phantom own property (and bypassed the shape-aware write funnels
     // on a shape-mode receiver). Mirror the flatMap gate below.
-    if (out.is_array_exotic) {
+    if (out.brand.is_array_exotic) {
         setLength(realm, out, write_idx) catch return error.OutOfMemory;
     }
     return out_v;
@@ -2316,7 +2316,7 @@ fn arrayFlatMap(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     // `flatMap/this-value-ctor-object-species-custom-ctor.js` asserts
     // the result has NO own `length`. Only stamp it on Array-shaped
     // results where the property already exists.
-    if (out.is_array_exotic) {
+    if (out.brand.is_array_exotic) {
         setLength(realm, out, write_idx) catch return error.OutOfMemory;
     }
     return out_v;
@@ -2512,7 +2512,7 @@ fn createDataPropertyOrThrowGeneric(realm: *Realm, obj: *JSObject, key_str: *JSS
     // create-species-length-exceeding-integer-limit).
     const proxy_mod = @import("proxy.zig");
     var cur = obj;
-    while (cur.getProxyTarget() != null or cur.proxy_revoked) {
+    while (cur.getProxyTarget() != null or cur.brand.proxy_revoked) {
         const r = try proxy_mod.nativeProxyDefineProperty(realm, cur, key, value, null);
         switch (r) {
             .boolean => |b| {
@@ -2526,7 +2526,7 @@ fn createDataPropertyOrThrowGeneric(realm: *Realm, obj: *JSObject, key_str: *JSS
         }
     }
     const had_own = cur.hasOwn(key);
-    if (!had_own and !cur.extensible) {
+    if (!had_own and !cur.brand.extensible) {
         return throwTypeError(realm, "Cannot define property on non-extensible object");
     }
     if (had_own) {
@@ -2651,7 +2651,7 @@ fn copyWithinStep(realm: *Realm, obj: *JSObject, src: i64, dst: i64) NativeError
 fn hasPropertyP(realm: *Realm, obj: *JSObject, key: []const u8) NativeError!bool {
     const proxy_mod = @import("proxy.zig");
     var cur = obj;
-    while (cur.getProxyTarget() != null or cur.proxy_revoked) {
+    while (cur.getProxyTarget() != null or cur.brand.proxy_revoked) {
         const r = try proxy_mod.nativeProxyHas(realm, cur, key, null);
         switch (r) {
             .boolean => |b| return b,
@@ -3904,7 +3904,7 @@ fn awaitAndThen(
     sc.push(result_promise) catch return error.OutOfMemory;
     const on_resolve_v = heap_mod.taggedFunction(on_resolve);
     const on_reject_v = heap_mod.taggedFunction(on_reject);
-    switch (source.promise_state) {
+    switch (source.brand.promise_state) {
         .fulfilled => realm.enqueuePromiseReaction(on_resolve_v, source.promise_value, result_promise, false) catch return error.OutOfMemory,
         .rejected => realm.enqueuePromiseReaction(on_reject_v, source.promise_value, result_promise, true) catch return error.OutOfMemory,
         else => {
@@ -4163,7 +4163,7 @@ fn createDataPropertyOrThrow(
     // `createDataPropertyOrThrowGeneric`.
     const proxy_mod = @import("proxy.zig");
     var cur = obj;
-    while (cur.getProxyTarget() != null or cur.proxy_revoked) {
+    while (cur.getProxyTarget() != null or cur.brand.proxy_revoked) {
         const r = try proxy_mod.nativeProxyDefineProperty(realm, cur, key, value, null);
         switch (r) {
             .boolean => |b| {
@@ -4178,7 +4178,7 @@ fn createDataPropertyOrThrow(
     }
     const had_own = cur.hasOwn(key);
     if (!had_own) {
-        if (!cur.extensible) {
+        if (!cur.brand.extensible) {
             return throwTypeError(realm, "Array.fromAsync: cannot define property on non-extensible object");
         }
     } else {

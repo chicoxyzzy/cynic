@@ -461,7 +461,7 @@ fn runModuleImportJob(
                     const ns_obj = module_mod.getModuleNamespace(realm, dep_mr) catch return error.OutOfMemory;
                     const ns_value = heap_mod.taggedObject(ns_obj);
                     const fulfill_handler = makeReturnThisHandler(realm, ns_value) catch return error.OutOfMemory;
-                    switch (eval_p.promise_state) {
+                    switch (eval_p.brand.promise_state) {
                         .fulfilled => try realm.enqueuePromiseReaction(fulfill_handler, eval_p.promise_value, result_promise, false),
                         .rejected => try realm.enqueuePromiseReaction(Value.undefined_, eval_p.promise_value, result_promise, true),
                         .pending => {
@@ -585,7 +585,7 @@ fn runThenableJob(
     // trampolines) gets the clean slate the spec mandates. The
     // exception-after-resolve guard below re-reads the flag, which the
     // job's resolve sets true again if the thenable resolved first.
-    outer_obj.promise_already_resolved = false;
+    outer_obj.brand.promise_already_resolved = false;
     const args = [_]Value{ heap_mod.taggedFunction(resolve_fn), heap_mod.taggedFunction(reject_fn) };
     const outcome = callJSFunction(allocator, realm, then_fn, thenable, &args) catch |err| switch (err) {
         else => return err,
@@ -602,8 +602,8 @@ fn runThenableJob(
             // outer Promise pending until a nested job runs); the
             // subsequent throw must NOT reject. `exception-after-
             // resolve-in-thenable-job.js`.
-            if (!outer_obj.promise_already_resolved) {
-                outer_obj.promise_already_resolved = true;
+            if (!outer_obj.brand.promise_already_resolved) {
+                outer_obj.brand.promise_already_resolved = true;
                 try settlePromiseInternal(realm, outer_obj, .rejected, ex);
             }
         },
@@ -676,7 +676,7 @@ fn runPromiseReaction(
 /// other internal settlement paths where the value is *not*
 /// flowing through the user-callable resolve trampoline.
 pub fn resolvePromiseWithValue(realm: *Realm, target: *JSObject, v: Value) !void {
-    if (target.promise_state != .pending) return;
+    if (target.brand.promise_state != .pending) return;
     if (heap_mod.valueAsPlainObject(v)) |v_obj| {
         if (v_obj == target) {
             const intrinsics = @import("../intrinsics.zig");
@@ -710,7 +710,7 @@ pub fn resolvePromiseWithValue(realm: *Realm, target: *JSObject, v: Value) !void
                     return;
                 },
             };
-            if (target.promise_state != .pending) return;
+            if (target.brand.promise_state != .pending) return;
             if (heap_mod.valueAsFunction(then_v2) == null) {
                 try settlePromiseInternal(realm, target, .fulfilled, v);
                 return;
@@ -728,7 +728,7 @@ pub fn resolvePromiseWithValue(realm: *Realm, target: *JSObject, v: Value) !void
                 return;
             },
         };
-        if (target.promise_state != .pending) return;
+        if (target.brand.promise_state != .pending) return;
         if (heap_mod.valueAsFunction(then_v) == null) {
             try settlePromiseInternal(realm, target, .fulfilled, v);
             return;
@@ -779,7 +779,7 @@ fn isVanillaPromiseChain(realm: *Realm, target: *JSObject, v_obj: *JSObject) boo
 /// Implemented by registering a no-handler reaction on `inner`
 /// pointing at `outer`. Spec §27.2.1.3 PromiseResolveThenableJob.
 fn chainPromiseToInner(realm: *Realm, inner: *JSObject, outer: *JSObject) !void {
-    switch (inner.promise_state) {
+    switch (inner.brand.promise_state) {
         .fulfilled => {
             try realm.enqueuePromiseReaction(Value.undefined_, inner.promise_value, heap_mod.taggedObject(outer), false);
             return;
@@ -1060,7 +1060,7 @@ pub fn settlePromiseInternal(
     state: enum { fulfilled, rejected },
     value: Value,
 ) !void {
-    if (inst.promise_state != .pending) return; // already settled
+    if (inst.brand.promise_state != .pending) return; // already settled
     realm.heap.settlePromise(inst, switch (state) {
         .fulfilled => .fulfilled,
         .rejected => .rejected,

@@ -106,7 +106,7 @@ fn appendValueAt(
     } else if (heap.isFunction(v)) {
         try buf.appendSlice(allocator, "[Function]");
     } else if (heap.valueAsPlainObject(v)) |obj| {
-        if (obj.is_array_exotic) {
+        if (obj.brand.is_array_exotic) {
             try appendArray(allocator, buf, obj, depth);
         } else if (try appendExoticObject(allocator, buf, obj, depth)) {
             // Rendered as a typed-slot builtin (Map / Set / Date /
@@ -131,7 +131,7 @@ fn appendArray(
     obj: *JSObject,
     depth: u8,
 ) FormatError!void {
-    const len: usize = if (obj.is_sparse)
+    const len: usize = if (obj.brand.is_sparse)
         @intCast(obj.sparse_length)
     else
         obj.elements.items.len;
@@ -145,7 +145,7 @@ fn appendArray(
     try buf.append(allocator, '[');
     const show_n = @min(len, max_array_show);
 
-    if (obj.is_sparse) {
+    if (obj.brand.is_sparse) {
         var i: u32 = 0;
         while (i < show_n) : (i += 1) {
             if (i > 0) try buf.appendSlice(allocator, ", ");
@@ -283,8 +283,8 @@ fn appendExoticObject(
     // Promise — §27.2. State only; the settled value isn't surfaced
     // here (reading it can race the reaction queue and isn't a
     // property anyway).
-    if (obj.promise_state != .none) {
-        try buf.appendSlice(allocator, switch (obj.promise_state) {
+    if (obj.brand.promise_state != .none) {
+        try buf.appendSlice(allocator, switch (obj.brand.promise_state) {
             .pending => "Promise {<pending>}",
             .fulfilled => "Promise {<fulfilled>}",
             .rejected => "Promise {<rejected>}",

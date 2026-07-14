@@ -91,7 +91,7 @@ fn syntheticSetterDispatch(
                 return .{ .thrown = ex };
             }
         }
-        if (!obj.extensible and !obj.ownDataContains(sa.key)) {
+        if (!obj.brand.extensible and !obj.ownDataContains(sa.key)) {
             const ex = try makeTypeError(realm, "Cannot add property; object is not extensible");
             return .{ .thrown = ex };
         }
@@ -230,8 +230,8 @@ pub fn callValue(
     // callability marker, so `typeof` reports "function") yet is not
     // a proxy, and must reach the identity check below — not here.
     if (heap_mod.valueAsPlainObject(callee_v)) |po| {
-        if ((po.is_proxy) and po.proxy_callable) {
-            if (po.proxy_revoked) {
+        if ((po.brand.is_proxy) and po.brand.proxy_callable) {
+            if (po.brand.proxy_revoked) {
                 // §10.5.12 step 1 ValidateNonRevokedProxy throws in
                 // the running execution context's realm — `running_realm`,
                 // not the active `realm` (they differ when a function
@@ -345,7 +345,7 @@ fn invokeProxyGetTrap(
     key: []const u8,
     receiver: Value,
 ) RunError!ProxyGetResult {
-    if (proxy.proxy_revoked) {
+    if (proxy.brand.proxy_revoked) {
         return .{ .thrown = try makeTypeError(realm, "Cannot perform 'get' on a proxy that has been revoked") };
     }
     const handler = proxy.getProxyHandler() orelse {
@@ -361,7 +361,7 @@ fn invokeProxyGetTrap(
     if (trap_v.isUndefined() or trap_v.isNull()) {
         // §10.5.5 step 6 — trap missing, recurse on the target.
         if (heap_mod.valueAsPlainObject(target_v)) |t_obj| {
-            if (t_obj.is_proxy) {
+            if (t_obj.brand.is_proxy) {
                 return try invokeProxyGetTrap(allocator, realm, t_obj, key, receiver);
             }
             return .{ .value = t_obj.get(key) };
@@ -401,13 +401,13 @@ pub fn getPrototypeFromConstructorValue(
         return try getPrototypeFromConstructor(allocator, realm, new_target_fn, intrinsic_default, default_owner_realm);
     }
     if (heap_mod.valueAsPlainObject(new_target)) |nt_proxy| {
-        if (nt_proxy.is_proxy) {
+        if (nt_proxy.brand.is_proxy) {
             const get_v = try invokeProxyGetTrap(allocator, realm, nt_proxy, "prototype", new_target);
             switch (get_v) {
                 .thrown => |ex| return .{ .thrown = ex },
                 .value => |v| {
                     if (heap_mod.valueAsPlainObject(v)) |po| return .{ .proto = po };
-                    if (nt_proxy.proxy_revoked or nt_proxy.getProxyHandler() == null) {
+                    if (nt_proxy.brand.proxy_revoked or nt_proxy.getProxyHandler() == null) {
                         return .{ .thrown = try makeTypeError(realm, "Cannot retrieve realm from a revoked Proxy") };
                     }
                     // §10.1.14 GetPrototypeFromConstructor step 4 — the
@@ -647,8 +647,8 @@ pub fn constructValue(
     new_target: Value,
 ) RunError!RunResult {
     if (heap_mod.valueAsPlainObject(callee_v)) |po| {
-        if (po.is_proxy) {
-            if (po.proxy_revoked) {
+        if (po.brand.is_proxy) {
+            if (po.brand.proxy_revoked) {
                 return .{ .thrown = try makeTypeError(realm, "Cannot perform 'construct' on a proxy that has been revoked") };
             }
             const target_v: Value = if (po.getProxyTargetFn()) |tfn|
@@ -739,7 +739,7 @@ pub fn constructValue(
             .thrown => |ex| return .{ .thrown = ex },
         };
     } else if (heap_mod.valueAsPlainObject(new_target)) |nt_proxy| {
-        if (nt_proxy.is_proxy) {
+        if (nt_proxy.brand.is_proxy) {
             // §10.5.5 Proxy [[Get]] on `prototype`. Run the trap (or
             // fall through to target.prototype). If a user-installed
             // get trap revokes the proxy here, the subsequent
@@ -755,7 +755,7 @@ pub fn constructValue(
                         // §10.1.14 step 4 — proto not an Object; the
                         // spec then calls GetFunctionRealm(new_target).
                         // If the proxy is now revoked, that throws.
-                        if (nt_proxy.proxy_revoked or nt_proxy.getProxyHandler() == null) {
+                        if (nt_proxy.brand.proxy_revoked or nt_proxy.getProxyHandler() == null) {
                             return .{ .thrown = try makeTypeError(realm, "Cannot retrieve realm from a revoked Proxy") };
                         }
                         resolved_proto = base_default;

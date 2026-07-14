@@ -43,14 +43,14 @@ const PropertyFlags = @import("../object.zig").PropertyFlags;
 fn jsonIsArrayValue(realm: *Realm, v: Value) NativeError!bool {
     var cur_obj = heap_mod.valueAsPlainObject(v) orelse return false;
     while (true) {
-        if (cur_obj.proxy_revoked) {
+        if (cur_obj.brand.proxy_revoked) {
             return throwTypeError(realm, "Cannot perform 'IsArray' on a proxy that has been revoked");
         }
         if (cur_obj.getProxyTarget()) |t| {
             cur_obj = t;
             continue;
         }
-        return cur_obj.is_array_exotic;
+        return cur_obj.brand.is_array_exotic;
     }
 }
 
@@ -61,7 +61,7 @@ fn jsonIsArrayValue(realm: *Realm, v: Value) NativeError!bool {
 fn jsonGetValue(realm: *Realm, value: Value, key: []const u8) NativeError!Value {
     const obj = heap_mod.valueAsPlainObject(value) orelse return Value.undefined_;
     var cur = obj;
-    while (cur.getProxyTarget() != null or cur.proxy_revoked) {
+    while (cur.getProxyTarget() != null or cur.brand.proxy_revoked) {
         const outcome = try proxy_mod.nativeProxyGet(realm, cur, key, heap_mod.taggedObject(obj), null);
         switch (outcome) {
             .value => |v| return v,
@@ -528,7 +528,7 @@ fn serializeJSONProperty(
     // exactly this — replacer rewrites a BigInt into JSON.rawJSON
     // and the stringified output must inline the digits).
     if (heap_mod.valueAsPlainObject(value)) |obj_raw| {
-        if (obj_raw.is_raw_json) {
+        if (obj_raw.brand.is_raw_json) {
             const raw_v = obj_raw.get("rawJSON");
             if (raw_v.isString()) {
                 const s: *JSString = @ptrCast(@alignCast(raw_v.asString()));
@@ -764,8 +764,8 @@ fn serializeJSONObject(
     // hashmap probes, while preserving §7.3.23 snapshot + §25.5.2.4
     // live-read observability.
     if (state.property_list == null and
-        obj.getProxyTarget() == null and !obj.proxy_revoked and
-        !obj.is_array_exotic and obj.getTypedView() == null and
+        obj.getProxyTarget() == null and !obj.brand.proxy_revoked and
+        !obj.brand.is_array_exotic and obj.getTypedView() == null and
         obj.propsConst().count() == 0 and obj.accessorCount() == 0)
     {
         if (obj.shape) |leaf| {
@@ -819,7 +819,7 @@ fn serializeJSONObject(
             // to be enumerated (the value-object-proxy fixture
             // covers this — its trap returns
             // `{enumerable: true}` for every probe anyway).
-            if (obj.getProxyTarget() == null and !obj.proxy_revoked) {
+            if (obj.getProxyTarget() == null and !obj.brand.proxy_revoked) {
                 if (!obj.flagsFor(key).enumerable) continue;
             }
         }
@@ -908,7 +908,7 @@ fn serializeJSONArray(
         // the index through ToString → Get → canonicalNumericIndex per
         // element. A hole / absent slot yields `null`, so the spec
         // `Get` (with its prototype walk) still runs for those.
-        const prefetched: ?Value = if (obj.getProxyTarget() == null and !obj.proxy_revoked)
+        const prefetched: ?Value = if (obj.getProxyTarget() == null and !obj.brand.proxy_revoked)
             obj.tryGetIndexedOwn(@intCast(i))
         else
             null;
@@ -1330,14 +1330,14 @@ fn internalizeJsonProperty(
 fn jsonIsArray(realm: *Realm, v: Value) NativeError!bool {
     var cur_obj = heap_mod.valueAsPlainObject(v) orelse return false;
     while (true) {
-        if (cur_obj.proxy_revoked) {
+        if (cur_obj.brand.proxy_revoked) {
             return throwTypeError(realm, "Cannot perform 'IsArray' on a proxy that has been revoked");
         }
         if (cur_obj.getProxyTarget()) |t| {
             cur_obj = t;
             continue;
         }
-        return cur_obj.is_array_exotic;
+        return cur_obj.brand.is_array_exotic;
     }
 }
 
@@ -1348,7 +1348,7 @@ fn jsonIsArray(realm: *Realm, v: Value) NativeError!bool {
 /// objects) at the end of the chain.
 fn jsonGet(realm: *Realm, obj: *JSObject, key: []const u8) NativeError!Value {
     var cur = obj;
-    while (cur.getProxyTarget() != null or cur.proxy_revoked) {
+    while (cur.getProxyTarget() != null or cur.brand.proxy_revoked) {
         const outcome = try proxy_mod.nativeProxyGet(realm, cur, key, heap_mod.taggedObject(obj), null);
         switch (outcome) {
             .value => |v| return v,
@@ -1368,7 +1368,7 @@ fn jsonGet(realm: *Realm, obj: *JSObject, key: []const u8) NativeError!Value {
 /// §25.5.1.1 step 2.b.iii.2.a / 2.c.ii.2.a).
 fn jsonDelete(realm: *Realm, obj: *JSObject, key: []const u8) NativeError!bool {
     var cur = obj;
-    while (cur.getProxyTarget() != null or cur.proxy_revoked) {
+    while (cur.getProxyTarget() != null or cur.brand.proxy_revoked) {
         const r = try proxy_mod.nativeProxyDelete(realm, cur, key, null);
         switch (r) {
             .boolean => |b| return b,
@@ -1407,7 +1407,7 @@ fn jsonCreateDataProperty(realm: *Realm, obj: *JSObject, key: []const u8, value:
     // catching the "trap returned falsy" TypeError and turning
     // it into a `false` result so we silently no-op (the spec
     // for CreateDataProperty discards the boolean here).
-    if (obj.getProxyTarget() != null or obj.proxy_revoked) {
+    if (obj.getProxyTarget() != null or obj.brand.proxy_revoked) {
         const desc = realm.heap.allocateObject() catch return error.OutOfMemory;
         realm.heap.setObjectPrototype(desc, realm.intrinsics.object_prototype);
         desc.set(realm.allocator, "value", value) catch return error.OutOfMemory;
@@ -1460,10 +1460,10 @@ fn jsonCreateDataProperty(realm: *Realm, obj: *JSObject, key: []const u8, value:
     // would diverge from §7.3.7 here).
     const had_own = obj.hasOwn(key) or obj.hasAccessor(key);
     if (!had_own) {
-        if (!obj.extensible) return false;
+        if (!obj.brand.extensible) return false;
         // For arrays, route integer-index writes through the
         // exotic indexed slot (matches §10.4.2.1 [[DefineOwnProperty]]).
-        if (obj.is_array_exotic) {
+        if (obj.brand.is_array_exotic) {
             if (@import("../object.zig").JSObject.canonicalIntegerIndex(key)) |idx| {
                 obj.setIndexed(realm.allocator, idx, value) catch return error.OutOfMemory;
                 return true;
@@ -1486,7 +1486,7 @@ fn jsonCreateDataProperty(realm: *Realm, obj: *JSObject, key: []const u8, value:
     if (obj.dictStore()) |d| _ = d.properties.swapRemove(key);
     if (obj.dictStore()) |d| _ = d.property_flags.swapRemove(key);
     _ = obj.removeAccessor(key);
-    if (obj.is_array_exotic) {
+    if (obj.brand.is_array_exotic) {
         if (@import("../object.zig").JSObject.canonicalIntegerIndex(key)) |idx| {
             obj.setIndexed(realm.allocator, idx, value) catch return error.OutOfMemory;
             return true;
@@ -1858,7 +1858,7 @@ fn jsonRawJSON(realm: *Realm, this_value: Value, args: []const Value) NativeErro
     // Step 4-7 — build the frozen, null-proto, branded wrapper.
     const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
     realm.heap.setObjectPrototype(obj, null);
-    obj.is_raw_json = true;
+    obj.brand.is_raw_json = true;
     // CreateDataPropertyOrThrow(obj, "rawJSON", jsonString). After
     // SetIntegrityLevel(frozen), this slot is `{w:false, e:true,
     // c:false}` — `returns-expected-object.js` checks that
@@ -1872,7 +1872,7 @@ fn jsonRawJSON(realm: *Realm, this_value: Value, args: []const Value) NativeErro
         .configurable = false,
     }) catch return error.OutOfMemory;
     // SetIntegrityLevel(obj, frozen) — also flips extensibility.
-    obj.extensible = false;
+    obj.brand.extensible = false;
     return heap_mod.taggedObject(obj);
 }
 
@@ -1883,7 +1883,7 @@ fn jsonIsRawJSON(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     _ = this_value;
     const v = argOr(args, 0, Value.undefined_);
     const obj = heap_mod.valueAsPlainObject(v) orelse return Value.false_;
-    return Value.fromBool(obj.is_raw_json);
+    return Value.fromBool(obj.brand.is_raw_json);
 }
 
 /// §25.5.4 step 2 whitespace set: TAB, LF, CR, SPACE.

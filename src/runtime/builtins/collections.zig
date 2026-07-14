@@ -541,7 +541,7 @@ fn arrayLikeIterStep(realm: *Realm, this_value: Value) StepOutcome {
                     elem = readTypedElement(realm, buf, tv.kind, off);
                 }
             }
-        } else if (obj.is_array_exotic and !obj.is_sparse) {
+        } else if (obj.brand.is_array_exotic and !obj.brand.is_sparse) {
             // §23.1.5.2.1 step 6 — fast path for a dense Array
             // exotic. `length` is a data property kept synced with
             // `elements.items.len`, and in-range data slots live

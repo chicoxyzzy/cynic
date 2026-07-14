@@ -438,7 +438,7 @@ fn makeUint8ArrayFromBytes(realm: *Realm, bytes_in: []const u8) NativeError!*JSO
     const buf_bytes = realm.allocator.alloc(u8, bytes_in.len) catch return error.OutOfMemory;
     if (bytes_in.len > 0) @memcpy(buf_bytes, bytes_in);
     buf_obj.setArrayBuffer(realm.allocator, buf_bytes) catch return error.OutOfMemory;
-    buf_obj.has_array_buffer_data = true;
+    buf_obj.brand.has_array_buffer_data = true;
     inst.setTypedView(realm.allocator, .{
         .kind = .uint8,
         .viewed = buf_obj,

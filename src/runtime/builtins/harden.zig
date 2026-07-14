@@ -126,13 +126,13 @@ pub fn hardenWalk(realm: *Realm, v: Value, visited: *std.AutoHashMap(usize, void
         // ([[DefineOwnProperty]] rejects flips). Spec harden would
         // walk the bindings anyway; we just bail — exports are
         // already non-configurable by construction.
-        if (obj.is_module_namespace) return;
-        obj.extensible = false;
+        if (obj.brand.is_module_namespace) return;
+        obj.brand.extensible = false;
         // §23.1.4 — an array exotic's virtual `length` carries its
         // [[Writable]] in the dedicated bit (it has no bag entry for
         // the flag walk below to catch); freezing must clear it or
         // `push` on a hardened array could still grow length.
-        if (obj.is_array_exotic) obj.array_length_writable = false;
+        if (obj.brand.is_array_exotic) obj.brand.array_length_writable = false;
         // Shape-mode write fast path (Phase 3 of
         // [docs/lazy-property-bag.md]) stores the live descriptor
         // attrs in the shape entry, NOT in `property_flags`.
@@ -198,7 +198,7 @@ pub fn hardenWalk(realm: *Realm, v: Value, visited: *std.AutoHashMap(usize, void
         // pinned in `tests/ses/harden_array_indexed_gap.js`);
         // this only recurses into the VALUES so transitive
         // freezing actually reaches them.
-        if (obj.is_array_exotic) {
+        if (obj.brand.is_array_exotic) {
             for (obj.elements.items) |elem| try hardenWalk(realm, elem, visited);
             var sit = obj.sparseConst().iterator();
             while (sit.next()) |e| try hardenWalk(realm, e.value_ptr.*, visited);

@@ -705,7 +705,7 @@ fn makeSuppressedError(realm: *Realm, err_v: Value, suppressed_v: Value) !Value 
     const proto = realm.intrinsics.suppressed_error_prototype.?;
     const instance = try realm.heap.allocateObject();
     realm.heap.setObjectPrototype(instance, proto);
-    instance.has_error_data = true;
+    instance.brand.has_error_data = true;
     try instance.setWithFlags(realm.allocator, "error", err_v, .{
         .writable = true,
         .enumerable = false,

@@ -307,10 +307,10 @@ fn wrapAsyncGenResultWithClose(
     // Fast path: settled rejected Promise → IteratorClose then
     // surface the rejection on the outer Promise.
     if (heap_mod.valueAsPlainObject(raw)) |p| {
-        if (p.promise_state == .rejected) {
+        if (p.brand.promise_state == .rejected) {
             return closeAndReject(realm, sync_iter_obj, sync_iter_v, p.promise_value);
         }
-        if (p.promise_state == .pending) {
+        if (p.brand.promise_state == .pending) {
             // Register on-fulfilled + on-rejected reactions. The
             // rejection reaction calls IteratorClose before
             // rejecting the outer Promise (§27.6.1.6 step 13).

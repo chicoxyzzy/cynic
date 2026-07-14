@@ -70,12 +70,12 @@ fn reflectPreventExtensions(realm: *Realm, this_value: Value, args: []const Valu
         // Functions: no proxy path, no extensible bit modelled today.
         return Value.fromBool(true);
     };
-    if (obj.getProxyTarget() != null or obj.proxy_revoked) {
+    if (obj.getProxyTarget() != null or obj.brand.proxy_revoked) {
         const obj_mod = @import("object.zig");
         const ok = try obj_mod.proxyPreventExtensionsBool(realm, obj);
         return Value.fromBool(ok);
     }
-    obj.extensible = false;
+    obj.brand.extensible = false;
     return Value.fromBool(true);
 }
 
@@ -153,7 +153,7 @@ fn reflectHas(realm: *Realm, this_value: Value, args: []const Value) NativeError
     const key_slice = try toPropertyKeySpec(realm, key_v);
     if (heap_mod.valueAsPlainObject(arg)) |maybe_proxy| {
         var cur = maybe_proxy;
-        while (cur.getProxyTarget() != null or cur.proxy_revoked) {
+        while (cur.getProxyTarget() != null or cur.brand.proxy_revoked) {
             const r = try proxy_mod.nativeProxyHas(realm, cur, key_slice, key_v);
             switch (r) {
                 .boolean => |b| return Value.fromBool(b),
@@ -216,9 +216,9 @@ fn hasPropertyProxyAware(realm: *Realm, root: *JSObject, key: []const u8) Native
         // §10.1.7.1 OrdinaryHasProperty step 2 — own property check.
         if (c.ownDataContains(key)) return true;
         if (c.hasAccessor(key)) return true;
-        if (c.is_module_namespace and c.hasAmbiguousNamespaceKey(key)) return false;
-        if (c.is_module_namespace and c.hasNamespaceRedirect(key)) return true;
-        if (c.is_array_exotic) {
+        if (c.brand.is_module_namespace and c.hasAmbiguousNamespaceKey(key)) return false;
+        if (c.brand.is_module_namespace and c.hasNamespaceRedirect(key)) return true;
+        if (c.brand.is_array_exotic) {
             if (@import("../object.zig").JSObject.canonicalIntegerIndex(key)) |idx| {
                 if (c.hasOwnIndexedSlot(idx)) return true;
             }
@@ -226,9 +226,9 @@ fn hasPropertyProxyAware(realm: *Realm, root: *JSObject, key: []const u8) Native
         // §10.1.7.1 step 4-5 — parent = [[GetPrototypeOf]]; if a
         // Proxy, dispatch its `has` trap before descending.
         const parent = c.prototype orelse return false;
-        if (parent.getProxyTarget() != null or parent.proxy_revoked) {
+        if (parent.getProxyTarget() != null or parent.brand.proxy_revoked) {
             var p = parent;
-            while (p.getProxyTarget() != null or p.proxy_revoked) {
+            while (p.getProxyTarget() != null or p.brand.proxy_revoked) {
                 const r = try proxy_mod.nativeProxyHas(realm, p, key, null);
                 switch (r) {
                     .boolean => |b| return b,
@@ -292,7 +292,7 @@ fn reflectGet(realm: *Realm, this_value: Value, args: []const Value) NativeError
     const target = heap_mod.valueAsPlainObject(arg) orelse return throwTypeError(realm, "Reflect.get target must be an object");
     // §10.5.5 Proxy [[Get]] dispatch.
     var proxy_cur = target;
-    while (proxy_cur.getProxyTarget() != null or proxy_cur.proxy_revoked) {
+    while (proxy_cur.getProxyTarget() != null or proxy_cur.brand.proxy_revoked) {
         const r = try proxy_mod.nativeProxyGet(realm, proxy_cur, key_slice, receiver, key_v);
         switch (r) {
             .value => |v| return v,
@@ -324,7 +324,7 @@ fn reflectGet(realm: *Realm, this_value: Value, args: []const Value) NativeError
             }
             return Value.undefined_;
         }
-        if (o.is_array_exotic) {
+        if (o.brand.is_array_exotic) {
             if (JSObject.canonicalIntegerIndex(key_slice)) |idx| {
                 if (o.tryGetIndexedOwn(idx)) |v| return v;
             }
@@ -364,7 +364,7 @@ fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError
     // false. Reflect.set surfaces that as the literal boolean
     // `false`; the strict-mode bytecode path translates it to
     // TypeError elsewhere.
-    if (target.is_module_namespace) return Value.false_;
+    if (target.brand.is_module_namespace) return Value.false_;
     // §10.5.9 Proxy [[Set]] dispatch. Reflect.set returns the
     // trap's boolean — it never throws on a falsy return, unlike
     // strict-mode bytecode assignment.
@@ -381,14 +381,14 @@ fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError
     // built-ins/Proxy/set/trap-is-{null,undefined}-target-is-proxy.js.
     {
         var proxy_cur = target;
-        while (proxy_cur.is_proxy) {
+        while (proxy_cur.brand.is_proxy) {
             // Callable Proxy of a function: §10.5.9 fires `set` if
             // present, otherwise `target.[[Set]]` against the wrapped
             // function. The function leg short-circuits through
             // `setIfWritable` per §10.1.9 OrdinarySet. Handled here
             // because `nativeProxySet` only knows the plain-object
             // target shape (`proxy_target`).
-            if (proxy_cur.getProxyTarget() == null and proxy_cur.getProxyTargetFn() != null and !proxy_cur.proxy_revoked) {
+            if (proxy_cur.getProxyTarget() == null and proxy_cur.getProxyTargetFn() != null and !proxy_cur.brand.proxy_revoked) {
                 const handler = proxy_cur.getProxyHandler() orelse return throwTypeError(realm, "proxy handler slot is null");
                 const trap_v = handler.get("set");
                 if (!trap_v.isUndefined() and !trap_v.isNull()) {
@@ -536,9 +536,9 @@ fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError
     // descriptor as it stands AFTER those side effects. Reflect.set
     // returns false here instead of throwing on a non-writable
     // length (the strict-mode bytecode path throws TypeError).
-    if (target.is_array_exotic and std.mem.eql(u8, key_slice, "length")) {
+    if (target.brand.is_array_exotic and std.mem.eql(u8, key_slice, "length")) {
         const lantern = @import("../lantern/interpreter.zig");
-        if (!target.array_length_writable) return Value.false_;
+        if (!target.brand.array_length_writable) return Value.false_;
         const new_len = (try lantern.arrayLengthCoerceSpec(realm, v)) orelse {
             return throwRangeError(realm, "Invalid array length");
         };
@@ -546,7 +546,7 @@ fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError
         // a user-side toPrimitive can flip `length: { writable: false }`
         // mid-flight; per sec-10.4.2.4 step 12 the set then returns
         // false (not throws) when reached via [[Set]].
-        if (!target.array_length_writable) return Value.false_;
+        if (!target.brand.array_length_writable) return Value.false_;
         const tr = lantern.truncateArrayAtLength(realm.allocator, target, new_len);
         target.setArrayLength(realm.allocator, tr.final_length) catch return error.OutOfMemory;
         if (tr.blocked) return Value.false_;
@@ -569,13 +569,13 @@ fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError
     // proxy.js's third block).
     var cursor: ?*@import("../object.zig").JSObject = target;
     walk: while (cursor) |o| {
-        if (o != target and (o.is_proxy)) {
+        if (o != target and (o.brand.is_proxy)) {
             // Walk the proxy chain to either hit a trap (which
             // settles the result) or reach a non-proxy ancestor we
             // can resume the ordinary cursor walk on.
             var proxy_cur = o;
-            while (proxy_cur.is_proxy) {
-                if (proxy_cur.getProxyTarget() == null and proxy_cur.getProxyTargetFn() != null and !proxy_cur.proxy_revoked) {
+            while (proxy_cur.brand.is_proxy) {
+                if (proxy_cur.getProxyTarget() == null and proxy_cur.getProxyTargetFn() != null and !proxy_cur.brand.proxy_revoked) {
                     const handler = proxy_cur.getProxyHandler() orelse return throwTypeError(realm, "proxy handler slot is null");
                     const trap_v = handler.get("set");
                     if (!trap_v.isUndefined() and !trap_v.isNull()) {
@@ -645,7 +645,7 @@ fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError
         }
         const has_own_data = blk: {
             if (o.ownDataContains(key_slice)) break :blk true;
-            if (o.is_array_exotic) {
+            if (o.brand.is_array_exotic) {
                 if (@import("../object.zig").JSObject.canonicalIntegerIndex(key_slice)) |idx| {
                     if (o.tryGetIndexedOwn(idx) != null) break :blk true;
                 }
@@ -684,9 +684,9 @@ fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError
     // chain so a trapless proxy wrapping a preventExtensions'd
     // target reports the rejection correctly (test262
     // built-ins/Proxy/set/trap-is-{null,undefined}-target-is-proxy.js).
-    if (receiver_obj.getProxyTarget() != null or receiver_obj.proxy_revoked) {
+    if (receiver_obj.getProxyTarget() != null or receiver_obj.brand.proxy_revoked) {
         var proxy_cur = receiver_obj;
-        while (proxy_cur.getProxyTarget() != null or proxy_cur.proxy_revoked) {
+        while (proxy_cur.getProxyTarget() != null or proxy_cur.brand.proxy_revoked) {
             // §10.1.9.2 step 3.b — `existingDescriptor =
             // ? Receiver.[[GetOwnProperty]](P)`. When Receiver is a
             // Proxy this MUST fire its `getOwnPropertyDescriptor`
@@ -731,7 +731,7 @@ fn reflectSet(realm: *Realm, this_value: Value, args: []const Value) NativeError
     // §10.1.9.2 step 3.f — CreateDataProperty(Receiver, P, V).
     // Receiver doesn't have the property; create it with the
     // default `{writable, enumerable, configurable}: true` flags.
-    if (!receiver_obj.extensible) return Value.false_;
+    if (!receiver_obj.brand.extensible) return Value.false_;
     const owned_k = realm.heap.allocateString(key_slice) catch return error.OutOfMemory;
     // §10.1.9.2 CreateDataProperty — anchor the heap key string on
     // the receiver. Plain `set` borrows the slice; the JSString is
@@ -793,16 +793,16 @@ fn reflectSetOnReceiver(realm: *Realm, receiver_v: Value, key_slice: []const u8,
     // §10.4.2.1 Array exotic [[DefineOwnProperty]] — for indexed
     // keys on an array receiver, route through the array-exotic
     // path so `length` auto-bumps.
-    if (receiver_obj.is_array_exotic) {
+    if (receiver_obj.brand.is_array_exotic) {
         if (@import("../object.zig").JSObject.canonicalIntegerIndex(key_slice)) |idx| {
             if (idx <= 0xFFFFFFFE) {
-                if (!receiver_obj.extensible and !receiver_obj.hasOwnIndexedSlot(idx)) return Value.false_;
+                if (!receiver_obj.brand.extensible and !receiver_obj.hasOwnIndexedSlot(idx)) return Value.false_;
                 receiver_obj.setIndexed(realm.allocator, idx, v) catch return error.OutOfMemory;
                 return Value.true_;
             }
         }
     }
-    if (!receiver_obj.extensible) return Value.false_;
+    if (!receiver_obj.brand.extensible) return Value.false_;
     const owned_k = realm.heap.allocateString(key_slice) catch return error.OutOfMemory;
     // §10.1.9.2 CreateDataProperty — anchor the heap key string on
     // the receiver. Plain `set` borrows the slice; the JSString is
@@ -858,7 +858,7 @@ fn reflectDeleteProperty(realm: *Realm, this_value: Value, args: []const Value) 
     // [[Delete]] the trapless outer proxy ultimately invokes
     // (§10.5.10 step 7.a).
     var target = target_outer;
-    while (target.getProxyTarget() != null or target.proxy_revoked) {
+    while (target.getProxyTarget() != null or target.brand.proxy_revoked) {
         const r = try proxy_mod.nativeProxyDelete(realm, target, key_slice, key_v);
         switch (r) {
             .boolean => |b| return Value.fromBool(b),
@@ -874,7 +874,7 @@ fn reflectDeleteProperty(realm: *Realm, this_value: Value, args: []const Value) 
     // non-configurable `@@toStringTag` install also rejects.
     // Includes the `namespace_redirects` entries (re-exports
     // installed by `module_reexport_named` / `module_reexport_star`).
-    if (target.is_module_namespace and !std.mem.startsWith(u8, key_slice, "@@") and !std.mem.startsWith(u8, key_slice, "<sym:") and (target.ownDataContains(key_slice) or target.hasAccessor(key_slice) or target.hasNamespaceRedirect(key_slice))) {
+    if (target.brand.is_module_namespace and !std.mem.startsWith(u8, key_slice, "@@") and !std.mem.startsWith(u8, key_slice, "<sym:") and (target.ownDataContains(key_slice) or target.hasAccessor(key_slice) or target.hasNamespaceRedirect(key_slice))) {
         return Value.false_;
     }
     // §10.1.10.1 — non-configurable own property → return false
@@ -989,7 +989,7 @@ fn reflectSetPrototypeOf(realm: *Realm, this_value: Value, args: []const Value) 
     }
     // §10.5.2 Proxy [[SetPrototypeOf]] — dispatch through the
     // handler trap if target is a proxy. Reflect returns the boolean.
-    if (target.getProxyTarget() != null or target.proxy_revoked) {
+    if (target.getProxyTarget() != null or target.brand.proxy_revoked) {
         const obj_mod = @import("object.zig");
         const ok = try obj_mod.proxySetPrototypeOfBool(realm, target, proto_v);
         return Value.fromBool(ok);
@@ -1016,7 +1016,7 @@ fn reflectSetPrototypeOf(realm: *Realm, this_value: Value, args: []const Value) 
     // covered by the SameValue short-circuit above. The fixture
     // `Reflect/setPrototypeOf/return-false-if-target-is-not-
     // extensible.js` checks this branch.
-    if (!target.extensible) return Value.false_;
+    if (!target.brand.extensible) return Value.false_;
     // §10.1.2.1 OrdinarySetPrototypeOf step 8 — cycle detection.
     var cursor: ?*@import("../object.zig").JSObject = new_proto;
     while (cursor) |node| {
@@ -1037,11 +1037,11 @@ fn reflectIsExtensible(realm: *Realm, this_value: Value, args: []const Value) Na
     if (heap_mod.valueAsPlainObject(target_v)) |target| {
         // §10.5.3 Proxy [[IsExtensible]] — dispatch via the shared
         // Object.isExtensible path (handles trap + invariant).
-        if (target.getProxyTarget() != null or target.proxy_revoked) {
+        if (target.getProxyTarget() != null or target.brand.proxy_revoked) {
             const obj_mod = @import("object.zig");
             return obj_mod.objectIsExtensible(realm, this_value, args);
         }
-        return Value.fromBool(target.extensible);
+        return Value.fromBool(target.brand.extensible);
     }
     if (heap_mod.valueAsFunction(target_v)) |_| {
         // Functions are objects; we don't track an extensible bit
@@ -1058,7 +1058,7 @@ fn reflectApply(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     // Allow callable Proxy (apply-trap dispatch via callValue).
     if (heap_mod.valueAsFunction(target_v) == null) {
         const po = heap_mod.valueAsPlainObject(target_v) orelse return throwTypeError(realm, "Reflect.apply target must be callable");
-        if (po.getProxyTargetFn() == null and po.getProxyTarget() == null and !po.proxy_revoked) {
+        if (po.getProxyTargetFn() == null and po.getProxyTarget() == null and !po.brand.proxy_revoked) {
             return throwTypeError(realm, "Reflect.apply target must be callable");
         }
     }
@@ -1165,7 +1165,7 @@ fn reflectConstruct(realm: *Realm, this_value: Value, args: []const Value) Nativ
     // dispatch the trap. Missing trap walks down the proxy chain
     // until we reach a real constructor.
     if (heap_mod.valueAsPlainObject(target_v)) |po| {
-        if (po.is_proxy) {
+        if (po.brand.is_proxy) {
             const newt: Value = if (new_target_v.isUndefined()) target_v else new_target_v;
             const outcome = lantern.constructValue(realm.allocator, realm, target_v, ctor_args.items, newt) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,

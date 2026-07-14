@@ -187,7 +187,7 @@ fn shadowRealmConstructor(
     // Brand + stash slots: child realm (host_data) + owner realm
     // (both ride the cold-field extension; ShadowRealm instances
     // are rare so neither sits inline on every JSObject).
-    inst.is_shadow_realm = true;
+    inst.brand.is_shadow_realm = true;
     inst.setHostData(realm.allocator, @ptrCast(child_ptr)) catch return error.OutOfMemory;
     inst.setShadowRealmOwner(realm.allocator, owner_realm) catch return error.OutOfMemory;
 
@@ -208,7 +208,7 @@ fn shadowRealmOf(realm: *Realm, this_value: Value, method_name: []const u8) Nati
     const inst = heap_mod.valueAsPlainObject(this_value) orelse {
         return throwBrandError(realm, method_name);
     };
-    if (!inst.is_shadow_realm) return throwBrandError(realm, method_name);
+    if (!inst.brand.is_shadow_realm) return throwBrandError(realm, method_name);
     const raw = inst.getHostData() orelse return throwBrandError(realm, method_name);
     const child: *Realm = @ptrCast(@alignCast(raw));
     // §10.2.5 / §3.8 — the "caller realm" is the realm of the
@@ -366,7 +366,7 @@ pub fn getWrappedValue(caller_realm: *Realm, value: Value) NativeError!Value {
         return heap_mod.taggedFunction(wrapper);
     }
     if (heap_mod.valueAsPlainObject(value)) |obj| {
-        if (obj.proxy_callable) {
+        if (obj.brand.proxy_callable) {
             const wrapper = try wrappedFunctionCreate(caller_realm, value);
             return heap_mod.taggedFunction(wrapper);
         }
@@ -591,7 +591,7 @@ pub fn callWrappedFunction(
     // *in callerRealm*. For now we approximate: if the target is
     // a revoked-proxy JSObject, throw immediately.
     if (heap_mod.valueAsPlainObject(target_v)) |obj| {
-        if (obj.proxy_revoked) {
+        if (obj.brand.proxy_revoked) {
             const ex = intrinsics.newTypeError(caller_realm, "ShadowRealm boundary: target proxy is revoked") catch return error.OutOfMemory;
             return .{ .thrown = ex };
         }

@@ -301,7 +301,7 @@ pub fn truncateArrayAtLength(allocator: std.mem.Allocator, obj: *JSObject, targe
     // `JSObject.setWithFlags`). The spec descends from the
     // highest index ≥ target_len; the first non-configurable
     // stops the walk and sets length to that index + 1.
-    if (obj.is_array_exotic) {
+    if (obj.brand.is_array_exotic) {
         // Collect promoted integer-indexed keys ≥ target_len so
         // we can fold them into the descending walk. Without
         // this, a non-configurable promoted index (e.g. via

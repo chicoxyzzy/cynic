@@ -261,14 +261,20 @@ fn featureSetFromBits(bits: u64) features.FeatureSet {
 // it here fails the BUILD — the alternative is a restored realm that
 // silently drops state.
 
-/// Fields `serializeObject` / `restoreObject` encode.
+/// Fields `serializeObject` / `restoreObject` encode. `brand` is the
+/// single packed `BrandFlags` word: `serializeObject` writes its
+/// snapshot-supported bits into `flags0` / `flags1` (`extensible`,
+/// `proxy_callable`, `is_array_exotic`, `array_length_writable`,
+/// `is_arguments_exotic`, `is_raw_json`, `has_error_data`) and asserts
+/// the remaining bits (the proxy / promise / weakref / sparse / buffer
+/// brands) are at their default — a non-default one is outside the
+/// phase-1 envelope (`error.SnapshotUnsupported`), same as before the
+/// fields were folded into one word.
 const object_serialized_fields = [_][]const u8{
-    "kind",                "dict_store",      "shape",
-    "inline_slots",        "slot_count",      "overflow_slots",
-    "prototype",           "prototype_fn",    "extensible",
-    "proxy_callable",      "is_array_exotic", "array_length_writable",
-    "is_arguments_exotic", "is_raw_json",     "has_error_data",
-    "elements",            "extension",       "needs_internal_scan",
+    "kind",         "dict_store",   "shape",
+    "inline_slots", "slot_count",   "overflow_slots",
+    "prototype",    "prototype_fn", "brand",
+    "elements",     "extension",    "needs_internal_scan",
     "is_pristine",
 };
 /// Fields recomputed / re-defaulted at restore (GC header, heap
@@ -279,13 +285,12 @@ const object_recomputed_fields = [_][]const u8{
 };
 /// Fields that must be at their default at capture — non-default
 /// means the object is outside the phase-1 envelope
-/// (`error.SnapshotUnsupported`).
+/// (`error.SnapshotUnsupported`). The proxy / promise / weakref /
+/// sparse / buffer brand bits are asserted the same way but now live
+/// inside the packed `brand` word, so they are checked inline in
+/// `serializeObject` rather than named here.
 const object_asserted_fields = [_][]const u8{
-    "promise_store",            "promise_state",       "promise_value",
-    "promise_already_resolved", "is_proxy",            "proxy_revoked",
-    "is_weak_ref",              "is_shadow_realm",     "is_module_namespace",
-    "is_sparse",                "sparse_length",       "elements_pooled",
-    "has_array_buffer_data",    "array_buffer_shared",
+    "promise_store", "promise_value", "sparse_length",
 };
 
 const extension_serialized_fields = [_][]const u8{
@@ -805,27 +810,27 @@ const Capture = struct {
         // moved to `serializeExtension`. The inline `is_proxy` brand
         // (set with them) and `proxy_revoked` stay here.
         if (o.promise_store != null or
-            o.promise_state != .none or !o.promise_value.isUndefined() or
-            o.promise_already_resolved or o.is_proxy or
-            o.proxy_revoked or o.is_weak_ref or
-            o.is_shadow_realm or o.is_module_namespace or o.is_sparse or
+            o.brand.promise_state != .none or !o.promise_value.isUndefined() or
+            o.brand.promise_already_resolved or o.brand.is_proxy or
+            o.brand.proxy_revoked or o.brand.is_weak_ref or
+            o.brand.is_shadow_realm or o.brand.is_module_namespace or o.brand.is_sparse or
             o.sparse_length != 0 or
-            o.elements_pooled or o.has_array_buffer_data or o.array_buffer_shared)
+            o.brand.elements_pooled or o.brand.has_array_buffer_data or o.brand.array_buffer_shared)
         {
             return error.SnapshotUnsupported;
         }
 
         var flags0: u8 = 0;
-        if (o.extensible) flags0 |= 1 << 0;
+        if (o.brand.extensible) flags0 |= 1 << 0;
         if (o.needs_internal_scan) flags0 |= 1 << 1;
         if (o.is_pristine) flags0 |= 1 << 2;
-        if (o.proxy_callable) flags0 |= 1 << 3;
-        if (o.is_array_exotic) flags0 |= 1 << 4;
-        if (o.array_length_writable) flags0 |= 1 << 5;
-        if (o.is_arguments_exotic) flags0 |= 1 << 6;
-        if (o.is_raw_json) flags0 |= 1 << 7;
+        if (o.brand.proxy_callable) flags0 |= 1 << 3;
+        if (o.brand.is_array_exotic) flags0 |= 1 << 4;
+        if (o.brand.array_length_writable) flags0 |= 1 << 5;
+        if (o.brand.is_arguments_exotic) flags0 |= 1 << 6;
+        if (o.brand.is_raw_json) flags0 |= 1 << 7;
         var flags1: u8 = 0;
-        if (o.has_error_data) flags1 |= 1 << 0;
+        if (o.brand.has_error_data) flags1 |= 1 << 0;
         try w.w8(flags0);
         try w.w8(flags1);
 
@@ -1563,15 +1568,15 @@ const Restore = struct {
         const allocator = self.realm.allocator;
         const flags0 = try r.r8();
         const flags1 = try r.r8();
-        o.extensible = flags0 & (1 << 0) != 0;
+        o.brand.extensible = flags0 & (1 << 0) != 0;
         o.needs_internal_scan = flags0 & (1 << 1) != 0;
         const restored_pristine = flags0 & (1 << 2) != 0;
-        o.proxy_callable = flags0 & (1 << 3) != 0;
-        o.is_array_exotic = flags0 & (1 << 4) != 0;
-        o.array_length_writable = flags0 & (1 << 5) != 0;
-        o.is_arguments_exotic = flags0 & (1 << 6) != 0;
-        o.is_raw_json = flags0 & (1 << 7) != 0;
-        o.has_error_data = flags1 & (1 << 0) != 0;
+        o.brand.proxy_callable = flags0 & (1 << 3) != 0;
+        o.brand.is_array_exotic = flags0 & (1 << 4) != 0;
+        o.brand.array_length_writable = flags0 & (1 << 5) != 0;
+        o.brand.is_arguments_exotic = flags0 & (1 << 6) != 0;
+        o.brand.is_raw_json = flags0 & (1 << 7) != 0;
+        o.brand.has_error_data = flags1 & (1 << 0) != 0;
 
         while (true) {
             const tag = try r.r8();

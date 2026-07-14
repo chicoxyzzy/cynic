@@ -1037,7 +1037,7 @@ pub fn typeOf(realm: *Realm, v: Value) RunError!Value {
         // §20.2.3 — %Function.prototype% is itself a built-in
         //   function. Both cases ride the same `proxy_callable`
         //   flag.
-        if (po.proxy_callable) "function" else "object"
+        if (po.brand.proxy_callable) "function" else "object"
     else
         "undefined";
     const s = realm.heap.allocateString(name) catch return error.OutOfMemory;

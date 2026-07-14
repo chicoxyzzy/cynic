@@ -3050,7 +3050,7 @@ test "jit bistromath: dense array literals compile via make_array_n" {
         .thrown => return error.UncaughtException,
     };
     const arr = heap_mod.valueAsPlainObject(v) orelse return error.NotAnArray;
-    try testing.expect(arr.is_array_exotic);
+    try testing.expect(arr.brand.is_array_exotic);
     try testing.expectEqual(@as(usize, 3), arr.elements.items.len);
     try testing.expectEqual(@as(i32, 10), arr.elements.items[0].asInt32());
     try testing.expectEqual(@as(i32, 20), arr.elements.items[1].asInt32());

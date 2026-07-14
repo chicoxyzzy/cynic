@@ -470,7 +470,7 @@ pub const GlobalBindings = struct {
         if (self.mapConst().contains(key)) return true;
         const t = self.target orelse return true;
         if (hardened) return true;
-        return t.extensible;
+        return t.brand.extensible;
     }
 
     /// §9.1.1.4.16 CanDeclareGlobalFunction — stricter than
@@ -490,7 +490,7 @@ pub const GlobalBindings = struct {
         const has_accessor = t.hasAccessor(key);
         if (!has_data and !has_accessor) {
             if (hardened) return true;
-            return t.extensible;
+            return t.brand.extensible;
         }
         // `flagsFor` is shape-aware (Phase 3 of
         // [docs/lazy-property-bag.md]) so a defineProperty-

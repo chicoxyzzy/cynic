@@ -722,8 +722,8 @@ fn memoryBufferGet(realm: *Realm, this_value: Value, args: []const Value) Native
     } else realm.intrinsics.array_buffer_prototype;
     realm.heap.setObjectPrototype(buf, ab_proto);
     buf.setExternalArrayBuffer(realm.allocator, st.mem.data) catch return error.OutOfMemory;
-    buf.has_array_buffer_data = true;
-    if (st.shared) buf.array_buffer_shared = true;
+    buf.brand.has_array_buffer_data = true;
+    if (st.shared) buf.brand.array_buffer_shared = true;
     st.buffer = buf;
     return heap_mod.taggedObject(buf);
 }
@@ -1472,7 +1472,7 @@ fn wasmModuleCustomSections(realm: *Realm, this_value: Value, args: []const Valu
         const copy = realm.allocator.alloc(u8, cs.bytes.len) catch return error.OutOfMemory;
         @memcpy(copy, cs.bytes);
         buf_obj.setArrayBuffer(realm.allocator, copy) catch return error.OutOfMemory;
-        buf_obj.has_array_buffer_data = true;
+        buf_obj.brand.has_array_buffer_data = true;
         try arraySetElem(realm, arr, n, heap_mod.taggedObject(buf_obj));
         n += 1;
     }

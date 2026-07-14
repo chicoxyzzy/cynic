@@ -2273,7 +2273,7 @@ pub const Compiler = struct {
         // Allocate the `raw` array.
         const raw_arr = self.realm.heap.allocateObject() catch return error.OutOfMemory;
         raw_arr.prototype = self.realm.intrinsics.array_prototype;
-        raw_arr.is_array_exotic = true;
+        raw_arr.brand.is_array_exotic = true;
         for (lit.quasis, 0..) |q, i| {
             const raw_text = self.source[q.span.start..q.span.end];
             // §12.8.6.1 TRV — raw `<CR>` / `<CR><LF>` collapse to a
@@ -2293,12 +2293,12 @@ pub const Compiler = struct {
             raw_arr.anchorKey(self.allocator, idx_owned) catch return error.OutOfMemory;
         }
         raw_arr.setWithFlags(self.allocator, "length", Value.fromInt32(@intCast(lit.quasis.len)), meta_frozen) catch return error.OutOfMemory;
-        raw_arr.extensible = false;
+        raw_arr.brand.extensible = false;
 
         // Allocate the `strs` array (cooked).
         const strs_arr = self.realm.heap.allocateObject() catch return error.OutOfMemory;
         strs_arr.prototype = self.realm.intrinsics.array_prototype;
-        strs_arr.is_array_exotic = true;
+        strs_arr.brand.is_array_exotic = true;
         for (lit.quasis, 0..) |q, i| {
             // §12.8.6 / §13.2.8.4 GetTemplateObject — a quasi whose
             // body holds an escape that is invalid under the strict TV
@@ -2325,7 +2325,7 @@ pub const Compiler = struct {
         }
         strs_arr.setWithFlags(self.allocator, "length", Value.fromInt32(@intCast(lit.quasis.len)), meta_frozen) catch return error.OutOfMemory;
         strs_arr.setWithFlags(self.allocator, "raw", heap_mod.taggedObject(raw_arr), meta_frozen) catch return error.OutOfMemory;
-        strs_arr.extensible = false;
+        strs_arr.brand.extensible = false;
 
         return self.builder.addConstant(heap_mod.taggedObject(strs_arr));
     }

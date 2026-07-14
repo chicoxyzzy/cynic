@@ -333,7 +333,7 @@ fn thisAsPromiseCtor(realm: *Realm, this_value: Value, op_name: []const u8) Nati
 
 fn promiseStateOf(v: Value) PromiseState {
     const obj = heap_mod.valueAsPlainObject(v) orelse return .none;
-    return obj.promise_state;
+    return obj.brand.promise_state;
 }
 
 fn promiseValueOf(v: Value) Value {
@@ -423,8 +423,8 @@ fn promiseConstructor(realm: *Realm, this_value: Value, args: []const Value) Nat
             // `resolve(thenable); throw …` leaves the Promise pending
             // until the thenable job runs, so the throw is ignored
             // per §27.2.1.3.2 alreadyResolved guard).
-            if (!inst.promise_already_resolved) {
-                inst.promise_already_resolved = true;
+            if (!inst.brand.promise_already_resolved) {
+                inst.brand.promise_already_resolved = true;
                 settlePromise(realm, inst, .rejected, ex) catch return error.OutOfMemory;
             }
         },
@@ -433,7 +433,7 @@ fn promiseConstructor(realm: *Realm, this_value: Value, args: []const Value) Nat
 }
 
 fn settlePromise(realm: *Realm, inst: *@import("../object.zig").JSObject, state: enum { fulfilled, rejected }, value: Value) !void {
-    if (inst.promise_state != .pending) return; // already settled
+    if (inst.brand.promise_state != .pending) return; // already settled
     realm.heap.settlePromise(inst, switch (state) {
         .fulfilled => .fulfilled,
         .rejected => .rejected,
@@ -467,9 +467,9 @@ fn promiseResolveImpl(realm: *Realm, this_value: Value, args: []const Value) Nat
     // §27.2.1.3.2 Promise Resolve Functions step 2 —
     // alreadyResolved guard. Set TRUE on first call regardless
     // of which path the resolution ultimately settles through.
-    if (target.promise_already_resolved) return Value.undefined_;
-    target.promise_already_resolved = true;
-    if (target.promise_state != .pending) return Value.undefined_;
+    if (target.brand.promise_already_resolved) return Value.undefined_;
+    target.brand.promise_already_resolved = true;
+    if (target.brand.promise_state != .pending) return Value.undefined_;
 
     // Step 4 — resolution === target → TypeError.
     if (heap_mod.valueAsPlainObject(v)) |v_obj| {
@@ -508,7 +508,7 @@ fn promiseResolveImpl(realm: *Realm, this_value: Value, args: []const Value) Nat
                 break :blk Value.undefined_;
             },
         };
-        if (target.promise_state != .pending) return Value.undefined_;
+        if (target.brand.promise_state != .pending) return Value.undefined_;
         // Step 10 — IsCallable(then) is false → fulfill with v.
         if (heap_mod.valueAsFunction(then_v) == null) {
             interp.settlePromiseInternal(realm, target, .fulfilled, v) catch return error.OutOfMemory;
@@ -529,7 +529,7 @@ fn promiseResolveImpl(realm: *Realm, this_value: Value, args: []const Value) Nat
 /// and the aggregator forwarding path.
 fn chainPromiseToInner(realm: *Realm, inner: *@import("../object.zig").JSObject, outer: *@import("../object.zig").JSObject) !void {
     const interp = @import("../lantern/interpreter.zig");
-    switch (inner.promise_state) {
+    switch (inner.brand.promise_state) {
         .fulfilled => try realm.enqueuePromiseReaction(Value.undefined_, inner.promise_value, heap_mod.taggedObject(outer), false),
         .rejected => try realm.enqueuePromiseReaction(Value.undefined_, inner.promise_value, heap_mod.taggedObject(outer), true),
         .pending => {
@@ -554,8 +554,8 @@ fn promiseRejectImpl(realm: *Realm, this_value: Value, args: []const Value) Nati
     // §27.2.1.3.1 Promise Reject Functions step 2 — alreadyResolved
     // guard. Sets the shared flag so a subsequent executor-threw
     // path (or duplicate reject) no-ops.
-    if (target.promise_already_resolved) return Value.undefined_;
-    target.promise_already_resolved = true;
+    if (target.brand.promise_already_resolved) return Value.undefined_;
+    target.brand.promise_already_resolved = true;
     interp.settlePromiseInternal(realm, target, .rejected, v) catch return error.OutOfMemory;
     return Value.undefined_;
 }
@@ -627,7 +627,7 @@ fn promiseThen(realm: *Realm, this_value: Value, args: []const Value) NativeErro
     if (c_fn == builtin_promise) {
         const value = source.promise_value;
         const result_promise = allocatePromise(realm, .pending, Value.undefined_) catch return error.OutOfMemory;
-        switch (source.promise_state) {
+        switch (source.brand.promise_state) {
             .fulfilled => realm.enqueuePromiseReaction(on_fulfilled_fn, value, result_promise, false) catch return error.OutOfMemory,
             .rejected => realm.enqueuePromiseReaction(on_rejected_fn, value, result_promise, true) catch return error.OutOfMemory,
             else => {
@@ -646,7 +646,7 @@ fn promiseThen(realm: *Realm, this_value: Value, args: []const Value) NativeErro
     // resolve/reject become the settlement edges.
     const cap = try newPromiseCapability(realm, c_fn);
     const value = source.promise_value;
-    switch (source.promise_state) {
+    switch (source.brand.promise_state) {
         .fulfilled => realm.enqueuePromiseReaction(on_fulfilled_fn, value, cap.promise, false) catch return error.OutOfMemory,
         .rejected => realm.enqueuePromiseReaction(on_rejected_fn, value, cap.promise, true) catch return error.OutOfMemory,
         else => {
@@ -899,7 +899,7 @@ fn chainFinallyResult(realm: *Realm, result: Value, carry: Value, is_throw: bool
             // PromiseResolveThenableJob.
             const new_p_v = try @import("../lantern/interpreter.zig").wrapInPromise(realm, true, Value.undefined_);
             const new_p = heap_mod.valueAsPlainObject(new_p_v) orelse return error.OutOfMemory;
-            new_p.promise_state = .pending;
+            new_p.brand.promise_state = .pending;
             new_p.promise_value = Value.undefined_;
             // state != .none ⇒ the typed-slot scan reads promise_value.
             new_p.needs_internal_scan = true;

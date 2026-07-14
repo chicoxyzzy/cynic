@@ -195,7 +195,7 @@ fn printValueToStream(io: std.Io, out: std.Io.File, v: Value) !void {
         // user-`toString` invocation — we can't safely re-enter
         // the engine to display a thrown value (it might throw
         // again, and we'd lose the original).
-        if (obj.has_error_data) {
+        if (obj.brand.has_error_data) {
             const name_str = lookupChain(obj, "name");
             try out.writeStreamingAll(io, if (name_str.len > 0) name_str else "Error");
             if (obj.lookupOwn("message")) |msg_v| {

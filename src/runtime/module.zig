@@ -158,7 +158,7 @@ pub fn getModuleNamespace(realm: *Realm, mr: *ModuleRecord) !*JSObject {
     // evaluating (a cycle that re-enters this MR sees a partial
     // namespace, but it's a namespace — `Symbol.toStringTag` and
     // proto:null are visible before finalisation).
-    ns.is_module_namespace = true;
+    ns.brand.is_module_namespace = true;
     realm.heap.setObjectPrototype(ns, null);
 
     // §28.3.5 — `Symbol.toStringTag` on a Module Namespace exotic is
@@ -227,7 +227,7 @@ pub fn getModuleNamespace(realm: *Realm, mr: *ModuleRecord) !*JSObject {
         }
     }
 
-    ns.extensible = false;
+    ns.brand.extensible = false;
     mr.namespace_finalized = true;
     return ns;
 }

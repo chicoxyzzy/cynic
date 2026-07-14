@@ -454,7 +454,7 @@ fn cachedNextFn(realm: *Realm, wrapper: *JSObject, source: Value) NativeError!*J
 /// the spec mandates.
 fn iterGet(realm: *Realm, recv: Value, key: []const u8) NativeError!Value {
     const obj = heap_mod.valueAsPlainObject(recv) orelse return Value.undefined_;
-    if (obj.getProxyTarget() != null or obj.proxy_revoked) {
+    if (obj.getProxyTarget() != null or obj.brand.proxy_revoked) {
         const proxy_mod = @import("proxy.zig");
         var cur = obj;
         while (true) {
@@ -463,7 +463,7 @@ fn iterGet(realm: *Realm, recv: Value, key: []const u8) NativeError!Value {
                 .value => |v| return v,
                 .fallthrough => |t| {
                     if (t == cur) return Value.undefined_;
-                    if (t.getProxyTarget() != null or t.proxy_revoked) {
+                    if (t.getProxyTarget() != null or t.brand.proxy_revoked) {
                         cur = t;
                         continue;
                     }

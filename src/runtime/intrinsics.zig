@@ -380,7 +380,7 @@ pub fn install(realm: *Realm) !void {
     // §13.5.3 typeof routes through the `proxy_callable` flag for
     // plain JSObjects with callable exotic semantics, so flip it
     // here to satisfy `typeof Function.prototype === "function"`.
-    if (realm.intrinsics.function_prototype) |fp| fp.proxy_callable = true;
+    if (realm.intrinsics.function_prototype) |fp| fp.brand.proxy_callable = true;
 
     // Function.prototype.call /.apply /.bind
     try @import("builtins/function.zig").installPrototypeMethods(realm);
@@ -1194,7 +1194,7 @@ pub fn allocateArray(realm: *Realm) !*JSObject {
     const obj = try realm.heap.allocateObject();
     realm.heap.setObjectPrototype(obj, realm.intrinsics.array_prototype);
     obj.markAsArrayExotic(realm.allocator) catch return error.OutOfMemory;
-    obj.is_array_exotic = true;
+    obj.brand.is_array_exotic = true;
     try obj.setWithFlags(realm.allocator, "length", Value.fromInt32(0), .{
         .writable = true,
         .enumerable = false,
@@ -1368,10 +1368,10 @@ pub fn getPropertyChain(realm: *Realm, obj: *JSObject, key: []const u8) NativeEr
     // saw `length === undefined` because the proxy has no own
     // `length` and the trapless fall-through never reached the
     // wrapped array.
-    if (obj.getProxyTarget() != null or obj.proxy_revoked) {
+    if (obj.getProxyTarget() != null or obj.brand.proxy_revoked) {
         const proxy_mod = @import("builtins/proxy.zig");
         var cur_proxy = obj;
-        while (cur_proxy.getProxyTarget() != null or cur_proxy.proxy_revoked) {
+        while (cur_proxy.getProxyTarget() != null or cur_proxy.brand.proxy_revoked) {
             const r = try proxy_mod.nativeProxyGet(realm, cur_proxy, key, heap_mod.taggedObject(obj), null);
             switch (r) {
                 .value => |v| return v,
@@ -1410,7 +1410,7 @@ pub fn getPropertyChain(realm: *Realm, obj: *JSObject, key: []const u8) NativeEr
         // through the packed `elements` vector, not the
         // named-property bag. Holes fall through to the
         // prototype chain (matches §10.4.2.1 step 2).
-        if (o.is_array_exotic) {
+        if (o.brand.is_array_exotic) {
             if (JSObject.canonicalIntegerIndex(key)) |idx| {
                 if (o.tryGetIndexedOwn(idx)) |v| return v;
             }
@@ -1513,12 +1513,12 @@ pub fn tryCreateListFromArrayLikeFast(
 ) NativeError!bool {
     const o = heap_mod.valueAsPlainObject(args_v) orelse return false;
     // §10.5.5 — any Proxy layer must fire per-index get traps.
-    if (o.is_proxy) return false;
+    if (o.brand.is_proxy) return false;
     const start_len = out.items.len;
-    if (o.is_array_exotic) {
+    if (o.brand.is_array_exotic) {
         // Sparse (dictionary-mode) arrays keep hole/proto semantics
         // in the generic path; dense holes bail below.
-        if (o.is_sparse) return false;
+        if (o.brand.is_sparse) return false;
         // Any own accessor could shadow an index (or `length` cannot
         // — it is virtual on an array exotic — but index accessors
         // installed via defineProperty live in the accessor map and
@@ -1540,7 +1540,7 @@ pub fn tryCreateListFromArrayLikeFast(
         }
         return true;
     }
-    if (o.is_arguments_exotic) {
+    if (o.brand.is_arguments_exotic) {
         // Exactly the built-in `callee` accessor (§10.4.4.7 step 5)
         // may exist; any other own accessor — a user defineProperty
         // on an index or on `length` — must fire via the generic
