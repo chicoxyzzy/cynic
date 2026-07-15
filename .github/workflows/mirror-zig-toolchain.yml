@@ -38,4 +38,4 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
 
       - name: Mirror the pinned toolchain
-        uses: xyzzylabs/mirror-zig-toolchain@6b39a26c702f6aa1961c55d5b8ce4dc673df64b6  # v1.0.1
+        uses: xyzzylabs/mirror-zig-toolchain@758aacadfed7916a36472091febb2dfece70c4f2  # v1.0.2
