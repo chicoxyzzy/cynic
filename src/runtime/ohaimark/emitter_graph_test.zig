@@ -5,8 +5,10 @@ const Builder = chunk_mod.Builder;
 const Op = @import("../../bytecode/op.zig").Op;
 const Span = @import("../../source.zig").Span;
 const code_alloc = @import("../jit/code_alloc.zig");
+const heap_mod = @import("../heap.zig");
 const lantern = @import("../lantern/interpreter.zig");
 const masm = @import("../jit/masm.zig");
+const object_mod = @import("../object.zig");
 const Realm = @import("../realm.zig").Realm;
 const Value = @import("../value.zig").Value;
 const allocation = @import("allocation.zig");
@@ -185,6 +187,35 @@ fn checkedAddBranchChunk(rhs: i32) !chunk_mod.Chunk {
     return builder.finish();
 }
 
+fn namedLoadChunk(realm: *Realm) !chunk_mod.Chunk {
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    const receiver = try builder.reserveRegister();
+    const key = try builder.addConstant(Value.fromString(
+        try realm.heap.allocateString("x"),
+    ));
+    try builder.emitLoadReg(span, receiver);
+    try builder.emitLdaProperty(span, key);
+    try builder.emitOp(.return_, span);
+    return builder.finish();
+}
+
+fn overflowNamedObject(realm: *Realm, value: i32) !*object_mod.JSObject {
+    const object = try realm.heap.allocateObject();
+    var key_buf: [32]u8 = undefined;
+    for (0..object_mod.inline_slot_cap) |index| {
+        const key = try std.fmt.bufPrint(&key_buf, "padding{d}", .{index});
+        try realm.heap.storeProperty(
+            object,
+            realm.allocator,
+            key,
+            Value.fromInt32(@intCast(index)),
+        );
+    }
+    try realm.heap.storeProperty(object, realm.allocator, "x", Value.fromInt32(value));
+    return object;
+}
+
 fn testFrame(chunk: *const chunk_mod.Chunk, registers: []Value) lantern.CallFrame {
     @memset(registers, Value.undefined_);
     return .{
@@ -198,6 +229,18 @@ fn testFrame(chunk: *const chunk_mod.Chunk, registers: []Value) lantern.CallFram
     };
 }
 
+const NativeEntry = *const fn (*Realm, *lantern.CallFrame, [*]Value) callconv(.c) u32;
+
+fn installNative(
+    native: *const NativeGraph,
+    frame: *lantern.CallFrame,
+    machine: *masm.Masm,
+    executable: *code_alloc.CodeAllocator,
+) !NativeEntry {
+    try native.emit(machine, frame.chunk);
+    return code_alloc.asFn(NativeEntry, try machine.install(executable));
+}
+
 fn executeNative(
     native: *const NativeGraph,
     realm: *Realm,
@@ -205,14 +248,27 @@ fn executeNative(
 ) !u32 {
     var machine = masm.Masm.init(testing.allocator);
     defer machine.deinit();
-    try native.emit(&machine, frame.chunk);
     var executable = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
     defer executable.deinit();
-    const entry = code_alloc.asFn(
-        *const fn (*Realm, *lantern.CallFrame, [*]Value) callconv(.c) u32,
-        try machine.install(&executable),
-    );
+    const entry = try installNative(native, frame, &machine, &executable);
     return entry(realm, frame, frame.registers.ptr);
+}
+
+fn findNode(native: *const NativeGraph, kind: ir.NodeKind) !ir.ValueId {
+    for (native.graph.nodes, 0..) |node, index| {
+        if (node.kind == kind) return @intCast(index);
+    }
+    return error.TestUnexpectedResult;
+}
+
+fn resumeLantern(realm: *Realm, frame: lantern.CallFrame) !Value {
+    var frames: std.ArrayListUnmanaged(lantern.CallFrame) = .empty;
+    defer frames.deinit(testing.allocator);
+    try frames.append(testing.allocator, frame);
+    return switch (try lantern.runFrames(testing.allocator, realm, &frames)) {
+        .value => |value| value,
+        else => error.TestUnexpectedResult,
+    };
 }
 
 test "Ohaimark AArch64 emitter returns a folded graph value" {
@@ -382,6 +438,240 @@ test "Ohaimark AArch64 graph branches on a checked int32 result" {
     }
 }
 
+test "Ohaimark AArch64 own named load guards live IC state" {
+    if (comptime !masm.native_aarch64) return error.SkipZigTest;
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = false;
+
+    var chunk = try namedLoadChunk(&realm);
+    defer chunk.deinit(testing.allocator);
+    const receiver = try realm.heap.allocateObject();
+    try realm.heap.storeProperty(receiver, realm.allocator, "x", Value.fromInt32(42));
+    const receiver_shape = receiver.shape orelse return error.TestUnexpectedResult;
+    const slot = (receiver_shape.lookup("x") orelse return error.TestUnexpectedResult).slot;
+    chunk.inline_load_caches[0].fillOwnData(receiver_shape, slot);
+
+    var native = try NativeGraph.build(&chunk);
+    defer native.deinit();
+    const load_id = try findNode(&native, .load_named);
+    try testing.expectEqual(
+        specialize.Lowering.load_named_own,
+        native.specialization.node_info[load_id].lowering,
+    );
+    const registers = try testing.allocator.alloc(Value, chunk.register_count);
+    defer testing.allocator.free(registers);
+    var frame = testFrame(&chunk, registers);
+    frame.registers[0] = heap_mod.taggedObject(receiver);
+
+    var machine = masm.Masm.init(testing.allocator);
+    defer machine.deinit();
+    var executable = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
+    defer executable.deinit();
+    const entry = try installNative(&native, &frame, &machine, &executable);
+
+    try testing.expectEqual(
+        @intFromEnum(codegen.EntryResult.done),
+        entry(&realm, &frame, frame.registers.ptr),
+    );
+    try testing.expectEqual(Value.fromInt32(42).bits, frame.accumulator.bits);
+
+    frame = testFrame(&chunk, registers);
+    frame.registers[0] = Value.fromInt32(5);
+    try testing.expectEqual(
+        @intFromEnum(codegen.EntryResult.resume_interp),
+        entry(&realm, &frame, frame.registers.ptr),
+    );
+    try testing.expectEqual(native.graph.nodes[load_id].bytecode_offset, frame.ip);
+    try testing.expectEqual(Value.fromInt32(5).bits, frame.accumulator.bits);
+
+    const other = try realm.heap.allocateObject();
+    try realm.heap.storeProperty(other, realm.allocator, "y", Value.fromInt32(1));
+    try realm.heap.storeProperty(other, realm.allocator, "x", Value.fromInt32(99));
+    frame = testFrame(&chunk, registers);
+    frame.registers[0] = heap_mod.taggedObject(other);
+    try testing.expectEqual(
+        @intFromEnum(codegen.EntryResult.resume_interp),
+        entry(&realm, &frame, frame.registers.ptr),
+    );
+    try testing.expectEqual(native.graph.nodes[load_id].bytecode_offset, frame.ip);
+    try testing.expectEqual(heap_mod.taggedObject(other).bits, frame.accumulator.bits);
+    try testing.expectEqual(Value.fromInt32(99).bits, (try resumeLantern(&realm, frame)).bits);
+
+    chunk.inline_load_caches[0].fillOwnData(receiver_shape, slot);
+    frame = testFrame(&chunk, registers);
+    frame.registers[0] = heap_mod.taggedObject(receiver);
+    chunk.inline_load_caches[0].invalidate();
+    try testing.expectEqual(
+        @intFromEnum(codegen.EntryResult.resume_interp),
+        entry(&realm, &frame, frame.registers.ptr),
+    );
+    try testing.expectEqual(heap_mod.taggedObject(receiver).bits, frame.accumulator.bits);
+    try testing.expectEqual(Value.fromInt32(42).bits, (try resumeLantern(&realm, frame)).bits);
+}
+
+test "Ohaimark AArch64 prototype named load guards holder and revision" {
+    if (comptime !masm.native_aarch64) return error.SkipZigTest;
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = false;
+
+    var chunk = try namedLoadChunk(&realm);
+    defer chunk.deinit(testing.allocator);
+    const proto = try overflowNamedObject(&realm, 41);
+    const receiver = try realm.heap.allocateObject();
+    try realm.heap.storeProperty(receiver, realm.allocator, "own", Value.fromInt32(1));
+    realm.heap.setObjectPrototype(receiver, proto);
+    const receiver_shape = receiver.shape orelse return error.TestUnexpectedResult;
+    const proto_shape = proto.shape orelse return error.TestUnexpectedResult;
+    const slot = (proto_shape.lookup("x") orelse return error.TestUnexpectedResult).slot;
+    try testing.expect(slot >= object_mod.inline_slot_cap);
+    chunk.inline_load_caches[0].fillPrototypeData(
+        receiver_shape,
+        slot,
+        proto,
+        proto_shape,
+        realm.proto_revision_counter,
+    );
+
+    var native = try NativeGraph.build(&chunk);
+    defer native.deinit();
+    const load_id = try findNode(&native, .load_named);
+    try testing.expectEqual(
+        specialize.Lowering.load_named_prototype,
+        native.specialization.node_info[load_id].lowering,
+    );
+    const registers = try testing.allocator.alloc(Value, chunk.register_count);
+    defer testing.allocator.free(registers);
+    var frame = testFrame(&chunk, registers);
+    frame.registers[0] = heap_mod.taggedObject(receiver);
+
+    var machine = masm.Masm.init(testing.allocator);
+    defer machine.deinit();
+    var executable = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
+    defer executable.deinit();
+    const entry = try installNative(&native, &frame, &machine, &executable);
+
+    try testing.expectEqual(
+        @intFromEnum(codegen.EntryResult.done),
+        entry(&realm, &frame, frame.registers.ptr),
+    );
+    try testing.expectEqual(Value.fromInt32(41).bits, frame.accumulator.bits);
+    try realm.heap.storeProperty(proto, realm.allocator, "x", Value.fromInt32(42));
+    frame = testFrame(&chunk, registers);
+    frame.registers[0] = heap_mod.taggedObject(receiver);
+    try testing.expectEqual(
+        @intFromEnum(codegen.EntryResult.done),
+        entry(&realm, &frame, frame.registers.ptr),
+    );
+    try testing.expectEqual(Value.fromInt32(42).bits, frame.accumulator.bits);
+
+    const other_proto = try overflowNamedObject(&realm, 77);
+    realm.heap.setObjectPrototype(receiver, other_proto);
+    frame = testFrame(&chunk, registers);
+    frame.registers[0] = heap_mod.taggedObject(receiver);
+    try testing.expectEqual(
+        @intFromEnum(codegen.EntryResult.resume_interp),
+        entry(&realm, &frame, frame.registers.ptr),
+    );
+    try testing.expectEqual(Value.fromInt32(77).bits, (try resumeLantern(&realm, frame)).bits);
+
+    // Refill changed only the GC-managed holder pointer. Its shape/slot/revision
+    // still satisfy the immutable assumption, so the installed code may hit.
+    frame = testFrame(&chunk, registers);
+    frame.registers[0] = heap_mod.taggedObject(receiver);
+    try testing.expectEqual(
+        @intFromEnum(codegen.EntryResult.done),
+        entry(&realm, &frame, frame.registers.ptr),
+    );
+    try testing.expectEqual(Value.fromInt32(77).bits, frame.accumulator.bits);
+
+    try realm.heap.storeProperty(other_proto, realm.allocator, "y", Value.fromInt32(2));
+    frame = testFrame(&chunk, registers);
+    frame.registers[0] = heap_mod.taggedObject(receiver);
+    try testing.expectEqual(
+        @intFromEnum(codegen.EntryResult.resume_interp),
+        entry(&realm, &frame, frame.registers.ptr),
+    );
+    try testing.expectEqual(Value.fromInt32(77).bits, (try resumeLantern(&realm, frame)).bits);
+
+    realm.proto_revision_counter +%= 1;
+    frame = testFrame(&chunk, registers);
+    frame.registers[0] = heap_mod.taggedObject(receiver);
+    try testing.expectEqual(
+        @intFromEnum(codegen.EntryResult.resume_interp),
+        entry(&realm, &frame, frame.registers.ptr),
+    );
+    try testing.expectEqual(Value.fromInt32(77).bits, (try resumeLantern(&realm, frame)).bits);
+}
+
+test "Ohaimark AArch64 synthetic named load reads live value and guards mode" {
+    if (comptime !masm.native_aarch64) return error.SkipZigTest;
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = false;
+
+    var chunk = try namedLoadChunk(&realm);
+    defer chunk.deinit(testing.allocator);
+    const proto = try realm.heap.allocateObject();
+    try realm.heap.storeProperty(proto, realm.allocator, "x", Value.fromInt32(88));
+    const receiver = try realm.heap.allocateObject();
+    try realm.heap.storeProperty(receiver, realm.allocator, "own", Value.fromInt32(1));
+    realm.heap.setObjectPrototype(receiver, proto);
+    const receiver_shape = receiver.shape orelse return error.TestUnexpectedResult;
+    const proto_shape = proto.shape orelse return error.TestUnexpectedResult;
+    const slot = (proto_shape.lookup("x") orelse return error.TestUnexpectedResult).slot;
+    chunk.inline_load_caches[0].fillSyntheticAccessor(
+        receiver_shape,
+        proto,
+        proto_shape,
+        realm.proto_revision_counter,
+        Value.fromInt32(70),
+    );
+
+    var native = try NativeGraph.build(&chunk);
+    defer native.deinit();
+    const load_id = try findNode(&native, .load_named);
+    try testing.expectEqual(
+        specialize.Lowering.load_named_synthetic,
+        native.specialization.node_info[load_id].lowering,
+    );
+    const registers = try testing.allocator.alloc(Value, chunk.register_count);
+    defer testing.allocator.free(registers);
+    var frame = testFrame(&chunk, registers);
+    frame.registers[0] = heap_mod.taggedObject(receiver);
+
+    var machine = masm.Masm.init(testing.allocator);
+    defer machine.deinit();
+    var executable = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
+    defer executable.deinit();
+    const entry = try installNative(&native, &frame, &machine, &executable);
+
+    try testing.expectEqual(
+        @intFromEnum(codegen.EntryResult.done),
+        entry(&realm, &frame, frame.registers.ptr),
+    );
+    try testing.expectEqual(Value.fromInt32(70).bits, frame.accumulator.bits);
+    chunk.inline_load_caches[0].synthetic_value = Value.fromInt32(71);
+    frame = testFrame(&chunk, registers);
+    frame.registers[0] = heap_mod.taggedObject(receiver);
+    try testing.expectEqual(
+        @intFromEnum(codegen.EntryResult.done),
+        entry(&realm, &frame, frame.registers.ptr),
+    );
+    try testing.expectEqual(Value.fromInt32(71).bits, frame.accumulator.bits);
+
+    chunk.inline_load_caches[0].kind = .data;
+    chunk.inline_load_caches[0].slot = slot;
+    frame = testFrame(&chunk, registers);
+    frame.registers[0] = heap_mod.taggedObject(receiver);
+    try testing.expectEqual(
+        @intFromEnum(codegen.EntryResult.resume_interp),
+        entry(&realm, &frame, frame.registers.ptr),
+    );
+    try testing.expectEqual(Value.fromInt32(88).bits, (try resumeLantern(&realm, frame)).bits);
+}
+
 test "Ohaimark AArch64 guard exit reconstructs and resumes Lantern before overflow" {
     if (comptime !masm.native_aarch64) return error.SkipZigTest;
     var chunk = try diamondBinaryChunk(
@@ -511,6 +801,46 @@ test "Ohaimark AArch64 guard exits cover sub, mul overflow, and negative zero" {
             try testing.expectEqual(Value.fromDouble(-0.0).bits, resumed.bits);
         }
     }
+}
+
+test "Ohaimark AArch64 cold named load rejection is transactional" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    var chunk = try namedLoadChunk(&realm);
+    defer chunk.deinit(testing.allocator);
+    var native = try NativeGraph.build(&chunk);
+    defer native.deinit();
+    const load_id = try findNode(&native, .load_named);
+    try testing.expectEqual(
+        specialize.Lowering.load_named_generic,
+        native.specialization.node_info[load_id].lowering,
+    );
+
+    var machine = masm.Masm.init(testing.allocator);
+    defer machine.deinit();
+    try testing.expectError(error.UnsupportedNode, native.emit(&machine, &chunk));
+    try testing.expectEqual(@as(usize, 0), machine.code.items.len);
+}
+
+test "Ohaimark AArch64 malformed named-load assumption is transactional" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    var chunk = try namedLoadChunk(&realm);
+    defer chunk.deinit(testing.allocator);
+    const receiver = try realm.heap.allocateObject();
+    try realm.heap.storeProperty(receiver, realm.allocator, "x", Value.fromInt32(1));
+    const receiver_shape = receiver.shape orelse return error.TestUnexpectedResult;
+    const slot = (receiver_shape.lookup("x") orelse return error.TestUnexpectedResult).slot;
+    chunk.inline_load_caches[0].fillOwnData(receiver_shape, slot);
+    var native = try NativeGraph.build(&chunk);
+    defer native.deinit();
+    try testing.expectEqual(@as(usize, 1), native.specialization.assumptions.len);
+    native.specialization.assumptions[0].slot = std.math.maxInt(u32);
+
+    var machine = masm.Masm.init(testing.allocator);
+    defer machine.deinit();
+    try testing.expectError(error.InvalidMetadata, native.emit(&machine, &chunk));
+    try testing.expectEqual(@as(usize, 0), machine.code.items.len);
 }
 
 test "Ohaimark AArch64 graph rejection is transactional" {

@@ -21,6 +21,7 @@ const emitter = @import("emitter_aarch64.zig");
 const ir = @import("ir.zig");
 const lowering = @import("lowering_aarch64.zig");
 const parallel_moves = @import("parallel_moves.zig");
+const property_codegen = @import("property_codegen_aarch64.zig");
 const representation = @import("representation.zig");
 const specialize = @import("specialize.zig");
 
@@ -213,11 +214,15 @@ const Compiler = struct {
                 try self.emitBranch(block_index, node_id);
                 return true;
             },
+            .load_named => {
+                try self.emitNamedLoad(node_id, info.lowering);
+                return false;
+            },
             .return_ => {
                 try self.emitReturn(node_id);
                 return true;
             },
-            .strict_eq, .less_than, .load_named => return error.UnsupportedNode,
+            .strict_eq, .less_than => return error.UnsupportedNode,
         }
     }
 
@@ -314,6 +319,103 @@ const Compiler = struct {
             try self.machine.emit(a64.lsrImm(guard_scratch, guard_scratch, 48));
             try self.jumpToGuardIfNonzero(guard_scratch, guard);
         }
+    }
+
+    fn emitNamedLoad(
+        self: *Compiler,
+        node_id: ir.ValueId,
+        lowering_kind: specialize.Lowering,
+    ) !void {
+        const assumption_kind: specialize.AssumptionKind, const mode: property_codegen.Mode = switch (lowering_kind) {
+            .load_named_own => .{ .load_own, .own_data },
+            .load_named_prototype => .{ .load_prototype, .prototype_data },
+            .load_named_synthetic => .{ .load_synthetic, .synthetic_accessor },
+            else => return error.UnsupportedNode,
+        };
+        const assumption = try self.assumptionFor(node_id, assumption_kind);
+        const receiver_shape = assumption.receiver_shape orelse return error.InvalidMetadata;
+        const cell_index: usize = assumption.feedback_index;
+        if (cell_index >= self.chunk.inline_load_caches.len) return error.InvalidMetadata;
+        const cell = &self.chunk.inline_load_caches[cell_index];
+        const guard = try self.guardFor(node_id);
+        try self.emitTaggedInput(node_id, 0, lhs_scratch);
+        const result = try property_codegen.emit(
+            self.allocator,
+            self.machine,
+            lowering.realm_register,
+            cell,
+            .{
+                .mode = mode,
+                .receiver_shape = receiver_shape,
+                .holder_shape = assumption.holder_shape,
+                .slot = assumption.slot,
+                .revision = assumption.revision,
+            },
+            lhs_scratch,
+            guard,
+        );
+        try self.emitTaggedResult(node_id, result);
+    }
+
+    fn emitTaggedInput(
+        self: *Compiler,
+        node_id: ir.ValueId,
+        operand: usize,
+        destination: a64.Reg,
+    ) !void {
+        if (node_id >= self.graph.nodes.len) return error.MalformedGraph;
+        const node = self.graph.nodes[node_id];
+        const inputs = try checkedRange(self.graph.inputs.len, node.input_start, node.input_count);
+        if (operand >= inputs.len) return error.MalformedGraph;
+        const input_index = inputs.start + operand;
+        const producer = self.graph.inputs[input_index];
+        if (producer >= self.representations.outputs.len) return error.MalformedGraph;
+        try emitter.emitMove(self.machine, .{
+            .source = try self.valueLocation(producer),
+            .destination = .{ .register = destination },
+            .source_kind = self.representations.outputs[producer],
+            .destination_kind = .tagged,
+            .conversion = try self.representations.conversionAt(self.graph, input_index),
+        }, self.chunk.constants);
+    }
+
+    fn emitTaggedResult(self: *Compiler, node_id: ir.ValueId, source: a64.Reg) !void {
+        if (node_id >= self.representations.outputs.len or
+            self.representations.outputs[node_id] != .tagged)
+        {
+            return error.InvalidRepresentation;
+        }
+        try emitter.emitMove(self.machine, .{
+            .source = .{ .register = source },
+            .destination = try self.valueLocation(node_id),
+            .source_kind = .tagged,
+            .destination_kind = .tagged,
+            .conversion = .none,
+        }, self.chunk.constants);
+        try self.emitDefinitionHome(node_id);
+    }
+
+    fn assumptionFor(
+        self: *const Compiler,
+        node_id: ir.ValueId,
+        expected_kind: specialize.AssumptionKind,
+    ) !specialize.Assumption {
+        if (node_id >= self.graph.nodes.len or node_id >= self.specialization.node_info.len) {
+            return error.MalformedGraph;
+        }
+        const info = self.specialization.node_info[node_id];
+        const assumption_index = info.assumption orelse return error.InvalidMetadata;
+        if (assumption_index >= self.specialization.assumptions.len) {
+            return error.InvalidMetadata;
+        }
+        const assumption = self.specialization.assumptions[assumption_index];
+        if (assumption.kind != expected_kind) return error.InvalidMetadata;
+        const site = switch (self.graph.nodes[node_id].payload) {
+            .named_load => |named| named,
+            else => return error.MalformedGraph,
+        };
+        if (assumption.feedback_index != site.feedback_index) return error.InvalidMetadata;
+        return assumption;
     }
 
     /// AArch64 conditional branches reach only +/-1 MiB. Keep the conditional

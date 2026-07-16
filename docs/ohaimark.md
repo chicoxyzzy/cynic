@@ -6,8 +6,9 @@ metadata, graph/Lantern differential evaluation, and abstract register/spill
 allocation plus AArch64 physical frame/edge lowering landed** (2026-07-16).
 Verified native frame entry/exit, typed physical moves, folded-value returns,
 checked int32 arithmetic/control, and direct Lantern-frame guard exits have
-also landed. Property-node emission, safepoints, code ownership, and tier-up
-are not shipped yet.
+also landed. Guarded own/prototype/synthetic named-property loads now execute
+through live typed IC cells. Safepoints, code ownership, and tier-up are not
+shipped yet.
 
 Ohaimark is Cynic's T2 method JIT. It consumes finalized Lantern bytecode
 and runtime feedback, builds a compact control-flow SSA graph, specializes
@@ -136,7 +137,8 @@ select generic, own-data, prototype-data, or synthetic-accessor lowering.
 
 An assumption contains the live typed-IC index, arena-stable shape pointers,
 slot, and revision only. It never captures the GC-managed prototype or
-synthetic accessor value; future code must validate through the live cell.
+synthetic accessor value; native code validates the copied scalar/shape facts
+against the live cell and reads those GC-managed values through it.
 Cold and invalidated cells remain generic. A stale or malformed feedback index
 rejects the graph instead of indexing unchecked memory.
 
@@ -299,10 +301,36 @@ Native arm64 tests cover successful add/sub/mul, dynamic zero/nonzero control,
 add/sub/mul overflow, `-1 * 0` recovery to `-0`, and exact resumed/full-Lantern
 result equality. Unsupported generic arithmetic rejects transactionally and
 leaves the machine buffer unchanged. The graph compiler remains test-only:
-property guards, safepoints, executable ownership, and runtime tier-up are the
-next boundaries.
+safepoints, executable ownership, and runtime tier-up are the next boundaries.
 
-### 3.10 Exceptions stay explicit
+### 3.10 Live named-property guards
+
+`runtime/ohaimark/property_codegen_aarch64.zig` owns the property-specific
+machine sequence, leaving graph scheduling and deopt integration in
+`codegen_aarch64.zig`. A specialized site embeds only its chunk-owned live-cell
+address and realm-arena-stable shape assumptions. It never embeds the
+GC-managed prototype or synthetic-accessor value.
+
+Every hit first proves a plain `JSObject`, then compares the immutable
+receiver-shape/slot assumption with the current `LoadICCell` and the receiver's
+current shape. Own-data mode additionally requires a data cell with no cached
+prototype. Prototype-data and synthetic-accessor modes compare the receiver's
+immediate prototype with the live cell pointer, the holder's current shape with
+both the cell and the optimizer assumption, and the cell revision with both the
+assumption and `Realm.proto_revision_counter`. The mode byte selects either a
+live holder-slot read or the live synthetic value. Slot reads cover the inline
+array and overflow buffer using the shared JIT layout contract.
+
+Any cold cell, invalidation, receiver/holder shape change, prototype swap,
+revision change, or mode change branches to the existing pre-operation guard
+exit. Bailout therefore restores the receiver and live registers, stamps the
+property bytecode offset, and lets Lantern execute that operation exactly once;
+the fast path and exit allocate nothing and call no helper. Native tests install
+the code before mutating cells and prototypes, cover inline and overflow slots,
+and compare resumed Lantern results. A cold generic load rejects compilation
+transactionally until a generic helper/safepoint path exists.
+
+### 3.11 Exceptions stay explicit
 
 Liveness exposes protected-range edges as `exception_edges`, separately from
 normal successors. An exception edge is not an ordinary branch: the unwinder
@@ -312,7 +340,7 @@ chunk with handlers. A later phase will add an exceptional environment and
 deopt state before enabling those chunks; silently treating handler edges as
 normal phis is forbidden.
 
-### 3.11 Fallback is part of correctness
+### 3.12 Fallback is part of correctness
 
 `UnsupportedOp`, `UnsupportedExceptionFlow`, malformed internal bytecode, an
 oversized graph, or allocation failure all abandon Ohaimark compilation. Once
@@ -377,15 +405,17 @@ the in-range optimized result is bit-identical to a full Lantern run; overflow
 reconstructs the pre-add int32 operands, resumes Lantern, and produces the same
 double result as a full run. A self-loop test proves the mandatory step limit
 returns `StepLimitExceeded` instead of hanging the host. Generic effectful
-arithmetic and named-load execution remain explicit `UnsupportedNode`/deopt
-boundaries until their rooting and guard semantics can be tested independently.
+arithmetic and cold generic named-load execution remain explicit
+`UnsupportedNode` boundaries. The evaluator continues to model a specialized
+named load as a guard failure; executable tests now cover the native hit and
+resumed-Lantern miss paths directly.
 
 The evaluator remains the target-independent oracle. Its first executable
 counterpart now emits checked int32 definitions/control, required home stores,
-and direct guard exits that reconstruct the existing Lantern frame. Ohaimark is
-still not a runtime tier: named-load guards, safepoints, code ownership, and a
-dispatcher entry path must land before optimized code can receive production
-traffic.
+direct guard exits that reconstruct the existing Lantern frame, and live-cell
+named-property guards. Ohaimark is still not a runtime tier: safepoints, code
+ownership, and a dispatcher entry path must land before optimized code can
+receive production traffic.
 
 ## 5. Delivery order
 
@@ -401,7 +431,7 @@ traffic.
    spill homes, physical boxing recipes, bounds-checked verifiers, and a bounded
    graph evaluator proving checked success plus overflow recovery against
    Lantern. Native guard exits now ship for the checked-int32 execution subset;
-   property guards remain.
+   own/prototype/synthetic property guards use those same exits.
 4. **Abstract allocation, shipped:** CFG-scheduled live intervals, bounded
    general-purpose register ids, immediate rematerialization, deterministic
    eviction, representation-partitioned spill reuse, and stable-home reuse.
@@ -416,8 +446,9 @@ traffic.
    rematerialization, and an end-to-end folded graph native return.
 8. **AArch64 optimized execution, initial slice shipped:** checked int32
    add/sub/mul, int32 control flow, stable-home writes, returns, and direct
-   Lantern-frame guard exits. Property guards, safepoints, code ownership, and
-   a disabled-by-default tier-up path remain.
+   Lantern-frame guard exits, plus live-cell own/prototype/synthetic named
+   loads with inline/overflow slot reads. Safepoints, code ownership, and a
+   disabled-by-default tier-up path remain.
 9. **Gates and tuning:** full test262 pass-set differential, SES suite,
    GC-pressure runs, fuzzing, and compile-time/code-size/performance budgets.
 10. **Only if measured:** background compilation, polymorphic feedback,

@@ -121,6 +121,7 @@ pub const load_ic_cell = struct {
     pub const proto_shape: u15 = @offsetOf(LoadICCell, "proto_shape");
     pub const proto_rev: u15 = @offsetOf(LoadICCell, "proto_rev");
     pub const synthetic_value: u15 = @offsetOf(LoadICCell, "synthetic_value");
+    pub const kind_data: u8 = @intFromEnum(LoadICCell.Kind.data);
     pub const kind_synthetic_accessor: u8 = @intFromEnum(LoadICCell.Kind.synthetic_accessor);
 };
 

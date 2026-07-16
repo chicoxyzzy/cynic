@@ -58,8 +58,9 @@ evaluator, deterministic register/spill allocation, and AArch64 frame/edge
 lowering plans plus verified native frame entry/exit emission have landed,
 along with typed physical moves, folded-value returns, checked int32
 add/sub/mul, int32 control flow, and allocation-free guard exits that rebuild
-the existing Lantern frame. Ohaimark remains test-only: property guards,
-safepoints, code ownership, and runtime tier-up are future work. See
+the existing Lantern frame. Guarded own/prototype/synthetic named-property
+loads now execute through live typed IC cells as well. Ohaimark remains
+test-only: safepoints, code ownership, and runtime tier-up are future work. See
 [`docs/ROADMAP.md`](docs/ROADMAP.md) for the thematic breakdown.
 
 ### Conformance

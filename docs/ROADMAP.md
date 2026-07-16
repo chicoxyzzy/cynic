@@ -1128,8 +1128,22 @@ sampling by `/profile`.
   Native arm64 differential tests cover all three arithmetic operations,
   overflow, `-0`, dynamic zero/nonzero branches, and resumed/full-Lantern
   equality. Generic unsupported graphs roll emission back transactionally.
-  Ohaimark remains test-only pending property guards, safepoints, code
-  ownership, and tier-up.
+  At this checkpoint Ohaimark remained test-only; live property guards follow
+  below.
+  See [ohaimark.md](ohaimark.md).
+- **Ohaimark live property-IC execution (2026-07-16).** Specialized own-data,
+  prototype-data, and frozen synthetic-accessor named loads now execute on
+  AArch64. Generated code validates the snapshot's arena-stable shape, slot,
+  and revision facts against the chunk-owned live `LoadICCell`; GC-managed
+  prototypes and synthetic values are read only through that cell. Receiver
+  shape, prototype identity, holder shape, realm revision, mode, and cell
+  invalidation misses use the existing allocation-free exit to restore the
+  pre-operation Lantern frame. Native tests install code before mutating live
+  state, cover inline and overflow slots, and compare resumed Lantern results;
+  cold generic loads still reject transactionally. Property mechanics live in
+  `runtime/ohaimark/property_codegen_aarch64.zig` so graph codegen remains
+  focused. Ohaimark remains test-only pending safepoints, executable-code
+  ownership, and disabled-by-default tier-up.
   See [ohaimark.md](ohaimark.md).
 - **Generational GC.** A JSC-Riptide-style non-moving
   generational collector — store-site routing, generation header
@@ -1522,8 +1536,8 @@ and the per-builtin checklist; this section tracks status.
   evaluator, abstract register/spill allocation, and AArch64 frame/edge
   lowering plus native frame entry/exit, typed moves, and folded returns ship;
   checked int32 arithmetic/control and direct Lantern-frame guard exits now
-  execute in tests. Property guards, safepoints, code ownership, and runtime
-  tier-up remain planned. See
+  execute in tests, as do live-cell own/prototype/synthetic named loads.
+  Safepoints, code ownership, and runtime tier-up remain planned. See
   [ohaimark.md](ohaimark.md).
 - **Spasm** — wasm baseline JIT (T1), Sarcasm's compiled tier.
   Single-pass over the validated module + branch side-table,

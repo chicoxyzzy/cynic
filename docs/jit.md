@@ -7,8 +7,9 @@ plus stable physical deopt homes, graph/Lantern differential evaluation, and
 abstract register/spill allocation plus AArch64 frame/edge lowering have
 landed. Transactional prologue/epilogue emission now has native AArch64 proof,
 and typed moves, folded-value returns, checked int32 arithmetic/control, and
-frame-reconstructing guard exits execute natively in tests. Property guards,
-safepoints, code ownership, and runtime tier-up remain future work; Spasm's
+frame-reconstructing guard exits execute natively in tests. Guarded
+own/prototype/synthetic named loads now execute through live typed IC cells.
+Safepoints, code ownership, and runtime tier-up remain future work; Spasm's
 delivery state is tracked below. The document doubles as the design record that
 pinned the architecture before the first emitter was written and as the delivery ledger
 (the "Delivery order" section tracks what each increment shipped). It is the
@@ -453,7 +454,13 @@ parallel edge transfers, stable deopt-home writes, normal returns, and cold
 guard exits. An exit decodes the physical recipe at compile time and writes the
 pre-operation accumulator, live registers, and bytecode offset directly into
 the existing Lantern frame before returning `resume_interp`; the bailout path
-allocates nothing and calls no helper. Property nodes, safepoints, code
+allocates nothing and calls no helper. The graph compiler also emits specialized
+own-data, prototype-data, and frozen synthetic-accessor named loads. It validates
+the snapshot's realm-stable shape/slot/revision facts against the live
+chunk-owned `LoadICCell`, then reads the GC-managed prototype or synthetic value
+only through that cell. Shape, holder, prototype-identity, revision, mode, or
+cell invalidation misses use the same pre-operation guard exit; native arm64
+tests resume Lantern and compare exact results. Safepoints, executable-code
 ownership, and runtime tier-up remain disabled. The decisions Bistromath must
 preserve are:
 
@@ -1184,8 +1191,9 @@ useful:
    data. A bounded graph evaluator also proves checked success and overflow
    recovery against Lantern. Register allocation, AArch64 frame/edge lowering,
    checked int32 arithmetic/control emission, and direct guard-exit frame
-   reconstruction now also ship in the test-only tier. Next: property-IC guards,
-   safepoints, executable-code ownership, and disabled-by-default tier-up; see
+   reconstruction now also ship in the test-only tier, along with guarded
+   own/prototype/synthetic named loads through live IC cells. Next: safepoints,
+   executable-code ownership, and disabled-by-default tier-up; see
    [ohaimark.md](ohaimark.md).
 
 ## 13. Considered and declined
