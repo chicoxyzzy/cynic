@@ -1,8 +1,8 @@
 # Ohaimark optimizing JIT
 
-Status: **ADR accepted; bytecode/feedback/SSA front end landed**
-(2026-07-16). Type speculation, deoptimization metadata, machine-code
-lowering, and runtime tier-up are not shipped yet.
+Status: **ADR accepted; bytecode/feedback/SSA and pure specialization front
+end landed** (2026-07-16). Deoptimization metadata, machine-code lowering,
+and runtime tier-up are not shipped yet.
 
 Ohaimark is Cynic's T2 method JIT. It consumes finalized Lantern bytecode
 and runtime feedback, builds a compact control-flow SSA graph, specializes
@@ -111,9 +111,31 @@ Because target parameters exist before translation, backward edges require no
 repair pass. Unreachable blocks are not translated, so unsupported dead code
 does not reject an otherwise eligible function. The initial node set covers
 constants, register moves, `add`/`sub`/`mul`, strict equality, less-than,
-immediate addition, branches, jumps, and returns.
+immediate addition, generic named-property loads, branches, jumps, and
+returns.
 
-### 3.3 Exceptions stay explicit
+### 3.3 Pure specialization plan
+
+`runtime/ohaimark/specialize.zig` computes monotone facts over the finished
+graph without mutating the graph or runtime. Its compact lattice distinguishes
+the primitive categories, int32 from Double, object from function, and the
+internal hole value. A linear edge pass merges incoming block-argument facts;
+loop phis iterate to a fixed point under a saturating convergence bound.
+
+Each node receives a result type, lowering choice, optional folded immediate,
+and optional removable assumption. Int32 arithmetic folds only when the exact
+result is representable: overflow stays on a checked Number lowering, and a
+sign-negative zero product stays unfolded because the int32 encoding cannot
+represent `-0`. Named loads consult their same-index feedback snapshot and
+select generic, own-data, prototype-data, or synthetic-accessor lowering.
+
+An assumption contains the live typed-IC index, arena-stable shape pointers,
+slot, and revision only. It never captures the GC-managed prototype or
+synthetic accessor value; future code must validate through the live cell.
+Cold and invalidated cells remain generic. A stale or malformed feedback index
+rejects the graph instead of indexing unchecked memory.
+
+### 3.4 Exceptions stay explicit
 
 Liveness exposes protected-range edges as `exception_edges`, separately from
 normal successors. An exception edge is not an ordinary branch: the unwinder
@@ -123,7 +145,7 @@ chunk with handlers. A later phase will add an exceptional environment and
 deopt state before enabling those chunks; silently treating handler edges as
 normal phis is forbidden.
 
-### 3.4 Fallback is part of correctness
+### 3.5 Fallback is part of correctness
 
 `UnsupportedOp`, `UnsupportedExceptionFlow`, malformed internal bytecode, an
 oversized graph, or allocation failure all abandon Ohaimark compilation. Once
@@ -150,8 +172,10 @@ deopt reconstruction agree with Lantern for the supported subset.
 
 1. **Front-end substrate, shipped:** exceptional CFG edges, immutable typed-IC
    snapshots, linear block-argument SSA, loop/diamond tests, graceful reject.
-2. **Typed specialization:** a small value lattice, IC-to-guard
-   transpilation, representation selection, constant folding, and local DCE.
+2. **Typed specialization, initial pass shipped:** small value lattice,
+   fixed-point block-argument facts, IC-to-assumption transpilation,
+   semantics-safe int32 folding, and explicit lowering choices.
+   Representation selection beyond those choices and local DCE remain.
 3. **Deopt first:** frame-state capture, compact translation stream, metadata
    verifier, and graph-vs-Lantern differential tests.
 4. **AArch64 lowering:** register allocation, safepoints, guard exits, code

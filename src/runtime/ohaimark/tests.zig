@@ -8,8 +8,10 @@ const Span = @import("../../source.zig").Span;
 const JSFunction = @import("../function.zig").JSFunction;
 const JSObject = @import("../object.zig").JSObject;
 const Shape = @import("../shape.zig").Shape;
+const Value = @import("../value.zig").Value;
 const feedback = @import("feedback.zig");
 const ir = @import("ir.zig");
+const specialize = @import("specialize.zig");
 
 const testing = std.testing;
 const span: Span = .{ .start = 0, .end = 1 };
@@ -270,4 +272,195 @@ test "Ohaimark defers exception lowering explicitly" {
     var chunk = try builder.finish();
     defer chunk.deinit(testing.allocator);
     try testing.expectError(error.UnsupportedExceptionFlow, ir.Graph.build(testing.allocator, &chunk));
+}
+
+test "Ohaimark specialization folds semantics-safe int32 constants" {
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    const lhs = try builder.reserveRegister();
+    try builder.emitLoadSmi(span, 40);
+    try builder.emitStoreReg(span, lhs);
+    try builder.emitLoadSmi(span, 2);
+    try builder.emitOp(.add, span);
+    try builder.emitU8(lhs);
+    var chunk = try finish(&builder);
+    defer chunk.deinit(testing.allocator);
+
+    var graph = try ir.Graph.build(testing.allocator, &chunk);
+    defer graph.deinit();
+    var plan = try specialize.Plan.build(testing.allocator, &graph);
+    defer plan.deinit();
+    const info = plan.node_info[findNode(&graph, .add).?];
+    try testing.expect(info.result_type.eql(specialize.Type.int32));
+    try testing.expectEqual(specialize.Lowering.constant, info.lowering);
+    try testing.expectEqual(ir.Immediate{ .int32 = 42 }, info.folded.?);
+}
+
+test "Ohaimark specialization keeps overflowing int32 addition guarded" {
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    const lhs = try builder.reserveRegister();
+    try builder.emitLoadSmi(span, std.math.maxInt(i32));
+    try builder.emitStoreReg(span, lhs);
+    try builder.emitLoadSmi(span, 1);
+    try builder.emitOp(.add, span);
+    try builder.emitU8(lhs);
+    var chunk = try finish(&builder);
+    defer chunk.deinit(testing.allocator);
+
+    var graph = try ir.Graph.build(testing.allocator, &chunk);
+    defer graph.deinit();
+    var plan = try specialize.Plan.build(testing.allocator, &graph);
+    defer plan.deinit();
+    const info = plan.node_info[findNode(&graph, .add).?];
+    try testing.expect(info.result_type.eql(specialize.Type.number));
+    try testing.expectEqual(specialize.Lowering.checked_int32_add, info.lowering);
+    try testing.expectEqual(@as(?ir.Immediate, null), info.folded);
+}
+
+test "Ohaimark specialization records pointer-free named-load assumptions" {
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    const receiver = try builder.reserveRegister();
+    try builder.emitLoadReg(span, receiver);
+    try builder.emitLdaProperty(span, 0);
+    var chunk = try finish(&builder);
+    defer chunk.deinit(testing.allocator);
+    const receiver_shape: *Shape = @ptrFromInt(0x7000);
+    chunk.inline_load_caches[0].fillOwnData(receiver_shape, 7);
+
+    var graph = try ir.Graph.build(testing.allocator, &chunk);
+    defer graph.deinit();
+    var plan = try specialize.Plan.build(testing.allocator, &graph);
+    defer plan.deinit();
+    const load_id = findNode(&graph, .load_named).?;
+    const hot = plan.node_info[load_id];
+    try testing.expectEqual(specialize.Lowering.load_named_own, hot.lowering);
+    const assumption = plan.assumptions[hot.assumption.?];
+    try testing.expect(!@hasField(specialize.Assumption, "proto"));
+    try testing.expectEqual(@as(u16, 0), assumption.feedback_index);
+    try testing.expectEqual(receiver_shape, assumption.receiver_shape);
+    try testing.expectEqual(@as(u32, 7), assumption.slot);
+
+    // A later compile observes the invalidated live cell and stays generic.
+    // Already-produced code must guard through the same cell index above.
+    chunk.inline_load_caches[0].invalidate();
+    var cold_graph = try ir.Graph.build(testing.allocator, &chunk);
+    defer cold_graph.deinit();
+    var cold_plan = try specialize.Plan.build(testing.allocator, &cold_graph);
+    defer cold_plan.deinit();
+    const cold_load = findNode(&cold_graph, .load_named).?;
+    try testing.expectEqual(specialize.Lowering.load_named_generic, cold_plan.node_info[cold_load].lowering);
+    try testing.expectEqual(@as(?u32, null), cold_plan.node_info[cold_load].assumption);
+
+    const holder_shape: *Shape = @ptrFromInt(0x8000);
+    const proto: *JSObject = @ptrFromInt(0x9000);
+    chunk.inline_load_caches[0].fillPrototypeData(receiver_shape, 8, proto, holder_shape, 21);
+    var prototype_graph = try ir.Graph.build(testing.allocator, &chunk);
+    defer prototype_graph.deinit();
+    var prototype_plan = try specialize.Plan.build(testing.allocator, &prototype_graph);
+    defer prototype_plan.deinit();
+    const prototype_load = findNode(&prototype_graph, .load_named).?;
+    const prototype_info = prototype_plan.node_info[prototype_load];
+    try testing.expectEqual(specialize.Lowering.load_named_prototype, prototype_info.lowering);
+    const prototype_assumption = prototype_plan.assumptions[prototype_info.assumption.?];
+    try testing.expectEqual(holder_shape, prototype_assumption.holder_shape);
+    try testing.expectEqual(@as(u64, 21), prototype_assumption.revision);
+
+    chunk.inline_load_caches[0].fillSyntheticAccessor(
+        receiver_shape,
+        proto,
+        holder_shape,
+        22,
+        Value.fromInt32(99),
+    );
+    var synthetic_graph = try ir.Graph.build(testing.allocator, &chunk);
+    defer synthetic_graph.deinit();
+    var synthetic_plan = try specialize.Plan.build(testing.allocator, &synthetic_graph);
+    defer synthetic_plan.deinit();
+    const synthetic_load = findNode(&synthetic_graph, .load_named).?;
+    try testing.expectEqual(
+        specialize.Lowering.load_named_synthetic,
+        synthetic_plan.node_info[synthetic_load].lowering,
+    );
+    try testing.expect(!@hasField(specialize.Assumption, "synthetic_value"));
+
+    const site = switch (synthetic_graph.nodes[synthetic_load].payload) {
+        .named_load => |named| named,
+        else => return error.TestUnexpectedResult,
+    };
+    synthetic_graph.nodes[synthetic_load].payload = .{ .named_load = .{
+        .key_constant = site.key_constant,
+        .feedback_index = std.math.maxInt(u16),
+    } };
+    try testing.expectError(
+        error.MalformedGraph,
+        specialize.Plan.build(testing.allocator, &synthetic_graph),
+    );
+}
+
+test "Ohaimark specialization preserves negative zero multiplication" {
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    const lhs = try builder.reserveRegister();
+    try builder.emitLoadSmi(span, -1);
+    try builder.emitStoreReg(span, lhs);
+    try builder.emitLoadSmi(span, 0);
+    try builder.emitOp(.mul, span);
+    try builder.emitU8(lhs);
+    var chunk = try finish(&builder);
+    defer chunk.deinit(testing.allocator);
+
+    var graph = try ir.Graph.build(testing.allocator, &chunk);
+    defer graph.deinit();
+    var plan = try specialize.Plan.build(testing.allocator, &graph);
+    defer plan.deinit();
+    const info = plan.node_info[findNode(&graph, .mul).?];
+    try testing.expect(info.result_type.eql(specialize.Type.number));
+    try testing.expectEqual(specialize.Lowering.checked_int32_mul, info.lowering);
+    try testing.expectEqual(@as(?ir.Immediate, null), info.folded);
+}
+
+test "Ohaimark value facts converge across loop phis" {
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    const counter = try builder.reserveRegister();
+    try builder.emitOp(.lda_zero, span);
+    try builder.emitStoreReg(span, counter);
+    try builder.emitOp(.lda_true, span);
+    const header_target = builder.here();
+    try builder.emitOp(.jmp_if_false, span);
+    const exit_patch = builder.here();
+    try builder.emitI16(0);
+    try builder.emitAddSmi(span, counter, 1);
+    try builder.emitStoreReg(span, counter);
+    try builder.emitOp(.lda_true, span);
+    try builder.emitOp(.jmp, span);
+    const back_patch = builder.here();
+    try builder.emitI16(0);
+    const exit_target = builder.here();
+    try builder.emitLoadReg(span, counter);
+    try builder.emitOp(.return_, span);
+    try builder.patchI16(exit_patch, exit_target);
+    try builder.patchI16(back_patch, header_target);
+    var chunk = try builder.finish();
+    defer chunk.deinit(testing.allocator);
+
+    var graph = try ir.Graph.build(testing.allocator, &chunk);
+    defer graph.deinit();
+    var plan = try specialize.Plan.build(testing.allocator, &graph);
+    defer plan.deinit();
+    var header: ?usize = null;
+    for (graph.blocks, 0..) |block, index| {
+        if (block.predecessor_count == 2) header = index;
+    }
+    for (graph.blockParams(header.?)) |param| switch (param.role) {
+        .register => |register| if (register == counter) {
+            try testing.expect(plan.node_info[param.value].result_type.eql(specialize.Type.number));
+            try testing.expectEqual(@as(?ir.Immediate, null), plan.node_info[param.value].folded);
+            return;
+        },
+        else => {},
+    };
+    return error.TestExpectedEqual;
 }

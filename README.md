@@ -51,9 +51,9 @@ Unicode tables, and
 the hardened-by-default realm-boot pipeline. The runtime is filling
 in §19-§28 one bucket at a time. Bistromath (the baseline JIT)
 runs by default (`--no-jit` opts out) since the step-3 exit
-([`docs/jit.md`](docs/jit.md)); Ohaimark's typed-feedback and
-block-argument-SSA front end has landed, while optimizing code generation
-remains future work. See
+([`docs/jit.md`](docs/jit.md)); Ohaimark's typed-feedback snapshot,
+block-argument SSA, and pure specialization planner have landed, while
+deoptimization and optimizing code generation remain future work. See
 [`docs/ROADMAP.md`](docs/ROADMAP.md) for the thematic breakdown.
 
 ### Conformance

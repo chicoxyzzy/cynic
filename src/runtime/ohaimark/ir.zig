@@ -27,6 +27,7 @@ pub const NodeKind = enum {
     mul,
     strict_eq,
     less_than,
+    load_named,
     jump,
     branch,
     return_,
@@ -48,11 +49,17 @@ pub const BranchCondition = enum {
     nullish,
 };
 
+pub const NamedLoad = struct {
+    key_constant: u16,
+    feedback_index: u16,
+};
+
 pub const Payload = union(enum) {
     none,
     immediate: Immediate,
     parameter: u32,
     branch: BranchCondition,
+    named_load: NamedLoad,
 };
 
 pub const Node = struct {
@@ -395,6 +402,41 @@ const Builder = struct {
                     };
                     const rhs = try self.addConstant(@intCast(pc), .{ .int32 = immediate });
                     accumulator = try self.addNode(.add, @intCast(pc), &.{ lhs, rhs }, .none);
+                },
+                .lda_property8, .lda_property => |load| {
+                    const narrow = load == .lda_property8;
+                    const key: u16 = if (narrow) self.chunk.code[pc + 1] else readU16(self.chunk.code, pc + 1);
+                    const feedback_index: u16 = if (narrow) self.chunk.code[pc + 2] else readU16(self.chunk.code, pc + 3);
+                    if (feedback_index >= self.chunk.inline_load_caches.len) return error.MalformedBytecode;
+                    accumulator = try self.addNode(
+                        .load_named,
+                        @intCast(pc),
+                        &.{accumulator},
+                        .{ .named_load = .{
+                            .key_constant = key,
+                            .feedback_index = feedback_index,
+                        } },
+                    );
+                },
+                .lda_property_reg8, .lda_property_reg => |load| {
+                    const narrow = load == .lda_property_reg8;
+                    const key: u16 = if (narrow) self.chunk.code[pc + 1] else readU16(self.chunk.code, pc + 1);
+                    const register_at = pc + if (narrow) @as(usize, 2) else 3;
+                    const receiver = try readRegister(registers, self.chunk.code[register_at]);
+                    const feedback_index: u16 = if (narrow)
+                        self.chunk.code[register_at + 1]
+                    else
+                        readU16(self.chunk.code, register_at + 1);
+                    if (feedback_index >= self.chunk.inline_load_caches.len) return error.MalformedBytecode;
+                    accumulator = try self.addNode(
+                        .load_named,
+                        @intCast(pc),
+                        &.{receiver},
+                        .{ .named_load = .{
+                            .key_constant = key,
+                            .feedback_index = feedback_index,
+                        } },
+                    );
                 },
                 .return_ => {
                     _ = try self.addNode(.return_, @intCast(pc), &.{accumulator}, .none);

@@ -1013,7 +1013,17 @@ sampling by `/profile`.
   accumulator and live-register phis, including loop back-edges. Liveness
   now exposes exceptional edges explicitly, while handler-bearing and
   unsupported chunks reject cleanly to the lower tiers. Optimizing codegen is
-  still off; typed specialization and verified deopt metadata come first.
+  still off; verified deopt metadata comes first.
+  See [ohaimark.md](ohaimark.md).
+- **Ohaimark specialization planner (2026-07-16).** Generic named-property
+  loads now enter SSA beside arithmetic and control flow. A pure fixed-point
+  pass propagates a compact value lattice through block arguments, folds only
+  semantics-safe int32 operations (overflow and negative-zero products stay
+  guarded), and selects checked arithmetic or feedback-driven named-load
+  lowerings. Every removable property assumption stores only the live typed-IC
+  index, realm-arena-stable shapes, and scalar guards; no GC-managed prototype
+  or accessor value enters optimizer state. Cold or invalidated sites remain
+  generic, and malformed feedback indices reject compilation.
   See [ohaimark.md](ohaimark.md).
 - **Generational GC.** A JSC-Riptide-style non-moving
   generational collector — store-site routing, generation header
@@ -1400,9 +1410,10 @@ and the per-builtin checklist; this section tracks status.
   tracked in docs/jit.md's delivery-order section.
 - **Ohaimark** — optimizing JIT (T2). IR (SSA), type speculation
   from inline caches, deopt back to Lantern on guard failure.
-  Modeled on JSC DFG / V8 Maglev / SpiderMonkey Warp. The feedback and
-  block-argument SSA front end ships; specialization, deopt metadata, and
-  machine-code execution remain planned. See [ohaimark.md](ohaimark.md).
+  Modeled on JSC DFG / V8 Maglev / SpiderMonkey Warp. The feedback snapshot,
+  block-argument SSA, and initial specialization planner ship; verified deopt
+  metadata and machine-code execution remain planned. See
+  [ohaimark.md](ohaimark.md).
 - **Spasm** — wasm baseline JIT (T1), Sarcasm's compiled tier.
   Single-pass over the validated module + branch side-table,
   Liftoff / Wizard-SPC shape; buries *asm* like its parent. The

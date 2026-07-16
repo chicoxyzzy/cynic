@@ -2,3 +2,4 @@
 
 pub const feedback = @import("feedback.zig");
 pub const ir = @import("ir.zig");
+pub const specialize = @import("specialize.zig");
