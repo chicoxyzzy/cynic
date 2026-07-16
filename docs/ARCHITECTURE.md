@@ -245,7 +245,8 @@ of truth for IR — Bistromath (default-on since 2026-06; `--no-jit`
 opts out) and Ohaimark
 (feedback/SSA/specialization/representation/deopt-home front end plus
 differential evaluator and a test-only checked-int32/property-IC AArch64 subset
-landed; safepoints, code ownership, and runtime tier-up remain future work)
+with frame-reconstructing backedge safepoints landed; code ownership and
+runtime tier-up remain future work)
 consume bytecode +
 warmth/IC data, not the AST. Ohaimark's accepted design and GC-pointer-free
 feedback boundary are in [ohaimark.md](ohaimark.md).

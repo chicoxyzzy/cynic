@@ -59,9 +59,11 @@ lowering plans plus verified native frame entry/exit emission have landed,
 along with typed physical moves, folded-value returns, checked int32
 add/sub/mul, int32 control flow, and allocation-free guard exits that rebuild
 the existing Lantern frame. Guarded own/prototype/synthetic named-property
-loads now execute through live typed IC cells as well. Ohaimark remains
-test-only: safepoints, code ownership, and runtime tier-up are future work. See
-[`docs/ROADMAP.md`](docs/ROADMAP.md) for the thematic breakdown.
+loads now execute through live typed IC cells as well. Taken backedges poll
+fuel, interrupts, hooks, and pending GC work; a slow poll transfers the exact
+loop-header state into Lantern's precise root set before returning. Ohaimark
+remains test-only: executable-code ownership and runtime tier-up are future
+work. See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the thematic breakdown.
 
 ### Conformance
 

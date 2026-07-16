@@ -247,7 +247,7 @@ default path. The new fields sit next to `step_budget` /
 > "metering armed" bit (or batching hook polls behind a small
 > counter), both compatible with this API.
 
-## 7. JIT interaction (Bistromath)
+## 7. JIT interaction
 
 Compiled code polls **`step_budget` and the `interrupt` byte at
 every compiled back-edge** (docs/jit.md §4.6, `backEdgeSafePoint`)
@@ -274,6 +274,13 @@ and tiers down to a Lantern safe point when either trips. Hence:
   on compiled back-edges, or a wasmtime-style epoch byte the hook
   owner flips — is recorded as the v2 candidate if an embedder
   needs hooks and tier-up simultaneously.
+
+Ohaimark's test-only backedge poll extends that contract: a non-null hook
+pointer is itself a slow condition. The optimized frame transfers its exact
+loop-header state to Lantern, which invokes the hook from the ordinary safe
+point; generated code never calls host code with optimized-only roots. Realm
+policy still disables `jit_enabled` when a hook is armed, but an explicit
+embedder re-enable remains correct for Ohaimark once runtime tier-up lands.
 
 The JIT differential gate (docs/jit.md §10) is unaffected: metering
 is off in the scored posture, and the harness's hook wiring happens

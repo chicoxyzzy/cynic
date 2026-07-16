@@ -18,6 +18,7 @@ const builtin = @import("builtin");
 
 const Value = @import("../value.zig").Value;
 const heap_mod = @import("../heap.zig");
+const Heap = heap_mod.Heap;
 const Realm = @import("../realm.zig").Realm;
 const GlobalBindings = @import("../realm.zig").GlobalBindings;
 const object_mod = @import("../object.zig");
@@ -75,9 +76,11 @@ pub const env = struct {
 /// Realm is large; consumers go through the shifted-add load
 /// helpers, so these are plain usize offsets.
 pub const realm = struct {
+    pub const heap: usize = @offsetOf(Realm, "heap");
     pub const step_budget: usize = @offsetOf(Realm, "step_budget");
     pub const interrupt_raw: usize =
         @offsetOf(Realm, "interrupt") + @offsetOf(std.atomic.Value(bool), "raw");
+    pub const interrupt_hook: usize = @offsetOf(Realm, "interrupt_hook");
     pub const proto_revision_counter: usize =
         @offsetOf(Realm, "proto_revision_counter");
     pub const globals_target: usize =
@@ -91,6 +94,18 @@ pub const realm = struct {
         @offsetOf(Realm, "globals") + @offsetOf(GlobalBindings, "decl_slots");
     pub const globals_decl_const_flags_ptr: usize =
         @offsetOf(Realm, "globals") + @offsetOf(GlobalBindings, "decl_const_flags");
+};
+
+/// `Heap` fields used only to detect pending collector work at a compiled
+/// backedge. Ohaimark returns to Lantern before running that work, so generated
+/// code never enters the collector with optimized-only roots.
+pub const heap = struct {
+    pub const allocs_since_gc: usize = @offsetOf(Heap, "allocs_since_gc");
+    pub const bytes_since_gc: usize = @offsetOf(Heap, "bytes_since_gc");
+    pub const gc_young_threshold: usize = @offsetOf(Heap, "gc_young_threshold");
+    pub const gc_byte_threshold: usize = @offsetOf(Heap, "gc_byte_threshold");
+    pub const marking_phase: usize = @offsetOf(Heap, "marking_phase");
+    pub const sweep_phase: usize = @offsetOf(Heap, "sweep_phase");
 };
 
 /// `JSObject` — the property-IC fast path's contact surface. Slots
@@ -162,9 +177,11 @@ comptime {
         load_ic_cell.proto,           load_ic_cell.proto_shape,
         load_ic_cell.proto_rev,       load_ic_cell.synthetic_value,
         store_ic_cell.shape,          call_ic_cell.callee,
-        realm.step_budget,            realm.proto_revision_counter,
+        realm.heap,                   realm.step_budget,
+        realm.interrupt_hook,         realm.proto_revision_counter,
         realm.globals_target,         realm.globals_decl_revision,
         realm.globals_decl_slots_ptr, realm.globals_decl_const_flags_ptr,
+        heap.bytes_since_gc,          heap.gc_byte_threshold,
     }) |off| std.debug.assert(off % 8 == 0);
     // `slot` is a u32 field — 4-aligned is enough (loaded via ldr-w
     // by the emitters... which use the 64-bit scaled form on an
@@ -172,6 +189,8 @@ comptime {
     // only if the emitters say so. Today they load it 32-bit.)
     std.debug.assert(load_ic_cell.slot % 4 == 0);
     std.debug.assert(store_ic_cell.slot % 4 == 0);
+    std.debug.assert(heap.allocs_since_gc % 4 == 0);
+    std.debug.assert(heap.gc_young_threshold % 4 == 0);
     // The kind bits live inside the 8-byte alignment slack.
     std.debug.assert(heap_mod.kind_mask < 8);
     // `is_arrow` is a byte load (ldrb imm12).
@@ -201,12 +220,54 @@ fn emitFieldLoad(m: *masm_mod.Masm, off: usize) !void {
     try m.emit(a64.ret());
 }
 
+fn emitFieldLoadW(m: *masm_mod.Masm, off: usize) !void {
+    if (off % 4 != 0) return error.InvalidLayout;
+    if (off <= 16380) {
+        try m.emit(a64.ldrImmW(.x0, .x0, @intCast(off)));
+    } else {
+        try m.emit(a64.addImm(.x0, .x0, @intCast(off >> 12), true));
+        try m.emit(a64.ldrImmW(.x0, .x0, @intCast(off & 0xFFF)));
+    }
+    try m.emit(a64.ret());
+}
+
+fn emitFieldLoadB(m: *masm_mod.Masm, off: usize) !void {
+    if (off <= 4095) {
+        try m.emit(a64.ldrbImm(.x0, .x0, @intCast(off)));
+    } else {
+        try m.emit(a64.addImm(.x0, .x0, @intCast(off >> 12), true));
+        try m.emit(a64.ldrbImm(.x0, .x0, @intCast(off & 0xFFF)));
+    }
+    try m.emit(a64.ret());
+}
+
 fn loadVia(ca: *code_alloc.CodeAllocator, off: usize, base: *const anyopaque) !u64 {
     var m = masm_mod.Masm.init(testing.allocator);
     defer m.deinit();
     try emitFieldLoad(&m, off);
     const f = code_alloc.asFn(*const fn (u64) callconv(.c) u64, try m.install(ca));
     return f(@intFromPtr(base));
+}
+
+fn loadViaW(ca: *code_alloc.CodeAllocator, off: usize, base: *const anyopaque) !u32 {
+    var m = masm_mod.Masm.init(testing.allocator);
+    defer m.deinit();
+    try emitFieldLoadW(&m, off);
+    const f = code_alloc.asFn(*const fn (u64) callconv(.c) u32, try m.install(ca));
+    return f(@intFromPtr(base));
+}
+
+fn loadViaB(ca: *code_alloc.CodeAllocator, off: usize, base: *const anyopaque) !u8 {
+    var m = masm_mod.Masm.init(testing.allocator);
+    defer m.deinit();
+    try emitFieldLoadB(&m, off);
+    const f = code_alloc.asFn(*const fn (u64) callconv(.c) u8, try m.install(ca));
+    return f(@intFromPtr(base));
+}
+
+fn proofInterruptHook(ctx: ?*anyopaque) Realm.InterruptAction {
+    _ = ctx;
+    return .proceed;
 }
 
 test "jit layout: machine loads match Zig reads on live values" {
@@ -225,7 +286,16 @@ test "jit layout: machine loads match Zig reads on live values" {
     var realm_v = Realm.init(testing.allocator);
     defer realm_v.deinit();
     realm_v.step_budget = 424242;
+    try testing.expectEqual(
+        @as(u64, @intFromPtr(realm_v.heap)),
+        try loadVia(&ca, realm.heap, &realm_v),
+    );
     try testing.expectEqual(@as(u64, 424242), try loadVia(&ca, realm.step_budget, &realm_v));
+    realm_v.setInterruptHook(proofInterruptHook, null);
+    try testing.expectEqual(
+        @as(u64, @intFromPtr(realm_v.interrupt_hook.?)),
+        try loadVia(&ca, realm.interrupt_hook, &realm_v),
+    );
     try testing.expectEqual(
         realm_v.proto_revision_counter,
         try loadVia(&ca, realm.proto_revision_counter, &realm_v),
@@ -234,6 +304,34 @@ test "jit layout: machine loads match Zig reads on live values" {
         realm_v.globals.decl_revision,
         try loadVia(&ca, realm.globals_decl_revision, &realm_v),
     );
+
+    // Heap safepoint fields: count/byte pressure and incremental phases.
+    realm_v.heap.allocs_since_gc = 17;
+    realm_v.heap.bytes_since_gc = 23;
+    realm_v.heap.gc_young_threshold = 29;
+    realm_v.heap.gc_byte_threshold = 31;
+    try testing.expectEqual(
+        @as(u32, 17),
+        try loadViaW(&ca, heap.allocs_since_gc, realm_v.heap),
+    );
+    try testing.expectEqual(
+        @as(u64, 23),
+        try loadVia(&ca, heap.bytes_since_gc, realm_v.heap),
+    );
+    try testing.expectEqual(
+        @as(u32, 29),
+        try loadViaW(&ca, heap.gc_young_threshold, realm_v.heap),
+    );
+    try testing.expectEqual(
+        @as(u64, 31),
+        try loadVia(&ca, heap.gc_byte_threshold, realm_v.heap),
+    );
+    realm_v.heap.marking_phase = .marking;
+    try testing.expectEqual(@as(u8, 1), try loadViaB(&ca, heap.marking_phase, realm_v.heap));
+    realm_v.heap.marking_phase = .idle;
+    realm_v.heap.sweep_phase = .sweeping;
+    try testing.expectEqual(@as(u8, 1), try loadViaB(&ca, heap.sweep_phase, realm_v.heap));
+    realm_v.heap.sweep_phase = .idle;
 
     // JSObject: shape / prototype / inline slot / overflow slot —
     // the last is the slice-layout witness.

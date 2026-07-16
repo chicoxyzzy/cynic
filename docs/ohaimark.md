@@ -7,8 +7,9 @@ allocation plus AArch64 physical frame/edge lowering landed** (2026-07-16).
 Verified native frame entry/exit, typed physical moves, folded-value returns,
 checked int32 arithmetic/control, and direct Lantern-frame guard exits have
 also landed. Guarded own/prototype/synthetic named-property loads now execute
-through live typed IC cells. Safepoints, code ownership, and tier-up are not
-shipped yet.
+through live typed IC cells. Frame-reconstructing backedge safepoints now poll
+fuel, interrupts, hooks, and pending GC work. Executable-code ownership and
+tier-up are not shipped yet.
 
 Ohaimark is Cynic's T2 method JIT. It consumes finalized Lantern bytecode
 and runtime feedback, builds a compact control-flow SSA graph, specializes
@@ -300,8 +301,8 @@ user-sized input.
 Native arm64 tests cover successful add/sub/mul, dynamic zero/nonzero control,
 add/sub/mul overflow, `-1 * 0` recovery to `-0`, and exact resumed/full-Lantern
 result equality. Unsupported generic arithmetic rejects transactionally and
-leaves the machine buffer unchanged. The graph compiler remains test-only:
-safepoints, executable ownership, and runtime tier-up are the next boundaries.
+leaves the machine buffer unchanged. At this checkpoint the graph compiler
+remained test-only; the backedge safepoint checkpoint follows below.
 
 ### 3.10 Live named-property guards
 
@@ -328,9 +329,36 @@ property bytecode offset, and lets Lantern execute that operation exactly once;
 the fast path and exit allocate nothing and call no helper. Native tests install
 the code before mutating cells and prototypes, cover inline and overflow slots,
 and compare resumed Lantern results. A cold generic load rejects compilation
-transactionally until a generic helper/safepoint path exists.
+transactionally until a rooted generic-helper call path exists.
 
-### 3.11 Exceptions stay explicit
+### 3.11 Backedge safepoints and precise root transfer
+
+`runtime/ohaimark/safepoint_codegen_aarch64.zig` polls every taken backedge
+after its parallel edge moves have installed the target block parameters. The
+no-work path checks incremental mark/sweep phases, allocation-count and byte
+pressure, an armed interrupt hook, the shared step budget, and the cooperative
+interrupt byte. It decrements the budget exactly once and jumps directly to
+the loop header.
+
+Any pending GC/host work branches to a nearby cold exit. The target block's
+accumulator parameter and liveness-derived register parameters are the exact
+Lantern state at that loop header, so the exit boxes them as needed, writes
+them into the existing `CallFrame`, stamps the target bytecode offset, and
+returns `resume_interp`. Lantern then performs the collection, hook call,
+termination, or cooperative throw with every live tagged value in its normal
+precise root set. Optimized code never invokes GC while a pointer exists only
+in a machine register or native spill.
+
+Native tests cover the no-work path, zero fuel, a cooperative interrupt, an
+armed-but-proceeding hook, and allocation-pressure young collection. The GC
+case carries an object only through a loop parameter, proves the cold exit
+transfers it to the Lantern register file, and proves a real collection keeps
+that object while reclaiming an unrooted peer. Corrupt parameter roles reject
+transactionally. The current optimized subset still allocates nothing and
+calls no helper; helper-backed nodes remain `UnsupportedNode` until a rooted
+call-safepoint policy lands.
+
+### 3.12 Exceptions stay explicit
 
 Liveness exposes protected-range edges as `exception_edges`, separately from
 normal successors. An exception edge is not an ordinary branch: the unwinder
@@ -340,7 +368,7 @@ chunk with handlers. A later phase will add an exceptional environment and
 deopt state before enabling those chunks; silently treating handler edges as
 normal phis is forbidden.
 
-### 3.12 Fallback is part of correctness
+### 3.13 Fallback is part of correctness
 
 `UnsupportedOp`, `UnsupportedExceptionFlow`, malformed internal bytecode, an
 oversized graph, or allocation failure all abandon Ohaimark compilation. Once
@@ -413,9 +441,10 @@ resumed-Lantern miss paths directly.
 The evaluator remains the target-independent oracle. Its first executable
 counterpart now emits checked int32 definitions/control, required home stores,
 direct guard exits that reconstruct the existing Lantern frame, and live-cell
-named-property guards. Ohaimark is still not a runtime tier: safepoints, code
-ownership, and a dispatcher entry path must land before optimized code can
-receive production traffic.
+named-property guards. Taken backedges also transfer loop-header state to
+Lantern whenever host or GC work is pending. Ohaimark is still not a runtime
+tier: executable-code ownership and a dispatcher entry path must land before
+optimized code can receive production traffic.
 
 ## 5. Delivery order
 
@@ -447,7 +476,9 @@ receive production traffic.
 8. **AArch64 optimized execution, initial slice shipped:** checked int32
    add/sub/mul, int32 control flow, stable-home writes, returns, and direct
    Lantern-frame guard exits, plus live-cell own/prototype/synthetic named
-   loads with inline/overflow slot reads. Safepoints, code ownership, and a
+   loads with inline/overflow slot reads. Taken backedges now poll fuel,
+   interrupts, hooks, and GC work, transferring exact loop-header state before
+   Lantern handles a slow condition. Executable-code ownership and a
    disabled-by-default tier-up path remain.
 9. **Gates and tuning:** full test262 pass-set differential, SES suite,
    GC-pressure runs, fuzzing, and compile-time/code-size/performance budgets.

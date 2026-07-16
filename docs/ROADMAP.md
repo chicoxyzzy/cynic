@@ -1142,8 +1142,23 @@ sampling by `/profile`.
   state, cover inline and overflow slots, and compare resumed Lantern results;
   cold generic loads still reject transactionally. Property mechanics live in
   `runtime/ohaimark/property_codegen_aarch64.zig` so graph codegen remains
-  focused. Ohaimark remains test-only pending safepoints, executable-code
-  ownership, and disabled-by-default tier-up.
+  focused. At this checkpoint Ohaimark remained test-only pending safepoints,
+  executable-code ownership, and disabled-by-default tier-up.
+  See [ohaimark.md](ohaimark.md).
+- **Ohaimark backedge safepoints (2026-07-16).** Every taken optimized
+  backedge now polls incremental mark/sweep work, allocation-count and byte
+  pressure, interrupt hooks, fuel, and the cooperative interrupt byte. The
+  no-work path decrements the shared budget once and stays native; any slow
+  condition boxes the target block's accumulator plus liveness-derived register
+  parameters into the existing Lantern frame, stamps the loop-header bytecode
+  offset, and returns `resume_interp` before GC or host code can run. The shared
+  JIT layout contract now executable-proves the Realm/Heap fields consumed by
+  that poll. Native tests cover exact fuel/interrupt state, hook deferral,
+  fast-path completion, malformed-state rollback, and a real young collection
+  that preserves a loop-carried object while reclaiming an unrooted peer.
+  Ohaimark still makes no optimized helper call or allocation; those nodes keep
+  rejecting until rooted call safepoints land. Executable-code ownership and
+  disabled-by-default tier-up remain.
   See [ohaimark.md](ohaimark.md).
 - **Generational GC.** A JSC-Riptide-style non-moving
   generational collector — store-site routing, generation header
@@ -1536,8 +1551,9 @@ and the per-builtin checklist; this section tracks status.
   evaluator, abstract register/spill allocation, and AArch64 frame/edge
   lowering plus native frame entry/exit, typed moves, and folded returns ship;
   checked int32 arithmetic/control and direct Lantern-frame guard exits now
-  execute in tests, as do live-cell own/prototype/synthetic named loads.
-  Safepoints, code ownership, and runtime tier-up remain planned. See
+  execute in tests, as do live-cell own/prototype/synthetic named loads and
+  frame-reconstructing backedge safepoints. Executable-code ownership and
+  runtime tier-up remain planned. See
   [ohaimark.md](ohaimark.md).
 - **Spasm** — wasm baseline JIT (T1), Sarcasm's compiled tier.
   Single-pass over the validated module + branch side-table,

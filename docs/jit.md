@@ -9,7 +9,9 @@ landed. Transactional prologue/epilogue emission now has native AArch64 proof,
 and typed moves, folded-value returns, checked int32 arithmetic/control, and
 frame-reconstructing guard exits execute natively in tests. Guarded
 own/prototype/synthetic named loads now execute through live typed IC cells.
-Safepoints, code ownership, and runtime tier-up remain future work; Spasm's
+Taken backedges now poll fuel, interrupts, hooks, and pending GC work, with a
+slow poll transferring exact loop-header state back to Lantern before any
+collection or host call. Code ownership and runtime tier-up remain future work; Spasm's
 delivery state is tracked below. The document doubles as the design record that
 pinned the architecture before the first emitter was written and as the delivery ledger
 (the "Delivery order" section tracks what each increment shipped). It is the
@@ -460,8 +462,16 @@ the snapshot's realm-stable shape/slot/revision facts against the live
 chunk-owned `LoadICCell`, then reads the GC-managed prototype or synthetic value
 only through that cell. Shape, holder, prototype-identity, revision, mode, or
 cell invalidation misses use the same pre-operation guard exit; native arm64
-tests resume Lantern and compare exact results. Safepoints, executable-code
-ownership, and runtime tier-up remain disabled. The decisions Bistromath must
+tests resume Lantern and compare exact results. Every taken backedge now polls
+incremental GC phases, allocation pressure, an interrupt hook, fuel, and the
+cooperative interrupt byte. Any slow condition serializes the target block's
+accumulator and liveness-derived register parameters into the existing Lantern
+frame and returns `resume_interp`; Lantern performs the slow work with those
+tagged values in its normal precise root set. Native tests include a real young
+collection that preserves a loop-carried object and reclaims an unrooted peer.
+The supported native subset still makes no helper call or allocation; such
+nodes continue to reject until rooted call safepoints land. Executable-code
+ownership and runtime tier-up remain disabled. The decisions Bistromath must
 preserve are:
 
 - **Method JIT over a CFG SSA IR with linear storage.** Not sea of
@@ -1192,8 +1202,9 @@ useful:
    recovery against Lantern. Register allocation, AArch64 frame/edge lowering,
    checked int32 arithmetic/control emission, and direct guard-exit frame
    reconstruction now also ship in the test-only tier, along with guarded
-   own/prototype/synthetic named loads through live IC cells. Next: safepoints,
-   executable-code ownership, and disabled-by-default tier-up; see
+   own/prototype/synthetic named loads through live IC cells and
+   frame-reconstructing backedge safepoints. Next: executable-code ownership
+   and disabled-by-default tier-up; see
    [ohaimark.md](ohaimark.md).
 
 ## 13. Considered and declined

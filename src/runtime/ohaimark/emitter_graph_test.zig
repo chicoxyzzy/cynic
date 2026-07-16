@@ -200,6 +200,43 @@ fn namedLoadChunk(realm: *Realm) !chunk_mod.Chunk {
     return builder.finish();
 }
 
+const SafepointLoop = struct {
+    chunk: chunk_mod.Chunk,
+    header: u32,
+    root: u8,
+};
+
+fn safepointLoopChunk() !SafepointLoop {
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    const root = try builder.reserveRegister();
+    try builder.emitOp(.lda_one, span);
+    const header = builder.here();
+    try builder.emitOp(.jmp_if_false, span);
+    const exit_patch = builder.here();
+    try builder.emitI16(0);
+    try builder.emitOp(.lda_zero, span);
+    try builder.emitOp(.jmp, span);
+    const back_patch = builder.here();
+    try builder.emitI16(0);
+    const exit_target = builder.here();
+    try builder.emitLoadReg(span, root);
+    try builder.emitOp(.return_, span);
+    try builder.patchI16(exit_patch, exit_target);
+    try builder.patchI16(back_patch, header);
+    return .{
+        .chunk = try builder.finish(),
+        .header = @intCast(header),
+        .root = root,
+    };
+}
+
+fn countingIdleHook(ctx: ?*anyopaque) Realm.InterruptAction {
+    const count: *u32 = @ptrCast(@alignCast(ctx.?));
+    count.* += 1;
+    return .proceed;
+}
+
 fn overflowNamedObject(realm: *Realm, value: i32) !*object_mod.JSObject {
     const object = try realm.heap.allocateObject();
     var key_buf: [32]u8 = undefined;
@@ -436,6 +473,156 @@ test "Ohaimark AArch64 graph branches on a checked int32 result" {
         );
         try testing.expectEqual(Value.fromInt32(case.expected).bits, frame.accumulator.bits);
     }
+}
+
+test "Ohaimark AArch64 backedge safepoint exhausts fuel with exact loop-header state" {
+    if (comptime !masm.native_aarch64) return error.SkipZigTest;
+    var loop = try safepointLoopChunk();
+    defer loop.chunk.deinit(testing.allocator);
+    var native = try NativeGraph.build(&loop.chunk);
+    defer native.deinit();
+
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = false;
+    const root = try realm.heap.allocateObject();
+    const registers = try testing.allocator.alloc(Value, loop.chunk.register_count);
+    defer testing.allocator.free(registers);
+    var frame = testFrame(&loop.chunk, registers);
+    frame.registers[loop.root] = heap_mod.taggedObject(root);
+    realm.step_budget = 0;
+
+    try testing.expectEqual(
+        @intFromEnum(codegen.EntryResult.resume_interp),
+        try executeNative(&native, &realm, &frame),
+    );
+    try testing.expectEqual(@as(u64, 0), realm.step_budget);
+    try testing.expectEqual(loop.header, frame.ip);
+    try testing.expectEqual(Value.fromInt32(0).bits, frame.accumulator.bits);
+    try testing.expectEqual(heap_mod.taggedObject(root).bits, frame.registers[loop.root].bits);
+
+    realm.step_budget = std.math.maxInt(u64);
+    try testing.expectEqual(
+        heap_mod.taggedObject(root).bits,
+        (try resumeLantern(&realm, frame)).bits,
+    );
+}
+
+test "Ohaimark AArch64 backedge safepoint fast path completes and consumes one unit" {
+    if (comptime !masm.native_aarch64) return error.SkipZigTest;
+    var loop = try safepointLoopChunk();
+    defer loop.chunk.deinit(testing.allocator);
+    var native = try NativeGraph.build(&loop.chunk);
+    defer native.deinit();
+
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = false;
+    const registers = try testing.allocator.alloc(Value, loop.chunk.register_count);
+    defer testing.allocator.free(registers);
+    var frame = testFrame(&loop.chunk, registers);
+    frame.registers[loop.root] = Value.null_;
+    realm.step_budget = 5;
+
+    try testing.expectEqual(
+        @intFromEnum(codegen.EntryResult.done),
+        try executeNative(&native, &realm, &frame),
+    );
+    try testing.expectEqual(@as(u64, 4), realm.step_budget);
+    try testing.expectEqual(Value.null_.bits, frame.accumulator.bits);
+}
+
+test "Ohaimark AArch64 backedge safepoint preserves cooperative interrupt state" {
+    if (comptime !masm.native_aarch64) return error.SkipZigTest;
+    var loop = try safepointLoopChunk();
+    defer loop.chunk.deinit(testing.allocator);
+    var native = try NativeGraph.build(&loop.chunk);
+    defer native.deinit();
+
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = false;
+    const registers = try testing.allocator.alloc(Value, loop.chunk.register_count);
+    defer testing.allocator.free(registers);
+    var frame = testFrame(&loop.chunk, registers);
+    frame.registers[loop.root] = Value.null_;
+    const budget = realm.step_budget;
+    realm.requestInterrupt();
+
+    try testing.expectEqual(
+        @intFromEnum(codegen.EntryResult.resume_interp),
+        try executeNative(&native, &realm, &frame),
+    );
+    try testing.expectEqual(budget - 1, realm.step_budget);
+    try testing.expectEqual(loop.header, frame.ip);
+    try testing.expectEqual(Value.fromInt32(0).bits, frame.accumulator.bits);
+    realm.clearInterrupt();
+}
+
+test "Ohaimark AArch64 backedge safepoint defers interrupt hooks to Lantern" {
+    if (comptime !masm.native_aarch64) return error.SkipZigTest;
+    var loop = try safepointLoopChunk();
+    defer loop.chunk.deinit(testing.allocator);
+    var native = try NativeGraph.build(&loop.chunk);
+    defer native.deinit();
+
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = false;
+    const registers = try testing.allocator.alloc(Value, loop.chunk.register_count);
+    defer testing.allocator.free(registers);
+    var frame = testFrame(&loop.chunk, registers);
+    frame.registers[loop.root] = Value.null_;
+    var polls: u32 = 0;
+    const budget = realm.step_budget;
+    realm.setInterruptHook(countingIdleHook, &polls);
+
+    try testing.expectEqual(
+        @intFromEnum(codegen.EntryResult.resume_interp),
+        try executeNative(&native, &realm, &frame),
+    );
+    try testing.expectEqual(@as(u32, 0), polls);
+    try testing.expectEqual(budget, realm.step_budget);
+    try testing.expectEqual(loop.header, frame.ip);
+    try testing.expectEqual(Value.fromInt32(0).bits, frame.accumulator.bits);
+    try testing.expectEqual(Value.null_.bits, (try resumeLantern(&realm, frame)).bits);
+    try testing.expect(polls > 0);
+}
+
+test "Ohaimark AArch64 GC safepoint transfers a tagged root before collection" {
+    if (comptime !masm.native_aarch64) return error.SkipZigTest;
+    var loop = try safepointLoopChunk();
+    defer loop.chunk.deinit(testing.allocator);
+    var native = try NativeGraph.build(&loop.chunk);
+    defer native.deinit();
+
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = false;
+    realm.heap.setGcThreshold(1);
+    const root = try realm.heap.allocateObject();
+    _ = try realm.heap.allocateObject();
+    try testing.expectEqual(@as(usize, 2), realm.heap.objectCount());
+    const registers = try testing.allocator.alloc(Value, loop.chunk.register_count);
+    defer testing.allocator.free(registers);
+    var frame = testFrame(&loop.chunk, registers);
+    frame.registers[loop.root] = heap_mod.taggedObject(root);
+    const budget = realm.step_budget;
+
+    try testing.expectEqual(
+        @intFromEnum(codegen.EntryResult.resume_interp),
+        try executeNative(&native, &realm, &frame),
+    );
+    try testing.expectEqual(budget, realm.step_budget);
+    try testing.expectEqual(loop.header, frame.ip);
+    try testing.expectEqual(Value.fromInt32(0).bits, frame.accumulator.bits);
+    try testing.expectEqual(heap_mod.taggedObject(root).bits, frame.registers[loop.root].bits);
+
+    try testing.expectEqual(
+        heap_mod.taggedObject(root).bits,
+        (try resumeLantern(&realm, frame)).bits,
+    );
+    try testing.expectEqual(@as(usize, 1), realm.heap.objectCount());
 }
 
 test "Ohaimark AArch64 own named load guards live IC state" {
@@ -840,6 +1027,27 @@ test "Ohaimark AArch64 malformed named-load assumption is transactional" {
     var machine = masm.Masm.init(testing.allocator);
     defer machine.deinit();
     try testing.expectError(error.InvalidMetadata, native.emit(&machine, &chunk));
+    try testing.expectEqual(@as(usize, 0), machine.code.items.len);
+}
+
+test "Ohaimark AArch64 malformed safepoint state is transactional" {
+    var loop = try safepointLoopChunk();
+    defer loop.chunk.deinit(testing.allocator);
+    var native = try NativeGraph.build(&loop.chunk);
+    defer native.deinit();
+    const header_index = blk: {
+        for (native.graph.blocks, 0..) |block, index| {
+            if (block.start == loop.header) break :blk index;
+        }
+        return error.TestUnexpectedResult;
+    };
+    const header = native.graph.blocks[header_index];
+    if (header.param_count < 2) return error.TestUnexpectedResult;
+    native.graph.params[header.param_start].role = .{ .register = loop.root };
+
+    var machine = masm.Masm.init(testing.allocator);
+    defer machine.deinit();
+    try testing.expectError(error.MalformedGraph, native.emit(&machine, &loop.chunk));
     try testing.expectEqual(@as(usize, 0), machine.code.items.len);
 }
 

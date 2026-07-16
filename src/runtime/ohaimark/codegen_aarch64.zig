@@ -4,7 +4,8 @@
 //! deoptimization, allocation, and physical-lowering plans. Guard exits write
 //! the pre-operation state back into the existing Lantern `CallFrame`, then
 //! return `resume_interp`; no helper call, allocation, or second frame format
-//! exists on the bailout path.
+//! exists on the bailout path. Taken backedges poll host/GC state and use the
+//! same frame-compatible exit before Lantern performs any slow work.
 
 const std = @import("std");
 
@@ -23,6 +24,7 @@ const lowering = @import("lowering_aarch64.zig");
 const parallel_moves = @import("parallel_moves.zig");
 const property_codegen = @import("property_codegen_aarch64.zig");
 const representation = @import("representation.zig");
+const safepoint_codegen = @import("safepoint_codegen_aarch64.zig");
 const specialize = @import("specialize.zig");
 
 /// Matches the established Bistromath dispatcher contract. Ohaimark remains
@@ -460,13 +462,11 @@ const Compiler = struct {
         if (inputs.len != 1) return error.MalformedGraph;
         const producer = self.graph.inputs[inputs.start];
         if (producer >= self.representations.outputs.len) return error.MalformedGraph;
-        try emitter.emitMove(self.machine, .{
-            .source = try self.valueLocation(producer),
-            .destination = .{ .register = lhs_scratch },
-            .source_kind = self.representations.outputs[producer],
-            .destination_kind = .tagged,
-            .conversion = try self.representations.conversionAt(self.graph, inputs.start),
-        }, self.chunk.constants);
+        const expected_conversion = try self.taggedConversion(producer);
+        if (try self.representations.conversionAt(self.graph, inputs.start) != expected_conversion) {
+            return error.InvalidRepresentation;
+        }
+        try self.emitTaggedValue(producer, lhs_scratch);
         try self.machine.emit(a64.strImm(
             lhs_scratch,
             lowering.lantern_frame_register,
@@ -522,11 +522,25 @@ const Compiler = struct {
     }
 
     fn emitEdgeAndJump(self: *Compiler, edge_index: usize) !void {
-        try self.emitEdge(edge_index);
         if (edge_index >= self.graph.edges.len) return error.MalformedGraph;
-        const target = self.graph.edges[edge_index].to;
+        const edge = self.graph.edges[edge_index];
+        try self.emitEdge(edge_index);
+        const target = edge.to;
         if (target >= self.block_labels.len or !self.graph.blocks[target].reachable) {
             return error.MalformedGraph;
+        }
+        if (try self.isBackEdge(edge)) {
+            var slow: Masm.Label = .{};
+            defer slow.deinit(self.allocator);
+            try safepoint_codegen.emitPoll(
+                self.machine,
+                lowering.realm_register,
+                &slow,
+            );
+            try self.machine.jump(&self.block_labels[target]);
+            self.machine.bind(&slow);
+            try self.emitSafepointExit(target);
+            return;
         }
         try self.machine.jump(&self.block_labels[target]);
     }
@@ -580,6 +594,88 @@ const Compiler = struct {
             .destination_kind = kind,
             .conversion = .none,
         }, self.chunk.constants);
+    }
+
+    /// A slow backedge has already applied its edge moves, so target block
+    /// parameters are the exact interpreter-visible loop-header state. Copy
+    /// the accumulator and every live-in register back to the Lantern frame
+    /// before returning; GC then sees only its normal precise root set.
+    fn emitSafepointExit(self: *Compiler, target_index: usize) !void {
+        if (target_index >= self.graph.blocks.len) return error.MalformedGraph;
+        const target = self.graph.blocks[target_index];
+        const params = try checkedRange(
+            self.graph.params.len,
+            target.param_start,
+            target.param_count,
+        );
+        var saw_accumulator = false;
+        var seen_registers: [256]bool = @splat(false);
+        for (self.graph.params[params.start..params.end()]) |param| {
+            try self.emitTaggedValue(param.value, lhs_scratch);
+            const destination_base: a64.Reg, const destination: u15 = switch (param.role) {
+                .accumulator => blk: {
+                    if (saw_accumulator) return error.MalformedGraph;
+                    saw_accumulator = true;
+                    break :blk .{
+                        lowering.lantern_frame_register,
+                        layout.frame.accumulator,
+                    };
+                },
+                .register => |register| blk: {
+                    if (register >= self.graph.register_count or
+                        register >= self.chunk.register_count or
+                        seen_registers[register])
+                    {
+                        return error.MalformedGraph;
+                    }
+                    seen_registers[register] = true;
+                    break :blk .{
+                        lowering.lantern_registers_register,
+                        try registerOffset(register),
+                    };
+                },
+            };
+            try self.machine.emit(a64.strImm(
+                lhs_scratch,
+                destination_base,
+                destination,
+            ));
+        }
+        if (!saw_accumulator) return error.MalformedGraph;
+        if (target.start >= self.chunk.code.len) return error.MalformedGraph;
+        try self.machine.movImm64(lhs_scratch, target.start);
+        try self.machine.emit(a64.strImm(
+            lhs_scratch,
+            lowering.lantern_frame_register,
+            layout.frame.ip,
+        ));
+        try self.machine.emit(a64.movz(.x0, @intFromEnum(EntryResult.resume_interp), 0));
+        try emitter.emitEpilogue(self.machine, self.lowered.frame);
+    }
+
+    fn emitTaggedValue(
+        self: *Compiler,
+        value: ir.ValueId,
+        destination: a64.Reg,
+    ) !void {
+        if (value >= self.representations.outputs.len) return error.MalformedGraph;
+        const source_kind = self.representations.outputs[value];
+        try emitter.emitMove(self.machine, .{
+            .source = try self.valueLocation(value),
+            .destination = .{ .register = destination },
+            .source_kind = source_kind,
+            .destination_kind = .tagged,
+            .conversion = try self.taggedConversion(value),
+        }, self.chunk.constants);
+    }
+
+    fn taggedConversion(self: *const Compiler, value: ir.ValueId) !representation.Conversion {
+        if (value >= self.representations.outputs.len) return error.MalformedGraph;
+        return switch (self.representations.outputs[value]) {
+            .tagged => .none,
+            .int32 => .box_int32,
+            .none => error.InvalidRepresentation,
+        };
     }
 
     fn emitGuardExit(self: *Compiler, point_index: usize) !void {
@@ -701,6 +797,15 @@ const Compiler = struct {
         if (block_index >= self.graph.blocks.len) return error.MalformedGraph;
         const block = self.graph.blocks[block_index];
         return checkedRange(self.graph.edges.len, block.edge_start, block.edge_count);
+    }
+
+    fn isBackEdge(self: *const Compiler, edge: ir.Edge) !bool {
+        if (edge.from >= self.graph.blocks.len or edge.to >= self.graph.blocks.len) {
+            return error.MalformedGraph;
+        }
+        const source = self.graph.blocks[edge.from];
+        const target = self.graph.blocks[edge.to];
+        return target.start <= source.start;
     }
 };
 
