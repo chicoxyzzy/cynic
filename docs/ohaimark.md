@@ -2,8 +2,9 @@
 
 Status: **ADR accepted; bytecode/feedback/SSA, pure specialization,
 representation selection, and logical plus stable-spill physical deopt
-metadata landed** (2026-07-16). Register allocation, machine-code lowering,
-runtime deoptimization, and tier-up are not shipped yet.
+metadata plus graph/Lantern differential evaluation landed** (2026-07-16).
+Register allocation, machine-code lowering, runtime deoptimization, and tier-up
+are not shipped yet.
 
 Ohaimark is Cynic's T2 method JIT. It consumes finalized Lantern bytecode
 and runtime feedback, builds a compact control-flow SSA graph, specializes
@@ -228,13 +229,28 @@ substrate. Tampered homes, region counts, tags, offsets, and spill indices
 return `InvalidMetadata` or `InvalidRecovery` without unchecked access or
 panicking.
 
-This is still compiler-level metadata, not an executable deoptimizer or a full
+`runtime/ohaimark/evaluator.zig` now provides that pre-codegen proof for the
+pure supported subset. It executes constants, block arguments, branches,
+loops, folded nodes, checked int32 arithmetic, strict equality, numeric
+less-than, and returns while applying the selected per-use conversions. Every
+definition writes its required physical home. A failed type/overflow guard
+decodes the physical stream, materializes the accumulator and live registers,
+and can resume `lantern.runFrames` at the original operation.
+
+The differential tests cover both sides of a checked add after a diamond phi:
+the in-range optimized result is bit-identical to a full Lantern run; overflow
+reconstructs the pre-add int32 operands, resumes Lantern, and produces the same
+double result as a full run. A self-loop test proves the mandatory step limit
+returns `StepLimitExceeded` instead of hanging the host. Generic effectful
+arithmetic and named-load execution remain explicit `UnsupportedNode`/deopt
+boundaries until their rooting and guard semantics can be tested independently.
+
+This remains a compiler oracle, not an executable optimizing tier or a full
 register allocator. Code generation must emit each required home store at the
 value's definition; ordinary uses may simultaneously keep a register copy.
-The next runtime step is an optimized frame layout plus a guard-exit stub that
-saves the two spill regions and reconstructs the existing Lantern frame. A
-graph evaluator must first prove graph execution and recovery agree with
-Lantern for the supported subset.
+The next runtime step is an optimized frame layout plus register allocation and
+a guard-exit stub that saves the two spill regions and reconstructs the
+existing Lantern frame.
 
 ## 5. Delivery order
 
@@ -247,9 +263,9 @@ Lantern for the supported subset.
    Double representation remain.
 3. **Deopt first, logical + physical-home metadata shipped:** pre-operation
    frame-state capture, liveness-compacted logical stream, stable tagged/int32
-   spill homes, physical boxing recipes, and bounds-checked verifiers. Native
-   frame emission, runtime reconstruction, and graph-vs-Lantern differential
-   tests remain.
+   spill homes, physical boxing recipes, bounds-checked verifiers, and a bounded
+   graph evaluator proving checked success plus overflow recovery against
+   Lantern. Native frame emission and runtime guard exits remain.
 4. **AArch64 lowering:** register allocation, safepoints, guard exits, code
    ownership, and a disabled-by-default tier-up path.
 5. **Gates and tuning:** full test262 pass-set differential, SES suite,

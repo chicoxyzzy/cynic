@@ -1058,7 +1058,19 @@ sampling by `/profile`.
   materialization produces Lantern's NaN-boxed `Value`s, while shared
   bounds-checked codec primitives reject corrupt homes, counts, tags, offsets,
   and spill indices without panicking. Native frame emission and runtime
-  replacement remain gated on graph differential execution and allocation.
+  replacement remain gated on register allocation and guard-exit codegen.
+  See [ohaimark.md](ohaimark.md).
+- **Ohaimark graph/Lantern differential evaluator (2026-07-16).** A bounded
+  pre-codegen evaluator now runs the pure SSA subset with block-argument CFG
+  transfer, representation conversions, checked int32 guards, and
+  definition-time physical-home writes. In-range checked arithmetic returns
+  the same NaN-boxed bits as Lantern. Overflow decodes the physical stream,
+  reconstructs the pre-operation accumulator/live registers, resumes Lantern
+  at that bytecode offset, and matches a full Lantern run's promoted Double.
+  Parallel edge assignment avoids phi clobbering, corrupt metadata remains a
+  normal error, and a mandatory step limit bounds loops. Generic effectful
+  operations stay explicit fallback boundaries until rooted execution and IC
+  guards land.
   See [ohaimark.md](ohaimark.md).
 - **Generational GC.** A JSC-Riptide-style non-moving
   generational collector — store-site routing, generation header
@@ -1447,8 +1459,9 @@ and the per-builtin checklist; this section tracks status.
   from inline caches, deopt back to Lantern on guard failure.
   Modeled on JSC DFG / V8 Maglev / SpiderMonkey Warp. The feedback snapshot,
   block-argument SSA, initial specialization and representation planners, and
-  logical plus stable-spill physical deopt metadata ship; runtime
-  deoptimization and machine-code execution remain planned. See
+  logical plus stable-spill physical deopt metadata and a bounded differential
+  evaluator ship; runtime deoptimization and machine-code execution remain
+  planned. See
   [ohaimark.md](ohaimark.md).
 - **Spasm** — wasm baseline JIT (T1), Sarcasm's compiled tier.
   Single-pass over the validated module + branch side-table,

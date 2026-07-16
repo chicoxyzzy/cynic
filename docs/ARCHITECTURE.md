@@ -243,10 +243,10 @@ Load, store, and computed property sites use separate typed IC arrays
 so their layouts and index spaces stay small. Bytecode is the source
 of truth for IR — Bistromath (default-on since 2026-06; `--no-jit`
 opts out) and Ohaimark
-(feedback/SSA/specialization/representation/deopt-home front end landed;
-optimized execution future) consume bytecode + warmth/IC data, not the AST.
-Ohaimark's accepted design and GC-pointer-free feedback boundary are in
-[ohaimark.md](ohaimark.md).
+(feedback/SSA/specialization/representation/deopt-home front end plus
+differential evaluator landed; optimized execution future) consume bytecode +
+warmth/IC data, not the AST. Ohaimark's accepted design and GC-pointer-free
+feedback boundary are in [ohaimark.md](ohaimark.md).
 
 An opt-in instrumentation build (`-Dbytecode-stats=true`, then
 `cynic run --bytecode-stats`) reports static encoding widths and

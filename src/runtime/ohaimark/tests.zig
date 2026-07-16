@@ -7,12 +7,15 @@ const Op = @import("../../bytecode/op.zig").Op;
 const Span = @import("../../source.zig").Span;
 const JSFunction = @import("../function.zig").JSFunction;
 const JSObject = @import("../object.zig").JSObject;
+const Realm = @import("../realm.zig").Realm;
 const Shape = @import("../shape.zig").Shape;
 const Value = @import("../value.zig").Value;
 const deopt = @import("deopt.zig");
 const deopt_physical = @import("deopt_physical.zig");
+const evaluator = @import("evaluator.zig");
 const feedback = @import("feedback.zig");
 const ir = @import("ir.zig");
+const lantern = @import("../lantern/interpreter.zig");
 const representation = @import("representation.zig");
 const specialize = @import("specialize.zig");
 
@@ -773,6 +776,255 @@ test "Ohaimark physical deopt metadata separates tagged and int32 homes" {
         ),
     );
     physical.tagged_slot_count -= 1;
+}
+
+test "Ohaimark graph evaluator matches Lantern on checked int32 success" {
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    const lhs = try builder.reserveRegister();
+    try builder.emitOp(.lda_true, span);
+    try builder.emitOp(.jmp_if_false, span);
+    const else_patch = builder.here();
+    try builder.emitI16(0);
+    try builder.emitOp(.lda_one, span);
+    try builder.emitOp(.jmp, span);
+    const join_patch = builder.here();
+    try builder.emitI16(0);
+    const else_target = builder.here();
+    try builder.emitLoadSmi(span, 2);
+    const join_target = builder.here();
+    try builder.emitStoreReg(span, lhs);
+    try builder.emitLoadSmi(span, 10);
+    try builder.emitOp(.add, span);
+    try builder.emitU8(lhs);
+    try builder.patchI16(else_patch, else_target);
+    try builder.patchI16(join_patch, join_target);
+    var chunk = try finish(&builder);
+    defer chunk.deinit(testing.allocator);
+
+    var graph = try ir.Graph.build(testing.allocator, &chunk);
+    defer graph.deinit();
+    var specialization = try specialize.Plan.build(testing.allocator, &graph);
+    defer specialization.deinit();
+    const add_id = findNode(&graph, .add).?;
+    try testing.expectEqual(
+        specialize.Lowering.checked_int32_add,
+        specialization.node_info[add_id].lowering,
+    );
+    var representations = try representation.Plan.build(
+        testing.allocator,
+        &graph,
+        &specialization,
+    );
+    defer representations.deinit();
+    var logical = try deopt.Metadata.build(testing.allocator, &graph, &specialization);
+    defer logical.deinit();
+    var homes = try deopt_physical.Homes.build(
+        testing.allocator,
+        &graph,
+        &specialization,
+        &representations,
+        &logical,
+    );
+    defer homes.deinit();
+    var physical = try deopt_physical.Metadata.build(
+        testing.allocator,
+        &graph,
+        &specialization,
+        &representations,
+        &logical,
+        &homes,
+    );
+    defer physical.deinit();
+
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = false;
+    const entry_registers = [_]Value{Value.undefined_};
+    var outcome = try evaluator.evaluate(
+        testing.allocator,
+        &chunk,
+        &graph,
+        &specialization,
+        &representations,
+        &logical,
+        &homes,
+        &physical,
+        .{
+            .accumulator = Value.undefined_,
+            .registers = &entry_registers,
+            .step_limit = 1_000,
+        },
+    );
+    defer outcome.deinit();
+    const optimized = switch (outcome) {
+        .returned => |value| value,
+        .deopt => return error.TestUnexpectedResult,
+    };
+    const interpreted = switch (try lantern.run(testing.allocator, &realm, &chunk)) {
+        .value => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try testing.expectEqual(interpreted.bits, optimized.bits);
+    try testing.expectEqual(Value.fromInt32(11).bits, optimized.bits);
+}
+
+test "Ohaimark graph evaluator deopt resumes Lantern before overflow" {
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    const lhs = try builder.reserveRegister();
+    try builder.emitOp(.lda_true, span);
+    try builder.emitOp(.jmp_if_false, span);
+    const else_patch = builder.here();
+    try builder.emitI16(0);
+    try builder.emitLoadSmi(span, std.math.maxInt(i32));
+    try builder.emitOp(.jmp, span);
+    const join_patch = builder.here();
+    try builder.emitI16(0);
+    const else_target = builder.here();
+    try builder.emitLoadSmi(span, std.math.maxInt(i32) - 1);
+    const join_target = builder.here();
+    try builder.emitStoreReg(span, lhs);
+    try builder.emitOp(.lda_one, span);
+    try builder.emitOp(.add, span);
+    try builder.emitU8(lhs);
+    try builder.patchI16(else_patch, else_target);
+    try builder.patchI16(join_patch, join_target);
+    var chunk = try finish(&builder);
+    defer chunk.deinit(testing.allocator);
+
+    var graph = try ir.Graph.build(testing.allocator, &chunk);
+    defer graph.deinit();
+    var specialization = try specialize.Plan.build(testing.allocator, &graph);
+    defer specialization.deinit();
+    var representations = try representation.Plan.build(
+        testing.allocator,
+        &graph,
+        &specialization,
+    );
+    defer representations.deinit();
+    var logical = try deopt.Metadata.build(testing.allocator, &graph, &specialization);
+    defer logical.deinit();
+    var homes = try deopt_physical.Homes.build(
+        testing.allocator,
+        &graph,
+        &specialization,
+        &representations,
+        &logical,
+    );
+    defer homes.deinit();
+    var physical = try deopt_physical.Metadata.build(
+        testing.allocator,
+        &graph,
+        &specialization,
+        &representations,
+        &logical,
+        &homes,
+    );
+    defer physical.deinit();
+
+    const entry_registers = [_]Value{Value.undefined_};
+    var outcome = try evaluator.evaluate(
+        testing.allocator,
+        &chunk,
+        &graph,
+        &specialization,
+        &representations,
+        &logical,
+        &homes,
+        &physical,
+        .{
+            .accumulator = Value.undefined_,
+            .registers = &entry_registers,
+            .step_limit = 1_000,
+        },
+    );
+    defer outcome.deinit();
+    const recovered = switch (outcome) {
+        .returned => return error.TestUnexpectedResult,
+        .deopt => |*state| state,
+    };
+    const add_id = findNode(&graph, .add).?;
+    try testing.expectEqual(add_id, recovered.node);
+    try testing.expectEqual(graph.nodes[add_id].bytecode_offset, recovered.bytecode_offset);
+    try testing.expectEqual(Value.fromInt32(1).bits, recovered.accumulator.bits);
+    try testing.expectEqual(Value.fromInt32(std.math.maxInt(i32)).bits, recovered.registers[lhs].bits);
+
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = false;
+    const resumed = switch (try recovered.resumeLantern(testing.allocator, &realm, &chunk)) {
+        .value => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    const interpreted = switch (try lantern.run(testing.allocator, &realm, &chunk)) {
+        .value => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try testing.expectEqual(interpreted.bits, resumed.bits);
+    try testing.expect(resumed.isDouble());
+    try testing.expectEqual(@as(f64, 2_147_483_648), resumed.asDouble());
+}
+
+test "Ohaimark graph evaluator bounds non-terminating control flow" {
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    const loop_target = builder.here();
+    try builder.emitOp(.jmp, span);
+    const loop_patch = builder.here();
+    try builder.emitI16(0);
+    try builder.patchI16(loop_patch, loop_target);
+    var chunk = try builder.finish();
+    defer chunk.deinit(testing.allocator);
+
+    var graph = try ir.Graph.build(testing.allocator, &chunk);
+    defer graph.deinit();
+    var specialization = try specialize.Plan.build(testing.allocator, &graph);
+    defer specialization.deinit();
+    var representations = try representation.Plan.build(
+        testing.allocator,
+        &graph,
+        &specialization,
+    );
+    defer representations.deinit();
+    var logical = try deopt.Metadata.build(testing.allocator, &graph, &specialization);
+    defer logical.deinit();
+    var homes = try deopt_physical.Homes.build(
+        testing.allocator,
+        &graph,
+        &specialization,
+        &representations,
+        &logical,
+    );
+    defer homes.deinit();
+    var physical = try deopt_physical.Metadata.build(
+        testing.allocator,
+        &graph,
+        &specialization,
+        &representations,
+        &logical,
+        &homes,
+    );
+    defer physical.deinit();
+
+    try testing.expectError(
+        error.StepLimitExceeded,
+        evaluator.evaluate(
+            testing.allocator,
+            &chunk,
+            &graph,
+            &specialization,
+            &representations,
+            &logical,
+            &homes,
+            &physical,
+            .{
+                .accumulator = Value.undefined_,
+                .registers = &.{},
+                .step_limit = 5,
+            },
+        ),
+    );
 }
 
 test "Ohaimark specialization records pointer-free named-load assumptions" {

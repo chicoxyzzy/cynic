@@ -3,11 +3,12 @@
 Status: **Bistromath shipped and on by default** (2026-06; `--no-jit`
 opts out, the CI differential gates merges). Ohaimark's feedback/SSA,
 specialization, representation-selection, and logical deopt-metadata front end
-plus stable physical deopt homes have landed, but optimized execution remains
-future work; Spasm's delivery state is tracked below. The document doubles as
-the design record that pinned the architecture before the first emitter was
-written and as the delivery ledger (the "Delivery order" section tracks what
-each increment shipped). It is the durable output of a prior-art survey (per
+plus stable physical deopt homes and graph/Lantern differential evaluation have
+landed, but optimized execution remains future work; Spasm's delivery state is
+tracked below. The document doubles as the design record that pinned the
+architecture before the first emitter was written and as the delivery ledger
+(the "Delivery order" section tracks what each increment shipped). It is the
+durable output of a prior-art survey (per
 [handbook/prior-art.md](handbook/prior-art.md)) across V8, JSC,
 SpiderMonkey, Hermes, LuaJIT, YJIT/ZJIT, CPython's copy-and-patch
 JIT, LibJS, ChakraCore, wasmtime (Winch), Wizard, and the papers in
@@ -432,9 +433,10 @@ pure specialization plan carrying value facts and pointer-free IC assumptions,
 a verified tagged/int32 representation plan with explicit per-use conversions,
 and logical deopt metadata mapping Lantern frame slots to SSA values. Physical
 metadata gives every referenced non-constant value a stable tagged or int32
-spill home and records the required boxing recipe. Register allocation, code
-generation, and runtime tier-up remain disabled. The decisions Bistromath must
-preserve are:
+spill home and records the required boxing recipe. A bounded graph evaluator
+now proves checked-int32 success and physical-deopt Lantern resumption against
+full Lantern runs. Register allocation, code generation, and runtime tier-up
+remain disabled. The decisions Bistromath must preserve are:
 
 - **Method JIT over a CFG SSA IR with linear storage.** Not sea of
   nodes (V8 is migrating off it: 3–7× worse cache locality, "error
@@ -1160,8 +1162,9 @@ useful:
 5. **Ohaimark** — the ADR plus bytecode/feedback/SSA, initial specialization,
    tagged/int32 representation selection, and verified logical deopt metadata
    plus stable physical spill homes have landed against measured Bistromath
-   data. Next: graph-vs-Lantern differential execution, register allocation,
-   and guard-exit frame reconstruction before any optimizing machine code; see
+   data. A bounded graph evaluator also proves checked success and overflow
+   recovery against Lantern. Next: register allocation and guard-exit frame
+   reconstruction before any optimizing machine code; see
    [ohaimark.md](ohaimark.md).
 
 ## 13. Considered and declined
