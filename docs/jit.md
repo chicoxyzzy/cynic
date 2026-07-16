@@ -6,10 +6,11 @@ specialization, representation-selection, and logical deopt-metadata front end
 plus stable physical deopt homes, graph/Lantern differential evaluation, and
 abstract register/spill allocation plus AArch64 frame/edge lowering have
 landed. Transactional prologue/epilogue emission now has native AArch64 proof,
-and typed moves plus folded-value returns execute natively, but non-folded
-optimized execution remains future work; Spasm's delivery state is tracked
-below. The document doubles as the design record that pinned the
-architecture before the first emitter was written and as the delivery ledger
+and typed moves, folded-value returns, checked int32 arithmetic/control, and
+frame-reconstructing guard exits execute natively in tests. Property guards,
+safepoints, code ownership, and runtime tier-up remain future work; Spasm's
+delivery state is tracked below. The document doubles as the design record that
+pinned the architecture before the first emitter was written and as the delivery ledger
 (the "Delivery order" section tracks what each increment shipped). It is the
 durable output of a prior-art survey (per
 [handbook/prior-art.md](handbook/prior-art.md)) across V8, JSC,
@@ -427,7 +428,7 @@ Counters follow the JSC/SM structure with Cynic-sized constants
 - a failed compile (allocator exhaustion) sets `dont_compile`;
   there is no recompilation ladder until Ohaimark exists.
 
-## 5. Ohaimark — T2 representation/deopt/allocation front end landed
+## 5. Ohaimark — T2 front end and checked execution subset landed
 
 The accepted design and delivery gates are in
 [ohaimark.md](ohaimark.md). The first checkpoints now ship the immutable
@@ -446,8 +447,15 @@ resolves parallel edge moves through a dedicated cycle scratch while preserving
 boxing conversions. The native prologue/epilogue now saves that convention,
 chunks aligned spill reservation, and initializes tagged slots safely. Typed
 register/stack moves and folded returns now emit, including int32 boxing, while
-heap constant-pool literals refuse raw code embedding. Non-folded node emission
-and runtime tier-up remain disabled. The decisions Bistromath must preserve are:
+heap constant-pool literals refuse raw code embedding. A verified AArch64 graph
+compiler now emits checked int32 add/sub/mul, constant and int32 control flow,
+parallel edge transfers, stable deopt-home writes, normal returns, and cold
+guard exits. An exit decodes the physical recipe at compile time and writes the
+pre-operation accumulator, live registers, and bytecode offset directly into
+the existing Lantern frame before returning `resume_interp`; the bailout path
+allocates nothing and calls no helper. Property nodes, safepoints, code
+ownership, and runtime tier-up remain disabled. The decisions Bistromath must
+preserve are:
 
 - **Method JIT over a CFG SSA IR with linear storage.** Not sea of
   nodes (V8 is migrating off it: 3–7× worse cache locality, "error
@@ -1174,8 +1182,10 @@ useful:
    tagged/int32 representation selection, and verified logical deopt metadata
    plus stable physical spill homes have landed against measured Bistromath
    data. A bounded graph evaluator also proves checked success and overflow
-   recovery against Lantern. Next: register allocation and guard-exit frame
-   reconstruction before any optimizing machine code; see
+   recovery against Lantern. Register allocation, AArch64 frame/edge lowering,
+   checked int32 arithmetic/control emission, and direct guard-exit frame
+   reconstruction now also ship in the test-only tier. Next: property-IC guards,
+   safepoints, executable-code ownership, and disabled-by-default tier-up; see
    [ohaimark.md](ohaimark.md).
 
 ## 13. Considered and declined

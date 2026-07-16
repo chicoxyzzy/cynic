@@ -1,9 +1,9 @@
-//! Initial AArch64 machine-frame emission for Ohaimark.
+//! Low-level AArch64 frame, move, and immediate-return emission for Ohaimark.
 //!
-//! This checkpoint emits only the verified prologue and epilogue. It preserves
-//! every callee-saved register claimed by the lowering convention, pins the
-//! entry ABI, reserves the aligned spill area, and initializes all tagged
-//! slots before optimized code can reach a safepoint.
+//! This module preserves every callee-saved register claimed by the lowering
+//! convention, pins the entry ABI, reserves the aligned spill area, initializes
+//! tagged slots, and emits representation-bearing physical moves. Verified CFG
+//! scheduling and guard exits live in `codegen_aarch64.zig`.
 
 const std = @import("std");
 

@@ -4,9 +4,10 @@ Status: **ADR accepted; bytecode/feedback/SSA, pure specialization,
 representation selection, and logical plus stable-spill physical deopt
 metadata, graph/Lantern differential evaluation, and abstract register/spill
 allocation plus AArch64 physical frame/edge lowering landed** (2026-07-16).
-Verified native frame entry/exit emission has also landed. SSA-node emission,
-typed physical moves, and folded-value returns have also landed. Non-folded
-SSA-node emission, runtime deoptimization, and tier-up are not shipped yet.
+Verified native frame entry/exit, typed physical moves, folded-value returns,
+checked int32 arithmetic/control, and direct Lantern-frame guard exits have
+also landed. Property-node emission, safepoints, code ownership, and tier-up
+are not shipped yet.
 
 Ohaimark is Cynic's T2 method JIT. It consumes finalized Lantern bytecode
 and runtime feedback, builds a compact control-flow SSA graph, specializes
@@ -243,7 +244,8 @@ layout before writing and roll the assembler buffer back on allocation failure.
 Golden-word tests pin the convention and immediate chunking. On AArch64, an
 executable-memory test enters the generated frame, reads the last initialized
 tagged slot through `x22`, restores the native stack, and returns the exact
-NaN-boxed bits. No SSA node or guard is executable through this emitter yet.
+NaN-boxed bits. Higher-level graph scheduling and guard exits live separately
+in `runtime/ohaimark/codegen_aarch64.zig`.
 
 ### 3.8 Typed moves and folded returns
 
@@ -267,7 +269,40 @@ folded `1 + 2` result remains an int32 immediate, the return use boxes it into
 rejects every non-immediate producer, so unchecked arithmetic or property nodes
 cannot execute before guards and deopt exits exist.
 
-### 3.9 Exceptions stay explicit
+### 3.9 Checked arithmetic, control flow, and guard exits
+
+`runtime/ohaimark/codegen_aarch64.zig` verifies every upstream plan before
+emitting the first non-folded graph subset. It materializes used entry
+parameters from the production three-argument ABI, binds CFG blocks, applies
+the resolved parallel edge streams, and writes every separate stable recovery
+home at definition time. Constant branches and dynamic int32 truthiness feed
+their own edge streams; checked add/sub use AArch64's signed overflow flag,
+while multiply compares the full signed product and separately guards the
+ECMAScript negative-zero case.
+
+Each speculative node branches to one cold out-of-line exit. Physical recovery
+metadata is decoded while compiling, then emitted as direct tagged/int32 spill
+loads, boxing, and stores into the existing Lantern `CallFrame` accumulator and
+register file. The exit stamps the pre-operation bytecode offset and returns
+the same numeric `resume_interp` result as Bistromath. Runtime bailout performs
+no allocation and calls no helper; Lantern executes the failed operation once.
+Heap-valued constant-pool recoveries remain a compile-time fallback rather than
+embedding an unrooted pointer.
+
+Conditional guards first branch over a near-site trampoline, whose
+unconditional branch reaches the cold exit. This keeps the AArch64 `b.cond` /
+`cbz` / `tbz` displacement local; verified graph, move-stream, and metadata
+caps keep the wider branch in range instead of allowing a fixup cast to trap on
+user-sized input.
+
+Native arm64 tests cover successful add/sub/mul, dynamic zero/nonzero control,
+add/sub/mul overflow, `-1 * 0` recovery to `-0`, and exact resumed/full-Lantern
+result equality. Unsupported generic arithmetic rejects transactionally and
+leaves the machine buffer unchanged. The graph compiler remains test-only:
+property guards, safepoints, executable ownership, and runtime tier-up are the
+next boundaries.
+
+### 3.10 Exceptions stay explicit
 
 Liveness exposes protected-range edges as `exception_edges`, separately from
 normal successors. An exception edge is not an ordinary branch: the unwinder
@@ -277,7 +312,7 @@ chunk with handlers. A later phase will add an exceptional environment and
 deopt state before enabling those chunks; silently treating handler edges as
 normal phis is forbidden.
 
-### 3.10 Fallback is part of correctness
+### 3.11 Fallback is part of correctness
 
 `UnsupportedOp`, `UnsupportedExceptionFlow`, malformed internal bytecode, an
 oversized graph, or allocation failure all abandon Ohaimark compilation. Once
@@ -345,14 +380,12 @@ returns `StepLimitExceeded` instead of hanging the host. Generic effectful
 arithmetic and named-load execution remain explicit `UnsupportedNode`/deopt
 boundaries until their rooting and guard semantics can be tested independently.
 
-This remains a compiler oracle, not an executable optimizing tier. The
-abstract allocator chooses ordinary locations and the AArch64 lowering plan
-fixes physical registers, frame offsets, and edge moves. Frame entry/exit now
-emits, as do typed moves and immediate returns. Code generation must still
-schedule non-folded definitions, emit each required home store while preserving
-a simultaneous register copy, and attach real guard exits. The next runtime
-step is checked int32 value/control lowering plus a guard-exit stub that
-reconstructs the existing Lantern frame.
+The evaluator remains the target-independent oracle. Its first executable
+counterpart now emits checked int32 definitions/control, required home stores,
+and direct guard exits that reconstruct the existing Lantern frame. Ohaimark is
+still not a runtime tier: named-load guards, safepoints, code ownership, and a
+dispatcher entry path must land before optimized code can receive production
+traffic.
 
 ## 5. Delivery order
 
@@ -367,7 +400,8 @@ reconstructs the existing Lantern frame.
    frame-state capture, liveness-compacted logical stream, stable tagged/int32
    spill homes, physical boxing recipes, bounds-checked verifiers, and a bounded
    graph evaluator proving checked success plus overflow recovery against
-   Lantern. Native frame emission and runtime guard exits remain.
+   Lantern. Native guard exits now ship for the checked-int32 execution subset;
+   property guards remain.
 4. **Abstract allocation, shipped:** CFG-scheduled live intervals, bounded
    general-purpose register ids, immediate rematerialization, deterministic
    eviction, representation-partitioned spill reuse, and stable-home reuse.
@@ -380,8 +414,10 @@ reconstructs the existing Lantern frame.
 7. **Typed moves + folded returns, shipped:** representation-bearing physical
    moves, raw int32 spill stores, boxing, checked offsets, non-heap constant
    rematerialization, and an end-to-end folded graph native return.
-8. **AArch64 optimized execution:** checked value/control lowering, safepoints, guard
-   exits, code ownership, and a disabled-by-default tier-up path.
+8. **AArch64 optimized execution, initial slice shipped:** checked int32
+   add/sub/mul, int32 control flow, stable-home writes, returns, and direct
+   Lantern-frame guard exits. Property guards, safepoints, code ownership, and
+   a disabled-by-default tier-up path remain.
 9. **Gates and tuning:** full test262 pass-set differential, SES suite,
    GC-pressure runs, fuzzing, and compile-time/code-size/performance budgets.
 10. **Only if measured:** background compilation, polymorphic feedback,

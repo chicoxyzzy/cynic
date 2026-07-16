@@ -43,7 +43,7 @@ that will be settled with an ADR when the time comes.
         │  hotter
         ▼
    ┌──────────────────┐
-   │  Ohaimark (T2)   │  ◄── SSA + repr + deopt metadata; codegen future (M6)
+   │  Ohaimark (T2)   │  ◄── checked AArch64 subset + deopt; tier-up future (M6)
    └──────────────────┘
    data flows T0→T1→T2; deopt can fall all the way back to Lantern (T0)
 
@@ -244,7 +244,8 @@ so their layouts and index spaces stay small. Bytecode is the source
 of truth for IR — Bistromath (default-on since 2026-06; `--no-jit`
 opts out) and Ohaimark
 (feedback/SSA/specialization/representation/deopt-home front end plus
-differential evaluator landed; optimized execution future) consume bytecode +
+differential evaluator and a test-only checked-int32 AArch64 subset landed;
+property guards and runtime tier-up remain future work) consume bytecode +
 warmth/IC data, not the AST. Ohaimark's accepted design and GC-pointer-free
 feedback boundary are in [ohaimark.md](ohaimark.md).
 

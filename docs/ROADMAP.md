@@ -1116,6 +1116,21 @@ sampling by `/profile`.
   native AArch64 frame code and returns the exact `Value.fromInt32(3)` bits.
   Non-folded nodes and guards remain disabled.
   See [ohaimark.md](ohaimark.md).
+- **Ohaimark checked execution and guard exits (2026-07-16).** A verified
+  AArch64 graph compiler now schedules the first non-folded subset: checked
+  int32 add/sub/mul, constant and dynamic-int32 control flow, resolved edge
+  moves, definition-time stable-home writes, and normal frame returns. Signed
+  overflow and multiplication's full-width/negative-zero conditions branch to
+  cold exits. Each exit compiles the physical recovery stream into direct
+  loads, int32 boxing, and stores of the pre-operation accumulator, live
+  registers, and bytecode offset into the existing Lantern `CallFrame`, then
+  returns `resume_interp`; bailout allocates nothing and calls no helper.
+  Native arm64 differential tests cover all three arithmetic operations,
+  overflow, `-0`, dynamic zero/nonzero branches, and resumed/full-Lantern
+  equality. Generic unsupported graphs roll emission back transactionally.
+  Ohaimark remains test-only pending property guards, safepoints, code
+  ownership, and tier-up.
+  See [ohaimark.md](ohaimark.md).
 - **Generational GC.** A JSC-Riptide-style non-moving
   generational collector — store-site routing, generation header
   bits, a write barrier + remembered set, `collectYoung` with
@@ -1506,7 +1521,9 @@ and the per-builtin checklist; this section tracks status.
   logical plus stable-spill physical deopt metadata and a bounded differential
   evaluator, abstract register/spill allocation, and AArch64 frame/edge
   lowering plus native frame entry/exit, typed moves, and folded returns ship;
-  non-folded node execution and runtime deoptimization remain planned. See
+  checked int32 arithmetic/control and direct Lantern-frame guard exits now
+  execute in tests. Property guards, safepoints, code ownership, and runtime
+  tier-up remain planned. See
   [ohaimark.md](ohaimark.md).
 - **Spasm** — wasm baseline JIT (T1), Sarcasm's compiled tier.
   Single-pass over the validated module + branch side-table,

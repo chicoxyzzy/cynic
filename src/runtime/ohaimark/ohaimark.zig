@@ -10,4 +10,5 @@ pub const allocation = @import("allocation.zig");
 pub const parallel_moves = @import("parallel_moves.zig");
 pub const lowering_aarch64 = @import("lowering_aarch64.zig");
 pub const emitter_aarch64 = @import("emitter_aarch64.zig");
+pub const codegen_aarch64 = @import("codegen_aarch64.zig");
 pub const evaluator = @import("evaluator.zig");
