@@ -1469,3 +1469,27 @@ the corpus under the relevant section's directory before adding.
   on the argument array fires (value + order + count). The 48 / 9 / 10
   existing fixtures cover only dense / `arguments` / empty happy paths;
   none exercises the per-element `[[Get]]` observably.
+
+### Int32 multiplication fast paths can lose negative zero
+
+- **Fixed in:** `7f467da1`
+- **Spec:** §6.1.6.1.4 Number::multiply — operands with different signs
+  produce `-0` when the mathematical product is zero.
+- **Reproducer:**
+  ```js
+  function multiply(x, y) { return x * y; }
+  assert.sameValue(multiply(-1, 0), -0);
+  assert.sameValue(multiply(0, -1), -0);
+  ```
+- **Before fix:** Cynic's int32 interpreter path and Bistromath emitter
+  returned int32 `+0`; compile-time folding deliberately mirrored that
+  result. The general Double path was correct.
+- **After fix:** the shared int32 Number::multiply helper escapes a
+  sign-negative zero product to Double `-0`; Bistromath tiers down for that
+  otherwise-unrepresentable result, and constant folding reuses the helper.
+- **Suggested fixture shape:** positive runtime fixture under
+  `language/expressions/multiplication/`, using function parameters so the
+  operands are not compile-time constants. Existing multiplication fixtures
+  distinguish `0 * -0` and related Double cases, but none covers a negative
+  nonzero integer multiplied by int32 `+0`, the representation boundary that
+  exposed this bug.
