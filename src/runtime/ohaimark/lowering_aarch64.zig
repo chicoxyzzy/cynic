@@ -66,6 +66,11 @@ pub const FrameLayout = struct {
         };
     }
 
+    pub fn verify(self: FrameLayout) !void {
+        const expected = try build(self.tagged_slot_count, self.int32_slot_count);
+        if (!std.meta.eql(self, expected)) return error.InvalidLowering;
+    }
+
     pub fn taggedByteOffset(self: FrameLayout, slot: u32) !u32 {
         if (slot >= self.tagged_slot_count) return error.InvalidLocation;
         return self.tagged_start + slot * 8;

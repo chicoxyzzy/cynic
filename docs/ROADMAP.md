@@ -1095,6 +1095,16 @@ sampling by `/profile`.
   move stream. Prologue/epilogue, tagged-slot initialization, safepoints,
   instructions, guard exits, and executable installation remain gated.
   See [ohaimark.md](ohaimark.md).
+- **Ohaimark native frame emission (2026-07-16).** The first AArch64 emitter
+  transactionally writes a full AAPCS64 prologue/epilogue: FP/LR and `x19`-`x28`
+  are preserved, aligned spill reservation is split at the 12-bit immediate
+  limit, entry ABI values are pinned, and every tagged slot receives
+  non-pointer `undefined` bits before a future safepoint can observe it. Golden
+  words pin the convention and a native arm64 executable-memory test enters the
+  frame, reads an initialized spill through `x22`, restores SP, and returns the
+  exact NaN-boxed value. SSA nodes, guards, helper calls, code ownership, and
+  tier-up remain disabled.
+  See [ohaimark.md](ohaimark.md).
 - **Generational GC.** A JSC-Riptide-style non-moving
   generational collector — store-site routing, generation header
   bits, a write barrier + remembered set, `collectYoung` with
@@ -1484,8 +1494,8 @@ and the per-builtin checklist; this section tracks status.
   block-argument SSA, initial specialization and representation planners, and
   logical plus stable-spill physical deopt metadata and a bounded differential
   evaluator, abstract register/spill allocation, and AArch64 frame/edge
-  lowering ship; runtime deoptimization and machine-code execution remain
-  planned. See
+  lowering plus native frame entry/exit emission ship; optimized node execution
+  and runtime deoptimization remain planned. See
   [ohaimark.md](ohaimark.md).
 - **Spasm** — wasm baseline JIT (T1), Sarcasm's compiled tier.
   Single-pass over the validated module + branch side-table,

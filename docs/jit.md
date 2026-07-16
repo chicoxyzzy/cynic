@@ -5,7 +5,8 @@ opts out, the CI differential gates merges). Ohaimark's feedback/SSA,
 specialization, representation-selection, and logical deopt-metadata front end
 plus stable physical deopt homes, graph/Lantern differential evaluation, and
 abstract register/spill allocation plus AArch64 frame/edge lowering have
-landed, but optimized execution remains future work; Spasm's delivery state is
+landed. Transactional prologue/epilogue emission now has native AArch64 proof,
+but optimized node execution remains future work; Spasm's delivery state is
 tracked below. The document doubles as the design record that pinned the
 architecture before the first emitter was written and as the delivery ledger
 (the "Delivery order" section tracks what each increment shipped). It is the
@@ -441,8 +442,10 @@ registers or representation-partitioned spills, rematerializes immediates, and
 reuses stable homes when a recoverable value spills. A physical plan now maps
 six values to `x23`-`x28`, lays out aligned tagged/int32 frame regions, and
 resolves parallel edge moves through a dedicated cycle scratch while preserving
-boxing conversions. Machine-code emission and runtime tier-up remain disabled.
-The decisions Bistromath must preserve are:
+boxing conversions. The native prologue/epilogue now saves that convention,
+chunks aligned spill reservation, and initializes tagged slots safely; node
+emission and runtime tier-up remain disabled. The decisions Bistromath must
+preserve are:
 
 - **Method JIT over a CFG SSA IR with linear storage.** Not sea of
   nodes (V8 is migrating off it: 3–7× worse cache locality, "error

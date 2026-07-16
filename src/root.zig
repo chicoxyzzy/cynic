@@ -167,4 +167,5 @@ test {
     _ = @import("runtime/ohaimark/tests.zig");
     _ = @import("runtime/ohaimark/allocation_test.zig");
     _ = @import("runtime/ohaimark/lowering_aarch64_test.zig");
+    _ = @import("runtime/ohaimark/emitter_aarch64_test.zig");
 }

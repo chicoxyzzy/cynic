@@ -4,7 +4,8 @@ Status: **ADR accepted; bytecode/feedback/SSA, pure specialization,
 representation selection, and logical plus stable-spill physical deopt
 metadata, graph/Lantern differential evaluation, and abstract register/spill
 allocation plus AArch64 physical frame/edge lowering landed** (2026-07-16).
-Machine-code emission, runtime deoptimization, and tier-up are not shipped yet.
+Verified native frame entry/exit emission has also landed. SSA-node emission,
+runtime deoptimization, and tier-up are not shipped yet.
 
 Ohaimark is Cynic's T2 method JIT. It consumes finalized Lantern bytecode
 and runtime feedback, builds a compact control-flow SSA graph, specializes
@@ -228,7 +229,22 @@ generation must initialize every tagged slot to a non-pointer value before the
 first safepoint and must spill or stack-map live tagged registers before any
 helper call or GC poll.
 
-### 3.7 Exceptions stay explicit
+### 3.7 Native frame entry and exit
+
+`runtime/ohaimark/emitter_aarch64.zig` is the first machine-code checkpoint.
+The prologue saves FP/LR and all ten pinned/value callee-saved registers, sets
+FP, reserves the spill area in 4,080-byte-or-smaller aligned chunks, pins the
+three-argument entry ABI, and initializes every tagged slot to Cynic's
+non-pointer `undefined` bits. The epilogue releases the exact spill size,
+restores each pair in reverse order, and returns. Both operations verify the
+layout before writing and roll the assembler buffer back on allocation failure.
+
+Golden-word tests pin the convention and immediate chunking. On AArch64, an
+executable-memory test enters the generated frame, reads the last initialized
+tagged slot through `x22`, restores the native stack, and returns the exact
+NaN-boxed bits. No SSA node or guard is executable through this emitter yet.
+
+### 3.8 Exceptions stay explicit
 
 Liveness exposes protected-range edges as `exception_edges`, separately from
 normal successors. An exception edge is not an ordinary branch: the unwinder
@@ -238,7 +254,7 @@ chunk with handlers. A later phase will add an exceptional environment and
 deopt state before enabling those chunks; silently treating handler edges as
 normal phis is forbidden.
 
-### 3.8 Fallback is part of correctness
+### 3.9 Fallback is part of correctness
 
 `UnsupportedOp`, `UnsupportedExceptionFlow`, malformed internal bytecode, an
 oversized graph, or allocation failure all abandon Ohaimark compilation. Once
@@ -308,11 +324,11 @@ boundaries until their rooting and guard semantics can be tested independently.
 
 This remains a compiler oracle, not an executable optimizing tier. The
 abstract allocator chooses ordinary locations and the AArch64 lowering plan
-fixes physical registers, frame offsets, and edge moves. Code generation must
-emit those moves and each required home store at the value's definition, while
-preserving a simultaneous register copy when selected. The next runtime step
-is prologue/epilogue plus a guard-exit stub that saves the two spill regions and
-reconstructs the existing Lantern frame.
+fixes physical registers, frame offsets, and edge moves. Frame entry/exit now
+emits, but code generation must still emit those moves and each required home
+store at the value's definition while preserving a simultaneous register copy
+when selected. The next runtime step is value/control lowering plus a guard-exit
+stub that reconstructs the existing Lantern frame.
 
 ## 5. Delivery order
 
@@ -334,11 +350,14 @@ reconstructs the existing Lantern frame.
 5. **AArch64 physical planning, shipped:** fixed callee-saved register mapping,
    aligned tagged/int32 frame regions, bounded direct offsets, and deterministic
    cycle-safe parallel edge moves with conversion preservation.
-6. **AArch64 emission:** prologue/epilogue, value lowering, safepoints, guard
+6. **AArch64 frame emission, shipped:** transactional prologue/epilogue,
+   chunked aligned stack reservation, pinned ABI setup, safe tagged-slot
+   initialization, golden words, and native-hardware execution proof.
+7. **AArch64 optimized execution:** value/control lowering, safepoints, guard
    exits, code ownership, and a disabled-by-default tier-up path.
-7. **Gates and tuning:** full test262 pass-set differential, SES suite,
+8. **Gates and tuning:** full test262 pass-set differential, SES suite,
    GC-pressure runs, fuzzing, and compile-time/code-size/performance budgets.
-8. **Only if measured:** background compilation, polymorphic feedback,
+9. **Only if measured:** background compilation, polymorphic feedback,
    inlining, x86_64 lowering, and exception-region compilation.
 
 ## 6. Declined for v1
