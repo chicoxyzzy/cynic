@@ -3,8 +3,8 @@
 Status: **ADR accepted; bytecode/feedback/SSA, pure specialization,
 representation selection, and logical plus stable-spill physical deopt
 metadata, graph/Lantern differential evaluation, and abstract register/spill
-allocation landed** (2026-07-16). Machine-code lowering, runtime
-deoptimization, and tier-up are not shipped yet.
+allocation plus AArch64 physical frame/edge lowering landed** (2026-07-16).
+Machine-code emission, runtime deoptimization, and tier-up are not shipped yet.
 
 Ohaimark is Cynic's T2 method JIT. It consumes finalized Lantern bytecode
 and runtime feedback, builds a compact control-flow SSA graph, specializes
@@ -198,7 +198,37 @@ ownership, use-after-definition ordering, home representation and uniqueness,
 register bounds, and spill bounds. Mutated plans return `InvalidAllocation`;
 malformed graphs or homes remain normal compilation errors.
 
-### 3.6 Exceptions stay explicit
+### 3.6 AArch64 physical lowering
+
+`runtime/ohaimark/lowering_aarch64.zig` maps the abstract plan onto one fixed
+AAPCS64 convention without emitting code. `x19`-`x22` pin the realm, Lantern
+frame, Lantern register-file base, and optimized spill base. Six optimizer
+values map to callee-saved `x23`-`x28`. `x9` is reserved exclusively for
+parallel-move cycles; `x10` remains available for a future emitter's
+stack-to-stack transfer. FP/LR and `x19`-`x28` occupy a 96-byte save area.
+
+The native spill area starts with contiguous 8-byte tagged slots, followed by
+contiguous 4-byte int32 slots, then rounds up to the AAPCS64 16-byte alignment.
+Physical locations carry byte offsets from `x22`. The first emitter uses direct
+scaled loads/stores, so a tagged offset beyond 32,760 or an int32 offset beyond
+16,380 returns `FrameTooLarge` and leaves the chunk in lower tiers; widening
+address materialization is deferred until a real fixture needs it.
+
+Every CFG edge lowers its block arguments as one parallel assignment.
+`runtime/ohaimark/parallel_moves.zig` first emits destinations that no pending
+source still needs. A cycle saves its first raw source in `x9`, redirects every
+fan-out consumer to that scratch, and preserves any `box_int32` conversion on
+the final move. Same-location copies disappear only when no conversion is
+attached. Duplicate destinations, scratch aliasing, and edge-level
+`check_int32` return normal compiler errors.
+
+The lowering verifier rebuilds the frame, physical value locations, per-edge
+stream ranges, and resolved move sequence. This is still non-executable: code
+generation must initialize every tagged slot to a non-pointer value before the
+first safepoint and must spill or stack-map live tagged registers before any
+helper call or GC poll.
+
+### 3.7 Exceptions stay explicit
 
 Liveness exposes protected-range edges as `exception_edges`, separately from
 normal successors. An exception edge is not an ordinary branch: the unwinder
@@ -208,7 +238,7 @@ chunk with handlers. A later phase will add an exceptional environment and
 deopt state before enabling those chunks; silently treating handler edges as
 normal phis is forbidden.
 
-### 3.7 Fallback is part of correctness
+### 3.8 Fallback is part of correctness
 
 `UnsupportedOp`, `UnsupportedExceptionFlow`, malformed internal bytecode, an
 oversized graph, or allocation failure all abandon Ohaimark compilation. Once
@@ -277,12 +307,12 @@ arithmetic and named-load execution remain explicit `UnsupportedNode`/deopt
 boundaries until their rooting and guard semantics can be tested independently.
 
 This remains a compiler oracle, not an executable optimizing tier. The
-abstract allocator now chooses ordinary locations, while code generation must
-map abstract registers to AArch64 registers, emit edge moves and each required
-home store at the value's definition, and preserve a simultaneous register
-copy when selected. The next runtime step is an optimized frame layout plus a
-guard-exit stub that saves the two spill regions and reconstructs the existing
-Lantern frame.
+abstract allocator chooses ordinary locations and the AArch64 lowering plan
+fixes physical registers, frame offsets, and edge moves. Code generation must
+emit those moves and each required home store at the value's definition, while
+preserving a simultaneous register copy when selected. The next runtime step
+is prologue/epilogue plus a guard-exit stub that saves the two spill regions and
+reconstructs the existing Lantern frame.
 
 ## 5. Delivery order
 
@@ -301,11 +331,14 @@ Lantern frame.
 4. **Abstract allocation, shipped:** CFG-scheduled live intervals, bounded
    general-purpose register ids, immediate rematerialization, deterministic
    eviction, representation-partitioned spill reuse, and stable-home reuse.
-5. **AArch64 lowering:** physical register mapping, edge moves, safepoints,
-   guard exits, code ownership, and a disabled-by-default tier-up path.
-6. **Gates and tuning:** full test262 pass-set differential, SES suite,
+5. **AArch64 physical planning, shipped:** fixed callee-saved register mapping,
+   aligned tagged/int32 frame regions, bounded direct offsets, and deterministic
+   cycle-safe parallel edge moves with conversion preservation.
+6. **AArch64 emission:** prologue/epilogue, value lowering, safepoints, guard
+   exits, code ownership, and a disabled-by-default tier-up path.
+7. **Gates and tuning:** full test262 pass-set differential, SES suite,
    GC-pressure runs, fuzzing, and compile-time/code-size/performance budgets.
-7. **Only if measured:** background compilation, polymorphic feedback,
+8. **Only if measured:** background compilation, polymorphic feedback,
    inlining, x86_64 lowering, and exception-region compilation.
 
 ## 6. Declined for v1

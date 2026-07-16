@@ -1034,9 +1034,9 @@ sampling by `/profile`.
   constants embed directly and other entries reference pre-node SSA values.
   A bounds-checked verifier rejects mismatched lowerings/assumptions, malformed
   state ranges, unavailable ValueIds, duplicate register slots, corrupt tags, and
-  truncated streams without panicking. Stable physical spill homes land in the
-  follow-up below; runtime frame reconstruction and register allocation remain
-  gated.
+  truncated streams without panicking. Stable physical spill homes and register
+  allocation are recorded in the follow-ups below; runtime frame reconstruction
+  remains gated.
   See [ohaimark.md](ohaimark.md).
 - **Ohaimark representation selection (2026-07-16).** A pure verified pass now
   assigns every SSA result and use either tagged or int32 form. Checked
@@ -1081,7 +1081,19 @@ sampling by `/profile`.
   future emitter from clobbering an input. The verifier independently
   recomputes live ranges, evictions, locations, and frame counts and rejects
   malformed ownership, homes, register ids, or spill indices. AArch64 register
-  mapping, edge moves, frame emission, and guard-exit code remain gated.
+  mapping and edge moves land in the follow-up below; frame emission and
+  guard-exit code remain gated.
+  See [ohaimark.md](ohaimark.md).
+- **Ohaimark AArch64 physical lowering plan (2026-07-16).** Abstract registers
+  now map to six callee-saved value registers (`x23`-`x28`) beside pinned realm,
+  Lantern-frame, register-file, and spill-base registers. The native frame
+  places tagged 8-byte slots before int32 4-byte slots, aligns to 16 bytes, and
+  rejects offsets outside the first emitter's direct scaled addressing range.
+  CFG block arguments lower through a deterministic parallel-move resolver:
+  leaves run first, `x9` breaks cycles and fan-out safely, and boxing remains on
+  the final move. The verifier rebuilds the frame, locations, edge ranges, and
+  move stream. Prologue/epilogue, tagged-slot initialization, safepoints,
+  instructions, guard exits, and executable installation remain gated.
   See [ohaimark.md](ohaimark.md).
 - **Generational GC.** A JSC-Riptide-style non-moving
   generational collector — store-site routing, generation header
@@ -1471,8 +1483,9 @@ and the per-builtin checklist; this section tracks status.
   Modeled on JSC DFG / V8 Maglev / SpiderMonkey Warp. The feedback snapshot,
   block-argument SSA, initial specialization and representation planners, and
   logical plus stable-spill physical deopt metadata and a bounded differential
-  evaluator plus abstract register/spill allocation ship; runtime
-  deoptimization and machine-code execution remain planned. See
+  evaluator, abstract register/spill allocation, and AArch64 frame/edge
+  lowering ship; runtime deoptimization and machine-code execution remain
+  planned. See
   [ohaimark.md](ohaimark.md).
 - **Spasm** — wasm baseline JIT (T1), Sarcasm's compiled tier.
   Single-pass over the validated module + branch side-table,
