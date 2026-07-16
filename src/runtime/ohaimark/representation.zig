@@ -287,6 +287,19 @@ fn initialOutput(node: ir.Node, info: specialize.NodeInfo) !Kind {
             => .tagged,
             else => error.MalformedGraph,
         },
+        .load_this => if (info.lowering == .load_this) .tagged else error.MalformedGraph,
+        .load_global => switch (info.lowering) {
+            .load_global_generic, .load_global => .tagged,
+            else => error.MalformedGraph,
+        },
+        .load_global_slot => if (info.lowering == .load_global_slot)
+            .tagged
+        else
+            error.MalformedGraph,
+        .load_environment => if (info.lowering == .load_environment)
+            .tagged
+        else
+            error.MalformedGraph,
         .jump, .branch, .return_ => .none,
     };
 }
@@ -308,7 +321,14 @@ fn arithmeticOutput(info: specialize.NodeInfo, checked: specialize.Lowering) !Ki
 
 fn nodeInputKind(node: ir.Node, info: specialize.NodeInfo) !Kind {
     return switch (node.kind) {
-        .block_parameter, .constant, .jump => .none,
+        .block_parameter,
+        .constant,
+        .load_this,
+        .load_global,
+        .load_global_slot,
+        .load_environment,
+        .jump,
+        => .none,
         .add => arithmeticInput(info, .checked_int32_add),
         .sub => arithmeticInput(info, .checked_int32_sub),
         .mul => arithmeticInput(info, .checked_int32_mul),
@@ -350,7 +370,14 @@ fn arithmeticInput(info: specialize.NodeInfo, checked: specialize.Lowering) !Kin
 
 fn nodeInputCount(kind: ir.NodeKind) u16 {
     return switch (kind) {
-        .block_parameter, .constant, .jump => 0,
+        .block_parameter,
+        .constant,
+        .load_this,
+        .load_global,
+        .load_global_slot,
+        .load_environment,
+        .jump,
+        => 0,
         .logical_not, .load_named, .branch, .return_ => 1,
         .add, .sub, .mul, .strict_eq, .less_than => 2,
     };
@@ -406,7 +433,9 @@ fn isCheckedInt32(kind: ir.NodeKind, lowering: specialize.Lowering) bool {
 }
 
 fn validateNodeContract(node: ir.Node, info: specialize.NodeInfo) !void {
-    if (node.kind != .load_named and info.assumption != null) {
+    if (node.kind != .load_named and node.kind != .load_global and
+        info.assumption != null)
+    {
         return error.MalformedGraph;
     }
     switch (node.kind) {
@@ -427,6 +456,35 @@ fn validateNodeContract(node: ir.Node, info: specialize.NodeInfo) !void {
         },
         .load_named => {
             if (!hasPayload(node.payload, .named_load)) return error.MalformedGraph;
+        },
+        .load_this => {
+            if (!hasPayload(node.payload, .none) or info.lowering != .load_this or
+                info.folded != null)
+            {
+                return error.MalformedGraph;
+            }
+        },
+        .load_global => {
+            if (!hasPayload(node.payload, .global_load) or
+                (info.lowering != .load_global_generic and info.lowering != .load_global) or
+                info.folded != null)
+            {
+                return error.MalformedGraph;
+            }
+        },
+        .load_global_slot => {
+            if (!hasPayload(node.payload, .global_slot) or
+                info.lowering != .load_global_slot or info.folded != null)
+            {
+                return error.MalformedGraph;
+            }
+        },
+        .load_environment => {
+            if (!hasPayload(node.payload, .environment_load) or
+                info.lowering != .load_environment or info.folded != null)
+            {
+                return error.MalformedGraph;
+            }
         },
         .jump, .return_ => {
             if (!hasPayload(node.payload, .none) or info.lowering != .none or

@@ -7,9 +7,12 @@ allocation plus AArch64 physical frame/edge lowering landed** (2026-07-16).
 Verified native frame entry/exit, typed physical moves, folded-value returns,
 checked int32 arithmetic/control and strict equality, every fused strict
 equality/inequality branch width, standalone strict inequality, Boolean logical
-not, and direct Lantern-frame guard exits have also landed. Guarded
+not, frame/realm loads, and direct Lantern-frame guard exits have also landed.
+Provably unobservable zero-slot environment creation is elided through a shared
+bytecode analysis; inherited lexical environments remain live. Guarded
 own/prototype/synthetic named-property loads now execute through live typed IC
-cells. Frame-reconstructing backedge safepoints now poll fuel,
+cells, as do named global and global lexical-slot loads. Frame-reconstructing
+backedge safepoints now poll fuel,
 interrupts, hooks, and pending GC work. Chunk-owned executable lifetime and
 transactional full-pipeline compilation/installation now ship. Runtime tier-up
 now enters ordinary functions behind a realm-local default-off gate; the full
@@ -514,6 +517,49 @@ frontier; `lda_global8` at 44,462, `make_environment` at 38,799, and `div` at
 36,894 are now the top three. The forced-T2 and fresh lower-tier pass lists
 remain byte-identical at 48,653 paths with the same SHA-256 above.
 
+### 3.17 Frame, environment, and global loads
+
+The optimizer now distinguishes environment allocation from environment access
+with a shared post-bytecode analysis in `bytecode/environment_elision.zig`.
+Both JIT tiers may erase `make_environment` only when every allocation in the
+chunk has zero slots and the same chunk performs no environment read or write.
+An `lda_env` without a local allocation is still valid: it reads an inherited
+environment from the existing `CallFrame`, so Ohaimark walks and null-checks the
+live parent chain rather than manufacturing optimizer state. This preserves the
+environment-record and `GetThisBinding` boundaries in
+[§9.1.1](https://tc39.es/ecma262/#sec-environment-records) and
+[§9.1.1.3.4](https://tc39.es/ecma262/#sec-getthisbinding). Malformed bytecode,
+nonzero allocations, and mixed allocation/access chunks reject normally.
+
+`lda_this` reads the executing Lantern frame after validating constructor state.
+Named global loads follow the same live-cell discipline as property loads: the
+feedback snapshot retains only arena-stable shape and scalar facts, while native
+code selects `frame.running_realm`, validates the live target, shape, slot, mode,
+prototype state, and declaration revision, then reads the current slot. Global
+lexical loads check the live declaration-slot length before indexing its live
+pointer. This keeps realm switching and global declaration invalidation faithful
+to the Global Environment Record in
+[§9.1.1.4](https://tc39.es/ecma262/#sec-global-environment-records) without
+embedding a GC-managed object in optimizer metadata.
+
+Every miss uses the original operation's pre-operation deopt point. Native tests
+cover `this`, inherited environment depth, named globals, `or_undefined`, global
+lexical slots, declaration-revision invalidation, null environments, and a frame
+whose running realm changes after code installation. The miss path reconstructs
+the frame and lets Lantern execute the operation exactly once; cold global ICs
+still reject transactionally because Ohaimark has no rooted generic-helper call
+path yet.
+
+The full forced-T2 sweep still attempted 218,345 compilations, published 6,896
+(+252), refused 211,449, and installed 670 KiB. It entered generated code 144,498
+times, completed 141,919 times, and took 2,579 guard exits; aggregate compilation
+cost was 2.043 s. `lda_global8` disappeared from the leading unsupported list and
+`make_environment` fell from 38,799 to 21,163 refusals. IR refusals fell from
+208,974 to 205,322, while codegen refusals rose from 2,727 to 6,125 because cold
+global sites now reach the transactional generic-load boundary. Forced T2 and a
+fresh lower-tier run retained byte-identical 48,653-path pass lists (SHA-256
+`10f024349d3467c72112da03dd57e0d7e543cdb819a00b3082dfecedaec614ca`).
+
 ## 4. Deoptimization contract
 
 Every speculative node will carry an explicit assumption and deopt point.
@@ -526,14 +572,15 @@ Deopt reconstructs a Lantern `CallFrame`, not a Bistromath-specific frame:
 - inlined-frame records once inlining exists.
 
 The first logical metadata checkpoint now ships. During graph construction,
-each arithmetic or named-load candidate records its **pre-operation**
+each arithmetic or guarded-load candidate records its **pre-operation**
 accumulator and live registers as SSA values. Resuming at the node's original
 bytecode offset therefore lets Lantern execute the failed operation exactly
 once. A single reverse-liveness scan per block selects those registers; dead
 defined registers do not inflate every guard state.
 
 After specialization, `runtime/ohaimark/deopt.zig` emits points only for
-checked-int32 and feedback-specialized named-load lowerings. Its byte stream
+checked-int32, feedback-specialized property/global loads, and guarded
+frame/environment loads. Its byte stream
 embeds constants directly and uses `ValueId` recoveries for non-constant SSA
 values. The verifier checks point order and bounds, lowering/assumption
 compatibility, same-block/parameter value availability, strictly ordered
@@ -618,12 +665,15 @@ traffic remains on T1/T0 until the rollout gates pass.
    widths, standalone strict inequality, guarded Boolean logical not, int32
    control flow, stable-home writes, returns, and direct Lantern-frame guard
    exits, plus live-cell own/prototype/synthetic named loads with inline/overflow
-   slot reads. Taken backedges now poll fuel, interrupts,
-   hooks, and GC work, transferring exact loop-header state before Lantern
-   handles a slow condition. Transactional compilation now publishes an owned
-   executable handle only after the full pipeline succeeds; per-tier refusal
-   and chunk teardown preserve Bistromath independently. Default-off
-   ordinary-function tier-up now ships with exact bailout-vs-fallback routing
+   slot reads. Frame `this`, inherited environments, named globals, and global
+   lexical slots now use the same exact-exit contract; shared analysis safely
+   erases only unobservable zero-slot environments. Taken backedges now poll
+   fuel, interrupts, hooks, and GC work, transferring exact loop-header state
+   before Lantern handles a slow condition. Transactional compilation now
+   publishes an owned executable handle only after the full pipeline succeeds;
+   per-tier refusal and chunk teardown preserve Bistromath independently.
+   Default-off ordinary-function tier-up now ships with exact
+   bailout-vs-fallback routing
    and child-realm policy inheritance; Ohaimark OSR remains deferred.
 9. **Gates and tuning:** full test262 pass-set differential, SES suite,
    GC-pressure runs, fuzzing, and compile-time/code-size/performance budgets.

@@ -34,6 +34,7 @@ const builtin = @import("builtin");
 
 const chunk_mod = @import("../../bytecode/chunk.zig");
 const Chunk = chunk_mod.Chunk;
+const environment_elision = @import("../../bytecode/environment_elision.zig");
 const op_mod = @import("../../bytecode/op.zig");
 const Op = op_mod.Op;
 const Value = @import("../value.zig").Value;
@@ -862,19 +863,17 @@ const Compiler = struct {
     /// collect branch targets so pass 2 can bind labels in order.
     fn scanTargets(self: *Compiler) CompileError!void {
         const code = self.chunk.code;
+        const environment_summary = environment_elision.analyze(code) catch
+            return error.UnsupportedOp;
+        if (!environment_summary.canElideMakeEnvironments()) {
+            return error.UnsupportedOp;
+        }
         for (self.chunk.handlers) |handler| {
             if (@as(usize, handler.handler_pc) >= code.len) return error.UnsupportedOp;
             _ = try self.labelFor(handler.handler_pc);
             try self.handler_entries.put(self.m.gpa, handler.handler_pc, {});
         }
         var i: usize = 0;
-        // A `make_environment 0` is emitted into the same chunk as the
-        // env reads it scopes — the elision below is only sound when
-        // there are none. Track both and reject the combination after
-        // the scan (the `make_environment` can lexically precede or
-        // follow the `lda_env`/`sta_env`).
-        var has_make_env = false;
-        var has_env_access = false;
         while (i < code.len) {
             const op: Op = @enumFromInt(code[i]);
             const after = i + 1 + Op.operandSize(op);
@@ -896,33 +895,11 @@ const Compiler = struct {
                 .lda_env, .sta_env => {
                     // Fixed-depth walks unroll; cap the unroll.
                     if (code[i + 1] > 8) return error.UnsupportedOp;
-                    has_env_access = true;
-                },
-                // zig fmt: on
-                .make_environment => {
-                    // Compiled code elides a zero-slot env allocation
-                    // (no own bindings to store). Any real slot count
-                    // means env-resident bindings: dont_compile. The
-                    // elision is only sound when the chunk has NO
-                    // `lda_env`/`sta_env` — those opcodes' depth
-                    // operands are computed relative to the pushed
-                    // env, so dropping it shifts every env read/write
-                    // one scope too shallow (the await-using getter
-                    // regression: a `make_environment 0` for an empty
-                    // block scope sat in the same chunk as `lda_env ^1`
-                    // reads of an outer closure var). The cross-check
-                    // is done after the scan.
-                    if (code[i + 1] != 0) return error.UnsupportedOp;
-                    has_make_env = true;
                 },
                 else => {},
             }
             i = after;
         }
-        // The elided `make_environment 0` would leave `frame.env` one
-        // scope shallower than the bytecode's `lda_env`/`sta_env`
-        // depths assume — dont_compile rather than read the wrong slot.
-        if (has_make_env and has_env_access) return error.UnsupportedOp;
     }
 
     fn prologue(self: *Compiler) CompileError!void {
@@ -1326,7 +1303,7 @@ const Compiler = struct {
                         try m.emit(a64.ldrImm(.x9, .x9, layout.env.parent));
                         try m.jumpCbz(.x9, td);
                     }
-                    try m.emit(a64.ldrImm(.x11, .x9, layout.env.slots + 8));
+                    try m.emit(a64.ldrImm(.x11, .x9, layout.env.slots_len));
                     try m.emit(a64.cmpImm(.x11, slot, false));
                     try m.jumpCond(.ls, td);
                     try m.emit(a64.ldrImm(.x10, .x9, layout.env.slots));
@@ -1346,7 +1323,7 @@ const Compiler = struct {
                         try m.emit(a64.ldrImm(.x9, .x9, layout.env.parent));
                         try m.jumpCbz(.x9, td);
                     }
-                    try m.emit(a64.ldrImm(.x11, .x9, layout.env.slots + 8));
+                    try m.emit(a64.ldrImm(.x11, .x9, layout.env.slots_len));
                     try m.emit(a64.cmpImm(.x11, slot, false));
                     try m.jumpCond(.ls, td);
                     try m.emit(a64.movReg(.x0, realm_reg));

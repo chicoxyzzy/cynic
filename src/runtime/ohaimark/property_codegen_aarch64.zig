@@ -248,7 +248,9 @@ fn emitPlainObject(
     try machine.emit(a64.lslImm(destination, destination, 2));
 }
 
-fn emitSlotRead(
+/// Read a shape slot from an object using the shared inline/overflow layout.
+/// The three registers must be distinct; `slot` is clobbered on overflow.
+pub fn emitSlotRead(
     allocator: std.mem.Allocator,
     machine: *Masm,
     destination: a64.Reg,
@@ -286,7 +288,9 @@ fn emitSlotRead(
     machine.bind(&done);
 }
 
-fn emitRealmU64(
+/// Load an aligned u64 field from a Realm-sized base, materializing the high
+/// page offset when it does not fit AArch64's scaled load immediate.
+pub fn emitRealmU64(
     machine: *Masm,
     realm_register: a64.Reg,
     destination: a64.Reg,

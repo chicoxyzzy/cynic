@@ -230,6 +230,22 @@ const Compiler = struct {
                 try self.emitNamedLoad(node_id, info.lowering);
                 return false;
             },
+            .load_this => {
+                try self.emitThisLoad(node_id, info.lowering);
+                return false;
+            },
+            .load_global => {
+                try self.emitGlobalLoad(node_id, info.lowering);
+                return false;
+            },
+            .load_global_slot => {
+                try self.emitGlobalSlotLoad(node_id, info.lowering);
+                return false;
+            },
+            .load_environment => {
+                try self.emitEnvironmentLoad(node_id, info.lowering);
+                return false;
+            },
             .return_ => {
                 try self.emitReturn(node_id);
                 return true;
@@ -418,6 +434,192 @@ const Compiler = struct {
         try self.emitTaggedResult(node_id, result);
     }
 
+    fn emitThisLoad(
+        self: *Compiler,
+        node_id: ir.ValueId,
+        lowering_kind: specialize.Lowering,
+    ) !void {
+        if (lowering_kind != .load_this) return error.UnsupportedNode;
+        const guard = try self.guardFor(node_id);
+        try self.machine.emit(a64.ldrImm(
+            lhs_scratch,
+            lowering.lantern_frame_register,
+            layout.frame.super_called_cell,
+        ));
+        try self.jumpToGuardIfNonzero(lhs_scratch, guard);
+        try self.machine.emit(a64.ldrImm(
+            lhs_scratch,
+            lowering.lantern_frame_register,
+            layout.frame.this_value,
+        ));
+        try self.emitTaggedResult(node_id, lhs_scratch);
+    }
+
+    fn emitGlobalLoad(
+        self: *Compiler,
+        node_id: ir.ValueId,
+        lowering_kind: specialize.Lowering,
+    ) !void {
+        if (lowering_kind == .load_global_generic) return error.UnsupportedNode;
+        if (lowering_kind != .load_global) return error.MalformedGraph;
+        const assumption = try self.assumptionFor(node_id, .load_global);
+        const expected_shape = assumption.receiver_shape orelse return error.InvalidMetadata;
+        if (assumption.holder_shape != null or assumption.slot >= expected_shape.property_count) {
+            return error.InvalidMetadata;
+        }
+        const site = switch (self.graph.nodes[node_id].payload) {
+            .global_load => |global| global,
+            else => return error.MalformedGraph,
+        };
+        if (site.feedback_index >= self.chunk.inline_load_caches.len) {
+            return error.InvalidMetadata;
+        }
+        const cell = &self.chunk.inline_load_caches[site.feedback_index];
+        const guard = try self.guardFor(node_id);
+
+        // x9 keeps the executing Realm, x10 the global object, and x11 the
+        // live IC cell. x12-x15 remain ordinary value/guard temporaries.
+        var have_running_realm: Masm.Label = .{};
+        defer have_running_realm.deinit(self.allocator);
+        try self.machine.emit(a64.ldrImm(
+            .x9,
+            lowering.lantern_frame_register,
+            layout.frame.running_realm,
+        ));
+        try self.machine.jumpCbnz(.x9, &have_running_realm);
+        try self.machine.emit(a64.movReg(.x9, lowering.realm_register));
+        self.machine.bind(&have_running_realm);
+
+        try property_codegen.emitRealmU64(
+            self.machine,
+            .x9,
+            .x10,
+            layout.realm.globals_target,
+        );
+        try self.machine.emit(a64.cmpImm(.x10, 0, false));
+        try self.jumpToGuardIf(.eq, guard);
+        try self.machine.movImm64(.x11, @intFromPtr(cell));
+
+        try self.machine.emit(a64.ldrImm(.x13, .x11, layout.load_ic_cell.shape));
+        try self.machine.emit(a64.cmpImm(.x13, 0, false));
+        try self.jumpToGuardIf(.eq, guard);
+        try self.machine.movImm64(lhs_scratch, @intFromPtr(expected_shape));
+        try self.machine.emit(a64.cmpReg(.x13, lhs_scratch));
+        try self.jumpToGuardIf(.ne, guard);
+        try self.machine.emit(a64.ldrImm(lhs_scratch, .x10, layout.object.shape));
+        try self.machine.emit(a64.cmpReg(.x13, lhs_scratch));
+        try self.jumpToGuardIf(.ne, guard);
+
+        try self.machine.emit(a64.ldrImm(lhs_scratch, .x11, layout.load_ic_cell.proto));
+        try self.machine.emit(a64.cmpImm(lhs_scratch, 0, false));
+        try self.jumpToGuardIf(.ne, guard);
+        try self.machine.emit(a64.ldrImm(lhs_scratch, .x11, layout.load_ic_cell.proto_rev));
+        try self.machine.movImm64(result_scratch, assumption.revision);
+        try self.machine.emit(a64.cmpReg(lhs_scratch, result_scratch));
+        try self.jumpToGuardIf(.ne, guard);
+        try property_codegen.emitRealmU64(
+            self.machine,
+            .x9,
+            result_scratch,
+            layout.realm.globals_decl_revision,
+        );
+        try self.machine.emit(a64.cmpReg(lhs_scratch, result_scratch));
+        try self.jumpToGuardIf(.ne, guard);
+
+        try self.machine.emit(a64.ldrImmW(result_scratch, .x11, layout.load_ic_cell.slot));
+        try self.machine.movImm64(lhs_scratch, assumption.slot);
+        try self.machine.emit(a64.cmpReg(result_scratch, lhs_scratch));
+        try self.jumpToGuardIf(.ne, guard);
+        try property_codegen.emitSlotRead(
+            self.allocator,
+            self.machine,
+            lhs_scratch,
+            .x10,
+            result_scratch,
+        );
+        try self.emitTaggedResult(node_id, lhs_scratch);
+    }
+
+    fn emitGlobalSlotLoad(
+        self: *Compiler,
+        node_id: ir.ValueId,
+        lowering_kind: specialize.Lowering,
+    ) !void {
+        if (lowering_kind != .load_global_slot) return error.UnsupportedNode;
+        const absolute_index = switch (self.graph.nodes[node_id].payload) {
+            .global_slot => |slot| slot,
+            else => return error.MalformedGraph,
+        };
+        const guard = try self.guardFor(node_id);
+        var have_running_realm: Masm.Label = .{};
+        defer have_running_realm.deinit(self.allocator);
+        try self.machine.emit(a64.ldrImm(
+            lhs_scratch,
+            lowering.lantern_frame_register,
+            layout.frame.running_realm,
+        ));
+        try self.machine.jumpCbnz(lhs_scratch, &have_running_realm);
+        try self.machine.emit(a64.movReg(lhs_scratch, lowering.realm_register));
+        self.machine.bind(&have_running_realm);
+
+        try property_codegen.emitRealmU64(
+            self.machine,
+            lhs_scratch,
+            rhs_scratch,
+            layout.realm.globals_decl_slots_len,
+        );
+        try self.machine.movImm64(result_scratch, absolute_index);
+        try self.machine.emit(a64.cmpReg(rhs_scratch, result_scratch));
+        try self.jumpToGuardIf(.ls, guard);
+        try property_codegen.emitRealmU64(
+            self.machine,
+            lhs_scratch,
+            rhs_scratch,
+            layout.realm.globals_decl_slots_ptr,
+        );
+        try self.machine.emit(a64.lslImm(result_scratch, result_scratch, 3));
+        try self.machine.emit(a64.addReg(rhs_scratch, rhs_scratch, result_scratch));
+        try self.machine.emit(a64.ldrImm(lhs_scratch, rhs_scratch, 0));
+        try self.emitTaggedResult(node_id, lhs_scratch);
+    }
+
+    fn emitEnvironmentLoad(
+        self: *Compiler,
+        node_id: ir.ValueId,
+        lowering_kind: specialize.Lowering,
+    ) !void {
+        if (lowering_kind != .load_environment) return error.UnsupportedNode;
+        const site = switch (self.graph.nodes[node_id].payload) {
+            .environment_load => |environment| environment,
+            else => return error.MalformedGraph,
+        };
+        if (site.depth > 8) return error.InvalidMetadata;
+        const guard = try self.guardFor(node_id);
+        try self.machine.emit(a64.ldrImm(
+            lhs_scratch,
+            lowering.lantern_frame_register,
+            layout.frame.env,
+        ));
+        try self.machine.emit(a64.cmpImm(lhs_scratch, 0, false));
+        try self.jumpToGuardIf(.eq, guard);
+        var depth = site.depth;
+        while (depth > 0) : (depth -= 1) {
+            try self.machine.emit(a64.ldrImm(lhs_scratch, lhs_scratch, layout.env.parent));
+            try self.machine.emit(a64.cmpImm(lhs_scratch, 0, false));
+            try self.jumpToGuardIf(.eq, guard);
+        }
+        try self.machine.emit(a64.ldrImm(rhs_scratch, lhs_scratch, layout.env.slots_len));
+        try self.machine.emit(a64.cmpImm(rhs_scratch, site.slot, false));
+        try self.jumpToGuardIf(.ls, guard);
+        try self.machine.emit(a64.ldrImm(lhs_scratch, lhs_scratch, layout.env.slots));
+        try self.machine.emit(a64.ldrImm(
+            lhs_scratch,
+            lhs_scratch,
+            @as(u15, site.slot) * 8,
+        ));
+        try self.emitTaggedResult(node_id, lhs_scratch);
+    }
+
     fn emitTaggedInput(
         self: *Compiler,
         node_id: ir.ValueId,
@@ -471,11 +673,12 @@ const Compiler = struct {
         }
         const assumption = self.specialization.assumptions[assumption_index];
         if (assumption.kind != expected_kind) return error.InvalidMetadata;
-        const site = switch (self.graph.nodes[node_id].payload) {
-            .named_load => |named| named,
+        const feedback_index = switch (self.graph.nodes[node_id].payload) {
+            .named_load => |named| named.feedback_index,
+            .global_load => |global| global.feedback_index,
             else => return error.MalformedGraph,
         };
-        if (assumption.feedback_index != site.feedback_index) return error.InvalidMetadata;
+        if (assumption.feedback_index != feedback_index) return error.InvalidMetadata;
         return assumption;
     }
 

@@ -209,7 +209,19 @@ const Runner = struct {
                 const node = self.graph.nodes[node_index];
                 switch (node.kind) {
                     .block_parameter => return error.MalformedGraph,
-                    .constant, .add, .sub, .mul, .strict_eq, .logical_not, .less_than, .load_named => {
+                    .constant,
+                    .add,
+                    .sub,
+                    .mul,
+                    .strict_eq,
+                    .logical_not,
+                    .less_than,
+                    .load_named,
+                    .load_this,
+                    .load_global,
+                    .load_global_slot,
+                    .load_environment,
+                    => {
                         switch (try self.evaluateValueNode(node_id)) {
                             .value => |value| try self.define(node_id, value),
                             .guard_failed => return self.deoptAt(node_id),
@@ -281,6 +293,23 @@ const Runner = struct {
                 .load_named_generic => error.UnsupportedNode,
                 else => error.MalformedGraph,
             },
+            .load_this => if (info.lowering == .load_this)
+                .{ .value = .{ .tagged = self.this_value } }
+            else
+                error.MalformedGraph,
+            .load_global => switch (info.lowering) {
+                .load_global => .guard_failed,
+                .load_global_generic => error.UnsupportedNode,
+                else => error.MalformedGraph,
+            },
+            .load_global_slot => if (info.lowering == .load_global_slot)
+                .guard_failed
+            else
+                error.MalformedGraph,
+            .load_environment => if (info.lowering == .load_environment)
+                .guard_failed
+            else
+                error.MalformedGraph,
             else => error.MalformedGraph,
         };
     }

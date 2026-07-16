@@ -1243,6 +1243,19 @@ sampling by `/profile`.
   exposing `lda_global8` (44,462), `make_environment` (38,799), and `div`
   (36,894). Forced T2 and a fresh lower-tier run retained byte-identical
   48,653-path pass sets. See [ohaimark.md](ohaimark.md) §3.16.
+- **Ohaimark frame, environment, and global loads (2026-07-17).** A shared
+  post-bytecode analysis now lets Bistromath and Ohaimark erase only
+  unobservable zero-slot `make_environment` instructions; nonzero or locally
+  accessed environments still reject, while inherited `lda_env` walks the live
+  frame chain. Ohaimark now executes `lda_this`, named global loads including
+  `or_undefined`, global lexical-slot loads, and inherited environment loads.
+  Generated code selects the frame's executing realm, validates live IC shape,
+  slot, mode, and declaration-revision facts, and bounds-checks live lexical and
+  environment slot slices before access. Every miss restores the exact
+  pre-operation Lantern state. Publications rose from 6,644 to 6,896;
+  `lda_global8` left the leading refusal list and `make_environment` fell from
+  38,799 to 21,163. The full forced-T2 and fresh lower-tier runs retained
+  byte-identical 48,653-path pass lists. See [ohaimark.md](ohaimark.md) §3.17.
 - **Generational GC.** A JSC-Riptide-style non-moving
   generational collector — store-site routing, generation header
   bits, a write barrier + remembered set, `collectYoung` with
@@ -1634,10 +1647,11 @@ and the per-builtin checklist; this section tracks status.
   evaluator, abstract register/spill allocation, and AArch64 frame/edge
   lowering plus native frame entry/exit, typed moves, and folded returns ship;
   checked int32 arithmetic/control and direct Lantern-frame guard exits now
-  execute in tests, as do live-cell own/prototype/synthetic named loads and
-  frame-reconstructing backedge safepoints. Transactional full-pipeline
-  compilation and chunk-owned executable lifetime now ship; runtime tier-up
-  remains planned. See
+  execute, as do live-cell property/global loads, guarded frame/environment
+  loads, and frame-reconstructing backedge safepoints. Transactional
+  full-pipeline compilation, chunk-owned executable lifetime, and default-off
+  ordinary-function tier-up now ship. Ohaimark OSR, rooted helper calls,
+  broader opcode coverage, and default-on rollout remain planned. See
   [ohaimark.md](ohaimark.md).
 - **Spasm** — wasm baseline JIT (T1), Sarcasm's compiled tier.
   Single-pass over the validated module + branch side-table,

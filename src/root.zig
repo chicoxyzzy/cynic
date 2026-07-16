@@ -143,6 +143,7 @@ test {
     _ = @import("bytecode/compiler.zig");
     _ = @import("bytecode/literals.zig");
     _ = @import("bytecode/arguments_scan.zig");
+    _ = @import("bytecode/environment_elision.zig");
     _ = @import("wasm_format.zig");
     _ = @import("wasm_diag.zig");
     _ = @import("wasm_inspect.zig");

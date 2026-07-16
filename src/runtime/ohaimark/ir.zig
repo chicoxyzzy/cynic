@@ -12,6 +12,7 @@ const std = @import("std");
 
 const chunk_mod = @import("../../bytecode/chunk.zig");
 const Chunk = chunk_mod.Chunk;
+const environment_elision = @import("../../bytecode/environment_elision.zig");
 const Op = @import("../../bytecode/op.zig").Op;
 const liveness = @import("../../bytecode/liveness.zig");
 const feedback_mod = @import("feedback.zig");
@@ -34,6 +35,10 @@ pub const NodeKind = enum {
     logical_not,
     less_than,
     load_named,
+    load_this,
+    load_global,
+    load_global_slot,
+    load_environment,
     jump,
     branch,
     return_,
@@ -60,12 +65,26 @@ pub const NamedLoad = struct {
     feedback_index: u16,
 };
 
+pub const GlobalLoad = struct {
+    key_constant: u16,
+    feedback_index: u16,
+    or_undefined: bool,
+};
+
+pub const EnvironmentLoad = struct {
+    depth: u8,
+    slot: u8,
+};
+
 pub const Payload = union(enum) {
     none,
     immediate: Immediate,
     parameter: u32,
     branch: BranchCondition,
     named_load: NamedLoad,
+    global_load: GlobalLoad,
+    global_slot: u32,
+    environment_load: EnvironmentLoad,
 };
 
 pub const Node = struct {
@@ -164,6 +183,13 @@ pub const Graph = struct {
         // Handler entry defines accumulator/catch state via the unwinder. It
         // needs an explicit exceptional-edge environment, not a normal phi.
         if (chunk.handlers.len != 0) return error.UnsupportedExceptionFlow;
+
+        const environment_summary = environment_elision.analyze(chunk.code) catch
+            return error.MalformedBytecode;
+        if (!environment_summary.canElideMakeEnvironments()) {
+            if (diagnostics) |out| out.unsupported_opcode = .make_environment;
+            return error.UnsupportedOp;
+        }
 
         var analysis = try liveness.analyze(
             allocator,
@@ -646,6 +672,90 @@ const Builder = struct {
                         live_registers,
                     );
                 },
+                .lda_this => {
+                    const live_registers = try deopt_liveness.take(&deopt_live_cursor, @intCast(pc));
+                    accumulator = try self.addDeoptNode(
+                        .load_this,
+                        @intCast(pc),
+                        &.{},
+                        .none,
+                        block_index,
+                        accumulator,
+                        registers,
+                        live_registers,
+                    );
+                },
+                .lda_global, .lda_global_or_undef, .lda_global8, .lda_global_or_undef8 => |load| {
+                    const narrow = load == .lda_global8 or load == .lda_global_or_undef8;
+                    const key: u16 = if (narrow)
+                        self.chunk.code[pc + 1]
+                    else
+                        readU16(self.chunk.code, pc + 1);
+                    const feedback_index: u16 = if (narrow)
+                        self.chunk.code[pc + 2]
+                    else
+                        readU16(self.chunk.code, pc + 3);
+                    if (key >= self.chunk.constants.len or
+                        feedback_index >= self.chunk.inline_load_caches.len)
+                    {
+                        return error.MalformedBytecode;
+                    }
+                    const live_registers = try deopt_liveness.take(&deopt_live_cursor, @intCast(pc));
+                    accumulator = try self.addDeoptNode(
+                        .load_global,
+                        @intCast(pc),
+                        &.{},
+                        .{ .global_load = .{
+                            .key_constant = key,
+                            .feedback_index = feedback_index,
+                            .or_undefined = load == .lda_global_or_undef or
+                                load == .lda_global_or_undef8,
+                        } },
+                        block_index,
+                        accumulator,
+                        registers,
+                        live_registers,
+                    );
+                },
+                .lda_global_slot => {
+                    const relative = readU32(self.chunk.code, pc + 1);
+                    if (relative > std.math.maxInt(u32) - self.chunk.global_lexical_base) {
+                        return error.MalformedBytecode;
+                    }
+                    const live_registers = try deopt_liveness.take(&deopt_live_cursor, @intCast(pc));
+                    accumulator = try self.addDeoptNode(
+                        .load_global_slot,
+                        @intCast(pc),
+                        &.{},
+                        .{ .global_slot = self.chunk.global_lexical_base + relative },
+                        block_index,
+                        accumulator,
+                        registers,
+                        live_registers,
+                    );
+                },
+                .lda_env => {
+                    const depth = self.chunk.code[pc + 1];
+                    if (depth > 8) {
+                        if (self.diagnostics) |out| out.unsupported_opcode = .lda_env;
+                        return error.UnsupportedOp;
+                    }
+                    const live_registers = try deopt_liveness.take(&deopt_live_cursor, @intCast(pc));
+                    accumulator = try self.addDeoptNode(
+                        .load_environment,
+                        @intCast(pc),
+                        &.{},
+                        .{ .environment_load = .{
+                            .depth = depth,
+                            .slot = self.chunk.code[pc + 2],
+                        } },
+                        block_index,
+                        accumulator,
+                        registers,
+                        live_registers,
+                    );
+                },
+                .make_environment => {},
                 .return_ => {
                     _ = try self.addNode(.return_, @intCast(pc), &.{accumulator}, .none);
                     terminated = true;
@@ -859,6 +969,13 @@ fn isDeoptCandidate(op: Op) bool {
         .lda_property8,
         .lda_property_reg,
         .lda_property_reg8,
+        .lda_this,
+        .lda_global,
+        .lda_global_or_undef,
+        .lda_global8,
+        .lda_global_or_undef8,
+        .lda_global_slot,
+        .lda_env,
         => true,
         else => false,
     };
@@ -895,4 +1012,8 @@ fn readI32(code: []const u8, at: usize) i32 {
 
 fn readU16(code: []const u8, at: usize) u16 {
     return std.mem.readInt(u16, code[at..][0..2], .little);
+}
+
+fn readU32(code: []const u8, at: usize) u32 {
+    return std.mem.readInt(u32, code[at..][0..4], .little);
 }

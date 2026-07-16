@@ -71,12 +71,18 @@ pub const Lowering = enum {
     load_named_own,
     load_named_prototype,
     load_named_synthetic,
+    load_this,
+    load_global_generic,
+    load_global,
+    load_global_slot,
+    load_environment,
 };
 
 pub const AssumptionKind = enum {
     load_own,
     load_prototype,
     load_synthetic,
+    load_global,
 };
 
 /// A removable optimization assumption. `feedback_index` tells future
@@ -169,14 +175,36 @@ pub const Plan = struct {
         var assumptions: std.ArrayListUnmanaged(Assumption) = .empty;
         defer assumptions.deinit(allocator);
         for (graph.nodes, 0..) |node, node_index| {
-            if (node.kind != .load_named) continue;
-            const site = switch (node.payload) {
-                .named_load => |named| named,
-                else => return error.MalformedGraph,
+            const feedback_index: u16, const decision: LoadDecision = switch (node.kind) {
+                .load_named => blk: {
+                    const site = switch (node.payload) {
+                        .named_load => |named| named,
+                        else => return error.MalformedGraph,
+                    };
+                    if (site.feedback_index >= graph.feedback.loads.len) {
+                        return error.MalformedGraph;
+                    }
+                    break :blk .{
+                        site.feedback_index,
+                        namedLoadDecision(graph.feedback.loads[site.feedback_index]),
+                    };
+                },
+                .load_global => blk: {
+                    const site = switch (node.payload) {
+                        .global_load => |global| global,
+                        else => return error.MalformedGraph,
+                    };
+                    if (site.feedback_index >= graph.feedback.loads.len) {
+                        return error.MalformedGraph;
+                    }
+                    break :blk .{
+                        site.feedback_index,
+                        globalLoadDecision(graph.feedback.loads[site.feedback_index]),
+                    };
+                },
+                else => continue,
             };
-            if (site.feedback_index >= graph.feedback.loads.len) return error.MalformedGraph;
-            const observed = graph.feedback.loads[site.feedback_index];
-            const decision = loadDecision(observed);
+            const observed = graph.feedback.loads[feedback_index];
             if (node_info[node_index].result_type.isBottom()) return error.MalformedGraph;
             node_info[node_index].lowering = decision.lowering;
             if (decision.kind) |kind| {
@@ -184,7 +212,7 @@ pub const Plan = struct {
                 const assumption_index: u32 = @intCast(assumptions.items.len);
                 try assumptions.append(allocator, .{
                     .kind = kind,
-                    .feedback_index = site.feedback_index,
+                    .feedback_index = feedback_index,
                     .receiver_shape = observed.receiver_shape,
                     .holder_shape = observed.holder_shape,
                     .slot = observed.slot,
@@ -213,13 +241,22 @@ const LoadDecision = struct {
     kind: ?AssumptionKind,
 };
 
-fn loadDecision(observed: feedback.Load) LoadDecision {
+fn namedLoadDecision(observed: feedback.Load) LoadDecision {
     return switch (observed.mode) {
         .cold => .{ .lowering = .load_named_generic, .kind = null },
         .own_data => .{ .lowering = .load_named_own, .kind = .load_own },
         .prototype_data => .{ .lowering = .load_named_prototype, .kind = .load_prototype },
         .synthetic_accessor => .{ .lowering = .load_named_synthetic, .kind = .load_synthetic },
     };
+}
+
+fn globalLoadDecision(observed: feedback.Load) LoadDecision {
+    if (observed.mode != .own_data or observed.receiver_shape == null or
+        observed.holder_shape != null)
+    {
+        return .{ .lowering = .load_global_generic, .kind = null };
+    }
+    return .{ .lowering = .load_global, .kind = .load_global };
 }
 
 fn inferNode(graph: *const ir.Graph, facts: []const NodeInfo, id: ir.ValueId) !NodeInfo {
@@ -239,6 +276,22 @@ fn inferNode(graph: *const ir.Graph, facts: []const NodeInfo, id: ir.ValueId) !N
         .less_than => inferLessThan(facts, inputs),
         .load_named => if (inputs.len == 1 and !facts[inputs[0]].result_type.isBottom())
             .{ .result_type = Type.any, .lowering = .load_named_generic }
+        else
+            .{},
+        .load_this => if (inputs.len == 0)
+            .{ .result_type = Type.any, .lowering = .load_this }
+        else
+            .{},
+        .load_global => if (inputs.len == 0)
+            .{ .result_type = Type.any, .lowering = .load_global_generic }
+        else
+            .{},
+        .load_global_slot => if (inputs.len == 0)
+            .{ .result_type = Type.any, .lowering = .load_global_slot }
+        else
+            .{},
+        .load_environment => if (inputs.len == 0)
+            .{ .result_type = Type.any, .lowering = .load_environment }
         else
             .{},
         .jump, .branch, .return_ => .{},

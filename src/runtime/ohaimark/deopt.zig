@@ -186,6 +186,10 @@ pub fn requiresDeopt(lowering: specialize.Lowering) bool {
         .load_named_own,
         .load_named_prototype,
         .load_named_synthetic,
+        .load_this,
+        .load_global,
+        .load_global_slot,
+        .load_environment,
         => true,
         else => false,
     };
@@ -210,6 +214,10 @@ fn validateGuardedNode(
         .load_named_own => try hasAssumption(plan, info, .load_own) and node.kind == .load_named,
         .load_named_prototype => try hasAssumption(plan, info, .load_prototype) and node.kind == .load_named,
         .load_named_synthetic => try hasAssumption(plan, info, .load_synthetic) and node.kind == .load_named,
+        .load_this => node.kind == .load_this and info.assumption == null,
+        .load_global => try hasAssumption(plan, info, .load_global) and node.kind == .load_global,
+        .load_global_slot => node.kind == .load_global_slot and info.assumption == null,
+        .load_environment => node.kind == .load_environment and info.assumption == null,
         else => false,
     };
     if (!valid or node.frame_state == null) return error.MalformedGraph;

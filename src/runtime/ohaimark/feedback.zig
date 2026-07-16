@@ -121,10 +121,11 @@ pub const Snapshot = struct {
                 else
                     null,
                 .slot = cell.slot,
-                .revision = if (mode == .prototype_data or mode == .synthetic_accessor)
-                    cell.proto_rev
-                else
-                    0,
+                // Own-property cells normally carry zero here. Global-load
+                // cells reuse `proto_rev` for GlobalBindings.decl_revision,
+                // so retain it in the pointer-free snapshot for the global
+                // specialization to validate against live realm state.
+                .revision = cell.proto_rev,
             };
         }
 

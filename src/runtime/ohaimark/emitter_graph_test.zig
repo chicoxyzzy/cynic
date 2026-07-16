@@ -273,6 +273,52 @@ fn namedLoadChunk(realm: *Realm) !chunk_mod.Chunk {
     return builder.finish();
 }
 
+fn thisLoadChunk(with_empty_environment: bool) !chunk_mod.Chunk {
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    if (with_empty_environment) {
+        try builder.emitOp(.make_environment, span);
+        try builder.emitU8(0);
+    }
+    try builder.emitOp(.lda_this, span);
+    try builder.emitOp(.return_, span);
+    return builder.finish();
+}
+
+fn environmentLoadChunk(depth: u8, slot: u8) !chunk_mod.Chunk {
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    try builder.emitOp(.lda_env, span);
+    try builder.emitU8(depth);
+    try builder.emitU8(slot);
+    try builder.emitOp(.return_, span);
+    return builder.finish();
+}
+
+fn globalLoadChunk(realm: *Realm, or_undefined: bool) !chunk_mod.Chunk {
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    const key = try builder.addConstant(Value.fromString(
+        try realm.heap.allocateString("ohaimarkGlobal"),
+    ));
+    if (or_undefined) {
+        try builder.emitLdaGlobalOrUndef(span, key);
+    } else {
+        try builder.emitLdaGlobal(span, key);
+    }
+    try builder.emitOp(.return_, span);
+    return builder.finish();
+}
+
+fn globalSlotLoadChunk(slot: u32) !chunk_mod.Chunk {
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    try builder.emitOp(.lda_global_slot, span);
+    try builder.emitU32(slot);
+    try builder.emitOp(.return_, span);
+    return builder.finish();
+}
+
 const SafepointLoop = struct {
     chunk: chunk_mod.Chunk,
     header: u32,
@@ -940,6 +986,218 @@ test "Ohaimark AArch64 GC safepoint transfers a tagged root before collection" {
         (try resumeLantern(&realm, frame)).bits,
     );
     try testing.expectEqual(@as(usize, 1), realm.heap.objectCount());
+}
+
+test "Ohaimark IR elides only unobservable empty environments" {
+    var safe = try thisLoadChunk(true);
+    defer safe.deinit(testing.allocator);
+    var safe_graph = try ir.Graph.build(testing.allocator, &safe);
+    defer safe_graph.deinit();
+    try testing.expect(findNodeInGraph(&safe_graph, .load_this) != null);
+
+    var mixed_builder = Builder.init(testing.allocator);
+    defer mixed_builder.deinit();
+    try mixed_builder.emitOp(.make_environment, span);
+    try mixed_builder.emitU8(0);
+    try mixed_builder.emitOp(.lda_env, span);
+    try mixed_builder.emitU8(1);
+    try mixed_builder.emitU8(0);
+    try mixed_builder.emitOp(.return_, span);
+    var mixed = try mixed_builder.finish();
+    defer mixed.deinit(testing.allocator);
+    var diagnostics: ir.BuildDiagnostics = .{};
+    try testing.expectError(
+        error.UnsupportedOp,
+        ir.Graph.buildWithDiagnostics(testing.allocator, &mixed, &diagnostics),
+    );
+    try testing.expectEqual(Op.make_environment, diagnostics.unsupported_opcode.?);
+
+    var real_builder = Builder.init(testing.allocator);
+    defer real_builder.deinit();
+    try real_builder.emitOp(.make_environment, span);
+    try real_builder.emitU8(1);
+    try real_builder.emitOp(.return_, span);
+    var real = try real_builder.finish();
+    defer real.deinit(testing.allocator);
+    diagnostics = .{};
+    try testing.expectError(
+        error.UnsupportedOp,
+        ir.Graph.buildWithDiagnostics(testing.allocator, &real, &diagnostics),
+    );
+    try testing.expectEqual(Op.make_environment, diagnostics.unsupported_opcode.?);
+}
+
+test "Ohaimark AArch64 frame this load guards derived-constructor state" {
+    if (comptime !masm.native_aarch64) return error.SkipZigTest;
+    var chunk = try thisLoadChunk(false);
+    defer chunk.deinit(testing.allocator);
+    var native = try NativeGraph.build(&chunk);
+    defer native.deinit();
+    const node_id = try findNode(&native, .load_this);
+
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = false;
+    const registers = try testing.allocator.alloc(Value, chunk.register_count);
+    defer testing.allocator.free(registers);
+    var frame = testFrame(&chunk, registers);
+    frame.this_value = Value.fromInt32(42);
+    try testing.expectEqual(
+        @intFromEnum(codegen.EntryResult.done),
+        try executeNative(&native, &realm, &frame),
+    );
+    try testing.expectEqual(Value.fromInt32(42).bits, frame.accumulator.bits);
+
+    var super_called = true;
+    frame = testFrame(&chunk, registers);
+    frame.accumulator = Value.null_;
+    frame.this_value = Value.fromInt32(77);
+    frame.super_called_cell = &super_called;
+    try testing.expectEqual(
+        @intFromEnum(codegen.EntryResult.resume_interp),
+        try executeNative(&native, &realm, &frame),
+    );
+    try testing.expectEqual(native.graph.nodes[node_id].bytecode_offset, frame.ip);
+    try testing.expectEqual(Value.null_.bits, frame.accumulator.bits);
+    try testing.expectEqual(Value.fromInt32(77).bits, (try resumeLantern(&realm, frame)).bits);
+}
+
+test "Ohaimark AArch64 inherited environment load walks and guards the chain" {
+    if (comptime !masm.native_aarch64) return error.SkipZigTest;
+    var chunk = try environmentLoadChunk(1, 0);
+    defer chunk.deinit(testing.allocator);
+    var native = try NativeGraph.build(&chunk);
+    defer native.deinit();
+    const node_id = try findNode(&native, .load_environment);
+
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = false;
+    const outer = try realm.heap.allocateEnvironment(null, 1);
+    realm.heap.storeEnvSlot(outer, 0, Value.fromInt32(42));
+    const inner = try realm.heap.allocateEnvironment(outer, 0);
+    const registers = try testing.allocator.alloc(Value, chunk.register_count);
+    defer testing.allocator.free(registers);
+    var frame = testFrame(&chunk, registers);
+    frame.env = inner;
+    try testing.expectEqual(
+        @intFromEnum(codegen.EntryResult.done),
+        try executeNative(&native, &realm, &frame),
+    );
+    try testing.expectEqual(Value.fromInt32(42).bits, frame.accumulator.bits);
+
+    frame = testFrame(&chunk, registers);
+    frame.accumulator = Value.null_;
+    try testing.expectEqual(
+        @intFromEnum(codegen.EntryResult.resume_interp),
+        try executeNative(&native, &realm, &frame),
+    );
+    try testing.expectEqual(native.graph.nodes[node_id].bytecode_offset, frame.ip);
+    try testing.expectEqual(Value.null_.bits, frame.accumulator.bits);
+}
+
+test "Ohaimark AArch64 global load guards live target shape and declaration revision" {
+    if (comptime !masm.native_aarch64) return error.SkipZigTest;
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.hardened = false;
+    try realm.installBuiltins();
+    realm.jit_enabled = false;
+    try realm.globals.put(realm.allocator, "ohaimarkGlobal", Value.fromInt32(42));
+
+    var chunk = try globalLoadChunk(&realm, false);
+    defer chunk.deinit(testing.allocator);
+    const target = realm.globals.target orelse return error.TestUnexpectedResult;
+    const target_shape = target.shape orelse return error.TestUnexpectedResult;
+    const slot = (target_shape.lookup("ohaimarkGlobal") orelse
+        return error.TestUnexpectedResult).slot;
+    chunk.inline_load_caches[0].fillOwnData(target_shape, slot);
+    chunk.inline_load_caches[0].proto_rev = realm.globals.decl_revision;
+    var native = try NativeGraph.build(&chunk);
+    defer native.deinit();
+    const node_id = try findNode(&native, .load_global);
+    try testing.expectEqual(
+        specialize.Lowering.load_global,
+        native.specialization.node_info[node_id].lowering,
+    );
+
+    const registers = try testing.allocator.alloc(Value, chunk.register_count);
+    defer testing.allocator.free(registers);
+    var frame = testFrame(&chunk, registers);
+    try testing.expectEqual(
+        @intFromEnum(codegen.EntryResult.done),
+        try executeNative(&native, &realm, &frame),
+    );
+    try testing.expectEqual(Value.fromInt32(42).bits, frame.accumulator.bits);
+
+    // `typeof`'s unresolved-global variant shares the hit predicate and only
+    // differs after a miss has returned to Lantern.
+    var or_undefined_chunk = try globalLoadChunk(&realm, true);
+    defer or_undefined_chunk.deinit(testing.allocator);
+    or_undefined_chunk.inline_load_caches[0].fillOwnData(target_shape, slot);
+    or_undefined_chunk.inline_load_caches[0].proto_rev = realm.globals.decl_revision;
+    var or_undefined_native = try NativeGraph.build(&or_undefined_chunk);
+    defer or_undefined_native.deinit();
+    const or_undefined_id = try findNode(&or_undefined_native, .load_global);
+    try testing.expect(or_undefined_native.graph.nodes[or_undefined_id].payload.global_load.or_undefined);
+    const or_undefined_registers = try testing.allocator.alloc(
+        Value,
+        or_undefined_chunk.register_count,
+    );
+    defer testing.allocator.free(or_undefined_registers);
+    var or_undefined_frame = testFrame(&or_undefined_chunk, or_undefined_registers);
+    try testing.expectEqual(
+        @intFromEnum(codegen.EntryResult.done),
+        try executeNative(&or_undefined_native, &realm, &or_undefined_frame),
+    );
+    try testing.expectEqual(Value.fromInt32(42).bits, or_undefined_frame.accumulator.bits);
+
+    try realm.globals.installScriptLexBinding(realm.allocator, "ohaimarkGlobal", false);
+    try realm.globals.putDecl(realm.allocator, "ohaimarkGlobal", Value.fromInt32(99));
+    frame = testFrame(&chunk, registers);
+    frame.accumulator = Value.null_;
+    try testing.expectEqual(
+        @intFromEnum(codegen.EntryResult.resume_interp),
+        try executeNative(&native, &realm, &frame),
+    );
+    try testing.expectEqual(native.graph.nodes[node_id].bytecode_offset, frame.ip);
+    try testing.expectEqual(Value.null_.bits, frame.accumulator.bits);
+    try testing.expectEqual(Value.fromInt32(99).bits, (try resumeLantern(&realm, frame)).bits);
+}
+
+test "Ohaimark AArch64 global lexical slot load guards the live slice" {
+    if (comptime !masm.native_aarch64) return error.SkipZigTest;
+    var chunk = try globalSlotLoadChunk(0);
+    defer chunk.deinit(testing.allocator);
+    var native = try NativeGraph.build(&chunk);
+    defer native.deinit();
+    const node_id = try findNode(&native, .load_global_slot);
+
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = false;
+    try realm.globals.installScriptLexBinding(realm.allocator, "slot", false);
+    try realm.globals.putDecl(realm.allocator, "slot", Value.fromInt32(42));
+    const registers = try testing.allocator.alloc(Value, chunk.register_count);
+    defer testing.allocator.free(registers);
+    var frame = testFrame(&chunk, registers);
+    try testing.expectEqual(
+        @intFromEnum(codegen.EntryResult.done),
+        try executeNative(&native, &realm, &frame),
+    );
+    try testing.expectEqual(Value.fromInt32(42).bits, frame.accumulator.bits);
+
+    var empty_realm = Realm.init(testing.allocator);
+    defer empty_realm.deinit();
+    frame = testFrame(&chunk, registers);
+    frame.accumulator = Value.null_;
+    frame.running_realm = &empty_realm;
+    try testing.expectEqual(
+        @intFromEnum(codegen.EntryResult.resume_interp),
+        try executeNative(&native, &realm, &frame),
+    );
+    try testing.expectEqual(native.graph.nodes[node_id].bytecode_offset, frame.ip);
+    try testing.expectEqual(Value.null_.bits, frame.accumulator.bits);
 }
 
 test "Ohaimark AArch64 own named load guards live IC state" {
