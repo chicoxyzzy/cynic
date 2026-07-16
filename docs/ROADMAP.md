@@ -1205,6 +1205,18 @@ sampling by `/profile`.
   generated completions with zero guard exits while retaining the exact
   48,517-path baseline pass set. See
   [ohaimark.md](ohaimark.md) §3.16.
+- **Ohaimark refusal diagnostics (2026-07-16).** Every failed T2 compile now
+  records the exact pipeline boundary, and IR construction additionally carries
+  the first unsupported bytecode directly from the builder. Heap/worker merges
+  saturate both histograms; `--ohaimark-stats` prints stages in pipeline order
+  and the top opcodes in deterministic count/opcode order. A full classified
+  run attributed 209,006 of 211,780 refusals (98.69%) to IR. The leading
+  `jmp_if_strict_neq8` (44,069), `make_environment` (38,799), and `lda_global8`
+  (32,265) buckets explain 54.36% of all refusals. The fresh same-tree lower-tier
+  and forced-T2 pass sets matched exactly at 48,653 paths. This selects the full
+  fused strict-equality/inequality branch family plus deopt-capable strict
+  equality as the next coverage slice; environment materialization and global
+  load ICs follow. See [ohaimark.md](ohaimark.md) §3.16.
 - **Generational GC.** A JSC-Riptide-style non-moving
   generational collector — store-site routing, generation header
   bits, a write barrier + remembered set, `collectYoung` with

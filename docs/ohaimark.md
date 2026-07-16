@@ -430,16 +430,23 @@ V8 exposes optimizing-tier publication/deoptimization through `--trace-opt` /
 questions. Cynic uses a smaller aggregate suited to an embedded engine: one
 opt-in `OhaimarkStats` lives on the shared heap and records compile attempts,
 publications/refusals, compile wall time (total/max), installed code bytes,
-generated entries, normal completions, and guard exits. Child realms naturally
-contribute because they share the parent heap; independent agent heaps remain
-independent rather than introducing cross-thread atomics into the runtime.
+generated entries, normal completions, guard exits, the pipeline stage of every
+refusal, and the first unsupported bytecode when IR construction is the
+boundary. Stage names are append-only diagnostic identifiers; opcode names come
+directly from the bytecode `Op` enum. Child realms naturally contribute because
+they share the parent heap; independent agent heaps remain independent rather
+than introducing cross-thread atomics into the runtime.
 
 Disabled telemetry performs no clock read and no entry-counter mutation. It is
 host-only state, never a JS-visible global or object property. The test262
 `--ohaimark-stats` flag enables it per fixture, merges snapshots across harness
-workers, and prints one main-phase summary. CI pairs that report with the full
-advisory `--ohaimark` pass-set differential and runs both T1 and T2 postures in
-the ReleaseSafe `--gc-threshold=1` matrix.
+workers with saturating counters, and prints one main-phase summary plus the top
+unsupported opcodes in deterministic count/opcode order. Every compiler pass
+stamps its stage before it can fail; the IR builder carries the exact opcode at
+its two explicit `UnsupportedOp` exits instead of reparsing bytecode after the
+fact. CI pairs that report with the full advisory `--ohaimark` pass-set
+differential and runs both T1 and T2 postures in the ReleaseSafe
+`--gc-threshold=1` matrix.
 
 The first full forced-tier sample attempted 217,427 compilations, published
 6,541 (3.01%), installed 581 KiB (91 bytes per published function), and ran
@@ -448,6 +455,22 @@ consumed 1.642 s in aggregate (7 us per attempt, 8.187 ms max). The exact
 48,517-path pass set still matched the non-T2 baseline. This is a rollout
 baseline, not a speed claim; the high refusal rate makes supported-surface
 coverage the next measurement target before threshold tuning.
+
+The first classified follow-up attempted 218,345 compilations and refused
+211,780. IR construction accounted for 209,006 refusals (98.69%); codegen
+accounted for the remaining 2,774 (1.31%). `jmp_if_strict_neq8` led the opcode
+histogram at 44,069 (20.81% of all refusals), followed by `make_environment` at
+38,799 (18.32%) and `lda_global8` at 32,265 (15.24%); together those three
+explain 54.36% of every refusal. The forced-T2 and same-tree lower-tier runs
+produced the exact same 48,653 sorted pass paths (SHA-256
+`10f024349d3467c72112da03dd57e0d7e543cdb819a00b3082dfecedaec614ca`).
+
+That evidence selects the fused strict-equality/inequality branch family as the
+first coverage expansion. It is the largest single blocker and can reuse the
+existing branch-width/CFG model, but it must land together with deopt-capable
+strict-equality lowering; merely admitting the opcode into IR would move the
+same functions into the current codegen `UnsupportedNode` bucket. Environment
+materialization and global-load ICs remain the next two measured frontiers.
 
 ## 4. Deoptimization contract
 

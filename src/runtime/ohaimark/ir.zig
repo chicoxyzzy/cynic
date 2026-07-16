@@ -20,6 +20,10 @@ pub const ValueId = u32;
 const invalid_value: ValueId = std.math.maxInt(ValueId);
 pub const FrameStateId = u32;
 
+pub const BuildDiagnostics = struct {
+    unsupported_opcode: ?Op = null,
+};
+
 pub const NodeKind = enum {
     block_parameter,
     constant,
@@ -139,6 +143,23 @@ pub const Graph = struct {
     feedback: feedback_mod.Snapshot,
 
     pub fn build(allocator: std.mem.Allocator, chunk: *const Chunk) !Graph {
+        return buildImpl(allocator, chunk, null);
+    }
+
+    pub fn buildWithDiagnostics(
+        allocator: std.mem.Allocator,
+        chunk: *const Chunk,
+        diagnostics: *BuildDiagnostics,
+    ) !Graph {
+        diagnostics.* = .{};
+        return buildImpl(allocator, chunk, diagnostics);
+    }
+
+    fn buildImpl(
+        allocator: std.mem.Allocator,
+        chunk: *const Chunk,
+        diagnostics: ?*BuildDiagnostics,
+    ) !Graph {
         // Handler entry defines accumulator/catch state via the unwinder. It
         // needs an explicit exceptional-edge environment, not a normal phi.
         if (chunk.handlers.len != 0) return error.UnsupportedExceptionFlow;
@@ -159,6 +180,7 @@ pub const Graph = struct {
             .allocator = allocator,
             .chunk = chunk,
             .analysis = &analysis,
+            .diagnostics = diagnostics,
         };
         defer builder.deinit();
         try builder.createBlocks();
@@ -269,6 +291,7 @@ const Builder = struct {
     allocator: std.mem.Allocator,
     chunk: *const Chunk,
     analysis: *const liveness.Analysis,
+    diagnostics: ?*BuildDiagnostics,
     blocks: std.ArrayListUnmanaged(Block) = .empty,
     nodes: std.ArrayListUnmanaged(Node) = .empty,
     inputs: std.ArrayListUnmanaged(ValueId) = .empty,
@@ -408,7 +431,12 @@ const Builder = struct {
                             registers,
                         );
                     },
-                    else => return error.UnsupportedOp,
+                    else => {
+                        if (self.diagnostics) |diagnostics| {
+                            diagnostics.unsupported_opcode = op;
+                        }
+                        return error.UnsupportedOp;
+                    },
                 }
                 terminated = true;
                 pc = next;
@@ -551,7 +579,12 @@ const Builder = struct {
                     _ = try self.addNode(.return_, @intCast(pc), &.{accumulator}, .none);
                     terminated = true;
                 },
-                else => return error.UnsupportedOp,
+                else => {
+                    if (self.diagnostics) |diagnostics| {
+                        diagnostics.unsupported_opcode = op;
+                    }
+                    return error.UnsupportedOp;
+                },
             }
             pc = next;
             if (terminated) break;

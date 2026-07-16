@@ -341,7 +341,12 @@ test "Ohaimark rejects unsupported bytecode without aborting" {
     try builder.emitOp(.make_object, span);
     var chunk = try finish(&builder);
     defer chunk.deinit(testing.allocator);
-    try testing.expectError(error.UnsupportedOp, ir.Graph.build(testing.allocator, &chunk));
+    var diagnostics: ir.BuildDiagnostics = .{};
+    try testing.expectError(
+        error.UnsupportedOp,
+        ir.Graph.buildWithDiagnostics(testing.allocator, &chunk, &diagnostics),
+    );
+    try testing.expectEqual(Op.make_object, diagnostics.unsupported_opcode.?);
 }
 
 test "Ohaimark defers exception lowering explicitly" {

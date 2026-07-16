@@ -91,7 +91,8 @@
 //!   --jit                   Force Bistromath T1 at threshold 1.
 //!   --ohaimark              Force Ohaimark T2 before T1, both at threshold 1.
 //!                           T2 remains default-off outside this test posture.
-//!   --ohaimark-stats        Print aggregate T2 compile/entry/exit telemetry.
+//!   --ohaimark-stats        Print aggregate T2 compile/entry/exit telemetry,
+//!                           refusal stages, and top unsupported opcodes.
 //!                           Requires `--ohaimark`; works with the worker pool.
 //!
 //! Diagnostics (each pins --threads=1):
@@ -116,6 +117,7 @@
 
 const std = @import("std");
 const cynic = @import("cynic");
+const Op = cynic.bytecode.Op;
 const OhaimarkStats = cynic.runtime.OhaimarkStats;
 
 const frontmatter = @import("test262/frontmatter.zig");
@@ -1278,9 +1280,10 @@ const Options = struct {
     /// finding leaks or oversized roots; pair with `--filter`
     /// to keep the output sane.
     gc_stats: bool = false,
-    /// Aggregate opt-in Ohaimark counters across fixture heaps and worker
-    /// threads, then print one rollout summary after the main phase. Requires
-    /// `--ohaimark`; unlike memory diagnostics this remains parallel-safe.
+    /// Aggregate opt-in Ohaimark counters and refusal histograms across
+    /// fixture heaps and worker threads, then print one rollout summary after
+    /// the main phase. Requires `--ohaimark`; unlike memory diagnostics this
+    /// remains parallel-safe.
     ohaimark_stats: bool = false,
     /// When true, the end-of-sweep tally includes a per-reason
     /// histogram of the `skip` count (by_path / no_strict /
@@ -3966,6 +3969,117 @@ fn printOhaimarkSummary(io: std.Io, stats: *const OhaimarkStats) !void {
         },
     );
     try std.Io.File.stdout().writeStreamingAll(io, report);
+
+    try std.Io.File.stdout().writeStreamingAll(io, "  refusal stages:\n");
+    const stage_info = @typeInfo(OhaimarkStats.Stage).@"enum";
+    var saw_stage = false;
+    inline for (stage_info.field_names, stage_info.field_values) |name, value| {
+        const stage: OhaimarkStats.Stage = @enumFromInt(value);
+        const count = stats.refusalCount(stage);
+        if (count != 0) {
+            saw_stage = true;
+            var line_buf: [192]u8 = undefined;
+            const pct: f64 = if (stats.compile_refusals == 0)
+                0
+            else
+                100.0 * @as(f64, @floatFromInt(count)) /
+                    @as(f64, @floatFromInt(stats.compile_refusals));
+            const line = try std.fmt.bufPrint(
+                &line_buf,
+                "    {s}: {d} ({d:.2}%)\n",
+                .{ name, count, pct },
+            );
+            try std.Io.File.stdout().writeStreamingAll(io, line);
+        }
+    }
+    if (!saw_stage) {
+        try std.Io.File.stdout().writeStreamingAll(io, "    none\n");
+    }
+
+    var opcode_storage: [256]OhaimarkOpcodeRefusal = undefined;
+    const opcodes = rankOhaimarkOpcodeRefusals(stats, &opcode_storage);
+    if (opcodes.len > 0) {
+        const shown = @min(opcodes.len, 12);
+        var heading_buf: [128]u8 = undefined;
+        const heading = try std.fmt.bufPrint(
+            &heading_buf,
+            "  unsupported opcodes (top {d} of {d}):\n",
+            .{ shown, opcodes.len },
+        );
+        try std.Io.File.stdout().writeStreamingAll(io, heading);
+        for (opcodes[0..shown]) |entry| {
+            var line_buf: [192]u8 = undefined;
+            const pct: f64 = if (stats.compile_refusals == 0)
+                0
+            else
+                100.0 * @as(f64, @floatFromInt(entry.count)) /
+                    @as(f64, @floatFromInt(stats.compile_refusals));
+            const line = try std.fmt.bufPrint(
+                &line_buf,
+                "    {s}: {d} ({d:.2}% of refusals)\n",
+                .{ @tagName(entry.op), entry.count, pct },
+            );
+            try std.Io.File.stdout().writeStreamingAll(io, line);
+        }
+    }
+}
+
+const OhaimarkOpcodeRefusal = struct {
+    op: Op,
+    count: u64,
+};
+
+fn rankOhaimarkOpcodeRefusals(
+    stats: *const OhaimarkStats,
+    storage: []OhaimarkOpcodeRefusal,
+) []OhaimarkOpcodeRefusal {
+    var len: usize = 0;
+    const op_info = @typeInfo(Op).@"enum";
+    inline for (op_info.field_values) |value| {
+        const op: Op = @enumFromInt(value);
+        const count = stats.unsupportedOpcodeCount(op);
+        if (count != 0) {
+            std.debug.assert(len < storage.len);
+            storage[len] = .{ .op = op, .count = count };
+            len += 1;
+        }
+    }
+    std.mem.sort(OhaimarkOpcodeRefusal, storage[0..len], {}, struct {
+        fn lessThan(_: void, lhs: OhaimarkOpcodeRefusal, rhs: OhaimarkOpcodeRefusal) bool {
+            if (lhs.count != rhs.count) return lhs.count > rhs.count;
+            return @intFromEnum(lhs.op) < @intFromEnum(rhs.op);
+        }
+    }.lessThan);
+    return storage[0..len];
+}
+
+test "Ohaimark unsupported opcode ranking is deterministic" {
+    var stats: OhaimarkStats = .{};
+    stats.enabled = true;
+    for (0..7) |_| {
+        stats.finishCompile(
+            stats.beginCompile(),
+            .{ .refused = .{ .stage = .ir, .unsupported_opcode = .bit_or } },
+        );
+        stats.finishCompile(
+            stats.beginCompile(),
+            .{ .refused = .{ .stage = .ir, .unsupported_opcode = .make_object } },
+        );
+    }
+    for (0..3) |_| {
+        stats.finishCompile(
+            stats.beginCompile(),
+            .{ .refused = .{ .stage = .ir, .unsupported_opcode = .div } },
+        );
+    }
+    var storage: [256]OhaimarkOpcodeRefusal = undefined;
+
+    const ranked = rankOhaimarkOpcodeRefusals(&stats, &storage);
+
+    try std.testing.expectEqual(@as(usize, 3), ranked.len);
+    try std.testing.expectEqual(Op.bit_or, ranked[0].op);
+    try std.testing.expectEqual(Op.make_object, ranked[1].op);
+    try std.testing.expectEqual(Op.div, ranked[2].op);
 }
 
 /// One score-row in memory. The on-disk format groups these by

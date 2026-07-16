@@ -440,8 +440,8 @@ before Bistromath and both thresholds forced to 1. This is the T2
 differential posture; it remains separate from the established
 T1-only `--jit` pass set),
 `--ohaimark-stats` (requires `--ohaimark`; print heap-scoped T2 compile,
-code-size, entry, completion, and guard-exit counters aggregated across
-fixtures and harness workers),
+code-size, entry, completion, guard-exit, refusal-stage, and top unsupported-
+opcode counters aggregated across fixtures and harness workers),
 `--write-results` (updates `test262-results.md`),
 `--only-failing` (skip-as-pass any test path listed in
 `.test262-pass-cache.txt` — iterative-dev shortcut; cache is

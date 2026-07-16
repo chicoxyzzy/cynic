@@ -7,8 +7,42 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const Op = @import("../../bytecode/op.zig").Op;
+
+/// The pipeline boundary at which a compile attempt stopped. These names are
+/// part of the diagnostic output contract: append new stages rather than
+/// reusing an existing bucket for a different pass.
+pub const RefusalStage = enum(u8) {
+    unsupported_target,
+    executable_allocator,
+    ir,
+    specialization,
+    representation,
+    logical_deopt,
+    physical_homes,
+    physical_deopt,
+    allocation,
+    lowering,
+    codegen,
+    code_install,
+};
+
+pub const Refusal = struct {
+    stage: RefusalStage,
+    unsupported_opcode: ?Op = null,
+};
+
+pub const CompileResult = union(enum) {
+    installed: usize,
+    refused: Refusal,
+};
+
+const refusal_stage_count = @typeInfo(RefusalStage).@"enum".field_names.len;
+const opcode_bucket_count = std.math.maxInt(u8) + 1;
 
 pub const Stats = struct {
+    pub const Stage = RefusalStage;
+
     enabled: bool = false,
     compile_attempts: u64 = 0,
     compile_successes: u64 = 0,
@@ -19,6 +53,8 @@ pub const Stats = struct {
     executed_entries: u64 = 0,
     completed_entries: u64 = 0,
     guard_exits: u64 = 0,
+    refusal_stages: [refusal_stage_count]u64 = std.mem.zeroes([refusal_stage_count]u64),
+    unsupported_opcodes: [opcode_bucket_count]u64 = std.mem.zeroes([opcode_bucket_count]u64),
 
     pub const CompileTimer = struct {
         active: bool = false,
@@ -34,8 +70,7 @@ pub const Stats = struct {
     pub fn finishCompile(
         self: *Stats,
         timer: CompileTimer,
-        success: bool,
-        installed_bytes: usize,
+        result: CompileResult,
     ) void {
         if (!timer.active) return;
         const now = monotonicNs();
@@ -46,14 +81,31 @@ pub const Stats = struct {
         ));
         self.compile_time_ns_total +|= elapsed;
         self.compile_time_ns_max = @max(self.compile_time_ns_max, elapsed);
-        if (success) {
-            self.compile_successes +|= 1;
-            self.code_bytes_installed +|= @intCast(@min(
-                installed_bytes,
-                std.math.maxInt(u64),
-            ));
-        } else {
-            self.compile_refusals +|= 1;
+        switch (result) {
+            .installed => |installed_bytes| {
+                self.compile_successes +|= 1;
+                self.code_bytes_installed +|= @intCast(@min(
+                    installed_bytes,
+                    std.math.maxInt(u64),
+                ));
+            },
+            .refused => |refusal| self.recordRefusal(refusal),
+        }
+    }
+
+    pub fn refusalCount(self: *const Stats, stage: RefusalStage) u64 {
+        return self.refusal_stages[@intFromEnum(stage)];
+    }
+
+    pub fn unsupportedOpcodeCount(self: *const Stats, op: Op) u64 {
+        return self.unsupported_opcodes[@intFromEnum(op)];
+    }
+
+    fn recordRefusal(self: *Stats, refusal: Refusal) void {
+        self.compile_refusals +|= 1;
+        self.refusal_stages[@intFromEnum(refusal.stage)] +|= 1;
+        if (refusal.unsupported_opcode) |op| {
+            self.unsupported_opcodes[@intFromEnum(op)] +|= 1;
         }
     }
 
@@ -81,6 +133,12 @@ pub const Stats = struct {
         self.executed_entries +|= other.executed_entries;
         self.completed_entries +|= other.completed_entries;
         self.guard_exits +|= other.guard_exits;
+        for (&self.refusal_stages, other.refusal_stages) |*total, count| {
+            total.* +|= count;
+        }
+        for (&self.unsupported_opcodes, other.unsupported_opcodes) |*total, count| {
+            total.* +|= count;
+        }
     }
 };
 
@@ -98,7 +156,7 @@ fn monotonicNs() i128 {
 test "Ohaimark stats stay inert while disabled" {
     var stats: Stats = .{};
     const timer = stats.beginCompile();
-    stats.finishCompile(timer, true, 128);
+    stats.finishCompile(timer, .{ .installed = 128 });
     stats.recordEntry();
     stats.recordCompletion();
     stats.recordGuardExit();
@@ -125,4 +183,21 @@ test "Ohaimark stats merge saturates counters and keeps maxima" {
     try std.testing.expectEqual(@as(u64, 2), total.compile_successes);
     try std.testing.expectEqual(@as(u64, 11), total.compile_time_ns_max);
     try std.testing.expectEqual(@as(u64, 3), total.executed_entries);
+}
+
+test "Ohaimark stats merge refusal stage and opcode histograms" {
+    var first: Stats = .{ .enabled = true };
+    first.recordRefusal(.{ .stage = .ir, .unsupported_opcode = .bit_or });
+    first.refusal_stages[@intFromEnum(RefusalStage.codegen)] = std.math.maxInt(u64) - 1;
+    var second: Stats = .{ .enabled = true };
+    second.recordRefusal(.{ .stage = .ir, .unsupported_opcode = .bit_or });
+    second.recordRefusal(.{ .stage = .lowering });
+    second.refusal_stages[@intFromEnum(RefusalStage.codegen)] = 5;
+
+    first.merge(second);
+
+    try std.testing.expectEqual(@as(u64, 2), first.refusalCount(.ir));
+    try std.testing.expectEqual(@as(u64, 1), first.refusalCount(.lowering));
+    try std.testing.expectEqual(std.math.maxInt(u64), first.refusalCount(.codegen));
+    try std.testing.expectEqual(@as(u64, 2), first.unsupportedOpcodeCount(.bit_or));
 }

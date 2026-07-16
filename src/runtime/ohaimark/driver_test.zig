@@ -235,5 +235,13 @@ test "Ohaimark refusal preserves Bistromath fallback" {
     try testing.expectEqual(@as(u64, 1), realm.heap.ohaimark_stats.compile_attempts);
     try testing.expectEqual(@as(u64, 0), realm.heap.ohaimark_stats.compile_successes);
     try testing.expectEqual(@as(u64, 1), realm.heap.ohaimark_stats.compile_refusals);
+    try testing.expectEqual(
+        @as(u64, 1),
+        realm.heap.ohaimark_stats.refusalCount(.ir),
+    );
+    try testing.expectEqual(
+        @as(u64, 1),
+        realm.heap.ohaimark_stats.unsupportedOpcodeCount(.bit_or),
+    );
     try testing.expectEqual(@as(u64, 0), realm.heap.ohaimark_stats.executed_entries);
 }

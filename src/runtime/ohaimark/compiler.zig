@@ -20,6 +20,7 @@ const ir = @import("ir.zig");
 const lowering = @import("lowering_aarch64.zig");
 const representation = @import("representation.zig");
 const specialize = @import("specialize.zig");
+const stats_mod = @import("stats.zig");
 
 pub const supported = masm.native_aarch64;
 
@@ -37,20 +38,32 @@ pub fn compile(realm: *Realm, chunk: *const Chunk) bool {
     const timer = telemetry.beginCompile();
     if (comptime !supported) {
         state.ohaimark.refuse();
-        telemetry.finishCompile(timer, false, 0);
+        telemetry.finishCompile(timer, .{ .refused = .{ .stage = .unsupported_target } });
         return false;
     }
     const executable_allocator = realm.heap.jitCodeAllocator() orelse {
         state.ohaimark.refuse();
-        telemetry.finishCompile(timer, false, 0);
+        telemetry.finishCompile(timer, .{ .refused = .{ .stage = .executable_allocator } });
         return false;
     };
-    const success = compileAndInstall(realm.heap.allocator, chunk, executable_allocator);
+    var refusal: stats_mod.Refusal = .{ .stage = .ir };
+    const success = compileAndInstallDiagnosed(
+        realm.heap.allocator,
+        chunk,
+        executable_allocator,
+        &refusal,
+    );
     const installed_bytes = if (success)
         state.ohaimark.executable.bytes().?.len
     else
         0;
-    telemetry.finishCompile(timer, success, installed_bytes);
+    telemetry.finishCompile(
+        timer,
+        if (success)
+            .{ .installed = installed_bytes }
+        else
+            .{ .refused = refusal },
+    );
     return success;
 }
 
@@ -62,6 +75,21 @@ pub fn compileAndInstall(
     chunk: *const Chunk,
     executable_allocator: *code_alloc.CodeAllocator,
 ) bool {
+    var refusal: stats_mod.Refusal = .{ .stage = .ir };
+    return compileAndInstallDiagnosed(
+        allocator,
+        chunk,
+        executable_allocator,
+        &refusal,
+    );
+}
+
+fn compileAndInstallDiagnosed(
+    allocator: std.mem.Allocator,
+    chunk: *const Chunk,
+    executable_allocator: *code_alloc.CodeAllocator,
+    refusal: *stats_mod.Refusal,
+) bool {
     const state = chunk.jit_state orelse return false;
     switch (state.ohaimark.tier) {
         .compiled => return true,
@@ -69,6 +97,7 @@ pub fn compileAndInstall(
         .cold => {},
     }
     if (comptime !supported) {
+        refusal.* = .{ .stage = .unsupported_target };
         state.ohaimark.refuse();
         return false;
     }
@@ -77,6 +106,7 @@ pub fn compileAndInstall(
         allocator,
         chunk,
         executable_allocator,
+        refusal,
     ) catch {
         state.ohaimark.refuse();
         return false;
@@ -90,19 +120,33 @@ fn compileUnpublished(
     allocator: std.mem.Allocator,
     chunk: *const Chunk,
     executable_allocator: *code_alloc.CodeAllocator,
+    refusal: *stats_mod.Refusal,
 ) !code_alloc.InstalledCode {
-    var graph = try ir.Graph.build(allocator, chunk);
+    refusal.* = .{ .stage = .ir };
+    var ir_diagnostics: ir.BuildDiagnostics = .{};
+    var graph = ir.Graph.buildWithDiagnostics(
+        allocator,
+        chunk,
+        &ir_diagnostics,
+    ) catch |err| {
+        refusal.unsupported_opcode = ir_diagnostics.unsupported_opcode;
+        return err;
+    };
     defer graph.deinit();
+    refusal.* = .{ .stage = .specialization };
     var specialization = try specialize.Plan.build(allocator, &graph);
     defer specialization.deinit();
+    refusal.* = .{ .stage = .representation };
     var representations = try representation.Plan.build(
         allocator,
         &graph,
         &specialization,
     );
     defer representations.deinit();
+    refusal.* = .{ .stage = .logical_deopt };
     var logical = try deopt.Metadata.build(allocator, &graph, &specialization);
     defer logical.deinit();
+    refusal.* = .{ .stage = .physical_homes };
     var homes = try deopt_physical.Homes.build(
         allocator,
         &graph,
@@ -111,6 +155,7 @@ fn compileUnpublished(
         &logical,
     );
     defer homes.deinit();
+    refusal.* = .{ .stage = .physical_deopt };
     var physical_deopt = try deopt_physical.Metadata.build(
         allocator,
         &graph,
@@ -120,6 +165,7 @@ fn compileUnpublished(
         &homes,
     );
     defer physical_deopt.deinit();
+    refusal.* = .{ .stage = .allocation };
     var allocated = try allocation.Plan.build(
         allocator,
         &graph,
@@ -129,6 +175,7 @@ fn compileUnpublished(
         .{ .register_count = lowering.value_registers.len },
     );
     defer allocated.deinit();
+    refusal.* = .{ .stage = .lowering };
     var lowered = try lowering.Plan.build(
         allocator,
         &graph,
@@ -141,6 +188,7 @@ fn compileUnpublished(
 
     var machine = masm.Masm.init(allocator);
     defer machine.deinit();
+    refusal.* = .{ .stage = .codegen };
     try codegen.emitGraph(
         allocator,
         &machine,
@@ -154,5 +202,6 @@ fn compileUnpublished(
         &allocated,
         &lowered,
     );
+    refusal.* = .{ .stage = .code_install };
     return executable_allocator.installOwned(machine.code.items);
 }
