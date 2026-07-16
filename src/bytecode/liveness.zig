@@ -318,6 +318,11 @@ pub const Analysis = struct {
     /// `switch_smi`, whose case table has N outgoing edges. Handler edges stay
     /// separate so forward must-analyses can conservatively pin handler entry.
     succs: []std.ArrayListUnmanaged(usize),
+    /// Exceptional successors induced by protected ranges. Kept separate from
+    /// `succs` because the unwinder also defines the handler-entry accumulator
+    /// and catch-register state; consumers must not mistake these for ordinary
+    /// branch edges.
+    exception_edges: []const ExceptionEdge,
     /// `reachable.isSet(b)` — block `b` is reachable from entry.
     reachable: std.DynamicBitSet,
     /// Per-block register live-in / live-out sets (size `register_count`).
@@ -391,12 +396,18 @@ pub const Analysis = struct {
         self.allocator.free(self.leaders);
         for (self.succs) |*succ| succ.deinit(self.allocator);
         self.allocator.free(self.succs);
+        self.allocator.free(self.exception_edges);
         self.reachable.deinit();
         for (self.live_in) |*s| s.deinit();
         for (self.live_out) |*s| s.deinit();
         self.allocator.free(self.live_in);
         self.allocator.free(self.live_out);
     }
+};
+
+pub const ExceptionEdge = struct {
+    from: usize,
+    to: usize,
 };
 
 /// Compute the block/liveness analysis for `code`. `handlers` supplies
@@ -548,7 +559,7 @@ pub fn analyze(
     // [protected_start, protected_end) gains an edge to the handler entry.
     // We don't store a third successor slot; instead we union the handler's
     // live-in during the fixpoint via an explicit extra-successor list.
-    var handler_edges: std.ArrayListUnmanaged([2]usize) = .empty; // (from_block, to_block)
+    var handler_edges: std.ArrayListUnmanaged(ExceptionEdge) = .empty;
     defer handler_edges.deinit(allocator);
     // NOTE: `catch_register` is written by the unwinder at handler entry,
     // not by an opcode, so liveness sees no def for it — it stays
@@ -559,7 +570,7 @@ pub fn analyze(
         for (0..nblocks) |b| {
             const s = leaders[b];
             if (s >= h.start_pc and s < h.end_pc) {
-                try handler_edges.append(allocator, .{ b, hb });
+                try handler_edges.append(allocator, .{ .from = b, .to = hb });
             }
         }
     }
@@ -574,9 +585,9 @@ pub fn analyze(
         reachable.set(0);
         // handler entries are reachable via throw edges
         for (handler_edges.items) |e| {
-            if (!reachable.isSet(e[1])) {
-                reachable.set(e[1]);
-                try stack.append(allocator, e[1]);
+            if (!reachable.isSet(e.to)) {
+                reachable.set(e.to);
+                try stack.append(allocator, e.to);
             }
         }
         while (stack.pop()) |b| {
@@ -616,7 +627,7 @@ pub fn analyze(
             defer new_out.deinit();
             for (succs[bi].items) |s| new_out.setUnion(live_in[s]);
             for (handler_edges.items) |e| {
-                if (e[0] == bi) new_out.setUnion(live_in[e[1]]);
+                if (e.from == bi) new_out.setUnion(live_in[e.to]);
             }
             // live_in[b] = use[b] ∪ (live_out[b] − def[b])
             var new_in = try std.DynamicBitSet.initEmpty(allocator, register_count);
@@ -639,6 +650,7 @@ pub fn analyze(
         .allocator = allocator,
         .leaders = leaders,
         .succs = succs,
+        .exception_edges = try handler_edges.toOwnedSlice(allocator),
         .reachable = reachable,
         .live_in = live_in,
         .live_out = live_out,
@@ -866,4 +878,25 @@ test "liveness: an opaque opcode marks the function not-fully-understood" {
     var a = try analyze(testing.allocator, &code, 4, &.{}, &.{});
     defer a.deinit();
     try testing.expect(!a.fully_understood);
+}
+
+test "liveness: exceptional control-flow edges remain observable" {
+    var code = [_]u8{
+        byteOf(.lda_one),
+        byteOf(.throw_),
+        byteOf(.lda_zero),
+        byteOf(.return_),
+    };
+    const handlers = [_]Handler{.{
+        .start_pc = 0,
+        .end_pc = 2,
+        .handler_pc = 2,
+        .catch_register = null,
+    }};
+    var a = try analyze(testing.allocator, &code, 1, &handlers, &.{});
+    defer a.deinit();
+
+    try testing.expectEqual(@as(usize, 1), a.exception_edges.len);
+    try testing.expectEqual(a.blockOf(0), a.exception_edges[0].from);
+    try testing.expectEqual(a.blockOf(2), a.exception_edges[0].to);
 }

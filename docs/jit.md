@@ -1,11 +1,12 @@
 # JIT tiers — Bistromath (T1), Ohaimark (T2), Spasm (wasm T1), and the shared substrate
 
 Status: **Bistromath shipped and on by default** (2026-06; `--no-jit`
-opts out, the CI differential gates merges). Ohaimark and Spasm
-remain future tiers; the document doubles as the design record that
-pinned the architecture before the first emitter was written and as
-the delivery ledger (the "Delivery order" section tracks what each
-increment shipped). It is the durable output of a prior-art survey (per
+opts out, the CI differential gates merges). Ohaimark's feedback/SSA
+front end has landed, but optimized execution remains future work; Spasm's
+delivery state is tracked below. The document doubles as the design record
+that pinned the architecture before the first emitter was written and as the
+delivery ledger (the "Delivery order" section tracks what each increment
+shipped). It is the durable output of a prior-art survey (per
 [handbook/prior-art.md](handbook/prior-art.md)) across V8, JSC,
 SpiderMonkey, Hermes, LuaJIT, YJIT/ZJIT, CPython's copy-and-patch
 JIT, LibJS, ChakraCore, wasmtime (Winch), Wizard, and the papers in
@@ -28,8 +29,8 @@ Pinned here:
 - the verification gate: differential test262 at force-compile, plus
   gc-stress (§10).
 
-Deferred, each with an owner section: Ohaimark internals (own ADR at
-M6 — §5), per-realm code-cache scoping (the ADR
+Deferred, each with an owner section: Ohaimark specialization/codegen
+([ohaimark.md](ohaimark.md) — §5), per-realm code-cache scoping (the ADR
 [multi-realm.md](multi-realm.md) already reserves — §14), x86_64
 port timing (§8), background compilation (§14).
 
@@ -421,10 +422,13 @@ Counters follow the JSC/SM structure with Cynic-sized constants
 - a failed compile (allocator exhaustion) sets `dont_compile`;
   there is no recompilation ladder until Ohaimark exists.
 
-## 5. Ohaimark — the T2 shape, pinned but not designed
+## 5. Ohaimark — T2 front end landed
 
-Full design is its own ADR at M6. What this survey pins now, so
-Bistromath doesn't foreclose it:
+The accepted design and delivery gates are in
+[ohaimark.md](ohaimark.md). The first checkpoint now ships the immutable
+typed-IC feedback snapshot and a linear CFG SSA graph with block arguments;
+type specialization, deopt metadata, code generation, and runtime tier-up
+remain disabled. The decisions Bistromath must preserve are:
 
 - **Method JIT over a CFG SSA IR with linear storage.** Not sea of
   nodes (V8 is migrating off it: 3–7× worse cache locality, "error
@@ -1147,9 +1151,10 @@ useful:
    surface (the other arithmetic/compare/convert/shuffle/lane families) is the
    remaining frontier, along with the side-table-as-control-oracle wiring (§6)
    that would make multi-target `br_table` cheap.
-5. **Ohaimark ADR** — written against measured Bistromath data
-   (where does T1 plateau, which sites are polymorphic, what does
-   deopt need) — then M6 implementation.
+5. **Ohaimark** — the ADR plus the bytecode/feedback/SSA front end have
+   landed against measured Bistromath data. Next: typed specialization and
+   deopt metadata before any optimizing machine code; see
+   [ohaimark.md](ohaimark.md).
 
 ## 13. Considered and declined
 

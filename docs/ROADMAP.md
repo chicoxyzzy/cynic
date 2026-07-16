@@ -1006,6 +1006,15 @@ sampling by `/profile`.
   the hardened `hasOwnProperty` path **304.6 → 152.8 ms p50 (-49.8%)**.
   Full main test262 reference and `--jit` sweeps match at
   **48,653 / 49,977 (97.35%)**; the SES suite remains **36 / 36**.
+- **Ohaimark optimizer front end (2026-07-16).** The T2 ADR is now
+  concrete: typed ICs snapshot into immutable same-index arrays without
+  copying GC-managed callee/prototype/snapshot pointers; finalized bytecode
+  lowers into a flat CFG SSA graph whose block arguments pre-create
+  accumulator and live-register phis, including loop back-edges. Liveness
+  now exposes exceptional edges explicitly, while handler-bearing and
+  unsupported chunks reject cleanly to the lower tiers. Optimizing codegen is
+  still off; typed specialization and verified deopt metadata come first.
+  See [ohaimark.md](ohaimark.md).
 - **Generational GC.** A JSC-Riptide-style non-moving
   generational collector — store-site routing, generation header
   bits, a write barrier + remembered set, `collectYoung` with
@@ -1391,7 +1400,9 @@ and the per-builtin checklist; this section tracks status.
   tracked in docs/jit.md's delivery-order section.
 - **Ohaimark** — optimizing JIT (T2). IR (SSA), type speculation
   from inline caches, deopt back to Lantern on guard failure.
-  Modeled on JSC DFG / V8 TurboFan or Maglev.
+  Modeled on JSC DFG / V8 Maglev / SpiderMonkey Warp. The feedback and
+  block-argument SSA front end ships; specialization, deopt metadata, and
+  machine-code execution remain planned. See [ohaimark.md](ohaimark.md).
 - **Spasm** — wasm baseline JIT (T1), Sarcasm's compiled tier.
   Single-pass over the validated module + branch side-table,
   Liftoff / Wizard-SPC shape; buries *asm* like its parent. The

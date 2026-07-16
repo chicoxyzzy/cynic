@@ -163,4 +163,6 @@ test {
     _ = @import("runtime/jit/masm.zig");
     _ = @import("runtime/jit/layout.zig");
     _ = @import("runtime/bistromath/bistromath.zig");
+    _ = @import("runtime/ohaimark/ohaimark.zig");
+    _ = @import("runtime/ohaimark/tests.zig");
 }
