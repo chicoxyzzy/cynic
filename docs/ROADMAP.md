@@ -1072,6 +1072,17 @@ sampling by `/profile`.
   operations stay explicit fallback boundaries until rooted execution and IC
   guards land.
   See [ohaimark.md](ohaimark.md).
+- **Ohaimark abstract register allocation (2026-07-16).** A deterministic
+  CFG-scheduled linear scan now assigns bounded target-independent GP register
+  ids and separate tagged/int32 spill regions. Constants and folded values
+  rematerialize; non-overlapping ordinary spills reuse slots after the stable
+  deopt-home prefix; a recoverable value that spills reuses its exact home.
+  Same-position operands remain live through result definition, preventing a
+  future emitter from clobbering an input. The verifier independently
+  recomputes live ranges, evictions, locations, and frame counts and rejects
+  malformed ownership, homes, register ids, or spill indices. AArch64 register
+  mapping, edge moves, frame emission, and guard-exit code remain gated.
+  See [ohaimark.md](ohaimark.md).
 - **Generational GC.** A JSC-Riptide-style non-moving
   generational collector — store-site routing, generation header
   bits, a write barrier + remembered set, `collectYoung` with
@@ -1460,8 +1471,8 @@ and the per-builtin checklist; this section tracks status.
   Modeled on JSC DFG / V8 Maglev / SpiderMonkey Warp. The feedback snapshot,
   block-argument SSA, initial specialization and representation planners, and
   logical plus stable-spill physical deopt metadata and a bounded differential
-  evaluator ship; runtime deoptimization and machine-code execution remain
-  planned. See
+  evaluator plus abstract register/spill allocation ship; runtime
+  deoptimization and machine-code execution remain planned. See
   [ohaimark.md](ohaimark.md).
 - **Spasm** — wasm baseline JIT (T1), Sarcasm's compiled tier.
   Single-pass over the validated module + branch side-table,

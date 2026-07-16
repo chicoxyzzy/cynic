@@ -3,9 +3,10 @@
 Status: **Bistromath shipped and on by default** (2026-06; `--no-jit`
 opts out, the CI differential gates merges). Ohaimark's feedback/SSA,
 specialization, representation-selection, and logical deopt-metadata front end
-plus stable physical deopt homes and graph/Lantern differential evaluation have
-landed, but optimized execution remains future work; Spasm's delivery state is
-tracked below. The document doubles as the design record that pinned the
+plus stable physical deopt homes, graph/Lantern differential evaluation, and
+abstract register/spill allocation have landed, but optimized execution remains
+future work; Spasm's delivery state is tracked below. The document doubles as
+the design record that pinned the
 architecture before the first emitter was written and as the delivery ledger
 (the "Delivery order" section tracks what each increment shipped). It is the
 durable output of a prior-art survey (per
@@ -424,7 +425,7 @@ Counters follow the JSC/SM structure with Cynic-sized constants
 - a failed compile (allocator exhaustion) sets `dont_compile`;
   there is no recompilation ladder until Ohaimark exists.
 
-## 5. Ohaimark — T2 representation/deopt-home front end landed
+## 5. Ohaimark — T2 representation/deopt/allocation front end landed
 
 The accepted design and delivery gates are in
 [ohaimark.md](ohaimark.md). The first checkpoints now ship the immutable
@@ -435,8 +436,11 @@ and logical deopt metadata mapping Lantern frame slots to SSA values. Physical
 metadata gives every referenced non-constant value a stable tagged or int32
 spill home and records the required boxing recipe. A bounded graph evaluator
 now proves checked-int32 success and physical-deopt Lantern resumption against
-full Lantern runs. Register allocation, code generation, and runtime tier-up
-remain disabled. The decisions Bistromath must preserve are:
+full Lantern runs. A deterministic linear-scan plan assigns bounded abstract
+registers or representation-partitioned spills, rematerializes immediates, and
+reuses stable homes when a recoverable value spills. Physical register mapping,
+code generation, and runtime tier-up remain disabled. The decisions Bistromath
+must preserve are:
 
 - **Method JIT over a CFG SSA IR with linear storage.** Not sea of
   nodes (V8 is migrating off it: 3–7× worse cache locality, "error

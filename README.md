@@ -54,8 +54,8 @@ runs by default (`--no-jit` opts out) since the step-3 exit
 ([`docs/jit.md`](docs/jit.md)); Ohaimark's typed-feedback snapshot,
 block-argument SSA, specialization and representation planners, and verified
 logical/physical deopt-home metadata plus a graph/Lantern differential
-evaluator have landed, while runtime deoptimization and optimizing code
-generation remain future work. See
+evaluator and deterministic register/spill allocation plan have landed, while
+runtime deoptimization and optimizing code generation remain future work. See
 [`docs/ROADMAP.md`](docs/ROADMAP.md) for the thematic breakdown.
 
 ### Conformance

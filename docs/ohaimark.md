@@ -2,9 +2,9 @@
 
 Status: **ADR accepted; bytecode/feedback/SSA, pure specialization,
 representation selection, and logical plus stable-spill physical deopt
-metadata plus graph/Lantern differential evaluation landed** (2026-07-16).
-Register allocation, machine-code lowering, runtime deoptimization, and tier-up
-are not shipped yet.
+metadata, graph/Lantern differential evaluation, and abstract register/spill
+allocation landed** (2026-07-16). Machine-code lowering, runtime
+deoptimization, and tier-up are not shipped yet.
 
 Ohaimark is Cynic's T2 method JIT. It consumes finalized Lantern bytecode
 and runtime feedback, builds a compact control-flow SSA graph, specializes
@@ -167,7 +167,38 @@ bounds, and conversion legality. Corrupt plans or graphs return
 `InvalidRepresentation` or `MalformedGraph`; they cannot reach unchecked
 slicing or casts.
 
-### 3.5 Exceptions stay explicit
+### 3.5 Register and spill allocation
+
+`runtime/ohaimark/allocation.zig` assigns every materialized SSA value one
+ordinary-use location: an abstract general-purpose register, tagged spill,
+int32 spill, or rematerializable immediate.
+`runtime/ohaimark/allocation_schedule.zig` constructs its live intervals:
+scheduling positions follow CFG block order rather than `ValueId` order because
+all block parameters are created before any block body. Parameters define in
+parallel at block entry; node operands use their values before the node result
+is defined; outgoing edge arguments use at block exit.
+
+The deterministic linear scan expires an interval only when its last use is
+strictly before the next definition, so an instruction cannot overwrite an
+operand register while producing its result. With no free register it spills
+the active interval ending farthest in the future only when that is better
+than spilling the current value. Constants and folded results never consume a
+register or stack slot; code generation rematerializes their `Immediate`.
+
+Tagged and int32 spills occupy separate regions. A spilled value already
+carrying a stable deopt home reuses that exact slot. Other spills start after
+the stable-home prefix and reuse the lowest slot whose prior interval ended
+before the new one starts. A value kept in a register still has its separate
+definition-time deopt-home write; ordinary location choice never weakens
+recovery metadata.
+
+The allocator verifier recomputes schedule ranges, locations, eviction
+choices, and region sizes from the graph. It also checks block/node/edge
+ownership, use-after-definition ordering, home representation and uniqueness,
+register bounds, and spill bounds. Mutated plans return `InvalidAllocation`;
+malformed graphs or homes remain normal compilation errors.
+
+### 3.6 Exceptions stay explicit
 
 Liveness exposes protected-range edges as `exception_edges`, separately from
 normal successors. An exception edge is not an ordinary branch: the unwinder
@@ -177,7 +208,7 @@ chunk with handlers. A later phase will add an exceptional environment and
 deopt state before enabling those chunks; silently treating handler edges as
 normal phis is forbidden.
 
-### 3.6 Fallback is part of correctness
+### 3.7 Fallback is part of correctness
 
 `UnsupportedOp`, `UnsupportedExceptionFlow`, malformed internal bytecode, an
 oversized graph, or allocation failure all abandon Ohaimark compilation. Once
@@ -245,12 +276,13 @@ returns `StepLimitExceeded` instead of hanging the host. Generic effectful
 arithmetic and named-load execution remain explicit `UnsupportedNode`/deopt
 boundaries until their rooting and guard semantics can be tested independently.
 
-This remains a compiler oracle, not an executable optimizing tier or a full
-register allocator. Code generation must emit each required home store at the
-value's definition; ordinary uses may simultaneously keep a register copy.
-The next runtime step is an optimized frame layout plus register allocation and
-a guard-exit stub that saves the two spill regions and reconstructs the
-existing Lantern frame.
+This remains a compiler oracle, not an executable optimizing tier. The
+abstract allocator now chooses ordinary locations, while code generation must
+map abstract registers to AArch64 registers, emit edge moves and each required
+home store at the value's definition, and preserve a simultaneous register
+copy when selected. The next runtime step is an optimized frame layout plus a
+guard-exit stub that saves the two spill regions and reconstructs the existing
+Lantern frame.
 
 ## 5. Delivery order
 
@@ -266,11 +298,14 @@ existing Lantern frame.
    spill homes, physical boxing recipes, bounds-checked verifiers, and a bounded
    graph evaluator proving checked success plus overflow recovery against
    Lantern. Native frame emission and runtime guard exits remain.
-4. **AArch64 lowering:** register allocation, safepoints, guard exits, code
-   ownership, and a disabled-by-default tier-up path.
-5. **Gates and tuning:** full test262 pass-set differential, SES suite,
+4. **Abstract allocation, shipped:** CFG-scheduled live intervals, bounded
+   general-purpose register ids, immediate rematerialization, deterministic
+   eviction, representation-partitioned spill reuse, and stable-home reuse.
+5. **AArch64 lowering:** physical register mapping, edge moves, safepoints,
+   guard exits, code ownership, and a disabled-by-default tier-up path.
+6. **Gates and tuning:** full test262 pass-set differential, SES suite,
    GC-pressure runs, fuzzing, and compile-time/code-size/performance budgets.
-6. **Only if measured:** background compilation, polymorphic feedback,
+7. **Only if measured:** background compilation, polymorphic feedback,
    inlining, x86_64 lowering, and exception-region compilation.
 
 ## 6. Declined for v1

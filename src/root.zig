@@ -165,4 +165,5 @@ test {
     _ = @import("runtime/bistromath/bistromath.zig");
     _ = @import("runtime/ohaimark/ohaimark.zig");
     _ = @import("runtime/ohaimark/tests.zig");
+    _ = @import("runtime/ohaimark/allocation_test.zig");
 }
