@@ -9,6 +9,7 @@
 
 const std = @import("std");
 
+const codec = @import("deopt_codec.zig");
 const ir = @import("ir.zig");
 const specialize = @import("specialize.zig");
 
@@ -65,14 +66,14 @@ pub const Metadata = struct {
             const state = try checkedState(graph, node_id);
             const slots = try checkedSlots(graph, node_id, state);
 
-            const stream_offset = try indexU32(stream.items.len);
-            try appendU32(&stream, allocator, state.bytecode_offset);
+            const stream_offset = try codec.indexU32(stream.items.len);
+            try codec.appendU32(&stream, allocator, state.bytecode_offset);
             try appendRecovery(
                 &stream,
                 allocator,
                 try recoveryFor(graph, state.accumulator),
             );
-            try appendU16(&stream, allocator, state.slot_count);
+            try codec.appendU16(&stream, allocator, state.slot_count);
             for (slots) |slot| {
                 try stream.append(allocator, slot.register);
                 try appendRecovery(
@@ -81,7 +82,7 @@ pub const Metadata = struct {
                     try recoveryFor(graph, slot.value),
                 );
             }
-            const stream_len = try indexU32(stream.items.len - stream_offset);
+            const stream_len = try codec.indexU32(stream.items.len - stream_offset);
             try points.append(allocator, .{
                 .node = node_id,
                 .stream_offset = stream_offset,
@@ -147,9 +148,9 @@ pub const Metadata = struct {
         point_index: usize,
     ) !DecodedPoint {
         if (point_index >= self.points.len) return error.InvalidMetadata;
-        var cursor: Cursor = .{ .bytes = try pointBytes(self, self.points[point_index]) };
+        var cursor: codec.Cursor = .{ .bytes = try pointBytes(self, self.points[point_index]) };
         const bytecode_offset = try cursor.readU32();
-        const accumulator = try cursor.readRecovery();
+        const accumulator = try readRecovery(&cursor);
         const slot_count = try cursor.readU16();
         const slots = try allocator.alloc(Slot, slot_count);
         errdefer allocator.free(slots);
@@ -161,7 +162,7 @@ pub const Metadata = struct {
             }
             slot.* = .{
                 .register = register,
-                .recovery = try cursor.readRecovery(),
+                .recovery = try readRecovery(&cursor),
             };
             previous_register = register;
         }
@@ -318,15 +319,15 @@ fn recoveryFor(graph: *const ir.Graph, value: ir.ValueId) !Recovery {
 fn verifyPoint(bytes: []const u8, graph: *const ir.Graph, node_id: ir.ValueId) !void {
     const state = try checkedState(graph, node_id);
     const slots = try checkedSlots(graph, node_id, state);
-    var cursor: Cursor = .{ .bytes = bytes };
+    var cursor: codec.Cursor = .{ .bytes = bytes };
     if (try cursor.readU32() != state.bytecode_offset) return error.InvalidMetadata;
-    if (!recoveryEql(try cursor.readRecovery(), try recoveryFor(graph, state.accumulator))) {
+    if (!recoveryEql(try readRecovery(&cursor), try recoveryFor(graph, state.accumulator))) {
         return error.InvalidMetadata;
     }
     if (try cursor.readU16() != slots.len) return error.InvalidMetadata;
     for (slots) |slot| {
         if (try cursor.readByte() != slot.register) return error.InvalidMetadata;
-        if (!recoveryEql(try cursor.readRecovery(), try recoveryFor(graph, slot.value))) {
+        if (!recoveryEql(try readRecovery(&cursor), try recoveryFor(graph, slot.value))) {
             return error.InvalidMetadata;
         }
     }
@@ -334,12 +335,7 @@ fn verifyPoint(bytes: []const u8, graph: *const ir.Graph, node_id: ir.ValueId) !
 }
 
 fn pointBytes(metadata: *const Metadata, point: Point) ![]const u8 {
-    const start: usize = point.stream_offset;
-    const len: usize = point.stream_len;
-    if (start > metadata.stream.len or len > metadata.stream.len - start) {
-        return error.InvalidMetadata;
-    }
-    return metadata.stream[start..][0..len];
+    return codec.checkedBytes(metadata.stream, point.stream_offset, point.stream_len);
 }
 
 const RecoveryTag = enum(u8) {
@@ -361,7 +357,7 @@ fn appendRecovery(
     switch (recovery) {
         .value => |value| {
             try stream.append(allocator, @intFromEnum(RecoveryTag.value));
-            try appendU32(stream, allocator, value);
+            try codec.appendU32(stream, allocator, value);
         },
         .immediate => |immediate| switch (immediate) {
             .undefined_ => try stream.append(allocator, @intFromEnum(RecoveryTag.undefined_)),
@@ -371,88 +367,34 @@ fn appendRecovery(
             .hole => try stream.append(allocator, @intFromEnum(RecoveryTag.hole)),
             .int32 => |value| {
                 try stream.append(allocator, @intFromEnum(RecoveryTag.int32));
-                try appendU32(stream, allocator, @bitCast(value));
+                try codec.appendU32(stream, allocator, @bitCast(value));
             },
             .constant_pool => |value| {
                 try stream.append(allocator, @intFromEnum(RecoveryTag.constant_pool));
-                try appendU16(stream, allocator, value);
+                try codec.appendU16(stream, allocator, value);
             },
         },
     }
 }
 
-fn appendU16(
-    stream: *std.ArrayListUnmanaged(u8),
-    allocator: std.mem.Allocator,
-    value: u16,
-) !void {
-    var bytes: [2]u8 = undefined;
-    std.mem.writeInt(u16, &bytes, value, .little);
-    try stream.appendSlice(allocator, &bytes);
+fn readRecovery(cursor: *codec.Cursor) !Recovery {
+    const tag = try cursor.readByte();
+    return switch (tag) {
+        @intFromEnum(RecoveryTag.value) => .{ .value = try cursor.readU32() },
+        @intFromEnum(RecoveryTag.undefined_) => .{ .immediate = .undefined_ },
+        @intFromEnum(RecoveryTag.null_) => .{ .immediate = .null_ },
+        @intFromEnum(RecoveryTag.true_) => .{ .immediate = .true_ },
+        @intFromEnum(RecoveryTag.false_) => .{ .immediate = .false_ },
+        @intFromEnum(RecoveryTag.hole) => .{ .immediate = .hole },
+        @intFromEnum(RecoveryTag.int32) => .{
+            .immediate = .{ .int32 = @as(i32, @bitCast(try cursor.readU32())) },
+        },
+        @intFromEnum(RecoveryTag.constant_pool) => .{
+            .immediate = .{ .constant_pool = try cursor.readU16() },
+        },
+        else => error.InvalidMetadata,
+    };
 }
-
-fn appendU32(
-    stream: *std.ArrayListUnmanaged(u8),
-    allocator: std.mem.Allocator,
-    value: u32,
-) !void {
-    var bytes: [4]u8 = undefined;
-    std.mem.writeInt(u32, &bytes, value, .little);
-    try stream.appendSlice(allocator, &bytes);
-}
-
-const Cursor = struct {
-    bytes: []const u8,
-    position: usize = 0,
-
-    fn readByte(self: *Cursor) !u8 {
-        if (self.position >= self.bytes.len) return error.InvalidMetadata;
-        const value = self.bytes[self.position];
-        self.position += 1;
-        return value;
-    }
-
-    fn readU16(self: *Cursor) !u16 {
-        if (self.position > self.bytes.len or self.bytes.len - self.position < 2) {
-            return error.InvalidMetadata;
-        }
-        const value = std.mem.readInt(u16, self.bytes[self.position..][0..2], .little);
-        self.position += 2;
-        return value;
-    }
-
-    fn readU32(self: *Cursor) !u32 {
-        if (self.position > self.bytes.len or self.bytes.len - self.position < 4) {
-            return error.InvalidMetadata;
-        }
-        const value = std.mem.readInt(u32, self.bytes[self.position..][0..4], .little);
-        self.position += 4;
-        return value;
-    }
-
-    fn readRecovery(self: *Cursor) !Recovery {
-        const tag = try self.readByte();
-        return switch (tag) {
-            @intFromEnum(RecoveryTag.value) => .{ .value = try self.readU32() },
-            @intFromEnum(RecoveryTag.undefined_) => .{ .immediate = .undefined_ },
-            @intFromEnum(RecoveryTag.null_) => .{ .immediate = .null_ },
-            @intFromEnum(RecoveryTag.true_) => .{ .immediate = .true_ },
-            @intFromEnum(RecoveryTag.false_) => .{ .immediate = .false_ },
-            @intFromEnum(RecoveryTag.hole) => .{ .immediate = .hole },
-            @intFromEnum(RecoveryTag.int32) => .{
-                .immediate = .{ .int32 = @as(i32, @bitCast(try self.readU32())) },
-            },
-            @intFromEnum(RecoveryTag.constant_pool) => .{
-                .immediate = .{ .constant_pool = try self.readU16() },
-            },
-            else => error.InvalidMetadata,
-        };
-    }
-
-    fn atEnd(self: *const Cursor) bool {
-        return self.position == self.bytes.len;
-    }
-};
 
 fn recoveryEql(lhs: Recovery, rhs: Recovery) bool {
     if (std.meta.activeTag(lhs) != std.meta.activeTag(rhs)) return false;
@@ -469,9 +411,4 @@ fn immediateEql(lhs: ir.Immediate, rhs: ir.Immediate) bool {
         .constant_pool => |value| value == rhs.constant_pool,
         else => true,
     };
-}
-
-fn indexU32(index: usize) !u32 {
-    if (index > std.math.maxInt(u32)) return error.GraphTooLarge;
-    return @intCast(index);
 }

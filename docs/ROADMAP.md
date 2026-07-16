@@ -1034,9 +1034,9 @@ sampling by `/profile`.
   constants embed directly and other entries reference pre-node SSA values.
   A bounds-checked verifier rejects mismatched lowerings/assumptions, malformed
   state ranges, unavailable ValueIds, duplicate register slots, corrupt tags, and
-  truncated streams without panicking. Physical register/stack recovery and
-  runtime frame reconstruction remain gated on representation selection and
-  allocation.
+  truncated streams without panicking. Stable physical spill homes land in the
+  follow-up below; runtime frame reconstruction and register allocation remain
+  gated.
   See [ohaimark.md](ohaimark.md).
 - **Ohaimark representation selection (2026-07-16).** A pure verified pass now
   assigns every SSA result and use either tagged or int32 form. Checked
@@ -1048,6 +1048,17 @@ sampling by `/profile`.
   malformed node/parameter/edge ranges, overlapping or orphaned input entries,
   inconsistent lowerings, and corrupt conversions without panicking. Double
   representation stays deferred until executable lowering measures a need.
+  See [ohaimark.md](ohaimark.md).
+- **Ohaimark physical deopt homes (2026-07-16).** Logical SSA recoveries now
+  lower into stable definition-time spill homes for only the values referenced
+  by deopt frame states. Tagged and int32 homes use separate regions, giving a
+  future stack walker one precise tagged-region boundary; repeated recoveries
+  reuse the same slot. A second compact stream records tagged loads, int32
+  loads with boxing recipes, and embedded immediates. Allocation-free
+  materialization produces Lantern's NaN-boxed `Value`s, while shared
+  bounds-checked codec primitives reject corrupt homes, counts, tags, offsets,
+  and spill indices without panicking. Native frame emission and runtime
+  replacement remain gated on graph differential execution and allocation.
   See [ohaimark.md](ohaimark.md).
 - **Generational GC.** A JSC-Riptide-style non-moving
   generational collector — store-site routing, generation header
@@ -1436,8 +1447,8 @@ and the per-builtin checklist; this section tracks status.
   from inline caches, deopt back to Lantern on guard failure.
   Modeled on JSC DFG / V8 Maglev / SpiderMonkey Warp. The feedback snapshot,
   block-argument SSA, initial specialization and representation planners, and
-  logical deopt metadata ship; physical recovery, runtime deoptimization, and
-  machine-code execution remain planned. See
+  logical plus stable-spill physical deopt metadata ship; runtime
+  deoptimization and machine-code execution remain planned. See
   [ohaimark.md](ohaimark.md).
 - **Spasm** — wasm baseline JIT (T1), Sarcasm's compiled tier.
   Single-pass over the validated module + branch side-table,

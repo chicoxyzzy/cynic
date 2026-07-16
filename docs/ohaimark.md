@@ -1,9 +1,9 @@
 # Ohaimark optimizing JIT
 
 Status: **ADR accepted; bytecode/feedback/SSA, pure specialization,
-representation selection, and logical deopt metadata landed** (2026-07-16).
-Physical recovery metadata, machine-code lowering, runtime deoptimization,
-and tier-up are not shipped yet.
+representation selection, and logical plus stable-spill physical deopt
+metadata landed** (2026-07-16). Register allocation, machine-code lowering,
+runtime deoptimization, and tier-up are not shipped yet.
 
 Ohaimark is Cynic's T2 method JIT. It consumes finalized Lantern bytecode
 and runtime feedback, builds a compact control-flow SSA graph, specializes
@@ -211,13 +211,30 @@ in-range register slots, and exact stream decoding. Corrupt metadata returns
 `InvalidMetadata` or `MalformedGraph`; it cannot become an unchecked slice or
 cast trap.
 
-This is deliberately compiler-level metadata, not an executable deoptimizer.
-Representation selection now fixes whether each `ValueId` is tagged or
-unboxed int32. Register allocation must next translate those values to machine
-registers or spill locations and encode the boxing recipe each recovery needs.
-Only then can a no-allocation runtime path reconstruct the existing Lantern
-frame. A graph evaluator must first prove graph execution and recovery agree
-with Lantern for the supported subset.
+`runtime/ohaimark/deopt_physical.zig` now turns those logical values into a
+conservative first physical policy. Every non-constant SSA value referenced by
+any deopt point receives one stable definition-time spill home; values absent
+from every frame state receive none. Tagged and int32 homes occupy separate
+regions, following Maglev's single split-point design
+([V8 Maglev](https://v8.dev/blog/maglev#register-allocation)), so a future stack
+walker scans only the tagged region. Repeated recoveries share a home.
+
+The physical translation stream contains tagged-stack, int32-stack, or
+immediate recipes. Materializing a tagged slot is a direct `Value` load;
+materializing an int32 slot boxes with `Value.fromInt32`; singleton and
+constant-pool recipes remain embedded. Every lookup and stream read is
+bounds-checked, and the logical and physical formats share one parser
+substrate. Tampered homes, region counts, tags, offsets, and spill indices
+return `InvalidMetadata` or `InvalidRecovery` without unchecked access or
+panicking.
+
+This is still compiler-level metadata, not an executable deoptimizer or a full
+register allocator. Code generation must emit each required home store at the
+value's definition; ordinary uses may simultaneously keep a register copy.
+The next runtime step is an optimized frame layout plus a guard-exit stub that
+saves the two spill regions and reconstructs the existing Lantern frame. A
+graph evaluator must first prove graph execution and recovery agree with
+Lantern for the supported subset.
 
 ## 5. Delivery order
 
@@ -228,10 +245,11 @@ with Lantern for the supported subset.
    semantics-safe int32 folding, explicit lowering choices, and verified
    tagged/int32 representation selection. Local DCE and a measured need for a
    Double representation remain.
-3. **Deopt first, logical metadata shipped:** pre-operation frame-state
-   capture, liveness-compacted translation stream, and metadata verifier.
-   Physical recovery locations and boxing recipes, runtime reconstruction, and
-   graph-vs-Lantern differential tests remain.
+3. **Deopt first, logical + physical-home metadata shipped:** pre-operation
+   frame-state capture, liveness-compacted logical stream, stable tagged/int32
+   spill homes, physical boxing recipes, and bounds-checked verifiers. Native
+   frame emission, runtime reconstruction, and graph-vs-Lantern differential
+   tests remain.
 4. **AArch64 lowering:** register allocation, safepoints, guard exits, code
    ownership, and a disabled-by-default tier-up path.
 5. **Gates and tuning:** full test262 pass-set differential, SES suite,

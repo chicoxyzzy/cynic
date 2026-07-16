@@ -5,3 +5,4 @@ pub const ir = @import("ir.zig");
 pub const specialize = @import("specialize.zig");
 pub const representation = @import("representation.zig");
 pub const deopt = @import("deopt.zig");
+pub const deopt_physical = @import("deopt_physical.zig");

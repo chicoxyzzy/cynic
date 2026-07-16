@@ -10,6 +10,7 @@ const JSObject = @import("../object.zig").JSObject;
 const Shape = @import("../shape.zig").Shape;
 const Value = @import("../value.zig").Value;
 const deopt = @import("deopt.zig");
+const deopt_physical = @import("deopt_physical.zig");
 const feedback = @import("feedback.zig");
 const ir = @import("ir.zig");
 const representation = @import("representation.zig");
@@ -607,6 +608,171 @@ test "Ohaimark deopt metadata rejects malformed frame values" {
         error.MalformedGraph,
         deopt.Metadata.build(testing.allocator, &graph, &plan),
     );
+}
+
+test "Ohaimark physical deopt metadata separates tagged and int32 homes" {
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    const receiver = try builder.reserveRegister();
+    const lhs = try builder.reserveRegister();
+    try builder.emitLoadReg(span, receiver);
+    try builder.emitLdaProperty(span, 0);
+    try builder.emitLoadSmi(span, 40);
+    try builder.emitStoreReg(span, lhs);
+    try builder.emitLoadSmi(span, 2);
+    try builder.emitOp(.add, span);
+    try builder.emitU8(lhs);
+    try builder.emitStoreReg(span, lhs);
+    try builder.emitLoadSmi(span, std.math.maxInt(i32));
+    try builder.emitOp(.add, span);
+    try builder.emitU8(lhs);
+    var chunk = try finish(&builder);
+    defer chunk.deinit(testing.allocator);
+    const receiver_shape: *Shape = @ptrFromInt(0xA000);
+    chunk.inline_load_caches[0].fillOwnData(receiver_shape, 3);
+
+    var graph = try ir.Graph.build(testing.allocator, &chunk);
+    defer graph.deinit();
+    var specialization = try specialize.Plan.build(testing.allocator, &graph);
+    defer specialization.deinit();
+    var representations = try representation.Plan.build(
+        testing.allocator,
+        &graph,
+        &specialization,
+    );
+    defer representations.deinit();
+    var logical = try deopt.Metadata.build(testing.allocator, &graph, &specialization);
+    defer logical.deinit();
+    try testing.expectEqual(@as(usize, 2), logical.points.len);
+
+    var homes = try deopt_physical.Homes.build(
+        testing.allocator,
+        &graph,
+        &specialization,
+        &representations,
+        &logical,
+    );
+    defer homes.deinit();
+    try homes.verify(&graph, &specialization, &representations, &logical);
+    try testing.expectEqual(@as(u32, 1), homes.tagged_slot_count);
+    try testing.expectEqual(@as(u32, 1), homes.int32_slot_count);
+
+    var first_logical = try logical.decode(testing.allocator, 0);
+    defer first_logical.deinit();
+    const receiver_value = switch (first_logical.accumulator) {
+        .value => |value| value,
+        .immediate => return error.TestUnexpectedResult,
+    };
+    try testing.expectEqual(
+        deopt_physical.Home{ .tagged_stack = 0 },
+        try homes.homeFor(receiver_value),
+    );
+
+    var second_logical = try logical.decode(testing.allocator, 1);
+    defer second_logical.deinit();
+    try testing.expectEqual(@as(usize, 1), second_logical.slots.len);
+    const folded_value = switch (second_logical.slots[0].recovery) {
+        .value => |value| value,
+        .immediate => return error.TestUnexpectedResult,
+    };
+    try testing.expectEqual(
+        deopt_physical.Home{ .int32_stack = 0 },
+        try homes.homeFor(folded_value),
+    );
+
+    var physical = try deopt_physical.Metadata.build(
+        testing.allocator,
+        &graph,
+        &specialization,
+        &representations,
+        &logical,
+        &homes,
+    );
+    defer physical.deinit();
+    try physical.verify(
+        &graph,
+        &specialization,
+        &representations,
+        &logical,
+        &homes,
+    );
+    try testing.expectEqual(homes.tagged_slot_count, physical.tagged_slot_count);
+    try testing.expectEqual(homes.int32_slot_count, physical.int32_slot_count);
+
+    var first_physical = try physical.decode(testing.allocator, 0);
+    defer first_physical.deinit();
+    try testing.expectEqual(
+        deopt_physical.Recovery{ .tagged_stack = 0 },
+        first_physical.accumulator,
+    );
+    var second_physical = try physical.decode(testing.allocator, 1);
+    defer second_physical.deinit();
+    try testing.expectEqual(
+        deopt_physical.Recovery{ .int32_stack = 0 },
+        second_physical.slots[0].recovery,
+    );
+
+    const tagged_spills = [_]Value{Value.null_};
+    const int32_spills = [_]i32{42};
+    try testing.expectEqual(
+        Value.null_.bits,
+        (try first_physical.accumulator.materialize(
+            &tagged_spills,
+            &int32_spills,
+            chunk.constants,
+        )).bits,
+    );
+    try testing.expectEqual(
+        Value.fromInt32(42).bits,
+        (try second_physical.slots[0].recovery.materialize(
+            &tagged_spills,
+            &int32_spills,
+            chunk.constants,
+        )).bits,
+    );
+    try testing.expectError(
+        error.InvalidRecovery,
+        (deopt_physical.Recovery{ .int32_stack = 1 }).materialize(
+            &tagged_spills,
+            &int32_spills,
+            chunk.constants,
+        ),
+    );
+
+    const original_home = homes.values[receiver_value];
+    homes.values[receiver_value] = .{ .tagged_stack = homes.tagged_slot_count };
+    try testing.expectError(
+        error.InvalidMetadata,
+        homes.verify(&graph, &specialization, &representations, &logical),
+    );
+    homes.values[receiver_value] = original_home;
+
+    const original_tag = physical.stream[4];
+    physical.stream[4] = 0xff;
+    try testing.expectError(
+        error.InvalidMetadata,
+        physical.verify(
+            &graph,
+            &specialization,
+            &representations,
+            &logical,
+            &homes,
+        ),
+    );
+    physical.stream[4] = original_tag;
+
+    physical.tagged_slot_count += 1;
+    try testing.expectError(
+        error.InvalidMetadata,
+        physical.verify(
+            &graph,
+            &specialization,
+            &representations,
+            &logical,
+            &homes,
+        ),
+    );
+    physical.tagged_slot_count -= 1;
 }
 
 test "Ohaimark specialization records pointer-free named-load assumptions" {
