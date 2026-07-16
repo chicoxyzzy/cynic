@@ -209,7 +209,7 @@ const Runner = struct {
                 const node = self.graph.nodes[node_index];
                 switch (node.kind) {
                     .block_parameter => return error.MalformedGraph,
-                    .constant, .add, .sub, .mul, .strict_eq, .less_than, .load_named => {
+                    .constant, .add, .sub, .mul, .strict_eq, .logical_not, .less_than, .load_named => {
                         switch (try self.evaluateValueNode(node_id)) {
                             .value => |value| try self.define(node_id, value),
                             .guard_failed => return self.deoptAt(node_id),
@@ -274,6 +274,7 @@ const Runner = struct {
             .sub => self.arithmetic(node_id, info, .sub),
             .mul => self.arithmetic(node_id, info, .mul),
             .strict_eq => self.strictEqual(node_id, info),
+            .logical_not => self.logicalNot(node_id, info),
             .less_than => self.lessThan(node_id, info),
             .load_named => switch (info.lowering) {
                 .load_named_own, .load_named_prototype, .load_named_synthetic => .guard_failed,
@@ -345,6 +346,28 @@ const Runner = struct {
         const lhs = (try self.int32NodeInput(node_id, 0)) orelse return .guard_failed;
         const rhs = (try self.int32NodeInput(node_id, 1)) orelse return .guard_failed;
         return .{ .value = .{ .tagged = Value.fromBool(lhs == rhs) } };
+    }
+
+    fn logicalNot(
+        self: *Runner,
+        node_id: ir.ValueId,
+        info: specialize.NodeInfo,
+    ) !NodeResult {
+        if (info.lowering == .constant) {
+            return .{ .value = try self.runtimeFromImmediate(
+                info.folded orelse return error.MalformedGraph,
+                self.outputKind(node_id),
+            ) };
+        }
+        if (info.lowering != .logical_not and info.lowering != .checked_boolean_not) {
+            return error.MalformedGraph;
+        }
+        const input = try self.taggedNodeInput(node_id, 0);
+        if (!input.isBool()) {
+            if (info.lowering == .checked_boolean_not) return .guard_failed;
+            return error.MalformedGraph;
+        }
+        return .{ .value = .{ .tagged = Value.fromBool(!input.asBool()) } };
     }
 
     fn lessThan(

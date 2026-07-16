@@ -194,6 +194,41 @@ const StrictBranchChunk = struct {
     rhs: u8,
 };
 
+const StrictComparisonChunk = struct {
+    chunk: chunk_mod.Chunk,
+    comparison_pc: u32,
+    lhs: u8,
+    rhs: u8,
+};
+
+fn strictComparisonChunk(op: Op) !StrictComparisonChunk {
+    if (op != .strict_eq and op != .strict_neq) return error.TestUnexpectedResult;
+
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    const lhs = try builder.reserveRegister();
+    const rhs = try builder.reserveRegister();
+    try builder.emitLoadReg(span, rhs);
+    const comparison_pc = builder.here();
+    try builder.emitOp(op, span);
+    try builder.emitU8(lhs);
+    try builder.emitOp(.return_, span);
+    return .{
+        .chunk = try builder.finish(),
+        .comparison_pc = @intCast(comparison_pc),
+        .lhs = lhs,
+        .rhs = rhs,
+    };
+}
+
+fn logicalNotChunk() !chunk_mod.Chunk {
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    try builder.emitOp(.logical_not, span);
+    try builder.emitOp(.return_, span);
+    return builder.finish();
+}
+
 fn strictBranchChunk(op: Op) !StrictBranchChunk {
     const info = op.branchInfo() orelse return error.TestUnexpectedResult;
     if (info.canonical != .jmp_if_strict_eq and info.canonical != .jmp_if_strict_neq) {
@@ -621,6 +656,140 @@ test "Ohaimark AArch64 fused strict equality deopts non-int32 operands at the ex
     try testing.expectEqual(lhs.bits, frame.registers[branch_chunk.lhs].bits);
     try testing.expectEqual(rhs.bits, frame.registers[branch_chunk.rhs].bits);
     try testing.expectEqual(Value.fromInt32(22).bits, (try resumeLantern(&realm, frame)).bits);
+}
+
+test "Ohaimark IR lowers strict inequality through reusable logical not" {
+    var comparison = try strictComparisonChunk(.strict_neq);
+    defer comparison.chunk.deinit(testing.allocator);
+    var native = try NativeGraph.build(&comparison.chunk);
+    defer native.deinit();
+
+    const strict_eq_id = try findNode(&native, .strict_eq);
+    const logical_not_id = try findNode(&native, .logical_not);
+    try testing.expectEqualSlices(
+        ir.ValueId,
+        &.{strict_eq_id},
+        native.graph.nodeInputs(logical_not_id),
+    );
+    try testing.expect(native.graph.nodes[strict_eq_id].frame_state != null);
+    try testing.expectEqual(comparison.comparison_pc, native.graph.nodes[strict_eq_id].bytecode_offset);
+    try testing.expectEqual(specialize.Lowering.logical_not, native.specialization.node_info[logical_not_id].lowering);
+}
+
+test "Ohaimark IR gives direct logical not a checked Boolean deopt point" {
+    var chunk = try logicalNotChunk();
+    defer chunk.deinit(testing.allocator);
+    var native = try NativeGraph.build(&chunk);
+    defer native.deinit();
+
+    const node_id = try findNode(&native, .logical_not);
+    const node = native.graph.nodes[node_id];
+    const frame_state = native.graph.frame_states[
+        node.frame_state orelse
+            return error.TestUnexpectedResult
+    ];
+    try testing.expectEqual(@as(u32, 0), node.bytecode_offset);
+    try testing.expectEqual(node.bytecode_offset, frame_state.bytecode_offset);
+    try testing.expectEqual(specialize.Lowering.checked_boolean_not, native.specialization.node_info[node_id].lowering);
+}
+
+test "Ohaimark AArch64 executes strict inequality for int32 operands" {
+    if (comptime !masm.native_aarch64) return error.SkipZigTest;
+    for ([_]bool{ false, true }) |equal| {
+        var comparison = try strictComparisonChunk(.strict_neq);
+        defer comparison.chunk.deinit(testing.allocator);
+        var native = try NativeGraph.build(&comparison.chunk);
+        defer native.deinit();
+        var realm = Realm.init(testing.allocator);
+        defer realm.deinit();
+        realm.jit_enabled = false;
+        const registers = try testing.allocator.alloc(Value, comparison.chunk.register_count);
+        defer testing.allocator.free(registers);
+        var frame = testFrame(&comparison.chunk, registers);
+        frame.registers[comparison.lhs] = Value.fromInt32(7);
+        frame.registers[comparison.rhs] = Value.fromInt32(if (equal) 7 else 8);
+
+        try testing.expectEqual(
+            @intFromEnum(codegen.EntryResult.done),
+            try executeNative(&native, &realm, &frame),
+        );
+        try testing.expectEqual(Value.fromBool(!equal).bits, frame.accumulator.bits);
+    }
+}
+
+test "Ohaimark AArch64 strict inequality deopts non-int32 operands at the exact opcode" {
+    if (comptime !masm.native_aarch64) return error.SkipZigTest;
+    var comparison = try strictComparisonChunk(.strict_neq);
+    defer comparison.chunk.deinit(testing.allocator);
+    var native = try NativeGraph.build(&comparison.chunk);
+    defer native.deinit();
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = false;
+    const registers = try testing.allocator.alloc(Value, comparison.chunk.register_count);
+    defer testing.allocator.free(registers);
+    var frame = testFrame(&comparison.chunk, registers);
+    const lhs = Value.fromDouble(1.5);
+    const rhs = Value.fromDouble(2.5);
+    frame.registers[comparison.lhs] = lhs;
+    frame.registers[comparison.rhs] = rhs;
+
+    try testing.expectEqual(
+        @intFromEnum(codegen.EntryResult.resume_interp),
+        try executeNative(&native, &realm, &frame),
+    );
+    try testing.expectEqual(comparison.comparison_pc, frame.ip);
+    try testing.expectEqual(rhs.bits, frame.accumulator.bits);
+    try testing.expectEqual(lhs.bits, frame.registers[comparison.lhs].bits);
+    try testing.expectEqual(rhs.bits, frame.registers[comparison.rhs].bits);
+    try testing.expectEqual(Value.true_.bits, (try resumeLantern(&realm, frame)).bits);
+}
+
+test "Ohaimark AArch64 executes logical not for Boolean input" {
+    if (comptime !masm.native_aarch64) return error.SkipZigTest;
+    for ([_]bool{ false, true }) |input| {
+        var chunk = try logicalNotChunk();
+        defer chunk.deinit(testing.allocator);
+        var native = try NativeGraph.build(&chunk);
+        defer native.deinit();
+        var realm = Realm.init(testing.allocator);
+        defer realm.deinit();
+        realm.jit_enabled = false;
+        const registers = try testing.allocator.alloc(Value, chunk.register_count);
+        defer testing.allocator.free(registers);
+        var frame = testFrame(&chunk, registers);
+        frame.accumulator = Value.fromBool(input);
+
+        try testing.expectEqual(
+            @intFromEnum(codegen.EntryResult.done),
+            try executeNative(&native, &realm, &frame),
+        );
+        try testing.expectEqual(Value.fromBool(!input).bits, frame.accumulator.bits);
+    }
+}
+
+test "Ohaimark AArch64 logical not deopts non-Boolean input at the exact opcode" {
+    if (comptime !masm.native_aarch64) return error.SkipZigTest;
+    var chunk = try logicalNotChunk();
+    defer chunk.deinit(testing.allocator);
+    var native = try NativeGraph.build(&chunk);
+    defer native.deinit();
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = false;
+    const registers = try testing.allocator.alloc(Value, chunk.register_count);
+    defer testing.allocator.free(registers);
+    var frame = testFrame(&chunk, registers);
+    const input = Value.fromInt32(0);
+    frame.accumulator = input;
+
+    try testing.expectEqual(
+        @intFromEnum(codegen.EntryResult.resume_interp),
+        try executeNative(&native, &realm, &frame),
+    );
+    try testing.expectEqual(@as(u32, 0), frame.ip);
+    try testing.expectEqual(input.bits, frame.accumulator.bits);
+    try testing.expectEqual(Value.true_.bits, (try resumeLantern(&realm, frame)).bits);
 }
 
 test "Ohaimark AArch64 backedge safepoint exhausts fuel with exact loop-header state" {

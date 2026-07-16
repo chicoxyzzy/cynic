@@ -271,6 +271,10 @@ fn initialOutput(node: ir.Node, info: specialize.NodeInfo) !Kind {
             .constant, .strict_eq => .tagged,
             else => error.MalformedGraph,
         },
+        .logical_not => switch (info.lowering) {
+            .constant, .logical_not, .checked_boolean_not => .tagged,
+            else => error.MalformedGraph,
+        },
         .less_than => switch (info.lowering) {
             .constant, .less_than => .tagged,
             else => error.MalformedGraph,
@@ -313,6 +317,11 @@ fn nodeInputKind(node: ir.Node, info: specialize.NodeInfo) !Kind {
             .strict_eq => .int32,
             else => error.MalformedGraph,
         },
+        .logical_not => switch (info.lowering) {
+            .constant => .none,
+            .logical_not, .checked_boolean_not => .tagged,
+            else => error.MalformedGraph,
+        },
         .less_than => switch (info.lowering) {
             .constant => .none,
             .less_than => .tagged,
@@ -342,7 +351,7 @@ fn arithmeticInput(info: specialize.NodeInfo, checked: specialize.Lowering) !Kin
 fn nodeInputCount(kind: ir.NodeKind) u16 {
     return switch (kind) {
         .block_parameter, .constant, .jump => 0,
-        .load_named, .branch, .return_ => 1,
+        .logical_not, .load_named, .branch, .return_ => 1,
         .add, .sub, .mul, .strict_eq, .less_than => 2,
     };
 }
@@ -413,7 +422,7 @@ fn validateNodeContract(node: ir.Node, info: specialize.NodeInfo) !void {
                 return error.MalformedGraph;
             }
         },
-        .add, .sub, .mul, .strict_eq, .less_than => {
+        .add, .sub, .mul, .strict_eq, .logical_not, .less_than => {
             if (!hasPayload(node.payload, .none)) return error.MalformedGraph;
         },
         .load_named => {

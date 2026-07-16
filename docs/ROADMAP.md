@@ -1231,6 +1231,18 @@ sampling by `/profile`.
   standalone `strict_neq` (32,025) are now the leading IR frontiers. Forced T2
   and the same-tree lower-tier posture retained byte-identical 48,653-path pass
   sets. See [ohaimark.md](ohaimark.md) §3.16.
+- **Ohaimark strict inequality + logical not (2026-07-16).** Standalone
+  `strict_neq` now canonicalizes to the existing guarded strict-equality node
+  followed by a reusable Boolean logical-not node, preserving the original
+  opcode's pre-operation deopt state. Direct `logical_not` folds known primitive
+  constants, flips proven Booleans without a guard, and otherwise accepts only
+  the canonical Boolean tags before resuming Lantern for full §7.1.2
+  `ToBoolean`. Native tests cover both Boolean results and exact non-int32 /
+  non-Boolean bailout state. Publications rose from 6,639 to 6,644; the former
+  `strict_neq` (32,025) and `logical_not` (2,541) refusal leaders disappeared,
+  exposing `lda_global8` (44,462), `make_environment` (38,799), and `div`
+  (36,894). Forced T2 and a fresh lower-tier run retained byte-identical
+  48,653-path pass sets. See [ohaimark.md](ohaimark.md) §3.16.
 - **Generational GC.** A JSC-Riptide-style non-moving
   generational collector — store-site routing, generation header
   bits, a write barrier + remembered set, `collectYoung` with

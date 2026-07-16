@@ -64,6 +64,8 @@ pub const Lowering = enum {
     checked_int32_sub,
     checked_int32_mul,
     strict_eq,
+    logical_not,
+    checked_boolean_not,
     less_than,
     load_named_generic,
     load_named_own,
@@ -233,6 +235,7 @@ fn inferNode(graph: *const ir.Graph, facts: []const NodeInfo, id: ir.ValueId) !N
         .sub => inferArithmetic(.sub, facts, inputs),
         .mul => inferArithmetic(.mul, facts, inputs),
         .strict_eq => inferStrictEq(facts, inputs),
+        .logical_not => inferLogicalNot(facts, inputs),
         .less_than => inferLessThan(facts, inputs),
         .load_named => if (inputs.len == 1 and !facts[inputs[0]].result_type.isBottom())
             .{ .result_type = Type.any, .lowering = .load_named_generic }
@@ -308,6 +311,26 @@ fn inferStrictEq(facts: []const NodeInfo, inputs: []const ir.ValueId) NodeInfo {
     return .{ .result_type = Type.boolean, .lowering = .strict_eq };
 }
 
+fn inferLogicalNot(facts: []const NodeInfo, inputs: []const ir.ValueId) NodeInfo {
+    if (inputs.len != 1) return .{};
+    const input = facts[inputs[0]];
+    if (input.result_type.isBottom()) return .{};
+    if (logicalNotConstant(input.folded)) |folded| {
+        return .{
+            .result_type = Type.boolean,
+            .lowering = .constant,
+            .folded = folded,
+        };
+    }
+    return .{
+        .result_type = Type.boolean,
+        .lowering = if (input.result_type.eql(Type.boolean))
+            .logical_not
+        else
+            .checked_boolean_not,
+    };
+}
+
 fn inferLessThan(facts: []const NodeInfo, inputs: []const ir.ValueId) NodeInfo {
     if (inputs.len != 2) return .{};
     const lhs = facts[inputs[0]];
@@ -353,6 +376,18 @@ fn intConstant(value: ?ir.Immediate) ?i32 {
         .int32 => |number| number,
         else => null,
     };
+}
+
+fn logicalNotConstant(value: ?ir.Immediate) ?ir.Immediate {
+    const immediate = value orelse return null;
+    const result = switch (immediate) {
+        .undefined_, .null_ => true,
+        .true_ => false,
+        .false_ => true,
+        .int32 => |number| number == 0,
+        .hole, .constant_pool => return null,
+    };
+    return if (result) .true_ else .false_;
 }
 
 fn knownStrictEqual(lhs: ?ir.Immediate, rhs: ?ir.Immediate) ?bool {

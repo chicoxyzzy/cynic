@@ -6,9 +6,10 @@ metadata, graph/Lantern differential evaluation, and abstract register/spill
 allocation plus AArch64 physical frame/edge lowering landed** (2026-07-16).
 Verified native frame entry/exit, typed physical moves, folded-value returns,
 checked int32 arithmetic/control and strict equality, every fused strict
-equality/inequality branch width, and direct Lantern-frame guard exits have also
-landed. Guarded own/prototype/synthetic named-property loads now execute through
-live typed IC cells. Frame-reconstructing backedge safepoints now poll fuel,
+equality/inequality branch width, standalone strict inequality, Boolean logical
+not, and direct Lantern-frame guard exits have also landed. Guarded
+own/prototype/synthetic named-property loads now execute through live typed IC
+cells. Frame-reconstructing backedge safepoints now poll fuel,
 interrupts, hooks, and pending GC work. Chunk-owned executable lifetime and
 transactional full-pipeline compilation/installation now ship. Runtime tier-up
 now enters ordinary functions behind a realm-local default-off gate; the full
@@ -121,11 +122,12 @@ arguments:
 Because target parameters exist before translation, backward edges require no
 repair pass. Unreachable blocks are not translated, so unsupported dead code
 does not reject an otherwise eligible function. The initial node set covers
-constants, register moves, `add`/`sub`/`mul`, strict equality, less-than,
-immediate addition, generic named-property loads, branches, jumps, and
-returns. All three displacement widths of the fused strict-equality and
+constants, register moves, `add`/`sub`/`mul`, strict equality, logical not,
+less-than, immediate addition, generic named-property loads, branches, jumps,
+and returns. All three displacement widths of the fused strict-equality and
 strict-inequality branches canonicalize to one guarded strict-equality value
-plus an ordinary truthy/falsy branch.
+plus an ordinary truthy/falsy branch. Standalone strict inequality canonicalizes
+to that same guarded equality node followed by a reusable logical-not node.
 
 ### 3.3 Pure specialization plan
 
@@ -490,6 +492,28 @@ former 44,069-entry fused-branch refusal disappeared. IR now accounts for
 produced byte-identical 48,653-path pass sets (SHA-256
 `10f024349d3467c72112da03dd57e0d7e543cdb819a00b3082dfecedaec614ca`).
 
+Standalone strict inequality now follows the spec's composition directly:
+[Equality Operators evaluation](https://tc39.es/ecma262/#sec-equality-operators-runtime-semantics-evaluation)
+computes `IsStrictlyEqual` and negates its Boolean result. The equality node
+owns the original `strict_neq` pre-operation frame state, while the synthetic
+logical-not node is statically Boolean and needs no second guard. Direct
+[`logical_not`](https://tc39.es/ecma262/#sec-logical-not-operator) uses two
+lowerings, matching the known-Boolean versus generic distinction in
+[V8 Maglev](https://chromium.googlesource.com/v8/v8.git/+/refs/heads/12.0.78/src/maglev/maglev-graph-builder.cc#7249): a proven Boolean flips payload bit
+zero directly; an arbitrary tagged input first guards for exactly `false` or
+`true` and otherwise resumes Lantern at the original opcode for full §7.1.2
+`ToBoolean`. Constants with primitive truthiness known to the planner fold to a
+Boolean.
+
+The resulting full run again attempted 218,345 compilations and published
+6,644, with 211,701 refusals (208,974 IR; 2,727 codegen). It installed 620 KiB,
+ran 43,309 generated entries (41,500 completions and 1,809 guard exits), and
+spent 1.833 s compiling in aggregate. Standalone `strict_neq` (previously
+32,025 refusals) and `logical_not` (2,541) disappeared from the leading
+frontier; `lda_global8` at 44,462, `make_environment` at 38,799, and `div` at
+36,894 are now the top three. The forced-T2 and fresh lower-tier pass lists
+remain byte-identical at 48,653 paths with the same SHA-256 above.
+
 ## 4. Deoptimization contract
 
 Every speculative node will carry an explicit assumption and deopt point.
@@ -536,9 +560,10 @@ panicking.
 
 `runtime/ohaimark/evaluator.zig` now provides that pre-codegen proof for the
 pure supported subset. It executes constants, block arguments, branches,
-loops, folded nodes, checked int32 arithmetic, strict equality, numeric
-less-than, and returns while applying the selected per-use conversions. Every
-definition writes its required physical home. A failed type/overflow guard
+loops, folded nodes, checked int32 arithmetic, strict equality/inequality,
+Boolean logical not, numeric less-than, and returns while applying the selected
+per-use conversions. Every definition writes its required physical home. A
+failed type/overflow guard
 decodes the physical stream, materializes the accumulator and live registers,
 and can resume `lantern.runFrames` at the original operation.
 
@@ -590,9 +615,10 @@ traffic remains on T1/T0 until the rollout gates pass.
    rematerialization, and an end-to-end folded graph native return.
 8. **AArch64 optimized execution, initial slice shipped:** checked int32
    add/sub/mul, strict equality and all fused strict equality/inequality branch
-   widths, int32 control flow, stable-home writes, returns, and direct
-   Lantern-frame guard exits, plus live-cell own/prototype/synthetic named loads
-   with inline/overflow slot reads. Taken backedges now poll fuel, interrupts,
+   widths, standalone strict inequality, guarded Boolean logical not, int32
+   control flow, stable-home writes, returns, and direct Lantern-frame guard
+   exits, plus live-cell own/prototype/synthetic named loads with inline/overflow
+   slot reads. Taken backedges now poll fuel, interrupts,
    hooks, and GC work, transferring exact loop-header state before Lantern
    handles a slow condition. Transactional compilation now publishes an owned
    executable handle only after the full pipeline succeeds; per-tier refusal

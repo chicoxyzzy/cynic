@@ -212,6 +212,11 @@ const Compiler = struct {
                 try self.emitStrictEqual(node_id, info.lowering);
                 return false;
             },
+            .logical_not => {
+                if (info.lowering == .constant) return false;
+                try self.emitLogicalNot(node_id, info.lowering);
+                return false;
+            },
             .jump => {
                 const edge_index = try self.singleEdge(block_index);
                 try self.emitEdgeAndJump(edge_index);
@@ -299,6 +304,29 @@ const Compiler = struct {
             .conversion = .none,
         }, self.chunk.constants);
         try self.emitDefinitionHome(node_id);
+    }
+
+    fn emitLogicalNot(
+        self: *Compiler,
+        node_id: ir.ValueId,
+        lowering_kind: specialize.Lowering,
+    ) !void {
+        if ((lowering_kind != .logical_not and lowering_kind != .checked_boolean_not) or
+            self.representations.outputs[node_id] != .tagged)
+        {
+            return error.UnsupportedNode;
+        }
+        try self.emitTaggedInput(node_id, 0, lhs_scratch);
+        if (lowering_kind == .checked_boolean_not) {
+            const guard = try self.guardFor(node_id);
+            try self.machine.movImm64(guard_scratch, Value.false_.bits);
+            try self.machine.emit(a64.eorReg(guard_scratch, lhs_scratch, guard_scratch));
+            try self.machine.emit(a64.cmpImm(guard_scratch, 1, false));
+            try self.jumpToGuardIf(.hi, guard);
+        }
+        try self.machine.emit(a64.movz(rhs_scratch, 1, 0));
+        try self.machine.emit(a64.eorReg(result_scratch, lhs_scratch, rhs_scratch));
+        try self.emitTaggedResult(node_id, result_scratch);
     }
 
     fn emitCheckedMultiply(self: *Compiler, guard: *Masm.Label) !void {
@@ -524,8 +552,10 @@ const Compiler = struct {
         const output_kind = self.representations.outputs[producer];
         const input_conversion = try self.representations.conversionAt(self.graph, inputs.start);
         const boxed_int32 = output_kind == .int32 and input_conversion == .box_int32;
-        const strict_boolean = output_kind == .tagged and input_conversion == .none and
-            self.graph.nodes[producer].kind == .strict_eq;
+        const strict_boolean = output_kind == .tagged and input_conversion == .none and switch (self.graph.nodes[producer].kind) {
+            .strict_eq, .logical_not => true,
+            else => false,
+        };
         if (!boxed_int32 and !strict_boolean) {
             return error.UnsupportedNode;
         }

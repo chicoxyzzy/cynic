@@ -31,6 +31,7 @@ pub const NodeKind = enum {
     sub,
     mul,
     strict_eq,
+    logical_not,
     less_than,
     load_named,
     jump,
@@ -534,13 +535,35 @@ const Builder = struct {
                         live_registers,
                     );
                 },
-                .strict_eq => {
+                .strict_eq, .strict_neq => |comparison| {
                     const lhs = try readRegister(registers, self.chunk.code[pc + 1]);
                     const live_registers = try deopt_liveness.take(&deopt_live_cursor, @intCast(pc));
-                    accumulator = try self.addDeoptNode(
+                    const equal = try self.addDeoptNode(
                         .strict_eq,
                         @intCast(pc),
                         &.{ lhs, accumulator },
+                        .none,
+                        block_index,
+                        accumulator,
+                        registers,
+                        live_registers,
+                    );
+                    accumulator = if (comparison == .strict_eq)
+                        equal
+                    else
+                        try self.addNode(
+                            .logical_not,
+                            @intCast(pc),
+                            &.{equal},
+                            .none,
+                        );
+                },
+                .logical_not => {
+                    const live_registers = try deopt_liveness.take(&deopt_live_cursor, @intCast(pc));
+                    accumulator = try self.addDeoptNode(
+                        .logical_not,
+                        @intCast(pc),
+                        &.{accumulator},
                         .none,
                         block_index,
                         accumulator,
@@ -821,6 +844,8 @@ fn isDeoptCandidate(op: Op) bool {
         .sub,
         .mul,
         .strict_eq,
+        .strict_neq,
+        .logical_not,
         .add_smi,
         .add_smi8,
         .add_smi16,
