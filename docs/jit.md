@@ -774,7 +774,9 @@ The tier ships dark, proves equivalence, then flips on:
    sweep can't tell them apart.
    Ohaimark repeats this gate independently with test262 `--ohaimark`, which
    forces T2 before T1 without changing the established T1-only `--jit` pass
-   set.
+   set. CI reruns that exact comparison as an advisory step and adds
+   `--ohaimark-stats` so publication/refusal and guard-exit evidence is visible
+   on every PR.
 3. **gc-stress with force-compile.** `test262-safe` +
    `--gc-threshold=1` + force-tier-up across the GC-heavy buckets —
    compiled frames must survive the same rooting torture as

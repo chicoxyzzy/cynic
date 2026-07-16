@@ -108,6 +108,7 @@ test "Ohaimark forced function entry compiles and completes through normal dispa
     realm.jit_threshold_override = 1;
     realm.ohaimark_enabled = true;
     realm.ohaimark_threshold_override = 1;
+    realm.heap.ohaimark_stats.enabled = true;
 
     const source =
         \\function answer() { return 1 + 2; }
@@ -123,6 +124,11 @@ test "Ohaimark forced function entry compiles and completes through normal dispa
     try testing.expectEqual(chunk_mod.Chunk.JitState.Tier.compiled, state.ohaimark.tier);
     try testing.expect(state.ohaimark.entry() != null);
     try testing.expectEqual(chunk_mod.Chunk.JitState.Tier.cold, state.bistromath.code.tier);
+    try testing.expectEqual(@as(u64, 1), realm.heap.ohaimark_stats.compile_attempts);
+    try testing.expectEqual(@as(u64, 1), realm.heap.ohaimark_stats.compile_successes);
+    try testing.expectEqual(@as(u64, 2), realm.heap.ohaimark_stats.executed_entries);
+    try testing.expectEqual(@as(u64, 2), realm.heap.ohaimark_stats.completed_entries);
+    try testing.expectEqual(@as(u64, 0), realm.heap.ohaimark_stats.guard_exits);
 }
 
 test "Ohaimark warmth continues through a compiled Bistromath caller" {
@@ -161,6 +167,7 @@ test "Ohaimark function-entry guard exit resumes the same Lantern frame" {
     realm.jit_enabled = true;
     realm.ohaimark_enabled = true;
     realm.ohaimark_threshold_override = 1;
+    realm.heap.ohaimark_stats.enabled = true;
 
     var chunk = try overflowChunk();
     defer chunk.deinit(testing.allocator);
@@ -189,6 +196,9 @@ test "Ohaimark function-entry guard exit resumes the same Lantern frame" {
     try testing.expectEqual(chunk_mod.Chunk.JitState.Tier.compiled, chunk.jit_state.?.ohaimark.tier);
     try testing.expect(frames.items.len == 1);
     try testing.expect(frames.items[0].ip != 0);
+    try testing.expectEqual(@as(u64, 1), realm.heap.ohaimark_stats.executed_entries);
+    try testing.expectEqual(@as(u64, 0), realm.heap.ohaimark_stats.completed_entries);
+    try testing.expectEqual(@as(u64, 1), realm.heap.ohaimark_stats.guard_exits);
 
     const resumed = switch (try lantern.runFrames(testing.allocator, &realm, &frames)) {
         .value => |value| value,
@@ -206,6 +216,7 @@ test "Ohaimark refusal preserves Bistromath fallback" {
     realm.jit_threshold_override = 1;
     realm.ohaimark_enabled = true;
     realm.ohaimark_threshold_override = 1;
+    realm.heap.ohaimark_stats.enabled = true;
 
     const source =
         \\function f(x) { return x | 1; }
@@ -221,4 +232,8 @@ test "Ohaimark refusal preserves Bistromath fallback" {
     try testing.expectEqual(chunk_mod.Chunk.JitState.Tier.dont_compile, state.ohaimark.tier);
     try testing.expectEqual(chunk_mod.Chunk.JitState.Tier.compiled, state.bistromath.code.tier);
     try testing.expect(state.bistromath.entry() != null);
+    try testing.expectEqual(@as(u64, 1), realm.heap.ohaimark_stats.compile_attempts);
+    try testing.expectEqual(@as(u64, 0), realm.heap.ohaimark_stats.compile_successes);
+    try testing.expectEqual(@as(u64, 1), realm.heap.ohaimark_stats.compile_refusals);
+    try testing.expectEqual(@as(u64, 0), realm.heap.ohaimark_stats.executed_entries);
 }

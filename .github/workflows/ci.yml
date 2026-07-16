@@ -463,7 +463,9 @@ jobs:
     # step now `--exclude`s exactly those buckets and writes each sweep's
     # pass set to an explicit `--pass-list-out` file, so it completes and
     # actually compares the pass-sets. Budget kept generous as headroom.
-    timeout-minutes: 55
+    # The gating T1 differential runs first; a separate continue-on-error T2
+    # sweep reuses its baseline pass list and emits rollout telemetry.
+    timeout-minutes: 75
     needs: build-and-test
     steps:
       - name: Audit egress (advisory)
@@ -516,18 +518,34 @@ jobs:
           diff -u /tmp/pass-interp.txt /tmp/pass-jit.txt
           echo "pass-sets identical: $(wc -l < /tmp/pass-interp.txt) fixtures (Atomics wait/notify + copyWithin coerced-detached excluded from the differential)"
 
+      - name: Ohaimark differential + telemetry (advisory)
+        continue-on-error: true
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          # Reuse the completed interpreter pass set from the gating step, then
+          # force default-off T2 before T1. A divergence remains advisory until
+          # Ohaimark graduates, but the exact diff and telemetry stay visible on
+          # every PR instead of relying on a local rollout run.
+          test -s /tmp/pass-interp.txt
+          EXCLUDES=(--exclude=built-ins/Atomics/wait/ --exclude=built-ins/Atomics/notify/ --exclude=built-ins/TypedArray/prototype/copyWithin/coerced)
+          zig build test262 -- --quiet --threads=0 --ohaimark --ohaimark-stats "${EXCLUDES[@]}" --pass-list-out=/tmp/pass-ohaimark.txt
+          test -s /tmp/pass-ohaimark.txt
+          diff -u /tmp/pass-interp.txt /tmp/pass-ohaimark.txt
+          echo "Ohaimark pass-set identical: $(wc -l < /tmp/pass-ohaimark.txt) fixtures"
+
   test262-gc-stress-jit:
-    name: test262 GC stress + JIT / ${{ matrix.bucket }} (advisory)
+    name: test262 GC stress + ${{ matrix.tier.label }} / ${{ matrix.bucket }} (advisory)
     # The docs/jit.md §12 step-3d net: ReleaseSafe arms
     # `verifyRememberedSet`, `--gc-threshold=1` collects on every
-    # allocation, and `--jit` force-compiles every eligible chunk —
+    # allocation, and each tier posture force-compiles eligible chunks —
     # so a compiled property write whose barrier mirror drifted
     # from the interpreter's (the §9 rule) trips the verifier with
     # the offending (container, field, target) instead of slipping
     # through as a rare flake. macos-latest because Bistromath is
     # aarch64-only (see test262-jit-differential above). Buckets
     # are the property-write-heavy surfaces; advisory like its
-    # sibling gc-stress job.
+    # sibling gc-stress job. T2 rows also print Ohaimark rollout telemetry.
     runs-on: macos-latest
     timeout-minutes: 25
     needs: build-and-test
@@ -535,6 +553,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        tier:
+          - label: Bistromath
+            flag: --jit
+            stats: ""
+            cache: t1
+          - label: Ohaimark
+            flag: --ohaimark
+            stats: --ohaimark-stats
+            cache: t2
         bucket:
           - built-ins/Object
           - built-ins/Array
@@ -553,13 +580,13 @@ jobs:
       - name: Set up Zig
         uses: xyzzylabs/setup-zig@09d85d9dbb73308882e7a26e61a8f706eed40df1  # v1.0.2
         with:
-          cache-key: gc-stress-jit
+          cache-key: gc-stress-jit-${{ matrix.tier.cache }}
 
-      - name: GC stress sweep (ReleaseSafe, --gc-threshold=1, --jit)
+      - name: GC stress sweep (ReleaseSafe, --gc-threshold=1, ${{ matrix.tier.label }})
         timeout-minutes: 20
         run: |
           zig build test262-safe -- \
-            --quiet --jit --gc-threshold=1 --threads=3 \
+            --quiet ${{ matrix.tier.flag }} ${{ matrix.tier.stats }} --gc-threshold=1 --threads=3 \
             --filter=${{ matrix.bucket }}
 
   test262-gc-stress:

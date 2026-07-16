@@ -91,6 +91,8 @@
 //!   --jit                   Force Bistromath T1 at threshold 1.
 //!   --ohaimark              Force Ohaimark T2 before T1, both at threshold 1.
 //!                           T2 remains default-off outside this test posture.
+//!   --ohaimark-stats        Print aggregate T2 compile/entry/exit telemetry.
+//!                           Requires `--ohaimark`; works with the worker pool.
 //!
 //! Diagnostics (each pins --threads=1):
 //!   --leak-check            Route per-fixture bytes through `std.heap.DebugAllocator`;
@@ -114,6 +116,7 @@
 
 const std = @import("std");
 const cynic = @import("cynic");
+const OhaimarkStats = cynic.runtime.OhaimarkStats;
 
 const frontmatter = @import("test262/frontmatter.zig");
 const skip_rules = @import("test262/skip.zig");
@@ -1275,6 +1278,10 @@ const Options = struct {
     /// finding leaks or oversized roots; pair with `--filter`
     /// to keep the output sane.
     gc_stats: bool = false,
+    /// Aggregate opt-in Ohaimark counters across fixture heaps and worker
+    /// threads, then print one rollout summary after the main phase. Requires
+    /// `--ohaimark`; unlike memory diagnostics this remains parallel-safe.
+    ohaimark_stats: bool = false,
     /// When true, the end-of-sweep tally includes a per-reason
     /// histogram of the `skip` count (by_path / no_strict /
     /// unsupported_feature / …). Useful for sizing roadmap work
@@ -2063,6 +2070,7 @@ fn runSweep(
         gc_time_list.deinit(gpa);
     }
     var mem_agg: MemAggregate = .{};
+    var ohaimark_agg: OhaimarkStats = .{};
 
     // `--only-failing` shortcut: only the main phase consults the
     // pass cache. Per-feature phases run the (tiny) tagged-fixture
@@ -2180,7 +2188,21 @@ fn runSweep(
             const fx_rss_pre: u64 = if (opts.top_rss > 0) (currentRssMb() orelse 0) else 0;
             const need_mem = opts.mem_summary or opts.top_alloc > 0 or opts.top_gc_time > 0;
             var fx_mem: FixtureMem = .{};
-            const outcome = try classifyAndRun(arena, bytes_allocator, io, corpus, rel, harness_pair, opts.gc_threshold, opts.gc_stats, if (need_mem) &fx_mem else null, phase);
+            var fx_ohaimark: OhaimarkStats = .{};
+            const outcome = try classifyAndRun(
+                arena,
+                bytes_allocator,
+                io,
+                corpus,
+                rel,
+                harness_pair,
+                opts.gc_threshold,
+                opts.gc_stats,
+                if (need_mem) &fx_mem else null,
+                if (opts.ohaimark_stats) &fx_ohaimark else null,
+                phase,
+            );
+            if (opts.ohaimark_stats) ohaimark_agg.merge(fx_ohaimark);
             if (need_mem) {
                 mem_agg.add(fx_mem);
                 if (opts.top_alloc > 0) {
@@ -2269,6 +2291,7 @@ fn runSweep(
                 .global_pass_paths = &pass_paths,
                 .global_slow = &slow,
                 .global_heavy = &heavy,
+                .global_ohaimark = &ohaimark_agg,
                 .is_full_run = is_full_run,
                 .phase = phase,
                 .worker_id = wid,
@@ -2344,6 +2367,9 @@ fn runSweep(
         }
         if (opts.mem_summary) {
             try printMemSummary(io, &mem_agg, &stats);
+        }
+        if (opts.ohaimark_stats) {
+            try printOhaimarkSummary(io, &ohaimark_agg);
         }
     }
 
@@ -2619,6 +2645,7 @@ const WorkerCtx = struct {
     global_pass_paths: *std.ArrayListUnmanaged([]const u8),
     global_slow: *std.ArrayListUnmanaged(SlowEntry),
     global_heavy: *std.ArrayListUnmanaged(HeavyEntry),
+    global_ohaimark: *OhaimarkStats,
     is_full_run: bool,
     /// Sweep phase selector. Forwarded to `classifyAndRun` so each
     /// worker filters fixtures the same way the orchestrator picked.
@@ -2675,8 +2702,9 @@ fn worker(ctx: WorkerCtx) void {
     var local_pass_paths: std.ArrayListUnmanaged([]const u8) = .empty;
     var local_slow: std.ArrayListUnmanaged(SlowEntry) = .empty;
     var local_heavy: std.ArrayListUnmanaged(HeavyEntry) = .empty;
+    var local_ohaimark: OhaimarkStats = .{};
 
-    workerLoop(ctx, &local_arena, &local_stats, &local_buckets, &local_failures, &local_pass_paths, &local_slow, &local_heavy) catch {
+    workerLoop(ctx, &local_arena, &local_stats, &local_buckets, &local_failures, &local_pass_paths, &local_slow, &local_heavy, &local_ohaimark) catch {
         // Best-effort: skip merging silently on OOM / IO blow-up.
         // The rolled-up totals will be slightly low, but the run
         // doesn't deadlock and the surviving workers still merge.
@@ -2690,6 +2718,7 @@ fn worker(ctx: WorkerCtx) void {
     ctx.global_pass_paths.appendSlice(ctx.gpa, local_pass_paths.items) catch {};
     ctx.global_slow.appendSlice(ctx.gpa, local_slow.items) catch {};
     ctx.global_heavy.appendSlice(ctx.gpa, local_heavy.items) catch {};
+    ctx.global_ohaimark.merge(local_ohaimark);
 
     // The merged-out arrays own their inner strings; we transferred
     // those via `appendSlice`. Free the spine arrays only.
@@ -2709,6 +2738,7 @@ fn workerLoop(
     pass_paths: *std.ArrayListUnmanaged([]const u8),
     slow: *std.ArrayListUnmanaged(SlowEntry),
     heavy: *std.ArrayListUnmanaged(HeavyEntry),
+    ohaimark: *OhaimarkStats,
 ) !void {
     defer ctx.current_paths[ctx.worker_id].store(idle_slot, .release);
     // Publish this worker's host-interrupt flag so `classifyAndRun`
@@ -2748,11 +2778,26 @@ fn workerLoop(
         const fx_rss_pre: u64 = if (ctx.opts.top_rss > 0) (currentRssMb() orelse 0) else 0;
         // Workers don't participate in `--mem-summary` / `--top-alloc`
         // (single-thread only — those flags pin `--threads=1` upstream).
-        const outcome = classifyAndRun(arena, ctx.gpa, ctx.io, ctx.corpus, rel, ctx.harness_sources, ctx.opts.gc_threshold, ctx.opts.gc_stats, null, ctx.phase) catch |err| {
+        var fx_ohaimark: OhaimarkStats = .{};
+        const outcome = classifyAndRun(
+            arena,
+            ctx.gpa,
+            ctx.io,
+            ctx.corpus,
+            rel,
+            ctx.harness_sources,
+            ctx.opts.gc_threshold,
+            ctx.opts.gc_stats,
+            null,
+            if (ctx.opts.ohaimark_stats) &fx_ohaimark else null,
+            ctx.phase,
+        ) catch |err| {
+            if (ctx.opts.ohaimark_stats) ohaimark.merge(fx_ohaimark);
             if (err == error.OutOfMemory) return err;
             try recordOutcome(ctx.gpa, stats, buckets, failures, pass_paths, rel, .{ .kind = .fail_false_reject, .fail_class = failClassOfPath(rel) }, ctx.is_full_run);
             continue;
         };
+        if (ctx.opts.ohaimark_stats) ohaimark.merge(fx_ohaimark);
         if (ctx.opts.top_slow > 0) {
             const ms_i = fx_start.untilNow(ctx.io, .awake).toMilliseconds();
             const ms_u: u64 = if (ms_i > 0) @intCast(ms_i) else 0;
@@ -2818,9 +2863,22 @@ fn classifyAndRun(
     gc_threshold: u32,
     gc_stats: bool,
     mem_out: ?*FixtureMem,
+    ohaimark_out: ?*OhaimarkStats,
     phase: Phase,
 ) !RunResult {
-    var r = try classifyAndRunInner(arena, bytes_allocator, io, corpus, rel, harness_pair, gc_threshold, gc_stats, mem_out, phase);
+    var r = try classifyAndRunInner(
+        arena,
+        bytes_allocator,
+        io,
+        corpus,
+        rel,
+        harness_pair,
+        gc_threshold,
+        gc_stats,
+        mem_out,
+        ohaimark_out,
+        phase,
+    );
     if (r.kind == .fail_false_reject or r.kind == .fail_false_accept) {
         // Re-derive the flags for classification; the fixture source is
         // small and arena-cached relative to the run that just happened.
@@ -2850,6 +2908,10 @@ fn classifyAndRunInner(
     /// Optional out-param. Filled with the fixture's heap counters
     /// via a `defer` so every return point is covered.
     mem_out: ?*FixtureMem,
+    /// Optional T2 telemetry snapshot. A non-null pointer enables collection
+    /// for this heap; child realms share it. Independent agent heaps are not
+    /// included in the fixture-local snapshot.
+    ohaimark_out: ?*OhaimarkStats,
     /// Sweep phase selector. Drives both the per-fixture skip
     /// decision (does this fixture belong in *this* sweep?) and
     /// the realm's `feature_flags` install set. Main excludes every
@@ -2979,6 +3041,7 @@ fn classifyAndRunInner(
 
     var realm = cynic.runtime.Realm.initWithBytesAllocator(std.heap.c_allocator, bytes_allocator);
     defer realm.deinit();
+    realm.heap.ohaimark_stats.enabled = ohaimark_out != null;
     // Wire the watchdog through the metering interrupt hook
     // (docs/resource-metering.md): past `--timeout`, `monitorLoop`
     // flips this worker's abort flag; the hook turns it into an
@@ -3004,6 +3067,9 @@ fn classifyAndRunInner(
             .gc_cycles = realm.heap.gc_cycles_total,
             .gc_time_ns = realm.heap.gc_time_ns_total,
         };
+    };
+    defer if (ohaimark_out) |out| {
+        out.* = realm.heap.ohaimark_stats;
     };
     // Install only the proposal flag(s) the current phase
     // demands. The main phase installs none — pre-Stage-4 fixtures
@@ -3852,6 +3918,56 @@ fn printMemSummary(io: std.Io, agg: *const MemAggregate, stats: *const Stats) !v
     try std.Io.File.stdout().writeStreamingAll(io, head);
 }
 
+/// Aggregate Ohaimark rollout evidence. Mirrors V8's opt/deopt tracing and
+/// JSC's tier counters at Cynic's scale: publication cost/size plus the result
+/// of every generated-code entry. Collection is opt-in, so normal execution
+/// does not read the clock or mutate these counters.
+fn printOhaimarkSummary(io: std.Io, stats: *const OhaimarkStats) !void {
+    var buf: [1024]u8 = undefined;
+    const acceptance_pct: f64 = if (stats.compile_attempts == 0)
+        0
+    else
+        100.0 * @as(f64, @floatFromInt(stats.compile_successes)) /
+            @as(f64, @floatFromInt(stats.compile_attempts));
+    const guard_pct: f64 = if (stats.executed_entries == 0)
+        0
+    else
+        100.0 * @as(f64, @floatFromInt(stats.guard_exits)) /
+            @as(f64, @floatFromInt(stats.executed_entries));
+    const avg_compile_us: u64 = if (stats.compile_attempts == 0)
+        0
+    else
+        (stats.compile_time_ns_total / stats.compile_attempts) / 1000;
+    const avg_code_bytes: u64 = if (stats.compile_successes == 0)
+        0
+    else
+        stats.code_bytes_installed / stats.compile_successes;
+    const report = try std.fmt.bufPrint(
+        &buf,
+        "\nOhaimark summary:\n" ++
+            "  compile attempts:   {d} ({d} published, {d} refused, {d:.2}% accepted)\n" ++
+            "  compile time:       {d} ms total, {d} us avg, {d} us max\n" ++
+            "  installed code:     {d} KiB total, {d} bytes avg / published function\n" ++
+            "  generated entries:  {d} ({d} completed, {d} guard exits, {d:.2}% guard rate)\n",
+        .{
+            stats.compile_attempts,
+            stats.compile_successes,
+            stats.compile_refusals,
+            acceptance_pct,
+            stats.compile_time_ns_total / std.time.ns_per_ms,
+            avg_compile_us,
+            stats.compile_time_ns_max / std.time.ns_per_us,
+            stats.code_bytes_installed / 1024,
+            avg_code_bytes,
+            stats.executed_entries,
+            stats.completed_entries,
+            stats.guard_exits,
+            guard_pct,
+        },
+    );
+    try std.Io.File.stdout().writeStreamingAll(io, report);
+}
+
 /// One score-row in memory. The on-disk format groups these by
 /// `date` into a `## History` section of per-day mini-tables, newest
 /// first. The reader parses only the current binary format; rows from
@@ -4621,6 +4737,8 @@ fn parseArgs(gpa: std.mem.Allocator, args: std.process.Args) !Options {
             g_jit_force = true;
         } else if (std.mem.eql(u8, arg, "--ohaimark")) {
             g_ohaimark_force = true;
+        } else if (std.mem.eql(u8, arg, "--ohaimark-stats")) {
+            opts.ohaimark_stats = true;
         } else if (std.mem.startsWith(u8, arg, "--gc-threshold=")) {
             opts.gc_threshold = std.fmt.parseInt(u32, arg["--gc-threshold=".len..], 10) catch 32768;
         } else if (std.mem.eql(u8, arg, "--gc-stats")) {
@@ -4664,6 +4782,11 @@ fn parseArgs(gpa: std.mem.Allocator, args: std.process.Args) !Options {
     }
 
     opts.exclude = try exclude_list.toOwnedSlice(gpa);
+
+    if (opts.ohaimark_stats and !g_ohaimark_force) {
+        std.debug.print("error: --ohaimark-stats requires --ohaimark\n", .{});
+        std.process.exit(1);
+    }
 
     // Single-threaded pin for flags that need it. The diagnostic
     // flags below all require single-process state — DebugAllocator

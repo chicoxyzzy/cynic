@@ -32,6 +32,7 @@ test "Ohaimark compiler publishes owned code after temporary plans die" {
     var realm = Realm.init(testing.allocator);
     defer realm.deinit();
     realm.jit_enabled = false;
+    realm.heap.ohaimark_stats.enabled = true;
     var chunk = try foldedAddChunk();
     defer chunk.deinit(testing.allocator);
 
@@ -41,6 +42,14 @@ test "Ohaimark compiler publishes owned code after temporary plans die" {
     const published_entry = state.ohaimark.entry().?;
     try testing.expect(compiler.compile(&realm, &chunk));
     try testing.expectEqual(published_entry, state.ohaimark.entry().?);
+    try testing.expectEqual(@as(u64, 1), realm.heap.ohaimark_stats.compile_attempts);
+    try testing.expectEqual(@as(u64, 1), realm.heap.ohaimark_stats.compile_successes);
+    try testing.expectEqual(@as(u64, 0), realm.heap.ohaimark_stats.compile_refusals);
+    try testing.expect(realm.heap.ohaimark_stats.code_bytes_installed > 0);
+    try testing.expect(
+        realm.heap.ohaimark_stats.compile_time_ns_total >=
+            realm.heap.ohaimark_stats.compile_time_ns_max,
+    );
 
     const registers = try testing.allocator.alloc(Value, chunk.register_count);
     defer testing.allocator.free(registers);

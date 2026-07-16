@@ -1191,6 +1191,20 @@ sampling by `/profile`.
   one pre-existing conformance failure). Ohaimark OSR, broader GC-pressure
   buckets, fuzzing, and compile-time/code-size/performance gates remain. See
   [ohaimark.md](ohaimark.md).
+- **Ohaimark rollout telemetry + automated gates (2026-07-16).** Opt-in,
+  heap-scoped counters now measure compile attempts, publications/refusals,
+  total/max compile time, installed code bytes, generated entries, normal
+  completions, and guard exits. Disabled telemetry avoids both clock reads and
+  entry-counter traffic; child realms aggregate through their shared heap,
+  while independent agent heaps stay thread-local. test262
+  `--ohaimark-stats` merges fixture snapshots across harness workers and prints
+  one summary. CI now reuses the gating interpreter pass list for an advisory
+  full `--ohaimark` exact differential and expands the ReleaseSafe
+  `--gc-threshold=1` JIT matrix across T1 and T2. The first full report saw
+  217,427 attempts, 6,541 publications (3.01%), 581 KiB installed, and 40,805
+  generated completions with zero guard exits while retaining the exact
+  48,517-path baseline pass set. See
+  [ohaimark.md](ohaimark.md) §3.16.
 - **Generational GC.** A JSC-Riptide-style non-moving
   generational collector — store-site routing, generation header
   bits, a write barrier + remembered set, `collectYoung` with

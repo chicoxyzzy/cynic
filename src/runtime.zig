@@ -32,6 +32,8 @@ pub const heap = @import("runtime/heap.zig");
 pub const Heap = heap.Heap;
 pub const HandleScope = heap.HandleScope;
 
+pub const OhaimarkStats = @import("runtime/ohaimark/stats.zig").Stats;
+
 pub const realm = @import("runtime/realm.zig");
 pub const Realm = realm.Realm;
 

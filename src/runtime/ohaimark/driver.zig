@@ -82,12 +82,18 @@ pub fn tryEnterTop(
 
     const raw_entry = state.ohaimark.entry() orelse return .not_entered;
     const entry: EntryFn = @ptrCast(@alignCast(raw_entry));
+    const telemetry = &realm.heap.ohaimark_stats;
+    telemetry.recordEntry();
     return switch (@as(
         codegen.EntryResult,
         @enumFromInt(entry(realm, frame, frame.registers.ptr)),
     )) {
-        .resume_interp => .resumed,
+        .resume_interp => blk: {
+            telemetry.recordGuardExit();
+            break :blk .resumed;
+        },
         .done => blk: {
+            telemetry.recordCompletion();
             const result = frame.accumulator;
             frame.releaseRegisters(realm, allocator);
             _ = frames.pop();

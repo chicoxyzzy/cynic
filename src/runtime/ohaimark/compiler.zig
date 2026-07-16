@@ -3,8 +3,8 @@
 //! All IR and physical plans live only for this synchronous call. Machine code
 //! is installed into the shared W^X allocator only after every pass and the
 //! emitter succeeds, then ownership moves into the chunk's T2 state in one
-//! publication step. Runtime dispatch deliberately does not consult that state
-//! yet; this module establishes lifetime independently of tier-up policy.
+//! publication step. The realm-facing entry records opt-in rollout telemetry;
+//! lower-level compile tests remain free to exercise installation directly.
 
 const std = @import("std");
 
@@ -23,7 +23,7 @@ const specialize = @import("specialize.zig");
 
 pub const supported = masm.native_aarch64;
 
-/// Realm-facing entry for the future dispatcher. Keeping allocator lookup here
+/// Realm-facing entry for the runtime dispatcher. Keeping allocator lookup here
 /// makes unavailable executable memory a T2-local refusal like every other
 /// compile failure.
 pub fn compile(realm: *Realm, chunk: *const Chunk) bool {
@@ -33,15 +33,25 @@ pub fn compile(realm: *Realm, chunk: *const Chunk) bool {
         .dont_compile => return false,
         .cold => {},
     }
+    const telemetry = &realm.heap.ohaimark_stats;
+    const timer = telemetry.beginCompile();
     if (comptime !supported) {
         state.ohaimark.refuse();
+        telemetry.finishCompile(timer, false, 0);
         return false;
     }
     const executable_allocator = realm.heap.jitCodeAllocator() orelse {
         state.ohaimark.refuse();
+        telemetry.finishCompile(timer, false, 0);
         return false;
     };
-    return compileAndInstall(realm.heap.allocator, chunk, executable_allocator);
+    const success = compileAndInstall(realm.heap.allocator, chunk, executable_allocator);
+    const installed_bytes = if (success)
+        state.ohaimark.executable.bytes().?.len
+    else
+        0;
+    telemetry.finishCompile(timer, success, installed_bytes);
+    return success;
 }
 
 /// Compile and publish T2 code, degrading to the lower tiers on every failure.

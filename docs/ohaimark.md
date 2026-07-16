@@ -423,6 +423,32 @@ the exact bytecode offset, accumulator, and live registers into the Lantern
 frame. The shared dispatcher resumes Lantern directly in that case and never
 restarts the activation at T1 entry.
 
+### 3.16 Opt-in rollout telemetry
+
+V8 exposes optimizing-tier publication/deoptimization through `--trace-opt` /
+`--trace-deopt`; JavaScriptCore keeps VM/tier counters for the same rollout
+questions. Cynic uses a smaller aggregate suited to an embedded engine: one
+opt-in `OhaimarkStats` lives on the shared heap and records compile attempts,
+publications/refusals, compile wall time (total/max), installed code bytes,
+generated entries, normal completions, and guard exits. Child realms naturally
+contribute because they share the parent heap; independent agent heaps remain
+independent rather than introducing cross-thread atomics into the runtime.
+
+Disabled telemetry performs no clock read and no entry-counter mutation. It is
+host-only state, never a JS-visible global or object property. The test262
+`--ohaimark-stats` flag enables it per fixture, merges snapshots across harness
+workers, and prints one main-phase summary. CI pairs that report with the full
+advisory `--ohaimark` pass-set differential and runs both T1 and T2 postures in
+the ReleaseSafe `--gc-threshold=1` matrix.
+
+The first full forced-tier sample attempted 217,427 compilations, published
+6,541 (3.01%), installed 581 KiB (91 bytes per published function), and ran
+40,805 generated entries to normal completion with no guard exit. Compilation
+consumed 1.642 s in aggregate (7 us per attempt, 8.187 ms max). The exact
+48,517-path pass set still matched the non-T2 baseline. This is a rollout
+baseline, not a speed claim; the high refusal rate makes supported-surface
+coverage the next measurement target before threshold tuning.
+
 ## 4. Deoptimization contract
 
 Every speculative node will carry an explicit assumption and deopt point.
@@ -535,8 +561,9 @@ T1/T0 until the rollout gates pass.
    GC-pressure runs, fuzzing, and compile-time/code-size/performance budgets.
    The first full differential (48,517 passing paths in each posture), SES
    suite, and a focused ReleaseSafe `--gc-threshold=1` run without verifier
-   failures are complete; broaden the remaining stress and performance
-   evidence before default-on rollout.
+   failures are complete. CI now repeats the T2 differential advisory, expands
+   the GC matrix across T1/T2, and reports opt-in heap-scoped rollout telemetry;
+   broaden fuzz and performance evidence before default-on rollout.
 10. **Only if measured:** background compilation, polymorphic feedback,
    inlining, x86_64 lowering, and exception-region compilation.
 
