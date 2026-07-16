@@ -562,6 +562,40 @@ test "interpreter: fused relational branch is jump-on-false, not negated (NaN)" 
     try expectInt("(function(n){ let i=0; while (i<n) i=i+1; return i; })(0/0);", 0);
 }
 
+test "interpreter: loose equality primitive coercion" {
+    try expectInt("(function(a,b){ if(a==b) return 1; return 2; })(1, '1');", 1);
+}
+
+test "interpreter: loose inequality polarity" {
+    try expectInt("(function(a,b){ if(a!=b) return 1; return 2; })(1, '1');", 2);
+}
+
+test "interpreter: loose equality nullish pair" {
+    try expectInt("(function(a,b){ if(a==b) return 1; return 2; })(null, void 0);", 1);
+}
+
+test "interpreter: loose equality snapshots lhs before rhs" {
+    // §13.15.2 snapshots the LHS before evaluating an RHS assignment. The
+    // register-bound specialization must decline this shape.
+    try expectInt("(function(a){if(a==(a=2))return 1;return a;})(1);", 2);
+}
+
+test "interpreter: loose equality runs object coercion once" {
+    try expectScriptInt(
+        "let n=0; let o={valueOf(){n=n+1;return 3;}}; " ++
+            "let r=(function(a,b){if(a==b)return 7;return 2;})(o,3); r*10+n;",
+        71,
+    );
+}
+
+test "interpreter: loose equality propagates coercion throw" {
+    try expectScriptInt(
+        "let n=0; let o={valueOf(){n=n+1;throw 9;}}; " ++
+            "try {(function(a,b){if(a==b)return 7;return 2;})(o,3);} catch(e) {n*10+e;}",
+        19,
+    );
+}
+
 test "interpreter: logical not" {
     try expectBool("!true;", false);
     try expectBool("!0;", true);
@@ -1539,6 +1573,42 @@ test "epilogue: switch without default can fall through (keeps undefined)" {
     try expectScriptString("typeof (function(x){ switch (x) { case 1: return 1; } })(2);", "undefined");
     // default present, all clauses return → terminated, returns the value.
     try expectScriptInt("(function(x){ switch (x) { case 1: return 1; default: return 9; } })(2);", 9);
+}
+
+test "switch_smi: dense integer dispatch preserves strict switch semantics" {
+    const source =
+        \\function choose(x) {
+        \\  switch (x) {
+        \\    case -1: return 9;
+        \\    case 0: return 10;
+        \\    case 1: return 11;
+        \\    case 2: return 12;
+        \\    default: return 99;
+        \\  }
+        \\}
+        \\choose(-1) + choose(0) + choose(6 / 3) + choose("1");
+    ;
+    // 9 + 10 + 12 + 99. `6 / 3` exercises a Number represented as a
+    // double; the string must miss because switch uses strict equality.
+    try expectScriptInt(source, 130);
+}
+
+test "switch_smi: first duplicate wins and case bodies still fall through" {
+    const source =
+        \\function run(x) {
+        \\  let r = 0;
+        \\  switch (x) {
+        \\    case 0: r = 10; break;
+        \\    case 1: r = r + 1;
+        \\    case 2: r = r + 2; break;
+        \\    case 1: r = 100; break;
+        \\    default: r = 9;
+        \\  }
+        \\  return r;
+        \\}
+        \\run(1) * 10 + run(0);
+    ;
+    try expectScriptInt(source, 40);
 }
 
 test "epilogue: finally can redirect a return (must not be dropped wrong)" {
@@ -2839,6 +2909,59 @@ test "update: non-fused for-update postfix counts correctly" {
     , 10);
 }
 
+test "register update: prefix and discarded postfix preserve bumped results" {
+    // Function parameters and `var` locals are non-TDZ register bindings, so
+    // these exercise IncReg / DecReg once the compiler specialization lands.
+    // A consumed postfix remains covered separately by the old-value tests.
+    try expectScriptStringWithBuiltins(
+        \\function pre(x) { return ++x; }
+        \\function discarded(x) { x++; return x; }
+        \\function down(x) { --x; return x; }
+        \\pre(41) + ":" + discarded(9) + ":" + down(-4);
+    , "42:10:-5");
+}
+
+test "register update: BigInt and int32 overflow retain numeric type semantics" {
+    // §13.4 selects Type(oldValue)::unit: BigInt gets 1n, while an int32
+    // boundary crossing widens to Number instead of trapping or wrapping.
+    try expectScriptStringWithBuiltins(
+        \\function up(x) { ++x; return x; }
+        \\function down(x) { --x; return x; }
+        \\const b = up(5n);
+        \\typeof b + ":" + b + ":" + up(2147483647) + ":" + down(-2147483648);
+    , "bigint:6:2147483648:-2147483649");
+}
+
+test "register update: object ToNumeric runs once and a throw does not store" {
+    // ToNumeric may re-enter JS through valueOf / @@toPrimitive. The fused
+    // opcode must perform that coercion exactly once and commit the register
+    // store only after both conversion and bump complete successfully.
+    try expectScriptStringWithBuiltins(
+        \\let calls = 0;
+        \\function up(x) { ++x; return x; }
+        \\const ok = up({ valueOf() { calls++; return 40; } });
+        \\const marker = {};
+        \\function fail(x) {
+        \\  const original = x;
+        \\  try { ++x; } catch (e) { return (e === marker) + ":" + (x === original); }
+        \\  return "no-throw";
+        \\}
+        \\const failed = fail({ valueOf() { calls++; throw marker; } });
+        \\ok + ":" + calls + ":" + failed;
+    , "41:2:true:true");
+}
+
+test "register update: self-update in a let initializer preserves TDZ ReferenceError" {
+    // `x` is register-promoted but still contains Hole while its own
+    // initializer runs. This site must stay on the explicit load/check path;
+    // a fused update that skipped ThrowIfHole would turn a ReferenceError
+    // into NaN and initialize the binding incorrectly.
+    try expectScriptStringWithBuiltins(
+        \\function f() { let x = ++x; return x; }
+        \\try { f(); "no-throw"; } catch (e) { e instanceof ReferenceError ? "reference" : "wrong"; }
+    , "reference");
+}
+
 test "later: private field prefix decrement returns new value" {
     try expectScriptIntWithBuiltins(
         \\class C {
@@ -3327,6 +3450,100 @@ test "computed-key write IC: freezing after a cached write invalidates the cell"
         \\}
         \\(o.x === 2 ? 100 : 0) + threw
     , 102);
+}
+
+// ── int32-keyed dense-element computed writes ───────────────────────────
+//
+// A non-negative int32 key rewriting a present packed Array element
+// can bypass ToPropertyKey + the general [[Set]] walk. These pin the
+// observable boundary: only an existing own default data element is
+// eligible; holes, growth, proxies, descriptor-demoted slots, and
+// non-int32 numeric keys must retain the full path.
+
+test "computed int write: packed rewrites preserve length and assignment value" {
+    try expectScriptStringWithBuiltins(
+        \\const a = [1, 2, 3];
+        \\for (let i = 0; i < 50; i++) a[1] = i;
+        \\const rhs = { value: 7 };
+        \\const result = (a[0] = rhs);
+        \\a.length + ":" + a[1] + ":" + (result === rhs) + ":" + a[0].value;
+    , "3:49:true:7");
+}
+
+test "computed int write: existing slots ignore extensibility and length writability" {
+    try expectScriptStringWithBuiltins(
+        \\const a = [1, 2, 3];
+        \\Object.preventExtensions(a);
+        \\a[0] = 10;
+        \\Object.defineProperty(a, "length", { writable: false });
+        \\a[2] = 30;
+        \\a.length + ":" + a.join(",");
+    , "3:10,2,30");
+}
+
+test "computed int write: dense own element shadows inherited setter, hole does not" {
+    try expectScriptStringUnhardened(
+        \\let calls = 0;
+        \\let seen = 0;
+        \\Object.defineProperty(Array.prototype, "1", {
+        \\  get() { return 40; },
+        \\  set(v) { calls++; seen = v; },
+        \\  configurable: true,
+        \\});
+        \\const dense = [0, 7, 2];
+        \\const holed = [0, , 2];
+        \\dense[1] = 9;
+        \\holed[1] = 5;
+        \\const result = dense[1] + ":" + calls + ":" + seen + ":" +
+        \\  Object.hasOwn(holed, "1") + ":" + holed[1];
+        \\delete Array.prototype["1"];
+        \\result;
+    , "9:1:5:false:40");
+}
+
+test "computed int write: holes and out-of-bounds indices retain the full path" {
+    try expectScriptStringWithBuiltins(
+        \\const a = [1, , 3];
+        \\a[1] = 2;
+        \\a[5] = 6;
+        \\a.length + ":" + Object.hasOwn(a, "1") + ":" + a[1] + ":" + a[5];
+    , "6:true:2:6");
+}
+
+test "computed int write: proxy and descriptor-demoted arrays retain the full path" {
+    try expectScriptStringWithBuiltins(
+        \\let trapCalls = 0;
+        \\const p = new Proxy([1], {
+        \\  set(target, key, value, receiver) {
+        \\    trapCalls++;
+        \\    return Reflect.set(target, key, value, receiver);
+        \\  },
+        \\});
+        \\p[0] = 9;
+        \\const locked = [5];
+        \\Object.defineProperty(locked, "0", { writable: false });
+        \\let lockedThrew = false;
+        \\try { locked[0] = 6; } catch (e) { lockedThrew = e instanceof TypeError; }
+        \\const frozen = [7];
+        \\Object.freeze(frozen);
+        \\let frozenThrew = false;
+        \\try { frozen[0] = 8; } catch (e) { frozenThrew = e instanceof TypeError; }
+        \\trapCalls + ":" + p[0] + ":" + lockedThrew + ":" + locked[0] + ":" +
+        \\  frozenThrew + ":" + frozen[0];
+    , "1:9:true:5:true:7");
+}
+
+test "computed int write: numeric -0 and integral doubles stay on fallback" {
+    try expectScriptStringWithBuiltins(
+        \\const a = [1, 2];
+        \\const zero = -0;
+        \\const one = 2 / 2;
+        \\const namedMinusZero = "-0";
+        \\a[zero] = 10;
+        \\a[one] = 20;
+        \\a[namedMinusZero] = 30;
+        \\a[0] + ":" + a[1] + ":" + a[namedMinusZero] + ":" + a.length;
+    , "10:20:30:2");
 }
 
 // ── `in` operator IC (`key in obj`) — own-positive cache regression
@@ -7342,6 +7559,25 @@ fn expectScriptStringUnderGcPressure(source: []const u8, expected: []const u8) !
     try testing.expectEqualStrings(expected, s.flatBytes());
 }
 
+test "GC: register update ToNumeric survives allocating JS re-entry" {
+    // IncReg reads the object from a frame register, then ToNumeric invokes
+    // user code. Allocation-pressure collections during that child dispatch
+    // must keep the parent frame/register roots live until coercion returns.
+    try expectScriptStringUnderGcPressure(
+        \\let calls = 0;
+        \\function up(x) { ++x; return x; }
+        \\const value = up({
+        \\  valueOf() {
+        \\    const junk = [];
+        \\    for (let i = 0; i < 20; i++) junk.push({ i });
+        \\    calls++;
+        \\    return 40;
+        \\  }
+        \\});
+        \\value + ":" + calls;
+    , "41:1");
+}
+
 test "GC: generator wrapper iteration survives gc_threshold=1" {
     // `for (v of g())` opens an iterator on the wrapper JSObject
     // returned by the generator call. The wrapper sits in the
@@ -10549,6 +10785,39 @@ test "array length: Object.freeze covers length, push then throws" {
     , "true:1");
 }
 
+test "Array.prototype.push: indexed intrinsic-prototype setter stays observable" {
+    // The packed one-item path must decline when OrdinarySet resolves an
+    // inherited indexed descriptor. The setter receives the value, no own
+    // element is created, and push's final length Set still advances length.
+    try expectScriptStringUnhardened(
+        \\let seen = 0;
+        \\Object.defineProperty(Array.prototype, "0", {
+        \\  configurable: true,
+        \\  set(value) { seen = value; },
+        \\});
+        \\const a = [];
+        \\const n = a.push(7);
+        \\seen + ":" + n + ":" + a.length + ":" + Object.hasOwn(a, "0");
+    , "7:1:1:false");
+}
+
+test "Array.prototype.push: custom prototype indexed setter stays observable" {
+    // A custom prototype chain is outside the first fast-path envelope.
+    // Preserve the generic OrdinarySet walk and original receiver.
+    try expectScriptStringUnhardened(
+        \\let seen = 0;
+        \\const proto = Object.create(Array.prototype);
+        \\Object.defineProperty(proto, "0", {
+        \\  configurable: true,
+        \\  set(value) { seen = value; },
+        \\});
+        \\const a = [];
+        \\Object.setPrototypeOf(a, proto);
+        \\const n = Array.prototype.push.call(a, 9);
+        \\seen + ":" + n + ":" + a.length + ":" + Object.hasOwn(a, "0");
+    , "9:1:1:false");
+}
+
 test "def_property dense-append fast path: array-literal element init" {
     // §13.2.4.1 ArrayAccumulation — a dense literal's elements append
     // straight onto `elements` (skipping the `hasOwn` precheck, the
@@ -12910,6 +13179,27 @@ test "fused method-call: proto-data method (the c.inc() shape)" {
     , 5);
 }
 
+test "fused method-call: non-tail recursion throws a catchable RangeError" {
+    // Zero-argument `this.descend()` is emitted as `call_property`.
+    // Keep the call out of tail position so each level must consume a
+    // frame, then cross the interpreter's host-safety ceiling by a
+    // bounded amount. The fused push must enforce the same guard as
+    // `.call` and `.call_method`, rather than growing until host OOM.
+    try expectScriptStringWithBuiltins(
+        \\const obj = {
+        \\  remaining: 1100,
+        \\  descend() {
+        \\    if (this.remaining === 0) return 0;
+        \\    this.remaining--;
+        \\    return this.descend() + 1;
+        \\  },
+        \\};
+        \\let result = "not-caught";
+        \\try { obj.descend(); } catch (e) { result = e.constructor.name; }
+        \\result;
+    , "RangeError");
+}
+
 test "fused method-call: own-data method shadows prototype" {
     try expectScriptStringWithBuiltins(
         \\const obj = {
@@ -13027,6 +13317,75 @@ test "fused method-call: monomorphic loop, second receiver same shape" {
         \\for (let i = 0; i < 3; i++) s += b.inc();
         \\s;
     , (1 + 2 + 3) + (101 + 102 + 103));
+}
+
+test "fused method-call: megamorphic immediate-prototype data keeps receiver this" {
+    // DeltaBlue-style call sites see several receiver/prototype shapes at
+    // one bytecode location. Each miss may resolve the ordinary data
+    // descriptor in one chain walk, but must still call it with the
+    // original receiver as `this`.
+    try expectScriptIntWithBuiltins(
+        \\function invoke(o) { return o.run() + 0; }
+        \\const p0 = { run() { return this.value; } };
+        \\const p1 = { run() { return this.value; } };
+        \\const p2 = { run() { return this.value; } };
+        \\const p3 = { run() { return this.value; } };
+        \\const p4 = { run() { return this.value; } };
+        \\const p5 = { run() { return this.value; } };
+        \\const o0 = Object.create(p0); o0.value = 1;
+        \\const o1 = Object.create(p1); o1.a = 0; o1.value = 2;
+        \\const o2 = Object.create(p2); o2.b = 0; o2.c = 0; o2.value = 3;
+        \\const o3 = Object.create(p3); o3.value = 4; o3.d = 0;
+        \\const o4 = Object.create(p4); o4.e = 0; o4.value = 5; o4.f = 0;
+        \\const o5 = Object.create(p5); o5.g = 0; o5.h = 0; o5.value = 6;
+        \\const objects = [o0, o1, o2, o3, o4, o5];
+        \\let sum = 0;
+        \\for (let i = 0; i < 600; i++) sum += invoke(objects[i % 6]);
+        \\sum;
+    , 2100);
+}
+
+test "fused method-call: deep prototype data resolves without an invalid shallow cache" {
+    // The current load IC can guard only the immediate prototype. A
+    // deeper hit is usable for this call, but must remain uncached so a
+    // later iteration cannot read the grandparent slot as if it belonged
+    // to the intermediate object.
+    try expectScriptIntWithBuiltins(
+        \\function invoke(o) { return o.run(); }
+        \\const grand = { run() { return this.value + this.bias; } };
+        \\const middle = Object.create(grand); middle.marker = 1;
+        \\const receiver = Object.create(middle); receiver.value = 40; receiver.bias = 2;
+        \\let result = 0;
+        \\for (let i = 0; i < 30; i++) result = invoke(receiver);
+        \\result;
+    , 42);
+}
+
+test "fused method-call: dictionary shadow and Proxy ancestor retain full Get" {
+    // A bag-only data descriptor must shadow deeper shape data. A Proxy
+    // ancestor must receive each [[Get]] with the original receiver.
+    try expectScriptStringWithBuiltins(
+        \\function invoke(o) { return o.run(); }
+        \\const grand = { run() { return "grand"; } };
+        \\const middle = Object.create(grand);
+        \\middle.discard = 1;
+        \\middle.run = function () { return this.label; };
+        \\delete middle.discard;
+        \\const dictionaryReceiver = Object.create(middle);
+        \\dictionaryReceiver.label = "dict";
+        \\let gets = 0;
+        \\const proxyProto = new Proxy({ run() { return "target"; } }, {
+        \\  get(target, key, receiver) {
+        \\    gets++;
+        \\    if (key === "run") return function () { return this.label; };
+        \\    return Reflect.get(target, key, receiver);
+        \\  },
+        \\});
+        \\const proxyReceiver = Object.create(proxyProto);
+        \\proxyReceiver.label = "proxy";
+        \\invoke(dictionaryReceiver) + ":" + invoke(proxyReceiver) + ":" +
+        \\  invoke(proxyReceiver) + ":" + gets;
+    , "dict:proxy:proxy:2");
 }
 
 test "fused method-call: proto chain swap invalidates the IC" {

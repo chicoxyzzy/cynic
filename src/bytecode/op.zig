@@ -8,23 +8,199 @@
 //! stores shuttle values between registers, the constant pool,
 //! and the accumulator.
 //!
-//! later ships only the opcodes the expression-only compiler emits.
-//! Statements, function calls, and object/property
-//! ops extend this enum without renumbering existing
-//! variants — disasm output for an later chunk stays stable.
-//!
 //! Operand encoding (little-endian on the wire):
 //! `r:u8` — register index, max 255 per frame.
 //! `k:u16` — index into `Chunk.constants`.
 //! `i:i32` — Smi immediate (small-int fast path, §6.1.6.1).
-//! `o:i16` — branch offset, signed, relative to the byte
-//! immediately after the operand.
+//! `o:i8|i16|i32` — relaxed signed branch offset, relative to the
+//! byte immediately after the displacement. Canonical compiler
+//! emission uses i16; `Builder.finish` selects the narrowest lossless
+//! variant and remaps every offset-bearing side table.
+//!
+//! `Op.spec()` is the authoritative instruction schema. Compiler,
+//! disassembler, liveness, statistics, Lantern, and Bistromath derive
+//! operand widths and control-flow contracts from it; a second opcode
+//! metadata switch is a bug.
 //!
 //! See the [compiler-engineering handbook](../../docs/handbook/compiler-engineering.md)
 //! for the design rationale (Ignition / Hermes lineage; why
 //! register file + accumulator beats a pure stack here).
 
 const std = @import("std");
+
+/// Primitive fields used by bytecode operand layouts. Keeping register
+/// operands distinct from generic one-byte fields is what lets a later wide
+/// prefix scale registers without also widening argument counts and flags.
+pub const OperandKind = enum {
+    register,
+    u8,
+    i8,
+    u16,
+    i16,
+    i32,
+    u32,
+
+    pub fn byteSize(kind: OperandKind) u8 {
+        return switch (kind) {
+            .register, .u8, .i8 => 1,
+            .u16, .i16 => 2,
+            .i32, .u32 => 4,
+        };
+    }
+};
+
+/// Wire layouts shared by the compiler, decoder, disassembler, analyses and
+/// execution tiers. The names describe operand kinds in stream order.
+pub const OperandLayout = enum {
+    none,
+    reg,
+    reg_reg,
+    reg_reg_reg,
+    reg_u8,
+    reg_u8_u8,
+    reg_reg_u8,
+    reg_reg_u8_u8,
+    reg_u16,
+    reg_reg_u16,
+    reg_u8_u16,
+    reg_reg_u8_u16,
+    reg_i16,
+    reg_i8,
+    reg_reg_i16,
+    reg_reg_i8,
+    reg_i32,
+    reg_reg_i32,
+    u8,
+    u8_u8,
+    u8_reg_u8,
+    u8_reg_u8_u8_u8,
+    u16,
+    u16_u16,
+    u16_reg,
+    u16_reg_reg,
+    u16_reg_u8,
+    u16_reg_u16,
+    u16_reg_u8_u16_u16,
+    i16,
+    i8,
+    i32,
+    u32,
+
+    pub fn operands(layout: OperandLayout) []const OperandKind {
+        return switch (layout) {
+            .none => &.{},
+            .reg => &.{.register},
+            .reg_reg => &.{ .register, .register },
+            .reg_reg_reg => &.{ .register, .register, .register },
+            .reg_u8 => &.{ .register, .u8 },
+            .reg_u8_u8 => &.{ .register, .u8, .u8 },
+            .reg_reg_u8 => &.{ .register, .register, .u8 },
+            .reg_reg_u8_u8 => &.{ .register, .register, .u8, .u8 },
+            .reg_u16 => &.{ .register, .u16 },
+            .reg_reg_u16 => &.{ .register, .register, .u16 },
+            .reg_u8_u16 => &.{ .register, .u8, .u16 },
+            .reg_reg_u8_u16 => &.{ .register, .register, .u8, .u16 },
+            .reg_i16 => &.{ .register, .i16 },
+            .reg_i8 => &.{ .register, .i8 },
+            .reg_reg_i16 => &.{ .register, .register, .i16 },
+            .reg_reg_i8 => &.{ .register, .register, .i8 },
+            .reg_i32 => &.{ .register, .i32 },
+            .reg_reg_i32 => &.{ .register, .register, .i32 },
+            .u8 => &.{.u8},
+            .u8_u8 => &.{ .u8, .u8 },
+            .u8_reg_u8 => &.{ .u8, .register, .u8 },
+            .u8_reg_u8_u8_u8 => &.{ .u8, .register, .u8, .u8, .u8 },
+            .u16 => &.{.u16},
+            .u16_u16 => &.{ .u16, .u16 },
+            .u16_reg => &.{ .u16, .register },
+            .u16_reg_reg => &.{ .u16, .register, .register },
+            .u16_reg_u8 => &.{ .u16, .register, .u8 },
+            .u16_reg_u16 => &.{ .u16, .register, .u16 },
+            .u16_reg_u8_u16_u16 => &.{ .u16, .register, .u8, .u16, .u16 },
+            .i16 => &.{.i16},
+            .i8 => &.{.i8},
+            .i32 => &.{.i32},
+            .u32 => &.{.u32},
+        };
+    }
+
+    pub fn operandSize(layout: OperandLayout) u8 {
+        var size: u8 = 0;
+        for (layout.operands()) |operand| size += operand.byteSize();
+        return size;
+    }
+};
+
+pub const ControlFlow = enum {
+    fallthrough,
+    jump,
+    conditional_jump,
+    multiway_jump,
+    suspend_,
+    terminator,
+};
+
+/// Contract between the bytecode vocabulary and Bistromath. `inline_` means
+/// the baseline compiler must understand the opcode; `unsupported` is an
+/// intentional tier boundary, never an accidental omission.
+pub const BaselineStrategy = enum {
+    inline_,
+    helper,
+    canonical_expansion,
+    unsupported,
+};
+
+pub const BranchWidth = enum(u8) {
+    i8 = 1,
+    i16 = 2,
+    i32 = 4,
+
+    pub fn byteSize(width: BranchWidth) u8 {
+        return @intFromEnum(width);
+    }
+};
+
+pub const BranchInfo = struct {
+    /// Semantic opcode independent of the encoded displacement width. The
+    /// canonical forms use i16 and keep the original opcode identities.
+    canonical: Op,
+    width: BranchWidth,
+    /// Byte offset of the signed displacement within the operand stream.
+    operand_offset: u8,
+
+    pub fn displacement(info: BranchInfo, code: []const u8, op_start: usize) i32 {
+        const at = op_start + 1 + info.operand_offset;
+        return switch (info.width) {
+            .i8 => @as(i8, @bitCast(code[at])),
+            .i16 => std.mem.readInt(i16, code[at..][0..2], .little),
+            .i32 => std.mem.readInt(i32, code[at..][0..4], .little),
+        };
+    }
+
+    pub fn target(info: BranchInfo, code: []const u8, op_start: usize) u32 {
+        const after = op_start + 1 + info.operand_offset + info.width.byteSize();
+        return @intCast(@as(i64, @intCast(after)) + info.displacement(code, op_start));
+    }
+};
+
+pub const InstructionSpec = struct {
+    mnemonic: []const u8,
+    layout: OperandLayout,
+    control_flow: ControlFlow = .fallthrough,
+    baseline: BaselineStrategy = .unsupported,
+};
+
+fn instruction(mnemonic_text: []const u8, layout: OperandLayout) InstructionSpec {
+    return .{ .mnemonic = mnemonic_text, .layout = layout };
+}
+
+fn baselineInstruction(mnemonic_text: []const u8, layout: OperandLayout) InstructionSpec {
+    return .{ .mnemonic = mnemonic_text, .layout = layout, .baseline = .inline_ };
+}
+
+fn controlInstruction(mnemonic_text: []const u8, layout: OperandLayout, control_flow: ControlFlow, baseline: BaselineStrategy) InstructionSpec {
+    return .{ .mnemonic = mnemonic_text, .layout = layout, .control_flow = control_flow, .baseline = baseline };
+}
 
 pub const Op = enum(u8) {
     // ── Loads ────────────────────────────────────────────────────────────
@@ -326,7 +502,7 @@ pub const Op = enum(u8) {
     /// `call_method` (proxy / bound / revocable / native / generator
     /// / async / regular).
     ///
-    /// `ic_load` indexes `Chunk.inline_caches` (the same proto-load
+    /// `ic_load` indexes `Chunk.inline_load_caches` (the same proto-load
     /// cache `lda_property` uses); `ic_call` indexes
     /// `Chunk.inline_call_caches` (the same callee cache
     /// `call_method` uses).
@@ -871,7 +1047,7 @@ pub const Op = enum(u8) {
     /// vs property semantics is approximated.
     ///
     /// Wire: `[op] [k:u16] [ic:u16]`. The `ic` operand indexes
-    /// `Chunk.inline_caches`; a cell with `proto == null` and
+    /// `Chunk.inline_load_caches`; a cell with `proto == null` and
     /// `shape == gt.shape` caches an object-env slot on
     /// `globalThis`. `proto_rev` is repurposed to record
     /// `GlobalBindings.decl_revision` at fill time so a new
@@ -1050,7 +1226,7 @@ pub const Op = enum(u8) {
     /// `[op] [k:u16] [r_obj:u8] [ic:u16]` — store acc into property
     /// `k` of the object held in register `r_obj`. The compiler
     /// arranges for `obj.x = v` to leave `obj` in `r_obj` and `v`
-    /// in acc. `ic` indexes the chunk's `inline_caches` table; the
+    /// in acc. `ic` indexes the chunk's `inline_store_caches` table; the
     /// interpreter's hit path is a shape pointer compare + a direct
     /// `slots[cell.slot] = v` (paired with a `properties` bag
     /// update). Misses fall through to `strictSetProperty`, which
@@ -1085,14 +1261,14 @@ pub const Op = enum(u8) {
     /// property read). Coerces the key to a string at runtime;
     /// non-string keys go through ToPropertyKey (§7.1.19). Walks the
     /// prototype chain like `lda_property`. The `ic` operand indexes
-    /// `Chunk.inline_caches`; the cell caches `(shape, slot)` keyed by
+    /// `Chunk.inline_computed_caches`; the cell caches `(shape, slot)` keyed by
     /// the dynamic string key (captured inline in the cell) so a hot
     /// monomorphic `obj[k]` collapses to a shape + key-bytes compare.
     lda_computed,
     /// `[op] [r_obj:u8] [r_key:u8] [ic:u16]` — `obj[key] = acc`
     /// (computed property write). Stores acc; the result of the
     /// expression is the assigned value (still in acc). The `ic`
-    /// operand indexes `Chunk.inline_caches`; the cell caches
+    /// operand indexes `Chunk.inline_computed_caches`; the cell caches
     /// `(shape, slot)` keyed by the dynamic key so a hot
     /// same-shape `obj[k] = v` rewrite of an existing writable
     /// own-data slot skips ToPropertyKey + the shape hash + the
@@ -1243,369 +1419,399 @@ pub const Op = enum(u8) {
     /// later; later distinguishes return-from-function.
     return_,
 
-    /// Total number of bytes the operand of `op` occupies (not
-    /// counting the opcode byte itself). Drives the disassembler
-    /// and the interpreter's instruction-pointer advance.
-    pub fn operandSize(op: Op) u8 {
+    // ── Appended specializations ────────────────────────────────────────
+    // Keep new variants at the enum tail so existing byte values remain
+    // stable for already-emitted chunks and diagnostic bytecode dumps.
+    /// `[op] [r:u8]` — `registers[r] = acc =
+    /// ToNumeric(registers[r]) + Type(oldValue)::unit`. §13.4 register-
+    /// binding specialization for prefix and discarded postfix updates.
+    inc_reg,
+    /// `[op] [r:u8]` — decrement counterpart of `inc_reg`.
+    dec_reg,
+    /// Compact signed-immediate forms. Values outside the indicated width
+    /// use the original i32 forms; semantics are identical.
+    lda_smi8,
+    lda_smi16,
+    add_smi8,
+    add_smi16,
+    /// Compact hot-site forms used while every constant/cache index at the
+    /// site fits in one byte. The original u16 forms remain the fallback.
+    lda_property8,
+    lda_property_reg8,
+    sta_property8,
+    lda_computed8,
+    sta_computed8,
+    in_op8,
+    lda_global8,
+    lda_global_or_undef8,
+    for_in_open8,
+    call8,
+    call0_8,
+    call1_8,
+    call2_8,
+    call3_8,
+    call_method8,
+    new_call8,
+    call_property8,
+
+    // Width-relaxed branch encodings. The original branch opcodes remain the
+    // canonical i16 forms; these tails keep existing opcode numbers stable.
+    jmp8,
+    jmp32,
+    jmp_if_false8,
+    jmp_if_false32,
+    jmp_if_true8,
+    jmp_if_true32,
+    jmp_if_nullish8,
+    jmp_if_nullish32,
+    jmp_if_strict_eq8,
+    jmp_if_strict_eq32,
+    jmp_if_strict_neq8,
+    jmp_if_strict_neq32,
+    jmp_if_not_lt8,
+    jmp_if_not_lt32,
+    jmp_if_not_le8,
+    jmp_if_not_le32,
+    jmp_if_not_gt8,
+    jmp_if_not_gt32,
+    jmp_if_not_ge8,
+    jmp_if_not_ge32,
+    loop_inc_lt8,
+    loop_inc_lt32,
+    /// `[op] [r_discriminant:u8] [table:u16]` — dense int32 switch.
+    /// Targets live in `Chunk.switch_tables[table]`; every execution jumps to
+    /// either one case body or the default target (no fallthrough edge).
+    switch_smi,
+
+    /// Authoritative instruction metadata. Adding an opcode requires one
+    /// exhaustive entry here; consumers derive names, sizes and tier/control
+    /// contracts from this table instead of maintaining parallel switches.
+    pub fn spec(op: Op) InstructionSpec {
         return switch (op) {
-            .lda_undefined,
-            .lda_null,
-            .lda_true,
-            .lda_false,
-            .lda_hole,
-            .lda_this,
-            .lda_new_target,
-            .make_object,
-            .make_array,
-            .super_call_forward,
-            .init_instance_fields,
-            .lda_arguments,
-            .arguments_snapshot,
-            .gen_yield,
-            .gen_yield_iter_result,
-            .gen_initial_suspend,
-            .await_,
-            .iter_open,
-            .async_iter_open,
-            .pop_env,
-            .negate,
-            .bit_not,
-            .logical_not,
-            .to_number,
-            .to_numeric,
-            .to_string,
-            .inc,
-            .dec,
-            .typeof_,
-            .throw_,
-            .throw_if_hole,
-            .require_object_coercible,
-            .throw_assign_const,
-            .throw_if_not_object,
-            .to_property_key,
-            .return_,
-            .super_get_computed,
-            .super_check_this,
-            .import_meta,
-            .module_link_complete,
-            .module_reexport_star,
-            // Compact operand-free loads/stores (index/constant in opcode).
-            .lda_zero,
-            .lda_one,
-            .ldar_0,
-            .ldar_1,
-            .ldar_2,
-            .ldar_3,
-            .star_0,
-            .star_1,
-            .star_2,
-            .star_3,
-            => 0,
-            .alloc_dispose_stack,
-            => 1, // r_dst
-            .dispose_stack,
-            .dispose_stack_async,
-            => 2, // r_stack + mode
-            .register_using,
-            => 3, // r_stack + r_value + hint
-            .ldar,
-            .star,
-            .add,
-            .add_to_int32,
-            .sub,
-            .mul,
-            .div,
-            .mod,
-            .pow,
-            .bit_and,
-            .bit_or,
-            .bit_xor,
-            .shl,
-            .shr,
-            .shr_u,
-            .eq,
-            .strict_eq,
-            .neq,
-            .strict_neq,
-            .lt,
-            .gt,
-            .le,
-            .ge,
-            .instanceof_,
-            .super_call_spread,
-            .array_spread,
-            .object_spread,
-            .set_proto_literal,
-            .set_home,
-            .rest_args_from,
-            => 1, // single u8 register operand
-            .set_fn_name_from => 2, // r_key:u8 + prefix:u8
-            .make_array_n => 2, // r_base:u8 + n:u8
-            .mov,
-            .array_rest_from,
-            .object_rest_from,
-            .iter_step,
-            .iter_close,
-            => 2, // src:u8, dst:u8 (or r_src, start / r_excl, or r_iter, r_done)
-            // iter_close: r_iter:u8 + mode:u8 (0 = normal completion;
-            //                                  1 = throw completion — swallow inner)
-            .lda_constant,
-            .jmp,
-            .jmp_if_false,
-            .jmp_if_true,
-            .jmp_if_nullish,
-            .make_function,
-            .make_named_function_expr,
-            .make_object_shape,
-            .super_get,
-            .lda_private,
-            .private_in,
-            .sta_global,
-            .sta_global_init,
-            .sta_global_fn_decl,
-            .module_export,
-            // §14.7.5.6 — `for_in_open [ic:u16]` carries the for-in
-            // enumeration-cache slot (object is in `acc`). The cell
-            // caches the key snapshot keyed by receiver shape + a
-            // frozen one-level prototype.
-            .for_in_open,
-            // §13.3.10 — `dynamic_import` carries the
-            // `with { type: "..." }` attribute as a u16 constant
-            // index (or `0xFFFF` for no attribute) so the deferred
-            // job picks the synthetic-module path. Specifier is in
-            // `acc`, not the operand stream.
-            .dynamic_import,
-            => 2, // u16 / i16
-            // §13.3.10 — `dynamic_import_with_options [r_spec:u8]`
-            // carries the specifier-bearing register; `options` is
-            // in `acc`. Runtime walks the options per
-            // §13.3.10.1 steps 9-15.
-            .dynamic_import_with_options => 1, // r_spec:u8
-            // §16.2.1.5 module_load — `k_spec:u16` selecting the
-            // specifier string, then `k_attr:u16` carrying the
-            // `with { type: "..." }` attribute value (or `0xFFFF`
-            // for no attribute). See compiler.MODULE_NO_ATTRIBUTE.
-            .module_load,
-            .module_reexport_named, // local_k:u16 + exported_k:u16
-            => 4,
-            .capture_unresolved_global,
-            .sta_global_strict,
-            => 3, // k:u16 + r:u8
-            .make_class => 4, // k:u16 + r_keys_base:u8 + inner_class_slot:u8
-            .super_call,
-            .tail_call,
-            .lda_env,
-            .sta_env,
-            => 2, // u8 + u8
-            .call => 4, // r_callee:u8 + argc:u8 + ic:u16
-            .call0, .call1, .call2, .call3 => 3, // r_callee:u8 + ic:u16 (argc in opcode)
-            .jmp_if_strict_eq, .jmp_if_strict_neq => 3, // r:u8 + off:i16
-            .jmp_if_not_lt, .jmp_if_not_le, .jmp_if_not_gt, .jmp_if_not_ge => 3, // r:u8 + off:i16
-            .new_call => 4, // r_callee:u8 + argc:u8 + ic:u16
-            .tail_call_method => 3, // r_recv:u8 + r_callee:u8 + argc:u8
-            .call_forward_args => 2, // r_callee:u8 + r_thisArg:u8
-            .direct_eval => 4, // scope:u16 + r_callee:u8 + argc:u8
-            .direct_eval_spread => 4, // scope:u16 + r_callee:u8 + r_args:u8
-            .sta_private, .super_set, .def_property => 3, // k:u16 + r_obj:u8
-            .def_template_property => 5, // k:u16 + r_obj:u8 + slot:u16
-            .add_smi => 5, // r:u8 + imm:i32
-            .to_int32 => 0, // no operand — transforms acc in place
-            .sta_property,
-            .lda_property_reg,
-            => 5, // k:u16 + r_obj:u8 + ic:u16 (inline-cache slot)
-            .def_accessor => 4, // k:u16 + r_obj:u8 + is_setter:u8
-            .def_computed_accessor => 3, // r_obj:u8 + r_key:u8 + is_setter:u8
-            .lda_computed => 3, // r_obj:u8 + ic:u16 (key in acc)
-            .in_op => 3, // r_key:u8 + ic:u16 (object in acc)
-            .sta_computed => 4, // r_obj:u8 + r_key:u8 + ic:u16
-            .super_set_computed, .def_computed => 2, // r_obj:u8 + r_key:u8
-            .del_named_property => 3, // k:u16 + r_obj:u8
-            .del_computed_property => 2, // r_obj:u8 + r_key:u8
-            .call_method => 5, // r_recv:u8 + r_callee:u8 + argc:u8 + ic:u16
-            .call_property => 8, // k:u16 + r_recv:u8 + argc:u8 + ic_load:u16 + ic_call:u16
-            .for_of_next => 3, // r_iter:u8 + r_next:u8 + r_done:u8
-            .loop_inc_lt => 4, // r_counter:u8 + r_bound:u8 + offset:i16
-            .make_environment => 1, // slot_count:u8
-            .lda_smi => 4, // i32 immediate
-            .lda_property,
-            .lda_global,
-            .lda_global_or_undef,
-            => 4, // k:u16 + ic:u16 (inline-cache slot)
-            .lda_global_slot,
-            .sta_global_slot,
-            .sta_global_slot_init,
-            => 4, // slot:u32
+            .lda_undefined => baselineInstruction("LdaUndefined", .none),
+            .lda_null => baselineInstruction("LdaNull", .none),
+            .lda_true => baselineInstruction("LdaTrue", .none),
+            .lda_false => baselineInstruction("LdaFalse", .none),
+            .lda_smi => baselineInstruction("LdaSmi", .i32),
+            .lda_constant => baselineInstruction("LdaConstant", .u16),
+            .lda_hole => baselineInstruction("LdaHole", .none),
+            .lda_zero => baselineInstruction("LdaZero", .none),
+            .lda_one => baselineInstruction("LdaOne", .none),
+            .ldar => baselineInstruction("Ldar", .reg),
+            .ldar_0 => baselineInstruction("Ldar0", .none),
+            .ldar_1 => baselineInstruction("Ldar1", .none),
+            .ldar_2 => baselineInstruction("Ldar2", .none),
+            .ldar_3 => baselineInstruction("Ldar3", .none),
+            .star => baselineInstruction("Star", .reg),
+            .star_0 => baselineInstruction("Star0", .none),
+            .star_1 => baselineInstruction("Star1", .none),
+            .star_2 => baselineInstruction("Star2", .none),
+            .star_3 => baselineInstruction("Star3", .none),
+            .mov => baselineInstruction("Mov", .reg_reg),
+            .add => baselineInstruction("Add", .reg),
+            .sub => baselineInstruction("Sub", .reg),
+            .mul => baselineInstruction("Mul", .reg),
+            .div => instruction("Div", .reg),
+            .mod => instruction("Mod", .reg),
+            .pow => instruction("Pow", .reg),
+            .add_smi => baselineInstruction("AddSmi", .reg_i32),
+            .to_int32 => baselineInstruction("ToInt32", .none),
+            .add_to_int32 => baselineInstruction("AddToInt32", .reg),
+            .bit_and => baselineInstruction("BitAnd", .reg),
+            .bit_or => baselineInstruction("BitOr", .reg),
+            .bit_xor => baselineInstruction("BitXor", .reg),
+            .shl => instruction("Shl", .reg),
+            .shr => instruction("Shr", .reg),
+            .shr_u => instruction("ShrU", .reg),
+            .negate => baselineInstruction("Negate", .none),
+            .bit_not => baselineInstruction("BitNot", .none),
+            .logical_not => baselineInstruction("LogicalNot", .none),
+            .to_number => instruction("ToNumber", .none),
+            .to_numeric => instruction("ToNumeric", .none),
+            .to_string => instruction("ToString", .none),
+            .inc => instruction("Inc", .none),
+            .dec => instruction("Dec", .none),
+            .inc_reg => baselineInstruction("IncReg", .reg),
+            .dec_reg => baselineInstruction("DecReg", .reg),
+            .lda_smi8 => baselineInstruction("LdaSmi8", .i8),
+            .lda_smi16 => baselineInstruction("LdaSmi16", .i16),
+            .add_smi8 => baselineInstruction("AddSmi8", .reg_i8),
+            .add_smi16 => baselineInstruction("AddSmi16", .reg_i16),
+            .lda_property8 => baselineInstruction("LdaProperty8", .u8_u8),
+            .lda_property_reg8 => baselineInstruction("LdaPropertyReg8", .u8_reg_u8),
+            .sta_property8 => baselineInstruction("StaProperty8", .u8_reg_u8),
+            .lda_computed8 => baselineInstruction("LdaComputed8", .reg_u8),
+            .sta_computed8 => instruction("StaComputed8", .reg_reg_u8),
+            .in_op8 => instruction("In8", .reg_u8),
+            .lda_global8 => baselineInstruction("LdaGlobal8", .u8_u8),
+            .lda_global_or_undef8 => baselineInstruction("LdaGlobalOrUndef8", .u8_u8),
+            .for_in_open8 => instruction("ForInOpen8", .u8),
+            .call8 => baselineInstruction("Call8", .reg_u8_u8),
+            .call0_8 => baselineInstruction("Call0_8", .reg_u8),
+            .call1_8 => baselineInstruction("Call1_8", .reg_u8),
+            .call2_8 => baselineInstruction("Call2_8", .reg_u8),
+            .call3_8 => baselineInstruction("Call3_8", .reg_u8),
+            .call_method8 => baselineInstruction("CallMethod8", .reg_reg_u8_u8),
+            .new_call8 => baselineInstruction("NewCall8", .reg_u8_u8),
+            .call_property8 => baselineInstruction("CallProperty8", .u8_reg_u8_u8_u8),
+            .jmp8 => controlInstruction("Jmp8", .i8, .jump, .inline_),
+            .jmp32 => controlInstruction("Jmp32", .i32, .jump, .inline_),
+            .jmp_if_false8 => controlInstruction("JmpIfFalse8", .i8, .conditional_jump, .inline_),
+            .jmp_if_false32 => controlInstruction("JmpIfFalse32", .i32, .conditional_jump, .inline_),
+            .jmp_if_true8 => controlInstruction("JmpIfTrue8", .i8, .conditional_jump, .inline_),
+            .jmp_if_true32 => controlInstruction("JmpIfTrue32", .i32, .conditional_jump, .inline_),
+            .jmp_if_nullish8 => controlInstruction("JmpIfNullish8", .i8, .conditional_jump, .unsupported),
+            .jmp_if_nullish32 => controlInstruction("JmpIfNullish32", .i32, .conditional_jump, .unsupported),
+            .jmp_if_strict_eq8 => controlInstruction("JmpIfStrictEq8", .reg_i8, .conditional_jump, .inline_),
+            .jmp_if_strict_eq32 => controlInstruction("JmpIfStrictEq32", .reg_i32, .conditional_jump, .inline_),
+            .jmp_if_strict_neq8 => controlInstruction("JmpIfStrictNeq8", .reg_i8, .conditional_jump, .inline_),
+            .jmp_if_strict_neq32 => controlInstruction("JmpIfStrictNeq32", .reg_i32, .conditional_jump, .inline_),
+            .jmp_if_not_lt8 => controlInstruction("JmpIfNotLt8", .reg_i8, .conditional_jump, .inline_),
+            .jmp_if_not_lt32 => controlInstruction("JmpIfNotLt32", .reg_i32, .conditional_jump, .inline_),
+            .jmp_if_not_le8 => controlInstruction("JmpIfNotLe8", .reg_i8, .conditional_jump, .inline_),
+            .jmp_if_not_le32 => controlInstruction("JmpIfNotLe32", .reg_i32, .conditional_jump, .inline_),
+            .jmp_if_not_gt8 => controlInstruction("JmpIfNotGt8", .reg_i8, .conditional_jump, .inline_),
+            .jmp_if_not_gt32 => controlInstruction("JmpIfNotGt32", .reg_i32, .conditional_jump, .inline_),
+            .jmp_if_not_ge8 => controlInstruction("JmpIfNotGe8", .reg_i8, .conditional_jump, .inline_),
+            .jmp_if_not_ge32 => controlInstruction("JmpIfNotGe32", .reg_i32, .conditional_jump, .inline_),
+            .loop_inc_lt8 => controlInstruction("LoopIncLt8", .reg_reg_i8, .conditional_jump, .inline_),
+            .loop_inc_lt32 => controlInstruction("LoopIncLt32", .reg_reg_i32, .conditional_jump, .inline_),
+            .switch_smi => controlInstruction("SwitchSmi", .reg_u16, .multiway_jump, .inline_),
+            .typeof_ => instruction("TypeOf", .none),
+            .eq => baselineInstruction("Eq", .reg),
+            .strict_eq => baselineInstruction("StrictEq", .reg),
+            .neq => baselineInstruction("Neq", .reg),
+            .strict_neq => baselineInstruction("StrictNeq", .reg),
+            .lt => baselineInstruction("Lt", .reg),
+            .gt => baselineInstruction("Gt", .reg),
+            .le => baselineInstruction("Le", .reg),
+            .ge => baselineInstruction("Ge", .reg),
+            .jmp => controlInstruction("Jmp", .i16, .jump, .inline_),
+            .jmp_if_false => controlInstruction("JmpIfFalse", .i16, .conditional_jump, .inline_),
+            .jmp_if_true => controlInstruction("JmpIfTrue", .i16, .conditional_jump, .inline_),
+            .jmp_if_nullish => controlInstruction("JmpIfNullish", .i16, .conditional_jump, .unsupported),
+            .jmp_if_strict_eq => controlInstruction("JmpIfStrictEq", .reg_i16, .conditional_jump, .inline_),
+            .jmp_if_strict_neq => controlInstruction("JmpIfStrictNeq", .reg_i16, .conditional_jump, .inline_),
+            .jmp_if_not_lt => controlInstruction("JmpIfNotLt", .reg_i16, .conditional_jump, .inline_),
+            .jmp_if_not_le => controlInstruction("JmpIfNotLe", .reg_i16, .conditional_jump, .inline_),
+            .jmp_if_not_gt => controlInstruction("JmpIfNotGt", .reg_i16, .conditional_jump, .inline_),
+            .jmp_if_not_ge => controlInstruction("JmpIfNotGe", .reg_i16, .conditional_jump, .inline_),
+            .loop_inc_lt => controlInstruction("LoopIncLt", .reg_reg_i16, .conditional_jump, .inline_),
+            .make_function => instruction("MakeFunction", .u16),
+            .make_named_function_expr => instruction("MakeNamedFunctionExpr", .u16),
+            .call => baselineInstruction("Call", .reg_u8_u16),
+            .call0 => baselineInstruction("Call0", .reg_u16),
+            .call1 => baselineInstruction("Call1", .reg_u16),
+            .call2 => baselineInstruction("Call2", .reg_u16),
+            .call3 => baselineInstruction("Call3", .reg_u16),
+            .call_method => baselineInstruction("CallMethod", .reg_reg_u8_u16),
+            .call_property => baselineInstruction("CallProperty", .u16_reg_u8_u16_u16),
+            .new_call => baselineInstruction("NewCall", .reg_u8_u16),
+            .tail_call => controlInstruction("TailCall", .reg_u8, .terminator, .inline_),
+            .tail_call_method => controlInstruction("TailCallMethod", .reg_reg_u8, .terminator, .inline_),
+            .direct_eval => instruction("DirectEval", .u16_reg_u8),
+            .direct_eval_spread => instruction("DirectEvalSpread", .u16_reg_reg),
+            .lda_this => baselineInstruction("LdaThis", .none),
+            .lda_new_target => instruction("LdaNewTarget", .none),
+            .instanceof_ => baselineInstruction("InstanceOf", .reg),
+            .in_op => instruction("In", .reg_u16),
+            .iter_close => instruction("IterClose", .reg_u8),
+            .array_rest_from => instruction("ArrayRestFrom", .reg_u8),
+            .object_rest_from => instruction("ObjectRestFrom", .reg_reg),
+            .make_class => instruction("MakeClass", .u16_reg_u8),
+            .super_get => instruction("SuperGet", .u16),
+            .super_get_computed => instruction("SuperGetComputed", .none),
+            .super_call => instruction("SuperCall", .reg_u8),
+            .super_call_spread => instruction("SuperCallSpread", .reg),
+            .super_set => instruction("SuperSet", .u16_reg),
+            .super_set_computed => instruction("SuperSetComputed", .reg_reg),
+            .super_call_forward => instruction("SuperCallForward", .none),
+            .super_check_this => instruction("SuperCheckThis", .none),
+            .init_instance_fields => instruction("InitInstanceFields", .none),
+            .lda_private => instruction("LdaPrivate", .u16),
+            .sta_private => instruction("StaPrivate", .u16_reg),
+            .private_in => instruction("PrivateIn", .u16),
+            .def_accessor => instruction("DefAccessor", .u16_reg_u8),
+            .def_computed_accessor => instruction("DefComputedAccessor", .reg_reg_u8),
+            .set_proto_literal => instruction("SetProtoLiteral", .reg),
+            .set_home => instruction("SetHome", .reg),
+            .set_fn_name_from => instruction("SetFnNameFrom", .reg_u8),
+            .lda_arguments => instruction("LdaArguments", .none),
+            .arguments_snapshot => instruction("ArgumentsSnapshot", .none),
+            .call_forward_args => instruction("CallForwardArgs", .reg_reg),
+            .rest_args_from => instruction("RestArgsFrom", .reg),
+            .gen_yield => controlInstruction("GenYield", .none, .suspend_, .unsupported),
+            .gen_yield_iter_result => controlInstruction("GenYieldIterResult", .none, .suspend_, .unsupported),
+            .gen_initial_suspend => controlInstruction("GenInitialSuspend", .none, .suspend_, .unsupported),
+            .await_ => controlInstruction("Await", .none, .suspend_, .unsupported),
+            .iter_open => instruction("IterOpen", .none),
+            .async_iter_open => instruction("AsyncIterOpen", .none),
+            .iter_step => instruction("IterStep", .reg_reg),
+            .for_of_next => instruction("ForOfNext", .reg_reg_reg),
+            .for_in_open => instruction("ForInOpen", .u16),
+            .pop_env => instruction("PopEnv", .none),
+            .module_load => instruction("ModuleLoad", .u16_u16),
+            .dynamic_import => instruction("DynamicImport", .u16),
+            .dynamic_import_with_options => instruction("DynamicImportWithOptions", .reg),
+            .import_meta => instruction("ImportMeta", .none),
+            .module_export => instruction("ModuleExport", .u16),
+            .module_link_complete => instruction("ModuleLinkComplete", .none),
+            .module_reexport_star => instruction("ModuleReexportStar", .none),
+            .module_reexport_named => instruction("ModuleReexportNamed", .u16_u16),
+            .make_environment => baselineInstruction("MakeEnvironment", .u8),
+            .lda_env => baselineInstruction("LdaEnv", .u8_u8),
+            .sta_env => baselineInstruction("StaEnv", .u8_u8),
+            .make_object => instruction("MakeObject", .none),
+            .make_object_shape => instruction("MakeObjectShape", .u16),
+            .make_array => instruction("MakeArray", .none),
+            .make_array_n => baselineInstruction("MakeArrayN", .reg_u8),
+            .array_spread => instruction("ArraySpread", .reg),
+            .object_spread => instruction("ObjectSpread", .reg),
+            .lda_property => baselineInstruction("LdaProperty", .u16_u16),
+            .lda_property_reg => baselineInstruction("LdaPropertyReg", .u16_reg_u16),
+            .sta_property => baselineInstruction("StaProperty", .u16_reg_u16),
+            .def_property => instruction("DefProperty", .u16_reg),
+            .def_template_property => instruction("DefTemplateProperty", .u16_reg_u16),
+            .lda_computed => baselineInstruction("LdaComputed", .reg_u16),
+            .sta_computed => instruction("StaComputed", .reg_reg_u16),
+            .def_computed => instruction("DefComputed", .reg_reg),
+            .del_named_property => instruction("DelNamedProperty", .u16_reg),
+            .del_computed_property => instruction("DelComputedProperty", .reg_reg),
+            .lda_global => baselineInstruction("LdaGlobal", .u16_u16),
+            .lda_global_or_undef => baselineInstruction("LdaGlobalOrUndef", .u16_u16),
+            .sta_global => instruction("StaGlobal", .u16),
+            .sta_global_init => instruction("StaGlobalInit", .u16),
+            .sta_global_fn_decl => instruction("StaGlobalFnDecl", .u16),
+            .lda_global_slot => baselineInstruction("LdaGlobalSlot", .u32),
+            .sta_global_slot => baselineInstruction("StaGlobalSlot", .u32),
+            .sta_global_slot_init => baselineInstruction("StaGlobalSlotInit", .u32),
+            .capture_unresolved_global => instruction("CaptureUnresolvedGlobal", .u16_reg),
+            .sta_global_strict => instruction("StaGlobalStrict", .u16_reg),
+            .throw_ => controlInstruction("Throw", .none, .terminator, .unsupported),
+            .throw_if_hole => baselineInstruction("ThrowIfHole", .none),
+            .require_object_coercible => instruction("RequireObjectCoercible", .none),
+            .throw_assign_const => instruction("ThrowAssignConst", .none),
+            .throw_if_not_object => instruction("ThrowIfNotObject", .none),
+            .to_property_key => instruction("ToPropertyKey", .none),
+            .alloc_dispose_stack => instruction("AllocDisposeStack", .reg),
+            .register_using => instruction("RegisterUsing", .reg_reg_u8),
+            .dispose_stack => instruction("DisposeStack", .reg_u8),
+            .dispose_stack_async => controlInstruction("DisposeStackAsync", .reg_u8, .suspend_, .unsupported),
+            .return_ => controlInstruction("Return", .none, .terminator, .inline_),
         };
     }
 
-    /// Stable mnemonic for the disassembler. The exact string is
-    /// part of the golden-test contract — keep stable.
+    /// Total operand bytes, derived from the authoritative layout.
+    pub fn operandSize(op: Op) u8 {
+        return op.spec().layout.operandSize();
+    }
+
+    /// Stable disassembly mnemonic, derived from the authoritative spec.
     pub fn mnemonic(op: Op) []const u8 {
+        return op.spec().mnemonic;
+    }
+
+    /// Branch encoding metadata shared by relaxation, decoding, CFG analysis,
+    /// disassembly, and Bistromath. `null` means ordinary fallthrough or a
+    /// non-relative control transfer.
+    pub fn branchInfo(op: Op) ?BranchInfo {
         return switch (op) {
-            .lda_undefined => "LdaUndefined",
-            .lda_null => "LdaNull",
-            .lda_true => "LdaTrue",
-            .lda_false => "LdaFalse",
-            .lda_smi => "LdaSmi",
-            .lda_constant => "LdaConstant",
-            .lda_hole => "LdaHole",
-            .lda_zero => "LdaZero",
-            .lda_one => "LdaOne",
-            .ldar => "Ldar",
-            .ldar_0 => "Ldar0",
-            .ldar_1 => "Ldar1",
-            .ldar_2 => "Ldar2",
-            .ldar_3 => "Ldar3",
-            .star => "Star",
-            .star_0 => "Star0",
-            .star_1 => "Star1",
-            .star_2 => "Star2",
-            .star_3 => "Star3",
-            .mov => "Mov",
-            .add => "Add",
-            .sub => "Sub",
-            .mul => "Mul",
-            .div => "Div",
-            .mod => "Mod",
-            .pow => "Pow",
-            .add_smi => "AddSmi",
-            .to_int32 => "ToInt32",
-            .add_to_int32 => "AddToInt32",
-            .bit_and => "BitAnd",
-            .bit_or => "BitOr",
-            .bit_xor => "BitXor",
-            .shl => "Shl",
-            .shr => "Shr",
-            .shr_u => "ShrU",
-            .negate => "Negate",
-            .bit_not => "BitNot",
-            .logical_not => "LogicalNot",
-            .to_number => "ToNumber",
-            .to_numeric => "ToNumeric",
-            .to_string => "ToString",
-            .inc => "Inc",
-            .dec => "Dec",
-            .typeof_ => "TypeOf",
-            .eq => "Eq",
-            .strict_eq => "StrictEq",
-            .neq => "Neq",
-            .strict_neq => "StrictNeq",
-            .lt => "Lt",
-            .gt => "Gt",
-            .le => "Le",
-            .ge => "Ge",
-            .jmp => "Jmp",
-            .jmp_if_false => "JmpIfFalse",
-            .jmp_if_true => "JmpIfTrue",
-            .jmp_if_nullish => "JmpIfNullish",
-            .jmp_if_strict_eq => "JmpIfStrictEq",
-            .jmp_if_strict_neq => "JmpIfStrictNeq",
-            .jmp_if_not_lt => "JmpIfNotLt",
-            .jmp_if_not_le => "JmpIfNotLe",
-            .jmp_if_not_gt => "JmpIfNotGt",
-            .jmp_if_not_ge => "JmpIfNotGe",
-            .loop_inc_lt => "LoopIncLt",
-            .make_function => "MakeFunction",
-            .make_named_function_expr => "MakeNamedFunctionExpr",
-            .call => "Call",
-            .call0 => "Call0",
-            .call1 => "Call1",
-            .call2 => "Call2",
-            .call3 => "Call3",
-            .call_method => "CallMethod",
-            .call_property => "CallProperty",
-            .new_call => "NewCall",
-            .tail_call => "TailCall",
-            .tail_call_method => "TailCallMethod",
-            .direct_eval => "DirectEval",
-            .direct_eval_spread => "DirectEvalSpread",
-            .lda_this => "LdaThis",
-            .lda_new_target => "LdaNewTarget",
-            .instanceof_ => "InstanceOf",
-            .in_op => "In",
-            .iter_close => "IterClose",
-            .array_rest_from => "ArrayRestFrom",
-            .object_rest_from => "ObjectRestFrom",
-            .make_class => "MakeClass",
-            .super_get => "SuperGet",
-            .super_get_computed => "SuperGetComputed",
-            .super_call => "SuperCall",
-            .super_call_spread => "SuperCallSpread",
-            .super_set => "SuperSet",
-            .super_set_computed => "SuperSetComputed",
-            .super_call_forward => "SuperCallForward",
-            .super_check_this => "SuperCheckThis",
-            .init_instance_fields => "InitInstanceFields",
-            .lda_private => "LdaPrivate",
-            .sta_private => "StaPrivate",
-            .private_in => "PrivateIn",
-            .def_accessor => "DefAccessor",
-            .def_computed_accessor => "DefComputedAccessor",
-            .set_proto_literal => "SetProtoLiteral",
-            .set_home => "SetHome",
-            .set_fn_name_from => "SetFnNameFrom",
-            .lda_arguments => "LdaArguments",
-            .arguments_snapshot => "ArgumentsSnapshot",
-            .call_forward_args => "CallForwardArgs",
-            .rest_args_from => "RestArgsFrom",
-            .gen_yield => "GenYield",
-            .gen_yield_iter_result => "GenYieldIterResult",
-            .gen_initial_suspend => "GenInitialSuspend",
-            .await_ => "Await",
-            .iter_open => "IterOpen",
-            .async_iter_open => "AsyncIterOpen",
-            .iter_step => "IterStep",
-            .for_of_next => "ForOfNext",
-            .for_in_open => "ForInOpen",
-            .pop_env => "PopEnv",
-            .module_load => "ModuleLoad",
-            .dynamic_import => "DynamicImport",
-            .dynamic_import_with_options => "DynamicImportWithOptions",
-            .import_meta => "ImportMeta",
-            .module_export => "ModuleExport",
-            .module_link_complete => "ModuleLinkComplete",
-            .module_reexport_star => "ModuleReexportStar",
-            .module_reexport_named => "ModuleReexportNamed",
-            .make_environment => "MakeEnvironment",
-            .lda_env => "LdaEnv",
-            .sta_env => "StaEnv",
-            .make_object => "MakeObject",
-            .make_object_shape => "MakeObjectShape",
-            .make_array => "MakeArray",
-            .make_array_n => "MakeArrayN",
-            .array_spread => "ArraySpread",
-            .object_spread => "ObjectSpread",
-            .lda_property => "LdaProperty",
-            .lda_property_reg => "LdaPropertyReg",
-            .sta_property => "StaProperty",
-            .def_property => "DefProperty",
-            .def_template_property => "DefTemplateProperty",
-            .lda_computed => "LdaComputed",
-            .sta_computed => "StaComputed",
-            .def_computed => "DefComputed",
-            .del_named_property => "DelNamedProperty",
-            .del_computed_property => "DelComputedProperty",
-            .lda_global => "LdaGlobal",
-            .lda_global_or_undef => "LdaGlobalOrUndef",
-            .sta_global => "StaGlobal",
-            .sta_global_init => "StaGlobalInit",
-            .sta_global_fn_decl => "StaGlobalFnDecl",
-            .lda_global_slot => "LdaGlobalSlot",
-            .sta_global_slot => "StaGlobalSlot",
-            .sta_global_slot_init => "StaGlobalSlotInit",
-            .capture_unresolved_global => "CaptureUnresolvedGlobal",
-            .sta_global_strict => "StaGlobalStrict",
-            .throw_ => "Throw",
-            .throw_if_hole => "ThrowIfHole",
-            .require_object_coercible => "RequireObjectCoercible",
-            .throw_assign_const => "ThrowAssignConst",
-            .throw_if_not_object => "ThrowIfNotObject",
-            .to_property_key => "ToPropertyKey",
-            .alloc_dispose_stack => "AllocDisposeStack",
-            .register_using => "RegisterUsing",
-            .dispose_stack => "DisposeStack",
-            .dispose_stack_async => "DisposeStackAsync",
-            .return_ => "Return",
+            .jmp8 => .{ .canonical = .jmp, .width = .i8, .operand_offset = 0 },
+            .jmp => .{ .canonical = .jmp, .width = .i16, .operand_offset = 0 },
+            .jmp32 => .{ .canonical = .jmp, .width = .i32, .operand_offset = 0 },
+            .jmp_if_false8 => .{ .canonical = .jmp_if_false, .width = .i8, .operand_offset = 0 },
+            .jmp_if_false => .{ .canonical = .jmp_if_false, .width = .i16, .operand_offset = 0 },
+            .jmp_if_false32 => .{ .canonical = .jmp_if_false, .width = .i32, .operand_offset = 0 },
+            .jmp_if_true8 => .{ .canonical = .jmp_if_true, .width = .i8, .operand_offset = 0 },
+            .jmp_if_true => .{ .canonical = .jmp_if_true, .width = .i16, .operand_offset = 0 },
+            .jmp_if_true32 => .{ .canonical = .jmp_if_true, .width = .i32, .operand_offset = 0 },
+            .jmp_if_nullish8 => .{ .canonical = .jmp_if_nullish, .width = .i8, .operand_offset = 0 },
+            .jmp_if_nullish => .{ .canonical = .jmp_if_nullish, .width = .i16, .operand_offset = 0 },
+            .jmp_if_nullish32 => .{ .canonical = .jmp_if_nullish, .width = .i32, .operand_offset = 0 },
+            .jmp_if_strict_eq8 => .{ .canonical = .jmp_if_strict_eq, .width = .i8, .operand_offset = 1 },
+            .jmp_if_strict_eq => .{ .canonical = .jmp_if_strict_eq, .width = .i16, .operand_offset = 1 },
+            .jmp_if_strict_eq32 => .{ .canonical = .jmp_if_strict_eq, .width = .i32, .operand_offset = 1 },
+            .jmp_if_strict_neq8 => .{ .canonical = .jmp_if_strict_neq, .width = .i8, .operand_offset = 1 },
+            .jmp_if_strict_neq => .{ .canonical = .jmp_if_strict_neq, .width = .i16, .operand_offset = 1 },
+            .jmp_if_strict_neq32 => .{ .canonical = .jmp_if_strict_neq, .width = .i32, .operand_offset = 1 },
+            .jmp_if_not_lt8 => .{ .canonical = .jmp_if_not_lt, .width = .i8, .operand_offset = 1 },
+            .jmp_if_not_lt => .{ .canonical = .jmp_if_not_lt, .width = .i16, .operand_offset = 1 },
+            .jmp_if_not_lt32 => .{ .canonical = .jmp_if_not_lt, .width = .i32, .operand_offset = 1 },
+            .jmp_if_not_le8 => .{ .canonical = .jmp_if_not_le, .width = .i8, .operand_offset = 1 },
+            .jmp_if_not_le => .{ .canonical = .jmp_if_not_le, .width = .i16, .operand_offset = 1 },
+            .jmp_if_not_le32 => .{ .canonical = .jmp_if_not_le, .width = .i32, .operand_offset = 1 },
+            .jmp_if_not_gt8 => .{ .canonical = .jmp_if_not_gt, .width = .i8, .operand_offset = 1 },
+            .jmp_if_not_gt => .{ .canonical = .jmp_if_not_gt, .width = .i16, .operand_offset = 1 },
+            .jmp_if_not_gt32 => .{ .canonical = .jmp_if_not_gt, .width = .i32, .operand_offset = 1 },
+            .jmp_if_not_ge8 => .{ .canonical = .jmp_if_not_ge, .width = .i8, .operand_offset = 1 },
+            .jmp_if_not_ge => .{ .canonical = .jmp_if_not_ge, .width = .i16, .operand_offset = 1 },
+            .jmp_if_not_ge32 => .{ .canonical = .jmp_if_not_ge, .width = .i32, .operand_offset = 1 },
+            .loop_inc_lt8 => .{ .canonical = .loop_inc_lt, .width = .i8, .operand_offset = 2 },
+            .loop_inc_lt => .{ .canonical = .loop_inc_lt, .width = .i16, .operand_offset = 2 },
+            .loop_inc_lt32 => .{ .canonical = .loop_inc_lt, .width = .i32, .operand_offset = 2 },
+            else => null,
+        };
+    }
+
+    pub fn branchVariant(op: Op, width: BranchWidth) Op {
+        const canonical = op.branchInfo().?.canonical;
+        return switch (canonical) {
+            .jmp => switch (width) {
+                .i8 => .jmp8,
+                .i16 => .jmp,
+                .i32 => .jmp32,
+            },
+            .jmp_if_false => switch (width) {
+                .i8 => .jmp_if_false8,
+                .i16 => .jmp_if_false,
+                .i32 => .jmp_if_false32,
+            },
+            .jmp_if_true => switch (width) {
+                .i8 => .jmp_if_true8,
+                .i16 => .jmp_if_true,
+                .i32 => .jmp_if_true32,
+            },
+            .jmp_if_nullish => switch (width) {
+                .i8 => .jmp_if_nullish8,
+                .i16 => .jmp_if_nullish,
+                .i32 => .jmp_if_nullish32,
+            },
+            .jmp_if_strict_eq => switch (width) {
+                .i8 => .jmp_if_strict_eq8,
+                .i16 => .jmp_if_strict_eq,
+                .i32 => .jmp_if_strict_eq32,
+            },
+            .jmp_if_strict_neq => switch (width) {
+                .i8 => .jmp_if_strict_neq8,
+                .i16 => .jmp_if_strict_neq,
+                .i32 => .jmp_if_strict_neq32,
+            },
+            .jmp_if_not_lt => switch (width) {
+                .i8 => .jmp_if_not_lt8,
+                .i16 => .jmp_if_not_lt,
+                .i32 => .jmp_if_not_lt32,
+            },
+            .jmp_if_not_le => switch (width) {
+                .i8 => .jmp_if_not_le8,
+                .i16 => .jmp_if_not_le,
+                .i32 => .jmp_if_not_le32,
+            },
+            .jmp_if_not_gt => switch (width) {
+                .i8 => .jmp_if_not_gt8,
+                .i16 => .jmp_if_not_gt,
+                .i32 => .jmp_if_not_gt32,
+            },
+            .jmp_if_not_ge => switch (width) {
+                .i8 => .jmp_if_not_ge8,
+                .i16 => .jmp_if_not_ge,
+                .i32 => .jmp_if_not_ge32,
+            },
+            .loop_inc_lt => switch (width) {
+                .i8 => .loop_inc_lt8,
+                .i16 => .loop_inc_lt,
+                .i32 => .loop_inc_lt32,
+            },
+            else => unreachable,
         };
     }
 };
@@ -1622,6 +1828,32 @@ test "Op: every variant has a stable mnemonic" {
         const mnem = op.mnemonic();
         try testing.expect(mnem.len > 0);
     }
+}
+
+test "Op: every variant has one authoritative instruction spec" {
+    inline for (@typeInfo(Op).@"enum".field_names) |field_name| {
+        const op: Op = @field(Op, field_name);
+        const spec = op.spec();
+        try testing.expectEqualStrings(op.mnemonic(), spec.mnemonic);
+        try testing.expectEqual(op.operandSize(), spec.layout.operandSize());
+    }
+}
+
+test "Op: instruction specs classify representative execution contracts" {
+    try testing.expectEqual(OperandLayout.none, Op.lda_undefined.spec().layout);
+    try testing.expectEqual(OperandLayout.reg, Op.ldar.spec().layout);
+    try testing.expectEqual(OperandLayout.reg_i32, Op.add_smi.spec().layout);
+    try testing.expectEqual(OperandLayout.reg_i16, Op.jmp_if_strict_eq.spec().layout);
+    try testing.expectEqual(OperandLayout.u16_reg_u8_u16_u16, Op.call_property.spec().layout);
+
+    try testing.expectEqual(ControlFlow.jump, Op.jmp.spec().control_flow);
+    try testing.expectEqual(ControlFlow.conditional_jump, Op.jmp_if_false.spec().control_flow);
+    try testing.expectEqual(ControlFlow.terminator, Op.return_.spec().control_flow);
+    try testing.expectEqual(ControlFlow.fallthrough, Op.add.spec().control_flow);
+
+    try testing.expectEqual(BaselineStrategy.inline_, Op.add.spec().baseline);
+    try testing.expectEqual(BaselineStrategy.inline_, Op.inc_reg.spec().baseline);
+    try testing.expectEqual(BaselineStrategy.unsupported, Op.await_.spec().baseline);
 }
 
 test "Op: operandSize agrees with the documented encoding" {
@@ -1691,4 +1923,9 @@ test "Op: operandSize agrees with the documented encoding" {
     // idiom); a wrong size would walk the disassembler off the next
     // instruction boundary.
     try testing.expectEqual(@as(u8, 1), Op.operandSize(.add_to_int32));
+    // Register update specializations are `[op] [r:u8]`. Keeping the
+    // operand size pinned is load-bearing for disassembly, liveness, and
+    // Bistromath's unsupported-op scan to stay aligned on the next opcode.
+    try testing.expectEqual(@as(u8, 1), Op.operandSize(.inc_reg));
+    try testing.expectEqual(@as(u8, 1), Op.operandSize(.dec_reg));
 }

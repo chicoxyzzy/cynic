@@ -52,10 +52,12 @@ const heap_mod = @import("../heap.zig");
 const intrinsics_mod = @import("../intrinsics.zig");
 const Realm = @import("../realm.zig").Realm;
 const Op = @import("../../bytecode/op.zig").Op;
+const bytecode_stats = @import("../../bytecode/stats.zig");
 const chunk_mod = @import("../../bytecode/chunk.zig");
 const bistromath = @import("../bistromath/bistromath.zig");
 const Chunk = chunk_mod.Chunk;
 const Handler = chunk_mod.Handler;
+const LoadICCell = chunk_mod.LoadICCell;
 const scope_mod = @import("../../bytecode/scope.zig");
 const parser_mod = @import("../../parser/parser.zig");
 const compiler_mod = @import("../../bytecode/compiler.zig");
@@ -1003,7 +1005,9 @@ inline fn decodeNext(code: []const u8, ip: *usize, committed: *bool) RunError!Op
     if (ip.* >= code.len) return error.InvalidOpcode;
     const b = code[ip.*];
     ip.* += 1;
-    return @enumFromInt(b);
+    const op: Op = @enumFromInt(b);
+    if (comptime bytecode_stats.enabled) bytecode_stats.observeActive(op);
+    return op;
 }
 
 /// Re-derive the loop-persistent dispatch state from the top frame,
@@ -1042,7 +1046,9 @@ inline fn reEnterDispatch(
     const b = code.*[ip.*];
     ip.* += 1;
     // Unchecked decode — see `decodeNext`.
-    return @enumFromInt(b);
+    const op: Op = @enumFromInt(b);
+    if (comptime bytecode_stats.enabled) bytecode_stats.observeActive(op);
+    return op;
 }
 
 /// Threaded-dispatch safe point. Runs the cooperative checks the
@@ -1381,6 +1387,7 @@ pub fn runFrames(
     if (ip >= code.len) return error.InvalidOpcode;
     const first_op: Op = @enumFromInt(code[ip]);
     ip += 1;
+    if (comptime bytecode_stats.enabled) bytecode_stats.observeActive(first_op);
 
     dispatch: switch (first_op) {
         // ── Loads ───────────────────────────────────────────────────
@@ -1400,9 +1407,14 @@ pub fn runFrames(
             acc = Value.false_;
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
-        .lda_smi => {
-            acc = Value.fromInt32(readI32(code, ip));
-            ip += 4;
+        .lda_smi, .lda_smi8, .lda_smi16 => |op_tag| {
+            const imm: i32 = switch (op_tag) {
+                .lda_smi8 => readI8(code, ip),
+                .lda_smi16 => readI16(code, ip),
+                else => readI32(code, ip),
+            };
+            ip += op_tag.operandSize();
+            acc = Value.fromInt32(imm);
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
         .lda_constant => {
@@ -1513,7 +1525,7 @@ pub fn runFrames(
             }
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
-        .add_smi => {
+        .add_smi, .add_smi8, .add_smi16 => |op_tag| {
             // Fused `<reg> + <imm>`. Reads the register, adds the
             // baked-in Smi immediate, writes to acc. The int32 fast
             // path here is BIT-IDENTICAL to `.add` with a Smi RHS:
@@ -1525,8 +1537,12 @@ pub fn runFrames(
             // TypeError, double + Smi all behave as if the
             // un-fused `LdaSmi imm; Add r` had run.
             const r = code[ip];
-            const imm = readI32(code, ip + 1);
-            ip += 5;
+            const imm: i32 = switch (op_tag) {
+                .add_smi8 => readI8(code, ip + 1),
+                .add_smi16 => readI16(code, ip + 1),
+                else => readI32(code, ip + 1),
+            };
+            ip += op_tag.operandSize();
             const reg_v = registers[r];
             if (reg_v.isInt32()) {
                 const ov = @addWithOverflow(reg_v.asInt32(), imm);
@@ -1919,6 +1935,53 @@ pub fn runFrames(
             }
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
+        .inc_reg, .dec_reg => |op_tag| {
+            const r = code[ip];
+            ip += 1;
+
+            // §13.4 GetValue → ToNumeric → type-matched unit →
+            // PutValue. The source register remains the authoritative root
+            // while object coercion re-enters JS; commit it only after both
+            // conversion and bump succeed, so a throw leaves the binding
+            // unchanged. `acc = old` mirrors the explicit leading Ldar.
+            acc = registers[r];
+            if (acc.isInt32()) {
+                const bumped = if (op_tag == .inc_reg)
+                    intArith(.add, acc, Value.fromInt32(1)).?
+                else
+                    intArith(.sub, acc, Value.fromInt32(1)).?;
+                acc = bumped;
+                registers[r] = bumped;
+                continue :dispatch try decodeNext(code, &ip, &committed);
+            }
+
+            if (try unaryToNumeric(realm, acc)) |numeric| {
+                acc = numeric;
+            } else {
+                const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
+                realm.pending_exception = null;
+                f.ip = ip;
+                f.accumulator = acc;
+                committed = true;
+                if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
+                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+            }
+
+            const delta: i32 = if (op_tag == .inc_reg) 1 else -1;
+            if (try arith.incOrDec(realm, acc, delta)) |bumped| {
+                acc = bumped;
+                registers[r] = bumped;
+            } else {
+                const ex = realm.pending_exception orelse try makeTypeError(realm, "Update failed");
+                realm.pending_exception = null;
+                f.ip = ip;
+                f.accumulator = acc;
+                committed = true;
+                if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
+                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+            }
+            continue :dispatch try decodeNext(code, &ip, &committed);
+        },
         .typeof_ => {
             acc = try typeOf(realm, acc);
             continue :dispatch try decodeNext(code, &ip, &committed);
@@ -1929,48 +1992,22 @@ pub fn runFrames(
         // ToPrimitive on object operands. Strict equality
         // skips primitive coercion entirely (object-vs-anything
         // is identity / false).
-        .eq => {
+        .eq, .neq => |comparison_op| {
             const r = code[ip];
             ip += 1;
-            // §7.2.14 IsLooselyEqual — ToPrimitive only fires
-            // when exactly one side is Object (steps 11/12).
-            // Object-vs-Object falls through to strictEq
-            // (reference equality) inside `looseEq`.
             const lhs_v = registers[r];
-            const rhs_v = acc;
-            // Fast paths that skip the two ToPrimitive (coerceForCompareEq)
-            // calls — §7.2.14 coercion fires only when one side is a plain
-            // object and the other an eligible primitive. int==int, the
-            // nullish rule, and both-primitive compares never coerce, so
-            // they short-circuit (and int/nullish skip `looseEq` too).
-            if (lhs_v.isInt32() and rhs_v.isInt32()) {
-                acc = Value.fromBool(lhs_v.asInt32() == rhs_v.asInt32());
-                continue :dispatch try decodeNext(code, &ip, &committed);
+            const outcome: LooseEqOutcome = if (looseEqualityFast(allocator, lhs_v, acc)) |equal|
+                .{ .value = equal }
+            else
+                try evaluateLooseEqualitySlow(allocator, realm, frames, f, ip, lhs_v, acc);
+            switch (outcome) {
+                .value => |equal| acc = Value.fromBool(if (comparison_op == .eq) equal else !equal),
+                .handled => {
+                    committed = true;
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                },
+                .uncaught => |ex| return .{ .thrown = ex },
             }
-            if (lhs_v.isNullish() or rhs_v.isNullish()) {
-                // Equal iff BOTH are null/undefined (no coercion to 0/false).
-                acc = Value.fromBool(lhs_v.isNullish() and rhs_v.isNullish());
-                continue :dispatch try decodeNext(code, &ip, &committed);
-            }
-            if (!lhs_v.isObject() and !rhs_v.isObject()) {
-                // Both primitives (symbol/bigint are object-tagged → slow
-                // path); coerceForCompareEq is a no-op here.
-                acc = Value.fromBool(looseEq(allocator, lhs_v, rhs_v));
-                continue :dispatch try decodeNext(code, &ip, &committed);
-            }
-            const lhs = try coerceForCompareEq(allocator, realm, frames, f, ip, lhs_v, rhs_v);
-            if (lhs == .uncaught) return .{ .thrown = lhs.uncaught };
-            if (lhs == .handled) {
-                committed = true;
-                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
-            }
-            const rhs = try coerceForCompareEq(allocator, realm, frames, f, ip, rhs_v, lhs.ok);
-            if (rhs == .uncaught) return .{ .thrown = rhs.uncaught };
-            if (rhs == .handled) {
-                committed = true;
-                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
-            }
-            acc = Value.fromBool(looseEq(allocator, lhs.ok, rhs.ok));
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
         .strict_eq => {
@@ -1983,39 +2020,6 @@ pub fn runFrames(
                 lhs_v.asInt32() == acc.asInt32()
             else
                 strictEq(lhs_v, acc));
-            continue :dispatch try decodeNext(code, &ip, &committed);
-        },
-        .neq => {
-            const r = code[ip];
-            ip += 1;
-            const lhs_v = registers[r];
-            const rhs_v = acc;
-            // Same fast paths as `.eq`, result negated (§7.2.14 → §7.2.15).
-            if (lhs_v.isInt32() and rhs_v.isInt32()) {
-                acc = Value.fromBool(lhs_v.asInt32() != rhs_v.asInt32());
-                continue :dispatch try decodeNext(code, &ip, &committed);
-            }
-            if (lhs_v.isNullish() or rhs_v.isNullish()) {
-                acc = Value.fromBool(!(lhs_v.isNullish() and rhs_v.isNullish()));
-                continue :dispatch try decodeNext(code, &ip, &committed);
-            }
-            if (!lhs_v.isObject() and !rhs_v.isObject()) {
-                acc = Value.fromBool(!looseEq(allocator, lhs_v, rhs_v));
-                continue :dispatch try decodeNext(code, &ip, &committed);
-            }
-            const lhs = try coerceForCompareEq(allocator, realm, frames, f, ip, lhs_v, rhs_v);
-            if (lhs == .uncaught) return .{ .thrown = lhs.uncaught };
-            if (lhs == .handled) {
-                committed = true;
-                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
-            }
-            const rhs = try coerceForCompareEq(allocator, realm, frames, f, ip, rhs_v, lhs.ok);
-            if (rhs == .uncaught) return .{ .thrown = rhs.uncaught };
-            if (rhs == .handled) {
-                committed = true;
-                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
-            }
-            acc = Value.fromBool(!looseEq(allocator, lhs.ok, rhs.ok));
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
         .strict_neq => {
@@ -2162,9 +2166,24 @@ pub fn runFrames(
         },
 
         // ── Control flow ────────────────────────────────────────────
-        .jmp => {
-            const off = readI16(code, ip);
-            ip += 2;
+        .switch_smi => {
+            const r_discriminant = code[ip];
+            const table_index = readU16(code, ip + 1);
+            ip += 3;
+            if (table_index >= local_chunk.switch_tables.len) return error.InvalidOpcode;
+            const table = local_chunk.switch_tables[table_index];
+            var target = table.default_target;
+            if (switchInt32(registers[r_discriminant])) |value| {
+                const slot = @as(i64, value) - table.min;
+                if (slot >= 0 and slot < table.targets.len) target = table.targets[@intCast(slot)];
+            }
+            if (target >= code.len) return error.InvalidOpcode;
+            ip = target;
+            continue :dispatch try decodeNext(code, &ip, &committed);
+        },
+        .jmp, .jmp8, .jmp32 => |op_tag| {
+            const off = op_tag.branchInfo().?.displacement(code, ip - 1);
+            ip += op_tag.operandSize();
             ip = applyOffset(ip, off);
             if (off < 0) {
                 if (try loopSafePoint(realm, f, ip, acc)) |r| return r;
@@ -2210,9 +2229,9 @@ pub fn runFrames(
             }
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
-        .jmp_if_false => {
-            const off = readI16(code, ip);
-            ip += 2;
+        .jmp_if_false, .jmp_if_false8, .jmp_if_false32 => |op_tag| {
+            const off = op_tag.branchInfo().?.displacement(code, ip - 1);
+            ip += op_tag.operandSize();
             // Inline ToBoolean fast path (§7.1.2): a comparison result
             // (bool) or an int condition skips the call; strings / objects
             // / doubles / BigInt fall through to `toBoolean`.
@@ -2264,9 +2283,9 @@ pub fn runFrames(
             }
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
-        .jmp_if_true => {
-            const off = readI16(code, ip);
-            ip += 2;
+        .jmp_if_true, .jmp_if_true8, .jmp_if_true32 => |op_tag| {
+            const off = op_tag.branchInfo().?.displacement(code, ip - 1);
+            ip += op_tag.operandSize();
             const truthy = if (acc.isBool()) acc.asBool() else if (acc.isInt32()) (acc.asInt32() != 0) else toBoolean(acc);
             if (truthy) {
                 ip = applyOffset(ip, off);
@@ -2315,17 +2334,23 @@ pub fn runFrames(
             }
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
-        .jmp_if_strict_eq, .jmp_if_strict_neq => |t| {
+        .jmp_if_strict_eq,
+        .jmp_if_strict_eq8,
+        .jmp_if_strict_eq32,
+        .jmp_if_strict_neq,
+        .jmp_if_strict_neq8,
+        .jmp_if_strict_neq32,
+        => |t| {
             // Fused strict-equality compare-and-branch: `registers[r] === acc`.
             // Byte-identical to `strict_eq r; jmp_if_{true,false}` — reuses
             // `strictEq` exactly. Emitted only as forward branches, so the
             // OSR back-edge machinery is unneeded; a backward offset
             // (defensive) still takes a GC safepoint.
             const r = code[ip];
-            const off = readI16(code, ip + 1);
-            ip += 3;
+            const off = t.branchInfo().?.displacement(code, ip - 1);
+            ip += t.operandSize();
             const equal = strictEq(registers[r], acc);
-            const take = if (t == .jmp_if_strict_eq) equal else !equal;
+            const take = if (t.branchInfo().?.canonical == .jmp_if_strict_eq) equal else !equal;
             if (take) {
                 ip = applyOffset(ip, off);
                 if (off < 0) {
@@ -2334,7 +2359,19 @@ pub fn runFrames(
             }
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
-        .jmp_if_not_lt, .jmp_if_not_le, .jmp_if_not_gt, .jmp_if_not_ge => |t| {
+        .jmp_if_not_lt,
+        .jmp_if_not_lt8,
+        .jmp_if_not_lt32,
+        .jmp_if_not_le,
+        .jmp_if_not_le8,
+        .jmp_if_not_le32,
+        .jmp_if_not_gt,
+        .jmp_if_not_gt8,
+        .jmp_if_not_gt32,
+        .jmp_if_not_ge,
+        .jmp_if_not_ge8,
+        .jmp_if_not_ge32,
+        => |t| {
             // Fused relational compare-and-branch, jump-when-false sense —
             // byte-identical to `lt|le|gt|ge r; jmp_if_false`: the §13.10
             // comparison (int32 fast path, else ToPrimitive/ToNumber
@@ -2348,10 +2385,11 @@ pub fn runFrames(
             // without duplicating the body. Forward-only by emit; a
             // defensive backward offset still takes a GC safepoint.
             const r = code[ip];
-            const off = readI16(code, ip + 1);
-            ip += 3;
+            const off = t.branchInfo().?.displacement(code, ip - 1);
+            ip += t.operandSize();
+            const canonical = t.branchInfo().?.canonical;
             var take: bool = undefined;
-            const fast: ?Value = switch (t) {
+            const fast: ?Value = switch (canonical) {
                 .jmp_if_not_lt => intCompare(.lt, registers[r], acc),
                 .jmp_if_not_le => intCompare(.le, registers[r], acc),
                 .jmp_if_not_gt => intCompare(.gt, registers[r], acc),
@@ -2372,7 +2410,7 @@ pub fn runFrames(
                     committed = true;
                     continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
-                const res = (switch (t) {
+                const res = (switch (canonical) {
                     .jmp_if_not_lt => relational(.lt, realm, lhs.ok, rhs.ok),
                     .jmp_if_not_le => relational(.le, realm, lhs.ok, rhs.ok),
                     .jmp_if_not_gt => relational(.gt, realm, lhs.ok, rhs.ok),
@@ -2399,9 +2437,9 @@ pub fn runFrames(
             }
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
-        .jmp_if_nullish => {
-            const off = readI16(code, ip);
-            ip += 2;
+        .jmp_if_nullish, .jmp_if_nullish8, .jmp_if_nullish32 => |op_tag| {
+            const off = op_tag.branchInfo().?.displacement(code, ip - 1);
+            ip += op_tag.operandSize();
             if (acc.isNull() or acc.isUndefined()) {
                 ip = applyOffset(ip, off);
                 if (off < 0) {
@@ -2449,11 +2487,11 @@ pub fn runFrames(
             }
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
-        .loop_inc_lt => {
+        .loop_inc_lt, .loop_inc_lt8, .loop_inc_lt32 => |op_tag| {
             const r_counter = code[ip];
             const r_bound = code[ip + 1];
-            const off = readI16(code, ip + 2);
-            ip += 4;
+            const off = op_tag.branchInfo().?.displacement(code, ip - 1);
+            ip += op_tag.operandSize();
             // Hot path: both operands int32, counter+1 doesn't
             // overflow. The branch back to the body is the
             // overwhelmingly common case (5M iterations of an
@@ -3012,7 +3050,17 @@ pub fn runFrames(
                 },
             }
         },
-        .call, .call0, .call1, .call2, .call3 => {
+        .call,
+        .call0,
+        .call1,
+        .call2,
+        .call3,
+        .call8,
+        .call0_8,
+        .call1_8,
+        .call2_8,
+        .call3_8,
+        => |op_tag| {
             const r_callee = code[ip];
             // Generic `call` carries an `argc:u8` operand; `call0..3`
             // fold argc into the opcode (one byte smaller bytecode for
@@ -3020,18 +3068,20 @@ pub fn runFrames(
             // `argc` / `ic_idx`; the OrdinaryCall body below is shared
             // verbatim (it can't be factored — threaded with
             // `continue :dispatch`).
-            const op_byte = code[ip - 1];
-            var argc: u8 = undefined;
-            var ic_idx: u16 = undefined;
-            if (op_byte == @intFromEnum(Op.call)) {
-                argc = code[ip + 1];
-                ic_idx = readU16(code, ip + 2);
-                ip += 4;
-            } else {
-                argc = op_byte - @intFromEnum(Op.call0);
-                ic_idx = readU16(code, ip + 1);
-                ip += 3;
-            }
+            const narrow = switch (op_tag) {
+                .call8, .call0_8, .call1_8, .call2_8, .call3_8 => true,
+                else => false,
+            };
+            const generic = op_tag == .call or op_tag == .call8;
+            const argc: u8 = if (generic) code[ip + 1] else switch (op_tag) {
+                .call0, .call0_8 => 0,
+                .call1, .call1_8 => 1,
+                .call2, .call2_8 => 2,
+                else => 3,
+            };
+            const ic_at = ip + if (generic) @as(usize, 2) else 1;
+            const ic_idx: u16 = if (narrow) code[ic_at] else readU16(code, ic_at);
+            ip += op_tag.operandSize();
 
             const callee_v = registers[r_callee];
             const call_cell = &local_chunk.inline_call_caches[ic_idx];
@@ -3410,12 +3460,12 @@ pub fn runFrames(
             continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
         },
 
-        .call_method => {
+        .call_method, .call_method8 => |op_tag| {
             const r_recv = code[ip];
             const r_callee = code[ip + 1];
             const argc = code[ip + 2];
-            const ic_idx = readU16(code, ip + 3);
-            ip += 5;
+            const ic_idx: u16 = if (op_tag == .call_method8) code[ip + 3] else readU16(code, ip + 3);
+            ip += op_tag.operandSize();
 
             const callee_v = registers[r_callee];
             const recv = registers[r_recv];
@@ -3734,13 +3784,15 @@ pub fn runFrames(
         // followed by the same call-dispatch arms as `call_method`
         // (proxy / bound / revocable / native / generator / async /
         // regular).
-        .call_property => {
-            const k = readU16(code, ip);
-            const r_recv = code[ip + 2];
-            const argc = code[ip + 3];
-            const ic_load_idx = readU16(code, ip + 4);
-            const ic_call_idx = readU16(code, ip + 6);
-            ip += 8;
+        .call_property, .call_property8 => |op_tag| {
+            const narrow = op_tag == .call_property8;
+            const k: u16 = if (narrow) code[ip] else readU16(code, ip);
+            const r_at = ip + if (narrow) @as(usize, 1) else 2;
+            const r_recv = code[r_at];
+            const argc = code[r_at + 1];
+            const ic_load_idx: u16 = if (narrow) code[r_at + 2] else readU16(code, r_at + 2);
+            const ic_call_idx: u16 = if (narrow) code[r_at + 3] else readU16(code, r_at + 4);
+            ip += op_tag.operandSize();
 
             if (k >= local_chunk.constants.len) return error.InvalidOpcode;
             const key_v = local_chunk.constants[k];
@@ -3751,27 +3803,76 @@ pub fn runFrames(
             // Resolve the callee. Fast path: shape compare on the
             // receiver (and proto identity + proto_shape + proto_rev
             // for the proto-load mode), serve `recv.slots[slot]` or
-            // `proto.slots[slot]`. Slow path: `slowLookupForCallProperty`.
+            // `proto.slots[slot]`. On an IC miss, the conservative
+            // ordinary-chain probe below resolves a shape-data hit or
+            // complete miss in one walk. Observable / exotic cases bail
+            // to `slowLookupForCallProperty`.
             var callee_v: Value = Value.undefined_;
-            var resolved_fast: bool = false;
+            var resolved_property: bool = false;
             if (heap_mod.valueAsPlainObject(recv)) |obj_in| {
-                const cell = &local_chunk.inline_caches[ic_load_idx];
+                const cell = &local_chunk.inline_load_caches[ic_load_idx];
                 if (cell.shape != null and cell.shape == obj_in.shape) {
                     if (cell.proto) |proto| {
                         if (obj_in.prototype == proto and
                             proto.shape == cell.proto_shape and
                             cell.proto_rev == realm.proto_revision_counter)
                         {
-                            callee_v = proto.slotAt(cell.slot);
-                            resolved_fast = true;
+                            callee_v = switch (cell.kind) {
+                                .data => proto.slotAt(cell.slot),
+                                .synthetic_accessor => cell.synthetic_value,
+                            };
+                            resolved_property = true;
                         }
                     } else {
                         callee_v = obj_in.slotAt(cell.slot);
-                        resolved_fast = true;
+                        resolved_property = true;
+                    }
+                }
+
+                if (!resolved_property) {
+                    const key = key_s.flatBytes();
+                    if (tryFillSyntheticPrototypeLoadIC(realm, obj_in, key, cell)) |value| {
+                        callee_v = value;
+                        resolved_property = true;
+                    } else switch (obj_in.lookupOrdinaryShapeDataChain(key)) {
+                        .hit => |hit| {
+                            callee_v = hit.owner.slotAt(hit.slot);
+                            resolved_property = true;
+
+                            // Refill only the two modes the load IC can
+                            // validate cheaply: own data and data on the
+                            // immediate prototype. A deeper hit is still
+                            // resolved by this one pass, but remains
+                            // uncached because the current guard records
+                            // only `receiver.prototype`, not the complete
+                            // chain identity.
+                            if (obj_in.shape) |recv_shape| {
+                                if (hit.owner == obj_in) {
+                                    cell.fillOwnData(recv_shape, hit.slot);
+                                } else if (obj_in.prototype == hit.owner) {
+                                    cell.fillPrototypeData(
+                                        recv_shape,
+                                        hit.slot,
+                                        hit.owner,
+                                        hit.owner_shape,
+                                        realm.proto_revision_counter,
+                                    );
+                                }
+                            }
+                        },
+                        .miss => {
+                            // Every rung was proven ordinary and the key
+                            // is absent, so §10.1.8 yields undefined. The
+                            // call dispatch below produces the usual
+                            // catchable TypeError for a missing method.
+                            callee_v = Value.undefined_;
+                            resolved_property = true;
+                        },
+                        .bail => {},
                     }
                 }
             }
-            if (!resolved_fast) {
+            if (!resolved_property) {
                 const lookup = try slowLookupForCallProperty(allocator, realm, frames, f, ip, recv, key_s.flatBytes());
                 callee_v = switch (lookup) {
                     .value => |v| v,
@@ -3788,45 +3889,6 @@ pub fn runFrames(
                     },
                     .uncaught => |ex| return .{ .thrown = ex },
                 };
-                // Refill the load IC for the simple shape-claimed
-                // own / proto-data case so the next call takes the
-                // fast path. Anything more exotic (accessor, proxy,
-                // module namespace, primitive auto-box) stays
-                // un-cached — mirrors `lda_property`'s IC fill
-                // policy.
-                if (heap_mod.valueAsPlainObject(recv)) |obj_in| {
-                    if (obj_in.shape) |sh| {
-                        const cell = &local_chunk.inline_caches[ic_load_idx];
-                        if (sh.lookup(key_s.flatBytes())) |entry| {
-                            if (entry.kind == .data) {
-                                cell.shape = sh;
-                                cell.slot = entry.slot;
-                                cell.proto = null;
-                                cell.proto_shape = null;
-                            }
-                        } else if (!chainHasProxy(obj_in) and !obj_in.hasAccessor(key_s.flatBytes())) {
-                            var cursor: ?*JSObject = obj_in.prototype;
-                            while (cursor) |proto| : (cursor = proto.prototype) {
-                                if (proto.getProxyTarget() != null or proto.brand.proxy_revoked) break;
-                                if (proto.brand.is_module_namespace) break;
-                                if (proto.hasAccessor(key_s.flatBytes())) break;
-                                if (proto.shape) |proto_sh| {
-                                    if (proto_sh.lookup(key_s.flatBytes())) |entry| {
-                                        if (entry.kind == .data) {
-                                            cell.shape = sh;
-                                            cell.slot = entry.slot;
-                                            cell.proto = proto;
-                                            cell.proto_shape = proto_sh;
-                                            cell.proto_rev = realm.proto_revision_counter;
-                                            break;
-                                        }
-                                    }
-                                }
-                                if (proto.ownDataContains(key_s.flatBytes())) break;
-                            }
-                        }
-                    }
-                }
             }
 
             // Call IC: pointer-compare the loaded callee against the
@@ -4005,6 +4067,17 @@ pub fn runFrames(
             }
 
             // Plain JS callee — push a new frame.
+            if (frames.items.len >= max_call_frames) {
+                const ex = try makeRangeError(realm, "Maximum call stack size exceeded");
+                f.ip = ip;
+                f.accumulator = acc;
+                committed = true;
+                if (!try unwindThrow(allocator, realm, frames, ex)) {
+                    return .{ .thrown = ex };
+                }
+                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+            }
+
             const callee_chunk = callee_fn.chunk orelse return error.InvalidOpcode;
             const reg_count = @max(@as(usize, callee_chunk.register_count), @as(usize, argc));
             var is_stack_alloc = true;
@@ -4647,11 +4720,11 @@ pub fn runFrames(
             continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
         },
 
-        .new_call => {
+        .new_call, .new_call8 => |op_tag| {
             const r_callee = code[ip];
             const argc = code[ip + 1];
-            const ic_idx = readU16(code, ip + 2);
-            ip += 4;
+            const ic_idx: u16 = if (op_tag == .new_call8) code[ip + 2] else readU16(code, ip + 2);
+            ip += op_tag.operandSize();
 
             const callee_v = registers[r_callee];
             const call_cell = &local_chunk.inline_call_caches[ic_idx];
@@ -5781,10 +5854,10 @@ pub fn runFrames(
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
 
-        .in_op => {
+        .in_op, .in_op8 => |op_tag| {
             const r = code[ip];
-            const ic_idx = readU16(code, ip + 1);
-            ip += 3;
+            const ic_idx: u16 = if (op_tag == .in_op8) code[ip + 1] else readU16(code, ip + 1);
+            ip += op_tag.operandSize();
             const obj_v = acc;
             // `in` IC fast path — own-positive cache. A filled cell
             // (shape + inline key bytes) means the cached shape carries
@@ -5797,7 +5870,7 @@ pub fn runFrames(
             // before a shape is stamped), so the result is identical to
             // the slow path below. Any miss falls through and refills.
             ic_hit: {
-                const cell = &local_chunk.inline_caches[ic_idx];
+                const cell = &local_chunk.inline_computed_caches[ic_idx];
                 if (cell.shape == null or cell.cached_key_len == 0 or cell.cached_key_len > chunk_mod.computed_key_cap) break :ic_hit;
                 const key_v = registers[r];
                 if (!key_v.isString()) break :ic_hit;
@@ -5940,7 +6013,7 @@ pub fn runFrames(
                 JSObject.canonicalIntegerIndex(key_slice) == null and
                 obj_in.shape.?.lookup(key_slice) != null)
             {
-                const cell = &local_chunk.inline_caches[ic_idx];
+                const cell = &local_chunk.inline_computed_caches[ic_idx];
                 cell.shape = obj_in.shape;
                 cell.cached_key_len = @intCast(key_slice.len);
                 @memcpy(cell.cached_key_buf[0..key_slice.len], key_slice);
@@ -7605,12 +7678,12 @@ pub fn runFrames(
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
 
-        .for_in_open => {
+        .for_in_open, .for_in_open8 => |op_tag| {
             // §14.7.5.6 — snapshot the object's own + inherited
             // string keys into a fresh array iterator. `null` /
             // `undefined` produce an empty iterator.
-            const forin_ic_idx = readU16(code, ip);
-            ip += 2;
+            const forin_ic_idx: u16 = if (op_tag == .for_in_open8) code[ip] else readU16(code, ip);
+            ip += op_tag.operandSize();
             if (acc.isNull() or acc.isUndefined()) {
                 const empty = realm.heap.allocateObject() catch return error.OutOfMemory;
                 realm.heap.setObjectPrototype(empty, realm.intrinsics.array_prototype);
@@ -8914,10 +8987,12 @@ pub fn runFrames(
         },
 
         // ── Globals ─────────────────────────────────────────────────
-        .lda_global => {
-            const k = readU16(code, ip);
-            const ic_idx = readU16(code, ip + 2);
-            ip += 4;
+        .lda_global, .lda_global8 => |op_tag| {
+            const narrow = op_tag == .lda_global8;
+            const k: u16 = if (narrow) code[ip] else readU16(code, ip);
+            const ic_at = ip + if (narrow) @as(usize, 1) else 2;
+            const ic_idx: u16 = if (narrow) code[ic_at] else readU16(code, ic_at);
+            ip += op_tag.operandSize();
             // §8.3 / §9.1: free globals resolve through the
             // *executing* function's global environment, which is
             // its [[Realm]]'s. With a shared heap (a ShadowRealm
@@ -8932,7 +9007,7 @@ pub fn runFrames(
             // shape — the cached object-env slot is still
             // authoritative.
             if (gr.globals.target) |gt| {
-                const cell = &local_chunk.inline_caches[ic_idx];
+                const cell = &local_chunk.inline_load_caches[ic_idx];
                 if (cell.shape != null and cell.shape == gt.shape and cell.proto == null and cell.proto_rev == gr.globals.decl_revision) {
                     acc = gt.slotAt(cell.slot);
                     continue :dispatch try decodeNext(code, &ip, &committed);
@@ -8942,7 +9017,7 @@ pub fn runFrames(
             const key_v = local_chunk.constants[k];
             if (!key_v.isString()) return error.InvalidOpcode;
             const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
-            switch (try slowLdaGlobal(allocator, realm, frames, f, ip, gr, key_s.flatBytes(), &local_chunk.inline_caches[ic_idx])) {
+            switch (try slowLdaGlobal(allocator, realm, frames, f, ip, gr, key_s.flatBytes(), &local_chunk.inline_load_caches[ic_idx])) {
                 .value => |v| acc = v,
                 .handled => {
                     committed = true;
@@ -8962,17 +9037,19 @@ pub fn runFrames(
             }
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
-        .lda_global_or_undef => {
+        .lda_global_or_undef, .lda_global_or_undef8 => |op_tag| {
             // §13.5.3 step 3 — typeof of an unresolvable
             // Reference is "undefined", not a thrown
             // ReferenceError. Shares the IC machinery with
             // `lda_global`; only the `.not_found` case differs.
-            const k = readU16(code, ip);
-            const ic_idx = readU16(code, ip + 2);
-            ip += 4;
+            const narrow = op_tag == .lda_global_or_undef8;
+            const k: u16 = if (narrow) code[ip] else readU16(code, ip);
+            const ic_at = ip + if (narrow) @as(usize, 1) else 2;
+            const ic_idx: u16 = if (narrow) code[ic_at] else readU16(code, ic_at);
+            ip += op_tag.operandSize();
             const gr = f.running_realm orelse realm;
             if (gr.globals.target) |gt| {
-                const cell = &local_chunk.inline_caches[ic_idx];
+                const cell = &local_chunk.inline_load_caches[ic_idx];
                 if (cell.shape != null and cell.shape == gt.shape and cell.proto == null and cell.proto_rev == gr.globals.decl_revision) {
                     acc = gt.slotAt(cell.slot);
                     continue :dispatch try decodeNext(code, &ip, &committed);
@@ -8982,7 +9059,7 @@ pub fn runFrames(
             const key_v = local_chunk.constants[k];
             if (!key_v.isString()) return error.InvalidOpcode;
             const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
-            switch (try slowLdaGlobal(allocator, realm, frames, f, ip, gr, key_s.flatBytes(), &local_chunk.inline_caches[ic_idx])) {
+            switch (try slowLdaGlobal(allocator, realm, frames, f, ip, gr, key_s.flatBytes(), &local_chunk.inline_load_caches[ic_idx])) {
                 .value => |v| acc = v,
                 .handled => {
                     committed = true;
@@ -9752,7 +9829,7 @@ pub fn runFrames(
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
 
-        .lda_property, .lda_property_reg => {
+        .lda_property, .lda_property_reg, .lda_property8, .lda_property_reg8 => |op_tag| {
             // §10.1.8 OrdinaryGet — hybrid receiver source. The acc
             // form (`lda_property`) reads the receiver from the
             // accumulator (chain continuations `a.b.c`, computed
@@ -9769,20 +9846,22 @@ pub fn runFrames(
             // seed. The receiver REGISTER is only read, never stored
             // to, so it survives for a following `call_method` to use
             // as `this`.
-            const k = readU16(code, ip);
-            const ic_idx = blk: {
-                if (code[ip - 1] == @intFromEnum(Op.lda_property_reg)) {
-                    const r_obj = code[ip + 2];
-                    const ic = readU16(code, ip + 3);
-                    ip += 5;
+            const narrow = op_tag == .lda_property8 or op_tag == .lda_property_reg8;
+            const from_reg = op_tag == .lda_property_reg or op_tag == .lda_property_reg8;
+            const k: u16 = if (narrow) code[ip] else readU16(code, ip);
+            const after_key = ip + if (narrow) @as(usize, 1) else 2;
+            const ic_idx: u16 = blk: {
+                if (from_reg) {
+                    const r_obj = code[after_key];
+                    const ic: u16 = if (narrow) code[after_key + 1] else readU16(code, after_key + 1);
                     acc = registers[r_obj];
                     break :blk ic;
                 } else {
-                    const ic = readU16(code, ip + 2);
-                    ip += 4;
+                    const ic: u16 = if (narrow) code[after_key] else readU16(code, after_key);
                     break :blk ic;
                 }
             };
+            ip += op_tag.operandSize();
             if (k >= local_chunk.constants.len) return error.InvalidOpcode;
             const key_v = local_chunk.constants[k];
             if (!key_v.isString()) return error.InvalidOpcode;
@@ -9808,7 +9887,7 @@ pub fn runFrames(
                 // plain ordinary object — the proxy / namespace
                 // checks below are still required for shapeless
                 // receivers and are reached on a cache miss.
-                const cell = &local_chunk.inline_caches[ic_idx];
+                const cell = &local_chunk.inline_load_caches[ic_idx];
                 if (cell.shape != null and cell.shape == obj_in.shape) {
                     if (cell.proto) |proto| {
                         // Two receivers can share an own shape
@@ -9825,7 +9904,10 @@ pub fn runFrames(
                             proto.shape == cell.proto_shape and
                             cell.proto_rev == realm.proto_revision_counter)
                         {
-                            acc = proto.slotAt(cell.slot);
+                            acc = switch (cell.kind) {
+                                .data => proto.slotAt(cell.slot),
+                                .synthetic_accessor => cell.synthetic_value,
+                            };
                             continue :dispatch try decodeNext(code, &ip, &committed);
                         }
                     } else {
@@ -9834,17 +9916,19 @@ pub fn runFrames(
                     }
                 }
                 // Cold / shape-changed / proto-invalidated.
+                const key = key_s.flatBytes();
                 // Probe own shape first.
                 if (obj_in.shape) |sh| {
-                    if (sh.lookup(key_s.flatBytes())) |entry| {
+                    if (sh.lookup(key)) |entry| {
                         if (entry.kind == .data) {
-                            cell.shape = sh;
-                            cell.slot = entry.slot;
-                            cell.proto = null;
-                            cell.proto_shape = null;
+                            cell.fillOwnData(sh, entry.slot);
                             acc = obj_in.slotAt(entry.slot);
                             continue :dispatch try decodeNext(code, &ip, &committed);
                         }
+                    }
+                    if (tryFillSyntheticPrototypeLoadIC(realm, obj_in, key, cell)) |value| {
+                        acc = value;
+                        continue :dispatch try decodeNext(code, &ip, &committed);
                     }
                     // Prototype-load chain walk. Cache the first
                     // shape-claimed own-data hit; otherwise fall
@@ -9868,20 +9952,22 @@ pub fn runFrames(
                     // `lookupAccessor` dispatch fires the getter;
                     // serving an inherited data slot would
                     // silently bypass it.
-                    if (!chainHasProxy(obj_in) and !obj_in.hasAccessor(key_s.flatBytes())) {
+                    if (!chainHasProxy(obj_in) and !obj_in.hasAccessor(key)) {
                         var cursor: ?*@import("../object.zig").JSObject = obj_in.prototype;
                         while (cursor) |proto| : (cursor = proto.prototype) {
                             if (proto.getProxyTarget() != null or proto.brand.proxy_revoked) break;
                             if (proto.brand.is_module_namespace) break;
-                            if (proto.hasAccessor(key_s.flatBytes())) break;
+                            if (proto.hasAccessor(key)) break;
                             if (proto.shape) |proto_sh| {
-                                if (proto_sh.lookup(key_s.flatBytes())) |entry| {
+                                if (proto_sh.lookup(key)) |entry| {
                                     if (entry.kind == .data) {
-                                        cell.shape = sh;
-                                        cell.slot = entry.slot;
-                                        cell.proto = proto;
-                                        cell.proto_shape = proto_sh;
-                                        cell.proto_rev = realm.proto_revision_counter;
+                                        cell.fillPrototypeData(
+                                            sh,
+                                            entry.slot,
+                                            proto,
+                                            proto_sh,
+                                            realm.proto_revision_counter,
+                                        );
                                         acc = proto.slotAt(entry.slot);
                                         continue :dispatch try decodeNext(code, &ip, &committed);
                                     }
@@ -9889,7 +9975,7 @@ pub fn runFrames(
                             }
                             // Dictionary-mode proto holding the
                             // key — let the slow path resolve it.
-                            if (proto.ownDataContains(key_s.flatBytes())) break;
+                            if (proto.ownDataContains(key)) break;
                         }
                     }
                 }
@@ -9899,7 +9985,7 @@ pub fn runFrames(
                 // on the target.
                 var obj = obj_in;
                 if (obj.getProxyTarget() != null or obj.brand.proxy_revoked) {
-                    const r = try proxyGetTrap(allocator, realm, frames, f, ip, obj, key_s.flatBytes(), key_v, acc);
+                    const r = try proxyGetTrap(allocator, realm, frames, f, ip, obj, key, key_v, acc);
                     switch (r) {
                         .value => |v| {
                             acc = v;
@@ -9925,8 +10011,8 @@ pub fn runFrames(
                 // ordinary path. Accessors don't exist on a
                 // module namespace, so the lookupAccessor walk
                 // below is skipped for the namespace case.
-                if (obj.brand.is_module_namespace and !std.mem.startsWith(u8, key_s.flatBytes(), "@@") and !std.mem.startsWith(u8, key_s.flatBytes(), "<sym:")) {
-                    const v_ns = module_mod.namespaceGetThrowingOnHole(realm, obj, key_s.flatBytes()) catch |err| switch (err) {
+                if (obj.brand.is_module_namespace and !std.mem.startsWith(u8, key, "@@") and !std.mem.startsWith(u8, key, "<sym:")) {
+                    const v_ns = module_mod.namespaceGetThrowingOnHole(realm, obj, key) catch |err| switch (err) {
                         error.OutOfMemory => return error.OutOfMemory,
                         error.NativeThrew => {
                             const ex = realm.pending_exception orelse Value.undefined_;
@@ -9949,7 +10035,7 @@ pub fn runFrames(
                     // 4.b passes Receiver unchanged). Without this
                     // an inherited proxy accessor / trap silently
                     // bypasses.
-                    switch (try getThroughChain(allocator, realm, frames, f, ip, obj, key_s.flatBytes(), acc)) {
+                    switch (try getThroughChain(allocator, realm, frames, f, ip, obj, key, acc)) {
                         .value => |v| acc = v,
                         .handled => {
                             committed = true;
@@ -9957,7 +10043,7 @@ pub fn runFrames(
                         },
                         .uncaught => |ex| return .{ .thrown = ex },
                     }
-                } else if (lookupAccessor(obj, key_s.flatBytes())) |acc_pair| {
+                } else if (lookupAccessor(obj, key)) |acc_pair| {
                     // §10.1.8 — accessor descriptor wins over
                     // data property. Walk the prototype chain
                     // looking for an accessor first.
@@ -9993,7 +10079,7 @@ pub fn runFrames(
                         acc = Value.undefined_;
                     }
                 } else {
-                    acc = obj.get(key_s.flatBytes());
+                    acc = obj.get(key);
                 }
             } else if (heap_mod.valueAsFunction(acc)) |fn_obj| {
                 // §10.1.8.1 OrdinaryGet step 4 — accessor
@@ -10213,11 +10299,13 @@ pub fn runFrames(
             }
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
-        .sta_property => {
-            const k = readU16(code, ip);
-            const r_obj = code[ip + 2];
-            const ic_idx = readU16(code, ip + 3);
-            ip += 5;
+        .sta_property, .sta_property8 => |op_tag| {
+            const narrow = op_tag == .sta_property8;
+            const k: u16 = if (narrow) code[ip] else readU16(code, ip);
+            const r_at = ip + if (narrow) @as(usize, 1) else 2;
+            const r_obj = code[r_at];
+            const ic_idx: u16 = if (narrow) code[r_at + 1] else readU16(code, r_at + 1);
+            ip += op_tag.operandSize();
             if (k >= local_chunk.constants.len) return error.InvalidOpcode;
             const key_v = local_chunk.constants[k];
             if (!key_v.isString()) return error.InvalidOpcode;
@@ -10233,7 +10321,7 @@ pub fn runFrames(
             // only on same-shape rewrites (no transition).
             const recv_obj_opt = heap_mod.valueAsPlainObject(recv);
             if (recv_obj_opt) |obj_in| {
-                const cell = &local_chunk.inline_caches[ic_idx];
+                const cell = &local_chunk.inline_store_caches[ic_idx];
                 if (cell.shape != null and cell.shape == obj_in.shape) {
                     // Shape-authoritative write: slot vector is
                     // the source of truth for shape-mode objects.
@@ -10333,23 +10421,11 @@ pub fn runFrames(
                         // own-data IC.
                         if (sh.lookup(key_s.flatBytes())) |entry| {
                             if (entry.kind == .data and entry.attrs.writable) {
-                                const cell = &local_chunk.inline_caches[ic_idx];
+                                const cell = &local_chunk.inline_store_caches[ic_idx];
                                 cell.shape = sh;
                                 cell.slot = entry.slot;
                                 cell.pre_shape = null;
                                 cell.post_shape = null;
-                                // Capture the bag's array-index for
-                                // the IC hot path's bag mirror. Safe
-                                // for shape-stable receivers because
-                                // shape transitions are the only
-                                // bag-append site (and they
-                                // invalidate the cell via the shape
-                                // pointer compare).
-                                if (obj_after.propsConst().getIndex(key_s.flatBytes())) |bi| {
-                                    cell.bag_index = @intCast(bi);
-                                } else {
-                                    cell.bag_index = chunk_mod.bag_index_uncached;
-                                }
                             }
                         }
                     } else if (sh.lookup(key_s.flatBytes())) |entry| {
@@ -10382,7 +10458,7 @@ pub fn runFrames(
                                 }
                             }
                             if (chain_clean) {
-                                const cell = &local_chunk.inline_caches[ic_idx];
+                                const cell = &local_chunk.inline_store_caches[ic_idx];
                                 cell.shape = null;
                                 cell.pre_shape = pre_shape;
                                 cell.post_shape = sh;
@@ -10391,7 +10467,6 @@ pub fn runFrames(
                                 cell.proto_shape = obj_after.prototype.?.shape;
                                 cell.proto_rev = realm.proto_revision_counter;
                                 cell.guard_epoch = realm.heap.proto_struct_epoch;
-                                cell.bag_index = chunk_mod.bag_index_uncached;
                             }
                         }
                     }
@@ -10540,10 +10615,10 @@ pub fn runFrames(
             realm.heap.storePropertyWithFlags(obj, allocator, key_s.flatBytes(), acc, object_mod.PropertyFlags.default) catch return error.OutOfMemory;
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
-        .lda_computed => {
+        .lda_computed, .lda_computed8 => |op_tag| {
             const r_obj = code[ip];
-            const ic_idx = readU16(code, ip + 1);
-            ip += 3;
+            const ic_idx: u16 = if (op_tag == .lda_computed8) code[ip + 1] else readU16(code, ip + 1);
+            ip += op_tag.operandSize();
             const recv = registers[r_obj];
             // §13.3.4.1 EvaluatePropertyAccessWithExpressionKey
             // step 5 — RequireObjectCoercible(baseValue) BEFORE
@@ -10571,7 +10646,7 @@ pub fn runFrames(
             // flatness are O(1) stored fields; ropes (rare for keys)
             // and any miss fall through to the full lookup, which refills.
             ic_hit: {
-                const cell = &local_chunk.inline_caches[ic_idx];
+                const cell = &local_chunk.inline_computed_caches[ic_idx];
                 // `cached_key_len == 0` is cold; `> computed_key_cap`
                 // is the megamorphic park sentinel — either way the
                 // cell can't serve, and the upper bound also keeps the
@@ -10734,7 +10809,7 @@ pub fn runFrames(
                     key_slice.len >= 1 and key_slice.len <= chunk_mod.computed_key_cap and
                     JSObject.canonicalIntegerIndex(key_slice) == null)
                 {
-                    const cell = &local_chunk.inline_caches[ic_idx];
+                    const cell = &local_chunk.inline_computed_caches[ic_idx];
                     // `cached_key_len > computed_key_cap` is the
                     // megamorphic park (a rotating-key site that already
                     // gave up) — leave it on the slow path.
@@ -10752,8 +10827,6 @@ pub fn runFrames(
                                 } else {
                                     cell.shape = obj.shape;
                                     cell.slot = entry.slot;
-                                    cell.proto = null;
-                                    cell.proto_shape = null;
                                     cell.cached_key_len = @intCast(key_slice.len);
                                     @memcpy(cell.cached_key_buf[0..key_slice.len], key_slice);
                                 }
@@ -10888,12 +10961,21 @@ pub fn runFrames(
             }
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
-        .sta_computed => {
+        .sta_computed, .sta_computed8 => |op_tag| {
             const r_obj = code[ip];
             const r_key = code[ip + 1];
-            const ic_idx = readU16(code, ip + 2);
-            ip += 4;
+            const ic_idx: u16 = if (op_tag == .sta_computed8) code[ip + 2] else readU16(code, ip + 2);
+            ip += op_tag.operandSize();
             const recv = registers[r_obj];
+            // §13.15.2 / §10.4.2.1 — the common macro-benchmark
+            // case: rewrite a present packed Array element addressed by
+            // a non-negative int32. The shared helper accepts only a
+            // clean own default-data slot and performs the write barrier;
+            // every hole, grow, descriptor, proxy, sparse, or non-int32
+            // case falls through to ToPropertyKey + full [[Set]] below.
+            if (realm.heap.denseElementFastSet(recv, registers[r_key], acc)) {
+                continue :dispatch try decodeNext(code, &ip, &committed);
+            }
             // Computed-key write IC fast path — a hot same-shape
             // `obj[k] = v` rewrite of an existing writable own-data
             // slot. A shaped receiver is a plain ordinary object
@@ -10903,7 +10985,7 @@ pub fn runFrames(
             // key-bytes match is a direct slot store with no accessor /
             // proxy / TypedArray / writability concern.
             sta_ic_hit: {
-                const cell = &local_chunk.inline_caches[ic_idx];
+                const cell = &local_chunk.inline_computed_caches[ic_idx];
                 if (cell.cached_key_len == 0 or cell.cached_key_len > chunk_mod.computed_key_cap or cell.shape == null) break :sta_ic_hit;
                 const kv = registers[r_key];
                 if (!kv.isString()) break :sta_ic_hit;
@@ -11049,7 +11131,7 @@ pub fn runFrames(
                         key_slice.len >= 1 and key_slice.len <= chunk_mod.computed_key_cap and
                         JSObject.canonicalIntegerIndex(key_slice) == null)
                     {
-                        const cell = &local_chunk.inline_caches[ic_idx];
+                        const cell = &local_chunk.inline_computed_caches[ic_idx];
                         if (cell.cached_key_len <= chunk_mod.computed_key_cap) {
                             if (sh.lookup(key_slice)) |entry| {
                                 if (entry.kind == .data and entry.attrs.writable) {
@@ -11059,8 +11141,6 @@ pub fn runFrames(
                                     } else {
                                         cell.shape = sh;
                                         cell.slot = entry.slot;
-                                        cell.proto = null;
-                                        cell.proto_shape = null;
                                         cell.cached_key_len = @intCast(key_slice.len);
                                         @memcpy(cell.cached_key_buf[0..key_slice.len], key_slice);
                                     }
@@ -12680,6 +12760,37 @@ fn chainHasProxy(obj: *JSObject) bool {
     return false;
 }
 
+/// Cache the Phase 3 SES override-mistake getter on an immediate frozen
+/// prototype. This is narrower than a general accessor IC: the getter must be
+/// Cynic's pure `SyntheticAccessor`, and its descriptor must be immutable on a
+/// non-extensible holder. The receiver shape guards against an own shadow;
+/// prototype identity/shape/revision guard the chain exactly like the existing
+/// immediate-prototype data mode (§10.1.8 OrdinaryGet).
+fn tryFillSyntheticPrototypeLoadIC(
+    realm: *Realm,
+    recv: *JSObject,
+    key: []const u8,
+    cell: *LoadICCell,
+) ?Value {
+    const recv_shape = recv.shape orelse return null;
+    if (recv_shape.lookup(key) != null or recv.ownDataContains(key) or recv.hasAccessor(key)) return null;
+    if (chainHasProxy(recv)) return null;
+    const proto = recv.prototype orelse return null;
+    if (proto.brand.extensible or proto.flagsFor(key).configurable) return null;
+    const accessor = proto.getAccessor(key) orelse return null;
+    const getter = accessor.getter orelse return null;
+    const synthetic = getter.synth_accessor orelse return null;
+    if (synthetic.is_setter) return null;
+    cell.fillSyntheticAccessor(
+        recv_shape,
+        proto,
+        proto.shape,
+        realm.proto_revision_counter,
+        synthetic.value,
+    );
+    return synthetic.value;
+}
+
 /// §10.4.5.6 IntegerIndexedExoticSet decision for the prototype-
 /// chain walk. When any ancestor of `obj` is a TypedArray and `key`
 /// is a CanonicalNumericIndexString, the IIE `[[Set]]` short-circuits
@@ -12768,7 +12879,7 @@ fn slowLdaGlobal(
     ip: usize,
     gr: *Realm,
     key: []const u8,
-    ic_cell: *@import("../../bytecode/chunk.zig").ICCell,
+    ic_cell: *@import("../../bytecode/chunk.zig").LoadICCell,
 ) RunError!LdaGlobalSlowOutcome {
     // §9.1.1.4 GetBindingValue — declarative env-record FIRST.
     // A decl-env hit MUST shadow the cached object-env slot; that's
@@ -12786,10 +12897,7 @@ fn slowLdaGlobal(
         if (gt.shape) |sh| {
             if (sh.lookup(key)) |entry| {
                 if (entry.kind == .data) {
-                    ic_cell.shape = sh;
-                    ic_cell.slot = entry.slot;
-                    ic_cell.proto = null;
-                    ic_cell.proto_shape = null;
+                    ic_cell.fillOwnData(sh, entry.slot);
                     ic_cell.proto_rev = gr.globals.decl_revision;
                     return .{ .value = gt.slotAt(entry.slot) };
                 }
@@ -13708,6 +13816,47 @@ fn proxySetTrap(
 /// • `.uncaught: Value` — coercion threw with no live handler;
 /// caller returns `.{.thrown = v }`.
 const CompareOutcome = union(enum) { ok: Value, handled, uncaught: Value };
+const LooseEqOutcome = union(enum) { value: bool, handled, uncaught: Value };
+
+inline fn looseEqualityFast(allocator: std.mem.Allocator, lhs_v: Value, rhs_v: Value) ?bool {
+    if (lhs_v.isInt32() and rhs_v.isInt32()) {
+        return lhs_v.asInt32() == rhs_v.asInt32();
+    }
+    if (lhs_v.isNullish() or rhs_v.isNullish()) {
+        return lhs_v.isNullish() and rhs_v.isNullish();
+    }
+    if (!lhs_v.isObject() and !rhs_v.isObject()) {
+        return looseEq(allocator, lhs_v, rhs_v);
+    }
+    return null;
+}
+
+/// Slow §7.2.14 IsLooselyEqual path shared by `eq` / `neq`. Keeping coercion
+/// and exception re-entry in one implementation prevents the two opcodes from
+/// drifting while the inline fast path handles int32/nullish/primitives.
+fn evaluateLooseEqualitySlow(
+    allocator: std.mem.Allocator,
+    realm: *Realm,
+    frames: *std.ArrayListUnmanaged(CallFrame),
+    f: *CallFrame,
+    ip: usize,
+    lhs_v: Value,
+    rhs_v: Value,
+) RunError!LooseEqOutcome {
+    const lhs = try coerceForCompareEq(allocator, realm, frames, f, ip, lhs_v, rhs_v);
+    switch (lhs) {
+        .handled => return .handled,
+        .uncaught => |ex| return .{ .uncaught = ex },
+        .ok => |lhs_primitive| {
+            const rhs = try coerceForCompareEq(allocator, realm, frames, f, ip, rhs_v, lhs_primitive);
+            return switch (rhs) {
+                .handled => .handled,
+                .uncaught => |ex| .{ .uncaught = ex },
+                .ok => |rhs_primitive| .{ .value = looseEq(allocator, lhs_primitive, rhs_primitive) },
+            };
+        },
+    }
+}
 
 /// `==`/`!=` variant of `coerceForCompare`. Per §7.2.14 IsLooselyEqual
 /// steps 11/12, ToPrimitive(.default) only fires when `self` is an
@@ -13834,6 +13983,10 @@ fn readI16(code: []const u8, at: usize) i16 {
     return @bitCast(readU16(code, at));
 }
 
+fn readI8(code: []const u8, at: usize) i8 {
+    return @bitCast(code[at]);
+}
+
 fn readI32(code: []const u8, at: usize) i32 {
     const u: u32 = @as(u32, code[at]) |
         (@as(u32, code[at + 1]) << 8) |
@@ -13849,9 +14002,21 @@ fn readU32(code: []const u8, at: usize) u32 {
         (@as(u32, code[at + 3]) << 24);
 }
 
-fn applyOffset(ip: usize, off: i16) usize {
+fn applyOffset(ip: usize, off: i32) usize {
     const signed: i64 = @intCast(ip);
     return @intCast(signed + off);
+}
+
+/// Number strict-equality projection for `switch_smi`. Integer-valued doubles
+/// compare equal to the corresponding int32 Number; strings, BigInts, NaN,
+/// infinities and fractional/out-of-range doubles miss to the default target.
+fn switchInt32(value: Value) ?i32 {
+    if (value.isInt32()) return value.asInt32();
+    if (!value.isDouble()) return null;
+    const d = value.asDouble();
+    if (!std.math.isFinite(d) or d < std.math.minInt(i32) or d > std.math.maxInt(i32)) return null;
+    if (@trunc(d) != d) return null;
+    return @intFromFloat(d);
 }
 
 // ── Coercions (§7.1) ────────────────────────────────────────────────────

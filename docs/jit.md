@@ -337,14 +337,17 @@ callee runs without growing the native stack (cross-function PTC).
 The driver is the same small loop that enters compiled code from
 `callJSFunction`; PTC is the one place v1 keeps a trampoline.
 
-**Exceptions tier down.** A throw inside compiled code calls the
-unwind helper; if the handler table (`chunk.handlers`) resolves the
-handler into this same frame, the helper sets `frame.ip` to the
-handler offset and **resumes the frame in Lantern** — legal because
-the frame is interpreter-identical. The function's next invocation
-still enters compiled code. Hot-throw loops ping-pong tiers; that's
-acceptable v1 pathology, and compiling handler dispatch is a
-follow-up, not a redesign.
+**Exceptions share Lantern's unwinder and re-enter compiled handlers.**
+The compiler records every `chunk.handlers[*].handler_pc` and emits the
+same frame-compatible prologue-and-jump stub used for OSR and post-call
+continuations. When compiled code reports a throw, the driver finds the
+first §14.15 catch/finally handler in the frame subtree it owns, invokes
+`unwindThrow` exactly once to install catch bindings, finally completion
+state, barriers, and `frame.ip`, then jumps to that handler's compiled
+stub. Termination, an async Promise-wrap boundary, a cold handler, or a
+handler below the driver's frame subtree takes the existing Lantern path.
+This keeps exception semantics in one implementation while removing the
+hot-throw tier-down/re-enter loop.
 
 **Excluded from v1 compilation** (per-chunk `dont_compile`, decided
 in one pre-pass over the opcodes): generator and async-function
@@ -885,9 +888,14 @@ useful:
        refuses construct frames — but skip the env allocation
        and chain walks) and `var` promotion (§14.3.2 — registers
        seed with undefined, no TDZ; re-declaration aliases;
-       destructuring vars keep the env path). Still open:
-       compiled handler dispatch so hot try-loops stop tier-down
-       ping-ponging. Generators/async stay last. Two defects the
+       destructuring vars keep the env path). Compiled handler
+       dispatch shipped 2026-07: each catch/finally bytecode entry
+       gets a frame-compatible reentry stub in the existing
+       continuation table. `driveTop` delegates the state change to
+       Lantern's real `unwindThrow` once, then resumes Bistromath at
+       that stub; termination, async Promise wrapping, and cold or
+       caller-owned handlers still fall back without changing
+       semantics. Generators/async stay last. Two defects the
        lean-call-path work unearthed shipped 2026-06: frames whose
        dispatch starts at a fresh `runFrames` (every callee of a
        compiled caller) now receive the §4.7 entry weight — without
@@ -912,35 +920,28 @@ useful:
        pre-freeze attrs, the `sta_global[_strict]` writability
        gates and the cross-realm default-proto remap read
        shape-first, and `installTestGlobals` re-locks in-shape.
-       Frozen PROTOTYPES still convert to synthetic accessor pairs
-       (the override-mistake fix), so a builtin-method read on a
-       hardened realm — `o.hasOwnProperty(k)`, `arr.slice(…)` —
-       resolves to a synth accessor on a dict-mode frozen proto,
-       and the proto-load IC fill bails on it twice
-       (interpreter.zig: `break` on `proto.hasAccessor(key)`, and
-       the fill requires a non-null `proto.shape`). The cell never
-       fills, so compiled code tiers down at the method read EVERY
-       call. Measured 2026-06 and the priority is higher than this
-       note first implied: a tiny-body method in a hot loop
-       (`o.hasOwnProperty("x")`, 5M iterations) runs 119 ms
-       `--unhardened` (IC fills, data on a frozen-in-shape proto)
-       vs 281 ms hardened — a 2.3× penalty on the PRODUCT DEFAULT,
-       and hardened is actually slower than `--no-jit` (252 ms)
-       because the per-iteration tier-down/re-enter costs more than
-       interpreting the whole op. The native body masks it when
-       it's heavy (`arr.indexOf` over a real scan shows no gap);
-       predicates / getters / comparators are the hot spot. The
-       fix is SES-substrate-deep — either an ICCell mode that
-       caches a synth-accessor's constant value (a synth getter
-       returns `sa.value` regardless of receiver, stable on a
-       frozen proto; needs a new ICCell field rippling through
-       chunk.zig + the interpreter fast path/fill + the Bistromath
-       emit + layout.zig), or rearchitecting the override-mistake
-       fix to keep methods as frozen DATA and move the shadow to
-       the `sta_property` write path (drops synth accessors
-       entirely; touches intrinsics.zig + the write path +
-       test-ses). Worth a dedicated session coordinated with the
-       shapes/SES work; not a tail-end change.
+       The frozen-PROTOTYPE gap is also CLOSED (2026-07).
+       `LoadICCell` now distinguishes ordinary data loads from a
+       `synthetic_accessor` mode that caches the override-mistake
+       getter's immutable captured value. Fill is deliberately
+       narrower than a general accessor IC: the receiver must be
+       shape-mode with no own shadow, the holder must be the
+       immediate non-extensible prototype, the descriptor must be
+       non-configurable, and the getter must carry Cynic's internal
+       non-setter `SyntheticAccessor` slot. Hits re-check receiver
+       shape, prototype identity/shape, and the realm prototype
+       revision; GC weak-clears a dead prototype, while a live
+       prototype's getter strongly traces the captured value.
+       Lantern and Bistromath consume the same cell mode. Tests
+       cover forced-GC survival, `Object.setPrototypeOf`
+       invalidation, and refusal to cache an ordinary immutable
+       user getter. On the original 5M-call
+       `o.hasOwnProperty("x")` workload, an interleaved ReleaseFast
+       same-tree A/B (11 timed pairs after one discarded cold pair)
+       measured **304.6 → 152.8 ms p50 (-49.8%)** when enabling the
+       new fill. Re-measured postures are approximately 153 ms
+       hardened/default, 152 ms `--no-jit`, and 149 ms
+       `--unhardened`: the former 2.3× product-default cliff is gone.
 
    Step exit — taken 2026-06-11: `--jit` flipped to default-on
    (`--no-jit` is the permanent escape hatch; `--jit` stays

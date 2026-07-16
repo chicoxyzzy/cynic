@@ -105,21 +105,55 @@ spec's `negative.type`.
 
 ## Bytecode design
 
-When later lands, the open questions:
+Cynic uses a register file plus an implicit accumulator, following
+V8 Ignition and Hermes rather than QuickJS's stack machine. Binary
+instructions read the left operand from a register and the right
+operand from the accumulator. This keeps common instructions short
+without making Bistromath reconstruct a virtual stack.
 
-- **Stack-only vs register-file vs accumulator + register.**
-  Ignition and Hermes use register file with accumulator; JSC
-  LLInt is register-file; QuickJS is stack. Register-file is
-  faster, stack is smaller and simpler.
-- **One-byte vs two-byte ops.** Ignition uses one-byte with a
-  `Wide` / `ExtraWide` prefix for >256 registers. JSC uses two
-  bytes throughout.
-- **Op count.** Ignition has ~150 opcodes; QuickJS ~250; JSC
-  several hundred (with macro expansion).
+`src/bytecode/op.zig` is the single instruction schema. Every opcode
+declares its mnemonic, operand layout, control-flow class, and
+Bistromath strategy in `Op.spec()`. The disassembler, liveness pass,
+statistics collector, branch decoder, Lantern, and Bistromath derive
+their stream walk from that schema. Do not add a parallel operand-size
+or opcode-classification table.
 
-Reference reading: V8 Ignition design (v8.dev posts), Hermes
-bytecode reference, JSC bytecode in
-`Source/JavaScriptCore/bytecode/`.
+The wire format is compact but scalable:
+
+- Common opcodes and registers are one byte; low registers and common
+  constants have operand-free forms.
+- Constants, IC indices, and call operands use narrow variants where
+  their values fit. Separate load/store/computed IC tables give each
+  family an independent small index space.
+- Relative branches are emitted as logical patches and relaxed to
+  signed i8, i16, or i32 at finalization. Re-emission remaps source
+  positions, exception handlers, and dense-switch targets.
+- Dense int32 `switch` statements use a side-table-backed `switch_smi`
+  dispatch. Sparse or effectful cases preserve the ordered comparison
+  chain required by §14.12.
+
+`-Dbytecode-stats=true` compiles instrumentation; `cynic run
+--bytecode-stats file.js` then reports nested-chunk instruction/byte
+counts, operand-width fit, and dynamic opcode/pair/trigram frequencies.
+The flag is compile-time so normal binaries contain no counter access.
+Use those traces plus paired wall-time measurements before retaining a
+new super-instruction. A 2026-07 loose-equality branch fusion removed
+4.34% of Richards dispatches but made paired non-JIT wall time 3.8%
+slower, so it was reverted.
+
+The finalized-bytecode liveness pass builds a CFG, including every
+`switch_smi` successor, and fails closed on unknown register effects.
+It supports dead-store re-emission and accumulator forwarding for an
+adjacent `Star r; Ldar r` only when the load is not a branch, switch,
+or handler entry. This rewrite must run after branch finalization:
+emission-time patch state does not yet know every incoming edge.
+Explicit register reads come from the opcode schema; instructions with
+implicit argument windows still require an explicit effect declaration.
+
+Reference reading: V8 Ignition's accumulator/register bytecodes and
+operand scaling, the Hermes bytecode reference, QuickJS's compact
+stack bytecode and switch tables, and JavaScriptCore's generated
+bytecode metadata plus `CodeBlock` side state.
 
 ## Value representation
 
@@ -229,6 +263,12 @@ The choices in this doc reflect what landed:
 - **NaN-boxing**, JSC encoding (§"Value representation" above).
 - **Register file + accumulator** bytecode, Ignition / Hermes
   shape (§"Bytecode design" above).
+- **Declarative opcode schema + compact finalization** — narrow
+  operands, i8/i16/i32 branch relaxation, dense-switch side tables,
+  and liveness-driven re-emission share one decoding contract.
+- **Typed inline-cache side tables** — load, store, and computed
+  sites pay only for the state their fast path consumes; Bistromath
+  reads the same load-cache layout as Lantern.
 - **Stop-the-world mark-sweep** GC with count + byte allocation
   triggers; see [gc.md](gc.md) for ops detail.
 - **Hashtable-backed properties** with a prototype slot — no

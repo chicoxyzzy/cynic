@@ -70,6 +70,44 @@ SPREAD_LIMIT=10   # percent
 OUT_FILE=""
 TIER="both"
 MACROS=0          # --macros: run bench/macros/ (Octane) instead of micros
+SELF_TEST_RSS_MEDALS=0
+
+# Emit one Peak-RSS row with the same distinct-value podium semantics as
+# the timing table: the three smallest measured footprints take gold,
+# silver, and bronze; ties share a medal; missing / invalid cells do not
+# place. Kept as a helper so the rendering contract can be exercised
+# without building or running every engine.
+emit_rss_medal_row() {
+  local base="$1" row_nums="" name cell num gold silver bronze
+  for name in "${ENGINE_NAMES[@]}"; do
+    cell="${RCELL["$name|$base"]:-—}"
+    case "$cell" in
+      ''|*[!0-9]*) continue ;;
+    esac
+    row_nums="$row_nums $cell"
+  done
+
+  gold=""; silver=""; bronze=""
+  read -r gold silver bronze <<EOF
+$(printf '%s\n' $row_nums | sort -nu | head -3 | tr '\n' ' ')
+EOF
+
+  printf '| %s |' "$base"
+  for name in "${ENGINE_NAMES[@]}"; do
+    cell="${RCELL["$name|$base"]:-—}"
+    case "$cell" in
+      ''|*[!0-9]*) printf ' %s |' "$cell" ;;
+      *)
+        num="$cell"
+        if   [ -n "$gold" ]   && [ "$num" -eq "$gold" ];   then printf ' 🥇 **%s** |' "$num"
+        elif [ -n "$silver" ] && [ "$num" -eq "$silver" ]; then printf ' 🥈 %s |' "$num"
+        elif [ -n "$bronze" ] && [ "$num" -eq "$bronze" ]; then printf ' 🥉 %s |' "$num"
+        else printf ' %s |' "$num"
+        fi ;;
+    esac
+  done
+  printf '\n'
+}
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -77,12 +115,25 @@ while [ $# -gt 0 ]; do
     --runs)     RUNS="$2"; shift 2 ;;
     --tier)     TIER="$2"; shift 2 ;;
     --macros)   MACROS=1; shift ;;
+    --self-test-rss-medals) SELF_TEST_RSS_MEDALS=1; shift ;;
     -h|--help)
       sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
       exit 0 ;;
     *) echo "bench-cross: unknown argument '$1'" >&2; exit 1 ;;
   esac
 done
+
+if [ "$SELF_TEST_RSS_MEDALS" = "1" ]; then
+  ENGINE_NAMES=(gold silver_a silver_b bronze plain missing)
+  declare -A RCELL
+  RCELL["gold|tied"]=100
+  RCELL["silver_a|tied"]=200
+  RCELL["silver_b|tied"]=200
+  RCELL["bronze|tied"]=300
+  RCELL["plain|tied"]=400
+  emit_rss_medal_row tied
+  exit 0
+fi
 
 # Cynic runs `--unhardened --allow=eval` for EVERY fixture (micros and
 # macros alike): the Octane bodies monkey-patch primordials (rejected by
@@ -487,8 +538,8 @@ emit() {
   echo "whose **winsorised** spread (one sample trimmed each end) exceeded"
   echo "${SPREAD_LIMIT}% — treat that cell as noisy. Timed runs are pinned to one"
   echo "core (Linux) to cut migration jitter."
-  echo "🥇 🥈 🥉 mark the three fastest engines on each fixture row"
-  echo "(gold also bold); tied cells share a medal."
+  echo "🥇 🥈 🥉 mark the three lowest values on each fixture row"
+  echo "(fastest for timing, smallest for RSS; gold also bold); tied cells share a medal."
   echo
   if [ "$TIER" = "jit" ]; then
     echo "Every engine runs at FULL SPEED — Cynic in its default posture"
@@ -579,12 +630,11 @@ EOF
 
   # ── Peak RSS: the memory axis ───────────────────────────────────────
   # Median subprocess max-resident-set per cell, KiB (lower is better).
-  # No medals — the timing table above carries the podium; this is a
-  # shape check on where Cynic's memory footprint sits against the
-  # field. A `—` cell is an ERR run or a host that couldn't measure RSS
-  # (the GNU-date path without `/usr/bin/time`). Cold-start RSS includes
-  # the binary + runtime baseline, so read column-to-column deltas, not
-  # absolutes.
+  # The same distinct-value podium as timing applies, with lower RSS
+  # placing first. A `—` cell is an ERR run or a host that couldn't
+  # measure RSS (the GNU-date path without `/usr/bin/time`). Cold-start
+  # RSS includes the binary + runtime baseline, so read column-to-column
+  # deltas, not absolutes.
   local have_rss=0
   for _k in "${!RCELL[@]}"; do have_rss=1; break; done
   if [ "$have_rss" -eq 1 ]; then
@@ -598,11 +648,7 @@ EOF
     printf '\n'
     for fixture in "${FIXTURES[@]}"; do
       base="$(basename "$fixture" .js)"
-      printf '| %s |' "$base"
-      for name in "${ENGINE_NAMES[@]}"; do
-        printf ' %s |' "${RCELL["$name|$base"]:-—}"
-      done
-      printf '\n'
+      emit_rss_medal_row "$base"
     done
   fi
 

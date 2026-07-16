@@ -23,8 +23,10 @@ const GlobalBindings = @import("../realm.zig").GlobalBindings;
 const object_mod = @import("../object.zig");
 const JSObject = object_mod.JSObject;
 const chunk_mod = @import("../../bytecode/chunk.zig");
-const ICCell = chunk_mod.ICCell;
+const LoadICCell = chunk_mod.LoadICCell;
+const StoreICCell = chunk_mod.StoreICCell;
 const CallICCell = chunk_mod.CallICCell;
+const Shape = @import("../shape.zig").Shape;
 const CallFrame = @import("../lantern/interpreter.zig").CallFrame;
 const Environment = @import("../environment.zig").Environment;
 const JSFunction = @import("../function.zig").JSFunction;
@@ -108,15 +110,25 @@ pub const object = struct {
     pub const inline_slot_cap: u32 = object_mod.inline_slot_cap;
 };
 
-/// `ICCell` — read as data by the Bistromath fast paths
+/// `LoadICCell` — read as data by the Bistromath fast paths
 /// (docs/jit.md §4.4); the GC weak-clear protocol stays untouched
 /// because compiled code only ever loads these fields.
-pub const ic_cell = struct {
-    pub const shape: u15 = @offsetOf(ICCell, "shape");
-    pub const slot: u15 = @offsetOf(ICCell, "slot");
-    pub const proto: u15 = @offsetOf(ICCell, "proto");
-    pub const proto_shape: u15 = @offsetOf(ICCell, "proto_shape");
-    pub const proto_rev: u15 = @offsetOf(ICCell, "proto_rev");
+pub const load_ic_cell = struct {
+    pub const shape: u15 = @offsetOf(LoadICCell, "shape");
+    pub const slot: u15 = @offsetOf(LoadICCell, "slot");
+    pub const kind: u12 = @offsetOf(LoadICCell, "kind");
+    pub const proto: u15 = @offsetOf(LoadICCell, "proto");
+    pub const proto_shape: u15 = @offsetOf(LoadICCell, "proto_shape");
+    pub const proto_rev: u15 = @offsetOf(LoadICCell, "proto_rev");
+    pub const synthetic_value: u15 = @offsetOf(LoadICCell, "synthetic_value");
+    pub const kind_synthetic_accessor: u8 = @intFromEnum(LoadICCell.Kind.synthetic_accessor);
+};
+
+/// Store-cache prefix consumed by Bistromath's same-shape write fast path.
+/// Transition-only fields remain Lantern-owned and need no native offsets.
+pub const store_ic_cell = struct {
+    pub const shape: u15 = @offsetOf(StoreICCell, "shape");
+    pub const slot: u15 = @offsetOf(StoreICCell, "slot");
 };
 
 /// `CallICCell` — the callee compare for compiled call sites
@@ -145,9 +157,10 @@ comptime {
         frame.running_realm,          frame.this_value,
         frame.super_called_cell,      object.shape,
         object.prototype,             object.inline_slots,
-        object.overflow_items_ptr,    ic_cell.shape,
-        ic_cell.proto,                ic_cell.proto_shape,
-        ic_cell.proto_rev,            call_ic_cell.callee,
+        object.overflow_items_ptr,    load_ic_cell.shape,
+        load_ic_cell.proto,           load_ic_cell.proto_shape,
+        load_ic_cell.proto_rev,       load_ic_cell.synthetic_value,
+        store_ic_cell.shape,          call_ic_cell.callee,
         realm.step_budget,            realm.proto_revision_counter,
         realm.globals_target,         realm.globals_decl_revision,
         realm.globals_decl_slots_ptr, realm.globals_decl_const_flags_ptr,
@@ -156,11 +169,13 @@ comptime {
     // by the emitters... which use the 64-bit scaled form on an
     // 8-aligned base; keep it 4-aligned and loaded as the low half
     // only if the emitters say so. Today they load it 32-bit.)
-    std.debug.assert(ic_cell.slot % 4 == 0);
+    std.debug.assert(load_ic_cell.slot % 4 == 0);
+    std.debug.assert(store_ic_cell.slot % 4 == 0);
     // The kind bits live inside the 8-byte alignment slack.
     std.debug.assert(heap_mod.kind_mask < 8);
     // `is_arrow` is a byte load (ldrb imm12).
     std.debug.assert(function.is_arrow < 4096);
+    std.debug.assert(load_ic_cell.kind < 4096);
 }
 
 // ── Executable proof ────────────────────────────────────────────────
@@ -235,13 +250,26 @@ test "jit layout: machine loads match Zig reads on live values" {
     const overflow1: *const Value = @ptrFromInt(@as(usize, @intCast(overflow_base)) + 8);
     try testing.expectEqual(obj.slotAt(object.inline_slot_cap + 1).bits, overflow1.bits);
 
-    // ICCell fields.
-    var cell: ICCell = .{};
+    // LoadICCell fields.
+    var cell: LoadICCell = .{};
     cell.slot = 5;
     cell.proto_rev = 0xABCD_EF01;
+    cell.synthetic_value = Value.fromInt32(77);
     try testing.expectEqual(
         @as(u64, 0xABCD_EF01),
-        try loadVia(&ca, ic_cell.proto_rev, &cell),
+        try loadVia(&ca, load_ic_cell.proto_rev, &cell),
+    );
+    try testing.expectEqual(
+        Value.fromInt32(77).bits,
+        try loadVia(&ca, load_ic_cell.synthetic_value, &cell),
+    );
+
+    var store_cell: StoreICCell = .{};
+    var shape_witness: Shape = undefined;
+    store_cell.shape = &shape_witness;
+    try testing.expectEqual(
+        @as(u64, @intFromPtr(&shape_witness)),
+        try loadVia(&ca, store_ic_cell.shape, &store_cell),
     );
 
     // Tag facts: a tagged object round-trips through the baked

@@ -256,7 +256,7 @@ code construction (aligns with SES).
 
 - **Monomorphic property cache — `lda_property` + `sta_property`
   + `call_method`.** Three opcodes grew a `u16` IC operand and a
-  chunk-local `inline_caches` / `inline_call_caches` table; the
+  chunk-local typed load/store cache plus `inline_call_caches`; the
   fast path is a single pointer compare against the cached
   receiver shape (or callee) and a direct `slots[slot]` load /
   write. Backed by the existing shape transition tree (V8 /
@@ -931,6 +931,11 @@ built-ins, accessor / legacy-global aliases), and the
   (script + every nested function template) and exits without
   executing — useful for tracing codegen shape and verifying
   peephole / IC work.
+- Opt-in bytecode telemetry: build with `-Dbytecode-stats=true`,
+  then run `cynic run --bytecode-stats <file>`. Reports static
+  nested-chunk bytes / operand-width fit plus dynamic opcode,
+  pair, and trigram frequencies; normal builds compile the
+  counters out.
 - `zig build test262 -- ...` parser and runtime modes; harness
   loads `harness/sta.js` + `assert.js` automatically; per-file
   outcome on `--verbose`; failure list on `--list-failures=N`;
@@ -976,6 +981,31 @@ sampling by `/profile`.
   `@enumFromInt` cast (rung-4); arithmetic / comparison / bitwise
   opcodes gained int32 fast paths (rung-5). Combined, `arith_loop`
   fell ~20× — see `bench-results.md`.
+- **Schema-driven compact bytecode (2026-07-15).** `Op.spec()` is
+  now the one source for mnemonics, operands, control-flow class,
+  and Bistromath support. Finalization selects narrow immediates /
+  IC operands, relaxes every relative branch to i8/i16/i32, remaps
+  source / handler / switch side tables, and emits a dense-int32
+  `switch_smi` table when §14.12 ordering permits. Load, store, and
+  computed-property ICs use typed arrays instead of one 96-byte
+  union-like cell. CFG/liveness models N-way switch edges and
+  implicit register windows; dead stores and redundant adjacent
+  `Star r; Ldar r` reloads are removed only after the finalized CFG
+  proves the load has no other predecessor. On the
+  instrumented non-JIT Richards run this pass moved static
+  instructions **1,509 → 1,456** (-3.5%), encoded bytes **3,122 →
+  3,067** (-1.8%), and dynamic dispatches **107,516,101 →
+  104,678,462** (-2.64%).
+- **Bistromath continuation + hardened-load closure (2026-07-16).**
+  Catch/finally PCs now receive compiled reentry stubs in the shared
+  bytecode-continuation table; the driver invokes Lantern's real unwinder
+  once, then continues in compiled code when the selected handler belongs to
+  its frame subtree. The typed load IC also gained a GC-safe
+  `synthetic_accessor` mode for the immutable internal getters installed by
+  the SES override-mistake fix. A controlled 5M-call ReleaseFast A/B measured
+  the hardened `hasOwnProperty` path **304.6 → 152.8 ms p50 (-49.8%)**.
+  Full main test262 reference and `--jit` sweeps match at
+  **48,653 / 49,977 (97.35%)**; the SES suite remains **36 / 36**.
 - **Generational GC.** A JSC-Riptide-style non-moving
   generational collector — store-site routing, generation header
   bits, a write barrier + remembered set, `collectYoung` with
@@ -1106,16 +1136,15 @@ optimizations remain on the table. Stack-ranked by expected
 impact for an interpreter-only engine; numbers are estimates,
 not measurements.
 
-5. **Super-instructions (bytecode pair fusion).** Static
-   analysis over compiled chunks identifies the top-N
-   bytecode-pair sequences (e.g. `lda_const k; sta_property k2`,
-   `ldar r; add r2`, `lda_int N; lt r`). Each pair becomes one
-   opcode — one dispatch, one operand fetch. V8 Ignition ships
-   ~30 super-instructions; the single biggest non-JIT perf
-   lever after ICs. Compiler emits the fused form when the
-   AST pattern matches; interpreter handler is the body of the
-   two old opcodes inlined. Estimated ~10-20 % on synthetic
-   benches.
+5. **Profile-gated super-instructions — infrastructure shipped.**
+   Static and dynamic opcode pair/trigram telemetry now identifies
+   candidates; existing retained fusions include compare+branch,
+   property-call, counter-loop, `add_smi`, and `add_to_int32`
+   shapes. New opcodes must clear a paired wall-time gate, not just
+   reduce dispatch. A loose-equality+branch family cut Richards
+   dispatch by 4.34% but regressed paired non-JIT wall time by 3.8%,
+   so it was reverted. Continue only where profiles show a candidate
+   and the end-to-end benchmark improves.
 
 6. **Counter-loop specialization — shipped.** `loop_inc_lt`
    opcode fuses the seven-opcode `add 1 + star + ldar + lt +
@@ -1133,17 +1162,16 @@ not measurements.
    (80.10 → 31.55 ms) — overtakes QuickJS-NG (77 ms) on the
    cross-engine bench.
 
-7. **Peephole pass at bytecode emit.** Pattern-match short
-   sequences in the emitted bytecode and rewrite:
-   - `lda_const 0; sub` → `negate`
-   - `ldar r; star r2; ldar r2` → `mov r r2`
-   - `lda_const c; jmp_if_false L` → fold (when c is statically
-     truthy/falsy)
-   - `jmp L1; L1: jmp L2` → `jmp L2` (jump threading)
-   - dead code after unconditional `return` / `throw` / `jmp`
-   Each rewrite is marginal; compounded across a real chunk
-   they shrink bytecode and remove dispatch overhead. Easy
-   first non-IC chunk to land.
+7. **Peephole + CFG/liveness re-emission — shipped foundation.**
+   Emit-time specializations cover common constants, low registers,
+   arithmetic idioms, calls, and comparisons; jump threading runs
+   over logical branch patches. Finalized chunks get CFG/liveness-
+   guarded dead-store re-emission and accumulator-aware adjacent
+   store/reload forwarding; a load that is a branch, switch, or
+   handler entry is retained. Re-emission repairs relaxed branches,
+   source positions, exception handlers, and switch targets. More
+   rewrites remain profile-driven; unknown register effects fail
+   closed and merely skip liveness-dependent passes.
 
 8. **Frame register pool — shipped** (`b38f125`). Every
    JS-function call site (`call`, `call_method`, `new_call`,

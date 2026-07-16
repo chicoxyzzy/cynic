@@ -5,8 +5,8 @@ runs** after 1 discarded warmup run. `*` flags a fixture
 whose **winsorised** spread (one sample trimmed each end) exceeded
 10% — treat that cell as noisy. Timed runs are pinned to one
 core (Linux) to cut migration jitter.
-🥇 🥈 🥉 mark the three fastest engines on each fixture row
-(gold also bold); tied cells share a medal.
+🥇 🥈 🥉 mark the three lowest values on each fixture row
+(fastest for timing, smallest for RSS; gold also bold); tied cells share a medal.
 
 All JIT engines run JIT-disabled (interpreter tier only): v8
 `--jitless`, sm `--no-baseline --no-ion`, jsc `JSC_useJIT=0`;
@@ -80,20 +80,20 @@ Noisy cells (>10% spread):
 
 | fixture | cynic | hermes | jsc | qjs | sm | v8 |
 |---|---:|---:|---:|---:|---:|---:|
-| arith_loop | 5888 | 6500 | 23680 | 1920 | 23936 | 30592 |
-| array_iter | 7040 | 6652 | 24064 | 1920 | 24800 | 30720 |
-| array_literal_loop | 9216 | 10476 | 58616 | 1920 | 24308 | 30976 |
-| class_instantiate | 8320 | — | 36864 | 1920 | 24532 | 30976 |
-| construct_loop | 8320 | 12624 | 56960 | 1920 | 24308 | 30976 |
-| ctor_array_build | 8832 | — | 59380 | 1920 | 24444 | 31104 |
-| json_stringify | 7936 | 10484 | 28160 | 1920 | 24188 | 30976 |
-| method_call | 6016 | — | 24192 | 1920 | 24064 | 28288 |
-| object_alloc | 8192 | 12604 | 36480 | 1920 | 24192 | 30848 |
-| promise_chain | 22656 | 8948 | 24960 | 10112 | 27648 | 28928 |
-| prop_access | 5888 | 6504 | 23680 | 1920 | 23808 | 28160 |
-| prop_write | 5888 | 6508 | 23808 | 1920 | 23936 | 28288 |
-| string_concat | 27392 | 11236 | 33280 | 2432 | 32384 | 36992 |
-| tail_recursion | 5888 | — | 23680 | — | — | — |
+| arith_loop | 🥈 5888 | 🥉 6500 | 23680 | 🥇 **1920** | 23936 | 30592 |
+| array_iter | 🥉 7040 | 🥈 6652 | 24064 | 🥇 **1920** | 24800 | 30720 |
+| array_literal_loop | 🥈 9216 | 🥉 10476 | 58616 | 🥇 **1920** | 24308 | 30976 |
+| class_instantiate | 🥈 8320 | — | 36864 | 🥇 **1920** | 🥉 24532 | 30976 |
+| construct_loop | 🥈 8320 | 🥉 12624 | 56960 | 🥇 **1920** | 24308 | 30976 |
+| ctor_array_build | 🥈 8832 | — | 59380 | 🥇 **1920** | 🥉 24444 | 31104 |
+| json_stringify | 🥈 7936 | 🥉 10484 | 28160 | 🥇 **1920** | 24188 | 30976 |
+| method_call | 🥈 6016 | — | 24192 | 🥇 **1920** | 🥉 24064 | 28288 |
+| object_alloc | 🥈 8192 | 🥉 12604 | 36480 | 🥇 **1920** | 24192 | 30848 |
+| promise_chain | 🥉 22656 | 🥇 **8948** | 24960 | 🥈 10112 | 27648 | 28928 |
+| prop_access | 🥈 5888 | 🥉 6504 | 23680 | 🥇 **1920** | 23808 | 28160 |
+| prop_write | 🥈 5888 | 🥉 6508 | 23808 | 🥇 **1920** | 23936 | 28288 |
+| string_concat | 🥉 27392 | 🥈 11236 | 33280 | 🥇 **2432** | 32384 | 36992 |
+| tail_recursion | 🥇 **5888** | — | 🥈 23680 | — | — | — |
 
 _Interpreter-tier-only, internal compass. Do not publish; do_
 _not append to bench-results.md (that file is the single-engine_
@@ -106,8 +106,8 @@ runs** after 1 discarded warmup run. `*` flags a fixture
 whose **winsorised** spread (one sample trimmed each end) exceeded
 10% — treat that cell as noisy. Timed runs are pinned to one
 core (Linux) to cut migration jitter.
-🥇 🥈 🥉 mark the three fastest engines on each fixture row
-(gold also bold); tied cells share a medal.
+🥇 🥈 🥉 mark the three lowest values on each fixture row
+(fastest for timing, smallest for RSS; gold also bold); tied cells share a medal.
 
 Every engine runs at FULL SPEED — Cynic in its default posture
 (Bistromath on; per-process cold start, so the tier warms inside
@@ -181,20 +181,20 @@ Noisy cells (>10% spread):
 
 | fixture | cynic | jsc | sm | v8 |
 |---|---:|---:|---:|---:|
-| arith_loop | 5888 | 31616 | 25600 | 38528 |
-| array_iter | 7040 | 32640 | 27264 | 39936 |
-| array_literal_loop | 9216 | 66432 | 25856 | 39040 |
-| class_instantiate | 8320 | 45568 | 28928 | 38528 |
-| construct_loop | 8320 | 40064 | 30720 | 38784 |
-| ctor_array_build | 8832 | 69376 | 29056 | 39424 |
-| json_stringify | 7936 | 34432 | 26228 | 38912 |
-| method_call | 6016 | 30592 | 25728 | 36096 |
-| object_alloc | 8192 | 45056 | 27904 | 38400 |
-| promise_chain | 22656 | 27520 | 30208 | 36864 |
-| prop_access | 5888 | 29952 | 25472 | 35968 |
-| prop_write | 5888 | 30080 | 25472 | 35712 |
-| string_concat | 27392 | 42240 | 34048 | 44800 |
-| tail_recursion | 5888 | 31104 | — | — |
+| arith_loop | 🥇 **5888** | 🥉 31616 | 🥈 25600 | 38528 |
+| array_iter | 🥇 **7040** | 🥉 32640 | 🥈 27264 | 39936 |
+| array_literal_loop | 🥇 **9216** | 66432 | 🥈 25856 | 🥉 39040 |
+| class_instantiate | 🥇 **8320** | 45568 | 🥈 28928 | 🥉 38528 |
+| construct_loop | 🥇 **8320** | 40064 | 🥈 30720 | 🥉 38784 |
+| ctor_array_build | 🥇 **8832** | 69376 | 🥈 29056 | 🥉 39424 |
+| json_stringify | 🥇 **7936** | 🥉 34432 | 🥈 26228 | 38912 |
+| method_call | 🥇 **6016** | 🥉 30592 | 🥈 25728 | 36096 |
+| object_alloc | 🥇 **8192** | 45056 | 🥈 27904 | 🥉 38400 |
+| promise_chain | 🥇 **22656** | 🥈 27520 | 🥉 30208 | 36864 |
+| prop_access | 🥇 **5888** | 🥉 29952 | 🥈 25472 | 35968 |
+| prop_write | 🥇 **5888** | 🥉 30080 | 🥈 25472 | 35712 |
+| string_concat | 🥇 **27392** | 🥉 42240 | 🥈 34048 | 44800 |
+| tail_recursion | 🥇 **5888** | 🥈 31104 | — | — |
 
 _Full-speed-tier, internal compass. Do not publish; do_
 _not append to bench-results.md (that file is the single-engine_
@@ -207,8 +207,8 @@ runs** after 1 discarded warmup run. `*` flags a fixture
 whose **winsorised** spread (one sample trimmed each end) exceeded
 10% — treat that cell as noisy. Timed runs are pinned to one
 core (Linux) to cut migration jitter.
-🥇 🥈 🥉 mark the three fastest engines on each fixture row
-(gold also bold); tied cells share a medal.
+🥇 🥈 🥉 mark the three lowest values on each fixture row
+(fastest for timing, smallest for RSS; gold also bold); tied cells share a medal.
 
 All JIT engines run JIT-disabled (interpreter tier only): v8
 `--jitless`, sm `--no-baseline --no-ion`, jsc `JSC_useJIT=0`;
@@ -247,12 +247,12 @@ Noisy cells (>10% spread):
 
 | fixture | cynic | hermes | jsc | qjs | sm | v8 |
 |---|---:|---:|---:|---:|---:|---:|
-| crypto | 10752 | 10076 | 25472 | 1920 | 25472 | 29696 |
-| deltablue | 15360 | 11356 | 29824 | 1920 | 26880 | 31616 |
-| navier-stokes | 9088 | 16084 | 26496 | 3140 | 26496 | 34688 |
-| raytrace | 9600 | 13272 | 50176 | 1920 | 26040 | 31872 |
-| richards | 7552 | 7108 | 25216 | 1920 | 24576 | 28800 |
-| splay | 281088 | 68252 | 55552 | 172544 | 95360 | 71296 |
+| crypto | 🥉 10752 | 🥈 10076 | 25472 | 🥇 **1920** | 25472 | 29696 |
+| deltablue | 🥉 15360 | 🥈 11356 | 29824 | 🥇 **1920** | 26880 | 31616 |
+| navier-stokes | 🥈 9088 | 🥉 16084 | 26496 | 🥇 **3140** | 26496 | 34688 |
+| raytrace | 🥈 9600 | 🥉 13272 | 50176 | 🥇 **1920** | 26040 | 31872 |
+| richards | 🥉 7552 | 🥈 7108 | 25216 | 🥇 **1920** | 24576 | 28800 |
+| splay | 281088 | 🥈 68252 | 🥇 **55552** | 172544 | 95360 | 🥉 71296 |
 
 _Interpreter-tier-only, internal compass. Do not publish; do_
 _not append to bench-results.md (that file is the single-engine_
@@ -265,8 +265,8 @@ runs** after 1 discarded warmup run. `*` flags a fixture
 whose **winsorised** spread (one sample trimmed each end) exceeded
 10% — treat that cell as noisy. Timed runs are pinned to one
 core (Linux) to cut migration jitter.
-🥇 🥈 🥉 mark the three fastest engines on each fixture row
-(gold also bold); tied cells share a medal.
+🥇 🥈 🥉 mark the three lowest values on each fixture row
+(fastest for timing, smallest for RSS; gold also bold); tied cells share a medal.
 
 Every engine runs at FULL SPEED — Cynic in its default posture
 (Bistromath on; per-process cold start, so the tier warms inside
@@ -306,12 +306,12 @@ Noisy cells (>10% spread):
 
 | fixture | cynic | jsc | sm | v8 |
 |---|---:|---:|---:|---:|
-| crypto | 10752 | 35968 | 28424 | 39680 |
-| deltablue | 15360 | 45952 | 30592 | 47872 |
-| navier-stokes | 9088 | 39552 | 29568 | 44928 |
-| raytrace | 9600 | 52480 | 31360 | 42368 |
-| richards | 7552 | 41984 | 26880 | 40064 |
-| splay | 281088 | 69504 | 93544 | 82432 |
+| crypto | 🥇 **10752** | 🥉 35968 | 🥈 28424 | 39680 |
+| deltablue | 🥇 **15360** | 🥉 45952 | 🥈 30592 | 47872 |
+| navier-stokes | 🥇 **9088** | 🥉 39552 | 🥈 29568 | 44928 |
+| raytrace | 🥇 **9600** | 52480 | 🥈 31360 | 🥉 42368 |
+| richards | 🥇 **7552** | 41984 | 🥈 26880 | 🥉 40064 |
+| splay | 281088 | 🥇 **69504** | 🥉 93544 | 🥈 82432 |
 
 _Full-speed-tier, internal compass. Do not publish; do_
 _not append to bench-results.md (that file is the single-engine_

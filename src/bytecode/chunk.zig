@@ -24,49 +24,80 @@ const Op = @import("op.zig").Op;
 const Span = @import("../source.zig").Span;
 const Value = @import("../runtime/value.zig").Value;
 const Shape = @import("../runtime/shape.zig").Shape;
+const JSObject = @import("../runtime/object.zig").JSObject;
 const BindingKind = @import("scope.zig").BindingKind;
 
-/// Inline-cache cell — one per property-access callsite. The
-/// interpreter records the last receiver's `(shape, slot)` after a
-/// successful lookup; on the next hit, a shape pointer compare and a
-/// `slots[slot]` load skip the full lookup.
-///
-/// Three modes (the consumer opcode picks which fields are valid):
-///   • Same-shape hit — `proto == null` AND `pre_shape == null`.
-///     `shape` matches the receiver; `slot` indexes
-///     `recv.slots`. The original `lda_property` / `sta_property`
-///     mode.
-///   • Proto-load hit (`lda_property`) — `proto != null`. The
-///     property was resolved through the receiver's prototype
-///     chain; `slot` indexes `proto.slots`. `proto_shape`
-///     snapshots `proto.shape` at fill time; `proto_rev` snapshots
-///     the realm's `proto_revision_counter`. Either changing
-///     invalidates the cell.
-///   • Transition hit (`sta_property`) — `pre_shape != null` AND
-///     `post_shape != null`. The receiver had `pre_shape` at fill
-///     time, no own accessor for the key, AND the full proto
-///     chain had no accessor for the key. The fast path stamps
-///     `post_shape`, resizes `recv.slots` to its property_count,
-///     and writes the new slot value — skipping the slow path's
-///     `lookupAccessor` chain walk, `Wyhash` on the key, and
-///     `ShapeTree.transition` lookup. `proto` / `proto_shape` /
-///     `proto_rev` are additionally snapshot to invalidate on
-///     any proto-chain mutation that could introduce an accessor
-///     (defineProperty on a proto changes that proto's shape;
-///     setPrototypeOf bumps the realm counter).
-///
-/// Monomorphic: a miss overwrites the cell, no polymorphism / chain.
-/// Hermes-style: no JIT, the cache lives entirely in the lantern.
-///
-/// `shape == null` AND `pre_shape == null` is the cold /
-/// un-cacheable state (the last lookup hit a dictionary-mode
-/// object, an accessor, the prototype chain, or simply hasn't run
-/// yet). Initialised that way at chunk finalisation.
-///
-/// The `proto` field is a GC-heap pointer; the heap's mark walk
-/// weak-clears any cell whose proto isn't otherwise reachable, so
-/// a swept-and-reused address cannot reawaken a stale cell.
-pub const ICCell = struct {
+const BranchPatch = struct {
+    operand_offset: u32,
+    target: u32,
+};
+
+/// Monomorphic named-load cache. Own-data hits use `(shape, slot)`;
+/// immediate-prototype hits additionally guard prototype identity, shape, and
+/// the realm-wide prototype revision. Frozen synthetic accessors created by
+/// the SES override-mistake fix cache their immutable captured value instead
+/// of a slot. `proto` is weak-cleared by the heap; while it is live, its own
+/// accessor entry strongly traces `synthetic_value` through the getter's
+/// `JSFunction.synth_accessor` internal slot.
+pub const LoadICCell = struct {
+    pub const Kind = enum(u8) { data, synthetic_accessor };
+
+    shape: ?*Shape = null,
+    slot: u32 = 0,
+    kind: Kind = .data,
+    proto: ?*JSObject = null,
+    proto_shape: ?*Shape = null,
+    proto_rev: u64 = 0,
+    synthetic_value: Value = Value.undefined_,
+
+    pub fn fillOwnData(self: *LoadICCell, shape: *Shape, slot: u32) void {
+        self.* = .{ .shape = shape, .slot = slot };
+    }
+
+    pub fn fillPrototypeData(
+        self: *LoadICCell,
+        shape: *Shape,
+        slot: u32,
+        proto: *JSObject,
+        proto_shape: ?*Shape,
+        proto_rev: u64,
+    ) void {
+        self.* = .{
+            .shape = shape,
+            .slot = slot,
+            .proto = proto,
+            .proto_shape = proto_shape,
+            .proto_rev = proto_rev,
+        };
+    }
+
+    pub fn fillSyntheticAccessor(
+        self: *LoadICCell,
+        shape: *Shape,
+        proto: *JSObject,
+        proto_shape: ?*Shape,
+        proto_rev: u64,
+        value: Value,
+    ) void {
+        self.* = .{
+            .shape = shape,
+            .kind = .synthetic_accessor,
+            .proto = proto,
+            .proto_shape = proto_shape,
+            .proto_rev = proto_rev,
+            .synthetic_value = value,
+        };
+    }
+
+    pub fn invalidate(self: *LoadICCell) void {
+        self.* = .{};
+    }
+};
+
+/// Monomorphic named-store cache. Same-shape rewrites use `(shape, slot)`;
+/// transition hits guard the receiver's before/after shapes and prototype
+/// structure before installing `post_shape`.
+pub const StoreICCell = struct {
     shape: ?*Shape = null,
     slot: u32 = 0,
     proto: ?*@import("../runtime/object.zig").JSObject = null,
@@ -90,21 +121,14 @@ pub const ICCell = struct {
     /// (null) shape and the realm counter don't change. A mismatch on
     /// the hot path forces the full `[[Set]]`, honouring §10.1.9.
     guard_epoch: u64 = 0,
-    /// Index into the receiver's `properties.values()` for the
-    /// shape's `slot`-th key. Cached on `sta_property` IC fill so
-    /// the IC-hit bag mirror collapses from a wyhash + bucket walk
-    /// + key compare (~41 % of `prop_write` samples) to a single
-    /// `values()[bag_index] = acc` store. Sentinel
-    /// `bag_index_uncached` means "not yet captured" (e.g. cell
-    /// filled by `lda_property` which doesn't need this) — in
-    /// that state the IC hit falls back to the hashing
-    /// `properties.put(...)` path.
-    ///
-    /// Stability: shape-stable objects' `properties` map only
-    /// appends on a shape transition (which invalidates the cell
-    /// via the shape pointer compare), so the cached index stays
-    /// valid as long as the cell matches.
-    bag_index: u32 = bag_index_uncached,
+};
+
+/// Monomorphic computed-key cache shared by computed loads, computed stores,
+/// and own-positive `in` sites. The key bytes are inline, so this cell has no
+/// GC-managed pointer and needs no weak-clear pass.
+pub const ComputedICCell = struct {
+    shape: ?*Shape = null,
+    slot: u32 = 0,
     /// `lda_computed` computed-key IC — the dynamic string key
     /// captured at fill, stored inline (no allocation, no GC anchor:
     /// the bytes are copied, not a JSString pointer). A hit guards on
@@ -123,8 +147,6 @@ pub const ICCell = struct {
     /// site pays the plain slow path instead of thrashing the cache.
     cached_key_miss: u8 = 0,
 };
-
-pub const bag_index_uncached: u32 = std.math.maxInt(u32);
 
 /// Inline byte budget for a `lda_computed` IC's cached key. Covers the
 /// overwhelming majority of property identifiers (`constructor` is 11);
@@ -162,7 +184,7 @@ pub const computed_key_megamorphic_after: u8 = 4;
 /// `proto` at `null`; they don't consult it.
 ///
 /// The cached pointers are GC-heap allocations, unlike the Shape
-/// pointers in `ICCell` (arena-stable). After the GC mark phase
+/// pointers in the property IC cells (arena-stable). After the GC mark phase
 /// the heap walks every reachable chunk's `inline_call_caches`
 /// and nulls cells whose callee (or `proto`, for `new_call`) isn't
 /// marked, so a swept-and-reused address cannot reawaken a stale
@@ -289,6 +311,15 @@ pub const Handler = struct {
     handler_pc: u32,
     catch_register: ?u8,
     is_finally: bool = false,
+};
+
+/// Dense integer switch side table. `targets[i]` is the absolute bytecode PC
+/// for case value `min + i`; holes point at `default_target`. Absolute PCs are
+/// finalized alongside branches and remapped by every length-changing pass.
+pub const SwitchTable = struct {
+    min: i32,
+    targets: []u32,
+    default_target: u32 = 0,
 };
 
 /// Compile-time blueprint for a `JSFunction`. Each function
@@ -554,6 +585,7 @@ pub const Chunk = struct {
     constants: []const Value,
     source_positions: []const SourcePos,
     handlers: []const Handler,
+    switch_tables: []SwitchTable = &.{},
     function_templates: []FunctionTemplate,
     class_templates: []ClassTemplate,
     /// §19.2.1 direct-eval scope snapshots — one per `direct_eval`
@@ -604,13 +636,12 @@ pub const Chunk = struct {
     /// modules (module top-levels are never slotted) and for any
     /// chunk that emits no slot opcodes.
     global_lexical_base: u32 = 0,
-    /// Mutable per-callsite IC table — one cell per property-access
-    /// op (`lda_property` today; `sta_property` and `call_method`
-    /// next). The interpreter overwrites cells as receiver shapes
-    /// change; the rest of the `Chunk` is logically immutable.
-    /// Sized at `finish`; index range `[0, inline_cache_count)` is
-    /// the operand space the compiler hands out.
-    inline_caches: []ICCell = &.{},
+    /// Typed mutable property-cache tables. Keeping unrelated guards out of
+    /// each cell reduces per-callsite memory and gives each opcode family an
+    /// independent compact operand-index space.
+    inline_load_caches: []LoadICCell = &.{},
+    inline_store_caches: []StoreICCell = &.{},
+    inline_computed_caches: []ComputedICCell = &.{},
     /// Sister table for `call_method` callsite caching. Cell at
     /// index `i` is the IC cell for the i-th call_method emit;
     /// the heap mark walks every reachable chunk's cells and
@@ -647,7 +678,7 @@ pub const Chunk = struct {
     /// non-empty slice is the only state the runtime acts on.
     ctor_field_shape: ?[]const u16 = null,
     /// JIT tier state — mutable side-state on the otherwise-
-    /// immutable chunk, following the `inline_caches` pattern
+    /// immutable chunk, following the typed inline-cache pattern
     /// (docs/jit.md §4.1). Allocated unconditionally at `finish`
     /// (8 bytes per template; the counter costs one saturating add
     /// per frame entry and loop back-edge). Bistromath's tier-up
@@ -671,11 +702,12 @@ pub const Chunk = struct {
         /// reclaimed wholesale with it (per-chunk code free is a
         /// recorded follow-up, docs/jit.md §8).
         entry: ?*const anyopaque = null,
-        /// On-stack-replacement table (docs/jit.md §12 3f): one
-        /// entry per loop header, mapping its bytecode offset to a
-        /// stub offset relative to `entry`. Lives in the code
-        /// region next to the code itself (same wholesale-reclaim
-        /// lifetime), so the chunk never owns the allocation.
+        /// Compiled reentry table: loop headers, post-call continuations,
+        /// and exception handlers map their bytecode offset to a prologue
+        /// stub offset relative to `entry`. Lives in the code region next to
+        /// the code itself (same wholesale-reclaim lifetime), so the chunk
+        /// never owns the allocation. The historical `osr_*` field names are
+        /// retained to avoid churning the runtime ABI.
         osr_ptr: ?[*]const OsrEntry = null,
         osr_len: u32 = 0,
         /// Each OSR entry that immediately tiers back down is a
@@ -686,15 +718,10 @@ pub const Chunk = struct {
 
         pub const OsrEntry = extern struct { bc: u32, code_off: u32 };
 
-        /// Bistromath in-line frame-reentry (docs/jit.md §4.5): the
-        /// code offset to re-enter this compiled chunk at after a
-        /// callee pushed by an in-line `call`/`new_call` returns —
-        /// keyed by the resume bytecode offset (the op after the
-        /// call) the compiler stamped into the same `osr_ptr` table
-        /// as the loop-header OSR entries. Disjoint bc keys (a
-        /// post-call ip is never a back-edge target), so the table
-        /// is shared. Returns null when `bc` isn't a recorded
-        /// resume point.
+        /// Return the compiled stub for a bytecode continuation. Bistromath
+        /// records loop-header OSR entries, post-call continuations, and
+        /// catch/finally handler entries in this shared table. Returns null
+        /// when the bytecode offset has no compiled continuation.
         pub fn resumeCodeOffset(self: *const JitState, bc: u32) ?u32 {
             const ptr = self.osr_ptr orelse return null;
             for (ptr[0..self.osr_len]) |e| {
@@ -714,6 +741,8 @@ pub const Chunk = struct {
         allocator.free(self.constants);
         allocator.free(self.source_positions);
         allocator.free(self.handlers);
+        for (self.switch_tables) |table| allocator.free(table.targets);
+        allocator.free(self.switch_tables);
         for (self.function_templates) |*t| t.chunk.deinit(allocator);
         allocator.free(self.function_templates);
         for (self.class_templates) |*t| t.deinit(allocator);
@@ -723,7 +752,9 @@ pub const Chunk = struct {
         // owned); only the binding slices + the outer slice are freed.
         for (self.direct_eval_scopes) |s| allocator.free(s.bindings);
         allocator.free(self.direct_eval_scopes);
-        allocator.free(self.inline_caches);
+        allocator.free(self.inline_load_caches);
+        allocator.free(self.inline_store_caches);
+        allocator.free(self.inline_computed_caches);
         allocator.free(self.inline_call_caches);
         allocator.free(self.inline_forin_caches);
         for (self.literal_shape_templates) |*t| allocator.free(t.keys);
@@ -742,6 +773,7 @@ pub const Builder = struct {
     constants: std.ArrayListUnmanaged(Value) = .empty,
     source_positions: std.ArrayListUnmanaged(SourcePos) = .empty,
     handlers: std.ArrayListUnmanaged(Handler) = .empty,
+    switch_tables: std.ArrayListUnmanaged(SwitchTable) = .empty,
     function_templates: std.ArrayListUnmanaged(FunctionTemplate) = .empty,
     class_templates: std.ArrayListUnmanaged(ClassTemplate) = .empty,
     literal_shape_templates: std.ArrayListUnmanaged(LiteralShapeTemplate) = .empty,
@@ -769,9 +801,10 @@ pub const Builder = struct {
     /// script body chunk AND every nested-function sub-chunk
     /// carry the same base. See `Chunk.global_lexical_base`.
     global_lexical_base: u32 = 0,
-    /// Running count of IC cells handed out via `allocIC`. The
-    /// `finish` step uses this to size `Chunk.inline_caches`.
-    inline_cache_count: u16 = 0,
+    /// Running counts for the typed property-cache tables.
+    inline_load_cache_count: u16 = 0,
+    inline_store_cache_count: u16 = 0,
+    inline_computed_cache_count: u16 = 0,
     /// Running count of call-IC cells handed out via `allocCallIC`.
     /// Sizes `Chunk.inline_call_caches` at `finish`.
     inline_call_cache_count: u16 = 0,
@@ -788,6 +821,11 @@ pub const Builder = struct {
     /// `accStillHoldsRegister`: if no jump targets the current
     /// position, control can only have fallen through to it.
     max_jump_target: u32 = 0,
+    /// Logical branch relocations. Emission reserves the historical i16
+    /// operand, but `finish` re-emits each branch using i8/i16/i32 after every
+    /// target is known. Keeping targets out-of-line also removes the old
+    /// `JumpTooFar` compile-time failure for large generated functions.
+    branch_patches: std.ArrayListUnmanaged(BranchPatch) = .empty,
 
     pub fn init(allocator: std.mem.Allocator) Builder {
         return .{ .allocator = allocator };
@@ -802,6 +840,8 @@ pub const Builder = struct {
         self.constants.deinit(self.allocator);
         self.source_positions.deinit(self.allocator);
         self.handlers.deinit(self.allocator);
+        for (self.switch_tables.items) |table| self.allocator.free(table.targets);
+        self.switch_tables.deinit(self.allocator);
         for (self.function_templates.items) |*t| t.chunk.deinit(self.allocator);
         self.function_templates.deinit(self.allocator);
         for (self.class_templates.items) |*t| t.deinit(self.allocator);
@@ -811,6 +851,7 @@ pub const Builder = struct {
         if (self.ctor_field_shape) |keys| self.allocator.free(keys);
         for (self.direct_eval_scopes.items) |s| self.allocator.free(s.bindings);
         self.direct_eval_scopes.deinit(self.allocator);
+        self.branch_patches.deinit(self.allocator);
     }
 
     /// Record the constructor instance-shape field-key list (constant-
@@ -824,6 +865,33 @@ pub const Builder = struct {
 
     pub fn addHandler(self: *Builder, h: Handler) !void {
         try self.handlers.append(self.allocator, h);
+    }
+
+    pub fn reserveSwitchTable(self: *Builder, min: i32, max: i32) !u16 {
+        if (self.switch_tables.items.len == std.math.maxInt(u16)) return error.TooManySwitchTables;
+        const span = @as(i64, max) - @as(i64, min) + 1;
+        if (span <= 0 or span > std.math.maxInt(u16)) return error.TooManySwitchTables;
+        const targets = try self.allocator.alloc(u32, @intCast(span));
+        errdefer self.allocator.free(targets);
+        @memset(targets, std.math.maxInt(u32));
+        const index: u16 = @intCast(self.switch_tables.items.len);
+        try self.switch_tables.append(self.allocator, .{ .min = min, .targets = targets });
+        return index;
+    }
+
+    pub fn setSwitchTarget(self: *Builder, table_index: u16, value: i32, target: u32) void {
+        const table = &self.switch_tables.items[table_index];
+        const slot: usize = @intCast(@as(i64, value) - table.min);
+        // Duplicate CaseClauses keep the first match (§14.12.9).
+        if (table.targets[slot] == std.math.maxInt(u32)) table.targets[slot] = target;
+    }
+
+    pub fn finishSwitchTable(self: *Builder, table_index: u16, default_target: u32) void {
+        const table = &self.switch_tables.items[table_index];
+        table.default_target = default_target;
+        for (table.targets) |*target| {
+            if (target.* == std.math.maxInt(u32)) target.* = default_target;
+        }
     }
 
     /// Register a compiled function body, returning the
@@ -986,6 +1054,10 @@ pub const Builder = struct {
         try self.code.append(self.allocator, x);
     }
 
+    pub fn emitI8(self: *Builder, x: i8) !void {
+        try self.code.append(self.allocator, @bitCast(x));
+    }
+
     pub fn emitU16(self: *Builder, x: u16) !void {
         try self.code.appendSlice(self.allocator, &std.mem.toBytes(x));
     }
@@ -1027,12 +1099,31 @@ pub const Builder = struct {
         }
     }
 
+    /// Emit a §13.4 register-binding update. Both variants share the
+    /// `[op][r:u8]` encoding; keeping the pair in one emitter prevents the
+    /// compiler and disassembler operand layouts from drifting apart.
+    pub fn emitUpdateReg(self: *Builder, op: Op, span: Span, r: u8) !void {
+        std.debug.assert(op == .inc_reg or op == .dec_reg);
+        try self.emitOp(op, span);
+        try self.emitU8(r);
+    }
+
     /// Emit a Smi load, choosing the operand-free `LdaZero` / `LdaOne`
     /// for the two most common constants (1 byte vs 5), else `LdaSmi`.
     pub fn emitLoadSmi(self: *Builder, span: Span, v: i32) !void {
         switch (v) {
             0 => try self.emitOp(.lda_zero, span),
             1 => try self.emitOp(.lda_one, span),
+            std.math.minInt(i8)...-1, 2...std.math.maxInt(i8) => {
+                try self.emitOp(.lda_smi8, span);
+                try self.emitI8(@intCast(v));
+            },
+            std.math.minInt(i16)...std.math.minInt(i8) - 1,
+            std.math.maxInt(i8) + 1...std.math.maxInt(i16),
+            => {
+                try self.emitOp(.lda_smi16, span);
+                try self.emitI16(@intCast(v));
+            },
             else => {
                 try self.emitOp(.lda_smi, span);
                 try self.emitI32(v);
@@ -1040,39 +1131,97 @@ pub const Builder = struct {
         }
     }
 
-    /// Patch a previously-emitted i16 placeholder at `at` with the
-    /// signed offset from the byte AFTER the operand to `target`.
+    /// Emit `acc = registers[r] + imm` with the narrowest signed
+    /// immediate that preserves the exact i32 value.
+    pub fn emitAddSmi(self: *Builder, span: Span, r: u8, imm: i32) !void {
+        if (imm >= std.math.minInt(i8) and imm <= std.math.maxInt(i8)) {
+            try self.emitOp(.add_smi8, span);
+            try self.emitU8(r);
+            try self.emitI8(@intCast(imm));
+        } else if (imm >= std.math.minInt(i16) and imm <= std.math.maxInt(i16)) {
+            try self.emitOp(.add_smi16, span);
+            try self.emitU8(r);
+            try self.emitI16(@intCast(imm));
+        } else {
+            try self.emitOp(.add_smi, span);
+            try self.emitU8(r);
+            try self.emitI32(imm);
+        }
+    }
+
+    /// Resolve a previously-emitted i16 branch placeholder. The logical
+    /// relocation is authoritative; the in-place i16 is only populated when
+    /// it fits so pre-finalization peepholes can inspect ordinary branches.
+    /// `finish` selects the final i8/i16/i32 encoding.
     pub fn patchI16(self: *Builder, at: u32, target: u32) !void {
         const after_operand: i64 = @intCast(at + 2);
         const offset: i64 = @as(i64, @intCast(target)) - after_operand;
-        if (offset < std.math.minInt(i16) or offset > std.math.maxInt(i16)) {
-            return error.JumpTooFar;
+        if (offset >= std.math.minInt(i16) and offset <= std.math.maxInt(i16)) {
+            const o: i16 = @intCast(offset);
+            const bytes = std.mem.toBytes(o);
+            self.code.items[at] = bytes[0];
+            self.code.items[at + 1] = bytes[1];
         }
-        const o: i16 = @intCast(offset);
-        const bytes = std.mem.toBytes(o);
-        self.code.items[at] = bytes[0];
-        self.code.items[at + 1] = bytes[1];
+        if (self.findBranchPatch(at)) |patch| {
+            patch.target = target;
+        } else {
+            try self.branch_patches.append(self.allocator, .{ .operand_offset = at, .target = target });
+        }
         if (target > self.max_jump_target) self.max_jump_target = target;
     }
 
-    /// Allocate a fresh inline-cache slot, returning its index. The
-    /// caller emits the index as a `u16` operand on a property-access
-    /// op; the interpreter indexes `Chunk.inline_caches` with it.
-    pub fn allocIC(self: *Builder) !u16 {
-        if (self.inline_cache_count == std.math.maxInt(u16)) {
+    fn findBranchPatch(self: *Builder, operand_offset: u32) ?*BranchPatch {
+        for (self.branch_patches.items) |*patch| {
+            if (patch.operand_offset == operand_offset) return patch;
+        }
+        return null;
+    }
+
+    fn branchPatchForOp(self: *Builder, op_start: u32, op: Op) ?*BranchPatch {
+        const info = op.branchInfo() orelse return null;
+        return self.findBranchPatch(op_start + 1 + info.operand_offset);
+    }
+
+    pub fn allocLoadIC(self: *Builder) !u16 {
+        if (self.inline_load_cache_count == std.math.maxInt(u16)) {
             return error.TooManyInlineCaches;
         }
-        const k = self.inline_cache_count;
-        self.inline_cache_count += 1;
+        const k = self.inline_load_cache_count;
+        self.inline_load_cache_count += 1;
+        return k;
+    }
+
+    pub fn allocStoreIC(self: *Builder) !u16 {
+        if (self.inline_store_cache_count == std.math.maxInt(u16)) {
+            return error.TooManyInlineCaches;
+        }
+        const k = self.inline_store_cache_count;
+        self.inline_store_cache_count += 1;
+        return k;
+    }
+
+    pub fn allocComputedIC(self: *Builder) !u16 {
+        if (self.inline_computed_cache_count == std.math.maxInt(u16)) {
+            return error.TooManyInlineCaches;
+        }
+        const k = self.inline_computed_cache_count;
+        self.inline_computed_cache_count += 1;
         return k;
     }
 
     /// Emit `lda_property` plus its key constant index and a freshly
     /// allocated IC slot. Encoding: `[op] [k:u16] [ic:u16]`.
     pub fn emitLdaProperty(self: *Builder, span: Span, k: u16) !void {
-        try self.emitOp(.lda_property, span);
-        try self.emitU16(k);
-        try self.emitU16(try self.allocIC());
+        const ic = try self.allocLoadIC();
+        if (k <= std.math.maxInt(u8) and ic <= std.math.maxInt(u8)) {
+            try self.emitOp(.lda_property8, span);
+            try self.emitU8(@intCast(k));
+            try self.emitU8(@intCast(ic));
+        } else {
+            try self.emitOp(.lda_property, span);
+            try self.emitU16(k);
+            try self.emitU16(ic);
+        }
     }
 
     /// Emit `lda_property_reg` plus its key constant index, receiver
@@ -1083,10 +1232,18 @@ pub const Builder = struct {
     /// redundant `ldar` into the accumulator. The IC cell shape is
     /// identical to `lda_property`'s — only the receiver source moves.
     pub fn emitLdaPropertyReg(self: *Builder, span: Span, k: u16, r_obj: u8) !void {
-        try self.emitOp(.lda_property_reg, span);
-        try self.emitU16(k);
-        try self.emitU8(r_obj);
-        try self.emitU16(try self.allocIC());
+        const ic = try self.allocLoadIC();
+        if (k <= std.math.maxInt(u8) and ic <= std.math.maxInt(u8)) {
+            try self.emitOp(.lda_property_reg8, span);
+            try self.emitU8(@intCast(k));
+            try self.emitU8(r_obj);
+            try self.emitU8(@intCast(ic));
+        } else {
+            try self.emitOp(.lda_property_reg, span);
+            try self.emitU16(k);
+            try self.emitU8(r_obj);
+            try self.emitU16(ic);
+        }
     }
 
     /// Emit `lda_computed` plus its receiver register and a freshly
@@ -1095,9 +1252,10 @@ pub const Builder = struct {
     /// by the runtime string key (captured inline in the cell) so a hot
     /// monomorphic `obj[k]` skips ToPropertyKey + the shape hash.
     pub fn emitLdaComputed(self: *Builder, span: Span, r_obj: u8) !void {
-        try self.emitOp(.lda_computed, span);
+        const ic = try self.allocComputedIC();
+        try self.emitOp(if (ic <= std.math.maxInt(u8)) .lda_computed8 else .lda_computed, span);
         try self.emitU8(r_obj);
-        try self.emitU16(try self.allocIC());
+        if (ic <= std.math.maxInt(u8)) try self.emitU8(@intCast(ic)) else try self.emitU16(ic);
     }
 
     /// Emit `sta_computed` plus its receiver / key registers and a
@@ -1107,10 +1265,11 @@ pub const Builder = struct {
     /// key so a hot same-shape `obj[k] = v` rewrite skips ToPropertyKey
     /// + the shape hash + the `[[Set]]` walk.
     pub fn emitStaComputed(self: *Builder, span: Span, r_obj: u8, r_key: u8) !void {
-        try self.emitOp(.sta_computed, span);
+        const ic = try self.allocComputedIC();
+        try self.emitOp(if (ic <= std.math.maxInt(u8)) .sta_computed8 else .sta_computed, span);
         try self.emitU8(r_obj);
         try self.emitU8(r_key);
-        try self.emitU16(try self.allocIC());
+        if (ic <= std.math.maxInt(u8)) try self.emitU8(@intCast(ic)) else try self.emitU16(ic);
     }
 
     /// Emit `in_op` plus its key register and a freshly allocated IC
@@ -1120,9 +1279,10 @@ pub const Builder = struct {
     /// the object's shape so a hot `key in obj` over a stable own
     /// property skips ToPropertyKey + the prototype walk.
     pub fn emitInOp(self: *Builder, span: Span, r_key: u8) !void {
-        try self.emitOp(.in_op, span);
+        const ic = try self.allocComputedIC();
+        try self.emitOp(if (ic <= std.math.maxInt(u8)) .in_op8 else .in_op, span);
         try self.emitU8(r_key);
-        try self.emitU16(try self.allocIC());
+        if (ic <= std.math.maxInt(u8)) try self.emitU8(@intCast(ic)) else try self.emitU16(ic);
     }
 
     /// Emit `lda_global` plus its key constant index and a freshly
@@ -1132,28 +1292,34 @@ pub const Builder = struct {
     /// `decl_env.get` + `globalThis.lookupOwn` hash pair to a shape
     /// compare + slot load.
     pub fn emitLdaGlobal(self: *Builder, span: Span, k: u16) !void {
-        try self.emitOp(.lda_global, span);
-        try self.emitU16(k);
-        try self.emitU16(try self.allocIC());
+        const ic = try self.allocLoadIC();
+        const narrow = k <= std.math.maxInt(u8) and ic <= std.math.maxInt(u8);
+        try self.emitOp(if (narrow) .lda_global8 else .lda_global, span);
+        if (narrow) try self.emitU8(@intCast(k)) else try self.emitU16(k);
+        if (narrow) try self.emitU8(@intCast(ic)) else try self.emitU16(ic);
     }
 
     /// Emit `lda_global_or_undef` plus its key constant index and a
     /// freshly allocated IC slot. Same cache shape as
     /// `lda_global` — the miss path is the only difference.
     pub fn emitLdaGlobalOrUndef(self: *Builder, span: Span, k: u16) !void {
-        try self.emitOp(.lda_global_or_undef, span);
-        try self.emitU16(k);
-        try self.emitU16(try self.allocIC());
+        const ic = try self.allocLoadIC();
+        const narrow = k <= std.math.maxInt(u8) and ic <= std.math.maxInt(u8);
+        try self.emitOp(if (narrow) .lda_global_or_undef8 else .lda_global_or_undef, span);
+        if (narrow) try self.emitU8(@intCast(k)) else try self.emitU16(k);
+        if (narrow) try self.emitU8(@intCast(ic)) else try self.emitU16(ic);
     }
 
     /// Emit `sta_property` plus its key constant index, receiver
     /// register, and a freshly allocated IC slot. Encoding:
     /// `[op] [k:u16] [r_obj:u8] [ic:u16]`.
     pub fn emitStaProperty(self: *Builder, span: Span, k: u16, r_obj: u8) !void {
-        try self.emitOp(.sta_property, span);
-        try self.emitU16(k);
+        const ic = try self.allocStoreIC();
+        const narrow = k <= std.math.maxInt(u8) and ic <= std.math.maxInt(u8);
+        try self.emitOp(if (narrow) .sta_property8 else .sta_property, span);
+        if (narrow) try self.emitU8(@intCast(k)) else try self.emitU16(k);
         try self.emitU8(r_obj);
-        try self.emitU16(try self.allocIC());
+        if (narrow) try self.emitU8(@intCast(ic)) else try self.emitU16(ic);
     }
 
     /// Allocate a fresh call-IC slot for a `call_method` site.
@@ -1182,8 +1348,9 @@ pub const Builder = struct {
     /// the receiver shape + a frozen one-level prototype, so a hot
     /// `for (k in o)` loop over a stable object skips the re-walk.
     pub fn emitForInOpen(self: *Builder, span: Span) !void {
-        try self.emitOp(.for_in_open, span);
-        try self.emitU16(try self.allocForInIC());
+        const ic = try self.allocForInIC();
+        try self.emitOp(if (ic <= std.math.maxInt(u8)) .for_in_open8 else .for_in_open, span);
+        if (ic <= std.math.maxInt(u8)) try self.emitU8(@intCast(ic)) else try self.emitU16(ic);
     }
 
     /// Emit `call_method` plus its receiver / callee / argc operands
@@ -1196,11 +1363,12 @@ pub const Builder = struct {
         r_callee: u8,
         argc: u8,
     ) !void {
-        try self.emitOp(.call_method, span);
+        const ic = try self.allocCallIC();
+        try self.emitOp(if (ic <= std.math.maxInt(u8)) .call_method8 else .call_method, span);
         try self.emitU8(r_recv);
         try self.emitU8(r_callee);
         try self.emitU8(argc);
-        try self.emitU16(try self.allocCallIC());
+        if (ic <= std.math.maxInt(u8)) try self.emitU8(@intCast(ic)) else try self.emitU16(ic);
     }
 
     /// Emit `call` plus its callee / argc operands and a freshly
@@ -1225,16 +1393,23 @@ pub const Builder = struct {
             3 => .call3,
             else => null,
         };
+        const ic = try self.allocCallIC();
         if (specialized) |op| {
-            try self.emitOp(op, span);
+            const emitted_op: Op = if (ic <= std.math.maxInt(u8)) switch (op) {
+                .call0 => .call0_8,
+                .call1 => .call1_8,
+                .call2 => .call2_8,
+                else => .call3_8,
+            } else op;
+            try self.emitOp(emitted_op, span);
             try self.emitU8(r_callee);
-            try self.emitU16(try self.allocCallIC());
+            if (ic <= std.math.maxInt(u8)) try self.emitU8(@intCast(ic)) else try self.emitU16(ic);
             return;
         }
-        try self.emitOp(.call, span);
+        try self.emitOp(if (ic <= std.math.maxInt(u8)) .call8 else .call, span);
         try self.emitU8(r_callee);
         try self.emitU8(argc);
-        try self.emitU16(try self.allocCallIC());
+        if (ic <= std.math.maxInt(u8)) try self.emitU8(@intCast(ic)) else try self.emitU16(ic);
     }
 
     /// Emit `new_call` plus its callee / argc operands and a
@@ -1249,10 +1424,11 @@ pub const Builder = struct {
         r_callee: u8,
         argc: u8,
     ) !void {
-        try self.emitOp(.new_call, span);
+        const ic = try self.allocCallIC();
+        try self.emitOp(if (ic <= std.math.maxInt(u8)) .new_call8 else .new_call, span);
         try self.emitU8(r_callee);
         try self.emitU8(argc);
-        try self.emitU16(try self.allocCallIC());
+        if (ic <= std.math.maxInt(u8)) try self.emitU8(@intCast(ic)) else try self.emitU16(ic);
     }
 
     /// Emit `def_template_property` — templatized CreateDataPropertyOrThrow.
@@ -1286,12 +1462,20 @@ pub const Builder = struct {
         r_recv: u8,
         argc: u8,
     ) !void {
-        try self.emitOp(.call_property, span);
-        try self.emitU16(k);
+        const load_ic = try self.allocLoadIC();
+        const call_ic = try self.allocCallIC();
+        const narrow = k <= std.math.maxInt(u8) and load_ic <= std.math.maxInt(u8) and call_ic <= std.math.maxInt(u8);
+        try self.emitOp(if (narrow) .call_property8 else .call_property, span);
+        if (narrow) try self.emitU8(@intCast(k)) else try self.emitU16(k);
         try self.emitU8(r_recv);
         try self.emitU8(argc);
-        try self.emitU16(try self.allocIC());
-        try self.emitU16(try self.allocCallIC());
+        if (narrow) {
+            try self.emitU8(@intCast(load_ic));
+            try self.emitU8(@intCast(call_ic));
+        } else {
+            try self.emitU16(load_ic);
+            try self.emitU16(call_ic);
+        }
     }
 
     /// Append `v` to the constant pool, returning its index.
@@ -1304,11 +1488,6 @@ pub const Builder = struct {
         const k: u16 = @intCast(self.constants.items.len);
         try self.constants.append(self.allocator, v);
         return k;
-    }
-
-    fn readI16(code: []const u8, at: usize) i16 {
-        const u: u16 = @as(u16, code[at]) | (@as(u16, code[at + 1]) << 8);
-        return @bitCast(u);
     }
 
     /// Length-preserving peephole pass. Scans `self.code` once and
@@ -1348,15 +1527,15 @@ pub const Builder = struct {
                 // jump-target reverse-index machinery the chunk doesn't
                 // have yet; revisit when that lands.
                 .jmp, .jmp_if_false, .jmp_if_true, .jmp_if_nullish => {
-                    // `[op] [off:i16]`. The offset is relative to the
-                    // byte AFTER the operand (matches `patchI16`).
                     // Follow the chain: if the target is an
                     // unconditional `jmp`, replace this op's target
                     // with that jmp's target. Repeat until the target
                     // is some other opcode or the hop budget runs out.
-                    const after_operand = i + 3;
-                    const cur_off = readI16(self.code.items, i + 1);
-                    const target: i64 = @as(i64, @intCast(after_operand)) + cur_off;
+                    const patch = self.branchPatchForOp(@intCast(i), op) orelse {
+                        i += 1 + op_size;
+                        continue;
+                    };
+                    const target: i64 = patch.target;
                     var hops: u8 = 0;
                     var new_target = target;
                     while (hops < max_thread_hops) : (hops += 1) {
@@ -1370,22 +1549,13 @@ pub const Builder = struct {
                         // landing would still terminate via the hop
                         // cap, but a guard makes the intent explicit.
                         if (t == i) break;
-                        const inner_after = t + 3;
-                        const inner_off = readI16(self.code.items, t + 1);
-                        const next_target: i64 = @as(i64, @intCast(inner_after)) + inner_off;
+                        const inner_patch = self.branchPatchForOp(@intCast(t), next_op) orelse break;
+                        const next_target: i64 = inner_patch.target;
                         if (next_target == new_target) break; // self-jmp
                         new_target = next_target;
                     }
                     if (new_target != target) {
-                        const new_off: i64 = new_target - @as(i64, @intCast(after_operand));
-                        if (new_off >= std.math.minInt(i16) and
-                            new_off <= std.math.maxInt(i16))
-                        {
-                            const o: i16 = @intCast(new_off);
-                            const bytes = std.mem.toBytes(o);
-                            self.code.items[i + 1] = bytes[0];
-                            self.code.items[i + 2] = bytes[1];
-                        }
+                        patch.target = @intCast(new_target);
                     }
                 },
                 else => {},
@@ -1394,12 +1564,169 @@ pub const Builder = struct {
         }
     }
 
+    fn fitsBranchWidth(rel: i64, width: @import("op.zig").BranchWidth) bool {
+        return switch (width) {
+            .i8 => rel >= std.math.minInt(i8) and rel <= std.math.maxInt(i8),
+            .i16 => rel >= std.math.minInt(i16) and rel <= std.math.maxInt(i16),
+            .i32 => rel >= std.math.minInt(i32) and rel <= std.math.maxInt(i32),
+        };
+    }
+
+    /// Re-emit relative branches at their narrowest lossless width. Widths
+    /// start at i32 and only shrink, so the offset fixpoint is monotonic: every
+    /// shrink can only reduce the distance crossed by another branch.
+    fn relaxBranches(self: *Builder) !void {
+        if (self.branch_patches.items.len == 0) return;
+
+        const old_code = self.code.items;
+        const n = self.branch_patches.items.len;
+        const widths = try self.allocator.alloc(@import("op.zig").BranchWidth, n);
+        defer self.allocator.free(widths);
+        @memset(widths, .i32);
+        const patch_starts = try self.allocator.alloc(u32, n);
+        defer self.allocator.free(patch_starts);
+
+        var patch_by_start: std.AutoHashMapUnmanaged(u32, usize) = .empty;
+        defer patch_by_start.deinit(self.allocator);
+        var patch_by_operand: std.AutoHashMapUnmanaged(u32, usize) = .empty;
+        defer patch_by_operand.deinit(self.allocator);
+        for (self.branch_patches.items, 0..) |patch, patch_idx| {
+            try patch_by_operand.put(self.allocator, patch.operand_offset, patch_idx);
+        }
+        var found_count: usize = 0;
+        var scan: u32 = 0;
+        while (scan < old_code.len) {
+            const op: Op = @enumFromInt(old_code[scan]);
+            if (op.branchInfo()) |info| {
+                if (patch_by_operand.get(scan + 1 + info.operand_offset)) |patch_idx| {
+                    try patch_by_start.put(self.allocator, scan, patch_idx);
+                    patch_starts[patch_idx] = scan;
+                    found_count += 1;
+                }
+            }
+            scan += 1 + op.operandSize();
+        }
+        if (found_count != n) return error.JumpTooFar;
+
+        const new_off = try self.allocator.alloc(u32, old_code.len + 1);
+        defer self.allocator.free(new_off);
+
+        var changed = true;
+        while (changed) {
+            changed = false;
+            var old: u32 = 0;
+            var new: u32 = 0;
+            while (old < old_code.len) {
+                new_off[old] = new;
+                const op: Op = @enumFromInt(old_code[old]);
+                if (patch_by_start.get(old)) |patch_idx| {
+                    const info = op.branchInfo().?;
+                    new += 1 + info.operand_offset + widths[patch_idx].byteSize();
+                } else {
+                    new += 1 + op.operandSize();
+                }
+                old += 1 + op.operandSize();
+            }
+            new_off[old_code.len] = new;
+
+            for (self.branch_patches.items, 0..) |patch, patch_idx| {
+                const old_start = patch_starts[patch_idx];
+                const op: Op = @enumFromInt(old_code[old_start]);
+                const info = op.branchInfo().?;
+                var selected: @import("op.zig").BranchWidth = .i32;
+                inline for (.{ @import("op.zig").BranchWidth.i8, @import("op.zig").BranchWidth.i16 }) |candidate| {
+                    var target = new_off[patch.target];
+                    // A forward target includes this branch's current encoded
+                    // width in its mapped position. Evaluate the candidate's
+                    // own shrink on both ends of the displacement.
+                    if (patch.target > old_start) {
+                        target -= widths[patch_idx].byteSize() - candidate.byteSize();
+                    }
+                    const after = new_off[old_start] + 1 + info.operand_offset + candidate.byteSize();
+                    const rel = @as(i64, target) - @as(i64, after);
+                    if (fitsBranchWidth(rel, candidate)) {
+                        selected = candidate;
+                        break;
+                    }
+                }
+                if (@intFromEnum(selected) < @intFromEnum(widths[patch_idx])) {
+                    widths[patch_idx] = selected;
+                    changed = true;
+                }
+            }
+        }
+
+        // Rebuild the final map for the converged widths.
+        var old: u32 = 0;
+        var new: u32 = 0;
+        while (old < old_code.len) {
+            new_off[old] = new;
+            const op: Op = @enumFromInt(old_code[old]);
+            if (patch_by_start.get(old)) |patch_idx| {
+                const info = op.branchInfo().?;
+                new += 1 + info.operand_offset + widths[patch_idx].byteSize();
+            } else {
+                new += 1 + op.operandSize();
+            }
+            old += 1 + op.operandSize();
+        }
+        new_off[old_code.len] = new;
+
+        var out: std.ArrayListUnmanaged(u8) = .empty;
+        errdefer out.deinit(self.allocator);
+        try out.ensureTotalCapacity(self.allocator, new);
+        old = 0;
+        while (old < old_code.len) {
+            const op: Op = @enumFromInt(old_code[old]);
+            const old_size: u32 = 1 + op.operandSize();
+            if (patch_by_start.get(old)) |patch_idx| {
+                const info = op.branchInfo().?;
+                const width = widths[patch_idx];
+                const variant = op.branchVariant(width);
+                try out.append(self.allocator, @intFromEnum(variant));
+                try out.appendSlice(self.allocator, old_code[old + 1 .. old + 1 + info.operand_offset]);
+                const after: i64 = @intCast(new_off[old] + 1 + info.operand_offset + width.byteSize());
+                const rel = @as(i64, new_off[self.branch_patches.items[patch_idx].target]) - after;
+                if (!fitsBranchWidth(rel, width)) return error.JumpTooFar;
+                switch (width) {
+                    .i8 => try out.append(self.allocator, @bitCast(@as(i8, @intCast(rel)))),
+                    .i16 => try out.appendSlice(self.allocator, &std.mem.toBytes(@as(i16, @intCast(rel)))),
+                    .i32 => try out.appendSlice(self.allocator, &std.mem.toBytes(@as(i32, @intCast(rel)))),
+                }
+            } else {
+                try out.appendSlice(self.allocator, old_code[old .. old + old_size]);
+            }
+            old += old_size;
+        }
+
+        for (self.source_positions.items) |*sp| sp.offset = new_off[sp.offset];
+        for (self.handlers.items) |*handler| {
+            handler.start_pc = new_off[handler.start_pc];
+            handler.end_pc = new_off[handler.end_pc];
+            handler.handler_pc = new_off[handler.handler_pc];
+        }
+        for (self.switch_tables.items) |*table| {
+            table.default_target = new_off[table.default_target];
+            for (table.targets) |*target| target.* = new_off[target.*];
+        }
+
+        self.code.deinit(self.allocator);
+        self.code = out;
+        self.branch_patches.deinit(self.allocator);
+        self.branch_patches = .empty;
+    }
+
     /// Transfer ownership of the accumulated buffers into a Chunk.
     /// The builder is empty after this call; `deinit` is a no-op.
     pub fn finish(self: *Builder) !Chunk {
         self.peephole();
-        const ics = try self.allocator.alloc(ICCell, self.inline_cache_count);
-        for (ics) |*c| c.* = .{};
+        try self.relaxBranches();
+        const load_ics = try self.allocator.alloc(LoadICCell, self.inline_load_cache_count);
+        for (load_ics) |*c| c.* = .{};
+        const store_ics = try self.allocator.alloc(StoreICCell, self.inline_store_cache_count);
+        for (store_ics) |*c| c.* = .{};
+        const computed_ics = try self.allocator.alloc(ComputedICCell, self.inline_computed_cache_count);
+        for (computed_ics) |*c| c.* = .{};
         const call_ics = try self.allocator.alloc(CallICCell, self.inline_call_cache_count);
         for (call_ics) |*c| c.* = .{};
         const forin_ics = try self.allocator.alloc(ForInICCell, self.inline_forin_cache_count);
@@ -1416,6 +1743,7 @@ pub const Builder = struct {
             .constants = try self.constants.toOwnedSlice(self.allocator),
             .source_positions = try self.source_positions.toOwnedSlice(self.allocator),
             .handlers = try self.handlers.toOwnedSlice(self.allocator),
+            .switch_tables = try self.switch_tables.toOwnedSlice(self.allocator),
             .function_templates = try self.function_templates.toOwnedSlice(self.allocator),
             .class_templates = try self.class_templates.toOwnedSlice(self.allocator),
             .literal_shape_templates = try self.literal_shape_templates.toOwnedSlice(self.allocator),
@@ -1425,7 +1753,9 @@ pub const Builder = struct {
             .is_async_module = self.is_async_module,
             .eval_global_deletable = self.eval_global_deletable,
             .global_lexical_base = self.global_lexical_base,
-            .inline_caches = ics,
+            .inline_load_caches = load_ics,
+            .inline_store_caches = store_ics,
+            .inline_computed_caches = computed_ics,
             .inline_call_caches = call_ics,
             .inline_forin_caches = forin_ics,
             .jit_state = jit_state,
@@ -1457,6 +1787,106 @@ test "Builder: emit then finish round-trips a simple sequence" {
     try testing.expectEqual(@as(usize, 2), chunk.source_positions.len);
 }
 
+test "Builder: integer immediates choose the narrowest lossless encoding" {
+    var b = Builder.init(testing.allocator);
+    errdefer b.deinit();
+    const span: Span = .{ .start = 0, .end = 1 };
+    const r = try b.reserveRegister();
+
+    try b.emitLoadSmi(span, -2);
+    try b.emitLoadSmi(span, 300);
+    try b.emitLoadSmi(span, 70_000);
+    try b.emitAddSmi(span, r, -3);
+    try b.emitAddSmi(span, r, 1_000);
+    try b.emitAddSmi(span, r, 100_000);
+    var chunk = try b.finish();
+    defer chunk.deinit(testing.allocator);
+
+    var pc: usize = 0;
+    const expected = [_]Op{ .lda_smi8, .lda_smi16, .lda_smi, .add_smi8, .add_smi16, .add_smi };
+    for (expected) |op| {
+        try testing.expectEqual(op, @as(Op, @enumFromInt(chunk.code[pc])));
+        pc += 1 + op.operandSize();
+    }
+    try testing.expectEqual(chunk.code.len, pc);
+}
+
+test "Builder: hot IC sites use byte indexes and retain u16 fallbacks" {
+    var b = Builder.init(testing.allocator);
+    errdefer b.deinit();
+    const span: Span = .{ .start = 0, .end = 1 };
+    const r0 = try b.reserveRegister();
+    const r1 = try b.reserveRegister();
+
+    try b.emitLdaProperty(span, 7);
+    try b.emitLdaPropertyReg(span, 8, r0);
+    try b.emitStaProperty(span, 9, r0);
+    try b.emitLdaComputed(span, r0);
+    try b.emitStaComputed(span, r0, r1);
+    try b.emitInOp(span, r0);
+    try b.emitLdaGlobal(span, 10);
+    try b.emitLdaGlobalOrUndef(span, 11);
+    try b.emitForInOpen(span);
+    try b.emitCall(span, r0, 0);
+    try b.emitCallMethod(span, r0, r1, 2);
+    try b.emitNewCall(span, r0, 1);
+    try b.emitCallProperty(span, 12, r0, 1);
+
+    var chunk = try b.finish();
+    defer chunk.deinit(testing.allocator);
+    var pc: usize = 0;
+    const expected = [_]Op{
+        .lda_property8,
+        .lda_property_reg8,
+        .sta_property8,
+        .lda_computed8,
+        .sta_computed8,
+        .in_op8,
+        .lda_global8,
+        .lda_global_or_undef8,
+        .for_in_open8,
+        .call0_8,
+        .call_method8,
+        .new_call8,
+        .call_property8,
+    };
+    for (expected) |op| {
+        try testing.expectEqual(op, @as(Op, @enumFromInt(chunk.code[pc])));
+        pc += 1 + op.operandSize();
+    }
+
+    var wide = Builder.init(testing.allocator);
+    errdefer wide.deinit();
+    wide.inline_load_cache_count = 256;
+    try wide.emitLdaProperty(span, 300);
+    var wide_chunk = try wide.finish();
+    defer wide_chunk.deinit(testing.allocator);
+    try testing.expectEqual(Op.lda_property, @as(Op, @enumFromInt(wide_chunk.code[0])));
+}
+
+test "Builder: property ICs use typed tables" {
+    var b = Builder.init(testing.allocator);
+    errdefer b.deinit();
+    const span: Span = .{ .start = 0, .end = 1 };
+
+    try b.emitLdaProperty(span, 0);
+    try b.emitLdaGlobal(span, 1);
+    try b.emitCallProperty(span, 2, 0, 0);
+    try b.emitStaProperty(span, 3, 0);
+    try b.emitLdaComputed(span, 0);
+    try b.emitStaComputed(span, 0, 1);
+    try b.emitInOp(span, 0);
+
+    var chunk = try b.finish();
+    defer chunk.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 3), chunk.inline_load_caches.len);
+    try testing.expectEqual(@as(usize, 1), chunk.inline_store_caches.len);
+    try testing.expectEqual(@as(usize, 3), chunk.inline_computed_caches.len);
+    try testing.expect(@sizeOf(LoadICCell) <= @sizeOf(StoreICCell));
+    try testing.expect(@sizeOf(ComputedICCell) <= @sizeOf(StoreICCell));
+    try testing.expect(@sizeOf(StoreICCell) <= 64);
+}
+
 test "Builder: addConstant returns sequential indices" {
     var b = Builder.init(testing.allocator);
     defer b.deinit();
@@ -1476,6 +1906,17 @@ test "Builder: reserveRegister grows the count" {
     try testing.expectEqual(@as(u8, 0), r0);
     try testing.expectEqual(@as(u8, 1), r1);
     try testing.expectEqual(@as(u8, 2), b.register_count);
+}
+
+test "Builder: store-load emission stays explicit until CFG optimization" {
+    var b = Builder.init(testing.allocator);
+    defer b.deinit();
+    const span: Span = .{ .start = 0, .end = 1 };
+
+    try b.emitStoreReg(span, 2);
+    try b.emitLoadReg(span, 2);
+
+    try testing.expectEqualSlices(u8, &.{ @intFromEnum(Op.star_2), @intFromEnum(Op.ldar_2) }, b.code.items);
 }
 
 test "Builder.peephole: jump threading rewrites first jump's target" {
@@ -1502,15 +1943,16 @@ test "Builder.peephole: jump threading rewrites first jump's target" {
     var chunk = try b.finish();
     defer chunk.deinit(testing.allocator);
 
-    // Byte layout: jmp(0..3), jmp(3..6), return(6).
-    // After threading, the first jmp should jump straight to L2
-    // (the return). Offset is from after-operand = 3, so 6-3 = +3.
-    const got_a: i16 = @bitCast(@as(u16, chunk.code[1]) | (@as(u16, chunk.code[2]) << 8));
-    try testing.expectEqual(@as(i16, 3), got_a);
+    // Both jumps relax to i8. After threading, the first jumps directly
+    // over the second to the return at byte 4: 4 - after(2) = +2.
+    try testing.expectEqual(Op.jmp8, @as(Op, @enumFromInt(chunk.code[0])));
+    const got_a: i8 = @bitCast(chunk.code[1]);
+    try testing.expectEqual(@as(i8, 2), got_a);
 
     // The second jmp's operand is unchanged.
-    const got_b: i16 = @bitCast(@as(u16, chunk.code[4]) | (@as(u16, chunk.code[5]) << 8));
-    try testing.expectEqual(@as(i16, 0), got_b);
+    try testing.expectEqual(Op.jmp8, @as(Op, @enumFromInt(chunk.code[2])));
+    const got_b: i8 = @bitCast(chunk.code[3]);
+    try testing.expectEqual(@as(i8, 0), got_b);
 }
 
 test "Builder.peephole: conditional jump threads through unconditional jmp" {
@@ -1539,12 +1981,11 @@ test "Builder.peephole: conditional jump threads through unconditional jmp" {
     var chunk = try b.finish();
     defer chunk.deinit(testing.allocator);
 
-    // jmp_if_false at 0, operand 1..3, lda_undefined at 3,
-    // jmp at 4, operand 5..7, return at 7.
-    // After threading, jmp_if_false's target = L2 = 7,
-    // after-operand = 3, so offset = +4.
-    const got_a: i16 = @bitCast(@as(u16, chunk.code[1]) | (@as(u16, chunk.code[2]) << 8));
-    try testing.expectEqual(@as(i16, 4), got_a);
+    // Relaxed layout: cond8(0..2), lda(2), jmp8(3..5), return(5).
+    // Threaded target is return: 5 - after(2) = +3.
+    try testing.expectEqual(Op.jmp_if_false8, @as(Op, @enumFromInt(chunk.code[0])));
+    const got_a: i8 = @bitCast(chunk.code[1]);
+    try testing.expectEqual(@as(i8, 3), got_a);
 }
 
 test "Builder.peephole: jump threading caps self-loop and doesn't infinite-loop" {
@@ -1563,9 +2004,10 @@ test "Builder.peephole: jump threading caps self-loop and doesn't infinite-loop"
     var chunk = try b.finish();
     defer chunk.deinit(testing.allocator);
 
-    // Self-loop detected — the offset stays as it was.
-    const got: i16 = @bitCast(@as(u16, chunk.code[1]) | (@as(u16, chunk.code[2]) << 8));
-    try testing.expectEqual(@as(i16, -3), got);
+    // Self-loop detected; relaxation changes only its width.
+    try testing.expectEqual(Op.jmp8, @as(Op, @enumFromInt(chunk.code[0])));
+    const got: i8 = @bitCast(chunk.code[1]);
+    try testing.expectEqual(@as(i8, -2), got);
 }
 
 test "Builder.peephole: conditional jump targeting a conditional jump is NOT threaded" {
@@ -1596,10 +2038,10 @@ test "Builder.peephole: conditional jump targeting a conditional jump is NOT thr
     var chunk = try b.finish();
     defer chunk.deinit(testing.allocator);
 
-    // First jmp's offset is still pointing at L1 (offset 0 from
-    // after-operand at 3).
-    const got_a: i16 = @bitCast(@as(u16, chunk.code[1]) | (@as(u16, chunk.code[2]) << 8));
-    try testing.expectEqual(@as(i16, 0), got_a);
+    // First jmp still points at L1; both branches happen to relax to i8.
+    try testing.expectEqual(Op.jmp8, @as(Op, @enumFromInt(chunk.code[0])));
+    const got_a: i8 = @bitCast(chunk.code[1]);
+    try testing.expectEqual(@as(i8, 0), got_a);
 }
 
 test "Builder: patchI16 sets a forward jump correctly" {
@@ -1620,9 +2062,113 @@ test "Builder: patchI16 sets a forward jump correctly" {
     var chunk = try b.finish();
     defer chunk.deinit(testing.allocator);
 
-    // Offset is from byte AFTER the operand. jmp at 0, operand at 1..3,
-    // after-operand at 3. lda_undefined at 3. target (return_) at 4.
-    // expected offset = 4 - 3 = 1.
-    const got: i16 = @bitCast(@as(u16, chunk.code[1]) | (@as(u16, chunk.code[2]) << 8));
-    try testing.expectEqual(@as(i16, 1), got);
+    // Relaxed jmp8 still skips the one-byte lda: target(3)-after(2)=1.
+    try testing.expectEqual(Op.jmp8, @as(Op, @enumFromInt(chunk.code[0])));
+    const got: i8 = @bitCast(chunk.code[1]);
+    try testing.expectEqual(@as(i8, 1), got);
+}
+
+test "Builder: branch relaxation chooses i8, i16, and i32 widths" {
+    const span: Span = .{ .start = 0, .end = 1 };
+
+    var short = Builder.init(testing.allocator);
+    errdefer short.deinit();
+    try short.emitOp(.jmp, span);
+    const short_patch = short.here();
+    try short.emitI16(0);
+    try short.emitOp(.lda_undefined, span);
+    const short_target = short.here();
+    try short.emitOp(.return_, span);
+    try short.patchI16(short_patch, short_target);
+    var short_chunk = try short.finish();
+    defer short_chunk.deinit(testing.allocator);
+    try testing.expectEqual(Op.jmp8, @as(Op, @enumFromInt(short_chunk.code[0])));
+    try testing.expectEqual(@as(i8, 1), @as(i8, @bitCast(short_chunk.code[1])));
+
+    var medium = Builder.init(testing.allocator);
+    errdefer medium.deinit();
+    try medium.emitOp(.jmp, span);
+    const medium_patch = medium.here();
+    try medium.emitI16(0);
+    for (0..200) |_| try medium.emitOp(.lda_undefined, span);
+    const medium_target = medium.here();
+    try medium.emitOp(.return_, span);
+    try medium.patchI16(medium_patch, medium_target);
+    var medium_chunk = try medium.finish();
+    defer medium_chunk.deinit(testing.allocator);
+    try testing.expectEqual(Op.jmp, @as(Op, @enumFromInt(medium_chunk.code[0])));
+    try testing.expectEqual(@as(i16, 200), std.mem.readInt(i16, medium_chunk.code[1..3], .little));
+
+    var long = Builder.init(testing.allocator);
+    errdefer long.deinit();
+    try long.emitOp(.jmp, span);
+    const long_patch = long.here();
+    try long.emitI16(0);
+    for (0..40_000) |_| try long.emitOp(.lda_undefined, span);
+    const long_target = long.here();
+    try long.emitOp(.return_, span);
+    try long.patchI16(long_patch, long_target);
+    var long_chunk = try long.finish();
+    defer long_chunk.deinit(testing.allocator);
+    try testing.expectEqual(Op.jmp32, @as(Op, @enumFromInt(long_chunk.code[0])));
+    try testing.expectEqual(@as(i32, 40_000), std.mem.readInt(i32, long_chunk.code[1..5], .little));
+}
+
+test "Builder: branch relaxation remaps source positions and handlers" {
+    var b = Builder.init(testing.allocator);
+    errdefer b.deinit();
+    const span: Span = .{ .start = 4, .end = 9 };
+
+    try b.emitOp(.jmp_if_strict_eq, span);
+    try b.emitU8(0);
+    const patch = b.here();
+    try b.emitI16(0);
+    const protected_start = b.here();
+    try b.emitOp(.lda_undefined, span);
+    const protected_end = b.here();
+    const target = b.here();
+    try b.emitOp(.return_, span);
+    try b.patchI16(patch, target);
+    try b.addHandler(.{
+        .start_pc = protected_start,
+        .end_pc = protected_end,
+        .handler_pc = target,
+        .catch_register = 0,
+    });
+
+    var chunk = try b.finish();
+    defer chunk.deinit(testing.allocator);
+    try testing.expectEqual(Op.jmp_if_strict_eq8, @as(Op, @enumFromInt(chunk.code[0])));
+    try testing.expectEqual(@as(u32, 3), chunk.source_positions[1].offset);
+    try testing.expectEqual(@as(u32, 3), chunk.handlers[0].start_pc);
+    try testing.expectEqual(@as(u32, 4), chunk.handlers[0].end_pc);
+    try testing.expectEqual(@as(u32, 4), chunk.handlers[0].handler_pc);
+}
+
+test "Builder: branch relaxation remaps switch table targets" {
+    var b = Builder.init(testing.allocator);
+    errdefer b.deinit();
+    const span: Span = .{ .start = 0, .end = 1 };
+
+    const table = try b.reserveSwitchTable(0, 0);
+    try b.emitOp(.switch_smi, span);
+    try b.emitU8(0);
+    try b.emitU16(table);
+
+    try b.emitOp(.jmp, span);
+    const patch = b.here();
+    try b.emitI16(0);
+    try b.emitOp(.lda_undefined, span);
+    const target = b.here();
+    try b.emitOp(.return_, span);
+    try b.patchI16(patch, target);
+    b.setSwitchTarget(table, 0, target);
+    b.finishSwitchTable(table, target);
+
+    var chunk = try b.finish();
+    defer chunk.deinit(testing.allocator);
+    try testing.expectEqual(Op.jmp8, @as(Op, @enumFromInt(chunk.code[4])));
+    try testing.expectEqual(@as(u32, 7), chunk.switch_tables[0].targets[0]);
+    try testing.expectEqual(@as(u32, 7), chunk.switch_tables[0].default_target);
+    try testing.expectEqual(Op.return_, @as(Op, @enumFromInt(chunk.code[7])));
 }

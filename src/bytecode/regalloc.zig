@@ -1,22 +1,24 @@
 //! P1 — liveness-driven register passes that re-emit a finalized chunk.
 //!
-//! First landed slice: dead-store elimination. A `Star rX` whose target
-//! register is not live afterward has no observable effect (the value is
-//! never read), so it is dropped — one fewer interpreter dispatch. The
-//! canonical case is a script/eval completion store inside a loop body
-//! (`for (…) { s = s + i; }` stores the completion every iteration, but
-//! the trailing statement overwrites it), so this directly shrinks hot
-//! loops.
+//! The first slices are dead-store elimination and accumulator forwarding.
+//! A `Star rX` whose target register is not live afterward has no observable
+//! effect, so it is dropped. An adjacent `Star rX; Ldar rX` can drop the load
+//! when the finalized CFG proves the `Ldar` has no other predecessor: `Star`
+//! leaves its value in the accumulator already. Both remove interpreter
+//! dispatches from hot loops.
 //!
 //! Re-emitting (vs in-place patching) is what lets an instruction be
 //! removed: the new code buffer is rebuilt and every code-offset
-//! reference is fixed up — i16-relative jumps, `source_positions`, and
-//! exception `handlers`. (`jit_state` is null at compile time; constants
+//! reference is fixed up — width-relaxed relative jumps,
+//! `source_positions`, exception `handlers`, and dense-switch targets.
+//! (`jit_state` is null at compile time; constants
 //! / inline caches / templates are index-based and untouched.)
 //!
-//! Only runs on `fully_understood` functions (every opcode's register
-//! effect modelled — see liveness.zig); on any other it is a no-op, so a
-//! gap in the effect model can never miscompile, only forgo the pass.
+//! Register-liveness rewrites run only on `fully_understood` functions
+//! (every opcode's register effect modelled — see liveness.zig); on any
+//! other they are a no-op, so an effect-model gap can only forgo a pass.
+//! Accumulator forwarding needs only the finalized CFG's leader set and is
+//! therefore safe across opaque register effects too.
 //!
 //! Register-renumbering passes (copy coalescing, frame packing) layer on
 //! this re-emit foundation next; they additionally must pin the ABI
@@ -29,6 +31,7 @@ const chunk_mod = @import("chunk.zig");
 const Chunk = chunk_mod.Chunk;
 const SourcePos = chunk_mod.SourcePos;
 const Handler = chunk_mod.Handler;
+const SwitchTable = chunk_mod.SwitchTable;
 const liveness = @import("liveness.zig");
 
 fn isPureStore(op: Op) bool {
@@ -44,6 +47,55 @@ fn storeTarget(op: Op, code: []const u8, i: u32) u8 {
         .star_0, .star_1, .star_2, .star_3 => @intFromEnum(op) - @intFromEnum(Op.star_0),
         else => unreachable,
     };
+}
+
+fn loadTarget(op: Op, code: []const u8, i: u32) ?u8 {
+    return switch (op) {
+        .ldar => code[i + 1],
+        .ldar_0, .ldar_1, .ldar_2, .ldar_3 => @intFromEnum(op) - @intFromEnum(Op.ldar_0),
+        else => null,
+    };
+}
+
+/// Drop the `Ldar rX` from adjacent `Star rX; Ldar rX` pairs when the
+/// finalized CFG proves the load is reached only by the store's fallthrough.
+/// Branch, dense-switch, and exception-handler targets are basic-block
+/// leaders, so a leader load is retained. Running after branch relaxation is
+/// essential: emission-time patch state does not yet know every incoming
+/// edge. Recurses through nested function templates and returns the total
+/// number of removed loads.
+pub fn eliminateRedundantStoreLoads(allocator: std.mem.Allocator, chunk: *Chunk) !usize {
+    var removed = try eliminateRedundantStoreLoadsOne(allocator, chunk);
+    for (chunk.function_templates) |*t| removed += try eliminateRedundantStoreLoads(allocator, &t.chunk);
+    return removed;
+}
+
+fn eliminateRedundantStoreLoadsOne(allocator: std.mem.Allocator, chunk: *Chunk) !usize {
+    const code = chunk.code;
+    if (code.len == 0) return 0;
+
+    var a = try liveness.analyze(allocator, code, chunk.register_count, chunk.handlers, chunk.switch_tables);
+    defer a.deinit();
+
+    var dead: std.ArrayListUnmanaged(u32) = .empty;
+    defer dead.deinit(allocator);
+
+    var i: u32 = 0;
+    while (i < code.len) {
+        const op: Op = @enumFromInt(code[i]);
+        const next = i + 1 + Op.operandSize(op);
+        if (isPureStore(op) and next < code.len and !isLeaderOff(a.leaders, next)) {
+            const next_op: Op = @enumFromInt(code[next]);
+            if (loadTarget(next_op, code, next)) |load_reg| {
+                if (load_reg == storeTarget(op, code, i)) try dead.append(allocator, next);
+            }
+        }
+        i = next;
+    }
+
+    if (dead.items.len == 0) return 0;
+    try reEmitDropping(allocator, chunk, dead.items);
+    return dead.items.len;
 }
 
 /// Drop dead `Star` instructions in `chunk` (and recurse into nested
@@ -73,7 +125,7 @@ fn eliminateDeadStoresOne(allocator: std.mem.Allocator, chunk: *Chunk) !usize {
     // stores) live in handler-free code, so the win is unaffected.
     if (chunk.handlers.len > 0) return 0;
 
-    var a = try liveness.analyze(allocator, code, chunk.register_count, chunk.handlers);
+    var a = try liveness.analyze(allocator, code, chunk.register_count, chunk.handlers, chunk.switch_tables);
     defer a.deinit();
     if (!a.fully_understood) return 0;
 
@@ -101,11 +153,12 @@ fn eliminateDeadStoresOne(allocator: std.mem.Allocator, chunk: *Chunk) !usize {
 
 /// Rebuild `chunk.code` / `source_positions` / `handlers` with the
 /// instructions at the given `dead` offsets removed (sorted ascending, each
-/// an instruction start), re-patching i16-relative jumps, remapping source
-/// positions, and fixing handler pc ranges. The old buffers are freed.
-/// Shared re-emit foundation for the dead-store and TDZ-check passes — a
-/// removed instruction's offset maps to the next surviving instruction, so a
-/// jump that targeted it still resolves.
+/// an instruction start), re-patching width-relaxed relative jumps,
+/// remapping source positions / switch targets, and fixing handler pc
+/// ranges. The old buffers are freed.
+/// Shared re-emit foundation for dead stores, accumulator forwarding, and
+/// TDZ checks — a removed instruction's offset maps to the next surviving
+/// instruction, so a jump that targeted it still resolves.
 fn reEmitDropping(allocator: std.mem.Allocator, chunk: *Chunk, dead: []const u32) !void {
     const code = chunk.code;
 
@@ -157,19 +210,28 @@ fn reEmitDropping(allocator: std.mem.Allocator, chunk: *Chunk, dead: []const u32
                 try new_sp.append(allocator, .{ .offset = new_self, .span = chunk.source_positions[sp_i].span });
             }
             if (liveness.branchTarget(op, code, old)) |tgt| {
-                // copy bytes, then overwrite the i16 with the recomputed
-                // relative offset from the new layout.
+                // Copy bytes, then overwrite the width-relaxed signed
+                // displacement with the recomputed relative offset.
                 try out.appendSlice(allocator, code[old .. old + sz]);
-                const i16_pos: u32 = switch (op) {
-                    .loop_inc_lt => new_self + 3, // [op][rc][rb][off]
-                    .jmp_if_strict_eq, .jmp_if_strict_neq, .jmp_if_not_lt, .jmp_if_not_le, .jmp_if_not_gt, .jmp_if_not_ge => new_self + 2, // [op][r][off]
-                    else => new_self + 1, // [op][off]
-                };
-                const new_after: i64 = @as(i64, i16_pos) + 2;
+                const info = op.branchInfo().?;
+                const disp_pos: u32 = new_self + 1 + info.operand_offset;
+                const new_after: i64 = @as(i64, disp_pos) + info.width.byteSize();
                 const new_target: i64 = new_off[tgt];
                 const rel: i64 = new_target - new_after;
-                std.debug.assert(rel >= std.math.minInt(i16) and rel <= std.math.maxInt(i16));
-                std.mem.writeInt(i16, out.items[i16_pos..][0..2], @intCast(rel), .little);
+                switch (info.width) {
+                    .i8 => {
+                        std.debug.assert(rel >= std.math.minInt(i8) and rel <= std.math.maxInt(i8));
+                        out.items[disp_pos] = @bitCast(@as(i8, @intCast(rel)));
+                    },
+                    .i16 => {
+                        std.debug.assert(rel >= std.math.minInt(i16) and rel <= std.math.maxInt(i16));
+                        std.mem.writeInt(i16, out.items[disp_pos..][0..2], @intCast(rel), .little);
+                    },
+                    .i32 => {
+                        std.debug.assert(rel >= std.math.minInt(i32) and rel <= std.math.maxInt(i32));
+                        std.mem.writeInt(i32, out.items[disp_pos..][0..4], @intCast(rel), .little);
+                    },
+                }
             } else {
                 try out.appendSlice(allocator, code[old .. old + sz]);
             }
@@ -188,6 +250,10 @@ fn reEmitDropping(allocator: std.mem.Allocator, chunk: *Chunk, dead: []const u32
             .catch_register = h.catch_register,
             .is_finally = h.is_finally,
         };
+    }
+    for (chunk.switch_tables) |*table| {
+        table.default_target = new_off[table.default_target];
+        for (table.targets) |*target| target.* = new_off[target.*];
     }
 
     // ── Commit: swap in the rebuilt buffers, free the originals ──
@@ -283,7 +349,7 @@ fn eliminateRedundantTdzChecksOne(allocator: std.mem.Allocator, chunk: *Chunk) !
     }
     if (nslots == 0) return 0; // no global-slot traffic
 
-    var a = try liveness.analyze(allocator, code, chunk.register_count, chunk.handlers);
+    var a = try liveness.analyze(allocator, code, chunk.register_count, chunk.handlers, chunk.switch_tables);
     defer a.deinit();
     const nblocks = a.blockCount();
 
@@ -328,7 +394,7 @@ fn eliminateRedundantTdzChecksOne(allocator: std.mem.Allocator, chunk: *Chunk) !
     for (0..nblocks) |b| preds[b] = .empty;
     for (0..nblocks) |b| {
         if (!a.reachable.isSet(b)) continue;
-        for (a.succs[b]) |maybe| if (maybe) |s| try preds[s].append(allocator, b);
+        for (a.succs[b].items) |s| try preds[s].append(allocator, b);
     }
 
     // Forward must-dataflow:
@@ -473,6 +539,54 @@ test "regalloc: a function with an exception handler is left untouched" {
     try testing.expectEqual(@as(usize, code.len), chunk.code.len); // unchanged
 }
 
+test "regalloc(store-load): adjacent same-register load is dropped" {
+    var code = [_]u8{
+        @intFromEnum(Op.lda_one),
+        @intFromEnum(Op.star_2),
+        @intFromEnum(Op.ldar_2),
+        @intFromEnum(Op.return_),
+    };
+    var chunk: Chunk = .{
+        .code = try testing.allocator.dupe(u8, &code),
+        .constants = &.{},
+        .source_positions = &.{},
+        .handlers = &.{},
+        .function_templates = &.{},
+        .class_templates = &.{},
+        .register_count = 4,
+    };
+    defer testing.allocator.free(chunk.code);
+
+    try testing.expectEqual(@as(usize, 1), try eliminateRedundantStoreLoadsOne(testing.allocator, &chunk));
+    try testing.expectEqualSlices(u8, &.{
+        @intFromEnum(Op.lda_one),
+        @intFromEnum(Op.star_2),
+        @intFromEnum(Op.return_),
+    }, chunk.code);
+}
+
+test "regalloc(store-load): load at a branch target is kept" {
+    // The jump reaches Ldar without executing the preceding Star, so the
+    // accumulator cannot substitute for the register on every path.
+    var code = [_]u8{
+        @intFromEnum(Op.jmp),    1,                       0, // after=3, +1 -> Ldar at 4
+        @intFromEnum(Op.star_2), @intFromEnum(Op.ldar_2), @intFromEnum(Op.return_),
+    };
+    var chunk: Chunk = .{
+        .code = try testing.allocator.dupe(u8, &code),
+        .constants = &.{},
+        .source_positions = &.{},
+        .handlers = &.{},
+        .function_templates = &.{},
+        .class_templates = &.{},
+        .register_count = 4,
+    };
+    defer testing.allocator.free(chunk.code);
+
+    try testing.expectEqual(@as(usize, 0), try eliminateRedundantStoreLoadsOne(testing.allocator, &chunk));
+    try testing.expectEqualSlices(u8, &code, chunk.code);
+}
+
 test "regalloc: a jump offset is recomputed when a store between it and its target is removed" {
     // 0: lda_zero
     // 1: jmp_if_false +2 -> 6   (false skips the store; true falls through)
@@ -513,6 +627,47 @@ test "regalloc: a jump offset is recomputed when a store between it and its targ
         i += 1 + Op.operandSize(op);
     }
     try testing.expect(checked);
+}
+
+test "regalloc: switch table targets follow removed instructions" {
+    // The dead r1 store precedes both switch destinations. Re-emission must
+    // move the table's absolute PCs along with the bytecode.
+    var code = [_]u8{
+        @intFromEnum(Op.lda_one),
+        @intFromEnum(Op.star),
+        1,
+        @intFromEnum(Op.switch_smi),
+        0,
+        0,
+        0,
+        @intFromEnum(Op.lda_zero),
+        @intFromEnum(Op.return_),
+        @intFromEnum(Op.lda_one),
+        @intFromEnum(Op.return_),
+    };
+    var targets = [_]u32{9};
+    var tables = [_]SwitchTable{.{
+        .min = 0,
+        .targets = &targets,
+        .default_target = 7,
+    }};
+    var chunk: Chunk = .{
+        .code = try testing.allocator.dupe(u8, &code),
+        .constants = &.{},
+        .source_positions = &.{},
+        .handlers = &.{},
+        .switch_tables = &tables,
+        .function_templates = &.{},
+        .class_templates = &.{},
+        .register_count = 2,
+    };
+    defer testing.allocator.free(chunk.code);
+
+    try testing.expectEqual(@as(usize, 1), try eliminateDeadStoresOne(testing.allocator, &chunk));
+    try testing.expectEqual(@as(u32, 5), chunk.switch_tables[0].default_target);
+    try testing.expectEqual(@as(u32, 7), chunk.switch_tables[0].targets[0]);
+    try testing.expectEqual(Op.lda_zero, @as(Op, @enumFromInt(chunk.code[5])));
+    try testing.expectEqual(Op.lda_one, @as(Op, @enumFromInt(chunk.code[7])));
 }
 
 fn mkChunk(code: []const u8) !Chunk {

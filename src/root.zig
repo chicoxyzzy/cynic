@@ -138,6 +138,7 @@ test {
     _ = @import("bytecode/op.zig");
     _ = @import("bytecode/chunk.zig");
     _ = @import("bytecode/disasm.zig");
+    _ = @import("bytecode/stats.zig");
     _ = @import("bytecode/scope.zig");
     _ = @import("bytecode/compiler.zig");
     _ = @import("bytecode/literals.zig");

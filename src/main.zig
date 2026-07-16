@@ -116,6 +116,7 @@ pub fn main(init: std.process.Init) !void {
         var dump_bytecode = false;
         var debug_globals = false;
         var gc_stats = false;
+        var bytecode_stats = false;
         var run_args = args;
         while (run_args.len > 0 and std.mem.startsWith(u8, run_args[0], "--")) {
             if (std.mem.eql(u8, run_args[0], "--dump-bytecode")) {
@@ -127,6 +128,9 @@ pub fn main(init: std.process.Init) !void {
             } else if (std.mem.eql(u8, run_args[0], "--gc-stats")) {
                 gc_stats = true;
                 run_args = run_args[1..];
+            } else if (std.mem.eql(u8, run_args[0], "--bytecode-stats")) {
+                bytecode_stats = true;
+                run_args = run_args[1..];
             } else {
                 try printUsage(io);
                 return error.UnknownArgument;
@@ -136,7 +140,7 @@ pub fn main(init: std.process.Init) !void {
             try printUsage(io);
             return error.MissingArgument;
         }
-        try run_cmd.run(allocator, io, run_args, feature_flags, gc_threshold, dump_bytecode, debug_globals, gc_stats, unhardened, allow_eval, allow_wasm, jit);
+        try run_cmd.run(allocator, io, run_args, feature_flags, gc_threshold, dump_bytecode, debug_globals, gc_stats, bytecode_stats, unhardened, allow_eval, allow_wasm, jit);
     } else if (std.mem.eql(u8, sub, "repl")) {
         // `cynic repl [--debug-globals]` — interactive read-eval-print
         // loop with a persistent realm. Same `--debug-globals` opt-in
@@ -183,7 +187,7 @@ fn printUsage(io: std.Io) !void {
         \\                                   script mode against a `.mjs` path.
         \\  eval <expr>                      Compile and execute a single
         \\                                   expression; print the result.
-        \\  run [--dump-bytecode] [--debug-globals] <file>...
+        \\  run [--dump-bytecode] [--bytecode-stats] [--debug-globals] <file>...
         \\                                   Compile and execute each <file>
         \\                                   against one realm; print the final
         \\                                   completion value. Files ending in
@@ -194,6 +198,9 @@ fn printUsage(io: std.Io) !void {
         \\                                   to the working directory).
         \\                                   `--dump-bytecode` prints the compiled
         \\                                   chunk and exits without executing.
+        \\                                   `--bytecode-stats` prints static operand-
+        \\                                   width and dynamic dispatch hot spots;
+        \\                                   build with -Dbytecode-stats=true.
         \\                                   `--debug-globals` installs
         \\                                   `__collectGarbage` / `__clearKeptObjects` /
         \\                                   `__drainMicrotasks` for debugging. Off

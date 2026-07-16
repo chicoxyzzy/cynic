@@ -70,6 +70,19 @@ All on `origin/main`:
   prototype-inherited reads (`arr.push`, `instance.m`,
   `String.prototype.constructor`) — the dominant real-world
   case the own-data IC missed.
+- **Hardened synthetic-accessor load mode (2026-07).** The SES
+  override-mistake fix represents each frozen primordial data property as
+  an internal synthetic accessor, so ordinary prototype-data filling cannot
+  cache reads such as `o.hasOwnProperty("x")`. `LoadICCell.Kind` now has a
+  `synthetic_accessor` mode that stores the getter's immutable captured
+  value. Fill accepts only an immediate non-extensible prototype with a
+  non-configurable descriptor and Cynic's internal non-setter
+  `SyntheticAccessor`; it refuses ordinary user accessors. Hits guard the
+  receiver shape, prototype identity/shape, and realm prototype revision.
+  The prototype pointer is weak-cleared by GC; while live, its getter owns
+  the cached value through the same internal slot. Lantern and Bistromath
+  share the mode. A same-tree ReleaseFast A/B on 5M
+  `hasOwnProperty` calls measured **304.6 → 152.8 ms p50 (-49.8%)**.
 - `fdf3940` — Fused `call_property` opcode for the simple
   `obj.method(args)` shape. Replaces a 4-op `ldar + lda_property
   + star + call_method` sequence (15 bytes operand, 4 dispatches)
@@ -211,10 +224,10 @@ All on `origin/main`:
   builtin sites — reach `heap.shapes` without a signature change.
 - **Dual representation.** `shape == null` → dictionary mode (the
   `properties` / `property_flags` hash). `shape != null` → `slots`
-  is authoritative; `properties` is currently mirrored for the
-  paths that still consult it (the *flip* — retire `properties`
-  for shaped objects — is the next structural step; see
-  [docs/lazy-property-bag.md](lazy-property-bag.md)).
+  is authoritative and named writes do not mirror into the property bag.
+  Shape-mode objects normally keep the map at zero capacity;
+  `demoteFromShape` materializes dictionary entries when an operation needs
+  dictionary mode. See [docs/lazy-property-bag.md](lazy-property-bag.md).
 - **Shapes are arena-allocated, agent-lifetime** — never collected
   individually. The GC does not trace into shapes.
 - **`verifyShapeInvariant`** runs on every reachable shaped
@@ -222,31 +235,26 @@ All on `origin/main`:
   on `std.debug.runtime_safety`). Catches any future direct
   `properties` mutation that bypasses `shadowSet` /
   `demoteFromShape` — the most common way the shape goes stale.
-- **`Chunk.inline_caches: []ICCell` + `Chunk.inline_call_caches:
-  []CallICCell`** are mutable side-tables on the otherwise-immutable
-  chunk. Both are zeroed at chunk finalisation. GC weak-clears the
-  call-IC's callee pointer and the proto-load IC's proto pointer.
-- **`ICCell` is multi-use.** Same struct serves four modes — the
-  consumer opcode picks which fields are valid:
-    * `lda_property` / `sta_property` same-shape (own-data) mode:
-      `shape` matches the receiver; `slot` indexes `recv.slots`;
-      `pre_shape` / `post_shape` null; `bag_index` is the
-      `sta_property` hot path's cached `properties` array index.
-    * `lda_property` proto-load mode: `shape` (receiver) +
-      `proto != null` + `proto_shape` (snapshot at fill) +
-      `proto_rev` (snapshot of `realm.proto_revision_counter`).
-      `slot` indexes `proto.slots`.
-    * `sta_property` transition mode: `pre_shape != null` AND
-      `post_shape != null`. Fast path stamps `post_shape` on the
-      receiver, resizes `slots`, writes `slots[slot]`. Same
-      `proto` + `proto_shape` + `proto_rev` snapshot as the
-      proto-load mode — adding an accessor to any proto changes
-      that proto's shape; `setPrototypeOf` bumps the counter.
-    * `lda_global` / `lda_global_or_undef`: `proto == null`,
-      `shape` is the global object's shape, `proto_rev` is
-      repurposed to record `GlobalBindings.decl_revision`. A
-      future `lda_global` proto-walk variant would set `proto`
-      like `lda_property`.
+- **Property ICs use typed mutable side tables.**
+  `Chunk.inline_load_caches`, `inline_store_caches`, and
+  `inline_computed_caches` give each opcode family a compact independent
+  index space instead of charging every site for one union-like cell.
+  `inline_call_caches` and `inline_forin_caches` remain separate. All are
+  zeroed at chunk finalization. GC weak-clears load-cache prototype pointers
+  and call-cache callee/prototype pointers.
+- **`LoadICCell` has data and synthetic-accessor modes.** Own data uses
+  `(shape, slot)`. Prototype data adds prototype identity/shape/revision and
+  loads `proto.slots[slot]`. Frozen synthetic accessors use the same guards
+  but load `synthetic_value`. Global loads reuse the data layout and store
+  `GlobalBindings.decl_revision` in the revision field.
+- **`StoreICCell` owns write-only state.** Same-shape writes cache the slot.
+  Transition writes additionally cache
+  `pre_shape`/`post_shape`, prototype guards, and `proto_struct_epoch` before
+  stamping the new shape and slot.
+- **`ComputedICCell` copies short dynamic keys inline.** Computed loads,
+  stores, and positive-own `in` sites guard receiver shape plus key bytes.
+  Four distinct-key refills park the cell as megamorphic instead of
+  thrashing it; the cell contains no GC pointer.
 - **`CallICCell` is also dual-use.** `call_method` / `call` use
   only `callee`; `new_call` sets `callee` AND `proto` (the
   cached `callee.prototype` snapshot, for the
@@ -474,6 +482,9 @@ calls (`objectHasOwn` etc.), outside the bytecode-opcode IC model. The
 `call_property` / `call` ICs already cache the *callee*; a shape→
 presence cache inside the native would need a per-realm `(shape, key)`
 table rather than a per-callsite cell. Niche; deferred.
+This refers to the native function's own-property test; the hardened
+prototype lookup that obtains `hasOwnProperty` itself is covered by the
+synthetic-accessor load mode above.
 
 **for-in enumeration cache — shipped (frozen-proto guard).**
 `for_in_open` carries an IC (`[op] [ic:u16]` → `Chunk.inline_forin_caches`,

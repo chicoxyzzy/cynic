@@ -235,9 +235,25 @@ later; see [src/bytecode/op.zig](../src/bytecode/op.zig).
 
 Per-frame register file; an implicit accumulator threads through
 binary and unary ops to keep Lantern's dispatch loop tight. One-byte
-opcodes for the common case. Bytecode is the source of truth for IR
-— Bistromath (default-on since 2026-06; `--no-jit` opts out) and Ohaimark (future)
-consume bytecode + warmth/IC data, not the AST.
+opcodes for the common case. `Op.spec()` is the authoritative schema
+for operand layouts, control flow, and tier support. Finalization
+selects narrow immediate / IC forms, relaxes relative branches to
+i8/i16/i32, and remaps source, handler, and dense-switch side tables.
+Load, store, and computed property sites use separate typed IC arrays
+so their layouts and index spaces stay small. Bytecode is the source
+of truth for IR — Bistromath (default-on since 2026-06; `--no-jit`
+opts out) and Ohaimark (future) consume bytecode + warmth/IC data, not
+the AST.
+
+An opt-in instrumentation build (`-Dbytecode-stats=true`, then
+`cynic run --bytecode-stats`) reports static encoding widths and
+dynamic opcode/pair/trigram frequencies. Normal builds compile the
+dispatch counters out. The CFG/liveness pass uses the same schema,
+models dense-switch N-way edges, and fails closed when an implicit
+register effect is not understood. Accumulator forwarding is a
+post-finalization rewrite: `Star r; Ldar r` loses the load only when
+the finalized leader set proves no branch, switch, or handler can enter
+between the pair.
 
 A pure-stack design (QuickJS) was considered and rejected: higher
 dispatch counts, and worse fit for Bistromath, which wants a register

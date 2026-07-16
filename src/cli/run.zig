@@ -107,12 +107,17 @@ pub fn run(
     dump_bytecode: bool,
     debug_globals: bool,
     gc_stats: bool,
+    collect_bytecode_stats: bool,
     unhardened: bool,
     allow_eval: bool,
     allow_wasm: bool,
     jit: bool,
 ) !void {
     std.debug.assert(paths.len > 0);
+    if (collect_bytecode_stats and !cynic.bytecode.stats.enabled) {
+        try std.Io.File.stderr().writeStreamingAll(io, "--bytecode-stats requires a -Dbytecode-stats=true build\n");
+        return error.BytecodeStatsNotEnabled;
+    }
 
     // Each chunk holds borrowed slices into its source buffer
     // (function names, identifier spans, …). Functions declared
@@ -137,7 +142,7 @@ pub fn run(
     if (allow_eval) realm.allow_eval = true;
     if (allow_wasm) realm.allow_wasm = true;
     // `--jit` — enable the Bistromath tier-up path (docs/jit.md §10).
-    if (jit) realm.jit_enabled = true;
+    if (jit and !collect_bytecode_stats) realm.jit_enabled = true;
     // Apply the `--gc-threshold` knob before `installBuiltins`
     // so the builtin-install allocations themselves run at the
     // requested cadence (matters at `--gc-threshold=1` where every
@@ -160,6 +165,16 @@ pub fn run(
     cli_loader_io = io;
     cli_loader_arena = sa;
     realm.module_loader = cliModuleLoader;
+
+    var dynamic_stats_ptr: ?*cynic.bytecode.stats.DynamicStats = null;
+    defer if (dynamic_stats_ptr) |stats| allocator.destroy(stats);
+    const stats_activation = if (collect_bytecode_stats) activate: {
+        const stats = try allocator.create(cynic.bytecode.stats.DynamicStats);
+        stats.* = .{};
+        dynamic_stats_ptr = stats;
+        break :activate cynic.bytecode.stats.activate(stats);
+    } else cynic.bytecode.stats.Activation{};
+    defer stats_activation.deinit();
 
     // `--dump-bytecode` — parse + compile each file and print the
     // disassembly; don't execute. Matches V8's `d8 --print-bytecode`
@@ -283,6 +298,14 @@ pub fn run(
     // never runs `cb` and the user sees the unresolved Promise as
     // the script's final value.
     cynic.runtime.lantern.drainMicrotasks(allocator, &realm) catch {};
+
+    if (dynamic_stats_ptr) |dynamic_stats| {
+        var static_stats: cynic.bytecode.stats.StaticStats = .{};
+        for (realm.script_chunks.items) |chunk| try static_stats.observeChunk(allocator, chunk);
+        const report = try cynic.bytecode.stats.formatReport(allocator, &static_stats, dynamic_stats, 20);
+        defer allocator.free(report);
+        try std.Io.File.stderr().writeStreamingAll(io, report);
+    }
 
     // Flush anything `print` / `console.log` buffered.
     if (realm.output.items.len > 0) {

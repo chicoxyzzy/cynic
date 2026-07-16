@@ -136,11 +136,11 @@ top-line score.
 
 ## History
 
-### 2026-07-08 — cynic `05c71887`, test262 `de8e621cdb`
+### 2026-07-15 — cynic `065e77b9`, test262 `de8e621c`
 
 | passing | failing | total | pass% | Δ pass | elapsed |
 |---:|---:|---:|---:|---:|---:|
-| 48653 | 1324 | 49977 | 97.35 % | +82 | 2m 55s |
+| 48653 | 1324 | 49977 | 97.35 % | ±0 | 2m 00s |
 
 Biggest movers:
 
@@ -149,6 +149,12 @@ Biggest movers:
 - `built-ins/DataView` +550
 - `built-ins/Iterator` +514
 - `built-ins/Atomics` +381
+
+### 2026-07-08 — cynic `05c71887`, test262 `de8e621cdb`
+
+| passing | failing | total | pass% | Δ pass | elapsed |
+|---:|---:|---:|---:|---:|---:|
+| 48653 | 1324 | 49977 | 97.35 % | +82 | 2m 55s |
 
 ### 2026-07-04 — cynic `46e55786`, test262 `de8e621cdb`
 

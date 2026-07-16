@@ -89,11 +89,12 @@ pub const CompileError = error{
     TooManyFunctions,
     TooManyClasses,
     /// Exceeded the per-`Chunk` 16-bit inline-cache slot index space.
-    /// Surfaces when `Builder.allocIC` runs out — a single chunk
-    /// emitted more than 65 535 property-access callsites. Distinct
+    /// Surfaces when a typed `Builder.alloc*IC` counter runs out — a
+    /// single chunk emitted more than 65 535 property-access callsites. Distinct
     /// from `TooManyConstants` because the IC table is a separate
     /// `u16`-indexed side-table.
     TooManyInlineCaches,
+    TooManySwitchTables,
     JumpTooFar,
     /// A statement or expression that is well-formed at parse
     /// time but not yet implementable — e.g. later doesn't compile
@@ -1682,7 +1683,7 @@ pub const Compiler = struct {
     }
 
     /// `++x` / `--x` (prefix), `x++` / `x--` (postfix). §13.4.
-    /// Lowers to `acc = ToNumber(x); x = acc ± 1; result =
+    /// Lowers to `acc = ToNumeric(x); x = acc ± Type(acc)::unit; result =
     /// (prefix ? acc_new : acc_old)`. Both identifier and
     /// member-access targets are supported.
     fn compileUpdate(self: *Compiler, u: ast.expression.UpdateExpr, result_used: bool) CompileError!void {
@@ -1736,6 +1737,17 @@ pub const Compiler = struct {
             return;
         }
 
+        // The coerced OLD value is observable only for a consumed postfix.
+        // Compute this before lowering so the non-TDZ register case can use
+        // the one-dispatch update while every old-value / TDZ-sensitive path
+        // retains the existing explicit sequence.
+        const need_old = !u.prefix and result_used;
+        if (binding.is_register and !binding.register_tdz and !need_old) {
+            const op: Op = if (u.op == .increment) .inc_reg else .dec_reg;
+            try self.builder.emitUpdateReg(op, u.span, binding.register);
+            return;
+        }
+
         // Read x → acc (with TDZ check for let/const).
         try self.emitLoadBinding(binding, span);
 
@@ -1752,7 +1764,6 @@ pub const Compiler = struct {
         // statement, `for (;; x++)` update clause), the save + reload
         // is dead — skip it (V8 / Hermes likewise emit a bare bump
         // when the postfix result is unused).
-        const need_old = !u.prefix and result_used;
         const r_orig: u8 = if (need_old) blk: {
             const r = try self.reserveTemp();
             try self.builder.emitStoreReg(span, r);
@@ -4886,9 +4897,7 @@ pub const Compiler = struct {
             {
                 if (op == .add) {
                     if (self.tryGetSmiLiteralValue(a.value.*)) |imm| {
-                        try self.builder.emitOp(.add_smi, a.span);
-                        try self.builder.emitU8(binding.register);
-                        try self.builder.emitI32(imm);
+                        try self.builder.emitAddSmi(a.span, binding.register, imm);
                         try self.emitStoreBinding(binding, a.span);
                         return;
                     }
@@ -5409,9 +5418,7 @@ pub const Compiler = struct {
                 // same `addValues` call.
                 if (op == .add) {
                     if (self.tryGetSmiLiteralValue(b.rhs.*)) |imm| {
-                        try self.builder.emitOp(.add_smi, b.span);
-                        try self.builder.emitU8(r_lhs);
-                        try self.builder.emitI32(imm);
+                        try self.builder.emitAddSmi(b.span, r_lhs, imm);
                         return;
                     }
                 }
@@ -7018,6 +7025,29 @@ pub const Compiler = struct {
         }
     }
 
+    /// Select the dense integer dispatch only when every non-default case test
+    /// is an effect-free exact i32 literal. §14.12 evaluates case expressions
+    /// in source order until a match, so any call/name/member/non-literal must
+    /// stay on the ordered comparison chain. The 2x density and 256-slot caps
+    /// follow Hermes/QuickJS's compact-table bias and bound side-table/codegen
+    /// growth for hostile generated source.
+    fn denseSwitchRange(self: *Compiler, cases: []const ast.statement.SwitchCase) ?[2]i32 {
+        var min: i32 = std.math.maxInt(i32);
+        var max: i32 = std.math.minInt(i32);
+        var count: usize = 0;
+        for (cases) |case| {
+            const test_expr = case.test_ orelse continue;
+            const value = self.tryGetSmiLiteralValue(test_expr) orelse return null;
+            min = @min(min, value);
+            max = @max(max, value);
+            count += 1;
+        }
+        if (count < 4) return null;
+        const range = @as(i64, max) - @as(i64, min) + 1;
+        if (range > 256 or range > @as(i64, @intCast(count * 2))) return null;
+        return .{ min, max };
+    }
+
     fn compileSwitch(self: *Compiler, s: ast.statement.SwitchStmt) CompileError!void {
         // §14.13 — `LABEL : SwitchStatement` lets `break LABEL ;`
         // inside the cases exit the switch.
@@ -7136,35 +7166,52 @@ pub const Compiler = struct {
             }
         }
 
-        // Per-case forward-jump patches into the body region.
+        // Per-case forward-jump patches into the body region. Dense literal
+        // switches use a side table instead; the slice stays allocated only
+        // for the ordered fallback path.
         var body_patches = try self.allocator.alloc(u32, s.cases.len);
         defer self.allocator.free(body_patches);
 
-        // 1. Dispatch: for each case (skipping default) emit
-        // `eval test → acc; strict_eq r_disc; jmp_if_true patch_i`.
+        const dense_range = self.denseSwitchRange(s.cases);
+        var dense_table: ?u16 = null;
         var default_idx: ?usize = null;
-        for (s.cases, 0..) |case, i| {
-            if (case.test_) |*test_expr| {
-                try self.compileExpression(test_expr);
-                try self.builder.emitOp(.strict_eq, case.span);
-                try self.builder.emitU8(r_disc);
-                try self.builder.emitOp(.jmp_if_true, case.span);
-                body_patches[i] = self.builder.here();
-                try self.builder.emitI16(0);
-            } else {
-                if (default_idx != null) return error.UnsupportedStatement;
-                default_idx = i;
-                // Reserve a slot we can later overwrite with the
-                // jump-to-default; we patch this in the fallback below.
-                body_patches[i] = std.math.maxInt(u32); // sentinel
-            }
-        }
+        var fallback_patch: ?u32 = null;
 
-        // 2. After all tests fail: jump to the default body if any,
-        // else past the bodies to the exit.
-        try self.builder.emitOp(.jmp, s.span);
-        const fallback_patch = self.builder.here();
-        try self.builder.emitI16(0);
+        if (dense_range) |range| {
+            const table = try self.builder.reserveSwitchTable(range[0], range[1]);
+            dense_table = table;
+            try self.builder.emitOp(.switch_smi, s.span);
+            try self.builder.emitU8(r_disc);
+            try self.builder.emitU16(table);
+            for (s.cases, 0..) |case, i| {
+                if (case.test_ == null) {
+                    if (default_idx != null) return error.UnsupportedStatement;
+                    default_idx = i;
+                }
+            }
+        } else {
+            // 1. Ordered dispatch: evaluate each case test in source order,
+            // compare strictly, then branch to the matching body.
+            for (s.cases, 0..) |case, i| {
+                if (case.test_) |*test_expr| {
+                    try self.compileExpression(test_expr);
+                    try self.builder.emitOp(.strict_eq, case.span);
+                    try self.builder.emitU8(r_disc);
+                    try self.builder.emitOp(.jmp_if_true, case.span);
+                    body_patches[i] = self.builder.here();
+                    try self.builder.emitI16(0);
+                } else {
+                    if (default_idx != null) return error.UnsupportedStatement;
+                    default_idx = i;
+                    body_patches[i] = std.math.maxInt(u32);
+                }
+            }
+
+            // 2. After all tests fail: jump to default, or past the bodies.
+            try self.builder.emitOp(.jmp, s.span);
+            fallback_patch = self.builder.here();
+            try self.builder.emitI16(0);
+        }
 
         // Set up a loop context for `break` inside the switch.
         // `needs_env_pop` matches the env we just emitted so a
@@ -7189,6 +7236,9 @@ pub const Compiler = struct {
             const body_pc = self.builder.here();
             if (case.test_ == null) {
                 default_body_pc = body_pc;
+            } else if (dense_table) |table| {
+                const value = self.tryGetSmiLiteralValue(case.test_.?) orelse unreachable;
+                self.builder.setSwitchTarget(table, value, body_pc);
             } else {
                 try self.builder.patchI16(body_patches[i], body_pc);
             }
@@ -7213,12 +7263,14 @@ pub const Compiler = struct {
         }
 
         const exit_pc = self.builder.here();
-        if (default_body_pc) |pc| {
-            try self.builder.patchI16(fallback_patch, pc);
+        if (dense_table) |table| {
+            self.builder.finishSwitchTable(table, default_body_pc orelse fallback_target_pc);
+        } else if (default_body_pc) |pc| {
+            try self.builder.patchI16(fallback_patch.?, pc);
         } else {
             // No default: land on the natural-fall-through pop so
             // the env teardown still runs (when we have one).
-            try self.builder.patchI16(fallback_patch, fallback_target_pc);
+            try self.builder.patchI16(fallback_patch.?, fallback_target_pc);
         }
         for (ctx.break_patches.items) |p| try self.builder.patchI16(p, exit_pc);
         if (has_lex_decls) {
@@ -11299,11 +11351,11 @@ pub const Compiler = struct {
         };
     }
 
-    /// §13.6 / §13.10 — when `cond` is a strict-equality (`===` / `!==`)
-    /// or relational (`<` `<=` `>` `>=`) comparison, emit a single fused
-    /// compare-and-branch (`JmpIfStrict*` / `JmpIfNot{Lt,Le,Gt,Ge}`) and
-    /// return the i16 patch slot; else return null so the caller compiles
-    /// the condition + a plain `jmp_if_{false,true}`. Folds the `<cmp> r;
+    /// §13.6 / §13.10 — when `cond` is a strict-equality or relational
+    /// comparison, emit a single fused compare-and-branch
+    /// (`JmpIfStrict*` / `JmpIfNot{Lt,Le,Gt,Ge}`) and
+    /// return the logical branch patch slot; else return null so the caller
+    /// compiles the condition + a plain `jmp_if_{false,true}`. Folds the `<cmp> r;
     /// jmp_if_*` pair into one op — one fewer dispatch per conditional.
     /// Strict-(in)equality is boolean-negatable, so it fuses in both senses
     /// (jump-when-false → the negated operator, `JmpIfStrictNeq`). Relational
@@ -11311,11 +11363,13 @@ pub const Compiler = struct {
     /// fuse only in the jump-when-false sense via the dedicated `JmpIfNot*`
     /// ops that test the comparison and branch on its falsity (`if (a<b)` →
     /// `JmpIfNotLt`); a jump-when-true relational test is left unfused. The
-    /// fused arms reuse the exact `strictEq` / `relational` routines (incl.
-    /// coercion / re-entry), so the fusion is byte-identical; only
+    /// fused arms reuse the exact strict equality and relational routines
+    /// (including coercion / re-entry), so the fusion is byte-identical; only
     /// forward-branch sites (if / while / for tests) use it, so there is no
-    /// loop back-edge to handle. Loose `==` / `!=` are not fused (they need
-    /// `coerceForCompareEq`).
+    /// loop back-edge to handle. Loose equality remains as `Eq` / `Neq` plus
+    /// a boolean branch: an instrumented Richards trace showed a 4.34%
+    /// dispatch reduction from fusing it, but paired wall time regressed
+    /// 3.8%, so the larger opcode family did not pass the retention gate.
     fn tryFuseComparisonBranch(
         self: *Compiler,
         cond: *const ast.expression.Expression,
@@ -11343,6 +11397,20 @@ pub const Compiler = struct {
             .ge => if (jump_when_false) .jmp_if_not_ge else return null,
             else => return null,
         };
+        // Match `compileBinary`'s register-bound LHS specialization. Reading
+        // the slot after RHS evaluation is valid only when RHS cannot assign
+        // or update a register binding; otherwise snapshot the pre-RHS value
+        // into a temporary as required by §13.15.2 evaluation order.
+        if (self.tryRegisterBoundIdent(b.lhs.*)) |r_lhs| {
+            if (!self.exprMayWriteRegister(b.rhs)) {
+                try self.compileExpression(b.rhs);
+                try self.builder.emitOp(fused, span);
+                try self.builder.emitU8(r_lhs);
+                const slot = self.builder.here();
+                try self.builder.emitI16(0);
+                return slot;
+            }
+        }
         try self.compileExpression(b.lhs);
         const r = try self.reserveTemp();
         defer self.releaseTemp();
@@ -15059,6 +15127,7 @@ fn compileScriptLikeChunk(
     // lifetime; pinning lets the GC skip walking the chunk
     // tree on every collect. See `Heap.pinChunk`.
     _ = try regalloc.eliminateRedundantTdzChecks(allocator, &chunk);
+    _ = try regalloc.eliminateRedundantStoreLoads(allocator, &chunk);
     _ = try regalloc.eliminateDeadStores(allocator, &chunk);
     try realm.heap.pinChunk(&chunk);
     return chunk;
@@ -15260,6 +15329,7 @@ pub fn compileModuleAsChunk(
     var chunk = try c.finish();
     chunk.base_url = base_url;
     _ = try regalloc.eliminateRedundantTdzChecks(allocator, &chunk);
+    _ = try regalloc.eliminateRedundantStoreLoads(allocator, &chunk);
     _ = try regalloc.eliminateDeadStores(allocator, &chunk);
     try realm.heap.pinChunk(&chunk);
     return chunk;
@@ -15292,6 +15362,7 @@ pub fn compileExpressionAsChunk(
     try c.builder.emitOp(.return_, expr.span());
     var chunk = try c.finish();
     _ = try regalloc.eliminateRedundantTdzChecks(allocator, &chunk);
+    _ = try regalloc.eliminateRedundantStoreLoads(allocator, &chunk);
     _ = try regalloc.eliminateDeadStores(allocator, &chunk);
     try realm.heap.pinChunk(&chunk);
     return chunk;
@@ -15409,7 +15480,7 @@ test "compiler: computed access a[i] with register-bound receiver reads the sour
     defer testing.allocator.free(got);
     const t0 = t0Of(got);
     // Object operand is the param register r0, not a copied temp.
-    try testing.expect(std.mem.indexOf(u8, t0, "LdaComputed r0") != null);
+    try testing.expect(std.mem.indexOf(u8, t0, "LdaComputed8 r0") != null);
     // …and the receiver-copy Star is gone (the body has no other Star).
     try testing.expect(std.mem.indexOf(u8, t0, "Star ") == null);
 }
@@ -15421,7 +15492,7 @@ test "compiler: member store o.x=v with register-bound receiver stores to the so
     const got = try dumpExpr("(function(o,v){ o.x = v; })");
     defer testing.allocator.free(got);
     const t0 = t0Of(got);
-    try testing.expect(std.mem.indexOf(u8, t0, "StaProperty k0 r0") != null);
+    try testing.expect(std.mem.indexOf(u8, t0, "StaProperty8 k0 r0") != null);
     try testing.expect(std.mem.indexOf(u8, t0, "Star ") == null);
 }
 
@@ -15446,15 +15517,15 @@ test "compiler: ≤3-arg free calls fold argc into the opcode (CallN), >3 stay g
     // so they stay generic; see the commit message.)
     const g3 = try dumpScript("function g(){} g(1,2,3);");
     defer testing.allocator.free(g3);
-    try testing.expect(std.mem.indexOf(u8, g3, "Call3 ") != null);
+    try testing.expect(std.mem.indexOf(u8, g3, "Call3_8 ") != null);
 
     const g0 = try dumpScript("function g(){} g();");
     defer testing.allocator.free(g0);
-    try testing.expect(std.mem.indexOf(u8, g0, "Call0 ") != null);
+    try testing.expect(std.mem.indexOf(u8, g0, "Call0_8 ") != null);
 
     const g4 = try dumpScript("function g(){} g(1,2,3,4);");
     defer testing.allocator.free(g4);
-    try testing.expect(std.mem.indexOf(u8, g4, "Call ") != null); // generic for >3
+    try testing.expect(std.mem.indexOf(u8, g4, "Call8 ") != null); // generic for >3
     try testing.expect(std.mem.indexOf(u8, g4, "Call4") == null);
 }
 
@@ -15498,7 +15569,7 @@ test "compiler: folds a constant numeric expression to a single LdaSmi" {
     // dispatch should survive.
     const got = try dumpExpr("1 + 2*3;");
     defer testing.allocator.free(got);
-    try testing.expect(std.mem.indexOf(u8, got, "LdaSmi 7") != null);
+    try testing.expect(std.mem.indexOf(u8, got, "LdaSmi8 7") != null);
     try testing.expect(std.mem.indexOf(u8, got, "Add") == null);
     try testing.expect(std.mem.indexOf(u8, got, "Mul") == null);
 }
@@ -15607,6 +15678,31 @@ test "compiler: a while-loop relational test fuses" {
     try testing.expect(std.mem.indexOf(u8, t0Of(got), "JmpIfNotLt") != null);
 }
 
+test "compiler: a dense integer switch emits SwitchSmi" {
+    const got = try dumpExpr(
+        "(function(x){ switch(x){ case -1:return 9; case 0:return 10; case 1:return 11; case 2:return 12; default:return 99; } })",
+    );
+    defer testing.allocator.free(got);
+    const body = t0Of(got);
+    try testing.expect(std.mem.indexOf(u8, body, "SwitchSmi") != null);
+    try testing.expect(std.mem.indexOf(u8, body, "StrictEq") == null);
+}
+
+test "compiler: sparse or effectful switch tests retain ordered comparisons" {
+    const sparse = try dumpExpr(
+        "(function(x){ switch(x){ case 1:return 1; case 100:return 2; case 10000:return 3; case 1000000:return 4; default:return 0; } })",
+    );
+    defer testing.allocator.free(sparse);
+    try testing.expect(std.mem.indexOf(u8, t0Of(sparse), "SwitchSmi") == null);
+    try testing.expect(std.mem.indexOf(u8, t0Of(sparse), "StrictEq") != null);
+
+    const effectful = try dumpExpr(
+        "(function(x,f){ switch(x){ case f():return 1; case 2:return 2; case 3:return 3; case 4:return 4; default:return 0; } })",
+    );
+    defer testing.allocator.free(effectful);
+    try testing.expect(std.mem.indexOf(u8, t0Of(effectful), "SwitchSmi") == null);
+}
+
 test "compiler: redundant TDZ checks on initialized global lexicals are eliminated" {
     // §9.1.1.4 — `const o` (and `let s`, `let i`) are initialized before the
     // loop, so every read of them inside the body is provably past the TDZ.
@@ -15653,6 +15749,44 @@ test "compiler: a used member post-increment keeps the old value" {
     const t0 = t0Of(got);
     try testing.expect(std.mem.indexOf(u8, t0, "Star2") != null);
     try testing.expect(std.mem.indexOf(u8, t0, "Ldar2") != null);
+}
+
+test "compiler: discarded non-TDZ register updates fuse into IncReg and DecReg" {
+    // §13.4 — function `var` bindings are register-resident and never
+    // carry a TDZ. A prefix update, or a postfix whose result is discarded,
+    // needs only the bumped value, so the four-dispatch
+    // `Ldar; ToNumeric; Inc/Dec; Star` sequence can be one register update.
+    const inc_dump = try dumpExpr("(function(n){ var i=0; while(i<n) i++; return i; })");
+    defer testing.allocator.free(inc_dump);
+    const inc_body = t0Of(inc_dump);
+    try testing.expect(std.mem.indexOf(u8, inc_body, "IncReg r") != null);
+    try testing.expect(std.mem.indexOf(u8, inc_body, "ToNumeric") == null);
+
+    const dec_dump = try dumpExpr("(function(n){ var i=n; while(i>0) --i; return i; })");
+    defer testing.allocator.free(dec_dump);
+    const dec_body = t0Of(dec_dump);
+    try testing.expect(std.mem.indexOf(u8, dec_body, "DecReg r") != null);
+    try testing.expect(std.mem.indexOf(u8, dec_body, "ToNumeric") == null);
+}
+
+test "compiler: consumed postfix and TDZ register updates stay unfused" {
+    // A consumed postfix must reload the OLD numeric value, which IncReg does
+    // not preserve. A body-local `let` still carries register_tdz while its
+    // own initializer is running, so that site must retain the existing
+    // load/check/store sequence rather than hiding the ReferenceError
+    // ordering in the fused opcode.
+    const postfix_dump = try dumpExpr("(function(x){ return x++; })");
+    defer testing.allocator.free(postfix_dump);
+    const postfix_body = t0Of(postfix_dump);
+    try testing.expect(std.mem.indexOf(u8, postfix_body, "IncReg") == null);
+    try testing.expect(std.mem.indexOf(u8, postfix_body, "ToNumeric") != null);
+
+    const tdz_dump = try dumpExpr("(function(){ let x=++x; return x; })");
+    defer testing.allocator.free(tdz_dump);
+    const tdz_body = t0Of(tdz_dump);
+    try testing.expect(std.mem.indexOf(u8, tdz_body, "IncReg") == null);
+    try testing.expect(std.mem.indexOf(u8, tdz_body, "ToNumeric") != null);
+    try testing.expect(std.mem.indexOf(u8, tdz_body, "ThrowIfHole") != null);
 }
 
 test "compiler: a method call loads the callee from the accumulator, not a redundant reload" {

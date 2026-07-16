@@ -406,6 +406,54 @@ fn arrayPush(realm: *Realm, this_value: Value, args: []const Value) NativeError!
     if (argc > 0 and len > safe_max - argc) {
         return throwTypeError(realm, "Pushed value would exceed maximum length");
     }
+
+    // Dense one-item append — the dominant `arr.push(value)` shape.
+    // Both V8's ArrayPush and JSC's arrayProtoFuncPush select a direct
+    // fast-elements append for a genuine Array before their generic Set
+    // loops; keep Cynic's first tier deliberately narrower:
+    //   https://github.com/v8/v8/blob/main/src/builtins/builtins-array.cc
+    //   https://github.com/WebKit/WebKit/blob/main/Source/JavaScriptCore/runtime/ArrayPrototype.cpp
+    //
+    // The exact intrinsic chain makes the three descriptor probes a
+    // constant-time envelope. Any custom/cross-realm prototype, Proxy,
+    // sparse representation, integrity restriction, or indexed own /
+    // inherited descriptor retains the full §7.3.4 Set path below.
+    // `appendDenseSequential` owns pooled-buffer growth, OOM propagation,
+    // and both generational + incremental-marking write barriers.
+    if (args.len == 1 and
+        obj.brand.is_array_exotic and
+        !obj.brand.is_sparse and
+        !obj.brand.is_proxy and
+        !obj.brand.proxy_revoked and
+        obj.brand.extensible and
+        obj.brand.array_length_writable and
+        len >= 0 and len <= 0xFFFFFFFE and
+        @as(i64, obj.arrayLength()) == len)
+    {
+        if (realm.intrinsics.array_prototype) |array_proto| {
+            if (realm.intrinsics.object_prototype) |object_proto| {
+                if (obj.prototype == array_proto and
+                    array_proto.prototype == object_proto and
+                    object_proto.prototype == null)
+                {
+                    const idx: u32 = @intCast(len); // safety: guarded to the array-index range above
+                    var ibuf: [24]u8 = undefined;
+                    const key = JSObject.smallIndexKey(idx) orelse
+                        (std.fmt.bufPrint(&ibuf, "{d}", .{idx}) catch unreachable);
+                    if (!obj.hasOwn(key) and
+                        !array_proto.hasOwn(key) and
+                        !object_proto.hasOwn(key))
+                    {
+                        if (try obj.appendDenseSequential(realm.allocator, idx, args[0])) {
+                            // Dense Array `length` is the virtual
+                            // `elements.len`; append already advanced it.
+                            return numberFromI64(len + 1);
+                        }
+                    }
+                }
+            }
+        }
+    }
     for (args) |v| {
         var ibuf: [24]u8 = undefined;
         const islice = std.fmt.bufPrint(&ibuf, "{d}", .{len}) catch unreachable;
@@ -4382,4 +4430,39 @@ fn rejectFromStateWithReason(realm: *Realm, state: *JSObject, reason: Value) Nat
 fn rejectWithTypeErrorFromState(realm: *Realm, state: *JSObject, msg: []const u8) NativeError!Value {
     const ex = intrinsics.newTypeError(realm, msg) catch return error.OutOfMemory;
     return rejectFromStateWithReason(realm, state, ex);
+}
+
+// ── focused allocation tests ───────────────────────────────────────────────
+
+test "Array.prototype.push: one dense append allocates no index string" {
+    const testing = std.testing;
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.hardened = false;
+    try realm.installBuiltins();
+
+    // `makeDenseArray` supplies a pooled element buffer with spare
+    // capacity. The append itself therefore needs no allocation; any
+    // counter movement comes from push materialising the decimal key.
+    const arr = try realm.heap.makeDenseArray(
+        realm.intrinsics.array_prototype,
+        &.{Value.fromInt32(1)},
+    );
+    const strings_before = realm.heap.stringCount();
+    const allocs_before = realm.heap.allocs_since_gc;
+    const bytes_before = realm.heap.bytes_alloc_total;
+
+    const result = try arrayPush(
+        &realm,
+        heap_mod.taggedObject(arr),
+        &.{Value.fromInt32(2)},
+    );
+
+    try testing.expect(result.isInt32());
+    try testing.expectEqual(@as(i32, 2), result.asInt32());
+    try testing.expectEqual(@as(u32, 2), arr.arrayLength());
+    try testing.expectEqual(@as(i32, 2), arr.getIndexed(1).asInt32());
+    try testing.expectEqual(strings_before, realm.heap.stringCount());
+    try testing.expectEqual(allocs_before, realm.heap.allocs_since_gc);
+    try testing.expectEqual(bytes_before, realm.heap.bytes_alloc_total);
 }

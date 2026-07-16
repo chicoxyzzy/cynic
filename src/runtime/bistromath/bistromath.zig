@@ -19,8 +19,9 @@
 //! Scope (docs/jit.md §4, §12): moves, constants, int32
 //! arithmetic/bitwise/compares, branches, `loop_inc_lt`, `return_`,
 //! the property/array IC codegen (`lda_computed` dense reads,
-//! `make_array_n`), and `call` / `new_call` via in-line frame
-//! re-entry (the `frame_pushed` result below; §4.2/§4.5,
+//! `make_array_n`), and `call` / `new_call` plus exception handlers
+//! via in-line frame re-entry (the `frame_pushed` result below;
+//! §4.2/§4.5,
 //! docs/ctor-array-build-gap.md L5). The compile decision is
 //! per-chunk: a chunk with an opcode the emitter doesn't handle is
 //! `dont_compile` and stays interpreted whole; within a compiled
@@ -64,10 +65,10 @@ pub const EntryResult = enum(u32) {
     done = 1,
     /// A callee (or a nested call) threw: `realm.pending_exception`
     /// holds the value and `frame.ip` sits at the faulting call op,
-    /// so `unwindThrow` checks this frame's own handlers first —
-    /// catching tiers the frame down at the handler (docs/jit.md
-    /// §4.5), and an unhandled throw keeps unwinding the caller
-    /// stack. The frame stays pushed.
+    /// so the driver asks the shared `unwindThrow` implementation to
+    /// select and install the handler state. A handler with a compiled
+    /// reentry stub continues in Bistromath; cold or out-of-scope handlers
+    /// return to Lantern. The frame stays pushed.
     threw = 2,
     /// The host ran out of memory inside a call — propagated as
     /// `error.OutOfMemory` (never re-executed: the callee may have
@@ -198,6 +199,43 @@ pub fn tryResumeTop(
     return driveTop(allocator, realm, frames, stub);
 }
 
+/// Find the first handler the shared Lantern unwinder would select inside the
+/// frame subtree owned by this `driveTop` invocation. When that handler's
+/// chunk has a compiled reentry stub, run the real unwinder once (so catch
+/// bindings, finally-return state, register release, and barriers stay in one
+/// implementation) and return the machine-code continuation. A cold handler,
+/// an async Promise-wrap boundary, termination, or a handler below `base`
+/// leaves the throw untouched for Lantern's existing caller-side path.
+fn dispatchCompiledHandler(
+    allocator: std.mem.Allocator,
+    realm: *Realm,
+    frames: *std.ArrayListUnmanaged(CallFrame),
+    base: usize,
+    exception: Value,
+) RunError!?EntryFn {
+    if (realm.termination != null) return null;
+    const return_mode = realm.gen_return_completion != null;
+    var depth = frames.items.len;
+    while (depth > base) : (depth -= 1) {
+        const frame = &frames.items[depth - 1];
+        for (frame.chunk.handlers) |handler| {
+            if (frame.ip > handler.start_pc and frame.ip <= handler.end_pc) {
+                if (return_mode and !handler.is_finally) continue;
+                const js = frame.chunk.jit_state orelse return null;
+                const entry_base = js.entry orelse return null;
+                const code_off = js.resumeCodeOffset(handler.handler_pc) orelse return null;
+                if (!try interpreter.unwindThrow(allocator, realm, frames, exception)) return null;
+                const code: [*]const u8 = @ptrCast(entry_base);
+                return @ptrCast(@alignCast(code + code_off));
+            }
+        }
+        // `unwindThrow` converts a throw crossing an async function boundary
+        // into a rejected Promise before it can reach any older frame.
+        if (frame.wrap_return_in_promise) return null;
+    }
+    return null;
+}
+
 /// The in-line frame-reentry driver (docs/jit.md §4.2/§4.5). Enters
 /// `entry` for the current top frame, then loops on its verdict —
 /// the generalisation of the §4.5(b) PTC trampoline to every
@@ -219,7 +257,9 @@ pub fn tryResumeTop(
 ///   hook re-enters this parked caller).
 /// - `.resume_interp`: the frame tiered down mid-body — return
 ///   `.not_entered` so Lantern interprets it at `frame.ip`.
-/// - `.threw` / `.host_oom`: propagate.
+/// - `.threw`: run the shared unwinder and continue at a compiled handler
+///   entry when available; otherwise propagate to Lantern.
+/// - `.host_oom`: propagate.
 fn driveTop(
     allocator: std.mem.Allocator,
     realm: *Realm,
@@ -294,6 +334,10 @@ fn driveTop(
             .threw => {
                 const ex = realm.pending_exception orelse Value.undefined_;
                 realm.pending_exception = null;
+                if (try dispatchCompiledHandler(allocator, realm, frames, base, ex)) |handler_entry| {
+                    stub = handler_entry;
+                    continue;
+                }
                 return .{ .threw = ex };
             },
             .host_oom => return error.OutOfMemory,
@@ -711,6 +755,10 @@ const Compiler = struct {
     /// Loop headers (backward-branch targets) — each gets an OSR
     /// entry stub; insertion-ordered for a deterministic table.
     osr_headers: std.AutoArrayHashMapUnmanaged(u32, void) = .empty,
+    /// Exception-handler bytecode entries. Each gets the same prologue+jump
+    /// reentry stub as an OSR header so `driveTop` can continue a compiled
+    /// catch/finally after the shared Lantern unwinder installs its state.
+    handler_entries: std.AutoArrayHashMapUnmanaged(u32, void) = .empty,
     osr_entries: std.ArrayListUnmanaged(Chunk.JitState.OsrEntry) = .empty,
     /// In-line frame-reentry resume points (docs/jit.md §4.5): one per
     /// in-line `call`/`new_call` site, mapping the resume bytecode
@@ -744,6 +792,7 @@ const Compiler = struct {
         for (self.threws.items) |*t| t.label.fixups.deinit(gpa);
         self.threws.deinit(gpa);
         self.osr_headers.deinit(gpa);
+        self.handler_entries.deinit(gpa);
         self.osr_entries.deinit(gpa);
         for (self.resume_points.items) |*r| r.label.fixups.deinit(gpa);
         self.resume_points.deinit(gpa);
@@ -797,6 +846,11 @@ const Compiler = struct {
     /// collect branch targets so pass 2 can bind labels in order.
     fn scanTargets(self: *Compiler) CompileError!void {
         const code = self.chunk.code;
+        for (self.chunk.handlers) |handler| {
+            if (@as(usize, handler.handler_pc) >= code.len) return error.UnsupportedOp;
+            _ = try self.labelFor(handler.handler_pc);
+            try self.handler_entries.put(self.m.gpa, handler.handler_pc, {});
+        }
         var i: usize = 0;
         // A `make_environment 0` is emitted into the same chunk as the
         // env reads it scopes — the elision below is only sound when
@@ -808,25 +862,21 @@ const Compiler = struct {
         while (i < code.len) {
             const op: Op = @enumFromInt(code[i]);
             const after = i + 1 + Op.operandSize(op);
+            if (op.spec().baseline == .unsupported) return error.UnsupportedOp;
+            if (op.branchInfo()) |info| {
+                const off = info.displacement(code, i);
+                const target = info.target(code, i);
+                _ = try self.labelFor(target);
+                if (off < 0) try self.osr_headers.put(self.m.gpa, target, {});
+            }
+            if (op == .switch_smi) {
+                const table_index = readU16(code, i + 2);
+                if (table_index >= self.chunk.switch_tables.len) return error.UnsupportedOp;
+                const table = self.chunk.switch_tables[table_index];
+                _ = try self.labelFor(table.default_target);
+                for (table.targets) |target| _ = try self.labelFor(target);
+            }
             switch (op) {
-                // zig fmt: off
-                .lda_undefined, .lda_null, .lda_true, .lda_false,
-                .lda_hole, .lda_smi, .lda_constant, .ldar, .star,
-                .lda_zero, .lda_one,
-                .ldar_0, .ldar_1, .ldar_2, .ldar_3,
-                .star_0, .star_1, .star_2, .star_3,
-                .mov, .add, .add_to_int32, .sub, .mul, .add_smi, .to_int32,
-                .bit_and, .bit_or, .bit_xor,
-                .lt, .gt, .le, .ge, .eq, .neq, .strict_eq, .strict_neq,
-                .lda_property, .lda_property_reg, .sta_property,
-                .lda_global, .lda_global_or_undef,
-                .lda_this, .call, .call0, .call1, .call2, .call3,
-                .call_method, .call_property, .new_call,
-                .tail_call, .tail_call_method,
-                .lda_global_slot, .sta_global_slot, .sta_global_slot_init,
-                .negate, .bit_not, .logical_not,
-                .make_array_n, .lda_computed,
-                .throw_if_hole, .return_ => {},
                 .lda_env, .sta_env => {
                     // Fixed-depth walks unroll; cap the unroll.
                     if (code[i + 1] > 8) return error.UnsupportedOp;
@@ -849,24 +899,7 @@ const Compiler = struct {
                     if (code[i + 1] != 0) return error.UnsupportedOp;
                     has_make_env = true;
                 },
-                .jmp, .jmp_if_true, .jmp_if_false => {
-                    const off = readI16(code, i + 1);
-                    _ = try self.labelFor(targetOf(after, off));
-                    // A backward branch's target is a loop header —
-                    // an OSR entry point (docs/jit.md §12 3f).
-                    if (off < 0) try self.osr_headers.put(self.m.gpa, targetOf(after, off), {});
-                },
-                .loop_inc_lt => {
-                    const off = readI16(code, i + 3);
-                    _ = try self.labelFor(targetOf(after, off));
-                    if (off < 0) try self.osr_headers.put(self.m.gpa, targetOf(after, off), {});
-                },
-                .jmp_if_strict_eq, .jmp_if_strict_neq, .jmp_if_not_lt, .jmp_if_not_le, .jmp_if_not_gt, .jmp_if_not_ge => {
-                    // `[op][r:u8][off:i16]` — forward-only by construction.
-                    const off = readI16(code, i + 2);
-                    _ = try self.labelFor(targetOf(after, off));
-                },
-                else => return error.UnsupportedOp,
+                else => {},
             }
             i = after;
         }
@@ -906,8 +939,12 @@ const Compiler = struct {
                 .lda_true => try m.movImm64(acc_reg, Value.true_.bits),
                 .lda_false => try m.movImm64(acc_reg, Value.false_.bits),
                 .lda_hole => try m.movImm64(acc_reg, Value.hole_.bits),
-                .lda_smi => {
-                    const imm = readI32(code, i + 1);
+                .lda_smi, .lda_smi8, .lda_smi16 => {
+                    const imm: i32 = switch (op) {
+                        .lda_smi8 => readI8(code, i + 1),
+                        .lda_smi16 => readI16(code, i + 1),
+                        else => readI32(code, i + 1),
+                    };
                     try m.movImm64(acc_reg, Value.fromInt32(imm).bits);
                 },
                 .lda_constant => {
@@ -927,6 +964,26 @@ const Compiler = struct {
                 .mov => {
                     try m.emit(a64.ldrImm(.x9, regs_reg, regSlot(code[i + 1])));
                     try m.emit(a64.strImm(.x9, regs_reg, regSlot(code[i + 2])));
+                },
+                .inc_reg, .dec_reg => {
+                    // §13.4 fast path. The bytecode's general semantics are
+                    // ToNumeric + a Number/BigInt unit; Bistromath handles the
+                    // common int32 case and resumes at this opcode for every
+                    // coercion, BigInt, or overflow case so Lantern performs
+                    // the observable slow path exactly once.
+                    const td = try self.tdFor(bc);
+                    const r = code[i + 1];
+                    try m.emit(a64.ldrImm(.x9, regs_reg, regSlot(r)));
+                    try self.checkInt32(.x9, td);
+                    if (op == .inc_reg) {
+                        try m.emit(a64.addsImmW(.x11, .x9, 1));
+                    } else {
+                        try m.movImm64(.x10, 1);
+                        try m.emit(a64.subsRegW(.x11, .x9, .x10));
+                    }
+                    try m.jumpCond(.vs, td);
+                    try m.emit(a64.orrReg(acc_reg, .x11, int32_tag_reg));
+                    try m.emit(a64.strImm(acc_reg, regs_reg, regSlot(r)));
                 },
 
                 .add, .sub => {
@@ -969,9 +1026,13 @@ const Compiler = struct {
                     try m.emit(a64.movRegW(.x11, .x11));
                     try m.emit(a64.orrReg(acc_reg, .x11, int32_tag_reg));
                 },
-                .add_smi => {
+                .add_smi, .add_smi8, .add_smi16 => {
                     const td = try self.tdFor(bc);
-                    const imm = readI32(code, i + 2);
+                    const imm: i32 = switch (op) {
+                        .add_smi8 => readI8(code, i + 2),
+                        .add_smi16 => readI16(code, i + 2),
+                        else => readI32(code, i + 2),
+                    };
                     try m.emit(a64.ldrImm(.x9, regs_reg, regSlot(code[i + 1])));
                     try self.checkInt32(.x9, td);
                     try m.movImm64(.x10, @as(u32, @bitCast(imm)));
@@ -1019,7 +1080,17 @@ const Compiler = struct {
                     // Zero-slot env (scan-enforced) — unobservable
                     // from this chunk; elided.
                 },
-                .call, .call0, .call1, .call2, .call3 => {
+                .call,
+                .call0,
+                .call1,
+                .call2,
+                .call3,
+                .call8,
+                .call0_8,
+                .call1_8,
+                .call2_8,
+                .call3_8,
+                => {
                     // docs/jit.md §4.5 — the cell-hit case takes in-line
                     // frame-reentry (push the callee, drive in place);
                     // the miss/exotic case takes the generic nested
@@ -1027,10 +1098,19 @@ const Compiler = struct {
                     const r_callee = code[i + 1];
                     // `call0..3` fold argc into the opcode (ic at i+2);
                     // generic `call` reads argc:u8 then ic at i+3.
-                    const op_byte = code[i];
-                    const is_generic = op_byte == @intFromEnum(Op.call);
-                    const argc: u8 = if (is_generic) code[i + 2] else op_byte - @intFromEnum(Op.call0);
-                    const ic_call = if (is_generic) readU16(code, i + 3) else readU16(code, i + 2);
+                    const narrow = switch (op) {
+                        .call8, .call0_8, .call1_8, .call2_8, .call3_8 => true,
+                        else => false,
+                    };
+                    const is_generic = op == .call or op == .call8;
+                    const argc: u8 = if (is_generic) code[i + 2] else switch (op) {
+                        .call0, .call0_8 => 0,
+                        .call1, .call1_8 => 1,
+                        .call2, .call2_8 => 2,
+                        else => 3,
+                    };
+                    const ic_at = i + if (is_generic) @as(usize, 3) else 2;
+                    const ic_call: u16 = if (narrow) code[ic_at] else readU16(code, ic_at);
                     const td = try self.tdFor(bc);
                     const threw = try self.threwFor(bc);
                     // Root the live accumulator through the frame —
@@ -1040,7 +1120,7 @@ const Compiler = struct {
                     try self.emitCallDispatch(.x9, null, r_callee + 1, argc, ic_call, @intCast(after), td, threw);
                     try self.bindResume(@intCast(after));
                 },
-                .call_method => {
+                .call_method, .call_method8 => {
                     // §13.3.6 — like `call` with `this` bound to the
                     // receiver register. The callee was loaded by
                     // preceding ops (the GET-before-arguments
@@ -1048,7 +1128,7 @@ const Compiler = struct {
                     const r_recv = code[i + 1];
                     const r_callee = code[i + 2];
                     const argc = code[i + 3];
-                    const ic_call = readU16(code, i + 4);
+                    const ic_call: u16 = if (op == .call_method8) code[i + 4] else readU16(code, i + 4);
                     const td = try self.tdFor(bc);
                     const threw = try self.threwFor(bc);
                     try m.emit(a64.strImm(acc_reg, frame_reg, acc_off));
@@ -1056,16 +1136,18 @@ const Compiler = struct {
                     try self.emitCallDispatch(.x9, r_recv, r_callee + 1, argc, ic_call, @intCast(after), td, threw);
                     try self.bindResume(@intCast(after));
                 },
-                .call_property => {
+                .call_property, .call_property8 => {
                     // The fused load+call (`obj.method(args)`): the
                     // §4.4 property-IC read into a scratch the call
                     // marshal then consumes, `this` = the receiver.
                     // Any load miss tiers down at the op — Lantern
                     // re-runs the whole fused sequence.
-                    const r_recv = code[i + 3];
-                    const argc = code[i + 4];
-                    const ic_load = readU16(code, i + 5);
-                    const ic_call = readU16(code, i + 7);
+                    const narrow = op == .call_property8;
+                    const r_at = i + if (narrow) @as(usize, 2) else 3;
+                    const r_recv = code[r_at];
+                    const argc = code[r_at + 1];
+                    const ic_load: u16 = if (narrow) code[r_at + 2] else readU16(code, r_at + 2);
+                    const ic_call: u16 = if (narrow) code[r_at + 3] else readU16(code, r_at + 4);
                     const td = try self.tdFor(bc);
                     const threw = try self.threwFor(bc);
                     // Sync the PRE-op accumulator before any
@@ -1079,7 +1161,7 @@ const Compiler = struct {
                     try self.emitCallDispatch(.x14, r_recv, r_recv + 1, argc, ic_call, @intCast(after), td, threw);
                     try self.bindResume(@intCast(after));
                 },
-                .new_call => {
+                .new_call, .new_call8 => {
                     // docs/jit.md §4.5 in-line construct — lifted from
                     // dont_compile (the prior nested-`runFrames` attempts
                     // regressed; see docs/ctor-array-build-gap.md L5).
@@ -1087,7 +1169,7 @@ const Compiler = struct {
                     // in place; any miss tiers down to re-run `new_call`.
                     const r_callee = code[i + 1];
                     const argc = code[i + 2];
-                    const ic_call = readU16(code, i + 3);
+                    const ic_call: u16 = if (op == .new_call8) code[i + 3] else readU16(code, i + 3);
                     try self.emitConstructDispatch(r_callee, argc, ic_call, bc, @intCast(after));
                     try self.bindResume(@intCast(after));
                 },
@@ -1317,12 +1399,12 @@ const Compiler = struct {
                     try m.jumpCbnz(.x9, td);
                     try m.emit(a64.ldrImm(acc_reg, frame_reg, layout.frame.this_value));
                 },
-                .lda_property => {
+                .lda_property, .lda_property8 => {
                     const td = try self.tdFor(bc);
-                    const ic_idx = readU16(code, i + 3);
+                    const ic_idx: u16 = if (op == .lda_property8) code[i + 2] else readU16(code, i + 3);
                     try self.emitPropertyIcLoad(acc_reg, acc_reg, ic_idx, td);
                 },
-                .lda_property_reg => {
+                .lda_property_reg, .lda_property_reg8 => {
                     // Register-receiver form: load the receiver from
                     // its frame slot (a GC-rooted register — only read
                     // here, never stored to, so it survives for a
@@ -1333,36 +1415,40 @@ const Compiler = struct {
                     // which reads `src` before writing `.x9`, so
                     // sourcing from `.x9` is safe.
                     const td = try self.tdFor(bc);
-                    const r_obj = code[i + 3];
-                    const ic_idx = readU16(code, i + 4);
+                    const narrow = op == .lda_property_reg8;
+                    const r_at = i + if (narrow) @as(usize, 2) else 3;
+                    const r_obj = code[r_at];
+                    const ic_idx: u16 = if (narrow) code[r_at + 1] else readU16(code, r_at + 1);
                     try m.emit(a64.ldrImm(.x9, regs_reg, regSlot(r_obj)));
                     try self.emitPropertyIcLoad(.x9, acc_reg, ic_idx, td);
                 },
-                .sta_property => {
+                .sta_property, .sta_property8 => {
                     // Same-shape hit only; the transition mode
                     // resizes slots and tiers down. The §9 rule:
                     // emit exactly what the interpreter's hit path
                     // does — the slot store, then the same
                     // storeInternalSlot barrier through a C shim.
                     const td = try self.tdFor(bc);
-                    const r_obj = code[i + 3];
-                    const ic_idx = readU16(code, i + 4);
+                    const narrow = op == .sta_property8;
+                    const r_at = i + if (narrow) @as(usize, 2) else 3;
+                    const r_obj = code[r_at];
+                    const ic_idx: u16 = if (narrow) code[r_at + 1] else readU16(code, r_at + 1);
                     try m.emit(a64.ldrImm(.x9, regs_reg, regSlot(r_obj)));
                     try self.emitPlainObject(.x9, .x9, td);
-                    try self.emitCellAddr(.x10, ic_idx);
-                    try m.emit(a64.ldrImm(.x11, .x10, layout.ic_cell.shape));
+                    try self.emitStoreCellAddr(.x10, ic_idx);
+                    try m.emit(a64.ldrImm(.x11, .x10, layout.store_ic_cell.shape));
                     try m.jumpCbz(.x11, td);
                     try m.emit(a64.ldrImm(.x12, .x9, layout.object.shape));
                     try m.emit(a64.cmpReg(.x11, .x12));
                     try m.jumpCond(.ne, td);
-                    try m.emit(a64.ldrImmW(.x11, .x10, layout.ic_cell.slot));
+                    try m.emit(a64.ldrImmW(.x11, .x10, layout.store_ic_cell.slot));
                     try self.emitSlotWrite(acc_reg, .x9, .x11);
                     try m.emit(a64.movReg(.x0, realm_reg));
                     try m.emit(a64.movReg(.x1, .x9));
                     try m.emit(a64.movReg(.x2, acc_reg));
                     try m.callAbs(.x16, @intFromPtr(&storeBarrier));
                 },
-                .lda_global, .lda_global_or_undef => {
+                .lda_global, .lda_global_or_undef, .lda_global8, .lda_global_or_undef8 => {
                     // The interpreter's predicate verbatim: resolve
                     // the global env through the executing frame's
                     // realm (§8.3 — ShadowRealm children differ from
@@ -1371,7 +1457,8 @@ const Compiler = struct {
                     // differ only on the miss path, which tiers down
                     // either way.
                     const td = try self.tdFor(bc);
-                    const ic_idx = readU16(code, i + 3);
+                    const narrow = op == .lda_global8 or op == .lda_global_or_undef8;
+                    const ic_idx: u16 = if (narrow) code[i + 2] else readU16(code, i + 3);
                     var have_gr = Masm.Label{};
                     defer have_gr.fixups.deinit(m.gpa);
                     try m.emit(a64.ldrImm(.x9, frame_reg, layout.frame.running_realm));
@@ -1381,31 +1468,58 @@ const Compiler = struct {
                     try self.emitCellAddr(.x10, ic_idx);
                     try self.loadFieldU64(.x12, .x9, layout.realm.globals_target);
                     try m.jumpCbz(.x12, td);
-                    try m.emit(a64.ldrImm(.x11, .x10, layout.ic_cell.shape));
+                    try m.emit(a64.ldrImm(.x11, .x10, layout.load_ic_cell.shape));
                     try m.jumpCbz(.x11, td);
                     try m.emit(a64.ldrImm(.x13, .x12, layout.object.shape));
                     try m.emit(a64.cmpReg(.x11, .x13));
                     try m.jumpCond(.ne, td);
-                    try m.emit(a64.ldrImm(.x11, .x10, layout.ic_cell.proto));
+                    try m.emit(a64.ldrImm(.x11, .x10, layout.load_ic_cell.proto));
                     try m.jumpCbnz(.x11, td);
                     try self.loadFieldU64(.x13, .x9, layout.realm.globals_decl_revision);
-                    try m.emit(a64.ldrImm(.x9, .x10, layout.ic_cell.proto_rev));
+                    try m.emit(a64.ldrImm(.x9, .x10, layout.load_ic_cell.proto_rev));
                     try m.emit(a64.cmpReg(.x13, .x9));
                     try m.jumpCond(.ne, td);
-                    try m.emit(a64.ldrImmW(.x11, .x10, layout.ic_cell.slot));
+                    try m.emit(a64.ldrImmW(.x11, .x10, layout.load_ic_cell.slot));
                     try self.emitSlotRead(acc_reg, .x12, .x11);
                 },
 
-                .jmp => {
-                    const off = readI16(code, i + 1);
-                    const target = targetOf(after, off);
+                .switch_smi => {
+                    const td = try self.tdFor(bc);
+                    const table_index = readU16(code, i + 2);
+                    const table = self.chunk.switch_tables[table_index];
+                    try m.emit(a64.ldrImm(.x9, regs_reg, regSlot(code[i + 1])));
+                    // Lantern handles integer-valued doubles and every
+                    // non-int32 default miss. The baseline's hot path stays a
+                    // tag check plus native comparisons with no JS re-entry.
+                    try self.checkInt32(.x9, td);
+                    for (table.targets, 0..) |target, slot| {
+                        if (target == table.default_target) continue;
+                        const case_value: i32 = @intCast(@as(i64, table.min) + @as(i64, @intCast(slot)));
+                        try m.movImm64(.x10, @as(u32, @bitCast(case_value)));
+                        try m.emit(a64.cmpRegW(.x9, .x10));
+                        try m.jumpCond(.eq, try self.labelForExisting(target));
+                    }
+                    try m.jump(try self.labelForExisting(table.default_target));
+                },
+                .jmp, .jmp8, .jmp32 => {
+                    const info = op.branchInfo().?;
+                    const off = info.displacement(code, i);
+                    const target = info.target(code, i);
                     if (off < 0) try self.backEdgeSafePoint(target);
                     try m.jump(try self.labelForExisting(target));
                 },
-                .jmp_if_true, .jmp_if_false => {
+                .jmp_if_true,
+                .jmp_if_true8,
+                .jmp_if_true32,
+                .jmp_if_false,
+                .jmp_if_false8,
+                .jmp_if_false32,
+                => {
                     const td = try self.tdFor(bc);
-                    const off = readI16(code, i + 1);
-                    const target = targetOf(after, off);
+                    const info = op.branchInfo().?;
+                    const off = info.displacement(code, i);
+                    const target = info.target(code, i);
+                    const canonical = info.canonical;
                     // Bool-tagged accumulators only; anything else
                     // (numbers, strings, objects in a condition)
                     // tiers down to ToBoolean in Lantern.
@@ -1416,7 +1530,7 @@ const Compiler = struct {
                     defer skip.fixups.deinit(m.gpa);
                     // Invert: hop over the (possibly safepointed)
                     // taken path when the condition doesn't hold.
-                    if (op == .jmp_if_true) {
+                    if (canonical == .jmp_if_true) {
                         try m.jumpTbz(acc_reg, 0, &skip);
                     } else {
                         try m.jumpTbnz(acc_reg, 0, &skip);
@@ -1425,12 +1539,13 @@ const Compiler = struct {
                     try m.jump(try self.labelForExisting(target));
                     m.bind(&skip);
                 },
-                .loop_inc_lt => {
+                .loop_inc_lt, .loop_inc_lt8, .loop_inc_lt32 => {
                     const td = try self.tdFor(bc);
                     const r_counter = code[i + 1];
                     const r_bound = code[i + 2];
-                    const off = readI16(code, i + 3);
-                    const target = targetOf(after, off);
+                    const info = op.branchInfo().?;
+                    const off = info.displacement(code, i);
+                    const target = info.target(code, i);
                     try m.emit(a64.ldrImm(.x9, regs_reg, regSlot(r_counter)));
                     try m.emit(a64.ldrImm(.x10, regs_reg, regSlot(r_bound)));
                     try self.checkInt32(.x9, td);
@@ -1447,7 +1562,25 @@ const Compiler = struct {
                     try m.jump(try self.labelForExisting(target));
                     m.bind(&skip);
                 },
-                .jmp_if_strict_eq, .jmp_if_strict_neq, .jmp_if_not_lt, .jmp_if_not_le, .jmp_if_not_gt, .jmp_if_not_ge => {
+                .jmp_if_strict_eq,
+                .jmp_if_strict_eq8,
+                .jmp_if_strict_eq32,
+                .jmp_if_strict_neq,
+                .jmp_if_strict_neq8,
+                .jmp_if_strict_neq32,
+                .jmp_if_not_lt,
+                .jmp_if_not_lt8,
+                .jmp_if_not_lt32,
+                .jmp_if_not_le,
+                .jmp_if_not_le8,
+                .jmp_if_not_le32,
+                .jmp_if_not_gt,
+                .jmp_if_not_gt8,
+                .jmp_if_not_gt32,
+                .jmp_if_not_ge,
+                .jmp_if_not_ge8,
+                .jmp_if_not_ge32,
+                => {
                     // Fused compare-and-branch — the int32 fast path of the
                     // comparison (cf. the `.lt`…`.strict_eq` codegen) + a
                     // forward branch (cf. loop_inc_lt). Non-int32 operands
@@ -1457,8 +1590,9 @@ const Compiler = struct {
                     // jump-on-false rather than negated comparisons).
                     // Forward-only ⇒ no back-edge safepoint.
                     const td = try self.tdFor(bc);
-                    const off = readI16(code, i + 2);
-                    const target = targetOf(after, off);
+                    const info = op.branchInfo().?;
+                    const target = info.target(code, i);
+                    const canonical = info.canonical;
                     try m.emit(a64.ldrImm(.x9, regs_reg, regSlot(code[i + 1])));
                     try self.checkInt32(.x9, td);
                     try self.checkInt32(acc_reg, td);
@@ -1466,11 +1600,11 @@ const Compiler = struct {
                     var skip = Masm.Label{};
                     defer skip.fixups.deinit(m.gpa);
                     // Skip the branch when it should NOT be taken. For the
-                    // strict-eq pair that is "comparison fails"; for the
+                    // equality pairs that is "comparison fails"; for the
                     // `jmp_if_not_*` (jump-on-false) ops it is "comparison
                     // holds" — int32 has no NaN, so the signed condition is
                     // exact here.
-                    const skip_cond: a64.Cond = switch (op) {
+                    const skip_cond: a64.Cond = switch (canonical) {
                         .jmp_if_strict_eq => .ne,
                         .jmp_if_strict_neq => .eq,
                         .jmp_if_not_lt => .lt,
@@ -1493,7 +1627,7 @@ const Compiler = struct {
                     try m.jumpCond(.eq, td);
                 },
 
-                .lda_computed => {
+                .lda_computed, .lda_computed8 => {
                     // docs/ctor-array-build-gap.md L1 — the int32-keyed
                     // dense read. recv is in r_obj, the key is in acc.
                     // The shared check is pure (no alloc), so no
@@ -1598,15 +1732,11 @@ const Compiler = struct {
         // the header. The dispatcher enters here from a Lantern
         // back-edge whose loopSafePoint already synced ip and
         // accumulator; frame identity makes the switch a jump.
-        for (self.osr_headers.keys()) |hdr| {
-            try self.osr_entries.append(m.gpa, .{
-                .bc = hdr,
-                .code_off = @intCast(m.code.items.len),
-            });
-            try self.prologue();
-            const idx = self.target_labels.get(hdr).?;
-            try m.jump(&self.labels.items[idx]);
-        }
+        for (self.osr_headers.keys()) |hdr| try self.emitTargetReentry(hdr);
+        // Handler reentry uses the same frame-compatible prologue as OSR,
+        // but the shared unwinder has already installed the catch binding /
+        // accumulator and moved `frame.ip` to `handler_pc`.
+        for (self.handler_entries.keys()) |handler_pc| try self.emitTargetReentry(handler_pc);
         // In-line frame-reentry resume stubs (docs/jit.md §4.5): one per
         // in-line call/construct site. The driver re-enters here after
         // the callee returns — same prologue (which reloads `acc_reg`
@@ -1624,6 +1754,16 @@ const Compiler = struct {
             try self.prologue();
             try m.jump(&r.label);
         }
+    }
+
+    fn emitTargetReentry(self: *Compiler, bc: u32) CompileError!void {
+        try self.osr_entries.append(self.m.gpa, .{
+            .bc = bc,
+            .code_off = @intCast(self.m.code.items.len),
+        });
+        try self.prologue();
+        const idx = self.target_labels.get(bc) orelse return error.UnsupportedOp;
+        try self.m.jump(&self.labels.items[idx]);
     }
 
     /// docs/jit.md §4.6 — every loop back-edge re-checks the step
@@ -1776,9 +1916,9 @@ const Compiler = struct {
         m.bind(&done);
     }
 
-    /// The named-property IC read — mirrors the interpreter's two
-    /// hit modes exactly, own-data and proto-load, reading the cell
-    /// as data (docs/jit.md §4.4); any miss (cold cell, shape
+    /// The named-property IC read — mirrors the interpreter's three
+    /// hit modes exactly: own data, prototype data, and a frozen
+    /// synthetic-accessor value. Any miss (cold cell, shape
     /// change, proto swap, exotic receiver) jumps to `td` and
     /// Lantern refills. `src_val` holds the receiver Value (read
     /// first; must not be x9-x13); `dst` receives the loaded Value
@@ -1793,7 +1933,7 @@ const Compiler = struct {
         const m = &self.m;
         try self.emitPlainObject(src_val, .x9, td);
         try self.emitCellAddr(.x10, ic_idx);
-        try m.emit(a64.ldrImm(.x11, .x10, layout.ic_cell.shape));
+        try m.emit(a64.ldrImm(.x11, .x10, layout.load_ic_cell.shape));
         try m.jumpCbz(.x11, td);
         try m.emit(a64.ldrImm(.x12, .x9, layout.object.shape));
         try m.emit(a64.cmpReg(.x11, .x12));
@@ -1802,10 +1942,10 @@ const Compiler = struct {
         defer proto_path.fixups.deinit(m.gpa);
         var next = Masm.Label{};
         defer next.fixups.deinit(m.gpa);
-        try m.emit(a64.ldrImm(.x11, .x10, layout.ic_cell.proto));
+        try m.emit(a64.ldrImm(.x11, .x10, layout.load_ic_cell.proto));
         try m.jumpCbnz(.x11, &proto_path);
         // Own-data hit: dst = recv.slots[cell.slot].
-        try m.emit(a64.ldrImmW(.x11, .x10, layout.ic_cell.slot));
+        try m.emit(a64.ldrImmW(.x11, .x10, layout.load_ic_cell.slot));
         try self.emitSlotRead(dst, .x9, .x11);
         try m.jump(&next);
         // Proto-load hit: identity of the cached proto, the proto's
@@ -1815,16 +1955,24 @@ const Compiler = struct {
         try m.emit(a64.ldrImm(.x12, .x9, layout.object.prototype));
         try m.emit(a64.cmpReg(.x12, .x11));
         try m.jumpCond(.ne, td);
-        try m.emit(a64.ldrImm(.x9, .x10, layout.ic_cell.proto_shape));
+        try m.emit(a64.ldrImm(.x9, .x10, layout.load_ic_cell.proto_shape));
         try m.emit(a64.ldrImm(.x13, .x12, layout.object.shape));
         try m.emit(a64.cmpReg(.x9, .x13));
         try m.jumpCond(.ne, td);
         try self.loadRealmU64(.x9, layout.realm.proto_revision_counter);
-        try m.emit(a64.ldrImm(.x13, .x10, layout.ic_cell.proto_rev));
+        try m.emit(a64.ldrImm(.x13, .x10, layout.load_ic_cell.proto_rev));
         try m.emit(a64.cmpReg(.x9, .x13));
         try m.jumpCond(.ne, td);
-        try m.emit(a64.ldrImmW(.x11, .x10, layout.ic_cell.slot));
+        var synthetic = Masm.Label{};
+        defer synthetic.fixups.deinit(m.gpa);
+        try m.emit(a64.ldrbImm(.x11, .x10, layout.load_ic_cell.kind));
+        try m.emit(a64.cmpImm(.x11, layout.load_ic_cell.kind_synthetic_accessor, false));
+        try m.jumpCond(.eq, &synthetic);
+        try m.emit(a64.ldrImmW(.x11, .x10, layout.load_ic_cell.slot));
         try self.emitSlotRead(dst, .x12, .x11);
+        try m.jump(&next);
+        m.bind(&synthetic);
+        try m.emit(a64.ldrImm(dst, .x10, layout.load_ic_cell.synthetic_value));
         m.bind(&next);
     }
 
@@ -1850,8 +1998,17 @@ const Compiler = struct {
     /// code, and compiled code only loads through the pointer, so
     /// the GC weak-clear protocol is untouched (docs/jit.md §4.4).
     fn emitCellAddr(self: *Compiler, dst: a64.Reg, ic_idx: u16) CompileError!void {
-        if (ic_idx >= self.chunk.inline_caches.len) return error.UnsupportedOp;
-        const addr: u64 = @intFromPtr(&self.chunk.inline_caches[ic_idx]);
+        if (ic_idx >= self.chunk.inline_load_caches.len) return error.UnsupportedOp;
+        const addr: u64 = @intFromPtr(&self.chunk.inline_load_caches[ic_idx]);
+        try self.m.movImm64(dst, addr);
+    }
+
+    /// Like `emitCellAddr` for a named-store IC. Load and store sites have
+    /// independent index spaces and layouts; crossing them silently tiers a
+    /// valid compiled store down (or reads the wrong cell).
+    fn emitStoreCellAddr(self: *Compiler, dst: a64.Reg, ic_idx: u16) CompileError!void {
+        if (ic_idx >= self.chunk.inline_store_caches.len) return error.UnsupportedOp;
+        const addr: u64 = @intFromPtr(&self.chunk.inline_store_caches[ic_idx]);
         try self.m.movImm64(dst, addr);
     }
 
@@ -2035,6 +2192,10 @@ fn readI16(code: []const u8, at: usize) i16 {
     return std.mem.readInt(i16, code[at..][0..2], .little);
 }
 
+fn readI8(code: []const u8, at: usize) i8 {
+    return @bitCast(code[at]);
+}
+
 fn readU32(code: []const u8, at: usize) u32 {
     return std.mem.readInt(u32, code[at..][0..4], .little);
 }
@@ -2196,6 +2357,51 @@ test "jit bistromath: unsupported opcodes mark the chunk dont_compile" {
     const js = chunk.function_templates[0].chunk.jit_state.?;
     try testing.expectEqual(Chunk.JitState.Tier.dont_compile, js.tier);
     try testing.expect(js.entry == null);
+}
+
+test "jit bistromath: fused register updates compile without blocking tier-up" {
+    if (comptime !supported) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+
+    const src =
+        \\function g(x) { ++x; --x; return x; }
+        \\let i = 0;
+        \\let r = 0;
+        \\while (i < 200) { r = g(i); i = i + 1; }
+        \\r;
+    ;
+    const program = try parser_mod.parseScript(arena.allocator(), src, null);
+    var chunk = try bc_compiler.compileScriptAsChunk(testing.allocator, &realm, &program, src, null);
+    defer chunk.deinit(testing.allocator);
+
+    // Pin the test to the specialization itself so a later compiler rewrite
+    // cannot make this pass without exercising IncReg / DecReg codegen.
+    const g_chunk = &chunk.function_templates[0].chunk;
+    var saw_inc_reg = false;
+    var saw_dec_reg = false;
+    var pc: usize = 0;
+    while (pc < g_chunk.code.len) {
+        const op: Op = @enumFromInt(g_chunk.code[pc]);
+        saw_inc_reg = saw_inc_reg or op == .inc_reg;
+        saw_dec_reg = saw_dec_reg or op == .dec_reg;
+        pc += 1 + Op.operandSize(op);
+    }
+    try testing.expect(saw_inc_reg);
+    try testing.expect(saw_dec_reg);
+
+    const out = try interpreter.run(testing.allocator, &realm, &chunk);
+    const v = switch (out) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    try testing.expectEqual(@as(i32, 199), v.asInt32());
+    const js = g_chunk.jit_state.?;
+    try testing.expectEqual(Chunk.JitState.Tier.compiled, js.tier);
+    try testing.expect(js.entry != null);
 }
 
 test "jit bistromath: make_environment(0) with env reads dont_compiles" {
@@ -3134,10 +3340,148 @@ test "jit bistromath: hardened realms keep global ICs warm" {
     // read tiers down — the hardened-realm IC hole).
     const callr_chunk = templateNamed(&chunk, "callr");
     var any_filled = false;
-    for (callr_chunk.inline_caches) |cell| {
+    for (callr_chunk.inline_load_caches) |cell| {
         if (cell.shape != null) any_filled = true;
     }
     try testing.expect(any_filled);
+}
+
+test "jit bistromath: hardened synthetic prototype loads fill the IC" {
+    if (comptime !supported) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+    try realm.installBuiltins();
+    try realm.installTestGlobals();
+
+    // Hardened primordial methods are §10.1.8 accessor reads after the SES
+    // override-mistake conversion. The accessor is pure and immutable, so
+    // the named-load IC should retain the resolved value under the same
+    // receiver/prototype guards as an immediate-prototype data hit.
+    const src =
+        \\function owns(o) { return o.hasOwnProperty("x") ? 1 : 0; }
+        \\const o = { x: 1 };
+        \\let i = 0;
+        \\while (i < 300) { owns(o); i = i + 1; }
+        \\__collectGarbage();
+        \\owns(o);
+    ;
+    const program = try parser_mod.parseScript(arena.allocator(), src, null);
+    var chunk = try bc_compiler.compileScriptAsChunk(testing.allocator, &realm, &program, src, null);
+    defer chunk.deinit(testing.allocator);
+    const out = try interpreter.run(testing.allocator, &realm, &chunk);
+    const v = switch (out) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    try testing.expectEqual(@as(i32, 1), v.asInt32());
+
+    const owns_chunk = templateNamed(&chunk, "owns");
+    try testing.expectEqual(Chunk.JitState.Tier.compiled, owns_chunk.jit_state.?.tier);
+    var cached_object_proto = false;
+    for (owns_chunk.inline_load_caches) |cell| {
+        if (cell.shape != null and cell.proto == realm.intrinsics.object_prototype) {
+            cached_object_proto = true;
+        }
+    }
+    try testing.expect(cached_object_proto);
+
+    // Prototype identity/revision invalidates the synthetic mode. A second
+    // Script in the same Realm reaches the original lexical bindings and
+    // replaces the receiver's prototype with an ordinary method holder.
+    const invalidated = try interpreter.evaluateScript(
+        testing.allocator,
+        &realm,
+        "const alternate = { hasOwnProperty: function () { return false; } }; Object.setPrototypeOf(o, alternate); owns(o);",
+    );
+    const invalidated_value = switch (invalidated) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    try testing.expectEqual(@as(i32, 0), invalidated_value.asInt32());
+}
+
+test "jit bistromath: ordinary immutable accessors do not fill synthetic IC mode" {
+    if (comptime !supported) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+    realm.hardened = false;
+    try realm.installBuiltins();
+
+    // This descriptor has the same immutable holder/descriptor shape as the
+    // SES accessor, but its getter is user code. It must run observably on
+    // every read and must never enter the cached-value mode.
+    const src =
+        \\let calls = 0;
+        \\const proto = {};
+        \\Object.defineProperty(proto, "m", { configurable: false, get: function () { calls = calls + 1; return 3; } });
+        \\Object.preventExtensions(proto);
+        \\const o = { x: 1 };
+        \\Object.setPrototypeOf(o, proto);
+        \\function read(v) { return v.m + 0; }
+        \\let i = 0;
+        \\while (i < 300) { read(o); i = i + 1; }
+        \\read(o) * 1000 + calls;
+    ;
+    const program = try parser_mod.parseScript(arena.allocator(), src, null);
+    var chunk = try bc_compiler.compileScriptAsChunk(testing.allocator, &realm, &program, src, null);
+    defer chunk.deinit(testing.allocator);
+    const out = try interpreter.run(testing.allocator, &realm, &chunk);
+    const v = switch (out) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    try testing.expectEqual(@as(i32, 3301), v.asInt32());
+
+    const read_chunk = templateNamed(&chunk, "read");
+    for (read_chunk.inline_load_caches) |cell| {
+        try testing.expect(cell.kind != .synthetic_accessor);
+    }
+}
+
+test "jit bistromath: catch handlers have compiled reentry points" {
+    if (comptime !supported) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+    try realm.installBuiltins();
+
+    // A bound function is deliberately not call-IC eligible, so the
+    // compiled `site` invokes it through helperCall. The final invocation
+    // throws from the interpreted target back into `site`'s compiled try;
+    // the catch must be a machine-code reentry rather than a Lantern-only
+    // continuation.
+    const src =
+        \\function maybe(flag) { if (flag) throw 1; return 0; }
+        \\const bound = maybe.bind(null);
+        \\function site(flag) { try { bound(flag); } catch { return 7; } return 3; }
+        \\let i = 0;
+        \\while (i < 300) { site(false); i = i + 1; }
+        \\site(true);
+    ;
+    const program = try parser_mod.parseScript(arena.allocator(), src, null);
+    var chunk = try bc_compiler.compileScriptAsChunk(testing.allocator, &realm, &program, src, null);
+    defer chunk.deinit(testing.allocator);
+    const out = try interpreter.run(testing.allocator, &realm, &chunk);
+    const v = switch (out) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    try testing.expectEqual(@as(i32, 7), v.asInt32());
+
+    const site_chunk = templateNamed(&chunk, "site");
+    try testing.expectEqual(Chunk.JitState.Tier.compiled, site_chunk.jit_state.?.tier);
+    try testing.expect(site_chunk.handlers.len != 0);
+    for (site_chunk.handlers) |handler| {
+        try testing.expect(site_chunk.jit_state.?.resumeCodeOffset(handler.handler_pc) != null);
+    }
 }
 
 test "jit bistromath calls: method calls bind `this` through the tier" {

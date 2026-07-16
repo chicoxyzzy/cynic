@@ -14,31 +14,28 @@
 //! is to believe a register is dead when a later instruction still reads
 //! it — i.e. to MISS a register read. Two invariants prevent that:
 //!
-//!  1. Every register-operand byte of every modelled opcode is recorded
-//!     as at least a READ (`Effect.read*`). Recording an actual *write*
-//!     as a read only over-extends a live range (pins a slot) — safe,
-//!     merely suboptimal. So when read/write direction is uncertain we
-//!     mark READ.
-//!  2. `effectOf` returns `.opaque_bail` for any opcode whose operand
-//!     layout we have not explicitly modelled (the `else` arm). A
-//!     function containing an opaque op has `fully_understood == false`,
-//!     and P1 must refuse to reallocate it. New opcodes therefore fail
-//!     safe (no optimization) until classified here.
+//!  1. Every explicit register operand is recorded as at least a READ
+//!     (`Effect.read*`), derived from `Op.spec().layout` when no more precise
+//!     case exists. Recording an actual *write* as a read only over-extends a
+//!     live range (pins a slot) — safe, merely suboptimal.
+//!  2. Instructions whose register dependency is not fully represented by
+//!     those explicit operands need a custom case for their implicit window.
+//!     If that window cannot be decoded from the byte stream (`make_class`
+//!     needs its template), the case returns `.opaque_bail`; P1 then refuses
+//!     to rewrite the whole function. Adding such an opcode without a custom
+//!     case is a correctness bug, not an optimization omission.
 
 const std = @import("std");
 const Op = @import("op.zig").Op;
 const Handler = @import("chunk.zig").Handler;
-
-fn readI16(code: []const u8, at: usize) i16 {
-    return std.mem.bytesToValue(i16, code[at..][0..2]);
-}
+const SwitchTable = @import("chunk.zig").SwitchTable;
 
 /// The register-level effect of one instruction. `reads` / `write` are
 /// discrete register indices; `win_*` is the inclusive arg/operand
 /// window `[win_base, win_base + win_len)` that call-family ops read.
 /// `opaque_bail` means the op's layout isn't modelled (fail safe).
 pub const Effect = struct {
-    reads: [2]u8 = .{ 0, 0 },
+    reads: [3]u8 = .{ 0, 0, 0 },
     n_reads: u8 = 0,
     write: ?u8 = null,
     win_base: u8 = 0,
@@ -46,15 +43,33 @@ pub const Effect = struct {
     opaque_bail: bool = false,
 
     fn read1(r: u8) Effect {
-        return .{ .reads = .{ r, 0 }, .n_reads = 1 };
+        return .{ .reads = .{ r, 0, 0 }, .n_reads = 1 };
     }
     fn read2(a: u8, b: u8) Effect {
-        return .{ .reads = .{ a, b }, .n_reads = 2 };
+        return .{ .reads = .{ a, b, 0 }, .n_reads = 2 };
     }
     fn writeReg(r: u8) Effect {
         return .{ .write = r };
     }
 };
+
+/// Decode every explicit register operand from the authoritative opcode
+/// layout and conservatively classify it as a read. Treating an output as a
+/// read extends liveness but is safe; omitting an input is not. Instructions
+/// with implicit contiguous windows are handled explicitly in `effectOf`.
+fn conservativeExplicitReads(op: Op, code: []const u8, i: usize) Effect {
+    var result: Effect = .{};
+    var operand_offset: usize = 1;
+    for (op.spec().layout.operands()) |kind| {
+        if (kind == .register) {
+            if (result.n_reads == result.reads.len) return .{ .opaque_bail = true };
+            result.reads[result.n_reads] = code[i + operand_offset];
+            result.n_reads += 1;
+        }
+        operand_offset += kind.byteSize();
+    }
+    return result;
+}
 
 /// Register effect of the instruction at `code[i]`. The operand byte
 /// positions mirror the emit helpers / disasm layout exactly; see the
@@ -72,6 +87,8 @@ pub fn effectOf(op: Op, code: []const u8, i: usize) Effect {
         .lda_zero,
         .lda_one,
         .lda_smi,
+        .lda_smi8,
+        .lda_smi16,
         .lda_constant,
         .lda_this,
         .lda_new_target,
@@ -83,8 +100,11 @@ pub fn effectOf(op: Op, code: []const u8, i: usize) Effect {
         .arguments_snapshot,
         .import_meta,
         .lda_property,
+        .lda_property8,
         .lda_global,
         .lda_global_or_undef,
+        .lda_global8,
+        .lda_global_or_undef8,
         .lda_global_slot,
         .sta_global_slot,
         .sta_global_slot_init,
@@ -145,23 +165,38 @@ pub fn effectOf(op: Op, code: []const u8, i: usize) Effect {
         .ge,
         .instanceof_,
         .in_op,
+        .in_op8,
         .array_spread,
         => Effect.read1(code[i + 1]),
-        // Fused compare-and-branch `[op][r:u8][off:i16]` — reads the
+        // Fused compare-and-branch `[op][r:u8][off:i8|i16|i32]` — reads the
         // register operand (the compared lhs); the branch edge is handled
         // by the leader/CFG scan via `branchTarget` / `isBranch`.
         .jmp_if_strict_eq,
+        .jmp_if_strict_eq8,
+        .jmp_if_strict_eq32,
         .jmp_if_strict_neq,
+        .jmp_if_strict_neq8,
+        .jmp_if_strict_neq32,
         .jmp_if_not_lt,
+        .jmp_if_not_lt8,
+        .jmp_if_not_lt32,
         .jmp_if_not_le,
+        .jmp_if_not_le8,
+        .jmp_if_not_le32,
         .jmp_if_not_gt,
+        .jmp_if_not_gt8,
+        .jmp_if_not_gt32,
         .jmp_if_not_ge,
+        .jmp_if_not_ge8,
+        .jmp_if_not_ge32,
         => Effect.read1(code[i + 1]),
-        .add_smi => Effect.read1(code[i + 1]),
-        .lda_computed => Effect.read1(code[i + 1]),
+        .add_smi, .add_smi8, .add_smi16 => Effect.read1(code[i + 1]),
+        .lda_computed, .lda_computed8 => Effect.read1(code[i + 1]),
+        .switch_smi => Effect.read1(code[i + 1]),
         // `[op][k:u16][r_obj:u8]…` — receiver register at i+3.
         .lda_property_reg, .sta_property, .def_property => Effect.read1(code[i + 3]),
-        .sta_computed, .def_computed => Effect.read2(code[i + 1], code[i + 2]),
+        .lda_property_reg8, .sta_property8 => Effect.read1(code[i + 2]),
+        .sta_computed, .sta_computed8, .def_computed => Effect.read2(code[i + 1], code[i + 2]),
 
         // Compact register loads/stores — index baked in the opcode.
         .ldar_0, .ldar_1, .ldar_2, .ldar_3 => Effect.read1(@intFromEnum(op) - @intFromEnum(Op.ldar_0)),
@@ -169,31 +204,55 @@ pub fn effectOf(op: Op, code: []const u8, i: usize) Effect {
         // ── Register writes ──
         .star => Effect.writeReg(code[i + 1]),
         .star_0, .star_1, .star_2, .star_3 => Effect.writeReg(@intFromEnum(op) - @intFromEnum(Op.star_0)),
-        .mov => .{ .reads = .{ code[i + 1], 0 }, .n_reads = 1, .write = code[i + 2] },
+        .mov => .{ .reads = .{ code[i + 1], 0, 0 }, .n_reads = 1, .write = code[i + 2] },
 
-        // ── Read + write the same register (loop counter) ──
-        // `[op][r_counter:u8][r_bound:u8][off:i16]` — counter is read
+        // ── Read + write the same register ──
+        // `[op][r:u8]` — read the old binding value and replace it with the
+        // ToNumeric-bumped result.
+        .inc_reg, .dec_reg => .{ .reads = .{ code[i + 1], 0, 0 }, .n_reads = 1, .write = code[i + 1] },
+        // `[op][r_counter:u8][r_bound:u8][off:i8|i16|i32]` — counter is read
         // (test + increment) and written (the bumped value).
-        .loop_inc_lt => .{ .reads = .{ code[i + 1], code[i + 2] }, .n_reads = 2, .write = code[i + 1] },
+        .loop_inc_lt, .loop_inc_lt8, .loop_inc_lt32 => .{ .reads = .{ code[i + 1], code[i + 2], 0 }, .n_reads = 2, .write = code[i + 1] },
 
         // ── Control flow (no register operands; edges handled by the
         // leader/CFG scan, not the register model) ──
-        .jmp, .jmp_if_true, .jmp_if_false, .jmp_if_nullish => .{},
+        .jmp,
+        .jmp8,
+        .jmp32,
+        .jmp_if_true,
+        .jmp_if_true8,
+        .jmp_if_true32,
+        .jmp_if_false,
+        .jmp_if_false8,
+        .jmp_if_false32,
+        .jmp_if_nullish,
+        .jmp_if_nullish8,
+        .jmp_if_nullish32,
+        => .{},
 
         // ── Call family — read the callee/receiver and the contiguous
         // argument window `[base+1 .. base+1+argc)`. Modelled as one
         // read window `[base .. base+argc]` (base + args). ──
         // `[op][r_callee:u8][argc:u8][ic:u16]`
-        .call, .new_call => .{ .win_base = code[i + 1], .win_len = @as(u16, code[i + 2]) + 1 },
+        .call, .call8, .new_call, .new_call8 => .{ .win_base = code[i + 1], .win_len = @as(u16, code[i + 2]) + 1 },
         // `[op][r_callee:u8][ic:u16]` — argc folded into the opcode.
         .call0, .call1, .call2, .call3 => .{
             .win_base = code[i + 1],
             .win_len = (@intFromEnum(op) - @intFromEnum(Op.call0)) + 1,
         },
+        .call0_8, .call1_8, .call2_8, .call3_8 => .{
+            .win_base = code[i + 1],
+            .win_len = switch (op) {
+                .call0_8 => 1,
+                .call1_8 => 2,
+                .call2_8 => 3,
+                else => 4,
+            },
+        },
         // `[op][r_recv:u8][r_callee:u8][argc:u8][ic:u16]` — receiver
         // plus the callee+args window.
-        .call_method => .{
-            .reads = .{ code[i + 1], 0 },
+        .call_method, .call_method8 => .{
+            .reads = .{ code[i + 1], 0, 0 },
             .n_reads = 1,
             .win_base = code[i + 2],
             .win_len = @as(u16, code[i + 3]) + 1,
@@ -201,89 +260,71 @@ pub fn effectOf(op: Op, code: []const u8, i: usize) Effect {
         // `[op][k:u16][r_recv:u8][argc:u8][ic:u16][callic:u16]` —
         // receiver plus the arg window placed after it (conservative).
         .call_property => .{ .win_base = code[i + 3], .win_len = @as(u16, code[i + 4]) + 1 },
+        .call_property8 => .{ .win_base = code[i + 2], .win_len = @as(u16, code[i + 3]) + 1 },
         // `[op][r_callee:u8][r_thisArg:u8]` — §10.4.4 forward site. The
         // argument list comes from the frame's snapshot (pinned param
         // slots), not a register window, so only the two operands read.
         .call_forward_args => Effect.read2(code[i + 1], code[i + 2]),
 
-        // ── Everything else: not modelled → fail safe. A function
-        // containing one of these is not `fully_understood`, so P1
-        // leaves it alone. (super_call, make_class, def_template_property,
-        // sta_private, generator/iterator/module/dispose ops, …) ──
-        else => .{ .opaque_bail = true },
+        // Other contiguous-window instructions. The encoded base register
+        // names the first value; the adjacent u8 is a count, not another
+        // independent operand.
+        .tail_call => .{ .win_base = code[i + 1], .win_len = @as(u16, code[i + 2]) + 1 },
+        .tail_call_method => .{
+            .reads = .{ code[i + 1], 0, 0 },
+            .n_reads = 1,
+            .win_base = code[i + 2],
+            .win_len = @as(u16, code[i + 3]) + 1,
+        },
+        .direct_eval => .{ .win_base = code[i + 3], .win_len = @as(u16, code[i + 4]) + 1 },
+        .super_call, .make_array_n => .{ .win_base = code[i + 1], .win_len = code[i + 2] },
+
+        // `make_class`'s encoded register is the base of a template-sized
+        // computed-key window. The window length lives in the class template,
+        // outside this analysis API, so treating only the base as a read would
+        // be unsound. Fail closed until liveness receives the template table.
+        .make_class => .{ .opaque_bail = true },
+
+        // ── Everything else: derive conservative reads from the declarative
+        // operand layout. This keeps newly classified opcodes safe by default
+        // and lets liveness cover iterator/class/module/dispose bytecode
+        // without a parallel hand-maintained layout switch. ──
+        else => conservativeExplicitReads(op, code, i),
     };
 }
 
 /// Returns the branch target offset for a control-transfer op, or null
-/// if the op doesn't branch. Offsets are i16 relative to the byte after
-/// the operand (matching `Builder.patchI16`).
+/// if the op doesn't branch. The opcode's `BranchInfo` selects i8/i16/i32;
+/// every displacement is relative to the byte after that operand.
 pub fn branchTarget(op: Op, code: []const u8, i: usize) ?u32 {
-    return switch (op) {
-        .jmp, .jmp_if_true, .jmp_if_false, .jmp_if_nullish => blk: {
-            const after: i64 = @intCast(i + 1 + 2);
-            break :blk @intCast(after + readI16(code, i + 1));
-        },
-        .loop_inc_lt => blk: {
-            const after: i64 = @intCast(i + 1 + 4);
-            break :blk @intCast(after + readI16(code, i + 3));
-        },
-        // Fused compare-and-branch `[op][r:u8][off:i16]` — i16 at i+2,
-        // relative to the byte after the operand (i + 1 + 3).
-        .jmp_if_strict_eq,
-        .jmp_if_strict_neq,
-        .jmp_if_not_lt,
-        .jmp_if_not_le,
-        .jmp_if_not_gt,
-        .jmp_if_not_ge,
-        => blk: {
-            const after: i64 = @intCast(i + 1 + 3);
-            break :blk @intCast(after + readI16(code, i + 2));
-        },
-        else => null,
-    };
+    const info = op.branchInfo() orelse return null;
+    return info.target(code, i);
 }
 
 fn isUnconditionalTransfer(op: Op) bool {
-    return switch (op) {
-        .jmp, .return_, .throw_ => true,
-        else => false,
-    };
+    if (op.branchInfo()) |info| if (info.canonical == .jmp) return true;
+    return op == .switch_smi or op == .return_ or op == .throw_;
 }
 
 fn isBranch(op: Op) bool {
-    return switch (op) {
-        .jmp,
-        .jmp_if_true,
-        .jmp_if_false,
-        .jmp_if_nullish,
-        .loop_inc_lt,
-        .jmp_if_strict_eq,
-        .jmp_if_strict_neq,
-        .jmp_if_not_lt,
-        .jmp_if_not_le,
-        .jmp_if_not_gt,
-        .jmp_if_not_ge,
-        => true,
-        else => false,
-    };
+    return op.branchInfo() != null or op == .switch_smi;
 }
 
 pub const Analysis = struct {
     allocator: std.mem.Allocator,
     /// Sorted block-leader offsets; block `b` spans `[leaders[b], leaders[b+1])`.
     leaders: []u32,
-    /// Per-block forward control-flow successors (block indices; up to two —
-    /// branch target + fall-through). `null` slots are unused. Handler edges
-    /// are NOT included here (consumers that care bail on handlers). Exposed
-    /// for forward dataflow passes (e.g. TDZ-check elimination).
-    succs: [][2]?usize,
+    /// Per-block normal control-flow successors. Dynamic lists are required by
+    /// `switch_smi`, whose case table has N outgoing edges. Handler edges stay
+    /// separate so forward must-analyses can conservatively pin handler entry.
+    succs: []std.ArrayListUnmanaged(usize),
     /// `reachable.isSet(b)` — block `b` is reachable from entry.
     reachable: std.DynamicBitSet,
     /// Per-block register live-in / live-out sets (size `register_count`).
     live_in: []std.DynamicBitSet,
     live_out: []std.DynamicBitSet,
     register_count: u16,
-    /// True iff every opcode's register effect was modelled exactly.
+    /// True iff every opcode's register reads were modelled conservatively.
     /// P1 must check this before reallocating registers.
     fully_understood: bool,
 
@@ -348,6 +389,7 @@ pub const Analysis = struct {
 
     pub fn deinit(self: *Analysis) void {
         self.allocator.free(self.leaders);
+        for (self.succs) |*succ| succ.deinit(self.allocator);
         self.allocator.free(self.succs);
         self.reachable.deinit();
         for (self.live_in) |*s| s.deinit();
@@ -366,6 +408,7 @@ pub fn analyze(
     code: []const u8,
     register_count: u16,
     handlers: []const Handler,
+    switch_tables: []const SwitchTable,
 ) !Analysis {
     var fully_understood = true;
 
@@ -384,6 +427,16 @@ pub fn analyze(
         try offsets.append(allocator, @intCast(i));
         if (effectOf(op, code, i).opaque_bail) fully_understood = false;
         if (branchTarget(op, code, i)) |t| try leader_set.put(allocator, t, {});
+        if (op == .switch_smi) {
+            const table_index = std.mem.readInt(u16, code[i + 2 ..][0..2], .little);
+            if (table_index < switch_tables.len) {
+                const table = switch_tables[table_index];
+                try leader_set.put(allocator, table.default_target, {});
+                for (table.targets) |target| try leader_set.put(allocator, target, {});
+            } else {
+                fully_understood = false;
+            }
+        }
         const next = i + 1 + Op.operandSize(op);
         // The instruction after any branch / terminator starts a block.
         if (isBranch(op) or isUnconditionalTransfer(op)) {
@@ -411,8 +464,12 @@ pub fn analyze(
     }.f;
 
     // ── Successors + per-block use/def ──
-    var succs = try allocator.alloc([2]?usize, nblocks);
-    errdefer allocator.free(succs);
+    var succs = try allocator.alloc(std.ArrayListUnmanaged(usize), nblocks);
+    var succs_initialized: usize = 0;
+    errdefer {
+        for (succs[0..succs_initialized]) |*succ| succ.deinit(allocator);
+        allocator.free(succs);
+    }
     var use = try allocator.alloc(std.DynamicBitSet, nblocks);
     var def = try allocator.alloc(std.DynamicBitSet, nblocks);
     defer {
@@ -424,7 +481,8 @@ pub fn analyze(
     // protected-range handler edges: a block whose range is covered by a
     // handler gets an extra successor to that handler's entry block.
     for (0..nblocks) |b| {
-        succs[b] = .{ null, null };
+        succs[b] = .empty;
+        succs_initialized += 1;
         use[b] = try std.DynamicBitSet.initEmpty(allocator, register_count);
         def[b] = try std.DynamicBitSet.initEmpty(allocator, register_count);
 
@@ -465,15 +523,24 @@ pub fn analyze(
         }
 
         // Successor edges from the terminator.
-        if (branchTarget(last_op, code, last_off)) |t| {
-            succs[b][0] = blockOfLeader(leaders, t);
+        if (last_op == .switch_smi) {
+            const table_index = std.mem.readInt(u16, code[last_off + 2 ..][0..2], .little);
+            if (table_index < switch_tables.len) {
+                const table = switch_tables[table_index];
+                try appendUniqueSuccessor(&succs[b], allocator, blockOfLeader(leaders, table.default_target));
+                for (table.targets) |target| {
+                    try appendUniqueSuccessor(&succs[b], allocator, blockOfLeader(leaders, target));
+                }
+            }
+        } else if (branchTarget(last_op, code, last_off)) |t| {
+            try appendUniqueSuccessor(&succs[b], allocator, blockOfLeader(leaders, t));
             if (!isUnconditionalTransfer(last_op)) {
                 // conditional branch / loop also falls through
-                if (end < code.len) succs[b][1] = blockOfLeader(leaders, end);
+                if (end < code.len) try appendUniqueSuccessor(&succs[b], allocator, blockOfLeader(leaders, end));
             }
         } else if (!isUnconditionalTransfer(last_op)) {
             // plain fall-through
-            if (end < code.len) succs[b][0] = blockOfLeader(leaders, end);
+            if (end < code.len) try appendUniqueSuccessor(&succs[b], allocator, blockOfLeader(leaders, end));
         }
     }
 
@@ -513,11 +580,11 @@ pub fn analyze(
             }
         }
         while (stack.pop()) |b| {
-            for (succs[b]) |maybe| {
-                if (maybe) |s| if (!reachable.isSet(s)) {
+            for (succs[b].items) |s| {
+                if (!reachable.isSet(s)) {
                     reachable.set(s);
                     try stack.append(allocator, s);
-                };
+                }
             }
         }
     }
@@ -547,9 +614,7 @@ pub fn analyze(
             // live_out[b] = ∪ live_in[succ]  (+ handler entries)
             var new_out = try std.DynamicBitSet.initEmpty(allocator, register_count);
             defer new_out.deinit();
-            for (succs[bi]) |maybe| {
-                if (maybe) |s| new_out.setUnion(live_in[s]);
-            }
+            for (succs[bi].items) |s| new_out.setUnion(live_in[s]);
             for (handler_edges.items) |e| {
                 if (e[0] == bi) new_out.setUnion(live_in[e[1]]);
             }
@@ -590,6 +655,11 @@ fn blockOfLeader(leaders: []const u32, off: u32) usize {
         if (leaders[mid] <= off) lo = mid else hi = mid;
     }
     return lo;
+}
+
+fn appendUniqueSuccessor(list: *std.ArrayListUnmanaged(usize), allocator: std.mem.Allocator, successor: usize) !void {
+    for (list.items) |existing| if (existing == successor) return;
+    try list.append(allocator, successor);
 }
 
 fn bitsetEql(a: std.DynamicBitSet, b: std.DynamicBitSet) bool {
@@ -637,6 +707,21 @@ test "liveness: effectOf classifies register operands" {
     try testing.expectEqual(@as(u8, 2), e_lil.n_reads);
     try testing.expectEqual(@as(?u8, 1), e_lil.write);
 
+    // Fused register updates read the old binding value and overwrite the
+    // same slot with its ToNumeric-bumped result. Missing either side can
+    // make register reuse unsound across the update.
+    var inc_reg = [_]u8{ byteOf(.inc_reg), 6 };
+    const e_inc_reg = effectOf(.inc_reg, &inc_reg, 0);
+    try testing.expectEqual(@as(u8, 1), e_inc_reg.n_reads);
+    try testing.expectEqual(@as(u8, 6), e_inc_reg.reads[0]);
+    try testing.expectEqual(@as(?u8, 6), e_inc_reg.write);
+
+    var dec_reg = [_]u8{ byteOf(.dec_reg), 7 };
+    const e_dec_reg = effectOf(.dec_reg, &dec_reg, 0);
+    try testing.expectEqual(@as(u8, 1), e_dec_reg.n_reads);
+    try testing.expectEqual(@as(u8, 7), e_dec_reg.reads[0]);
+    try testing.expectEqual(@as(?u8, 7), e_dec_reg.write);
+
     // call reads the [callee .. callee+argc] window.
     var call = [_]u8{ byteOf(.call), 4, 2, 0, 0 }; // r_callee=4, argc=2
     const e_call = effectOf(.call, &call, 0);
@@ -651,7 +736,7 @@ test "liveness: effectOf classifies register operands" {
 test "liveness: straight-line block, def-then-use register is not live-in" {
     // lda_one; star r0; ldar r0; star r1; return
     var code = [_]u8{ byteOf(.lda_one), byteOf(.star), 0, byteOf(.ldar), 0, byteOf(.star), 1, byteOf(.return_) };
-    var a = try analyze(testing.allocator, &code, 4, &.{});
+    var a = try analyze(testing.allocator, &code, 4, &.{}, &.{});
     defer a.deinit();
     try testing.expectEqual(@as(usize, 1), a.blockCount());
     try testing.expect(a.reachable.isSet(0));
@@ -669,7 +754,7 @@ test "liveness: a register defined before a branch is live across both arms" {
         byteOf(.ldar), 0, // 7: join reads r0
         byteOf(.return_), // 9
     };
-    var a = try analyze(testing.allocator, &code, 4, &.{});
+    var a = try analyze(testing.allocator, &code, 4, &.{}, &.{});
     defer a.deinit();
     try testing.expectEqual(@as(usize, 3), a.blockCount()); // leaders 0,5,7
     for (0..3) |i| try testing.expect(a.reachable.isSet(i));
@@ -681,7 +766,7 @@ test "liveness: a register defined before a branch is live across both arms" {
 test "liveness: code after an unconditional return is unreachable" {
     // lda_zero; return; star r0; return   (the star/return are dead)
     var code = [_]u8{ byteOf(.lda_zero), byteOf(.return_), byteOf(.star), 0, byteOf(.return_) };
-    var a = try analyze(testing.allocator, &code, 4, &.{});
+    var a = try analyze(testing.allocator, &code, 4, &.{}, &.{});
     defer a.deinit();
     try testing.expectEqual(@as(usize, 2), a.blockCount()); // leaders 0, 2
     try testing.expect(a.reachable.isSet(0));
@@ -695,7 +780,7 @@ test "liveness: a backward loop keeps the counter live across the back-edge" {
         byteOf(.jmp), 0xf8, 0xff, // 5: back-edge -8 -> (5+3)-8 = 0
         byteOf(.return_), // 8: exit
     };
-    var a = try analyze(testing.allocator, &code, 4, &.{});
+    var a = try analyze(testing.allocator, &code, 4, &.{}, &.{});
     defer a.deinit();
     try testing.expect(a.fully_understood);
     // r0 is read in the loop body and the back-edge re-enters, so r0 is
@@ -713,7 +798,7 @@ test "liveness: a fused compare-and-branch is modelled (register read + branch e
         byteOf(.ldar), 0, // 4
         byteOf(.return_), // 6
     };
-    var a = try analyze(testing.allocator, &code, 4, &.{});
+    var a = try analyze(testing.allocator, &code, 4, &.{}, &.{});
     defer a.deinit();
     try testing.expect(a.fully_understood);
     try testing.expectEqual(@as(?u32, 6), branchTarget(.jmp_if_not_lt, &code, 0));
@@ -728,15 +813,57 @@ test "liveness: make_function is modelled (no register operand → no effect)" {
     // that merely declares a closure stay fully-understood, so the register
     // passes still fire on the common "closure + loop" shape.
     var code = [_]u8{ byteOf(.make_function), 0, 0, byteOf(.return_) };
-    var a = try analyze(testing.allocator, &code, 4, &.{});
+    var a = try analyze(testing.allocator, &code, 4, &.{}, &.{});
     defer a.deinit();
     try testing.expect(a.fully_understood);
+}
+
+test "liveness: unclassified explicit registers are conservative reads" {
+    // `for_of_next` has three explicit register operands. Even before their
+    // finer read/write directions matter to an optimization, the schema lets
+    // liveness conservatively retain all three values without bailing out.
+    var code = [_]u8{ byteOf(.for_of_next), 1, 2, 3, byteOf(.return_) };
+    var a = try analyze(testing.allocator, &code, 4, &.{}, &.{});
+    defer a.deinit();
+    try testing.expect(a.fully_understood);
+    try testing.expect(a.live_in[0].isSet(1));
+    try testing.expect(a.live_in[0].isSet(2));
+    try testing.expect(a.live_in[0].isSet(3));
+}
+
+test "liveness: make_array_n reads its contiguous input window" {
+    var code = [_]u8{ byteOf(.make_array_n), 2, 3, byteOf(.return_) };
+    var a = try analyze(testing.allocator, &code, 6, &.{}, &.{});
+    defer a.deinit();
+    try testing.expect(a.fully_understood);
+    try testing.expect(a.live_in[0].isSet(2));
+    try testing.expect(a.live_in[0].isSet(3));
+    try testing.expect(a.live_in[0].isSet(4));
+    try testing.expect(!a.live_in[0].isSet(5));
+}
+
+test "liveness: switch_smi contributes every table target to the CFG" {
+    var code = [_]u8{
+        byteOf(.switch_smi), 0,                0,                0,
+        byteOf(.return_),    byteOf(.return_), byteOf(.return_),
+    };
+    var targets = [_]u32{ 4, 5 };
+    const tables = [_]SwitchTable{.{ .min = 0, .targets = &targets, .default_target = 6 }};
+    var a = try analyze(testing.allocator, &code, 1, &.{}, &tables);
+    defer a.deinit();
+
+    try testing.expect(a.fully_understood);
+    try testing.expectEqual(@as(usize, 4), a.blockCount());
+    try testing.expectEqual(@as(usize, 3), a.succs[0].items.len);
+    try testing.expect(a.reachable.isSet(a.blockOf(4)));
+    try testing.expect(a.reachable.isSet(a.blockOf(5)));
+    try testing.expect(a.reachable.isSet(a.blockOf(6)));
 }
 
 test "liveness: an opaque opcode marks the function not-fully-understood" {
     // make_class is not modelled → P1 must not reallocate this function.
     var code = [_]u8{ byteOf(.make_class), 0, 0, 0, 0, byteOf(.return_) };
-    var a = try analyze(testing.allocator, &code, 4, &.{});
+    var a = try analyze(testing.allocator, &code, 4, &.{}, &.{});
     defer a.deinit();
     try testing.expect(!a.fully_understood);
 }

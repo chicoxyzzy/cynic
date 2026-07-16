@@ -36,6 +36,14 @@ pub fn build(b: *std.Build) void {
         "exhaustive-tests",
         "Enable the whole-range Unicode invariant tests (slow under Debug+testing.allocator). Default: false.",
     ) orelse false;
+    // Dynamic opcode tracing is a dedicated instrumentation build. The
+    // compile-time gate removes every dispatch counter access from normal
+    // binaries; `cynic run --bytecode-stats` requires this option.
+    const bytecode_stats = b.option(
+        bool,
+        "bytecode-stats",
+        "Compile opcode/pair/trigram dispatch instrumentation (default false).",
+    ) orelse false;
     // ECMA-402 build flavour (ROADMAP: separate from default edge/server
     // build — not a CLI `--enable`/`--allow` verb). `off` = no `Intl`
     // global, Temporal ISO+UTC/offset only; `stub` = structural Intl +
@@ -54,12 +62,14 @@ pub fn build(b: *std.Build) void {
     const t262_intl_tier = intl_tier_opt orelse .full;
     const lib_build_options = b.addOptions();
     lib_build_options.addOption(bool, "exhaustive_tests", exhaustive_tests);
+    lib_build_options.addOption(bool, "bytecode_stats", bytecode_stats);
     lib_build_options.addOption(IntlTier, "intl", intl_tier);
     lib_mod.addOptions("build_options", lib_build_options);
     // Separate options for the test262 harness lib modules — same
     // `exhaustive_tests`, but the test262 intl tier (`full` default).
     const t262_build_options = b.addOptions();
     t262_build_options.addOption(bool, "exhaustive_tests", exhaustive_tests);
+    t262_build_options.addOption(bool, "bytecode_stats", bytecode_stats);
     t262_build_options.addOption(IntlTier, "intl", t262_intl_tier);
     // Embed the locale data blobs (CYTZ tzdb + CYCL CLDR) only for `full`, so
     // off/stub binaries stay lean. Both are gated on `intl_config.has_locale_data`.

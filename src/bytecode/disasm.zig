@@ -54,7 +54,7 @@ pub fn dump(allocator: std.mem.Allocator, chunk: *const Chunk) ![]u8 {
 
         // Format the operand, if any.
         switch (op) {
-            .ldar, .star => {
+            .ldar, .star, .inc_reg, .dec_reg => {
                 const r = chunk.code[i + 1];
                 try buf.print(allocator, " r{d}", .{r});
             },
@@ -67,9 +67,13 @@ pub fn dump(allocator: std.mem.Allocator, chunk: *const Chunk) ![]u8 {
                 const r = chunk.code[i + 1];
                 try buf.print(allocator, " r{d}", .{r});
             },
-            .add_smi => {
+            .add_smi, .add_smi8, .add_smi16 => |op_tag| {
                 const r = chunk.code[i + 1];
-                const imm = readI32(chunk.code, i + 2);
+                const imm: i32 = switch (op_tag) {
+                    .add_smi8 => readI8(chunk.code, i + 2),
+                    .add_smi16 => readI16(chunk.code, i + 2),
+                    else => readI32(chunk.code, i + 2),
+                };
                 try buf.print(allocator, " r{d} {d}", .{ r, imm });
             },
             .lda_constant => {
@@ -80,42 +84,90 @@ pub fn dump(allocator: std.mem.Allocator, chunk: *const Chunk) ![]u8 {
                     try formatConstant(allocator, &buf, chunk.constants[k]);
                 }
             },
-            .lda_smi => {
-                const v = readI32(chunk.code, i + 1);
+            .lda_smi, .lda_smi8, .lda_smi16 => |op_tag| {
+                const v: i32 = switch (op_tag) {
+                    .lda_smi8 => readI8(chunk.code, i + 1),
+                    .lda_smi16 => readI16(chunk.code, i + 1),
+                    else => readI32(chunk.code, i + 1),
+                };
                 try buf.print(allocator, " {d}", .{v});
             },
-            .jmp, .jmp_if_false, .jmp_if_true => {
-                const o = readI16(chunk.code, i + 1);
-                const target: i64 = @as(i64, @intCast(i + 1 + 2)) + o;
+            .jmp,
+            .jmp8,
+            .jmp32,
+            .jmp_if_false,
+            .jmp_if_false8,
+            .jmp_if_false32,
+            .jmp_if_true,
+            .jmp_if_true8,
+            .jmp_if_true32,
+            .jmp_if_nullish,
+            .jmp_if_nullish8,
+            .jmp_if_nullish32,
+            => {
+                const info = op.branchInfo().?;
+                const o = info.displacement(chunk.code, i);
+                const target = info.target(chunk.code, i);
                 try buf.print(allocator, " {s}{d} -> {x:0>4}", .{
                     if (o >= 0) "+" else "",
                     o,
-                    @as(u64, @intCast(target)),
+                    target,
                 });
             },
-            .jmp_if_strict_eq, .jmp_if_strict_neq, .jmp_if_not_lt, .jmp_if_not_le, .jmp_if_not_gt, .jmp_if_not_ge => {
+            .jmp_if_strict_eq,
+            .jmp_if_strict_eq8,
+            .jmp_if_strict_eq32,
+            .jmp_if_strict_neq,
+            .jmp_if_strict_neq8,
+            .jmp_if_strict_neq32,
+            .jmp_if_not_lt,
+            .jmp_if_not_lt8,
+            .jmp_if_not_lt32,
+            .jmp_if_not_le,
+            .jmp_if_not_le8,
+            .jmp_if_not_le32,
+            .jmp_if_not_gt,
+            .jmp_if_not_gt8,
+            .jmp_if_not_gt32,
+            .jmp_if_not_ge,
+            .jmp_if_not_ge8,
+            .jmp_if_not_ge32,
+            => {
                 const r = chunk.code[i + 1];
-                const o = readI16(chunk.code, i + 2);
-                const target: i64 = @as(i64, @intCast(i + 1 + 3)) + o;
+                const info = op.branchInfo().?;
+                const o = info.displacement(chunk.code, i);
+                const target = info.target(chunk.code, i);
                 try buf.print(allocator, " r{d} {s}{d} -> {x:0>4}", .{
                     r,
                     if (o >= 0) "+" else "",
                     o,
-                    @as(u64, @intCast(target)),
+                    target,
                 });
             },
-            .loop_inc_lt => {
+            .loop_inc_lt, .loop_inc_lt8, .loop_inc_lt32 => {
                 const r_counter = chunk.code[i + 1];
                 const r_bound = chunk.code[i + 2];
-                const o = readI16(chunk.code, i + 3);
-                const target: i64 = @as(i64, @intCast(i + 1 + 4)) + o;
+                const info = op.branchInfo().?;
+                const o = info.displacement(chunk.code, i);
+                const target = info.target(chunk.code, i);
                 try buf.print(allocator, " r{d} r{d} {s}{d} -> {x:0>4}", .{
                     r_counter,
                     r_bound,
                     if (o >= 0) "+" else "",
                     o,
-                    @as(u64, @intCast(target)),
+                    target,
                 });
+            },
+            .switch_smi => {
+                const r = chunk.code[i + 1];
+                const table_index = readU16(chunk.code, i + 2);
+                if (table_index < chunk.switch_tables.len) {
+                    const table = chunk.switch_tables[table_index];
+                    const max = @as(i64, table.min) + @as(i64, @intCast(table.targets.len)) - 1;
+                    try buf.print(allocator, " r{d} table{d} [{d}..{d}]", .{ r, table_index, table.min, max });
+                } else {
+                    try buf.print(allocator, " r{d} table{d}", .{ r, table_index });
+                }
             },
             .make_function => {
                 const k = readU16(chunk.code, i + 1);
@@ -149,17 +201,22 @@ pub fn dump(allocator: std.mem.Allocator, chunk: *const Chunk) ![]u8 {
                 const argc = chunk.code[i + 2];
                 try buf.print(allocator, " r{d} ({d} args)", .{ r, argc });
             },
-            .call, .new_call => {
+            .call, .call8, .new_call, .new_call8 => {
                 const r = chunk.code[i + 1];
                 const argc = chunk.code[i + 2];
                 try buf.print(allocator, " r{d} ({d} args)", .{ r, argc });
             },
-            .call0, .call1, .call2, .call3 => {
+            .call0, .call1, .call2, .call3, .call0_8, .call1_8, .call2_8, .call3_8 => |op_tag| {
                 const r = chunk.code[i + 1];
-                const argc = @intFromEnum(op) - @intFromEnum(Op.call0);
+                const argc: u8 = switch (op_tag) {
+                    .call0, .call0_8 => 0,
+                    .call1, .call1_8 => 1,
+                    .call2, .call2_8 => 2,
+                    else => 3,
+                };
                 try buf.print(allocator, " r{d} ({d} args)", .{ r, argc });
             },
-            .call_method => {
+            .call_method, .call_method8 => {
                 const r_recv = chunk.code[i + 1];
                 const r_callee = chunk.code[i + 2];
                 const argc = chunk.code[i + 3];
@@ -179,11 +236,17 @@ pub fn dump(allocator: std.mem.Allocator, chunk: *const Chunk) ![]u8 {
                 const slot = chunk.code[i + 2];
                 try buf.print(allocator, " ^{d} s{d}", .{ depth, slot });
             },
-            .lda_property => {
-                const k = readU16(chunk.code, i + 1);
+            .lda_property, .lda_property8 => |op_tag| {
+                const k: u16 = if (op_tag == .lda_property8) chunk.code[i + 1] else readU16(chunk.code, i + 1);
                 try buf.print(allocator, " k{d}", .{k});
             },
-            .sta_property, .def_property, .lda_property_reg => {
+            .sta_property, .lda_property_reg, .sta_property8, .lda_property_reg8 => |op_tag| {
+                const narrow = op_tag == .sta_property8 or op_tag == .lda_property_reg8;
+                const k: u16 = if (narrow) chunk.code[i + 1] else readU16(chunk.code, i + 1);
+                const r = chunk.code[i + if (narrow) @as(usize, 2) else 3];
+                try buf.print(allocator, " k{d} r{d}", .{ k, r });
+            },
+            .def_property => {
                 const k = readU16(chunk.code, i + 1);
                 const r = chunk.code[i + 3];
                 try buf.print(allocator, " k{d} r{d}", .{ k, r });
@@ -194,20 +257,20 @@ pub fn dump(allocator: std.mem.Allocator, chunk: *const Chunk) ![]u8 {
                 const slot = readU16(chunk.code, i + 4);
                 try buf.print(allocator, " k{d} r{d} s{d}", .{ k, r, slot });
             },
-            .lda_computed => {
+            .lda_computed, .lda_computed8 => |op_tag| {
                 const r = chunk.code[i + 1];
-                const slot = readU16(chunk.code, i + 2);
+                const slot: u16 = if (op_tag == .lda_computed8) chunk.code[i + 2] else readU16(chunk.code, i + 2);
                 try buf.print(allocator, " r{d} ic{d}", .{ r, slot });
             },
-            .in_op => {
+            .in_op, .in_op8 => |op_tag| {
                 const r = chunk.code[i + 1];
-                const slot = readU16(chunk.code, i + 2);
+                const slot: u16 = if (op_tag == .in_op8) chunk.code[i + 2] else readU16(chunk.code, i + 2);
                 try buf.print(allocator, " r{d} ic{d}", .{ r, slot });
             },
-            .sta_computed => {
+            .sta_computed, .sta_computed8 => |op_tag| {
                 const r_obj = chunk.code[i + 1];
                 const r_key = chunk.code[i + 2];
-                const slot = readU16(chunk.code, i + 3);
+                const slot: u16 = if (op_tag == .sta_computed8) chunk.code[i + 3] else readU16(chunk.code, i + 3);
                 try buf.print(allocator, " r{d}[r{d}] ic{d}", .{ r_obj, r_key, slot });
             },
             .def_computed => {
@@ -215,7 +278,12 @@ pub fn dump(allocator: std.mem.Allocator, chunk: *const Chunk) ![]u8 {
                 const r_key = chunk.code[i + 2];
                 try buf.print(allocator, " r{d}[r{d}]", .{ r_obj, r_key });
             },
-            .lda_global, .sta_global => {
+            .lda_global, .lda_global_or_undef, .lda_global8, .lda_global_or_undef8 => |op_tag| {
+                const narrow = op_tag == .lda_global8 or op_tag == .lda_global_or_undef8;
+                const k: u16 = if (narrow) chunk.code[i + 1] else readU16(chunk.code, i + 1);
+                try buf.print(allocator, " k{d}", .{k});
+            },
+            .sta_global => {
                 const k = readU16(chunk.code, i + 1);
                 try buf.print(allocator, " k{d}", .{k});
             },
@@ -271,6 +339,10 @@ fn readU16(code: []const u8, at: usize) u16 {
 
 fn readI16(code: []const u8, at: usize) i16 {
     return @bitCast(readU16(code, at));
+}
+
+fn readI8(code: []const u8, at: usize) i8 {
+    return @bitCast(code[at]);
 }
 
 fn readU32(code: []const u8, at: usize) u32 {
@@ -392,6 +464,29 @@ test "disasm: register operands" {
     , out);
 }
 
+test "disasm: register updates print their operand and preserve alignment" {
+    var b = Builder.init(testing.allocator);
+    errdefer b.deinit();
+    const span: Span = .{ .start = 3, .end = 8 };
+    _ = try b.reserveRegister();
+    const r1 = try b.reserveRegister();
+    try b.emitUpdateReg(.inc_reg, span, r1);
+    try b.emitUpdateReg(.dec_reg, span, r1);
+    try b.emitOp(.return_, span);
+    var chunk = try b.finish();
+    defer chunk.deinit(testing.allocator);
+
+    const out = try dump(testing.allocator, &chunk);
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings(
+        \\(chunk regs=2 consts=0
+        \\  0000 IncReg r1 [3..8]
+        \\  0002 DecReg r1 [3..8]
+        \\  0004 Return [3..8]
+        \\)
+    , out);
+}
+
 test "disasm: global-lexical slot opcodes print the slot index" {
     var b = Builder.init(testing.allocator);
     errdefer b.deinit();
@@ -437,9 +532,9 @@ test "disasm: jump shows target address" {
     defer testing.allocator.free(out);
     try testing.expectEqualStrings(
         \\(chunk regs=0 consts=0
-        \\  0000 Jmp +1 -> 0004 [0..5]
-        \\  0003 LdaUndefined [0..5]
-        \\  0004 Return [0..5]
+        \\  0000 Jmp8 +1 -> 0003 [0..5]
+        \\  0002 LdaUndefined [0..5]
+        \\  0003 Return [0..5]
         \\)
     , out);
 }

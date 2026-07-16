@@ -1345,6 +1345,86 @@ pub const JSObject = struct {
         return .{ .mode = .{ .bag = self.propsConst().iterator() } };
     }
 
+    /// A shape-backed data descriptor found by the conservative
+    /// §10.1.8 OrdinaryGet chain probe below. `owner_shape` is captured
+    /// with the slot so an inline-cache caller can snapshot the exact
+    /// representation that supplied the value without walking again.
+    pub const OrdinaryShapeDataHit = struct {
+        owner: *JSObject,
+        owner_shape: *@import("shape.zig").Shape,
+        slot: u32,
+    };
+
+    /// Tri-state result for `lookupOrdinaryShapeDataChain`:
+    ///
+    /// - `hit`: a plain shape-data descriptor was resolved.
+    /// - `miss`: the complete ordinary object chain was inspected and
+    ///   the property is absent.
+    /// - `bail`: an accessor, dictionary value, exotic object, or
+    ///   function-valued prototype requires the full realm-aware path.
+    pub const OrdinaryShapeDataLookup = union(enum) {
+        hit: OrdinaryShapeDataHit,
+        miss,
+        bail,
+    };
+
+    /// §10.1.8.1 OrdinaryGet, shape-data-only probe for interpreter IC
+    /// misses. Walk each ordinary JSObject rung exactly once and return
+    /// the first shape-backed data descriptor. Any case with observable
+    /// or representation-specific behaviour declines to `.bail`; the
+    /// caller must then execute the full [[Get]] machinery.
+    ///
+    /// This is deliberately narrower than `get`: it never invokes user
+    /// code, never allocates, and never follows `prototype_fn`. That makes
+    /// the returned `(owner_shape, slot)` safe to consume immediately and
+    /// lets a callsite resolve + refill its IC from one chain walk.
+    pub fn lookupOrdinaryShapeDataChain(self: *JSObject, key: []const u8) OrdinaryShapeDataLookup {
+        var cursor: ?*JSObject = self;
+        while (cursor) |cur| {
+            // These brands have specialised [[Get]] semantics (or can run
+            // a Proxy trap). Keep the shape-only helper strictly ordinary.
+            if (cur.brand.is_proxy or
+                cur.brand.is_module_namespace or
+                cur.brand.is_array_exotic or
+                cur.brand.is_arguments_exotic or
+                cur.getTypedView() != null or
+                cur.getBoxedString() != null)
+            {
+                return .bail;
+            }
+
+            // OrdinaryGetOwnProperty resolves an accessor at this exact
+            // level before consulting the prototype. Preserve that order;
+            // an accessor with no getter still shadows deeper data.
+            if (cur.accessorCount() != 0 and cur.hasAccessor(key)) return .bail;
+
+            if (cur.shape) |sh| {
+                if (sh.lookup(key)) |entry| {
+                    if (entry.kind != .data or entry.slot >= cur.slotCount()) return .bail;
+                    return .{ .hit = .{
+                        .owner = cur,
+                        .owner_shape = sh,
+                        .slot = entry.slot,
+                    } };
+                }
+            }
+
+            // A bag-only value (dictionary mode, or a partially-demoted
+            // shaped object) shadows every deeper prototype. Do not skip
+            // it merely because this helper cannot return a shape slot.
+            if (cur.dictStore()) |dict| {
+                if (dict.properties.contains(key)) return .bail;
+            }
+
+            // JSFunction is a distinct heap representation with its own
+            // static-parent / proto walk; the realm-aware slow path handles
+            // that parallel chain.
+            if (cur.prototype_fn != null) return .bail;
+            cursor = cur.prototype;
+        }
+        return .miss;
+    }
+
     /// §10.1.1 OrdinaryGetOwnProperty (data half) — return the
     /// own data property's value, or `null` if absent. Shape-
     /// first: `slots[shape.lookup(key).slot]` for a shape-mode
@@ -4267,6 +4347,92 @@ test "JSObject: hasOwn prefers the shape when present" {
     // not the bag; strip the bag entry if a dict store exists.)
     if (o.dictStore()) |d| _ = d.properties.swapRemove("x");
     try testing.expect(o.hasOwn("x"));
+}
+
+test "JSObject: ordinary shape-chain lookup resolves data and rejects observable shadows" {
+    const heap_mod = @import("heap.zig");
+    var heap = heap_mod.Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    const grand = try heap.allocateObject();
+    try grand.set(testing.allocator, "method", Value.fromInt32(11));
+    const mid = try heap.allocateObject();
+    try mid.set(testing.allocator, "mid", Value.fromInt32(1));
+    try mid.set(testing.allocator, "near", Value.fromInt32(5));
+    heap.setObjectPrototype(mid, grand);
+    const recv = try heap.allocateObject();
+    try recv.set(testing.allocator, "own", Value.fromInt32(7));
+    heap.setObjectPrototype(recv, mid);
+
+    const own = switch (recv.lookupOrdinaryShapeDataChain("own")) {
+        .hit => |hit| hit,
+        else => return error.TestUnexpectedResult,
+    };
+    try testing.expect(own.owner == recv);
+    try testing.expectEqual(@as(i32, 7), own.owner.slotAt(own.slot).asInt32());
+
+    const immediate = switch (recv.lookupOrdinaryShapeDataChain("near")) {
+        .hit => |hit| hit,
+        else => return error.TestUnexpectedResult,
+    };
+    try testing.expect(immediate.owner == mid);
+    try testing.expectEqual(@as(i32, 5), immediate.owner.slotAt(immediate.slot).asInt32());
+
+    const inherited = switch (recv.lookupOrdinaryShapeDataChain("method")) {
+        .hit => |hit| hit,
+        else => return error.TestUnexpectedResult,
+    };
+    try testing.expect(inherited.owner == grand);
+    try testing.expectEqual(@as(i32, 11), inherited.owner.slotAt(inherited.slot).asInt32());
+    try testing.expect(switch (recv.lookupOrdinaryShapeDataChain("absent")) {
+        .miss => true,
+        else => false,
+    });
+
+    // A dictionary-mode data property at an intermediate level shadows
+    // the shaped grandparent. The shape-only resolver must decline so
+    // the caller takes full OrdinaryGet rather than skipping the shadow.
+    try mid.demoteFromShape(testing.allocator);
+    try mid.set(testing.allocator, "method", Value.fromInt32(22));
+    try testing.expect(switch (recv.lookupOrdinaryShapeDataChain("method")) {
+        .bail => true,
+        else => false,
+    });
+
+    // An accessor is observable even when it has no getter. It likewise
+    // stops a shape-data shortcut from reaching the grandparent.
+    _ = try mid.deleteOwn(testing.allocator, "method");
+    const accessor = try mid.getOrPutAccessor(testing.allocator, "method");
+    if (!accessor.found_existing) accessor.value_ptr.* = .{};
+    try testing.expect(switch (recv.lookupOrdinaryShapeDataChain("method")) {
+        .bail => true,
+        else => false,
+    });
+
+    // Proxy / namespace brands require their exotic [[Get]] paths,
+    // including when they appear below an ordinary receiver.
+    const exotic = try heap.allocateObject();
+    try exotic.set(testing.allocator, "method", Value.fromInt32(33));
+    exotic.brand.is_proxy = true;
+    const exotic_recv = try heap.allocateObject();
+    heap.setObjectPrototype(exotic_recv, exotic);
+    try testing.expect(switch (exotic_recv.lookupOrdinaryShapeDataChain("method")) {
+        .bail => true,
+        else => false,
+    });
+    exotic.brand.is_proxy = false;
+    exotic.brand.is_module_namespace = true;
+    try testing.expect(switch (exotic_recv.lookupOrdinaryShapeDataChain("method")) {
+        .bail => true,
+        else => false,
+    });
+
+    exotic.brand.is_module_namespace = false;
+    exotic.brand.is_array_exotic = true;
+    try testing.expect(switch (exotic_recv.lookupOrdinaryShapeDataChain("method")) {
+        .bail => true,
+        else => false,
+    });
 }
 
 test "JSObject: deleteOwn demotes the shape for shape-stable receivers" {

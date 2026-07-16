@@ -1234,6 +1234,46 @@ pub const Heap = struct {
         return els[idx];
     }
 
+    /// §13.15.2 / §10.4.2.1 — rewrite an existing packed Array
+    /// element without stringifying and reparsing the computed key.
+    /// A present own element shadows the prototype chain and carries
+    /// the default writable data descriptor, so the clean dense case
+    /// needs neither an accessor/proxy walk nor an extensibility /
+    /// length-writability check. Returns false for every case that can
+    /// add a property, grow length, consult descriptor metadata, or
+    /// run user code; the caller then executes the full [[Set]] path.
+    ///
+    /// P0 deliberately accepts only non-negative int32 keys, matching
+    /// `denseElementFastGet`. Integral doubles (including numeric -0)
+    /// retain the existing ToPropertyKey fallback until read and write
+    /// can share one widened numeric-index conversion contract.
+    pub fn denseElementFastSet(self: *Heap, recv: Value, key: Value, v: Value) bool {
+        if (!key.isInt32()) return false;
+        const ik = key.asInt32();
+        if (ik < 0) return false;
+        const aobj = valueAsPlainObject(recv) orelse return false;
+        if (!aobj.brand.is_array_exotic or aobj.brand.is_sparse or aobj.brand.is_proxy) return false;
+
+        const idx: usize = @intCast(ik);
+        const els = aobj.elements.items;
+        if (idx >= els.len or JSObject.isElementHole(els[idx])) return false;
+
+        // Array exotics normally keep indexed values exclusively in
+        // `elements`. Be conservative around any named representation:
+        // `markAsArrayExotic` can brand a pre-shaped object, and an
+        // indexed descriptor demotion can leave bag/flag metadata that
+        // must win over a blind packed-vector store. Accessors live in
+        // the extension independently of the dictionary pointer.
+        if (aobj.shape != null or aobj.dictStore() != null or aobj.accessorCount() != 0) return false;
+
+        aobj.elements.items[idx] = v;
+        // The direct store bypasses `JSObject.setIndexed`, so preserve
+        // both its mature→young remembered-set edge and its Dijkstra
+        // incremental-marking shade explicitly.
+        self.writeBarrier(.{ .object = aobj }, v);
+        return true;
+    }
+
     /// Allocate a new `Environment` chained to `parent`, with
     /// `slot_count` bindings initialised to the TDZ Hole. Header
     /// comes from the per-heap slab pool (O(1) after warmup);
@@ -1803,15 +1843,18 @@ pub const Heap = struct {
                 // Shape-mode objects keep their named-data values
                 // in `slots` (the bag is empty under Phase 3 of
                 // [docs/lazy-property-bag.md]); dictionary-mode
-                // objects keep them in `properties`. Walk both —
-                // for any individual object only one of the two
-                // is non-empty, so the cost is paid once.
-                {
+                // objects keep them in `properties`. Select exactly
+                // one representation: `iterOwnNamedKeys` also walks
+                // shape slots, so calling it after the direct slot
+                // loop would enqueue every shape-mode value twice
+                // (and resolve each key through the shape chain).
+                if (o.shape != null) {
                     var si: usize = 0;
                     while (si < o.slotCount()) : (si += 1) self.enqueue(o.slotAt(si));
+                } else {
+                    var it = o.propsConst().iterator();
+                    while (it.next()) |entry| self.enqueue(entry.value_ptr.*);
                 }
-                var it = o.iterOwnNamedKeys();
-                while (it.next()) |entry| self.enqueue(entry.value_ptr.*);
                 if (o.privatePropertyIterator()) |pit_outer| {
                     var pit = pit_outer;
                     while (pit.next()) |entry| self.enqueue(entry.value_ptr.*);
@@ -2283,17 +2326,26 @@ pub const Heap = struct {
         }
     }
 
-    /// Weak-clear stale heap pointers in both IC tables of a chunk:
-    /// `inline_caches` (proto pointer for prototype-load cells)
+    /// Weak-clear stale heap pointers in the IC tables of a chunk:
+    /// named load/store caches (prototype guard pointers)
     /// and `inline_call_caches` (callee pointer + `new_call`'s
     /// `proto` pointer). Cells whose pointer isn't otherwise
     /// reachable get nulled, so a swept-and-reused address cannot
     /// reawaken a stale cell.
     fn weakClearChunkICs(chunk: *const Chunk, live_color: u1) void {
-        for (chunk.inline_caches) |*cell| {
+        for (chunk.inline_load_caches) |*cell| {
+            if (cell.proto) |proto| {
+                if (proto.mark_color != live_color) {
+                    cell.invalidate();
+                }
+            }
+        }
+        for (chunk.inline_store_caches) |*cell| {
             if (cell.proto) |proto| {
                 if (proto.mark_color != live_color) {
                     cell.shape = null;
+                    cell.pre_shape = null;
+                    cell.post_shape = null;
                     cell.proto = null;
                     cell.proto_shape = null;
                 }
@@ -5059,6 +5111,101 @@ test "Heap: collectFull keeps a rooted mature object" {
     try testing.expectEqual(@as(usize, 1), heap.strings_mature.items.len);
 }
 
+test "Heap: denseElementFastSet overwrites only clean existing packed elements" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    const arr = try heap.makeDenseArray(null, &.{ Value.fromInt32(10), Value.fromInt32(20) });
+    const arr_v = taggedObject(arr);
+    try testing.expect(heap.denseElementFastSet(arr_v, Value.fromInt32(1), Value.fromInt32(99)));
+    try testing.expectEqual(@as(i32, 10), arr.elements.items[0].asInt32());
+    try testing.expectEqual(@as(i32, 99), arr.elements.items[1].asInt32());
+    try testing.expectEqual(@as(u32, 2), arr.arrayLength());
+
+    // P0 deliberately accepts only non-negative int32 keys. Numeric
+    // -0 and integral doubles have the same eventual property-key
+    // semantics, but stay on the full ToPropertyKey path for now.
+    try testing.expect(!heap.denseElementFastSet(arr_v, Value.fromInt32(-1), Value.fromInt32(1)));
+    try testing.expect(!heap.denseElementFastSet(arr_v, Value.fromDouble(-0.0), Value.fromInt32(1)));
+    try testing.expect(!heap.denseElementFastSet(arr_v, Value.fromDouble(1.0), Value.fromInt32(1)));
+    try testing.expect(!heap.denseElementFastSet(arr_v, Value.fromInt32(2), Value.fromInt32(1)));
+    try testing.expectEqual(@as(i32, 10), arr.elements.items[0].asInt32());
+    try testing.expectEqual(@as(i32, 99), arr.elements.items[1].asInt32());
+
+    const holed = try heap.makeDenseArray(null, &.{Value.hole_});
+    try testing.expect(!heap.denseElementFastSet(taggedObject(holed), Value.fromInt32(0), Value.fromInt32(1)));
+    try testing.expect(JSObject.isElementHole(holed.elements.items[0]));
+
+    const ordinary = try heap.allocateObject();
+    try ordinary.setIndexed(heap.allocator, 0, Value.fromInt32(3));
+    try testing.expect(!heap.denseElementFastSet(taggedObject(ordinary), Value.fromInt32(0), Value.fromInt32(4)));
+    try testing.expectEqual(@as(i32, 3), ordinary.elements.items[0].asInt32());
+
+    const sparse = try heap.allocateObject();
+    try sparse.markAsArrayExotic(heap.allocator);
+    try sparse.setIndexed(heap.allocator, 100_000, Value.fromInt32(5));
+    try testing.expect(sparse.brand.is_sparse);
+    try testing.expect(!heap.denseElementFastSet(taggedObject(sparse), Value.fromInt32(100_000), Value.fromInt32(6)));
+    try testing.expectEqual(@as(i32, 5), sparse.getIndexed(100_000).asInt32());
+
+    const proxy_branded = try heap.makeDenseArray(null, &.{Value.fromInt32(7)});
+    proxy_branded.brand.is_proxy = true;
+    try testing.expect(!heap.denseElementFastSet(taggedObject(proxy_branded), Value.fromInt32(0), Value.fromInt32(8)));
+    try testing.expectEqual(@as(i32, 7), proxy_branded.elements.items[0].asInt32());
+
+    // Array exotics can be branded after acquiring a shape. A numeric
+    // shape descriptor could then coexist with indexed storage, so the
+    // P0 helper accepts only the representation-clean shape-null case.
+    const shaped = try heap.allocateObject();
+    try shaped.set(heap.allocator, "meta", Value.fromInt32(1));
+    try testing.expect(shaped.shape != null);
+    try shaped.markAsArrayExotic(heap.allocator);
+    try shaped.setIndexed(heap.allocator, 0, Value.fromInt32(9));
+    try testing.expect(!heap.denseElementFastSet(taggedObject(shaped), Value.fromInt32(0), Value.fromInt32(10)));
+    try testing.expectEqual(@as(i32, 9), shaped.elements.items[0].asInt32());
+
+    // Descriptor-demoted indexed entries and accessors live outside
+    // the packed vector. Conservatively reject any dictionary or
+    // accessor state so a stale/demoted descriptor can never be
+    // bypassed by a direct element store.
+    const dictionary = try heap.makeDenseArray(null, &.{Value.fromInt32(11)});
+    try dictionary.set(heap.allocator, "meta", Value.fromInt32(1));
+    try testing.expect(dictionary.dictStore() != null);
+    try testing.expect(!heap.denseElementFastSet(taggedObject(dictionary), Value.fromInt32(0), Value.fromInt32(12)));
+    try testing.expectEqual(@as(i32, 11), dictionary.elements.items[0].asInt32());
+
+    const accessor_bearing = try heap.makeDenseArray(null, &.{Value.fromInt32(13)});
+    const accessor = try accessor_bearing.getOrPutAccessor(heap.allocator, "meta");
+    if (!accessor.found_existing) accessor.value_ptr.* = .{};
+    try testing.expectEqual(@as(usize, 1), accessor_bearing.accessorCount());
+    try testing.expect(!heap.denseElementFastSet(taggedObject(accessor_bearing), Value.fromInt32(0), Value.fromInt32(14)));
+    try testing.expectEqual(@as(i32, 13), accessor_bearing.elements.items[0].asInt32());
+}
+
+test "Heap: denseElementFastSet remembers a young child stored into a mature array" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    const arr = try heap.makeDenseArray(null, &.{Value.undefined_});
+    heap.collectYoung(&.{taggedObject(arr)});
+    try testing.expectEqual(Generation.mature, arr.generation);
+
+    const child = try heap.allocateObject();
+    try child.set(heap.allocator, "tag", Value.fromInt32(42));
+    try testing.expect(heap.denseElementFastSet(taggedObject(arr), Value.fromInt32(0), taggedObject(child)));
+    try testing.expect(arr.dirty);
+    try testing.expectEqual(@as(usize, 1), heap.dirty_list.items.len);
+
+    // The child is absent from the explicit root set. Only the direct
+    // store's write barrier can make the mature array a minor-GC root.
+    heap.collectYoung(&.{});
+    try testing.expectEqual(Generation.mature, child.generation);
+    try testing.expectEqual(taggedObject(child).bits, arr.elements.items[0].bits);
+    try testing.expectEqual(@as(i32, 42), child.get("tag").asInt32());
+    try testing.expect(!arr.dirty);
+    try testing.expectEqual(@as(usize, 0), heap.dirty_list.items.len);
+}
+
 test "Heap: write barrier records an old→young store" {
     var heap = Heap.init(testing.allocator);
     defer heap.deinit();
@@ -5689,6 +5836,92 @@ test "Heap: markValue is idempotent within a cycle" {
     // Clean up — finish the cycle so heap.deinit doesn't trip on
     // a dangling cycle_started flag.
     heap.collectFull(&.{taggedObject(o)});
+}
+
+test "Heap: major mark scans each shape-mode named value once" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    // Keep enough heap-valued properties to cross the inline/overflow
+    // slot seam. `markValue(owner)` seeds (but does not yet drain) the
+    // worklist, so its length is an exact structural count of the named
+    // data edges the owner scan visited. Each distinct child must appear
+    // once: a second shape enumeration would leave 2N entries here.
+    const object_mod = @import("object.zig");
+    const owner = try heap.allocateObject();
+    const n: usize = object_mod.inline_slot_cap + 2;
+    var children: [object_mod.inline_slot_cap + 2]*object_mod.JSObject = undefined;
+    var keys: [object_mod.inline_slot_cap + 1][1]u8 = undefined;
+
+    var i: usize = 0;
+    while (i < n - 1) : (i += 1) {
+        const child = try heap.allocateObject();
+        try child.set(heap.allocator, "tag", Value.fromInt32(@intCast(i)));
+        children[i] = child;
+        keys[i] = .{@as(u8, 'a') + @as(u8, @intCast(i))};
+        try heap.storeProperty(owner, heap.allocator, &keys[i], taggedObject(child));
+    }
+
+    // A user Symbol used only as a shape key is not a Value edge. The
+    // representation-exclusive value scan must remain paired with the
+    // independent `markSymbolKeys` walk so the Symbol itself survives.
+    const sym = try heap.allocateSymbol("shape-key");
+    const sym_key = try testing.allocator.dupe(u8, sym.prop_key);
+    defer testing.allocator.free(sym_key);
+    const sym_child = try heap.allocateObject();
+    try sym_child.set(heap.allocator, "tag", Value.fromInt32(@intCast(n - 1)));
+    children[n - 1] = sym_child;
+    try heap.storeProperty(owner, heap.allocator, sym.prop_key, taggedObject(sym_child));
+
+    try testing.expect(owner.shape != null);
+    try testing.expectEqual(n, owner.slotCount());
+
+    heap.beginMajorCycle();
+    heap.markValue(taggedObject(owner));
+    try testing.expectEqual(n, heap.mark_worklist.items.len);
+
+    // Finish the already-armed cycle and prove both the values and the
+    // shape-only Symbol key remain live after the real major sweep.
+    heap.collectFull(&.{taggedObject(owner)});
+    try testing.expectEqual(@as(usize, 1), heap.symbolCount());
+    try testing.expectEqual(sym, heap.symbolForKey(sym_key).?);
+    i = 0;
+    while (i < n) : (i += 1) {
+        try testing.expectEqual(@as(i32, @intCast(i)), children[i].get("tag").asInt32());
+    }
+}
+
+test "Heap: major mark preserves dictionary named values and Symbol keys" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    const owner = try heap.allocateObject();
+    const plain_child = try heap.allocateObject();
+    try plain_child.set(heap.allocator, "tag", Value.fromInt32(11));
+    try heap.storeProperty(owner, heap.allocator, "plain", taggedObject(plain_child));
+
+    const sym = try heap.allocateSymbol("dictionary-key");
+    const sym_key = try testing.allocator.dupe(u8, sym.prop_key);
+    defer testing.allocator.free(sym_key);
+    const sym_child = try heap.allocateObject();
+    try sym_child.set(heap.allocator, "tag", Value.fromInt32(22));
+    try heap.storeProperty(owner, heap.allocator, sym.prop_key, taggedObject(sym_child));
+
+    // Demotion materializes the bag and clears the slots. The major
+    // marker must keep walking this representation exactly once too.
+    try owner.demoteFromShape(heap.allocator);
+    try testing.expect(owner.shape == null);
+    try testing.expectEqual(@as(usize, 0), owner.slotCount());
+
+    heap.beginMajorCycle();
+    heap.markValue(taggedObject(owner));
+    try testing.expectEqual(@as(usize, 2), heap.mark_worklist.items.len);
+
+    heap.collectFull(&.{taggedObject(owner)});
+    try testing.expectEqual(@as(usize, 1), heap.symbolCount());
+    try testing.expectEqual(sym, heap.symbolForKey(sym_key).?);
+    try testing.expectEqual(@as(i32, 11), plain_child.get("tag").asInt32());
+    try testing.expectEqual(@as(i32, 22), sym_child.get("tag").asInt32());
 }
 
 test "Heap: a mature object unreachable after a cycle is swept by the next cycle" {
