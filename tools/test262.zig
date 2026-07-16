@@ -87,6 +87,11 @@
 //!                           32768. `0` falls through to the engine default.
 //!   --gc-stats              Per-realm one-line stderr report after every GC cycle.
 //!
+//! Tier differentials:
+//!   --jit                   Force Bistromath T1 at threshold 1.
+//!   --ohaimark              Force Ohaimark T2 before T1, both at threshold 1.
+//!                           T2 remains default-off outside this test posture.
+//!
 //! Diagnostics (each pins --threads=1):
 //!   --leak-check            Route per-fixture bytes through `std.heap.DebugAllocator`;
 //!                           every unfreed allocation prints a stack trace at exit.
@@ -716,12 +721,7 @@ fn poolWorkerMain(slot: *PoolWorker) void {
     // Match the scored posture so the agent's SAB / Atomics / eval work.
     realm.hardened = false;
     realm.allow_eval = true;
-    if (g_jit_force) {
-        // `--jit` — the docs/jit.md §10 differential gate: Bistromath
-        // on, every eligible chunk force-compiled on first call.
-        realm.jit_enabled = true;
-        realm.jit_threshold_override = 1;
-    }
+    configureForcedJit(&realm);
     realm.installBuiltins() catch return;
     // `install262` (no `current_agent` here) records its `$262.agent`
     // group as this thread's `reap_group`; the worker never reaps, so
@@ -773,12 +773,7 @@ fn agentMainPrivate(state: *AgentThreadState) void {
     var realm = cynic.runtime.Realm.init(std.heap.c_allocator);
     realm.hardened = false;
     realm.allow_eval = true;
-    if (g_jit_force) {
-        // `--jit` — the docs/jit.md §10 differential gate: Bistromath
-        // on, every eligible chunk force-compiled on first call.
-        realm.jit_enabled = true;
-        realm.jit_threshold_override = 1;
-    }
+    configureForcedJit(&realm);
     if (realm.installBuiltins()) |_| {} else |_| {
         realm.deinit();
         std.heap.page_allocator.free(state.src);
@@ -1049,12 +1044,7 @@ test "agent realm reset: a reused realm isolates one agent from the next" {
     defer realm.deinit();
     realm.hardened = false;
     realm.allow_eval = true;
-    if (g_jit_force) {
-        // `--jit` — the docs/jit.md §10 differential gate: Bistromath
-        // on, every eligible chunk force-compiled on first call.
-        realm.jit_enabled = true;
-        realm.jit_threshold_override = 1;
-    }
+    configureForcedJit(&realm);
     try realm.installBuiltins();
     try install262(&realm);
     // `install262` recorded its `$262.agent` group as this thread's
@@ -1168,6 +1158,50 @@ const SkipReason = enum {
 /// sweep with this flag must produce identical pass/fail results
 /// to one without it. Read-only after flag parsing.
 var g_jit_force: bool = false;
+
+/// `--ohaimark` — exercise the default-off optimizing tier before T1 and
+/// force both thresholds to 1. Kept separate from `--jit` so the established
+/// Bistromath differential pass set remains a stable gate of its own.
+var g_ohaimark_force: bool = false;
+
+fn configureForcedJit(realm: *cynic.runtime.Realm) void {
+    if (!g_jit_force and !g_ohaimark_force) return;
+    realm.jit_enabled = true;
+    realm.jit_threshold_override = 1;
+    if (g_ohaimark_force) {
+        realm.ohaimark_enabled = true;
+        realm.ohaimark_threshold_override = 1;
+    }
+}
+
+test "test262 tier force keeps Bistromath and Ohaimark postures distinct" {
+    const saved_jit = g_jit_force;
+    const saved_ohaimark = g_ohaimark_force;
+    defer {
+        g_jit_force = saved_jit;
+        g_ohaimark_force = saved_ohaimark;
+    }
+
+    g_jit_force = true;
+    g_ohaimark_force = false;
+    var baseline = cynic.runtime.Realm.init(std.testing.allocator);
+    defer baseline.deinit();
+    configureForcedJit(&baseline);
+    try std.testing.expect(baseline.jit_enabled);
+    try std.testing.expectEqual(@as(?u32, 1), baseline.jit_threshold_override);
+    try std.testing.expect(!baseline.ohaimark_enabled);
+    try std.testing.expectEqual(@as(?u32, null), baseline.ohaimark_threshold_override);
+
+    g_jit_force = false;
+    g_ohaimark_force = true;
+    var optimized = cynic.runtime.Realm.init(std.testing.allocator);
+    defer optimized.deinit();
+    configureForcedJit(&optimized);
+    try std.testing.expect(optimized.jit_enabled);
+    try std.testing.expectEqual(@as(?u32, 1), optimized.jit_threshold_override);
+    try std.testing.expect(optimized.ohaimark_enabled);
+    try std.testing.expectEqual(@as(?u32, 1), optimized.ohaimark_threshold_override);
+}
 
 const Options = struct {
     corpus: []const u8 = "vendor/test262/test",
@@ -2955,7 +2989,7 @@ fn classifyAndRunInner(
     // which has no monitor — harmless.
     //
     // NOTE: `setInterruptHook` clears `jit_enabled` (the v1
-    // hook-vs-JIT rule); the `--jit` branch below re-enables it
+    // hook-vs-JIT rule); the forced-tier branch below re-enables it
     // deliberately — compiled frames poll only the fuel counter and
     // the interrupt byte at back-edges, and the 50M step budget
     // below backstops a wedged compiled loop.
@@ -2990,12 +3024,7 @@ fn classifyAndRunInner(
     // default agent can block (Cynic's edge/server target); only these
     // fixtures opt out.
     if (fm.flags.can_block_is_false) realm.agent_can_block = false;
-    if (g_jit_force) {
-        // `--jit` — the docs/jit.md §10 differential gate: Bistromath
-        // on, every eligible chunk force-compiled on first call.
-        realm.jit_enabled = true;
-        realm.jit_threshold_override = 1;
-    }
+    configureForcedJit(&realm);
     realm.installBuiltins() catch return fail_reject_or_ch;
     // test262 fixtures use `__collectGarbage` / `__clearKeptObjects`
     // / `__drainMicrotasks` for deterministic triggering — debug
@@ -4590,6 +4619,8 @@ fn parseArgs(gpa: std.mem.Allocator, args: std.process.Args) !Options {
             opts.timeout_s = std.fmt.parseInt(u32, arg["--timeout=".len..], 10) catch 60;
         } else if (std.mem.eql(u8, arg, "--jit")) {
             g_jit_force = true;
+        } else if (std.mem.eql(u8, arg, "--ohaimark")) {
+            g_ohaimark_force = true;
         } else if (std.mem.startsWith(u8, arg, "--gc-threshold=")) {
             opts.gc_threshold = std.fmt.parseInt(u32, arg["--gc-threshold=".len..], 10) catch 32768;
         } else if (std.mem.eql(u8, arg, "--gc-stats")) {

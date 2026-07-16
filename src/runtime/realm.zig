@@ -1144,6 +1144,15 @@ pub const Realm = struct {
     /// Bistromath everywhere. `null` uses the size-scaled default
     /// (docs/jit.md §4.7).
     jit_threshold_override: ?u32 = null,
+    /// Ohaimark T2 rollout gate (docs/ohaimark.md §5). This is subordinate to
+    /// `jit_enabled`: `--no-jit` remains a master opt-out for every JS tier.
+    /// The optimizing tier stays off by default until forced differential,
+    /// GC-pressure, fuzz, and performance gates pass.
+    ohaimark_enabled: bool = false,
+    /// T2-only threshold override. Tests and the test262 differential harness
+    /// use `1` to attempt every eligible warm function; `null` uses the
+    /// size-scaled policy in runtime/ohaimark/driver.zig.
+    ohaimark_threshold_override: ?u32 = null,
     /// Lazily-created arena owning every realm-resident WebAssembly
     /// artifact (decoded modules, instances, their store state). Freed
     /// wholesale at realm teardown, so wasm objects need no per-object
@@ -1315,6 +1324,14 @@ pub const Realm = struct {
             // this, nested `new ShadowRealm()` inside `.evaluate()`
             // would skip the ShadowRealm install on the grandchild.
             .feature_flags = parent.feature_flags,
+            // Tier policy is host posture, not realm-local JS state. A forced
+            // test262 differential must cover `$262.createRealm()` and
+            // ShadowRealm children with the same thresholds as their parent;
+            // the master `jit_enabled` switch remains authoritative.
+            .jit_enabled = parent.jit_enabled,
+            .jit_threshold_override = parent.jit_threshold_override,
+            .ohaimark_enabled = parent.ohaimark_enabled,
+            .ohaimark_threshold_override = parent.ohaimark_threshold_override,
         };
         r.globals.heap = parent.heap;
         r.value_stack = parent.allocator.alloc(Value, value_stack_capacity) catch unreachable;

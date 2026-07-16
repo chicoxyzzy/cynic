@@ -63,8 +63,12 @@ loads now execute through live typed IC cells as well. Taken backedges poll
 fuel, interrupts, hooks, and pending GC work; a slow poll transfers the exact
 loop-header state into Lantern's precise root set before returning. Ohaimark
 now also has chunk-owned executable lifetime and a transactional full-pipeline
-compile/install boundary. It remains test-only: runtime tier-up is the next
-gate. See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the thematic breakdown.
+compile/install boundary. A realm-local, default-off function-entry dispatcher
+now attempts T2 before T1, preserves exact Lantern bailout state, and inherits
+through child realms; the test262 harness forces it with `--ohaimark`. Full
+test262 pass-set equivalence is green; broader GC stress, fuzz, and performance
+gates still precede default-on use. See
+[`docs/ROADMAP.md`](docs/ROADMAP.md) for the thematic breakdown.
 
 ### Conformance
 
@@ -190,6 +194,7 @@ your local `zig version` reports an older dev tag, bump it.
 - `--no-harness` — skip the `sta.js` + `assert.js` preamble (for measuring the no-harness floor).
 - `--threads=<n>` — worker count (`0` = auto, `1` = sequential, `>1` = pool).
 - `--only-failing` — skip-as-pass any path in `.test262-pass-cache.txt`. After a full sweep populates the cache, the next iteration runs only the ~7 k failing/skipped fixtures — ≤ 30 s vs ≤ 100 s. Don't use for score rows; use it for per-fix verification.
+- `--jit` / `--ohaimark` — force Bistromath alone, or default-off Ohaimark before Bistromath, at threshold 1 for pass-set differential runs.
 - `--gc-threshold=<n>` — per-fixture allocation-pressure GC threshold (default 32,768; engine default 16,384). `0` falls through to the engine default. The engine also has a 16 MiB byte trigger so allocate-and-discard patterns GC promptly regardless of count.
 - `--write-results` — update `test262-results.md` with today's row. Re-running on the same date replaces that day's row rather than appending. The default run never touches that file.
 - **Memory / leak instrumentation:** `--gc-stats` (per-cycle pool counts + bytes), `--mem-summary` (end-of-sweep totals: cumulative bytes, max charged peak, GC cycles), `--top-rss=<n>` (top-N fixtures by process RSS delta ≥ 8 MiB), `--top-alloc=<n>` (top-N by cumulative bytes allocated ≥ 64 KiB — catches GC-cleaned thrash that RSS hides), `--leak-check` (route per-fixture bytes allocator through `std.heap.DebugAllocator`; stack trace per unfreed allocation), `--max-rss=<mb>` (abort with the offending path when RSS crosses budget).

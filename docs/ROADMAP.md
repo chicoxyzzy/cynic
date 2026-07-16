@@ -1173,6 +1173,24 @@ sampling by `/profile`.
   prove repeat compilation is idempotent, and verify released slots are reused.
   Ohaimark remains test-only pending disabled-by-default dispatcher tier-up.
   See [ohaimark.md](ohaimark.md).
+- **Ohaimark default-off function entry (2026-07-16).** A realm-local T2 gate
+  now sits beneath the existing JIT master switch. Every fresh ordinary JS
+  frame consults Ohaimark before Bistromath; cold/refused graphs fall through
+  untouched, while an optimized guard exit is distinguished from refusal and
+  resumes the reconstructed Lantern frame without restarting in T1. The first
+  natural policy waits for `8192 + 32 * bytecode_length` warmth; the test262
+  `--ohaimark` posture forces both T2 and T1 to threshold 1. Fresh calls add
+  heat before tier selection, including Bistromath's in-place callee pushes, so
+  T1 publication cannot starve T2. Tier policy follows `Realm.initChild`,
+  covering `$262.createRealm()` and ShadowRealm. End-to-end
+  tests prove default-off behavior, native completion through normal call
+  dispatch, checked-overflow resumption, and T2 refusal preserving published
+  T1. The first full differential produced the same sorted 48,517-entry pass
+  set with T2 forced as without it; a ReleaseSafe `--gc-threshold=1` expression
+  bucket also completed without a GC/JIT verifier failure (47 existing passes,
+  one pre-existing conformance failure). Ohaimark OSR, broader GC-pressure
+  buckets, fuzzing, and compile-time/code-size/performance gates remain. See
+  [ohaimark.md](ohaimark.md).
 - **Generational GC.** A JSC-Riptide-style non-moving
   generational collector — store-site routing, generation header
   bits, a write barrier + remembered set, `collectYoung` with

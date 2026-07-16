@@ -170,4 +170,5 @@ test {
     _ = @import("runtime/ohaimark/emitter_aarch64_test.zig");
     _ = @import("runtime/ohaimark/emitter_graph_test.zig");
     _ = @import("runtime/ohaimark/compiler_test.zig");
+    _ = @import("runtime/ohaimark/driver_test.zig");
 }

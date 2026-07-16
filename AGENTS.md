@@ -435,6 +435,10 @@ runs the comparison as the gating `test262-jit-differential`
 job. The harness flag is independent of the `cynic` CLI, where
 the tier is on by default at natural thresholds and `--no-jit`
 opts out),
+`--ohaimark` (run every realm with default-off Ohaimark attempted
+before Bistromath and both thresholds forced to 1. This is the T2
+differential posture; it remains separate from the established
+T1-only `--jit` pass set),
 `--write-results` (updates `test262-results.md`),
 `--only-failing` (skip-as-pass any test path listed in
 `.test262-pass-cache.txt` — iterative-dev shortcut; cache is

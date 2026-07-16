@@ -12,8 +12,10 @@ own/prototype/synthetic named loads now execute through live typed IC cells.
 Taken backedges now poll fuel, interrupts, hooks, and pending GC work, with a
 slow poll transferring exact loop-header state back to Lantern before any
 collection or host call. Chunk-owned executable lifetime and Ohaimark's
-transactional full-pipeline compile/install boundary now ship; runtime tier-up
-remains future work. Spasm's delivery state is tracked below. The document
+transactional full-pipeline compile/install boundary now ship. Default-off
+ordinary-function tier-up tries T2 before T1 and resumes Lantern exactly after
+a guard exit; Ohaimark OSR and default-on rollout remain future work. Spasm's
+delivery state is tracked below. The document
 doubles as the design record that pinned the architecture before the first
 emitter was written and as the delivery ledger (the "Delivery order" section
 tracks what each increment shipped). It is the
@@ -420,7 +422,9 @@ Counters follow the JSC/SM structure with Cynic-sized constants
 (all named in one place, tunable by flag):
 
 - `warmth += 16` at function entry, `+= 1` per back-edge
-  (JSC weights 15/1; round to a shift);
+  (JSC weights 15/1; round to a shift). Entry heat is observed before tier
+  selection, including T1's in-place callee pushes, so published baseline code
+  cannot starve a higher T2 threshold;
 - compile when `warmth >= 512 + 8 × chunk.code.len` — size-scaled
   so a 4-line helper compiles after ~30 calls but a 3000-byte
   function waits for real heat (V8 scales budgets by bytecode
@@ -474,7 +478,13 @@ collection that preserves a loop-carried object and reclaims an unrooted peer.
 The supported native subset still makes no helper call or allocation; such
 nodes continue to reject until rooted call safepoints land. Completed code now
 publishes transactionally into a chunk-owned T2 record, independently of
-Bistromath's owned main/continuation records; runtime tier-up remains disabled.
+Bistromath's owned main/continuation records. A realm-local default-off driver
+enters fresh ordinary functions after sustained heat (or threshold 1 under the
+test262 `--ohaimark` differential), then returns completed frames or resumes
+Lantern's reconstructed frame without offering that bailout to T1. Constructors,
+generators, async frames, and Ohaimark OSR remain lower-tier paths. The first
+full differential is green: the baseline and forced-T2 sweeps produced the same
+sorted 48,517-entry pass set.
 The decisions Bistromath must preserve are:
 
 - **Method JIT over a CFG SSA IR with linear storage.** Not sea of
@@ -762,6 +772,9 @@ The tier ships dark, proves equivalence, then flips on:
    ([inline-caches.md](inline-caches.md) "Verification"). Lantern is
    the executable spec; Bistromath is correct exactly when the
    sweep can't tell them apart.
+   Ohaimark repeats this gate independently with test262 `--ohaimark`, which
+   forces T2 before T1 without changing the established T1-only `--jit` pass
+   set.
 3. **gc-stress with force-compile.** `test262-safe` +
    `--gc-threshold=1` + force-tier-up across the GC-heavy buckets —
    compiled frames must survive the same rooting torture as
@@ -1207,11 +1220,12 @@ useful:
    data. A bounded graph evaluator also proves checked success and overflow
    recovery against Lantern. Register allocation, AArch64 frame/edge lowering,
    checked int32 arithmetic/control emission, and direct guard-exit frame
-   reconstruction now also ship in the test-only tier, along with guarded
+   reconstruction now also ship in the default-off tier, along with guarded
    own/prototype/synthetic named loads through live IC cells and
    frame-reconstructing backedge safepoints. Transactional full-pipeline
    compilation now publishes owned code into independent T1/T2 chunk state.
-   Next: disabled-by-default tier-up; see
+   Ordinary-function entry now reaches T2 through the disabled-by-default
+   realm gate. Next: broader GC/fuzz/performance evidence and OSR; see
    [ohaimark.md](ohaimark.md).
 
 ## 13. Considered and declined

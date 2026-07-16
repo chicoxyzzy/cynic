@@ -55,6 +55,7 @@ const Op = @import("../../bytecode/op.zig").Op;
 const bytecode_stats = @import("../../bytecode/stats.zig");
 const chunk_mod = @import("../../bytecode/chunk.zig");
 const bistromath = @import("../bistromath/bistromath.zig");
+const ohaimark_driver = @import("../ohaimark/driver.zig");
 const Chunk = chunk_mod.Chunk;
 const Handler = chunk_mod.Handler;
 const LoadICCell = chunk_mod.LoadICCell;
@@ -472,6 +473,34 @@ pub const RunResult = union(enum) {
     /// unwinding; a real yield leaves it as `.executing`).
     yielded: Value,
 };
+
+/// Fresh-frame tier selection. Ohaimark gets first refusal only when its
+/// separate rollout gate is enabled; a cold or unsupported T2 attempt leaves
+/// the frame untouched and falls through to Bistromath. A T2 guard exit has
+/// already reconstructed the frame, so it resumes Lantern directly instead
+/// of restarting the activation in T1.
+pub fn tryEnterFreshJitFrame(
+    allocator: std.mem.Allocator,
+    realm: *Realm,
+    frames: *std.ArrayListUnmanaged(CallFrame),
+) RunError!bistromath.EnterOutcome {
+    switch (try tryEnterOhaimarkTop(allocator, realm, frames)) {
+        .not_entered => return bistromath.tryEnterTop(allocator, realm, frames),
+        .resumed => return .not_entered,
+        .completed => |value| return .{ .completed = value },
+    }
+}
+
+/// Ohaimark-only half of fresh-frame selection. Bistromath's in-place call
+/// driver uses this when generated T1 code pushes a callee, then either resumes
+/// its own continuation or selects a T1 callee entry without nesting drivers.
+pub fn tryEnterOhaimarkTop(
+    allocator: std.mem.Allocator,
+    realm: *Realm,
+    frames: *std.ArrayListUnmanaged(CallFrame),
+) RunError!ohaimark_driver.EnterOutcome {
+    return ohaimark_driver.tryEnterTop(allocator, realm, frames);
+}
 
 pub const EvaluateError = error{
     OutOfMemory,
@@ -1035,13 +1064,6 @@ inline fn reEnterDispatch(
     registers.* = fr.registers;
     ip.* = fr.ip;
     acc.* = fr.accumulator;
-    if (fr.ip == 0) {
-        // Fresh frame entry — a call push seeds ip 0, a §15.10 PTC
-        // re-entry reframes in place to ip 0, and a generator's
-        // first resume starts at 0. Returns and unwind landings
-        // resume mid-chunk and don't re-heat. docs/jit.md §4.7.
-        if (fr.chunk.jit_state) |js| js.warmth +|= Chunk.JitState.entry_weight;
-    }
     if (ip.* >= code.*.len) return error.InvalidOpcode;
     const b = code.*[ip.*];
     ip.* += 1;
@@ -3410,12 +3432,13 @@ pub fn runFrames(
             // chunk / registers / ip=0. decodeNext would keep
             // running the caller against a reallocated stack.
             //
-            // Bistromath first (docs/jit.md §4): a hot compiled
+            // Optimizing tier first when explicitly enabled, then
+            // Bistromath (docs/jit.md §4): a hot compiled
             // callee runs to completion here and hands its result
             // to the caller frame exactly as `return_` would; a
             // tier-down leaves the frame mid-chunk for
             // reEnterDispatch. Cold chunks fall straight through.
-            switch (try bistromath.tryEnterTop(allocator, realm, frames)) {
+            switch (try tryEnterFreshJitFrame(allocator, realm, frames)) {
                 .not_entered => {},
                 .completed => |jit_ret| {
                     frames.items[frames.items.len - 1].accumulator = jit_ret;
@@ -3724,12 +3747,13 @@ pub fn runFrames(
             // chunk / registers / ip=0. decodeNext would keep
             // running the caller against a reallocated stack.
             //
-            // Bistromath first (docs/jit.md §4): a hot compiled
+            // Optimizing tier first when explicitly enabled, then
+            // Bistromath (docs/jit.md §4): a hot compiled
             // callee runs to completion here and hands its result
             // to the caller frame exactly as `return_` would; a
             // tier-down leaves the frame mid-chunk for
             // reEnterDispatch. Cold chunks fall straight through.
-            switch (try bistromath.tryEnterTop(allocator, realm, frames)) {
+            switch (try tryEnterFreshJitFrame(allocator, realm, frames)) {
                 .not_entered => {},
                 .completed => |jit_ret| {
                     frames.items[frames.items.len - 1].accumulator = jit_ret;
@@ -4097,10 +4121,10 @@ pub fn runFrames(
                 }
                 return error.OutOfMemory;
             };
-            // Bistromath first (docs/jit.md §4) — same hook as the
+            // Shared fresh-tier hook — same path as the
             // `.call` / `.call_method` arms; this is the
             // own-property method-call push site.
-            switch (try bistromath.tryEnterTop(allocator, realm, frames)) {
+            switch (try tryEnterFreshJitFrame(allocator, realm, frames)) {
                 .not_entered => {},
                 .completed => |jit_ret| {
                     frames.items[frames.items.len - 1].accumulator = jit_ret;
@@ -4420,7 +4444,7 @@ pub fn runFrames(
             // The reframed frame sits at ip 0 — a tail-recursive
             // function enters the tier exactly like a fresh call
             // (docs/jit.md §12 3f).
-            switch (try bistromath.tryEnterTop(allocator, realm, frames)) {
+            switch (try tryEnterFreshJitFrame(allocator, realm, frames)) {
                 .not_entered => {},
                 .completed => |jit_ret| {
                     if (frames.items.len == 0) return .{ .value = jit_ret };
@@ -4676,7 +4700,7 @@ pub fn runFrames(
             // The reframed frame sits at ip 0 — a tail-recursive
             // function enters the tier exactly like a fresh call
             // (docs/jit.md §12 3f).
-            switch (try bistromath.tryEnterTop(allocator, realm, frames)) {
+            switch (try tryEnterFreshJitFrame(allocator, realm, frames)) {
                 .not_entered => {},
                 .completed => |jit_ret| {
                     if (frames.items.len == 0) return .{ .value = jit_ret };
@@ -4808,7 +4832,7 @@ pub fn runFrames(
                         // leaves the frame mid-chunk for `reEnterDispatch`;
                         // a throw (incl. the derived-ctor verdict error)
                         // unwinds against the caller stack.
-                        switch (try bistromath.tryEnterTop(allocator, realm, frames)) {
+                        switch (try tryEnterFreshJitFrame(allocator, realm, frames)) {
                             .not_entered => {},
                             .completed => |jit_ret| {
                                 frames.items[frames.items.len - 1].accumulator = jit_ret;
@@ -5195,7 +5219,7 @@ pub fn runFrames(
             // to the caller frame exactly as `return_` would; a
             // tier-down leaves the frame mid-chunk for
             // reEnterDispatch. Cold chunks fall straight through.
-            switch (try bistromath.tryEnterTop(allocator, realm, frames)) {
+            switch (try tryEnterFreshJitFrame(allocator, realm, frames)) {
                 .not_entered => {},
                 .completed => |jit_ret| {
                     frames.items[frames.items.len - 1].accumulator = jit_ret;

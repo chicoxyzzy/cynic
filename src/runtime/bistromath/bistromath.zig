@@ -156,6 +156,14 @@ fn entryForFresh(realm: *Realm, fr: *CallFrame) ?EntryFn {
     return @ptrCast(@alignCast(js.bistromath.entry().?));
 }
 
+fn entryForResume(fr: *CallFrame) ?EntryFn {
+    const state = fr.chunk.jit_state orelse return null;
+    const entry = state.bistromath.entry() orelse return null;
+    const code_off = state.resumeCodeOffset(@intCast(fr.ip)) orelse return null;
+    const base: [*]const u8 = @ptrCast(entry);
+    return @ptrCast(@alignCast(base + code_off));
+}
+
 /// The dispatcher hook: called right after a frame push, before
 /// dispatch enters it. Self-gating — returns `.not_entered` (and the
 /// caller proceeds into Lantern as if no JIT existed) unless the
@@ -191,11 +199,7 @@ pub fn tryResumeTop(
     if (comptime !supported) return .not_entered;
     if (!realm.jit_enabled) return .not_entered;
     const fr = &frames.items[frames.items.len - 1];
-    const js = fr.chunk.jit_state orelse return .not_entered;
-    const entry = js.bistromath.entry() orelse return .not_entered;
-    const code_off = js.resumeCodeOffset(@intCast(fr.ip)) orelse return .not_entered;
-    const base: [*]const u8 = @ptrCast(entry);
-    const stub: EntryFn = @ptrCast(@alignCast(base + code_off));
+    const stub = entryForResume(fr) orelse return .not_entered;
     return driveTop(allocator, realm, frames, stub);
 }
 
@@ -315,20 +319,27 @@ fn driveTop(
                 // tells the dispatch loop the whole activation finished, so
                 // nothing would ever pop the caller's subtree — the stack
                 // grows unboundedly to the `max_call_frames` RangeError.
-                const cjs = caller.chunk.jit_state orelse return .not_entered;
-                const caller_entry = cjs.bistromath.entry() orelse return .not_entered;
-                const code_off = cjs.resumeCodeOffset(@intCast(caller.ip)) orelse return .not_entered;
-                const cbase: [*]const u8 = @ptrCast(caller_entry);
-                stub = @ptrCast(@alignCast(cbase + code_off));
+                stub = entryForResume(caller) orelse return .not_entered;
             },
             .frame_pushed => {
-                // A compiled call/construct site pushed the callee at the
-                // top and yielded. Drive it: compiled → enter fresh; cold
-                // → let Lantern drive it (the caller stays parked, its
-                // `.return_` resume re-enters via `tryResumeTop`).
-                const callee = &frames.items[frames.items.len - 1];
-                const centry = entryForFresh(realm, callee) orelse return .not_entered;
-                stub = centry;
+                // A compiled call/construct site pushed the callee at the top.
+                // Offer the fresh frame to default-off T2 first; if T2 refuses,
+                // select T1 without nesting another `driveTop`. A T2 completion
+                // pops the callee, so resume this compiled caller exactly like
+                // the `.done` path above. A guard exit leaves the callee parked
+                // at its reconstructed bytecode offset for Lantern.
+                switch (try interpreter.tryEnterOhaimarkTop(allocator, realm, frames)) {
+                    .not_entered => {
+                        const callee = &frames.items[frames.items.len - 1];
+                        stub = entryForFresh(realm, callee) orelse return .not_entered;
+                    },
+                    .resumed => return .not_entered,
+                    .completed => |ret| {
+                        const caller = &frames.items[frames.items.len - 1];
+                        caller.accumulator = ret;
+                        stub = entryForResume(caller) orelse return .not_entered;
+                    },
+                }
             },
             .resume_interp => return .not_entered,
             .threw => {

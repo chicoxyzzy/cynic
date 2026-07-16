@@ -10,7 +10,9 @@ also landed. Guarded own/prototype/synthetic named-property loads now execute
 through live typed IC cells. Frame-reconstructing backedge safepoints now poll
 fuel, interrupts, hooks, and pending GC work. Chunk-owned executable lifetime
 and transactional full-pipeline compilation/installation now ship. Runtime
-tier-up is not wired yet.
+tier-up now enters ordinary functions behind a realm-local default-off gate;
+the first full test262 differential is exact, while broader GC-pressure, fuzz,
+and performance gates remain.
 
 Ohaimark is Cynic's T2 method JIT. It consumes finalized Lantern bytecode
 and runtime feedback, builds a compact control-flow SSA graph, specializes
@@ -373,9 +375,9 @@ normal phis is forbidden.
 
 `UnsupportedOp`, `UnsupportedExceptionFlow`, malformed internal bytecode, an
 oversized graph, or allocation failure all abandon Ohaimark compilation. Once
-tier-up is wired, the chunk remains executable in Bistromath/Lantern. These are
-normal compiler outcomes, never `panic`, `unreachable` on input-dependent
-state, or partial optimized execution.
+tier-up is attempted, the chunk remains executable in Bistromath/Lantern.
+These are normal compiler outcomes, never `panic`, `unreachable` on
+input-dependent state, or partial optimized execution.
 
 ### 3.14 Publication is transactional and chunk-owned
 
@@ -386,7 +388,7 @@ state. Only a completely emitted buffer reaches the shared W^X
 `CodeAllocator`; only a successful install reaches `Chunk.JitState.ohaimark`.
 Every failure marks T2 alone `dont_compile`, leaving Bistromath and Lantern
 untouched. Its realm-facing `compile` entry owns executable-allocator lookup;
-the future dispatcher does not need to manipulate code memory directly.
+the dispatcher does not manipulate code memory directly.
 
 `CodeAllocator.InstalledCode` couples the exact executable slice to its owner.
 Publication uses an explicit `take()` transfer, and idempotent `deinit` returns
@@ -396,6 +398,30 @@ installed continuation table through the same mechanism. Recursive
 `Chunk.deinit` releases all tier code while the realm's heap allocator is still
 alive; parent and child realm teardown both complete before the owning heap
 unmaps the shared region. No temporary graph/plan pointer survives publication.
+
+### 3.15 Default-off function-entry tiering
+
+`runtime/ohaimark/driver.zig` consults T2 before Bistromath whenever both the
+master `Realm.jit_enabled` switch and the separate
+`Realm.ohaimark_enabled` rollout gate are true. Cold T2 waits for
+`8192 + 32 * bytecode_length` warmth unless the host supplies an override;
+the test262 `--ohaimark` posture forces both T1 and T2 thresholds to 1. Child
+realms inherit all four tier policy fields, so `$262.createRealm()` and
+ShadowRealm do not silently leave a differential run.
+
+Fresh-entry heat is recorded before either tier is selected, including callees
+pushed by Bistromath's in-place call driver. T1 therefore keeps accumulating
+evidence for T2 instead of freezing the shared counter when baseline code first
+publishes. Backedges continue to add warmth in Lantern/T1 independently; this
+checkpoint does not perform Ohaimark OSR.
+
+Only fresh ordinary-function frames enter this checkpoint. Constructors,
+generators, async Promise-wrapping frames, and Ohaimark OSR stay in the lower
+tiers. A cold/refused T2 attempt leaves the frame untouched and permits T1;
+an optimized guard exit reports `resumed` separately because it already wrote
+the exact bytecode offset, accumulator, and live registers into the Lantern
+frame. The shared dispatcher resumes Lantern directly in that case and never
+restarts the activation at T1 entry.
 
 ## 4. Deoptimization contract
 
@@ -463,10 +489,10 @@ The evaluator remains the target-independent oracle. Its first executable
 counterpart now emits checked int32 definitions/control, required home stores,
 direct guard exits that reconstruct the existing Lantern frame, and live-cell
 named-property guards. Taken backedges also transfer loop-header state to
-Lantern whenever host or GC work is pending. Ohaimark is still not a runtime
-tier: owned code now survives destruction of every temporary compiler plan,
-but no dispatcher entry path consults it, so optimized code cannot receive
-production traffic yet.
+Lantern whenever host or GC work is pending. Owned code survives destruction
+of every temporary compiler plan, and the default-off function-entry driver
+now executes it through normal call dispatch. Production traffic remains on
+T1/T0 until the rollout gates pass.
 
 ## 5. Delivery order
 
@@ -502,10 +528,15 @@ production traffic yet.
    interrupts, hooks, and GC work, transferring exact loop-header state before
    Lantern handles a slow condition. Transactional compilation now publishes
    an owned executable handle only after the full pipeline succeeds; per-tier
-   refusal and chunk teardown preserve Bistromath independently. A
-   disabled-by-default tier-up path remains.
+   refusal and chunk teardown preserve Bistromath independently. Default-off
+   ordinary-function tier-up now ships with exact bailout-vs-fallback routing
+   and child-realm policy inheritance; Ohaimark OSR remains deferred.
 9. **Gates and tuning:** full test262 pass-set differential, SES suite,
    GC-pressure runs, fuzzing, and compile-time/code-size/performance budgets.
+   The first full differential (48,517 passing paths in each posture), SES
+   suite, and a focused ReleaseSafe `--gc-threshold=1` run without verifier
+   failures are complete; broaden the remaining stress and performance
+   evidence before default-on rollout.
 10. **Only if measured:** background compilation, polymorphic feedback,
    inlining, x86_64 lowering, and exception-region compilation.
 

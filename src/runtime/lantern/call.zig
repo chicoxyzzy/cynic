@@ -30,7 +30,6 @@ const heap_mod = @import("../heap.zig");
 const intrinsics_mod = @import("../intrinsics.zig");
 const Realm = @import("../realm.zig").Realm;
 const Chunk = @import("../../bytecode/chunk.zig").Chunk;
-const bistromath = @import("../bistromath/bistromath.zig");
 
 // Circular back to interpreter.zig for shared types + the dispatch
 // loop entry + a handful of helpers that bracket call/construct.
@@ -1008,13 +1007,15 @@ pub fn callJSFunction(
         return error.OutOfMemory;
     };
 
-    // Bistromath (docs/jit.md §4): a hot compiled callee completes
+    // Fresh-tier dispatch (docs/jit.md §4/§5): Ohaimark is considered only
+    // under its rollout gate, then Bistromath handles the shipping path. A
+    // compiled callee completes
     // without ever entering the dispatch loop; tier-downs and cold
     // chunks fall through to Lantern below. A throw landed by a
     // nested call unwinds against the callee's own handlers first
     // (the frame stays pushed at the faulting ip) and resumes in
     // Lantern when caught.
-    switch (try bistromath.tryEnterTop(allocator, realm, &frames)) {
+    switch (try lantern.tryEnterFreshJitFrame(allocator, realm, &frames)) {
         .not_entered => {},
         .completed => |jit_ret| return .{ .value = jit_ret },
         .threw => |ex| {
