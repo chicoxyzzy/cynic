@@ -5033,8 +5033,8 @@ pub const Compiler = struct {
                 // Canonicalise to the SAME Value the LdaSmi / LdaConstant
                 // path loads at runtime, so the reused int32-vs-double
                 // fast-path selection matches and the fold is byte-exact
-                // (e.g. `-1 * 0` stays +0 via the int path, as the engine
-                // computes it — double leaves would synthesize -0).
+                // (including the §6.1.6.1.4 escape to Double when an int32
+                // multiplication produces -0).
                 break :blk if (asExactSmi(num)) |i| Value.fromInt32(i) else Value.fromDouble(num);
             },
             .string_literal => |lit| blk: {

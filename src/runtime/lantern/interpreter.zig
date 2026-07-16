@@ -1226,12 +1226,16 @@ inline fn intArith(comptime op: enum { add, sub, mul }, a: Value, b: Value) ?Val
     if (!a.isInt32() or !b.isInt32()) return null;
     const x = a.asInt32();
     const y = b.asInt32();
-    const ov = switch (op) {
-        .add => @addWithOverflow(x, y),
-        .sub => @subWithOverflow(x, y),
-        .mul => @mulWithOverflow(x, y),
-    };
-    if (ov[1] == 0) return Value.fromInt32(ov[0]);
+    if (op == .mul) {
+        if (arith.numberMultiplyInt32(x, y)) |result| return result;
+    } else {
+        const ov = switch (op) {
+            .add => @addWithOverflow(x, y),
+            .sub => @subWithOverflow(x, y),
+            .mul => unreachable,
+        };
+        if (ov[1] == 0) return Value.fromInt32(ov[0]);
+    }
     const fx: f64 = @floatFromInt(x);
     const fy: f64 = @floatFromInt(y);
     return Value.fromDouble(switch (op) {

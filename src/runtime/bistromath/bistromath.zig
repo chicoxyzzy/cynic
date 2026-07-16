@@ -1023,6 +1023,15 @@ const Compiler = struct {
                     try m.emit(a64.sxtw(.x12, .x11));
                     try m.emit(a64.cmpReg(.x12, .x11));
                     try m.jumpCond(.ne, td);
+                    // §6.1.6.1.4: int32 cannot encode -0. A zero product
+                    // with one negative operand resumes in Lantern, whose
+                    // shared Number::multiply helper returns Double(-0).
+                    var nonzero = Masm.Label{};
+                    defer nonzero.fixups.deinit(m.gpa);
+                    try m.jumpCbnz(.x11, &nonzero);
+                    try m.jumpTbnz(.x9, 31, td);
+                    try m.jumpTbnz(acc_reg, 31, td);
+                    m.bind(&nonzero);
                     try m.emit(a64.movRegW(.x11, .x11));
                     try m.emit(a64.orrReg(acc_reg, .x11, int32_tag_reg));
                 },
@@ -2256,6 +2265,37 @@ test "jit bistromath: hot int function compiles and computes" {
     const js = chunk.function_templates[0].chunk.jit_state.?;
     try testing.expectEqual(Chunk.JitState.Tier.compiled, js.tier);
     try testing.expect(js.entry != null);
+}
+
+test "jit bistromath: int32 multiplication preserves negative zero" {
+    if (comptime !supported) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+
+    const src =
+        \\function f(a, b) { return a * b; }
+        \\let i = 0;
+        \\while (i < 200) { f(3, 4); i = i + 1; }
+        \\f(-1, 0);
+    ;
+    const program = try parser_mod.parseScript(arena.allocator(), src, null);
+    var chunk = try bc_compiler.compileScriptAsChunk(testing.allocator, &realm, &program, src, null);
+    defer chunk.deinit(testing.allocator);
+    const out = try interpreter.run(testing.allocator, &realm, &chunk);
+    const v = switch (out) {
+        .value, .yielded => |val| val,
+        .thrown => return error.UncaughtException,
+    };
+    const js = templateNamed(&chunk, "f").jit_state.?;
+    try testing.expectEqual(Chunk.JitState.Tier.compiled, js.tier);
+    try testing.expect(v.isDouble());
+    try testing.expectEqual(
+        @as(u64, @bitCast(@as(f64, -0.0))),
+        @as(u64, @bitCast(v.asDouble())),
+    );
 }
 
 test "jit bistromath: non-int operands tier down and stay correct" {

@@ -318,16 +318,20 @@ test "const-fold: -0 / NaN / Infinity survive folding bit-exactly" {
     try expectDouble("1 / 0;", std.math.inf(f64));
     // -0 must NOT collapse to +0 on emit: `1 / -0 === -Infinity`.
     try expectDouble("1 / -0;", -std.math.inf(f64));
-    // The int32 fast path returns +0 for `-1 * 0` (sign is lost); the
-    // fold must MATCH the runtime, not synthesize spec's -0. This guards
-    // the canonical-Value leaf choice (fromInt32, not fromDouble) — with
-    // double leaves this would fold to -0 and diverge from the engine.
-    try expectDouble("-1 * 0;", 0.0);
+    // §6.1.6.1.4 — multiplying operands with opposite signs produces -0.
+    try expectDouble("-1 * 0;", -0.0);
     // NaN folds and propagates: NaN !== NaN is true.
     try expectBool("(0/0) !== (0/0);", true);
     // §6.1.6.1.3 — |1| ** ±Infinity is NaN (the jsPow special case),
     // reached entirely through folding (`1/0` folds to Infinity).
     try expectBool("(1 ** (1/0)) !== (1 ** (1/0));", true);
+}
+
+test "multiplication: int32 fast path preserves negative zero" {
+    // Keep both operands dynamic so this exercises Lantern's opcode fast
+    // path independently from the compiler's constant folder.
+    try expectDouble("(function () { let x = -1; let y = 0; return x * y; })();", -0.0);
+    try expectDouble("(function () { let x = 0; let y = -1; return x * y; })();", -0.0);
 }
 
 test "const-fold: string concat / comparisons / equality on literals" {

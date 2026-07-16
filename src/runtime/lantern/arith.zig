@@ -300,8 +300,7 @@ pub fn numericBinary(realm: *Realm, comptime op: NumericOp, lhs: Value, rhs: Val
                 if (o[1] == 0) return Value.fromInt32(o[0]);
             },
             .mul => {
-                const o = @mulWithOverflow(a, b);
-                if (o[1] == 0) return Value.fromInt32(o[0]);
+                if (numberMultiplyInt32(a, b)) |result| return result;
             },
             .mod => {
                 // §13.6.2 / §6.1.6.1.5 Number::remainder — JS
@@ -340,6 +339,19 @@ pub fn numericBinary(realm: *Realm, comptime op: NumericOp, lhs: Value, rhs: Val
         .mod => @rem(a, b),
         .pow => jsPow(a, b),
     });
+}
+
+/// §6.1.6.1.4 Number::multiply for two canonical int32 operands. `null`
+/// means the mathematical product overflowed int32 and needs the Number
+/// double path. A zero product with opposite operand signs is represented as
+/// a Double because the int32 Value encoding cannot distinguish -0 from +0.
+pub inline fn numberMultiplyInt32(lhs: i32, rhs: i32) ?Value {
+    const product = @mulWithOverflow(lhs, rhs);
+    if (product[1] != 0) return null;
+    if (product[0] == 0 and ((lhs < 0) != (rhs < 0))) {
+        return Value.fromDouble(-0.0);
+    }
+    return Value.fromInt32(product[0]);
 }
 
 /// §6.1.6.1.3 Number::exponentiate — adds the JS spec's special
