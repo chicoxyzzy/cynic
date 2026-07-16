@@ -1207,6 +1207,19 @@ inline fn loopSafePoint(realm: *Realm, f: *CallFrame, ip: usize, acc: Value) Run
     return runSafePoint(realm);
 }
 
+/// Keep the duplicated backedge precheck in one inlinable place: interpreted
+/// loops pay no dispatcher call until T1 is plausibly enterable.
+inline fn bistromathOsrWorth(realm: *const Realm, chunk: *const Chunk) bool {
+    if (!realm.jit_enabled) return false;
+    const state = chunk.jit_state orelse return false;
+    return switch (state.bistromath.code.tier) {
+        .dont_compile => false,
+        .cold => state.warmth >= (realm.jit_threshold_override orelse bistromath.tier_up_base),
+        .compiled => state.bistromath.hasContinuations() and
+            state.bistromath.osr_strikes < bistromath.osr_strike_limit,
+    };
+}
+
 // ── Int32 fast paths ───────────────────────────────────────────────
 // The arithmetic / comparison / bitwise opcodes route the general
 // case through `addValues` / `numericBinary` / `relational` /
@@ -2201,15 +2214,7 @@ pub fn runFrames(
                 // only when tier-up is plausibly due (cold and past
                 // the threshold floor) or an OSR table exists and is
                 // not striking out.
-                const osr_worth = realm.jit_enabled and worth: {
-                    const js_ = f.chunk.jit_state orelse break :worth false;
-                    if (js_.tier == .dont_compile) break :worth false;
-                    if (js_.tier == .cold) {
-                        const floor = realm.jit_threshold_override orelse bistromath.tier_up_base;
-                        break :worth js_.warmth >= floor;
-                    }
-                    break :worth js_.osr_ptr != null and js_.osr_strikes < bistromath.osr_strike_limit;
-                };
+                const osr_worth = bistromathOsrWorth(realm, f.chunk);
                 if (osr_worth) {
                     switch (try bistromath.tryOsrEnterTop(allocator, realm, frames)) {
                         .not_entered => {},
@@ -2254,15 +2259,7 @@ pub fn runFrames(
                     // only when tier-up is plausibly due (cold and past
                     // the threshold floor) or an OSR table exists and is
                     // not striking out.
-                    const osr_worth = realm.jit_enabled and worth: {
-                        const js_ = f.chunk.jit_state orelse break :worth false;
-                        if (js_.tier == .dont_compile) break :worth false;
-                        if (js_.tier == .cold) {
-                            const floor = realm.jit_threshold_override orelse bistromath.tier_up_base;
-                            break :worth js_.warmth >= floor;
-                        }
-                        break :worth js_.osr_ptr != null and js_.osr_strikes < bistromath.osr_strike_limit;
-                    };
+                    const osr_worth = bistromathOsrWorth(realm, f.chunk);
                     if (osr_worth) {
                         switch (try bistromath.tryOsrEnterTop(allocator, realm, frames)) {
                             .not_entered => {},
@@ -2305,15 +2302,7 @@ pub fn runFrames(
                     // only when tier-up is plausibly due (cold and past
                     // the threshold floor) or an OSR table exists and is
                     // not striking out.
-                    const osr_worth = realm.jit_enabled and worth: {
-                        const js_ = f.chunk.jit_state orelse break :worth false;
-                        if (js_.tier == .dont_compile) break :worth false;
-                        if (js_.tier == .cold) {
-                            const floor = realm.jit_threshold_override orelse bistromath.tier_up_base;
-                            break :worth js_.warmth >= floor;
-                        }
-                        break :worth js_.osr_ptr != null and js_.osr_strikes < bistromath.osr_strike_limit;
-                    };
+                    const osr_worth = bistromathOsrWorth(realm, f.chunk);
                     if (osr_worth) {
                         switch (try bistromath.tryOsrEnterTop(allocator, realm, frames)) {
                             .not_entered => {},
@@ -2458,15 +2447,7 @@ pub fn runFrames(
                     // only when tier-up is plausibly due (cold and past
                     // the threshold floor) or an OSR table exists and is
                     // not striking out.
-                    const osr_worth = realm.jit_enabled and worth: {
-                        const js_ = f.chunk.jit_state orelse break :worth false;
-                        if (js_.tier == .dont_compile) break :worth false;
-                        if (js_.tier == .cold) {
-                            const floor = realm.jit_threshold_override orelse bistromath.tier_up_base;
-                            break :worth js_.warmth >= floor;
-                        }
-                        break :worth js_.osr_ptr != null and js_.osr_strikes < bistromath.osr_strike_limit;
-                    };
+                    const osr_worth = bistromathOsrWorth(realm, f.chunk);
                     if (osr_worth) {
                         switch (try bistromath.tryOsrEnterTop(allocator, realm, frames)) {
                             .not_entered => {},
@@ -2521,15 +2502,7 @@ pub fn runFrames(
                             // only when tier-up is plausibly due (cold and past
                             // the threshold floor) or an OSR table exists and is
                             // not striking out.
-                            const osr_worth = realm.jit_enabled and worth: {
-                                const js_ = f.chunk.jit_state orelse break :worth false;
-                                if (js_.tier == .dont_compile) break :worth false;
-                                if (js_.tier == .cold) {
-                                    const floor = realm.jit_threshold_override orelse bistromath.tier_up_base;
-                                    break :worth js_.warmth >= floor;
-                                }
-                                break :worth js_.osr_ptr != null and js_.osr_strikes < bistromath.osr_strike_limit;
-                            };
+                            const osr_worth = bistromathOsrWorth(realm, f.chunk);
                             if (osr_worth) {
                                 switch (try bistromath.tryOsrEnterTop(allocator, realm, frames)) {
                                     .not_entered => {},
@@ -2609,15 +2582,7 @@ pub fn runFrames(
                     // only when tier-up is plausibly due (cold and past
                     // the threshold floor) or an OSR table exists and is
                     // not striking out.
-                    const osr_worth = realm.jit_enabled and worth: {
-                        const js_ = f.chunk.jit_state orelse break :worth false;
-                        if (js_.tier == .dont_compile) break :worth false;
-                        if (js_.tier == .cold) {
-                            const floor = realm.jit_threshold_override orelse bistromath.tier_up_base;
-                            break :worth js_.warmth >= floor;
-                        }
-                        break :worth js_.osr_ptr != null and js_.osr_strikes < bistromath.osr_strike_limit;
-                    };
+                    const osr_worth = bistromathOsrWorth(realm, f.chunk);
                     if (osr_worth) {
                         switch (try bistromath.tryOsrEnterTop(allocator, realm, frames)) {
                             .not_entered => {},

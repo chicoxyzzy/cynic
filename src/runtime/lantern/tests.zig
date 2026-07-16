@@ -15652,7 +15652,7 @@ test "jit warmth: entries, back-edges, and PTC re-entries heat the chunk" {
     const f_state = chunk.function_templates[0].chunk.jit_state.?;
     // Three entries (3 × 16) plus ~150 back-edges.
     try testing.expect(f_state.warmth >= 3 * 16 + 100);
-    try testing.expectEqual(.cold, f_state.tier);
+    try testing.expectEqual(.cold, f_state.bistromath.code.tier);
 
     // §15.10 PTC: each tail re-entry reframes to ip 0 and counts
     // as an entry — a tail-recursive loop heats like a call-heavy

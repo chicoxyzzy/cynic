@@ -43,7 +43,7 @@ that will be settled with an ADR when the time comes.
         │  hotter
         ▼
    ┌──────────────────┐
-   │  Ohaimark (T2)   │  ◄── checked/IC AArch64 subset + deopt; tier-up future (M6)
+   │  Ohaimark (T2)   │  ◄── owned checked/IC AArch64 code; tier-up future (M6)
    └──────────────────┘
    data flows T0→T1→T2; deopt can fall all the way back to Lantern (T0)
 
@@ -245,8 +245,8 @@ of truth for IR — Bistromath (default-on since 2026-06; `--no-jit`
 opts out) and Ohaimark
 (feedback/SSA/specialization/representation/deopt-home front end plus
 differential evaluator and a test-only checked-int32/property-IC AArch64 subset
-with frame-reconstructing backedge safepoints landed; code ownership and
-runtime tier-up remain future work)
+with frame-reconstructing backedge safepoints plus transactional chunk-owned
+code installation landed; runtime tier-up remains future work)
 consume bytecode +
 warmth/IC data, not the AST. Ohaimark's accepted design and GC-pointer-free
 feedback boundary are in [ohaimark.md](ohaimark.md).

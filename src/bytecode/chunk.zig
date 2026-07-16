@@ -25,6 +25,7 @@ const Span = @import("../source.zig").Span;
 const Value = @import("../runtime/value.zig").Value;
 const Shape = @import("../runtime/shape.zig").Shape;
 const JSObject = @import("../runtime/object.zig").JSObject;
+const jit_code_alloc = @import("../runtime/jit/code_alloc.zig");
 const BindingKind = @import("scope.zig").BindingKind;
 
 const BranchPatch = struct {
@@ -679,9 +680,10 @@ pub const Chunk = struct {
     ctor_field_shape: ?[]const u16 = null,
     /// JIT tier state — mutable side-state on the otherwise-
     /// immutable chunk, following the typed inline-cache pattern
-    /// (docs/jit.md §4.1). Allocated unconditionally at `finish`
-    /// (8 bytes per template; the counter costs one saturating add
-    /// per frame entry and loop back-edge). Bistromath's tier-up
+    /// (docs/jit.md §4.1). Allocated unconditionally at `finish`;
+    /// the counter costs one saturating add per frame entry and loop
+    /// back-edge, while the tier records stay cold until publication.
+    /// Bistromath's tier-up
     /// check consumes `warmth` when it lands; until then the heat
     /// signal just accumulates. Null only on hand-built chunks
     /// that never went through `Builder.finish`.
@@ -694,49 +696,129 @@ pub const Chunk = struct {
     /// rather than wrap.
     pub const JitState = struct {
         warmth: u32 = 0,
-        tier: Tier = .cold,
-        /// Bistromath entry point once `tier == .compiled` — stored
-        /// type-erased so the bytecode layer doesn't import runtime
-        /// types; the dispatcher casts to its concrete signature.
-        /// The code bytes live in the heap's code allocator and are
-        /// reclaimed wholesale with it (per-chunk code free is a
-        /// recorded follow-up, docs/jit.md §8).
-        entry: ?*const anyopaque = null,
-        /// Compiled reentry table: loop headers, post-call continuations,
-        /// and exception handlers map their bytecode offset to a prologue
-        /// stub offset relative to `entry`. Lives in the code region next to
-        /// the code itself (same wholesale-reclaim lifetime), so the chunk
-        /// never owns the allocation. The historical `osr_*` field names are
-        /// retained to avoid churning the runtime ABI.
-        osr_ptr: ?[*]const OsrEntry = null,
-        osr_len: u32 = 0,
-        /// Each OSR entry that immediately tiers back down is a
-        /// strike; past the limit the back-edge precheck stops
-        /// paying the entry cost (the enter-and-bail ping-pong
-        /// would otherwise tax every iteration).
-        osr_strikes: u8 = 0,
+        /// T1 and T2 have independent refusal/publication state. A T2 reject
+        /// must never disable a valid Bistromath entry, and both tiers retain
+        /// owned executable handles so chunk teardown can return their slots
+        /// before the heap unmaps the shared code allocator.
+        bistromath: BistromathState = .{},
+        ohaimark: TierCode = .{},
 
         pub const OsrEntry = extern struct { bc: u32, code_off: u32 };
+
+        pub const Tier = enum(u8) { cold, compiled, dont_compile };
+
+        /// Common single-entry code state. Publication consumes the temporary
+        /// compiler handle and makes the status visible last; refusal is local
+        /// to this tier and never releases another tier's code.
+        pub const TierCode = struct {
+            tier: Tier = .cold,
+            executable: jit_code_alloc.InstalledCode = .{},
+
+            pub fn entry(self: *const TierCode) ?*const anyopaque {
+                return self.executable.entry();
+            }
+
+            pub fn publish(self: *TierCode, executable: *jit_code_alloc.InstalledCode) void {
+                if (self.executable.bytes() != null or executable.bytes() == null) return;
+                self.executable = executable.take();
+                self.tier = .compiled;
+            }
+
+            pub fn refuse(self: *TierCode) void {
+                if (self.executable.bytes() == null) self.tier = .dont_compile;
+            }
+
+            fn deinit(self: *TierCode) void {
+                self.executable.deinit();
+                self.* = .{};
+            }
+        };
+
+        pub const BistromathState = struct {
+            code: TierCode = .{},
+            /// Loop headers, post-call continuations, and exception handlers
+            /// map bytecode offsets to prologue-stub offsets relative to the
+            /// main entry. This data is installed in the executable region so
+            /// it shares the same stable-address and teardown contract.
+            continuations: jit_code_alloc.InstalledCode = .{},
+            continuation_count: u32 = 0,
+            /// Each OSR entry that immediately tiers back down is a strike;
+            /// past the limit the back-edge precheck stops paying the entry
+            /// cost (avoids enter-and-bail ping-pong on every iteration).
+            osr_strikes: u8 = 0,
+
+            pub fn entry(self: *const BistromathState) ?*const anyopaque {
+                return self.code.entry();
+            }
+
+            pub fn publish(
+                self: *BistromathState,
+                executable: *jit_code_alloc.InstalledCode,
+                continuations: ?*jit_code_alloc.InstalledCode,
+                continuation_count: u32,
+            ) void {
+                if (self.code.entry() != null or executable.bytes() == null) return;
+                if (continuations) |table| {
+                    if (table.bytes()) |bytes| {
+                        self.continuations = table.take();
+                        const available = bytes.len / @sizeOf(OsrEntry);
+                        self.continuation_count = @intCast(@min(continuation_count, available));
+                    }
+                }
+                self.code.publish(executable);
+            }
+
+            pub fn refuse(self: *BistromathState) void {
+                self.code.refuse();
+            }
+
+            pub fn resumeCodeOffset(self: *const BistromathState, bc: u32) ?u32 {
+                const bytes = self.continuations.bytes() orelse return null;
+                const ptr: [*]const OsrEntry = @ptrCast(@alignCast(bytes.ptr));
+                for (ptr[0..self.continuation_count]) |continuation| {
+                    if (continuation.bc == bc) return continuation.code_off;
+                }
+                return null;
+            }
+
+            pub fn hasContinuations(self: *const BistromathState) bool {
+                return self.continuation_count != 0;
+            }
+
+            fn deinit(self: *BistromathState) void {
+                self.code.deinit();
+                self.continuations.deinit();
+                self.* = .{};
+            }
+        };
 
         /// Return the compiled stub for a bytecode continuation. Bistromath
         /// records loop-header OSR entries, post-call continuations, and
         /// catch/finally handler entries in this shared table. Returns null
         /// when the bytecode offset has no compiled continuation.
         pub fn resumeCodeOffset(self: *const JitState, bc: u32) ?u32 {
-            const ptr = self.osr_ptr orelse return null;
-            for (ptr[0..self.osr_len]) |e| {
-                if (e.bc == bc) return e.code_off;
-            }
-            return null;
+            return self.bistromath.resumeCodeOffset(bc);
         }
 
-        pub const Tier = enum(u8) { cold, compiled, dont_compile };
+        pub fn deinit(self: *JitState) void {
+            self.bistromath.deinit();
+            self.ohaimark.deinit();
+        }
+
         /// JSC weights +15 per entry / +1 per back-edge; 16 keeps
         /// the entry bump a shift (docs/jit.md §4.7).
         pub const entry_weight: u32 = 16;
     };
 
     pub fn deinit(self: *Chunk, allocator: std.mem.Allocator) void {
+        // Generated code may embed addresses of this chunk's typed IC cells.
+        // Make every entry unreachable and return its slot before releasing
+        // any bytecode side table it could reference.
+        if (self.jit_state) |js| {
+            js.deinit();
+            allocator.destroy(js);
+            self.jit_state = null;
+        }
         allocator.free(self.code);
         allocator.free(self.constants);
         allocator.free(self.source_positions);
@@ -760,7 +842,6 @@ pub const Chunk = struct {
         for (self.literal_shape_templates) |*t| allocator.free(t.keys);
         allocator.free(self.literal_shape_templates);
         if (self.ctor_field_shape) |keys| allocator.free(keys);
-        if (self.jit_state) |js| allocator.destroy(js);
     }
 };
 
@@ -2171,4 +2252,50 @@ test "Builder: branch relaxation remaps switch table targets" {
     try testing.expectEqual(@as(u32, 7), chunk.switch_tables[0].targets[0]);
     try testing.expectEqual(@as(u32, 7), chunk.switch_tables[0].default_target);
     try testing.expectEqual(Op.return_, @as(Op, @enumFromInt(chunk.code[7])));
+}
+
+test "Chunk JIT state releases baseline continuations and optimized code" {
+    const code_alloc = @import("../runtime/jit/code_alloc.zig");
+    if (comptime !code_alloc.supported) return error.SkipZigTest;
+
+    var executable = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
+    defer executable.deinit();
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    const span: Span = .{ .start = 0, .end = 1 };
+    try builder.emitOp(.lda_undefined, span);
+    try builder.emitOp(.return_, span);
+    var chunk = try builder.finish();
+    var chunk_live = true;
+    defer if (chunk_live) chunk.deinit(testing.allocator);
+
+    var baseline = try executable.installOwned(code_alloc.ret42_stub);
+    defer baseline.deinit();
+    var continuations = try executable.installOwned(code_alloc.ret42_stub);
+    defer continuations.deinit();
+    var optimized = try executable.installOwned(code_alloc.ret42_stub);
+    defer optimized.deinit();
+    const installed = [_][*]const u8{
+        baseline.bytes().?.ptr,
+        continuations.bytes().?.ptr,
+        optimized.bytes().?.ptr,
+    };
+
+    const state = chunk.jit_state.?;
+    state.bistromath.publish(&baseline, &continuations, 1);
+    state.ohaimark.publish(&optimized);
+    try testing.expect(baseline.bytes() == null);
+    try testing.expect(continuations.bytes() == null);
+    try testing.expect(optimized.bytes() == null);
+    chunk.deinit(testing.allocator);
+    chunk_live = false;
+
+    var reused: [3]code_alloc.InstalledCode = .{ .{}, .{}, .{} };
+    defer for (&reused) |*slot| slot.deinit();
+    for (&reused) |*slot| slot.* = try executable.installOwned(code_alloc.ret42_stub);
+    for (installed) |want| {
+        var found = false;
+        for (reused) |slot| found = found or slot.bytes().?.ptr == want;
+        try testing.expect(found);
+    }
 }

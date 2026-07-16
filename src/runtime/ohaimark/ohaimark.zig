@@ -13,4 +13,5 @@ pub const emitter_aarch64 = @import("emitter_aarch64.zig");
 pub const property_codegen_aarch64 = @import("property_codegen_aarch64.zig");
 pub const safepoint_codegen_aarch64 = @import("safepoint_codegen_aarch64.zig");
 pub const codegen_aarch64 = @import("codegen_aarch64.zig");
+pub const compiler = @import("compiler.zig");
 pub const evaluator = @import("evaluator.zig");

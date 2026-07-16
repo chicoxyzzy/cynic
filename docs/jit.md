@@ -11,10 +11,12 @@ frame-reconstructing guard exits execute natively in tests. Guarded
 own/prototype/synthetic named loads now execute through live typed IC cells.
 Taken backedges now poll fuel, interrupts, hooks, and pending GC work, with a
 slow poll transferring exact loop-header state back to Lantern before any
-collection or host call. Code ownership and runtime tier-up remain future work; Spasm's
-delivery state is tracked below. The document doubles as the design record that
-pinned the architecture before the first emitter was written and as the delivery ledger
-(the "Delivery order" section tracks what each increment shipped). It is the
+collection or host call. Chunk-owned executable lifetime and Ohaimark's
+transactional full-pipeline compile/install boundary now ship; runtime tier-up
+remains future work. Spasm's delivery state is tracked below. The document
+doubles as the design record that pinned the architecture before the first
+emitter was written and as the delivery ledger (the "Delivery order" section
+tracks what each increment shipped). It is the
 durable output of a prior-art survey (per
 [handbook/prior-art.md](handbook/prior-art.md)) across V8, JSC,
 SpiderMonkey, Hermes, LuaJIT, YJIT/ZJIT, CPython's copy-and-patch
@@ -470,9 +472,10 @@ frame and returns `resume_interp`; Lantern performs the slow work with those
 tagged values in its normal precise root set. Native tests include a real young
 collection that preserves a loop-carried object and reclaims an unrooted peer.
 The supported native subset still makes no helper call or allocation; such
-nodes continue to reject until rooted call safepoints land. Executable-code
-ownership and runtime tier-up remain disabled. The decisions Bistromath must
-preserve are:
+nodes continue to reject until rooted call safepoints land. Completed code now
+publishes transactionally into a chunk-owned T2 record, independently of
+Bistromath's owned main/continuation records; runtime tier-up remains disabled.
+The decisions Bistromath must preserve are:
 
 - **Method JIT over a CFG SSA IR with linear storage.** Not sea of
   nodes (V8 is migrating off it: 3–7× worse cache locality, "error
@@ -691,12 +694,15 @@ ever touches a syscall:
   single region well under that (64 MiB default, flag-tunable) so
   every intra-cache call is a near branch; veneer support in `masm`
   is the day-two answer if a workload outgrows it.
-- **Code lifetime:** `CompiledCode` is owned via the chunk
-  (`chunk.code`), so realm teardown — ShadowRealm, `initChild`
-  realms — frees code exactly when it frees chunks; the allocator
-  keeps a free list (compiled functions are small; fragmentation is
-  a non-problem at this scale). The *scoping* question (per-realm
-  pools vs engine-wide) stays with the ADR
+- **Code lifetime:** `CodeAllocator.installOwned` returns an
+  `InstalledCode` handle containing the exact executable slice and allocator.
+  `Chunk.JitState` owns Bistromath's main code + continuation blob and
+  Ohaimark's code in separate records; explicit `take()` publication prevents
+  failure cleanup from freeing published bytes. Recursive `Chunk.deinit`
+  returns every slot before parent/child realm teardown unmaps the owner heap's
+  shared region. The allocator keeps a free list (compiled functions are
+  small; fragmentation is a non-problem at this scale). The *scoping*
+  question (per-realm pools vs engine-wide) stays with the ADR
   [multi-realm.md](multi-realm.md) reserved for it; nothing in v1
   forecloses either answer.
 - **Targets without codegen:** the playground builds Cynic to
@@ -1203,8 +1209,9 @@ useful:
    checked int32 arithmetic/control emission, and direct guard-exit frame
    reconstruction now also ship in the test-only tier, along with guarded
    own/prototype/synthetic named loads through live IC cells and
-   frame-reconstructing backedge safepoints. Next: executable-code ownership
-   and disabled-by-default tier-up; see
+   frame-reconstructing backedge safepoints. Transactional full-pipeline
+   compilation now publishes owned code into independent T1/T2 chunk state.
+   Next: disabled-by-default tier-up; see
    [ohaimark.md](ohaimark.md).
 
 ## 13. Considered and declined

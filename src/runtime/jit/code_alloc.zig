@@ -55,6 +55,42 @@ pub const Error = error{
 /// keeps slots cache-line-tidy and covers x86_64 for free.
 const slot_align = 16;
 
+/// Move-only-by-convention ownership handle for one executable slot. Keeping
+/// the allocator and exact installed slice together lets tier state release
+/// code deterministically instead of retaining raw pointers until heap
+/// teardown. `deinit` is idempotent so partially-published compile paths can
+/// use ordinary `defer` / `errdefer` cleanup safely. The allocator must outlive
+/// the handle; Realm teardown enforces that by destroying chunks before the
+/// owning heap's code allocator.
+pub const InstalledCode = struct {
+    owner: ?*CodeAllocator = null,
+    installed: []const u8 = &.{},
+
+    /// Transfer this handle into its long-lived owner. The source becomes
+    /// empty, preventing the compile transaction's cleanup from freeing code
+    /// after publication.
+    pub fn take(self: *InstalledCode) InstalledCode {
+        const result = self.*;
+        self.* = .{};
+        return result;
+    }
+
+    pub fn deinit(self: *InstalledCode) void {
+        if (self.owner) |owner| owner.free(self.installed);
+        self.* = .{};
+    }
+
+    pub fn bytes(self: *const InstalledCode) ?[]const u8 {
+        if (self.owner == null) return null;
+        return self.installed;
+    }
+
+    pub fn entry(self: *const InstalledCode) ?*const anyopaque {
+        const code = self.bytes() orelse return null;
+        return @ptrCast(code.ptr);
+    }
+};
+
 pub const CodeAllocator = struct {
     gpa: std.mem.Allocator,
     region: []align(std.heap.page_size_min) u8,
@@ -120,6 +156,15 @@ pub const CodeAllocator = struct {
         self.endWrite(dst);
         flushICache(dst);
         return dst;
+    }
+
+    /// Install code and bind the returned executable slice to this allocator.
+    /// Tier state should retain this handle, not a naked entry pointer.
+    pub fn installOwned(self: *CodeAllocator, code: []const u8) Error!InstalledCode {
+        return .{
+            .owner = self,
+            .installed = try self.install(code),
+        };
     }
 
     /// Return a slot to the free list. The bytes stay mapped and
@@ -234,6 +279,25 @@ test "jit code_alloc: a freed slot is reused first-fit" {
     try std.testing.expectEqual(a.ptr, b.ptr);
     // And the reused slot still runs.
     const f = asFn(*const fn () callconv(.c) u64, b);
+    try std.testing.expectEqual(@as(u64, 42), f());
+}
+
+test "jit code_alloc: owned code releases its slot exactly once" {
+    if (comptime !supported) return error.SkipZigTest;
+    var ca = try CodeAllocator.init(std.testing.allocator, 64 * 1024);
+    defer ca.deinit();
+
+    var owned = try ca.installOwned(ret42_stub);
+    const first = owned.bytes().?.ptr;
+    try std.testing.expect(owned.entry() != null);
+    owned.deinit();
+    owned.deinit();
+    try std.testing.expect(owned.bytes() == null);
+
+    var reused = try ca.installOwned(ret42_stub);
+    defer reused.deinit();
+    try std.testing.expectEqual(first, reused.bytes().?.ptr);
+    const f = asFn(*const fn () callconv(.c) u64, reused.bytes().?);
     try std.testing.expectEqual(@as(u64, 42), f());
 }
 

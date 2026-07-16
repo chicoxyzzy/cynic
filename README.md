@@ -62,8 +62,9 @@ the existing Lantern frame. Guarded own/prototype/synthetic named-property
 loads now execute through live typed IC cells as well. Taken backedges poll
 fuel, interrupts, hooks, and pending GC work; a slow poll transfers the exact
 loop-header state into Lantern's precise root set before returning. Ohaimark
-remains test-only: executable-code ownership and runtime tier-up are future
-work. See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the thematic breakdown.
+now also has chunk-owned executable lifetime and a transactional full-pipeline
+compile/install boundary. It remains test-only: runtime tier-up is the next
+gate. See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the thematic breakdown.
 
 ### Conformance
 

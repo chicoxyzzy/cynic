@@ -1160,6 +1160,19 @@ sampling by `/profile`.
   rejecting until rooted call safepoints land. Executable-code ownership and
   disabled-by-default tier-up remain.
   See [ohaimark.md](ohaimark.md).
+- **Ohaimark executable ownership (2026-07-16).** The shared W^X allocator now
+  returns an `InstalledCode` handle coupling each exact executable slice to its
+  owner; explicit transfer and idempotent release make failed publication and
+  recursive chunk teardown safe. `Chunk.JitState` separates Bistromath and
+  Ohaimark status/code, and Bistromath's main body plus continuation table now
+  use the same owned lifetime instead of raw wholesale-reclaimed pointers.
+  `runtime/ohaimark/compiler.zig` runs every optimizer plan and AArch64 emission
+  in temporary state, installs only a complete buffer, then publishes T2 last.
+  Exhaustion or unsupported input marks only T2 `dont_compile`; T1 remains
+  callable. Native tests execute published code after all temporary plans die,
+  prove repeat compilation is idempotent, and verify released slots are reused.
+  Ohaimark remains test-only pending disabled-by-default dispatcher tier-up.
+  See [ohaimark.md](ohaimark.md).
 - **Generational GC.** A JSC-Riptide-style non-moving
   generational collector — store-site routing, generation header
   bits, a write barrier + remembered set, `collectYoung` with
@@ -1552,8 +1565,9 @@ and the per-builtin checklist; this section tracks status.
   lowering plus native frame entry/exit, typed moves, and folded returns ship;
   checked int32 arithmetic/control and direct Lantern-frame guard exits now
   execute in tests, as do live-cell own/prototype/synthetic named loads and
-  frame-reconstructing backedge safepoints. Executable-code ownership and
-  runtime tier-up remain planned. See
+  frame-reconstructing backedge safepoints. Transactional full-pipeline
+  compilation and chunk-owned executable lifetime now ship; runtime tier-up
+  remains planned. See
   [ohaimark.md](ohaimark.md).
 - **Spasm** — wasm baseline JIT (T1), Sarcasm's compiled tier.
   Single-pass over the validated module + branch side-table,
