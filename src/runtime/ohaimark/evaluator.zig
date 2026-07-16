@@ -342,9 +342,9 @@ const Runner = struct {
             ) };
         }
         if (info.lowering != .strict_eq) return error.MalformedGraph;
-        const lhs = try self.taggedNodeInput(node_id, 0);
-        const rhs = try self.taggedNodeInput(node_id, 1);
-        return .{ .value = .{ .tagged = Value.fromBool(arith.strictEq(lhs, rhs)) } };
+        const lhs = (try self.int32NodeInput(node_id, 0)) orelse return .guard_failed;
+        const rhs = (try self.int32NodeInput(node_id, 1)) orelse return .guard_failed;
+        return .{ .value = .{ .tagged = Value.fromBool(lhs == rhs) } };
     }
 
     fn lessThan(

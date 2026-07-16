@@ -187,6 +187,44 @@ fn checkedAddBranchChunk(rhs: i32) !chunk_mod.Chunk {
     return builder.finish();
 }
 
+const StrictBranchChunk = struct {
+    chunk: chunk_mod.Chunk,
+    branch_pc: u32,
+    lhs: u8,
+    rhs: u8,
+};
+
+fn strictBranchChunk(op: Op) !StrictBranchChunk {
+    const info = op.branchInfo() orelse return error.TestUnexpectedResult;
+    if (info.canonical != .jmp_if_strict_eq and info.canonical != .jmp_if_strict_neq) {
+        return error.TestUnexpectedResult;
+    }
+
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    const lhs = try builder.reserveRegister();
+    const rhs = try builder.reserveRegister();
+    try builder.emitLoadReg(span, rhs);
+    const branch_pc = builder.here();
+    try builder.emitOp(op, span);
+    try builder.emitU8(lhs);
+    switch (info.width) {
+        .i8 => try builder.emitI8(3),
+        .i16 => try builder.emitI16(3),
+        .i32 => try builder.emitI32(3),
+    }
+    try builder.emitLoadSmi(span, 11);
+    try builder.emitOp(.return_, span);
+    try builder.emitLoadSmi(span, 22);
+    try builder.emitOp(.return_, span);
+    return .{
+        .chunk = try builder.finish(),
+        .branch_pc = @intCast(branch_pc),
+        .lhs = lhs,
+        .rhs = rhs,
+    };
+}
+
 fn namedLoadChunk(realm: *Realm) !chunk_mod.Chunk {
     var builder = Builder.init(testing.allocator);
     defer builder.deinit();
@@ -296,6 +334,13 @@ fn findNode(native: *const NativeGraph, kind: ir.NodeKind) !ir.ValueId {
         if (node.kind == kind) return @intCast(index);
     }
     return error.TestUnexpectedResult;
+}
+
+fn findNodeInGraph(graph: *const ir.Graph, kind: ir.NodeKind) ?ir.ValueId {
+    for (graph.nodes, 0..) |node, index| {
+        if (node.kind == kind) return @intCast(index);
+    }
+    return null;
 }
 
 fn resumeLantern(realm: *Realm, frame: lantern.CallFrame) !Value {
@@ -473,6 +518,109 @@ test "Ohaimark AArch64 graph branches on a checked int32 result" {
         );
         try testing.expectEqual(Value.fromInt32(case.expected).bits, frame.accumulator.bits);
     }
+}
+
+test "Ohaimark IR models every fused strict equality branch width with deopt state" {
+    const ops = [_]Op{
+        .jmp_if_strict_eq8,
+        .jmp_if_strict_eq,
+        .jmp_if_strict_eq32,
+        .jmp_if_strict_neq8,
+        .jmp_if_strict_neq,
+        .jmp_if_strict_neq32,
+    };
+    for (ops) |op| {
+        var branch_chunk = try strictBranchChunk(op);
+        defer branch_chunk.chunk.deinit(testing.allocator);
+        var graph = try ir.Graph.build(testing.allocator, &branch_chunk.chunk);
+        defer graph.deinit();
+
+        const strict_eq_id = findNodeInGraph(&graph, .strict_eq) orelse
+            return error.TestUnexpectedResult;
+        const strict_eq = graph.nodes[strict_eq_id];
+        const frame_state_id = strict_eq.frame_state orelse
+            return error.TestUnexpectedResult;
+        try testing.expectEqual(branch_chunk.branch_pc, strict_eq.bytecode_offset);
+        try testing.expectEqual(branch_chunk.branch_pc, graph.frame_states[frame_state_id].bytecode_offset);
+
+        const branch_id = findNodeInGraph(&graph, .branch) orelse
+            return error.TestUnexpectedResult;
+        try testing.expectEqualSlices(
+            ir.ValueId,
+            &.{strict_eq_id},
+            graph.nodeInputs(branch_id),
+        );
+        try testing.expectEqual(
+            ir.Payload{ .branch = if (op.branchInfo().?.canonical == .jmp_if_strict_eq) .truthy else .falsy },
+            graph.nodes[branch_id].payload,
+        );
+    }
+}
+
+test "Ohaimark AArch64 executes every fused strict equality branch width" {
+    if (comptime !masm.native_aarch64) return error.SkipZigTest;
+    const ops = [_]Op{
+        .jmp_if_strict_eq8,
+        .jmp_if_strict_eq,
+        .jmp_if_strict_eq32,
+        .jmp_if_strict_neq8,
+        .jmp_if_strict_neq,
+        .jmp_if_strict_neq32,
+    };
+    for (ops) |op| {
+        for ([_]bool{ false, true }) |equal| {
+            var branch_chunk = try strictBranchChunk(op);
+            defer branch_chunk.chunk.deinit(testing.allocator);
+            var native = try NativeGraph.build(&branch_chunk.chunk);
+            defer native.deinit();
+            var realm = Realm.init(testing.allocator);
+            defer realm.deinit();
+            realm.jit_enabled = false;
+            const registers = try testing.allocator.alloc(Value, branch_chunk.chunk.register_count);
+            defer testing.allocator.free(registers);
+            var frame = testFrame(&branch_chunk.chunk, registers);
+            frame.registers[branch_chunk.lhs] = Value.fromInt32(7);
+            frame.registers[branch_chunk.rhs] = Value.fromInt32(if (equal) 7 else 8);
+
+            try testing.expectEqual(
+                @intFromEnum(codegen.EntryResult.done),
+                try executeNative(&native, &realm, &frame),
+            );
+            const takes_branch = (op.branchInfo().?.canonical == .jmp_if_strict_eq) == equal;
+            try testing.expectEqual(
+                Value.fromInt32(if (takes_branch) 22 else 11).bits,
+                frame.accumulator.bits,
+            );
+        }
+    }
+}
+
+test "Ohaimark AArch64 fused strict equality deopts non-int32 operands at the exact opcode" {
+    if (comptime !masm.native_aarch64) return error.SkipZigTest;
+    var branch_chunk = try strictBranchChunk(.jmp_if_strict_neq8);
+    defer branch_chunk.chunk.deinit(testing.allocator);
+    var native = try NativeGraph.build(&branch_chunk.chunk);
+    defer native.deinit();
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = false;
+    const registers = try testing.allocator.alloc(Value, branch_chunk.chunk.register_count);
+    defer testing.allocator.free(registers);
+    var frame = testFrame(&branch_chunk.chunk, registers);
+    const lhs = Value.fromDouble(1.5);
+    const rhs = Value.fromDouble(2.5);
+    frame.registers[branch_chunk.lhs] = lhs;
+    frame.registers[branch_chunk.rhs] = rhs;
+
+    try testing.expectEqual(
+        @intFromEnum(codegen.EntryResult.resume_interp),
+        try executeNative(&native, &realm, &frame),
+    );
+    try testing.expectEqual(branch_chunk.branch_pc, frame.ip);
+    try testing.expectEqual(rhs.bits, frame.accumulator.bits);
+    try testing.expectEqual(lhs.bits, frame.registers[branch_chunk.lhs].bits);
+    try testing.expectEqual(rhs.bits, frame.registers[branch_chunk.rhs].bits);
+    try testing.expectEqual(Value.fromInt32(22).bits, (try resumeLantern(&realm, frame)).bits);
 }
 
 test "Ohaimark AArch64 backedge safepoint exhausts fuel with exact loop-header state" {

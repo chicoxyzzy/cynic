@@ -63,7 +63,8 @@ test "Ohaimark allocation bounds registers and partitions spills" {
         &logical,
     );
     defer homes.deinit();
-    try testing.expectEqual(@as(u32, 0), homes.tagged_slot_count);
+    try testing.expectEqual(@as(usize, 3), logical.points.len);
+    try testing.expectEqual(@as(u32, 6), homes.tagged_slot_count);
     try testing.expectEqual(@as(u32, 0), homes.int32_slot_count);
 
     var plan = try allocation.Plan.build(
@@ -100,7 +101,7 @@ test "Ohaimark allocation bounds registers and partitions spills" {
     };
     try testing.expect(register_values > 0);
     try testing.expect(tagged_spills >= 2);
-    try testing.expect(tagged_spills > plan.tagged_slot_count);
+    try testing.expect(plan.tagged_slot_count > homes.tagged_slot_count);
 
     const value_id = register_value.?;
     const original = plan.locations[value_id];

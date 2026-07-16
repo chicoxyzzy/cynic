@@ -431,6 +431,40 @@ const Builder = struct {
                             registers,
                         );
                     },
+                    .jmp_if_strict_eq, .jmp_if_strict_neq => |canonical| {
+                        const lhs = try readRegister(registers, self.chunk.code[pc + 1]);
+                        const live_registers = try deopt_liveness.take(
+                            &deopt_live_cursor,
+                            @intCast(pc),
+                        );
+                        const comparison = try self.addDeoptNode(
+                            .strict_eq,
+                            @intCast(pc),
+                            &.{ lhs, accumulator },
+                            .none,
+                            block_index,
+                            accumulator,
+                            registers,
+                            live_registers,
+                        );
+                        _ = try self.addNode(
+                            .branch,
+                            @intCast(pc),
+                            &.{comparison},
+                            .{ .branch = if (canonical == .jmp_if_strict_eq) .truthy else .falsy },
+                        );
+                        // The fused opcode branches on the comparison but preserves
+                        // the accumulator.
+                        try self.addEdge(.branch_taken, block_index, target, accumulator, registers);
+                        if (end >= self.chunk.code.len) return error.MalformedBytecode;
+                        try self.addEdge(
+                            .branch_fallthrough,
+                            block_index,
+                            self.analysis.blockOf(end),
+                            accumulator,
+                            registers,
+                        );
+                    },
                     else => {
                         if (self.diagnostics) |diagnostics| {
                             diagnostics.unsupported_opcode = op;
@@ -500,10 +534,24 @@ const Builder = struct {
                         live_registers,
                     );
                 },
-                .strict_eq, .lt => |binary| {
+                .strict_eq => {
+                    const lhs = try readRegister(registers, self.chunk.code[pc + 1]);
+                    const live_registers = try deopt_liveness.take(&deopt_live_cursor, @intCast(pc));
+                    accumulator = try self.addDeoptNode(
+                        .strict_eq,
+                        @intCast(pc),
+                        &.{ lhs, accumulator },
+                        .none,
+                        block_index,
+                        accumulator,
+                        registers,
+                        live_registers,
+                    );
+                },
+                .lt => {
                     const lhs = try readRegister(registers, self.chunk.code[pc + 1]);
                     accumulator = try self.addNode(
-                        if (binary == .strict_eq) .strict_eq else .less_than,
+                        .less_than,
                         @intCast(pc),
                         &.{ lhs, accumulator },
                         .none,
@@ -772,9 +820,16 @@ fn isDeoptCandidate(op: Op) bool {
         .add,
         .sub,
         .mul,
+        .strict_eq,
         .add_smi,
         .add_smi8,
         .add_smi16,
+        .jmp_if_strict_eq,
+        .jmp_if_strict_eq8,
+        .jmp_if_strict_eq32,
+        .jmp_if_strict_neq,
+        .jmp_if_strict_neq8,
+        .jmp_if_strict_neq32,
         .lda_property,
         .lda_property8,
         .lda_property_reg,

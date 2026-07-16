@@ -310,7 +310,7 @@ fn nodeInputKind(node: ir.Node, info: specialize.NodeInfo) !Kind {
         .mul => arithmeticInput(info, .checked_int32_mul),
         .strict_eq => switch (info.lowering) {
             .constant => .none,
-            .strict_eq => .tagged,
+            .strict_eq => .int32,
             else => error.MalformedGraph,
         },
         .less_than => switch (info.lowering) {
@@ -366,7 +366,7 @@ fn verifyConversions(
         for (inputs.start..inputs.end()) |input_index| {
             const selected = try plan.conversionAt(graph, input_index);
             if (selected != .check_int32) continue;
-            if (!isCheckedArithmetic(node.kind, info.lowering) or node.frame_state == null) {
+            if (!isCheckedInt32(node.kind, info.lowering) or node.frame_state == null) {
                 return error.InvalidRepresentation;
             }
         }
@@ -386,11 +386,12 @@ fn verifyConversions(
     }
 }
 
-fn isCheckedArithmetic(kind: ir.NodeKind, lowering: specialize.Lowering) bool {
+fn isCheckedInt32(kind: ir.NodeKind, lowering: specialize.Lowering) bool {
     return switch (kind) {
         .add => lowering == .checked_int32_add,
         .sub => lowering == .checked_int32_sub,
         .mul => lowering == .checked_int32_mul,
+        .strict_eq => lowering == .strict_eq,
         else => false,
     };
 }

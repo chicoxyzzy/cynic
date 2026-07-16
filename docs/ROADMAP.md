@@ -1217,6 +1217,20 @@ sampling by `/profile`.
   fused strict-equality/inequality branch family plus deopt-capable strict
   equality as the next coverage slice; environment materialization and global
   load ICs follow. See [ohaimark.md](ohaimark.md) §3.16.
+- **Ohaimark fused strict-equality branches (2026-07-16).** All six equality
+  and inequality encodings (8-, 16-, and 32-bit displacements) now canonicalize
+  to one guarded strict-equality SSA value plus an ordinary truthy/falsy branch.
+  Standalone and fused strict equality share checked-int32 representation
+  selection, logical/physical deopt metadata, and AArch64 emission of a tagged
+  boolean; non-int32 operands restore the pre-operation Lantern frame at the
+  original opcode for full §7.2.14 semantics. Exact-width native tests cover
+  taken and fallthrough equality/inequality plus Double-operand bailout and
+  resumed Lantern execution. In the full forced-T2 sweep, publications rose
+  from 6,565 to 6,639 and the former 44,069-entry `jmp_if_strict_neq8` refusal
+  disappeared; `lda_global8` (44,142), `make_environment` (38,799), and
+  standalone `strict_neq` (32,025) are now the leading IR frontiers. Forced T2
+  and the same-tree lower-tier posture retained byte-identical 48,653-path pass
+  sets. See [ohaimark.md](ohaimark.md) §3.16.
 - **Generational GC.** A JSC-Riptide-style non-moving
   generational collector — store-site routing, generation header
   bits, a write barrier + remembered set, `collectYoung` with

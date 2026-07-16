@@ -57,11 +57,13 @@ logical/physical deopt-home metadata plus a graph/Lantern differential
 evaluator, deterministic register/spill allocation, and AArch64 frame/edge
 lowering plans plus verified native frame entry/exit emission have landed,
 along with typed physical moves, folded-value returns, checked int32
-add/sub/mul, int32 control flow, and allocation-free guard exits that rebuild
-the existing Lantern frame. Guarded own/prototype/synthetic named-property
-loads now execute through live typed IC cells as well. Taken backedges poll
-fuel, interrupts, hooks, and pending GC work; a slow poll transfers the exact
-loop-header state into Lantern's precise root set before returning. Ohaimark
+add/sub/mul, checked int32 strict equality (including every fused equality and
+inequality branch width), int32 control flow, and allocation-free guard exits
+that rebuild the existing Lantern frame. Guarded own/prototype/synthetic
+named-property loads now execute through live typed IC cells as well. Taken
+backedges poll fuel, interrupts, hooks, and pending GC work; a slow poll
+transfers the exact loop-header state into Lantern's precise root set before
+returning. Ohaimark
 now also has chunk-owned executable lifetime and a transactional full-pipeline
 compile/install boundary. A realm-local, default-off function-entry dispatcher
 now attempts T2 before T1, preserves exact Lantern bailout state, and inherits

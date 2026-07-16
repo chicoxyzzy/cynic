@@ -207,6 +207,11 @@ const Compiler = struct {
                 try self.emitCheckedArithmetic(node_id, node.kind, info.lowering);
                 return false;
             },
+            .strict_eq => {
+                if (info.lowering == .constant) return false;
+                try self.emitStrictEqual(node_id, info.lowering);
+                return false;
+            },
             .jump => {
                 const edge_index = try self.singleEdge(block_index);
                 try self.emitEdgeAndJump(edge_index);
@@ -224,7 +229,7 @@ const Compiler = struct {
                 try self.emitReturn(node_id);
                 return true;
             },
-            .strict_eq, .less_than => return error.UnsupportedNode,
+            .less_than => return error.UnsupportedNode,
         }
     }
 
@@ -265,6 +270,32 @@ const Compiler = struct {
             .destination = destination,
             .source_kind = .int32,
             .destination_kind = .int32,
+            .conversion = .none,
+        }, self.chunk.constants);
+        try self.emitDefinitionHome(node_id);
+    }
+
+    fn emitStrictEqual(
+        self: *Compiler,
+        node_id: ir.ValueId,
+        lowering_kind: specialize.Lowering,
+    ) !void {
+        if (lowering_kind != .strict_eq or self.representations.outputs[node_id] != .tagged) {
+            return error.UnsupportedNode;
+        }
+        const guard = try self.guardFor(node_id);
+        try self.emitInt32Input(node_id, 0, lhs_scratch, guard);
+        try self.emitInt32Input(node_id, 1, rhs_scratch, guard);
+        try self.machine.emit(a64.cmpRegW(lhs_scratch, rhs_scratch));
+        try self.machine.emit(a64.csetW(result_scratch, .eq));
+        try self.machine.movImm64(guard_scratch, Value.false_.bits);
+        try self.machine.emit(a64.orrReg(result_scratch, result_scratch, guard_scratch));
+
+        try emitter.emitMove(self.machine, .{
+            .source = .{ .register = result_scratch },
+            .destination = try self.valueLocation(node_id),
+            .source_kind = .tagged,
+            .destination_kind = .tagged,
             .conversion = .none,
         }, self.chunk.constants);
         try self.emitDefinitionHome(node_id);
@@ -487,10 +518,15 @@ const Compiler = struct {
             try self.emitEdgeAndJump(edge_index);
             return;
         }
-        if (producer >= self.representations.outputs.len or
-            self.representations.outputs[producer] != .int32 or
-            try self.representations.conversionAt(self.graph, inputs.start) != .box_int32)
-        {
+        if (producer >= self.graph.nodes.len or producer >= self.representations.outputs.len) {
+            return error.MalformedGraph;
+        }
+        const output_kind = self.representations.outputs[producer];
+        const input_conversion = try self.representations.conversionAt(self.graph, inputs.start);
+        const boxed_int32 = output_kind == .int32 and input_conversion == .box_int32;
+        const strict_boolean = output_kind == .tagged and input_conversion == .none and
+            self.graph.nodes[producer].kind == .strict_eq;
+        if (!boxed_int32 and !strict_boolean) {
             return error.UnsupportedNode;
         }
         const condition = switch (node.payload) {
@@ -505,11 +541,16 @@ const Compiler = struct {
         try emitter.emitMove(self.machine, .{
             .source = location,
             .destination = .{ .register = lhs_scratch },
-            .source_kind = .int32,
-            .destination_kind = .int32,
+            .source_kind = output_kind,
+            .destination_kind = output_kind,
             .conversion = .none,
         }, self.chunk.constants);
-        try self.machine.emit(a64.cmpImm(lhs_scratch, 0, false));
+        if (boxed_int32) {
+            try self.machine.emit(a64.cmpImm(lhs_scratch, 0, false));
+        } else {
+            try self.machine.movImm64(rhs_scratch, Value.false_.bits);
+            try self.machine.emit(a64.cmpReg(lhs_scratch, rhs_scratch));
+        }
         var taken: Masm.Label = .{};
         defer taken.deinit(self.allocator);
         try self.machine.jumpCond(

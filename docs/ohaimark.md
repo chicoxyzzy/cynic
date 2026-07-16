@@ -5,14 +5,15 @@ representation selection, and logical plus stable-spill physical deopt
 metadata, graph/Lantern differential evaluation, and abstract register/spill
 allocation plus AArch64 physical frame/edge lowering landed** (2026-07-16).
 Verified native frame entry/exit, typed physical moves, folded-value returns,
-checked int32 arithmetic/control, and direct Lantern-frame guard exits have
-also landed. Guarded own/prototype/synthetic named-property loads now execute
-through live typed IC cells. Frame-reconstructing backedge safepoints now poll
-fuel, interrupts, hooks, and pending GC work. Chunk-owned executable lifetime
-and transactional full-pipeline compilation/installation now ship. Runtime
-tier-up now enters ordinary functions behind a realm-local default-off gate;
-the first full test262 differential is exact, while broader GC-pressure, fuzz,
-and performance gates remain.
+checked int32 arithmetic/control and strict equality, every fused strict
+equality/inequality branch width, and direct Lantern-frame guard exits have also
+landed. Guarded own/prototype/synthetic named-property loads now execute through
+live typed IC cells. Frame-reconstructing backedge safepoints now poll fuel,
+interrupts, hooks, and pending GC work. Chunk-owned executable lifetime and
+transactional full-pipeline compilation/installation now ship. Runtime tier-up
+now enters ordinary functions behind a realm-local default-off gate; the full
+test262 differential remains exact, while broader GC-pressure, fuzz, and
+performance gates remain.
 
 Ohaimark is Cynic's T2 method JIT. It consumes finalized Lantern bytecode
 and runtime feedback, builds a compact control-flow SSA graph, specializes
@@ -122,7 +123,9 @@ repair pass. Unreachable blocks are not translated, so unsupported dead code
 does not reject an otherwise eligible function. The initial node set covers
 constants, register moves, `add`/`sub`/`mul`, strict equality, less-than,
 immediate addition, generic named-property loads, branches, jumps, and
-returns.
+returns. All three displacement widths of the fused strict-equality and
+strict-inequality branches canonicalize to one guarded strict-equality value
+plus an ordinary truthy/falsy branch.
 
 ### 3.3 Pure specialization plan
 
@@ -465,12 +468,27 @@ explain 54.36% of every refusal. The forced-T2 and same-tree lower-tier runs
 produced the exact same 48,653 sorted pass paths (SHA-256
 `10f024349d3467c72112da03dd57e0d7e543cdb819a00b3082dfecedaec614ca`).
 
-That evidence selects the fused strict-equality/inequality branch family as the
-first coverage expansion. It is the largest single blocker and can reuse the
-existing branch-width/CFG model, but it must land together with deopt-capable
-strict-equality lowering; merely admitting the opcode into IR would move the
-same functions into the current codegen `UnsupportedNode` bucket. Environment
-materialization and global-load ICs remain the next two measured frontiers.
+The first measured coverage expansion now ships the complete fused
+strict-equality/inequality branch family. The strict-equality node implements
+the int32 subset of
+[§7.2.14 Strict Equality Comparison](https://tc39.es/ecma262/#sec-isstrictlyequal):
+both inputs use checked-int32 conversions, and any other representation takes
+the node's pre-operation deopt point so Lantern re-executes the original fused
+opcode with full ECMAScript semantics. AArch64 emits the tagged boolean result
+and the existing branch machinery consumes it; outgoing SSA edges retain the
+original accumulator because the fused bytecode does not overwrite it. Native
+tests execute equality and inequality across all 8/16/32-bit displacement
+encodings and prove a Double pair restores the exact opcode, accumulator, and
+registers before Lantern resumes.
+
+The follow-up full run attempted the same 218,345 compilations, published 6,639
+and refused 211,706: 74 additional functions reached native T2 code, while the
+former 44,069-entry fused-branch refusal disappeared. IR now accounts for
+208,980 refusals and codegen for 2,726. The newly exposed leaders are
+`lda_global8` at 44,142, `make_environment` at 38,799, and standalone
+`strict_neq` at 32,025. The forced-T2 and same-tree lower-tier runs again
+produced byte-identical 48,653-path pass sets (SHA-256
+`10f024349d3467c72112da03dd57e0d7e543cdb819a00b3082dfecedaec614ca`).
 
 ## 4. Deoptimization contract
 
@@ -535,13 +553,13 @@ named load as a guard failure; executable tests now cover the native hit and
 resumed-Lantern miss paths directly.
 
 The evaluator remains the target-independent oracle. Its first executable
-counterpart now emits checked int32 definitions/control, required home stores,
-direct guard exits that reconstruct the existing Lantern frame, and live-cell
-named-property guards. Taken backedges also transfer loop-header state to
-Lantern whenever host or GC work is pending. Owned code survives destruction
-of every temporary compiler plan, and the default-off function-entry driver
-now executes it through normal call dispatch. Production traffic remains on
-T1/T0 until the rollout gates pass.
+counterpart now emits checked int32 definitions/control and strict equality,
+required home stores, direct guard exits that reconstruct the existing Lantern
+frame, and live-cell named-property guards. Taken backedges also transfer
+loop-header state to Lantern whenever host or GC work is pending. Owned code
+survives destruction of every temporary compiler plan, and the default-off
+function-entry driver now executes it through normal call dispatch. Production
+traffic remains on T1/T0 until the rollout gates pass.
 
 ## 5. Delivery order
 
@@ -571,19 +589,20 @@ T1/T0 until the rollout gates pass.
    moves, raw int32 spill stores, boxing, checked offsets, non-heap constant
    rematerialization, and an end-to-end folded graph native return.
 8. **AArch64 optimized execution, initial slice shipped:** checked int32
-   add/sub/mul, int32 control flow, stable-home writes, returns, and direct
-   Lantern-frame guard exits, plus live-cell own/prototype/synthetic named
-   loads with inline/overflow slot reads. Taken backedges now poll fuel,
-   interrupts, hooks, and GC work, transferring exact loop-header state before
-   Lantern handles a slow condition. Transactional compilation now publishes
-   an owned executable handle only after the full pipeline succeeds; per-tier
-   refusal and chunk teardown preserve Bistromath independently. Default-off
+   add/sub/mul, strict equality and all fused strict equality/inequality branch
+   widths, int32 control flow, stable-home writes, returns, and direct
+   Lantern-frame guard exits, plus live-cell own/prototype/synthetic named loads
+   with inline/overflow slot reads. Taken backedges now poll fuel, interrupts,
+   hooks, and GC work, transferring exact loop-header state before Lantern
+   handles a slow condition. Transactional compilation now publishes an owned
+   executable handle only after the full pipeline succeeds; per-tier refusal
+   and chunk teardown preserve Bistromath independently. Default-off
    ordinary-function tier-up now ships with exact bailout-vs-fallback routing
    and child-realm policy inheritance; Ohaimark OSR remains deferred.
 9. **Gates and tuning:** full test262 pass-set differential, SES suite,
    GC-pressure runs, fuzzing, and compile-time/code-size/performance budgets.
-   The first full differential (48,517 passing paths in each posture), SES
-   suite, and a focused ReleaseSafe `--gc-threshold=1` run without verifier
+   The current full differential (48,653 passing paths in each posture), SES
+   suite, and focused ReleaseSafe `--gc-threshold=1` runs without verifier
    failures are complete. CI now repeats the T2 differential advisory, expands
    the GC matrix across T1/T2, and reports opt-in heap-scoped rollout telemetry;
    broaden fuzz and performance evidence before default-on rollout.
