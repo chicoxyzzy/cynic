@@ -1105,6 +1105,17 @@ sampling by `/profile`.
   exact NaN-boxed value. SSA nodes, guards, helper calls, code ownership, and
   tier-up remain disabled.
   See [ohaimark.md](ohaimark.md).
+- **Ohaimark typed moves and folded native returns (2026-07-16).** Physical
+  moves now carry source/destination representations through cycle resolution
+  and code emission. Registers and separate tagged/int32 stack regions move
+  through reserved transfer/tag scratch registers; int32 boxing preserves the
+  raw low word and adds Cynic's NaN tag. Offset and kind mismatches roll back
+  normally. Non-heap constant-pool values may rematerialize, while heap-valued
+  entries return `UnsupportedConstant` rather than embedding an unrooted GC
+  pointer. A folded `1 + 2` graph now runs through all optimizer plans and
+  native AArch64 frame code and returns the exact `Value.fromInt32(3)` bits.
+  Non-folded nodes and guards remain disabled.
+  See [ohaimark.md](ohaimark.md).
 - **Generational GC.** A JSC-Riptide-style non-moving
   generational collector — store-site routing, generation header
   bits, a write barrier + remembered set, `collectYoung` with
@@ -1494,8 +1505,8 @@ and the per-builtin checklist; this section tracks status.
   block-argument SSA, initial specialization and representation planners, and
   logical plus stable-spill physical deopt metadata and a bounded differential
   evaluator, abstract register/spill allocation, and AArch64 frame/edge
-  lowering plus native frame entry/exit emission ship; optimized node execution
-  and runtime deoptimization remain planned. See
+  lowering plus native frame entry/exit, typed moves, and folded returns ship;
+  non-folded node execution and runtime deoptimization remain planned. See
   [ohaimark.md](ohaimark.md).
 - **Spasm** — wasm baseline JIT (T1), Sarcasm's compiled tier.
   Single-pass over the validated module + branch side-table,

@@ -22,6 +22,8 @@ pub const Location = union(enum) {
 pub const Assignment = struct {
     source: Location,
     destination: Location,
+    source_kind: representation.Kind,
+    destination_kind: representation.Kind,
     conversion: representation.Conversion,
 };
 
@@ -62,21 +64,26 @@ pub fn resolve(
             continue;
         }
 
-        var cycle_source: ?Location = null;
+        var cycle_source: ?struct { location: Location, kind: representation.Kind } = null;
         for (pending.items) |assignment| {
             if (isStorage(assignment.source)) {
-                cycle_source = assignment.source;
+                cycle_source = .{
+                    .location = assignment.source,
+                    .kind = assignment.source_kind,
+                };
                 break;
             }
         }
         const source = cycle_source orelse return error.InvalidParallelMove;
         try output.append(allocator, .{
-            .source = source,
+            .source = source.location,
             .destination = scratch,
+            .source_kind = source.kind,
+            .destination_kind = source.kind,
             .conversion = .none,
         });
         for (pending.items) |*assignment| {
-            if (storageEql(assignment.source, source)) assignment.source = scratch;
+            if (storageEql(assignment.source, source.location)) assignment.source = scratch;
         }
     }
 }
@@ -84,9 +91,8 @@ pub fn resolve(
 fn validate(assignments: []const Assignment, cycle_scratch: a64.Reg) !void {
     const scratch: Location = .{ .register = cycle_scratch };
     for (assignments, 0..) |assignment, index| {
-        if (!isSource(assignment.source) or !isStorage(assignment.destination) or
-            assignment.conversion == .check_int32 or
-            storageEql(assignment.source, scratch) or
+        validateTypes(assignment) catch return error.InvalidParallelMove;
+        if (storageEql(assignment.source, scratch) or
             storageEql(assignment.destination, scratch))
         {
             return error.InvalidParallelMove;
@@ -95,8 +101,46 @@ fn validate(assignments: []const Assignment, cycle_scratch: a64.Reg) !void {
             if (storageEql(previous.destination, assignment.destination)) {
                 return error.InvalidParallelMove;
             }
+            if (storageEql(previous.source, assignment.source) and
+                previous.source_kind != assignment.source_kind)
+            {
+                return error.InvalidParallelMove;
+            }
         }
     }
+}
+
+pub fn validateTypes(assignment: Assignment) !void {
+    if (!locationAccepts(assignment.source, assignment.source_kind, true) or
+        !locationAccepts(assignment.destination, assignment.destination_kind, false))
+    {
+        return error.InvalidMove;
+    }
+    const valid_conversion = switch (assignment.conversion) {
+        .none => assignment.source_kind == assignment.destination_kind,
+        .box_int32 => assignment.source_kind == .int32 and
+            assignment.destination_kind == .tagged,
+        .check_int32 => false,
+    };
+    if (!valid_conversion) return error.InvalidMove;
+}
+
+fn locationAccepts(location: Location, kind: representation.Kind, source: bool) bool {
+    if (kind == .none) return false;
+    return switch (location) {
+        .none => false,
+        .immediate => |immediate| source and immediateKind(immediate) == kind,
+        .register => true,
+        .tagged_stack => kind == .tagged,
+        .int32_stack => kind == .int32,
+    };
+}
+
+fn immediateKind(immediate: ir.Immediate) representation.Kind {
+    return switch (immediate) {
+        .int32 => .int32,
+        .undefined_, .null_, .true_, .false_, .hole, .constant_pool => .tagged,
+    };
 }
 
 fn destinationIsSource(destination: Location, assignments: []const Assignment) bool {

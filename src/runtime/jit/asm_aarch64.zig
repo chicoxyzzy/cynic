@@ -435,6 +435,13 @@ pub fn ldrImmW(rt: Reg, rn: Reg, byte_off: u14) u32 {
     return 0xB9400000 | (@as(u32, byte_off / 4) << 10) | (r(rn) << 5) | r(rt);
 }
 
+/// STR Wt, [Xn, #byte_off] — 32-bit store, unsigned scaled offset;
+/// `byte_off` must be 4-byte aligned and <= 16380 (imm12 x 4).
+pub fn strImmW(rt: Reg, rn: Reg, byte_off: u14) u32 {
+    std.debug.assert(byte_off % 4 == 0);
+    return 0xB9000000 | (@as(u32, byte_off / 4) << 10) | (r(rn) << 5) | r(rt);
+}
+
 /// LDRB Wt, [Xn, #imm12] — unsigned byte load (atomic-flag reads;
 /// plain monotonic load is enough for a monitor flag the consumer
 /// re-checks with proper ordering after tier-down).
@@ -957,6 +964,7 @@ test "jit asm_aarch64: golden encodings" {
     try expectEqual(@as(u32, 0xF9400C20), ldrImm(.x0, .x1, 24)); // ldr x0, [x1, #24]
     try expectEqual(@as(u32, 0xB9400020), ldrImmW(.x0, .x1, 0)); // ldr w0, [x1]
     try expectEqual(@as(u32, 0xB9400420), ldrImmW(.x0, .x1, 4)); // ldr w0, [x1, #4]
+    try expectEqual(@as(u32, 0xB9000C83), strImmW(.x3, .x4, 12)); // str w3, [x4, #12]
     try expectEqual(@as(u32, 0xF81F0FFE), strPreIdxSp(.lr, -16)); // str x30, [sp, #-16]!
     try expectEqual(@as(u32, 0xF84107FE), ldrPostIdxSp(.lr, 16)); // ldr x30, [sp], #16
     try expectEqual(@as(u32, 0xA9BF7BFD), stpPreIdxSp(.fp, .lr, -16)); // stp x29, x30, [sp, #-16]!

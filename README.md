@@ -56,7 +56,8 @@ block-argument SSA, specialization and representation planners, and verified
 logical/physical deopt-home metadata plus a graph/Lantern differential
 evaluator, deterministic register/spill allocation, and AArch64 frame/edge
 lowering plans plus verified native frame entry/exit emission have landed,
-while runtime deoptimization and optimizing node execution remain future work. See
+along with typed physical moves and folded-value native returns. Runtime
+deoptimization and non-folded optimizing execution remain future work. See
 [`docs/ROADMAP.md`](docs/ROADMAP.md) for the thematic breakdown.
 
 ### Conformance

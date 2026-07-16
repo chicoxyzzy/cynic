@@ -44,9 +44,27 @@ test "Ohaimark parallel moves preserve cycles and fanout" {
     const b: parallel_moves.Location = .{ .register = .x24 };
     const spill: parallel_moves.Location = .{ .tagged_stack = 0 };
     const assignments = [_]parallel_moves.Assignment{
-        .{ .source = a, .destination = b, .conversion = .none },
-        .{ .source = b, .destination = a, .conversion = .none },
-        .{ .source = a, .destination = spill, .conversion = .none },
+        .{
+            .source = a,
+            .destination = b,
+            .source_kind = .tagged,
+            .destination_kind = .tagged,
+            .conversion = .none,
+        },
+        .{
+            .source = b,
+            .destination = a,
+            .source_kind = .tagged,
+            .destination_kind = .tagged,
+            .conversion = .none,
+        },
+        .{
+            .source = a,
+            .destination = spill,
+            .source_kind = .tagged,
+            .destination_kind = .tagged,
+            .conversion = .none,
+        },
     };
     var resolved: std.ArrayListUnmanaged(parallel_moves.Move) = .empty;
     defer resolved.deinit(testing.allocator);
@@ -60,21 +78,29 @@ test "Ohaimark parallel moves preserve cycles and fanout" {
     try testing.expectEqual(parallel_moves.Move{
         .source = a,
         .destination = spill,
+        .source_kind = .tagged,
+        .destination_kind = .tagged,
         .conversion = .none,
     }, resolved.items[0]);
     try testing.expectEqual(parallel_moves.Move{
         .source = a,
         .destination = .{ .register = lowering.cycle_scratch },
+        .source_kind = .tagged,
+        .destination_kind = .tagged,
         .conversion = .none,
     }, resolved.items[1]);
     try testing.expectEqual(parallel_moves.Move{
         .source = b,
         .destination = a,
+        .source_kind = .tagged,
+        .destination_kind = .tagged,
         .conversion = .none,
     }, resolved.items[2]);
     try testing.expectEqual(parallel_moves.Move{
         .source = .{ .register = lowering.cycle_scratch },
         .destination = b,
+        .source_kind = .tagged,
+        .destination_kind = .tagged,
         .conversion = .none,
     }, resolved.items[3]);
 
@@ -82,6 +108,8 @@ test "Ohaimark parallel moves preserve cycles and fanout" {
     const in_place_box = [_]parallel_moves.Assignment{.{
         .source = a,
         .destination = a,
+        .source_kind = .int32,
+        .destination_kind = .tagged,
         .conversion = .box_int32,
     }};
     try parallel_moves.resolve(
@@ -100,8 +128,20 @@ test "Ohaimark parallel moves preserve cycles and fanout" {
     try testing.expectEqual(a, resolved.items[1].destination);
 
     const duplicate_destinations = [_]parallel_moves.Assignment{
-        .{ .source = a, .destination = spill, .conversion = .none },
-        .{ .source = b, .destination = spill, .conversion = .none },
+        .{
+            .source = a,
+            .destination = spill,
+            .source_kind = .tagged,
+            .destination_kind = .tagged,
+            .conversion = .none,
+        },
+        .{
+            .source = b,
+            .destination = spill,
+            .source_kind = .tagged,
+            .destination_kind = .tagged,
+            .conversion = .none,
+        },
     };
     try testing.expectError(
         error.InvalidParallelMove,

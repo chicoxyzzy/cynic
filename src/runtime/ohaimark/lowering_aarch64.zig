@@ -22,6 +22,7 @@ pub const spill_base_register: a64.Reg = .x22;
 pub const value_registers = [_]a64.Reg{ .x23, .x24, .x25, .x26, .x27, .x28 };
 pub const cycle_scratch: a64.Reg = .x9;
 pub const transfer_scratch: a64.Reg = .x10;
+pub const boxing_scratch: a64.Reg = .x11;
 
 /// FP/LR plus x19-x28, saved as six 16-byte pairs.
 pub const callee_save_bytes: u32 = 96;
@@ -259,14 +260,11 @@ fn buildEdgeMoves(
             const producer = graph.inputs[input_index];
             if (producer >= locations.len) return error.MalformedGraph;
             const conversion = try representations.conversionAt(graph, input_index);
-            try validateEdgeConversion(
-                representations.outputs[producer],
-                representations.outputs[parameter.value],
-                conversion,
-            );
             try assignments.append(allocator, .{
                 .source = locations[producer],
                 .destination = destination,
+                .source_kind = representations.outputs[producer],
+                .destination_kind = representations.outputs[parameter.value],
                 .conversion = conversion,
             });
         }
@@ -277,19 +275,6 @@ fn buildEdgeMoves(
             .move_count = try indexU32(moves.items.len - move_start),
         };
     }
-}
-
-fn validateEdgeConversion(
-    source: representation.Kind,
-    destination: representation.Kind,
-    conversion: representation.Conversion,
-) !void {
-    const valid = switch (conversion) {
-        .none => source == destination and source != .none,
-        .box_int32 => source == .int32 and destination == .tagged,
-        .check_int32 => false,
-    };
-    if (!valid) return error.InvalidLowering;
 }
 
 const Range = struct {
@@ -314,7 +299,9 @@ fn indexU32(index: usize) !u32 {
 }
 
 fn moveEql(lhs: Move, rhs: Move) bool {
-    return lhs.conversion == rhs.conversion and
+    return lhs.source_kind == rhs.source_kind and
+        lhs.destination_kind == rhs.destination_kind and
+        lhs.conversion == rhs.conversion and
         parallel_moves.eql(lhs.source, rhs.source) and
         parallel_moves.eql(lhs.destination, rhs.destination);
 }

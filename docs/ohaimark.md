@@ -5,7 +5,8 @@ representation selection, and logical plus stable-spill physical deopt
 metadata, graph/Lantern differential evaluation, and abstract register/spill
 allocation plus AArch64 physical frame/edge lowering landed** (2026-07-16).
 Verified native frame entry/exit emission has also landed. SSA-node emission,
-runtime deoptimization, and tier-up are not shipped yet.
+typed physical moves, and folded-value returns have also landed. Non-folded
+SSA-node emission, runtime deoptimization, and tier-up are not shipped yet.
 
 Ohaimark is Cynic's T2 method JIT. It consumes finalized Lantern bytecode
 and runtime feedback, builds a compact control-flow SSA graph, specializes
@@ -244,7 +245,29 @@ executable-memory test enters the generated frame, reads the last initialized
 tagged slot through `x22`, restores the native stack, and returns the exact
 NaN-boxed bits. No SSA node or guard is executable through this emitter yet.
 
-### 3.8 Exceptions stay explicit
+### 3.8 Typed moves and folded returns
+
+The emitter now consumes the resolved physical move stream. Every move carries
+explicit source and destination representations, so one shared validator checks
+register/stack kind compatibility and permits only identity or int32-to-tagged
+boxing. `x10` transfers stack values and `x11` materializes the int32 NaN-box
+tag; `x9` remains untouched while it preserves a parallel-move cycle. The
+shared encoder gained a golden-tested 32-bit scaled store for raw int32 spills.
+
+Immediate, register, tagged-stack, and int32-stack sources can target registers
+or their matching stack region. Move emission is transactional and all offsets
+are checked before reaching assertion-bearing encoder APIs. A constant-pool
+value is embedded only when it is non-heap; object/string/symbol/BigInt values
+return `UnsupportedConstant` until codegen has a rooted pool-load path. Raw GC
+pointers never enter code literals.
+
+`emitConstantReturn` connects the first complete graph path: a specialization-
+folded `1 + 2` result remains an int32 immediate, the return use boxes it into
+`x0`, and native AArch64 returns bits identical to `Value.fromInt32(3)`. The API
+rejects every non-immediate producer, so unchecked arithmetic or property nodes
+cannot execute before guards and deopt exits exist.
+
+### 3.9 Exceptions stay explicit
 
 Liveness exposes protected-range edges as `exception_edges`, separately from
 normal successors. An exception edge is not an ordinary branch: the unwinder
@@ -254,7 +277,7 @@ chunk with handlers. A later phase will add an exceptional environment and
 deopt state before enabling those chunks; silently treating handler edges as
 normal phis is forbidden.
 
-### 3.9 Fallback is part of correctness
+### 3.10 Fallback is part of correctness
 
 `UnsupportedOp`, `UnsupportedExceptionFlow`, malformed internal bytecode, an
 oversized graph, or allocation failure all abandon Ohaimark compilation. Once
@@ -325,10 +348,11 @@ boundaries until their rooting and guard semantics can be tested independently.
 This remains a compiler oracle, not an executable optimizing tier. The
 abstract allocator chooses ordinary locations and the AArch64 lowering plan
 fixes physical registers, frame offsets, and edge moves. Frame entry/exit now
-emits, but code generation must still emit those moves and each required home
-store at the value's definition while preserving a simultaneous register copy
-when selected. The next runtime step is value/control lowering plus a guard-exit
-stub that reconstructs the existing Lantern frame.
+emits, as do typed moves and immediate returns. Code generation must still
+schedule non-folded definitions, emit each required home store while preserving
+a simultaneous register copy, and attach real guard exits. The next runtime
+step is checked int32 value/control lowering plus a guard-exit stub that
+reconstructs the existing Lantern frame.
 
 ## 5. Delivery order
 
@@ -353,11 +377,14 @@ stub that reconstructs the existing Lantern frame.
 6. **AArch64 frame emission, shipped:** transactional prologue/epilogue,
    chunked aligned stack reservation, pinned ABI setup, safe tagged-slot
    initialization, golden words, and native-hardware execution proof.
-7. **AArch64 optimized execution:** value/control lowering, safepoints, guard
+7. **Typed moves + folded returns, shipped:** representation-bearing physical
+   moves, raw int32 spill stores, boxing, checked offsets, non-heap constant
+   rematerialization, and an end-to-end folded graph native return.
+8. **AArch64 optimized execution:** checked value/control lowering, safepoints, guard
    exits, code ownership, and a disabled-by-default tier-up path.
-8. **Gates and tuning:** full test262 pass-set differential, SES suite,
+9. **Gates and tuning:** full test262 pass-set differential, SES suite,
    GC-pressure runs, fuzzing, and compile-time/code-size/performance budgets.
-9. **Only if measured:** background compilation, polymorphic feedback,
+10. **Only if measured:** background compilation, polymorphic feedback,
    inlining, x86_64 lowering, and exception-region compilation.
 
 ## 6. Declined for v1
