@@ -1038,6 +1038,17 @@ sampling by `/profile`.
   runtime frame reconstruction remain gated on representation selection and
   allocation.
   See [ohaimark.md](ohaimark.md).
+- **Ohaimark representation selection (2026-07-16).** A pure verified pass now
+  assigns every SSA result and use either tagged or int32 form. Checked
+  arithmetic and compatible block arguments keep int32 values unboxed; tagged
+  consumers box explicitly, while tagged-to-int32 checks are legal only on
+  frame-state-owning speculative nodes. Phi selection monotonically falls back
+  to tagged when any incoming edge is not already int32, so CFG edges never
+  acquire ownerless deopt guards. The verifier recomputes the plan and rejects
+  malformed node/parameter/edge ranges, overlapping or orphaned input entries,
+  inconsistent lowerings, and corrupt conversions without panicking. Double
+  representation stays deferred until executable lowering measures a need.
+  See [ohaimark.md](ohaimark.md).
 - **Generational GC.** A JSC-Riptide-style non-moving
   generational collector — store-site routing, generation header
   bits, a write barrier + remembered set, `collectYoung` with
@@ -1424,9 +1435,9 @@ and the per-builtin checklist; this section tracks status.
 - **Ohaimark** — optimizing JIT (T2). IR (SSA), type speculation
   from inline caches, deopt back to Lantern on guard failure.
   Modeled on JSC DFG / V8 Maglev / SpiderMonkey Warp. The feedback snapshot,
-  block-argument SSA, initial specialization planner, and logical deopt
-  metadata ship; physical recovery, runtime deoptimization, and machine-code
-  execution remain planned. See
+  block-argument SSA, initial specialization and representation planners, and
+  logical deopt metadata ship; physical recovery, runtime deoptimization, and
+  machine-code execution remain planned. See
   [ohaimark.md](ohaimark.md).
 - **Spasm** — wasm baseline JIT (T1), Sarcasm's compiled tier.
   Single-pass over the validated module + branch side-table,

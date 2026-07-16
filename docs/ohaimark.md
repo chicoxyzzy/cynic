@@ -1,8 +1,9 @@
 # Ohaimark optimizing JIT
 
-Status: **ADR accepted; bytecode/feedback/SSA, pure specialization, and
-logical deopt metadata landed** (2026-07-16). Physical recovery metadata,
-machine-code lowering, runtime deoptimization, and tier-up are not shipped yet.
+Status: **ADR accepted; bytecode/feedback/SSA, pure specialization,
+representation selection, and logical deopt metadata landed** (2026-07-16).
+Physical recovery metadata, machine-code lowering, runtime deoptimization,
+and tier-up are not shipped yet.
 
 Ohaimark is Cynic's T2 method JIT. It consumes finalized Lantern bytecode
 and runtime feedback, builds a compact control-flow SSA graph, specializes
@@ -135,7 +136,37 @@ synthetic accessor value; future code must validate through the live cell.
 Cold and invalidated cells remain generic. A stale or malformed feedback index
 rejects the graph instead of indexing unchecked memory.
 
-### 3.4 Exceptions stay explicit
+### 3.4 Representation selection
+
+`runtime/ohaimark/representation.zig` assigns one output representation to
+every SSA value and one required representation to every entry in the shared
+node-input/edge-argument array. The initial lattice is intentionally only
+`tagged` and `int32`; adding Double before a lowering and recovery path needs
+it would increase conversion and deopt states without improving executable
+coverage.
+
+Int32 constants and successful checked-int32 arithmetic stay unboxed. Generic
+arithmetic, comparisons, property loads, branches, and returns consume tagged
+values, so an int32 producer records an explicit `box_int32` conversion at
+that use. A checked arithmetic input may record `check_int32`, but only on a
+node carrying a pre-operation frame state. Folded nodes mark their eliminated
+inputs as unused.
+
+Block parameters remain int32 only when specialization proves the exact type
+and every incoming edge already produces int32. Selection starts optimistic
+and monotonically drops parameters to tagged until loop phis converge. This
+rule deliberately forbids a tagged-to-int32 guard on a CFG edge: an edge has
+no operation-owned deopt point from which Lantern could safely resume. Tagged
+phis instead box int32 incoming values.
+
+The verifier recomputes selection independently and checks node arity and
+payload/lowering compatibility, parameter ownership, edge ownership and
+argument counts, disjoint complete coverage of the flat input array, producer
+bounds, and conversion legality. Corrupt plans or graphs return
+`InvalidRepresentation` or `MalformedGraph`; they cannot reach unchecked
+slicing or casts.
+
+### 3.5 Exceptions stay explicit
 
 Liveness exposes protected-range edges as `exception_edges`, separately from
 normal successors. An exception edge is not an ordinary branch: the unwinder
@@ -145,7 +176,7 @@ chunk with handlers. A later phase will add an exceptional environment and
 deopt state before enabling those chunks; silently treating handler edges as
 normal phis is forbidden.
 
-### 3.5 Fallback is part of correctness
+### 3.6 Fallback is part of correctness
 
 `UnsupportedOp`, `UnsupportedExceptionFlow`, malformed internal bytecode, an
 oversized graph, or allocation failure all abandon Ohaimark compilation. Once
@@ -181,8 +212,9 @@ in-range register slots, and exact stream decoding. Corrupt metadata returns
 cast trap.
 
 This is deliberately compiler-level metadata, not an executable deoptimizer.
-Representation selection and register allocation must translate each
-`ValueId` recovery to a tagged/unboxed machine register or spill location.
+Representation selection now fixes whether each `ValueId` is tagged or
+unboxed int32. Register allocation must next translate those values to machine
+registers or spill locations and encode the boxing recipe each recovery needs.
 Only then can a no-allocation runtime path reconstruct the existing Lantern
 frame. A graph evaluator must first prove graph execution and recovery agree
 with Lantern for the supported subset.
@@ -193,12 +225,13 @@ with Lantern for the supported subset.
    snapshots, linear block-argument SSA, loop/diamond tests, graceful reject.
 2. **Typed specialization, initial pass shipped:** small value lattice,
    fixed-point block-argument facts, IC-to-assumption transpilation,
-   semantics-safe int32 folding, and explicit lowering choices.
-   Representation selection beyond those choices and local DCE remain.
+   semantics-safe int32 folding, explicit lowering choices, and verified
+   tagged/int32 representation selection. Local DCE and a measured need for a
+   Double representation remain.
 3. **Deopt first, logical metadata shipped:** pre-operation frame-state
    capture, liveness-compacted translation stream, and metadata verifier.
-   Physical recovery locations, runtime reconstruction, and graph-vs-Lantern
-   differential tests remain.
+   Physical recovery locations and boxing recipes, runtime reconstruction, and
+   graph-vs-Lantern differential tests remain.
 4. **AArch64 lowering:** register allocation, safepoints, guard exits, code
    ownership, and a disabled-by-default tier-up path.
 5. **Gates and tuning:** full test262 pass-set differential, SES suite,

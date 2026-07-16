@@ -12,6 +12,7 @@ const Value = @import("../value.zig").Value;
 const deopt = @import("deopt.zig");
 const feedback = @import("feedback.zig");
 const ir = @import("ir.zig");
+const representation = @import("representation.zig");
 const specialize = @import("specialize.zig");
 
 const testing = std.testing;
@@ -191,6 +192,88 @@ test "Ohaimark block arguments merge accumulator values in a diamond" {
     }
     try testing.expectEqual(@as(usize, 2), count);
     try testing.expect(incoming[0] != incoming[1]);
+
+    var specialization = try specialize.Plan.build(testing.allocator, &graph);
+    defer specialization.deinit();
+    var representations = try representation.Plan.build(
+        testing.allocator,
+        &graph,
+        &specialization,
+    );
+    defer representations.deinit();
+    try representations.verify(&graph, &specialization);
+    try testing.expectEqual(
+        representation.Kind.int32,
+        representations.outputs[params[0].value],
+    );
+    for (graph.edges) |edge| {
+        if (edge.to != join_index) continue;
+        try testing.expectEqual(
+            representation.Kind.int32,
+            representations.input_requirements[edge.argument_start],
+        );
+        try testing.expectEqual(
+            representation.Conversion.none,
+            try representations.conversionAt(&graph, edge.argument_start),
+        );
+    }
+}
+
+test "Ohaimark representation selection keeps mixed block arguments tagged" {
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    try builder.emitOp(.lda_true, span);
+    try builder.emitOp(.jmp_if_false, span);
+    const else_patch = builder.here();
+    try builder.emitI16(0);
+    try builder.emitOp(.lda_one, span);
+    try builder.emitOp(.jmp, span);
+    const join_patch = builder.here();
+    try builder.emitI16(0);
+    const else_target = builder.here();
+    try builder.emitOp(.lda_null, span);
+    const join_target = builder.here();
+    try builder.emitOp(.return_, span);
+    try builder.patchI16(else_patch, else_target);
+    try builder.patchI16(join_patch, join_target);
+    var chunk = try builder.finish();
+    defer chunk.deinit(testing.allocator);
+
+    var graph = try ir.Graph.build(testing.allocator, &chunk);
+    defer graph.deinit();
+    var specialization = try specialize.Plan.build(testing.allocator, &graph);
+    defer specialization.deinit();
+    var representations = try representation.Plan.build(
+        testing.allocator,
+        &graph,
+        &specialization,
+    );
+    defer representations.deinit();
+
+    var join: ?usize = null;
+    for (graph.blocks, 0..) |block, index| {
+        if (block.predecessor_count == 2) join = index;
+    }
+    const join_index = join.?;
+    const accumulator = graph.blockParams(join_index)[0].value;
+    try testing.expectEqual(representation.Kind.tagged, representations.outputs[accumulator]);
+
+    var boxed_count: usize = 0;
+    var unchanged_count: usize = 0;
+    for (graph.edges) |edge| {
+        if (edge.to != join_index) continue;
+        try testing.expectEqual(
+            representation.Kind.tagged,
+            representations.input_requirements[edge.argument_start],
+        );
+        switch (try representations.conversionAt(&graph, edge.argument_start)) {
+            .box_int32 => boxed_count += 1,
+            .none => unchanged_count += 1,
+            .check_int32 => return error.TestUnexpectedResult,
+        }
+    }
+    try testing.expectEqual(@as(usize, 1), boxed_count);
+    try testing.expectEqual(@as(usize, 1), unchanged_count);
 }
 
 test "Ohaimark pre-creates live register parameters for loop back-edges" {
@@ -317,6 +400,116 @@ test "Ohaimark specialization keeps overflowing int32 addition guarded" {
     try testing.expect(info.result_type.eql(specialize.Type.number));
     try testing.expectEqual(specialize.Lowering.checked_int32_add, info.lowering);
     try testing.expectEqual(@as(?ir.Immediate, null), info.folded);
+}
+
+test "Ohaimark representation selection keeps guarded arithmetic int32" {
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    const lhs = try builder.reserveRegister();
+    try builder.emitLoadSmi(span, std.math.maxInt(i32));
+    try builder.emitStoreReg(span, lhs);
+    try builder.emitLoadSmi(span, 1);
+    try builder.emitOp(.add, span);
+    try builder.emitU8(lhs);
+    var chunk = try finish(&builder);
+    defer chunk.deinit(testing.allocator);
+
+    var graph = try ir.Graph.build(testing.allocator, &chunk);
+    defer graph.deinit();
+    var specialization = try specialize.Plan.build(testing.allocator, &graph);
+    defer specialization.deinit();
+    var representations = try representation.Plan.build(
+        testing.allocator,
+        &graph,
+        &specialization,
+    );
+    defer representations.deinit();
+    try representations.verify(&graph, &specialization);
+
+    const add_id = findNode(&graph, .add).?;
+    try testing.expectEqual(representation.Kind.int32, representations.outputs[add_id]);
+    try testing.expectEqual(
+        representation.Kind.int32,
+        try representations.nodeInputRequirement(&graph, add_id, 0),
+    );
+    try testing.expectEqual(
+        representation.Kind.int32,
+        try representations.nodeInputRequirement(&graph, add_id, 1),
+    );
+    try testing.expectEqual(
+        representation.Conversion.none,
+        try representations.nodeInputConversion(&graph, add_id, 0),
+    );
+
+    const return_id = findNode(&graph, .return_).?;
+    try testing.expectEqual(
+        representation.Kind.tagged,
+        try representations.nodeInputRequirement(&graph, return_id, 0),
+    );
+    try testing.expectEqual(
+        representation.Conversion.box_int32,
+        try representations.nodeInputConversion(&graph, return_id, 0),
+    );
+
+    const original_start = graph.nodes[add_id].input_start;
+    graph.nodes[add_id].input_start = std.math.maxInt(u32);
+    try testing.expectError(
+        error.MalformedGraph,
+        representation.Plan.build(testing.allocator, &graph, &specialization),
+    );
+    graph.nodes[add_id].input_start = original_start;
+
+    const constant_id = findNode(&graph, .constant).?;
+    const original_lowering = specialization.node_info[constant_id].lowering;
+    specialization.node_info[constant_id].lowering = .generic;
+    try testing.expectError(
+        error.MalformedGraph,
+        representation.Plan.build(testing.allocator, &graph, &specialization),
+    );
+    specialization.node_info[constant_id].lowering = original_lowering;
+}
+
+test "Ohaimark representation selection keeps generic arithmetic tagged" {
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    const lhs = try builder.reserveRegister();
+    try builder.emitLoadSmi(span, 1);
+    try builder.emitOp(.add, span);
+    try builder.emitU8(lhs);
+    var chunk = try finish(&builder);
+    defer chunk.deinit(testing.allocator);
+
+    var graph = try ir.Graph.build(testing.allocator, &chunk);
+    defer graph.deinit();
+    var specialization = try specialize.Plan.build(testing.allocator, &graph);
+    defer specialization.deinit();
+    const add_id = findNode(&graph, .add).?;
+    try testing.expectEqual(
+        specialize.Lowering.generic,
+        specialization.node_info[add_id].lowering,
+    );
+    var representations = try representation.Plan.build(
+        testing.allocator,
+        &graph,
+        &specialization,
+    );
+    defer representations.deinit();
+    try testing.expectEqual(representation.Kind.tagged, representations.outputs[add_id]);
+    try testing.expectEqual(
+        representation.Kind.tagged,
+        try representations.nodeInputRequirement(&graph, add_id, 1),
+    );
+    try testing.expectEqual(
+        representation.Conversion.box_int32,
+        try representations.nodeInputConversion(&graph, add_id, 1),
+    );
+
+    const input_index = graph.nodes[add_id].input_start + 1;
+    representations.input_requirements[input_index] = .int32;
+    try testing.expectError(
+        error.InvalidRepresentation,
+        representations.verify(&graph, &specialization),
+    );
 }
 
 test "Ohaimark deopt metadata round-trips pre-guard frame state" {
