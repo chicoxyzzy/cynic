@@ -18,6 +18,7 @@ const feedback_mod = @import("feedback.zig");
 
 pub const ValueId = u32;
 const invalid_value: ValueId = std.math.maxInt(ValueId);
+pub const FrameStateId = u32;
 
 pub const NodeKind = enum {
     block_parameter,
@@ -68,6 +69,23 @@ pub const Node = struct {
     input_start: u32,
     input_count: u16,
     payload: Payload = .none,
+    frame_state: ?FrameStateId = null,
+};
+
+pub const FrameSlot = struct {
+    register: u8,
+    value: ValueId,
+};
+
+/// Interpreter-visible state immediately before a speculative node executes.
+/// Deopt resumes at `bytecode_offset`, so the accumulator and register values
+/// are the inputs to that opcode, never its partially-computed outputs.
+pub const FrameState = struct {
+    block: u32,
+    bytecode_offset: u32,
+    accumulator: ValueId,
+    slot_start: u32,
+    slot_count: u16,
 };
 
 pub const ParamRole = union(enum) {
@@ -110,11 +128,14 @@ pub const Block = struct {
 
 pub const Graph = struct {
     allocator: std.mem.Allocator,
+    register_count: u8,
     blocks: []Block,
     nodes: []Node,
     inputs: []ValueId,
     params: []Param,
     edges: []Edge,
+    frame_states: []FrameState,
+    frame_slots: []FrameSlot,
     feedback: feedback_mod.Snapshot,
 
     pub fn build(allocator: std.mem.Allocator, chunk: *const Chunk) !Graph {
@@ -154,14 +175,21 @@ pub const Graph = struct {
         errdefer allocator.free(params);
         const edges = try builder.edges.toOwnedSlice(allocator);
         errdefer allocator.free(edges);
+        const frame_states = try builder.frame_states.toOwnedSlice(allocator);
+        errdefer allocator.free(frame_states);
+        const frame_slots = try builder.frame_slots.toOwnedSlice(allocator);
+        errdefer allocator.free(frame_slots);
 
         return .{
             .allocator = allocator,
+            .register_count = chunk.register_count,
             .blocks = blocks,
             .nodes = nodes,
             .inputs = inputs,
             .params = params,
             .edges = edges,
+            .frame_states = frame_states,
+            .frame_slots = frame_slots,
             .feedback = feedback,
         };
     }
@@ -172,6 +200,8 @@ pub const Graph = struct {
         self.allocator.free(self.inputs);
         self.allocator.free(self.params);
         self.allocator.free(self.edges);
+        self.allocator.free(self.frame_states);
+        self.allocator.free(self.frame_slots);
         self.feedback.deinit();
         self.* = undefined;
     }
@@ -194,6 +224,45 @@ pub const Graph = struct {
         const b = self.blocks[block];
         return self.edges[b.edge_start..][0..b.edge_count];
     }
+
+    pub fn frameSlots(self: *const Graph, state: FrameState) []const FrameSlot {
+        return self.frame_slots[state.slot_start..][0..state.slot_count];
+    }
+};
+
+const DeoptLivePoint = struct {
+    bytecode_offset: u32,
+    register_start: u32,
+    register_count: u16,
+};
+
+const DeoptLiveness = struct {
+    points: std.ArrayListUnmanaged(DeoptLivePoint) = .empty,
+    registers: std.ArrayListUnmanaged(u8) = .empty,
+
+    fn deinit(self: *DeoptLiveness, allocator: std.mem.Allocator) void {
+        self.points.deinit(allocator);
+        self.registers.deinit(allocator);
+    }
+
+    /// Points were collected while scanning bytecode backwards, so forward
+    /// graph translation consumes them from the end of the array.
+    fn take(
+        self: *const DeoptLiveness,
+        cursor: *usize,
+        bytecode_offset: u32,
+    ) ![]const u8 {
+        if (cursor.* == 0) return error.MalformedBytecode;
+        cursor.* -= 1;
+        const point = self.points.items[cursor.*];
+        if (point.bytecode_offset != bytecode_offset) return error.MalformedBytecode;
+        const start: usize = point.register_start;
+        const count: usize = point.register_count;
+        if (start > self.registers.items.len or count > self.registers.items.len - start) {
+            return error.MalformedBytecode;
+        }
+        return self.registers.items[start..][0..count];
+    }
 };
 
 const Builder = struct {
@@ -205,6 +274,8 @@ const Builder = struct {
     inputs: std.ArrayListUnmanaged(ValueId) = .empty,
     params: std.ArrayListUnmanaged(Param) = .empty,
     edges: std.ArrayListUnmanaged(Edge) = .empty,
+    frame_states: std.ArrayListUnmanaged(FrameState) = .empty,
+    frame_slots: std.ArrayListUnmanaged(FrameSlot) = .empty,
 
     fn deinit(self: *Builder) void {
         self.blocks.deinit(self.allocator);
@@ -212,6 +283,8 @@ const Builder = struct {
         self.inputs.deinit(self.allocator);
         self.params.deinit(self.allocator);
         self.edges.deinit(self.allocator);
+        self.frame_states.deinit(self.allocator);
+        self.frame_slots.deinit(self.allocator);
     }
 
     fn createBlocks(self: *Builder) !void {
@@ -278,6 +351,10 @@ const Builder = struct {
         self.blocks.items[block_index].edge_start = try indexU32(self.edges.items.len);
         const body_start = self.nodes.items.len;
         const edge_start = self.edges.items.len;
+
+        var deopt_liveness = try self.computeDeoptLiveness(block_index, start, end);
+        defer deopt_liveness.deinit(self.allocator);
+        var deopt_live_cursor = deopt_liveness.points.items.len;
 
         const registers = try self.allocator.alloc(ValueId, self.chunk.register_count);
         defer self.allocator.free(registers);
@@ -376,17 +453,29 @@ const Builder = struct {
                     const value = try readRegister(registers, self.chunk.code[pc + 1]);
                     try writeRegister(registers, self.chunk.code[pc + 2], value);
                 },
-                .add, .sub, .mul, .strict_eq, .lt => |binary| {
+                .add, .sub, .mul => |binary| {
                     const lhs = try readRegister(registers, self.chunk.code[pc + 1]);
-                    accumulator = try self.addNode(
+                    const live_registers = try deopt_liveness.take(&deopt_live_cursor, @intCast(pc));
+                    accumulator = try self.addDeoptNode(
                         switch (binary) {
                             .add => .add,
                             .sub => .sub,
                             .mul => .mul,
-                            .strict_eq => .strict_eq,
-                            .lt => .less_than,
                             else => unreachable,
                         },
+                        @intCast(pc),
+                        &.{ lhs, accumulator },
+                        .none,
+                        block_index,
+                        accumulator,
+                        registers,
+                        live_registers,
+                    );
+                },
+                .strict_eq, .lt => |binary| {
+                    const lhs = try readRegister(registers, self.chunk.code[pc + 1]);
+                    accumulator = try self.addNode(
+                        if (binary == .strict_eq) .strict_eq else .less_than,
                         @intCast(pc),
                         &.{ lhs, accumulator },
                         .none,
@@ -401,14 +490,25 @@ const Builder = struct {
                         else => unreachable,
                     };
                     const rhs = try self.addConstant(@intCast(pc), .{ .int32 = immediate });
-                    accumulator = try self.addNode(.add, @intCast(pc), &.{ lhs, rhs }, .none);
+                    const live_registers = try deopt_liveness.take(&deopt_live_cursor, @intCast(pc));
+                    accumulator = try self.addDeoptNode(
+                        .add,
+                        @intCast(pc),
+                        &.{ lhs, rhs },
+                        .none,
+                        block_index,
+                        accumulator,
+                        registers,
+                        live_registers,
+                    );
                 },
                 .lda_property8, .lda_property => |load| {
                     const narrow = load == .lda_property8;
                     const key: u16 = if (narrow) self.chunk.code[pc + 1] else readU16(self.chunk.code, pc + 1);
                     const feedback_index: u16 = if (narrow) self.chunk.code[pc + 2] else readU16(self.chunk.code, pc + 3);
                     if (feedback_index >= self.chunk.inline_load_caches.len) return error.MalformedBytecode;
-                    accumulator = try self.addNode(
+                    const live_registers = try deopt_liveness.take(&deopt_live_cursor, @intCast(pc));
+                    accumulator = try self.addDeoptNode(
                         .load_named,
                         @intCast(pc),
                         &.{accumulator},
@@ -416,6 +516,10 @@ const Builder = struct {
                             .key_constant = key,
                             .feedback_index = feedback_index,
                         } },
+                        block_index,
+                        accumulator,
+                        registers,
+                        live_registers,
                     );
                 },
                 .lda_property_reg8, .lda_property_reg => |load| {
@@ -428,7 +532,8 @@ const Builder = struct {
                     else
                         readU16(self.chunk.code, register_at + 1);
                     if (feedback_index >= self.chunk.inline_load_caches.len) return error.MalformedBytecode;
-                    accumulator = try self.addNode(
+                    const live_registers = try deopt_liveness.take(&deopt_live_cursor, @intCast(pc));
+                    accumulator = try self.addDeoptNode(
                         .load_named,
                         @intCast(pc),
                         &.{receiver},
@@ -436,6 +541,10 @@ const Builder = struct {
                             .key_constant = key,
                             .feedback_index = feedback_index,
                         } },
+                        block_index,
+                        accumulator,
+                        registers,
+                        live_registers,
                     );
                 },
                 .return_ => {
@@ -454,6 +563,7 @@ const Builder = struct {
             _ = try self.addNode(.jump, end, &.{}, .none);
             try self.addEdge(.fallthrough, block_index, successors[0], accumulator, registers);
         }
+        if (deopt_live_cursor != 0) return error.MalformedBytecode;
         self.blocks.items[block_index].node_count = try indexU32(self.nodes.items.len - body_start);
         const edge_count = self.edges.items.len - edge_start;
         if (edge_count > std.math.maxInt(u16)) return error.GraphTooLarge;
@@ -483,6 +593,113 @@ const Builder = struct {
             .payload = payload,
         });
         return id;
+    }
+
+    fn addDeoptNode(
+        self: *Builder,
+        kind: NodeKind,
+        pc: u32,
+        node_inputs: []const ValueId,
+        payload: Payload,
+        block_index: usize,
+        accumulator: ValueId,
+        registers: []const ValueId,
+        live_registers: []const u8,
+    ) !ValueId {
+        const frame_state = try self.addFrameState(
+            block_index,
+            pc,
+            accumulator,
+            registers,
+            live_registers,
+        );
+        const id = try self.addNode(kind, pc, node_inputs, payload);
+        self.nodes.items[id].frame_state = frame_state;
+        return id;
+    }
+
+    fn addFrameState(
+        self: *Builder,
+        block_index: usize,
+        pc: u32,
+        accumulator: ValueId,
+        registers: []const ValueId,
+        live_registers: []const u8,
+    ) !FrameStateId {
+        if (accumulator == invalid_value or accumulator >= self.nodes.items.len) {
+            return error.MalformedBytecode;
+        }
+        const state_id = try indexU32(self.frame_states.items.len);
+        const slot_start = try indexU32(self.frame_slots.items.len);
+        for (live_registers) |register| {
+            if (register >= registers.len) return error.MalformedBytecode;
+            const value = registers[register];
+            if (value >= self.nodes.items.len) return error.MalformedBytecode;
+            try self.frame_slots.append(self.allocator, .{
+                .register = register,
+                .value = value,
+            });
+        }
+        try self.frame_states.append(self.allocator, .{
+            .block = try indexU32(block_index),
+            .bytecode_offset = pc,
+            .accumulator = accumulator,
+            .slot_start = slot_start,
+            .slot_count = @intCast(live_registers.len),
+        });
+        return state_id;
+    }
+
+    fn computeDeoptLiveness(
+        self: *Builder,
+        block_index: usize,
+        start: u32,
+        end: u32,
+    ) !DeoptLiveness {
+        var result: DeoptLiveness = .{};
+        errdefer result.deinit(self.allocator);
+        var offsets: std.ArrayListUnmanaged(u32) = .empty;
+        defer offsets.deinit(self.allocator);
+
+        var pc: usize = start;
+        while (pc < end) {
+            const op: Op = @enumFromInt(self.chunk.code[pc]);
+            const next = pc + 1 + Op.operandSize(op);
+            if (next > end) return error.MalformedBytecode;
+            try offsets.append(self.allocator, @intCast(pc));
+            pc = next;
+        }
+
+        var live = try std.DynamicBitSet.initEmpty(self.allocator, self.chunk.register_count);
+        defer live.deinit();
+        live.setUnion(self.analysis.live_out[block_index]);
+        var offset_index = offsets.items.len;
+        while (offset_index > 0) {
+            offset_index -= 1;
+            const offset = offsets.items[offset_index];
+            const op: Op = @enumFromInt(self.chunk.code[offset]);
+            liveness.applyReverseEffect(
+                &live,
+                liveness.effectOf(op, self.chunk.code, offset),
+                self.chunk.register_count,
+            );
+            if (!isDeoptCandidate(op)) continue;
+
+            const register_start = try indexU32(result.registers.items.len);
+            var iterator = live.iterator(.{});
+            while (iterator.next()) |register| {
+                if (register > std.math.maxInt(u8)) return error.GraphTooLarge;
+                try result.registers.append(self.allocator, @intCast(register));
+            }
+            const register_count = result.registers.items.len - register_start;
+            if (register_count > std.math.maxInt(u16)) return error.GraphTooLarge;
+            try result.points.append(self.allocator, .{
+                .bytecode_offset = offset,
+                .register_start = register_start,
+                .register_count = @intCast(register_count),
+            });
+        }
+        return result;
     }
 
     fn addEdge(
@@ -516,6 +733,23 @@ const Builder = struct {
         });
     }
 };
+
+fn isDeoptCandidate(op: Op) bool {
+    return switch (op) {
+        .add,
+        .sub,
+        .mul,
+        .add_smi,
+        .add_smi8,
+        .add_smi16,
+        .lda_property,
+        .lda_property8,
+        .lda_property_reg,
+        .lda_property_reg8,
+        => true,
+        else => false,
+    };
+}
 
 fn indexU32(index: usize) !u32 {
     if (index > std.math.maxInt(u32)) return error.GraphTooLarge;

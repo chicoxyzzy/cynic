@@ -1,8 +1,8 @@
 # Ohaimark optimizing JIT
 
-Status: **ADR accepted; bytecode/feedback/SSA and pure specialization front
-end landed** (2026-07-16). Deoptimization metadata, machine-code lowering,
-and runtime tier-up are not shipped yet.
+Status: **ADR accepted; bytecode/feedback/SSA, pure specialization, and
+logical deopt metadata landed** (2026-07-16). Physical recovery metadata,
+machine-code lowering, runtime deoptimization, and tier-up are not shipped yet.
 
 Ohaimark is Cynic's T2 method JIT. It consumes finalized Lantern bytecode
 and runtime feedback, builds a compact control-flow SSA graph, specializes
@@ -164,9 +164,28 @@ Deopt reconstructs a Lantern `CallFrame`, not a Bistromath-specific frame:
 - environment/home-object/`this` state already owned by the frame;
 - inlined-frame records once inlining exists.
 
-The serialized metadata format and verifier land before speculative codegen.
-A graph interpreter or evaluator must first prove that graph execution and
-deopt reconstruction agree with Lantern for the supported subset.
+The first logical metadata checkpoint now ships. During graph construction,
+each arithmetic or named-load candidate records its **pre-operation**
+accumulator and live registers as SSA values. Resuming at the node's original
+bytecode offset therefore lets Lantern execute the failed operation exactly
+once. A single reverse-liveness scan per block selects those registers; dead
+defined registers do not inflate every guard state.
+
+After specialization, `runtime/ohaimark/deopt.zig` emits points only for
+checked-int32 and feedback-specialized named-load lowerings. Its byte stream
+embeds constants directly and uses `ValueId` recoveries for non-constant SSA
+values. The verifier checks point order and bounds, lowering/assumption
+compatibility, same-block/parameter value availability, strictly ordered
+in-range register slots, and exact stream decoding. Corrupt metadata returns
+`InvalidMetadata` or `MalformedGraph`; it cannot become an unchecked slice or
+cast trap.
+
+This is deliberately compiler-level metadata, not an executable deoptimizer.
+Representation selection and register allocation must translate each
+`ValueId` recovery to a tagged/unboxed machine register or spill location.
+Only then can a no-allocation runtime path reconstruct the existing Lantern
+frame. A graph evaluator must first prove graph execution and recovery agree
+with Lantern for the supported subset.
 
 ## 5. Delivery order
 
@@ -176,8 +195,10 @@ deopt reconstruction agree with Lantern for the supported subset.
    fixed-point block-argument facts, IC-to-assumption transpilation,
    semantics-safe int32 folding, and explicit lowering choices.
    Representation selection beyond those choices and local DCE remain.
-3. **Deopt first:** frame-state capture, compact translation stream, metadata
-   verifier, and graph-vs-Lantern differential tests.
+3. **Deopt first, logical metadata shipped:** pre-operation frame-state
+   capture, liveness-compacted translation stream, and metadata verifier.
+   Physical recovery locations, runtime reconstruction, and graph-vs-Lantern
+   differential tests remain.
 4. **AArch64 lowering:** register allocation, safepoints, guard exits, code
    ownership, and a disabled-by-default tier-up path.
 5. **Gates and tuning:** full test262 pass-set differential, SES suite,

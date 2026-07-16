@@ -9,6 +9,7 @@ const JSFunction = @import("../function.zig").JSFunction;
 const JSObject = @import("../object.zig").JSObject;
 const Shape = @import("../shape.zig").Shape;
 const Value = @import("../value.zig").Value;
+const deopt = @import("deopt.zig");
 const feedback = @import("feedback.zig");
 const ir = @import("ir.zig");
 const specialize = @import("specialize.zig");
@@ -318,6 +319,103 @@ test "Ohaimark specialization keeps overflowing int32 addition guarded" {
     try testing.expectEqual(@as(?ir.Immediate, null), info.folded);
 }
 
+test "Ohaimark deopt metadata round-trips pre-guard frame state" {
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    const dead = try builder.reserveRegister();
+    const lhs = try builder.reserveRegister();
+    try builder.emitLoadSmi(span, 99);
+    try builder.emitStoreReg(span, dead);
+    try builder.emitLoadSmi(span, std.math.maxInt(i32));
+    try builder.emitStoreReg(span, lhs);
+    try builder.emitLoadSmi(span, 1);
+    try builder.emitOp(.add, span);
+    try builder.emitU8(lhs);
+    var chunk = try finish(&builder);
+    defer chunk.deinit(testing.allocator);
+
+    var graph = try ir.Graph.build(testing.allocator, &chunk);
+    defer graph.deinit();
+    const add_id = findNode(&graph, .add).?;
+    const state = graph.frame_states[graph.nodes[add_id].frame_state.?];
+    try testing.expectEqual(graph.nodes[add_id].bytecode_offset, state.bytecode_offset);
+    const slots = graph.frameSlots(state);
+    try testing.expectEqual(@as(usize, 1), slots.len);
+    try testing.expectEqual(lhs, slots[0].register);
+
+    var plan = try specialize.Plan.build(testing.allocator, &graph);
+    defer plan.deinit();
+    try testing.expectEqual(
+        specialize.Lowering.checked_int32_add,
+        plan.node_info[add_id].lowering,
+    );
+    var metadata = try deopt.Metadata.build(testing.allocator, &graph, &plan);
+    defer metadata.deinit();
+    try metadata.verify(&graph, &plan);
+    try testing.expectEqual(@as(usize, 1), metadata.points.len);
+    try testing.expectEqual(add_id, metadata.points[0].node);
+
+    var decoded = try metadata.decode(testing.allocator, 0);
+    defer decoded.deinit();
+    try testing.expectEqual(state.bytecode_offset, decoded.bytecode_offset);
+    try testing.expectEqual(
+        deopt.Recovery{ .immediate = .{ .int32 = 1 } },
+        decoded.accumulator,
+    );
+    try testing.expectEqual(@as(usize, 1), decoded.slots.len);
+    try testing.expectEqual(lhs, decoded.slots[0].register);
+    try testing.expectEqual(
+        deopt.Recovery{ .immediate = .{ .int32 = std.math.maxInt(i32) } },
+        decoded.slots[0].recovery,
+    );
+
+    const original_offset_byte = metadata.stream[0];
+    metadata.stream[0] ^= 0xff;
+    try testing.expectError(error.InvalidMetadata, metadata.verify(&graph, &plan));
+    metadata.stream[0] = original_offset_byte;
+
+    const original_recovery_tag = metadata.stream[4];
+    metadata.stream[4] = 0xff;
+    try testing.expectError(error.InvalidMetadata, metadata.verify(&graph, &plan));
+    metadata.stream[4] = original_recovery_tag;
+
+    metadata.points[0].stream_len -= 1;
+    try testing.expectError(error.InvalidMetadata, metadata.verify(&graph, &plan));
+}
+
+test "Ohaimark deopt metadata rejects malformed frame values" {
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    const lhs = try builder.reserveRegister();
+    try builder.emitLoadSmi(span, std.math.maxInt(i32));
+    try builder.emitStoreReg(span, lhs);
+    try builder.emitLoadSmi(span, 1);
+    try builder.emitOp(.add, span);
+    try builder.emitU8(lhs);
+    var chunk = try finish(&builder);
+    defer chunk.deinit(testing.allocator);
+
+    var graph = try ir.Graph.build(testing.allocator, &chunk);
+    defer graph.deinit();
+    var plan = try specialize.Plan.build(testing.allocator, &graph);
+    defer plan.deinit();
+    const add_id = findNode(&graph, .add).?;
+    const state_id = graph.nodes[add_id].frame_state.?;
+    const state = graph.frame_states[state_id];
+    const original_value = graph.frame_slots[state.slot_start].value;
+    graph.frame_slots[state.slot_start].value = std.math.maxInt(ir.ValueId);
+    try testing.expectError(
+        error.MalformedGraph,
+        deopt.Metadata.build(testing.allocator, &graph, &plan),
+    );
+    graph.frame_slots[state.slot_start].value = original_value;
+    graph.frame_states[state_id].block = std.math.maxInt(u32);
+    try testing.expectError(
+        error.MalformedGraph,
+        deopt.Metadata.build(testing.allocator, &graph, &plan),
+    );
+}
+
 test "Ohaimark specialization records pointer-free named-load assumptions" {
     var builder = Builder.init(testing.allocator);
     defer builder.deinit();
@@ -341,6 +439,17 @@ test "Ohaimark specialization records pointer-free named-load assumptions" {
     try testing.expectEqual(@as(u16, 0), assumption.feedback_index);
     try testing.expectEqual(receiver_shape, assumption.receiver_shape);
     try testing.expectEqual(@as(u32, 7), assumption.slot);
+    var hot_metadata = try deopt.Metadata.build(testing.allocator, &graph, &plan);
+    defer hot_metadata.deinit();
+    try hot_metadata.verify(&graph, &plan);
+    try testing.expectEqual(@as(usize, 1), hot_metadata.points.len);
+    try testing.expectEqual(load_id, hot_metadata.points[0].node);
+    var hot_decoded = try hot_metadata.decode(testing.allocator, 0);
+    defer hot_decoded.deinit();
+    try testing.expectEqual(
+        deopt.Recovery{ .value = graph.nodeInputs(load_id)[0] },
+        hot_decoded.accumulator,
+    );
 
     // A later compile observes the invalidated live cell and stays generic.
     // Already-produced code must guard through the same cell index above.

@@ -1025,6 +1025,19 @@ sampling by `/profile`.
   or accessor value enters optimizer state. Cold or invalidated sites remain
   generic, and malformed feedback indices reject compilation.
   See [ohaimark.md](ohaimark.md).
+- **Ohaimark logical deopt metadata (2026-07-16).** Potentially speculative
+  arithmetic and named-load nodes now carry the pre-operation Lantern
+  continuation: accumulator plus exactly the registers live before that
+  bytecode. A single backward transfer per block reuses the authoritative
+  liveness effects, avoiding all-register snapshots. The specialization plan
+  emits a compact point table + recovery byte stream only for guarded nodes;
+  constants embed directly and other entries reference pre-node SSA values.
+  A bounds-checked verifier rejects mismatched lowerings/assumptions, malformed
+  state ranges, unavailable ValueIds, duplicate register slots, corrupt tags, and
+  truncated streams without panicking. Physical register/stack recovery and
+  runtime frame reconstruction remain gated on representation selection and
+  allocation.
+  See [ohaimark.md](ohaimark.md).
 - **Generational GC.** A JSC-Riptide-style non-moving
   generational collector — store-site routing, generation header
   bits, a write barrier + remembered set, `collectYoung` with
@@ -1411,8 +1424,9 @@ and the per-builtin checklist; this section tracks status.
 - **Ohaimark** — optimizing JIT (T2). IR (SSA), type speculation
   from inline caches, deopt back to Lantern on guard failure.
   Modeled on JSC DFG / V8 Maglev / SpiderMonkey Warp. The feedback snapshot,
-  block-argument SSA, and initial specialization planner ship; verified deopt
-  metadata and machine-code execution remain planned. See
+  block-argument SSA, initial specialization planner, and logical deopt
+  metadata ship; physical recovery, runtime deoptimization, and machine-code
+  execution remain planned. See
   [ohaimark.md](ohaimark.md).
 - **Spasm** — wasm baseline JIT (T1), Sarcasm's compiled tier.
   Single-pass over the validated module + branch side-table,

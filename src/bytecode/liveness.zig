@@ -293,6 +293,27 @@ pub fn effectOf(op: Op, code: []const u8, i: usize) Effect {
     };
 }
 
+/// Apply one backward liveness transfer: `live = (live - writes) union reads`.
+/// Shared by consumers that need an exact instruction boundary (register
+/// allocation, dead-store analysis, and deopt frame-state capture).
+pub fn applyReverseEffect(live: *std.DynamicBitSet, effect: Effect, register_count: u16) void {
+    if (effect.write) |write| {
+        if (write < register_count) live.unset(write);
+    }
+    var read_index: u8 = 0;
+    while (read_index < effect.n_reads) : (read_index += 1) {
+        const register = effect.reads[read_index];
+        if (register < register_count) live.set(register);
+    }
+    if (effect.win_len > 0) {
+        var register: u32 = effect.win_base;
+        const end = @as(u32, effect.win_base) + effect.win_len;
+        while (register < end) : (register += 1) {
+            if (register < register_count) live.set(@intCast(register));
+        }
+    }
+}
+
 /// Returns the branch target offset for a control-transfer op, or null
 /// if the op doesn't branch. The opcode's `BranchInfo` selects i8/i16/i32;
 /// every displacement is relative to the byte after that operand.
@@ -375,19 +396,7 @@ pub const Analysis = struct {
             idx -= 1;
             const at = insn.items[idx];
             const op: Op = @enumFromInt(code[at]);
-            const e = effectOf(op, code, at);
-            if (e.write) |w| {
-                if (w < self.register_count) live.unset(w);
-            }
-            var ri: u8 = 0;
-            while (ri < e.n_reads) : (ri += 1) {
-                if (e.reads[ri] < self.register_count) live.set(e.reads[ri]);
-            }
-            if (e.win_len > 0) {
-                var w: u32 = e.win_base;
-                const wend = @as(u32, e.win_base) + e.win_len;
-                while (w < wend) : (w += 1) if (w < self.register_count) live.set(@intCast(w));
-            }
+            applyReverseEffect(&live, effectOf(op, code, at), self.register_count);
         }
         return live;
     }
