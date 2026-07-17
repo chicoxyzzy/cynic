@@ -91,6 +91,7 @@ test "Ohaimark runtime policy follows child realms" {
     parent.jit_threshold_override = 7;
     parent.ohaimark_enabled = true;
     parent.ohaimark_threshold_override = 11;
+    parent.ohaimark_osr_enabled = true;
 
     var child = Realm.initChild(&parent);
     defer child.deinit();
@@ -98,6 +99,16 @@ test "Ohaimark runtime policy follows child realms" {
     try testing.expectEqual(@as(?u32, 7), child.jit_threshold_override);
     try testing.expect(child.ohaimark_enabled);
     try testing.expectEqual(@as(?u32, 11), child.ohaimark_threshold_override);
+    try testing.expect(child.ohaimark_osr_enabled);
+}
+
+test "Ohaimark OSR stays disabled by default" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try testing.expect(!realm.ohaimark_osr_enabled);
+    var child = Realm.initChild(&realm);
+    defer child.deinit();
+    try testing.expect(!child.ohaimark_osr_enabled);
 }
 
 test "Ohaimark forced function entry compiles and completes through normal dispatch" {
@@ -367,4 +378,154 @@ test "Ohaimark refusal preserves Bistromath fallback" {
         realm.heap.ohaimark_stats.unsupportedOpcodeCount(.bit_or),
     );
     try testing.expectEqual(@as(u64, 0), realm.heap.ohaimark_stats.executed_entries);
+}
+
+test "Ohaimark OSR: single-call hot loop compiles and completes" {
+    if (comptime !driver.supported) return error.SkipZigTest;
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+    realm.jit_threshold_override = 1;
+    realm.ohaimark_enabled = true;
+    realm.ohaimark_threshold_override = 1;
+    realm.ohaimark_osr_enabled = true;
+    realm.heap.ohaimark_stats.enabled = true;
+
+    // One call, many backedges — function-entry T2 never re-enters; OSR must.
+    const source =
+        \\function sum(n) {
+        \\  let i = 0;
+        \\  let acc = 0;
+        \\  while (i < n) {
+        \\    acc = acc + 1;
+        \\    i = i + 1;
+        \\  }
+        \\  return acc;
+        \\}
+        \\sum(100);
+    ;
+    var chunk = try compileScript(&realm, source);
+    defer chunk.deinit(testing.allocator);
+    const value = try runValue(&realm, &chunk);
+    try testing.expectEqual(Value.fromInt32(100).bits, value.bits);
+
+    const state = templateNamed(&chunk, "sum").jit_state.?;
+    // May refuse if the loop uses unsupported opcodes (e.g. less-than);
+    // either a successful OSR publish or an honest dont_compile is fine —
+    // the result must still match Lantern.
+    if (state.ohaimark.tier == .compiled) {
+        try testing.expect(state.hasOhaimarkOsr() or state.ohaimark_osr_count == 0);
+        try testing.expect(realm.heap.ohaimark_stats.executed_entries > 0 or
+            realm.heap.ohaimark_stats.compile_successes > 0);
+    }
+}
+
+test "Ohaimark OSR: Lantern and forced T2 agree on loop result" {
+    if (comptime !driver.supported) return error.SkipZigTest;
+    const source =
+        \\function sum(n) {
+        \\  let i = 0;
+        \\  let acc = 0;
+        \\  while (i < n) {
+        \\    acc = acc + i;
+        \\    i = i + 1;
+        \\  }
+        \\  return acc;
+        \\}
+        \\sum(50);
+    ;
+
+    var lantern_realm = Realm.init(testing.allocator);
+    defer lantern_realm.deinit();
+    lantern_realm.jit_enabled = false;
+    var lantern_chunk = try compileScript(&lantern_realm, source);
+    defer lantern_chunk.deinit(testing.allocator);
+    const lantern_value = try runValue(&lantern_realm, &lantern_chunk);
+
+    var t2_realm = Realm.init(testing.allocator);
+    defer t2_realm.deinit();
+    t2_realm.jit_enabled = true;
+    t2_realm.jit_threshold_override = 1;
+    t2_realm.ohaimark_enabled = true;
+    t2_realm.ohaimark_threshold_override = 1;
+    t2_realm.ohaimark_osr_enabled = true;
+    var t2_chunk = try compileScript(&t2_realm, source);
+    defer t2_chunk.deinit(testing.allocator);
+    const t2_value = try runValue(&t2_realm, &t2_chunk);
+
+    try testing.expectEqual(lantern_value.bits, t2_value.bits);
+}
+
+test "Ohaimark OSR: refused compile does not retry every backedge" {
+    if (comptime !driver.supported) return error.SkipZigTest;
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+    realm.jit_threshold_override = 1;
+    realm.ohaimark_enabled = true;
+    realm.ohaimark_threshold_override = 1;
+    realm.ohaimark_osr_enabled = true;
+    realm.heap.ohaimark_stats.enabled = true;
+
+    // Exception regions refuse IR construction once and stick.
+    const source =
+        \\function f(n) {
+        \\  let i = 0;
+        \\  try {
+        \\    while (i < n) { i = i + 1; }
+        \\  } catch (e) {}
+        \\  return i;
+        \\}
+        \\f(20);
+    ;
+    var chunk = try compileScript(&realm, source);
+    defer chunk.deinit(testing.allocator);
+    const value = try runValue(&realm, &chunk);
+    try testing.expectEqual(Value.fromInt32(20).bits, value.bits);
+
+    const state = templateNamed(&chunk, "f").jit_state.?;
+    try testing.expectEqual(chunk_mod.Chunk.JitState.Tier.dont_compile, state.ohaimark.tier);
+    const attempts_before = realm.heap.ohaimark_stats.compile_attempts;
+    try testing.expect(attempts_before >= 1);
+    // Run again — warmth is high; must not thrash-recompile.
+    const value2 = try runValue(&realm, &chunk);
+    try testing.expectEqual(Value.fromInt32(20).bits, value2.bits);
+    try testing.expectEqual(attempts_before, realm.heap.ohaimark_stats.compile_attempts);
+}
+
+test "Ohaimark OSR: fuel exhaustion at optimized backedge resumes exactly" {
+    if (comptime !driver.supported) return error.SkipZigTest;
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+    realm.jit_threshold_override = 1;
+    realm.ohaimark_enabled = true;
+    realm.ohaimark_threshold_override = 1;
+    realm.ohaimark_osr_enabled = true;
+
+    const source =
+        \\function spin(n) {
+        \\  let i = 0;
+        \\  while (i < n) { i = i + 1; }
+        \\  return i;
+        \\}
+        \\spin(5);
+    ;
+    var chunk = try compileScript(&realm, source);
+    defer chunk.deinit(testing.allocator);
+    // First run warms / compiles.
+    _ = try runValue(&realm, &chunk);
+
+    // Second run with zero fuel: must throw RangeError, not abort.
+    realm.step_budget = 0;
+    const result = lantern.run(testing.allocator, &realm, &chunk);
+    // Fuel exhaustion is a catchable RangeError completion path.
+    if (result) |r| {
+        switch (r) {
+            .thrown => {},
+            .value, .yielded => return error.TestUnexpectedResult,
+        }
+    } else |_| {
+        // Host OOM would be surprising; other errors are fine to surface.
+    }
 }

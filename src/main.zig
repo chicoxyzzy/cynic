@@ -62,6 +62,7 @@ pub fn main(init: std.process.Init) !void {
     const allow_wasm = parsed.allow_wasm;
     const jit = parsed.jit;
     const ohaimark = parsed.ohaimark;
+    const ohaimark_osr = parsed.ohaimark_osr;
 
     if (std.mem.eql(u8, sub, "lex")) {
         if (args.len != 1) {
@@ -106,7 +107,7 @@ pub fn main(init: std.process.Init) !void {
             try printUsage(io);
             return error.MissingArgument;
         }
-        try eval_cmd.run(allocator, io, args[0], feature_flags, gc_threshold, unhardened, allow_eval, allow_wasm, jit, ohaimark);
+        try eval_cmd.run(allocator, io, args[0], feature_flags, gc_threshold, unhardened, allow_eval, allow_wasm, jit, ohaimark, ohaimark_osr);
     } else if (std.mem.eql(u8, sub, "run")) {
         // `cynic run a.js b.js c.js` evaluates each file in order
         // against one realm — the same shape every other engine's
@@ -165,6 +166,7 @@ pub fn main(init: std.process.Init) !void {
             allow_wasm,
             jit,
             ohaimark,
+            ohaimark_osr,
         );
     } else if (std.mem.eql(u8, sub, "repl")) {
         // `cynic repl [--debug-globals]` — interactive read-eval-print
@@ -187,7 +189,7 @@ pub fn main(init: std.process.Init) !void {
             try printUsage(io);
             return error.UnexpectedArgument;
         }
-        try repl_cmd.run(allocator, io, feature_flags, gc_threshold, repl_debug_globals, unhardened, allow_eval, allow_wasm, jit, ohaimark);
+        try repl_cmd.run(allocator, io, feature_flags, gc_threshold, repl_debug_globals, unhardened, allow_eval, allow_wasm, jit, ohaimark, ohaimark_osr);
     } else if (std.mem.eql(u8, sub, "help") or std.mem.eql(u8, sub, "--help") or std.mem.eql(u8, sub, "-h")) {
         try printUsage(io);
     } else {
@@ -287,6 +289,9 @@ fn printUsage(io: std.Io) !void {
         \\                                   default at its natural production threshold;
         \\                                   --ohaimark is an explicit no-op and --no-jit
         \\                                   remains the master opt-out for both tiers.
+        \\  --ohaimark-osr                   Enable loop-header OSR into Ohaimark
+        \\                                   (default off; validation/bench gate only
+        \\                                   until docs/ohaimark.md §3.17 graduation).
         \\
     );
 }
@@ -461,6 +466,12 @@ pub const ParsedFlags = struct {
     /// differential, GC-pressure, and fuzz gates passed. `--no-ohaimark`
     /// isolates Bistromath; `--no-jit` remains the master opt-out.
     ohaimark: bool = true,
+    /// Loop-header OSR into Ohaimark (docs/ohaimark.md §3.17). Default-off
+    /// until its own differential and natural-threshold gates pass. Exposed
+    /// as a CLI flag so the OSR rollout benchmark and focused validation can
+    /// flip `Realm.ohaimark_osr_enabled` without a separate test binary; it
+    /// is not a general user-facing production surface while the gate is off.
+    ohaimark_osr: bool = false,
     /// The unconsumed tail of the argv slice (subcommand + its
     /// arguments). Empty when no subcommand was supplied — the
     /// caller prints usage in that case.
@@ -517,6 +528,9 @@ pub fn parseTopLevelFlags(args: []const []const u8) ParsedFlags {
             rest = rest[1..];
         } else if (std.mem.eql(u8, a, "--no-ohaimark")) {
             out.ohaimark = false;
+            rest = rest[1..];
+        } else if (std.mem.eql(u8, a, "--ohaimark-osr")) {
+            out.ohaimark_osr = true;
             rest = rest[1..];
         } else if (std.mem.startsWith(u8, a, "--allow=")) {
             // `--allow=<name>` relaxes a default-on restriction

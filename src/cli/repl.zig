@@ -36,6 +36,7 @@ pub fn run(
     allow_wasm: bool,
     jit: bool,
     ohaimark: bool,
+    ohaimark_osr: bool,
 ) !void {
     var realm = Realm.init(allocator);
     defer realm.deinit();
@@ -54,6 +55,7 @@ pub fn run(
     // constructing Realm directly retain explicit per-tier opt-in.
     if (jit) realm.jit_enabled = true;
     if (jit and ohaimark) realm.ohaimark_enabled = true;
+    if (jit and ohaimark and ohaimark_osr) realm.ohaimark_osr_enabled = true;
     if (gc_threshold) |n| realm.heap.setGcThreshold(n);
     try realm.installBuiltins();
     // REPL is a debug / exploration context — install the debug

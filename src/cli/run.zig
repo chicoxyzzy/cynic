@@ -114,6 +114,7 @@ pub fn run(
     allow_wasm: bool,
     jit: bool,
     ohaimark: bool,
+    ohaimark_osr: bool,
 ) !void {
     std.debug.assert(paths.len > 0);
     if (collect_bytecode_stats and !cynic.bytecode.stats.enabled) {
@@ -147,6 +148,10 @@ pub fn run(
     // instrumentation keeps native execution disabled so counters stay exact.
     if (jit and !collect_bytecode_stats) realm.jit_enabled = true;
     if (jit and ohaimark and !collect_bytecode_stats) realm.ohaimark_enabled = true;
+    // Loop-header OSR stays default-off (docs/ohaimark.md §3.17).
+    if (jit and ohaimark and ohaimark_osr and !collect_bytecode_stats) {
+        realm.ohaimark_osr_enabled = true;
+    }
     realm.heap.ohaimark_stats.enabled = ohaimark_stats;
     // Apply the `--gc-threshold` knob before `installBuiltins`
     // so the builtin-install allocations themselves run at the

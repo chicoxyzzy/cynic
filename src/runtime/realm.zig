@@ -1153,6 +1153,11 @@ pub const Realm = struct {
     /// use `1` to attempt every eligible warm function; `null` uses the
     /// size-scaled policy in runtime/ohaimark/driver.zig.
     ohaimark_threshold_override: ?u32 = null,
+    /// Loop-header on-stack replacement into Ohaimark (docs/ohaimark.md §3.17).
+    /// Independently default-off until OSR's own differential and natural-
+    /// threshold performance gates pass. Function-entry T2 does not require
+    /// this flag. Inherited by child realms.
+    ohaimark_osr_enabled: bool = false,
     /// Lazily-created arena owning every realm-resident WebAssembly
     /// artifact (decoded modules, instances, their store state). Freed
     /// wholesale at realm teardown, so wasm objects need no per-object
@@ -1332,6 +1337,7 @@ pub const Realm = struct {
             .jit_threshold_override = parent.jit_threshold_override,
             .ohaimark_enabled = parent.ohaimark_enabled,
             .ohaimark_threshold_override = parent.ohaimark_threshold_override,
+            .ohaimark_osr_enabled = parent.ohaimark_osr_enabled,
         };
         r.globals.heap = parent.heap;
         r.value_stack = parent.allocator.alloc(Value, value_stack_capacity) catch unreachable;
