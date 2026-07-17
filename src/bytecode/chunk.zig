@@ -792,6 +792,17 @@ pub const Chunk = struct {
         /// before the heap unmaps the shared code allocator.
         bistromath: BistromathState = .{},
         ohaimark: TierCode = .{},
+        /// Loop-header OSR stubs for T2. `bc → code_off` relative to the
+        /// Ohaimark entry, installed in the executable region so teardown
+        /// shares the same stable-address contract as Bistromath continuations
+        /// (docs/ohaimark.md §3.17). Empty until a successful T2 publish that
+        /// emitted at least one header stub.
+        ohaimark_osr: jit_code_alloc.InstalledCode = .{},
+        ohaimark_osr_count: u32 = 0,
+        /// Each OSR entry that immediately reconstructs the Lantern frame is a
+        /// strike; past the limit the backedge precheck stops paying the entry
+        /// cost (enter-and-bail ping-pong).
+        ohaimark_osr_strikes: u8 = 0,
         /// Function-entry T2 guard exits. Once the bounded budget is spent,
         /// dispatch bypasses this installed entry to avoid permanent
         /// Ohaimark-to-Lantern ping-pong on a changed type profile.
@@ -894,9 +905,46 @@ pub const Chunk = struct {
             return self.bistromath.resumeCodeOffset(bc);
         }
 
+        /// Ohaimark loop-header OSR: look up a stub offset relative to the T2
+        /// entry for `bc`. Independent of Bistromath's continuation table.
+        pub fn ohaimarkOsrCodeOffset(self: *const JitState, bc: u32) ?u32 {
+            const bytes = self.ohaimark_osr.bytes() orelse return null;
+            const ptr: [*]const OsrEntry = @ptrCast(@alignCast(bytes.ptr));
+            for (ptr[0..self.ohaimark_osr_count]) |entry| {
+                if (entry.bc == bc) return entry.code_off;
+            }
+            return null;
+        }
+
+        pub fn hasOhaimarkOsr(self: *const JitState) bool {
+            return self.ohaimark_osr_count != 0;
+        }
+
+        /// Publish T2 main code and an optional OSR table in one step. The
+        /// OSR table is only taken when the main entry publishes successfully.
+        pub fn publishOhaimark(
+            self: *JitState,
+            executable: *jit_code_alloc.InstalledCode,
+            osr_table: ?*jit_code_alloc.InstalledCode,
+            osr_count: u32,
+        ) void {
+            if (self.ohaimark.entry() != null or executable.bytes() == null) return;
+            if (osr_table) |table| {
+                if (table.bytes()) |bytes| {
+                    self.ohaimark_osr = table.take();
+                    const available = bytes.len / @sizeOf(OsrEntry);
+                    self.ohaimark_osr_count = @intCast(@min(osr_count, available));
+                }
+            }
+            self.ohaimark.publish(executable);
+        }
+
         pub fn deinit(self: *JitState) void {
             self.bistromath.deinit();
             self.ohaimark.deinit();
+            self.ohaimark_osr.deinit();
+            self.ohaimark_osr_count = 0;
+            self.ohaimark_osr_strikes = 0;
         }
 
         /// JSC weights +15 per entry / +1 per back-edge; 16 keeps
@@ -2454,7 +2502,7 @@ test "Chunk JIT state releases baseline continuations and optimized code" {
 
     const state = chunk.jit_state.?;
     state.bistromath.publish(&baseline, &continuations, 1);
-    state.ohaimark.publish(&optimized);
+    state.publishOhaimark(&optimized, null, 0);
     try testing.expect(baseline.bytes() == null);
     try testing.expect(continuations.bytes() == null);
     try testing.expect(optimized.bytes() == null);

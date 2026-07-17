@@ -103,7 +103,7 @@ fn compileAndInstallDiagnosed(
         return false;
     }
 
-    var executable = compileUnpublished(
+    var artifacts = compileUnpublished(
         allocator,
         chunk,
         executable_allocator,
@@ -112,17 +112,28 @@ fn compileAndInstallDiagnosed(
         state.ohaimark.refuse();
         return false;
     };
-    defer executable.deinit();
-    state.ohaimark.publish(&executable);
+    defer artifacts.executable.deinit();
+    defer artifacts.osr_table.deinit();
+    state.publishOhaimark(
+        &artifacts.executable,
+        if (artifacts.osr_count != 0) &artifacts.osr_table else null,
+        artifacts.osr_count,
+    );
     return state.ohaimark.tier == .compiled;
 }
+
+const CompileArtifacts = struct {
+    executable: code_alloc.InstalledCode,
+    osr_table: code_alloc.InstalledCode,
+    osr_count: u32,
+};
 
 fn compileUnpublished(
     allocator: std.mem.Allocator,
     chunk: *const Chunk,
     executable_allocator: *code_alloc.CodeAllocator,
     refusal: *stats_mod.Refusal,
-) !code_alloc.InstalledCode {
+) !CompileArtifacts {
     refusal.* = .{ .stage = .ir };
     var ir_diagnostics: ir.BuildDiagnostics = .{};
     var graph = ir.Graph.buildWithDiagnostics(
@@ -199,8 +210,10 @@ fn compileUnpublished(
 
     var machine = masm.Masm.init(allocator);
     defer machine.deinit();
+    var osr_entries: std.ArrayListUnmanaged(Chunk.JitState.OsrEntry) = .empty;
+    defer osr_entries.deinit(allocator);
     refusal.* = .{ .stage = .codegen };
-    try codegen.emitGraph(
+    try codegen.emitGraphCollectingOsr(
         allocator,
         &machine,
         chunk,
@@ -213,7 +226,20 @@ fn compileUnpublished(
         &physical_deopt,
         &allocated,
         &lowered,
+        &osr_entries,
     );
     refusal.* = .{ .stage = .code_install };
-    return executable_allocator.installOwned(machine.code.items);
+    var executable = try executable_allocator.installOwned(machine.code.items);
+    errdefer executable.deinit();
+    var osr_table: code_alloc.InstalledCode = .{};
+    const osr_count: u32 = @intCast(osr_entries.items.len);
+    if (osr_count != 0) {
+        const bytes = std.mem.sliceAsBytes(osr_entries.items);
+        osr_table = try executable_allocator.installOwned(bytes);
+    }
+    return .{
+        .executable = executable,
+        .osr_table = osr_table,
+        .osr_count = osr_count,
+    };
 }

@@ -24,6 +24,7 @@ const emitter = @import("emitter_aarch64.zig");
 const ir = @import("ir.zig");
 const lowering = @import("lowering_aarch64.zig");
 const parallel_moves = @import("parallel_moves.zig");
+const osr_mod = @import("osr.zig");
 const property_codegen = @import("property_codegen_aarch64.zig");
 const representation = @import("representation.zig");
 const safepoint_codegen = @import("safepoint_codegen_aarch64.zig");
@@ -103,6 +104,44 @@ pub fn emitGraph(
     allocated: *const allocation.Plan,
     lowered: *const lowering.Plan,
 ) !void {
+    var osr_entries: std.ArrayListUnmanaged(Chunk.JitState.OsrEntry) = .empty;
+    defer osr_entries.deinit(allocator);
+    try emitGraphCollectingOsr(
+        allocator,
+        machine,
+        chunk,
+        graph,
+        specialization,
+        representations,
+        fused_control,
+        logical,
+        homes,
+        physical_deopt,
+        allocated,
+        lowered,
+        &osr_entries,
+    );
+}
+
+/// Emit optimized code and append loop-header OSR stubs. Each successful
+/// stub records `{bc, code_off}` relative to `machine.code` at the start of
+/// emission (the published entry base). Callers that publish the table pass
+/// a non-null `osr_entries` list; tests may leave it empty-consuming.
+pub fn emitGraphCollectingOsr(
+    allocator: std.mem.Allocator,
+    machine: *Masm,
+    chunk: *const Chunk,
+    graph: *const ir.Graph,
+    specialization: *const specialize.Plan,
+    representations: *const representation.Plan,
+    fused_control: *const control_fusion.Plan,
+    logical: *const deopt.Metadata,
+    homes: *const deopt_physical.Homes,
+    physical_deopt: *const deopt_physical.Metadata,
+    allocated: *const allocation.Plan,
+    lowered: *const lowering.Plan,
+    osr_entries: *std.ArrayListUnmanaged(Chunk.JitState.OsrEntry),
+) !void {
     if (graph.blocks.len == 0) return error.MalformedGraph;
     if (graph.blocks.len > max_graph_items or graph.nodes.len > max_graph_nodes or
         graph.inputs.len > max_graph_items or graph.params.len > max_graph_items or
@@ -124,6 +163,10 @@ pub fn emitGraph(
         homes,
         allocated,
     );
+
+    var osr_meta = try osr_mod.Metadata.build(allocator, graph);
+    defer osr_meta.deinit();
+    try osr_meta.verify(graph);
 
     const block_labels = try allocator.alloc(Masm.Label, graph.blocks.len);
     defer {
@@ -163,6 +206,8 @@ pub fn emitGraph(
         .block_labels = block_labels,
         .guard_labels = guard_labels,
         .point_for_node = point_for_node,
+        .osr_meta = &osr_meta,
+        .osr_entries = osr_entries,
     };
     const code_start = machine.code.items.len;
     errdefer machine.code.shrinkRetainingCapacity(code_start);
@@ -183,6 +228,8 @@ const Compiler = struct {
     block_labels: []Masm.Label,
     guard_labels: []Masm.Label,
     point_for_node: []const ?usize,
+    osr_meta: *const osr_mod.Metadata,
+    osr_entries: *std.ArrayListUnmanaged(Chunk.JitState.OsrEntry),
 
     fn emit(self: *Compiler) !void {
         try emitter.emitPrologue(self.machine, self.lowered.frame);
@@ -192,6 +239,9 @@ const Compiler = struct {
             self.machine.bind(&self.block_labels[block_index]);
             try self.emitBlock(block_index, block);
         }
+        // OSR stubs after the ordinary body so fallthrough never lands in one.
+        // Each stub shares the same spill layout and block labels as entry.
+        try self.emitOsrEntries();
         for (self.physical_deopt.points, 0..) |_, point_index| {
             self.machine.bind(&self.guard_labels[point_index]);
             try self.emitGuardExit(point_index);
@@ -201,7 +251,22 @@ const Compiler = struct {
     fn emitEntryParameters(self: *Compiler) !void {
         const entry = self.graph.blocks[0];
         if (!entry.reachable) return error.MalformedGraph;
-        const params = try checkedRange(self.graph.params.len, entry.param_start, entry.param_count);
+        try self.materializeBlockParametersFromFrame(0, null);
+    }
+
+    /// Map the live Lantern frame into the SSA parameters of `block_index`.
+    /// Function entry requires tagged destinations (the frame is always
+    /// NaN-boxed). OSR headers may need int32 unboxing; a failed check
+    /// branches to `int32_fail` when provided, otherwise refuses compilation.
+    fn materializeBlockParametersFromFrame(
+        self: *Compiler,
+        block_index: usize,
+        int32_fail: ?*Masm.Label,
+    ) !void {
+        if (block_index >= self.graph.blocks.len) return error.MalformedGraph;
+        const block = self.graph.blocks[block_index];
+        if (!block.reachable) return error.MalformedGraph;
+        const params = try checkedRange(self.graph.params.len, block.param_start, block.param_count);
         for (self.graph.params[params.start..params.end()]) |param| {
             if (param.value >= self.lowered.locations.len or
                 param.value >= self.representations.outputs.len)
@@ -210,11 +275,8 @@ const Compiler = struct {
             }
             const destination = self.lowered.locations[param.value];
             if (destination == .none) continue;
-            if (destination == .immediate or
-                self.representations.outputs[param.value] != .tagged)
-            {
-                return error.UnsupportedNode;
-            }
+            if (destination == .immediate) return error.UnsupportedNode;
+            const kind = self.representations.outputs[param.value];
             switch (param.role) {
                 .accumulator => try self.machine.emit(a64.ldrImm(
                     lhs_scratch,
@@ -227,14 +289,77 @@ const Compiler = struct {
                     try registerOffset(register),
                 )),
             }
-            try emitter.emitMove(self.machine, .{
-                .source = .{ .register = lhs_scratch },
-                .destination = destination,
-                .source_kind = .tagged,
-                .destination_kind = .tagged,
-                .conversion = .none,
-            }, self.chunk.constants);
+            switch (kind) {
+                .tagged => {
+                    try emitter.emitMove(self.machine, .{
+                        .source = .{ .register = lhs_scratch },
+                        .destination = destination,
+                        .source_kind = .tagged,
+                        .destination_kind = .tagged,
+                        .conversion = .none,
+                    }, self.chunk.constants);
+                },
+                .int32 => {
+                    const fail = int32_fail orelse return error.UnsupportedNode;
+                    try self.machine.movImm64(
+                        guard_scratch,
+                        @as(u64, Value.tag_int32) << 48,
+                    );
+                    try self.machine.emit(a64.eorReg(guard_scratch, lhs_scratch, guard_scratch));
+                    try self.machine.emit(a64.lsrImm(guard_scratch, guard_scratch, 48));
+                    try self.machine.jumpCbnz(guard_scratch, fail);
+                    try emitter.emitMove(self.machine, .{
+                        .source = .{ .register = lhs_scratch },
+                        .destination = destination,
+                        .source_kind = .int32,
+                        .destination_kind = .int32,
+                        .conversion = .none,
+                    }, self.chunk.constants);
+                },
+                .none => return error.MalformedGraph,
+            }
             try self.emitDefinitionHome(param.value);
+        }
+    }
+
+    fn emitOsrEntries(self: *Compiler) !void {
+        for (self.osr_meta.headers, 0..) |header, header_index| {
+            if (header.block_index >= self.block_labels.len or
+                header.block_index >= self.graph.blocks.len or
+                !self.graph.blocks[header.block_index].reachable)
+            {
+                return error.InvalidMetadata;
+            }
+            // Offsets are relative to the buffer start, which becomes the
+            // published entry base after installOwned.
+            const code_off: u32 = @intCast(self.machine.code.items.len);
+            try self.osr_entries.append(self.allocator, .{
+                .bc = header.bytecode_offset,
+                .code_off = code_off,
+            });
+
+            var int32_fail: Masm.Label = .{};
+            defer int32_fail.deinit(self.allocator);
+            const needs_int32 = try self.osr_meta.headerNeedsInt32Checks(
+                self.graph,
+                self.representations,
+                header_index,
+            );
+
+            try emitter.emitPrologue(self.machine, self.lowered.frame);
+            try self.materializeBlockParametersFromFrame(
+                header.block_index,
+                if (needs_int32) &int32_fail else null,
+            );
+            try self.machine.jump(&self.block_labels[header.block_index]);
+
+            if (needs_int32) {
+                // Frame already holds loop-header state (OSR loads never
+                // write it). Release the spill area and resume Lantern.
+                self.machine.bind(&int32_fail);
+                try self.machine.movImm64(.x0, resume_sentinel_bits);
+                try emitter.emitEpilogue(self.machine, self.lowered.frame);
+            }
         }
     }
 

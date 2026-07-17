@@ -2353,3 +2353,116 @@ test "Ohaimark AArch64 graph rejection is transactional" {
     try testing.expectError(error.UnsupportedNode, native.emit(&machine, &chunk));
     try testing.expectEqual(@as(usize, 0), machine.code.items.len);
 }
+
+test "Ohaimark AArch64 OSR entry completes a single-backedge loop" {
+    if (comptime !masm.native_aarch64) return error.SkipZigTest;
+    var loop = try safepointLoopChunk();
+    defer loop.chunk.deinit(testing.allocator);
+    var native = try NativeGraph.build(&loop.chunk);
+    defer native.deinit();
+
+    var machine = masm.Masm.init(testing.allocator);
+    defer machine.deinit();
+    var osr_entries: std.ArrayListUnmanaged(chunk_mod.Chunk.JitState.OsrEntry) = .empty;
+    defer osr_entries.deinit(testing.allocator);
+    try codegen.emitGraphCollectingOsr(
+        testing.allocator,
+        &machine,
+        &loop.chunk,
+        &native.graph,
+        &native.specialization,
+        &native.representations,
+        &native.control_fusion,
+        &native.logical,
+        &native.homes,
+        &native.physical_deopt,
+        &native.allocated,
+        &native.lowered,
+        &osr_entries,
+    );
+    try testing.expectEqual(@as(usize, 1), osr_entries.items.len);
+    try testing.expectEqual(loop.header, osr_entries.items[0].bc);
+
+    var executable = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
+    defer executable.deinit();
+    const entry = code_alloc.asFn(NativeEntry, try machine.install(&executable));
+    const base: [*]const u8 = @ptrCast(entry);
+    const stub: NativeEntry = @ptrCast(@alignCast(base + osr_entries.items[0].code_off));
+
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = false;
+    const registers = try testing.allocator.alloc(Value, loop.chunk.register_count);
+    defer testing.allocator.free(registers);
+    var frame = testFrame(&loop.chunk, registers);
+    frame.ip = loop.header;
+    frame.accumulator = Value.fromInt32(1);
+    frame.registers[loop.root] = Value.null_;
+    realm.step_budget = 10;
+
+    try testing.expectEqual(
+        @intFromEnum(codegen.EntryResult.done),
+        executeEntry(stub, &realm, &frame),
+    );
+    try testing.expectEqual(Value.null_.bits, frame.accumulator.bits);
+}
+
+test "Ohaimark AArch64 OSR entry then backedge safepoint restores exact header" {
+    if (comptime !masm.native_aarch64) return error.SkipZigTest;
+    // Enter mid-loop via OSR with a live object in a register, force the
+    // first optimized backedge's safepoint (zero fuel), and prove Lantern
+    // recovers the header bytecode offset + exact live state.
+    var loop = try safepointLoopChunk();
+    defer loop.chunk.deinit(testing.allocator);
+    var native = try NativeGraph.build(&loop.chunk);
+    defer native.deinit();
+
+    var machine = masm.Masm.init(testing.allocator);
+    defer machine.deinit();
+    var osr_entries: std.ArrayListUnmanaged(chunk_mod.Chunk.JitState.OsrEntry) = .empty;
+    defer osr_entries.deinit(testing.allocator);
+    try codegen.emitGraphCollectingOsr(
+        testing.allocator,
+        &machine,
+        &loop.chunk,
+        &native.graph,
+        &native.specialization,
+        &native.representations,
+        &native.control_fusion,
+        &native.logical,
+        &native.homes,
+        &native.physical_deopt,
+        &native.allocated,
+        &native.lowered,
+        &osr_entries,
+    );
+    try testing.expectEqual(@as(usize, 1), osr_entries.items.len);
+
+    var executable = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
+    defer executable.deinit();
+    const entry = code_alloc.asFn(NativeEntry, try machine.install(&executable));
+    const base: [*]const u8 = @ptrCast(entry);
+    const stub: NativeEntry = @ptrCast(@alignCast(base + osr_entries.items[0].code_off));
+
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = false;
+    const root = try realm.heap.allocateObject();
+    const registers = try testing.allocator.alloc(Value, loop.chunk.register_count);
+    defer testing.allocator.free(registers);
+    var frame = testFrame(&loop.chunk, registers);
+    frame.ip = loop.header;
+    // Truthy accumulator takes the loop body once; body stores zero and
+    // backedges into the header, where the safepoint fires.
+    frame.accumulator = Value.fromInt32(1);
+    frame.registers[loop.root] = heap_mod.taggedObject(root);
+    realm.step_budget = 0;
+
+    try testing.expectEqual(
+        @intFromEnum(codegen.EntryResult.resume_interp),
+        executeEntry(stub, &realm, &frame),
+    );
+    try testing.expectEqual(loop.header, frame.ip);
+    try testing.expectEqual(Value.fromInt32(0).bits, frame.accumulator.bits);
+    try testing.expectEqual(heap_mod.taggedObject(root).bits, frame.registers[loop.root].bits);
+}
