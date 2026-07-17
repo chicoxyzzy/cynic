@@ -17,4 +17,5 @@ pub const codegen_aarch64 = @import("codegen_aarch64.zig");
 pub const compiler = @import("compiler.zig");
 pub const driver = @import("driver.zig");
 pub const evaluator = @import("evaluator.zig");
+pub const osr = @import("osr.zig");
 pub const stats = @import("stats.zig");
