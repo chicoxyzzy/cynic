@@ -2154,7 +2154,9 @@ pub const Realm = struct {
 
     /// Install the host's built-in bindings — `print`, `console`,
     /// the typed Error constructors, plus core prototypes.
-    /// Call after `init` if the realm should run user scripts.
+    /// Call after `init` if the realm should run user scripts. `self` must
+    /// already be at its lifetime address and is non-movable after this call:
+    /// heap roots and native-function [[Realm]] slots retain this pointer.
     pub fn installBuiltins(self: *Realm) !void {
         // §26.2 — wire the FinalizationRegistry cleanup-job
         // scheduler onto the heap. `self` is stable here (the realm

@@ -303,6 +303,16 @@ every live Context. (This is also the hook for future per-realm
 teardown: dropping a realm from the list lets the next GC reclaim its
 now-unreachable objects.)
 
+**Installed realms are address-stable.** `installBuiltins` stores `*Realm` in
+the heap registry, native-function `[[Realm]]` slots, and the heap's
+FinalizationRegistry enqueue callback. The Realm must therefore already be at
+its lifetime address before installation and must not subsequently be returned
+or copied by value. Initialize it in the caller-owned slot and then call
+`realm.installBuiltins()`, or allocator-create a `*Realm` first. Test helpers
+must accept `*Realm`; a helper that installs a local Realm and returns it by
+value leaves those retained pointers aimed at dead stack storage, producing GC
+root corruption or a native-callback use-after-return.
+
 Each per-kind heap is split `_young` / `_mature`. `promoteYoungList`
 runs at the end of the mark phase: it walks the young half,
 `swapRemove`s any unmarked entry (freed via the kind's `deinit`),

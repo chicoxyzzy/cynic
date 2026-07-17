@@ -1287,8 +1287,9 @@ test "native reentry: recursive Reflect.apply throws and is catchable" {
 
 test "native reentry: bounded callback recursion still completes" {
     // The guard must NOT trip on legitimate shallow native re-entry.
-    // A depth-50 recursion through `Array.prototype.forEach` is well
-    // within budget and must return the right answer.
+    // The exact stack limit is deliberately build-mode and host-stack
+    // dependent, so keep this positive case comfortably below the Debug
+    // red zone while still exercising repeated native callback re-entry.
     try expectScriptIntWithBuiltins(
         \\function sumDown(n) {
         \\  if (n === 0) return 0;
@@ -1296,9 +1297,9 @@ test "native reentry: bounded callback recursion still completes" {
         \\  [n].forEach(v => { acc = v + sumDown(v - 1); });
         \\  return acc;
         \\}
-        \\sumDown(50);
-        // sum(1..50) = 1275
-    , 1275);
+        \\sumDown(16);
+        // sum(1..16) = 136
+    , 136);
 }
 
 test "later: calling a non-function throws TypeError" {

@@ -22,23 +22,23 @@ const testing = std.testing;
 const Realm = @import("realm.zig").Realm;
 const lantern = @import("lantern/interpreter.zig");
 
-/// Helper: spin up a fresh `Realm` with builtins installed under the
-/// requested SES posture. Caller owns deinit. Mirrors the bootstrap
-/// every sibling `_test.zig` file uses.
-fn freshRealm(hardened: bool) !Realm {
-    var r = Realm.init(testing.allocator);
-    r.hardened = hardened;
-    try r.installBuiltins();
-    return r;
+/// Install builtins only after the caller has placed the Realm at its final
+/// address. Heap root registration and native-function [[Realm]] slots retain
+/// this pointer for the realm's lifetime, so an installed Realm is non-movable.
+fn installFreshRealm(realm: *Realm, hardened: bool) !void {
+    realm.hardened = hardened;
+    try realm.installBuiltins();
 }
 
 // ── Contract 1: two realms have distinct intrinsics ─────────────────
 
 test "realm coexistence: two independent realms have distinct intrinsic pointers" {
-    var ra = try freshRealm(true);
+    var ra = Realm.init(testing.allocator);
     defer ra.deinit();
-    var rb = try freshRealm(true);
+    try installFreshRealm(&ra, true);
+    var rb = Realm.init(testing.allocator);
     defer rb.deinit();
+    try installFreshRealm(&rb, true);
 
     // Distinct prototype objects: each realm allocates its OWN
     // %X.prototype% copies, and this is mandatory and permanent —
@@ -56,10 +56,12 @@ test "realm coexistence: two independent realms have distinct intrinsic pointers
 }
 
 test "realm coexistence: each realm has its own globalThis" {
-    var ra = try freshRealm(true);
+    var ra = Realm.init(testing.allocator);
     defer ra.deinit();
-    var rb = try freshRealm(true);
+    try installFreshRealm(&ra, true);
+    var rb = Realm.init(testing.allocator);
     defer rb.deinit();
+    try installFreshRealm(&rb, true);
 
     const a_gt = ra.globals.get("globalThis") orelse return error.TestFailed;
     const b_gt = rb.globals.get("globalThis") orelse return error.TestFailed;
@@ -70,10 +72,12 @@ test "realm coexistence: each realm has its own globalThis" {
 // ── Contract 2: mutation isolation (unhardened) ─────────────────────
 
 test "realm coexistence: mutating ra's Array.prototype does not affect rb (unhardened)" {
-    var ra = try freshRealm(false);
+    var ra = Realm.init(testing.allocator);
     defer ra.deinit();
-    var rb = try freshRealm(false);
+    try installFreshRealm(&ra, false);
+    var rb = Realm.init(testing.allocator);
     defer rb.deinit();
+    try installFreshRealm(&rb, false);
 
     // Mutate in ra.
     _ = try lantern.evaluateScript(testing.allocator, &ra, "Array.prototype.fooFromA = 42;");
@@ -94,10 +98,12 @@ test "realm coexistence: each realm has its own microtask queue (isolation via s
     // which under hardened is frozen (§ SES position in
     // `docs/ses-alignment.md`). The contract being verified
     // here is queue isolation, independent of freeze posture.
-    var ra = try freshRealm(false);
+    var ra = Realm.init(testing.allocator);
     defer ra.deinit();
-    var rb = try freshRealm(false);
+    try installFreshRealm(&ra, false);
+    var rb = Realm.init(testing.allocator);
     defer rb.deinit();
+    try installFreshRealm(&rb, false);
 
     // `evaluateScript` itself doesn't drain — the host (here, this
     // test) is responsible for calling `drainMicrotasks` at the
@@ -164,10 +170,12 @@ test "realm coexistence: child realm shares the parent's ShapeTree (D1 revised)"
 // ── Contract 4: output buffer isolation ─────────────────────────────
 
 test "realm coexistence: each realm has its own output buffer (print)" {
-    var ra = try freshRealm(true);
+    var ra = Realm.init(testing.allocator);
     defer ra.deinit();
-    var rb = try freshRealm(true);
+    try installFreshRealm(&ra, true);
+    var rb = Realm.init(testing.allocator);
     defer rb.deinit();
+    try installFreshRealm(&rb, true);
 
     // Sanity: both empty.
     try testing.expectEqual(@as(usize, 0), ra.output.items.len);
@@ -717,8 +725,9 @@ test "cross-realm: calling a class constructor without new throws the class's re
 //        own data property { writable, enumerable, configurable: true }.
 
 test "Error.prototype.stack: accessor-pair contract (proposal-error-stacks)" {
-    var realm = try freshRealm(false); // unhardened — the scored posture
+    var realm = Realm.init(testing.allocator);
     defer realm.deinit();
+    try installFreshRealm(&realm, false); // unhardened — the scored posture
     // Every assertion is folded into one boolean so a single completion
     // value reports pass/fail; each `try/catch` pins a throwing clause.
     const src =
@@ -791,8 +800,9 @@ test "GC: a self-deferring microtask allocation storm is throttled mid-drain" {
     // growing unbounded until control happens back to a JS loop. Regression
     // guard for that safe-point; if it ever moves to back-edges only, the
     // drain would stop collecting and this goes red.
-    var ra = try freshRealm(false);
+    var ra = Realm.init(testing.allocator);
     defer ra.deinit();
+    try installFreshRealm(&ra, false);
     // Low young threshold so the storm crosses it during the drain.
     ra.heap.gc_young_threshold = 64;
     _ = try lantern.evaluateScript(testing.allocator, &ra,
