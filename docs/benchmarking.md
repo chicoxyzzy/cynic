@@ -135,8 +135,29 @@ out of the timed samples. Increase confidence with:
 
 The ordinary `bench/micros/mul_loop.js` and `div_loop.js` intentionally invoke
 their hot function once. Backedges heat those chunks, but an entry-only T2 has
-no later entry at which to compile them; they remain valid T1 and future-OSR
-benchmarks. The rollout fixtures repeatedly call small leaf functions instead,
+no later entry at which to compile them; they remain valid T1 benchmarks and
+are the shape the **OSR rollout** suite targets. Function-entry rollout
+fixtures repeatedly call small leaf functions instead,
+
+### Ohaimark OSR natural-threshold gate
+
+`zig build bench -- --ohaimark-osr-rollout` selects `bench/ohaimark_osr/*.js`:
+single-call hot loops that only OSR can promote to T2. It compares explicit T1
+(`--jit --no-ohaimark`) against T1+T2 with OSR (`--jit --ohaimark --ohaimark-osr`)
+in the same ReleaseFast binary with interleaved process pairs. The
+`--ohaimark-osr` CLI flag exists solely so this harness (and focused validation)
+can flip `Realm.ohaimark_osr_enabled` without a separate binary; OSR remains
+default-off in production until the §3.17 graduation criteria pass
+([ohaimark.md](ohaimark.md)). Report columns match the function-entry rollout:
+compile attempts/publications, compile time, code size, entries, exits,
+geometric mean, and worst fixture.
+
+    zig build bench -- --ohaimark-osr-rollout --runs=30
+
+Do **not** default OSR on unless geometric mean T2/T1 is `≤ 1.000×` and no
+stable fixture exceeds `1.050×`, with clean differential/GC/fuzz gates.
+
+The ordinary function-entry rollout fixtures repeatedly call small leaf functions instead,
 covering tagged Number multiplication/division, monomorphic named loads,
 strict-equality control flow, and a call wrapper that should refuse once while
 its numeric callee publishes. No default-on decision passes if any stable

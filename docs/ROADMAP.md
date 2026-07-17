@@ -1190,9 +1190,17 @@ sampling by `/profile`.
   T1. The first full differential produced the same sorted 48,517-entry pass
   set with T2 forced as without it; a ReleaseSafe `--gc-threshold=1` expression
   bucket also completed without a GC/JIT verifier failure (47 existing passes,
-  one pre-existing conformance failure). Ohaimark OSR, broader GC-pressure
-  buckets, fuzzing, and compile-time/code-size/performance gates remain. See
-  [ohaimark.md](ohaimark.md).
+  one pre-existing conformance failure). Broader GC-pressure buckets, fuzzing,
+  and compile-time/code-size/performance gates followed; loop-header OSR is
+  tracked separately below. See [ohaimark.md](ohaimark.md).
+- **Ohaimark loop-header OSR, default-off (2026-07-17).** Verified OSR-entry
+  metadata, AArch64 entry stubs in the same transactional code allocation,
+  Lantern + Bistromath backedge drivers, `Realm.ohaimark_osr_enabled` (default
+  off, child-inherited), CLI `--ohaimark-osr` for validation/bench only, and
+  anti-thrash strikes. Reuses guard-exit, safepoint, and fuel/interrupt
+  machinery. Graduation requires exact differential, clean GC/fuzz, and
+  natural-threshold geometric mean `≤ 1.000×` with no fixture above `1.050×`
+  ([ohaimark.md](ohaimark.md) §3.17).
 - **Ohaimark rollout telemetry + automated gates (2026-07-16).** Opt-in,
   heap-scoped counters now measure compile attempts, publications/refusals,
   total/max compile time, installed code bytes, generated entries, normal
@@ -1788,8 +1796,9 @@ and the per-builtin checklist; this section tracks status.
   full-pipeline compilation, chunk-owned executable lifetime, verified CFG
   transfer coalescing/fallthrough, one-word completion, and exact Number
   operand-shape specialization now ship. Ohaimark is on by default at natural
-  thresholds; `--no-ohaimark` isolates T1. OSR, rooted helper calls, broader
-  opcode coverage, and additional architectures remain planned. See
+  thresholds; `--no-ohaimark` isolates T1. Loop-header OSR ships default-off
+  (`Realm.ohaimark_osr_enabled` / `--ohaimark-osr`). Rooted helper calls,
+  broader opcode coverage, and additional architectures remain planned. See
   [ohaimark.md](ohaimark.md).
 - **Spasm** — wasm baseline JIT (T1), Sarcasm's compiled tier.
   Single-pass over the validated module + branch side-table,

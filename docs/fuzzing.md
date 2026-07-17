@@ -438,6 +438,11 @@ graduation audit ran each posture for five bounded minutes: the crash campaign
 retained 216 programs and the value differential retained 49, with no crash or
 differential artifact.
 
+Loop-header OSR (`--ohaimark-osr`, docs/ohaimark.md §3.17) is **default-off**
+and is not part of the production or base fuzz posture. A focused OSR
+crash/value-differential campaign should pass both `--ohaimark` and
+`--ohaimark-osr` and must stay clean before OSR graduates to default-on.
+
 ## The coverage protocol
 
 `cynic-fuzz` builds with `-fsanitize-coverage=trace-pc-guard` so

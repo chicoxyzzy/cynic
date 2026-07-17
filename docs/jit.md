@@ -11,9 +11,12 @@ graduation 30-pair T2/T1 run measured `0.997x` geometric mean, `1.041x` worst,
 and 0.8 KiB installed code. Baseline and forced-T2 test262 pass lists match at
 48,517 paths; focused ReleaseSafe GC-pressure runs and bounded crash/value
 differential fuzz campaigns found no verifier failure, host crash, or
-differential. CI now gates both T1 and T2 pass-set equality. Ohaimark OSR,
-rooted helper calls, broader opcode coverage, and additional codegen targets
-remain future work. Spasm's
+differential. CI now gates both T1 and T2 pass-set equality. Loop-header OSR
+into Ohaimark is implemented behind a realm-local **default-off** gate
+(`Realm.ohaimark_osr_enabled` / CLI `--ohaimark-osr`); it does not graduate to
+default-on until its own differential and natural-threshold gates pass (see
+[ohaimark.md](ohaimark.md) §3.17). Rooted helper calls, broader opcode
+coverage, and additional codegen targets remain future work. Spasm's
 delivery state is tracked below. The document
 doubles as the design record that pinned the architecture before the first
 emitter was written and as the delivery ledger (the "Delivery order" section
@@ -487,7 +490,9 @@ under the test262 `--ohaimark` differential), then returns a tagged completion
 in AAPCS64 `x0` or resumes Lantern's reconstructed frame after receiving the
 reserved one-word sentinel. `--no-ohaimark` retains Bistromath; `--no-jit`
 retains Lantern alone. Constructors, generators, async frames, and Ohaimark OSR
-remain lower-tier paths.
+remain lower-tier paths unless `Realm.ohaimark_osr_enabled` is set (default
+off). With OSR on, Lantern and Bistromath backedges may enter published T2
+stubs at loop headers using the existing frame-identity ABI.
 The production-threshold rollout harness in [benchmarking.md](benchmarking.md)
 now compares T1 and T1+T2 with interleaved process pairs and machine-readable
 publication telemetry. Its first 30-pair arm64 sample published five supported
@@ -1253,7 +1258,8 @@ useful:
    completion, and exact Number operand-shape specialization passed the
    performance gate; full differential, focused GC-pressure, and bounded fuzz
    evidence passed the rollout audit. Ordinary-function entry now reaches T2
-   by default at natural thresholds. Next: OSR, rooted helper calls, broader
+   by default at natural thresholds. OSR ships default-off (ohaimark.md §3.17).
+   Next: OSR graduation, rooted helper calls, broader
    opcode coverage, and additional architectures; see
    [ohaimark.md](ohaimark.md).
 

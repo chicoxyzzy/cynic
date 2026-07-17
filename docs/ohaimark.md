@@ -13,9 +13,12 @@ test262 sweeps produced the same 48,517-pass set and SHA-256; focused
 ReleaseSafe GC-pressure runs and bounded crash/value-differential fuzz
 campaigns found no verifier failure, host crash, or differential. The
 production CLI enables Ohaimark at its natural threshold; `--no-ohaimark`
-isolates Bistromath, while `--no-jit` disables both tiers. Ohaimark OSR, rooted
-helper calls, broader opcode coverage, and additional architectures remain
-future work.
+isolates Bistromath, while `--no-jit` disables both tiers. Loop-header OSR is
+implemented behind a realm-local **default-off** gate
+(`Realm.ohaimark_osr_enabled`); it does not graduate to default-on until its
+own differential, GC/fuzz, and natural-threshold performance gates pass.
+Rooted helper calls, broader opcode coverage, and additional architectures
+remain future work.
 
 Ohaimark is Cynic's T2 method JIT. It consumes finalized Lantern bytecode
 and runtime feedback, builds a compact control-flow SSA graph, specializes
@@ -441,12 +444,14 @@ continues to isolate T1. Child realms inherit all four tier policy fields, so
 Fresh-entry heat is recorded before either tier is selected, including callees
 pushed by Bistromath's in-place call driver. T1 therefore keeps accumulating
 evidence for T2 instead of freezing the shared counter when baseline code first
-publishes. Backedges continue to add warmth in Lantern/T1 independently; this
-checkpoint does not perform Ohaimark OSR.
+publishes. Backedges continue to add warmth in Lantern/T1 independently; when
+`Realm.ohaimark_osr_enabled` is set they may also enter published T2 stubs
+(§3.17).
 
-Only fresh ordinary-function frames enter this checkpoint. Constructors,
-generators, async Promise-wrapping frames, and Ohaimark OSR stay in the lower
-tiers. A cold/refused T2 attempt leaves the frame untouched and permits T1;
+Only fresh ordinary-function frames use function-entry T2. Constructors,
+generators, and async Promise-wrapping frames stay in the lower tiers. Loop-
+header OSR is a separate default-off gate. A cold/refused T2 attempt leaves the
+frame untouched and permits T1;
 an optimized guard exit reports `resumed` separately because it already wrote
 the exact bytecode offset, accumulator, and live registers into the Lantern
 frame. The shared dispatcher resumes Lantern directly in that case and never
@@ -1149,7 +1154,13 @@ continue through Bistromath/Lantern without changing JavaScript behavior.
    per-tier refusal and chunk teardown preserve Bistromath independently.
    Default-on ordinary-function tier-up now ships with exact
    bailout-vs-fallback routing, one-word completion, and child-realm policy
-   inheritance; Ohaimark OSR remains deferred.
+   inheritance.
+8b. **Loop-header OSR, shipping default-off:** verified OSR-entry metadata for
+   every eligible loop header, AArch64 entry stubs in the same transactional
+   code allocation as function entry, Lantern and Bistromath backedge drivers,
+   reuse of guard-exit / safepoint recovery, and anti-thrash strikes. Kept
+   independently off until its own differential and rollout benchmarks pass
+   (see §3.17).
 9. **Gates and tuning, shipped:** full test262 pass-set differential, SES suite,
    GC-pressure runs, fuzzing, and compile-time/code-size/performance budgets.
    CFG edge coalescing/fallthrough and exact Number operand shapes brought the
@@ -1163,6 +1174,115 @@ continue through Bistromath/Lantern without changing JavaScript behavior.
 10. **Only if measured:** background compilation, polymorphic feedback,
    inlining, x86_64 lowering, and exception-region compilation.
 
+### 3.17 Loop-header on-stack replacement (OSR)
+
+Status: **implemented, default-off.** Function-entry T2 alone cannot win
+single-entry hot loops (`function f() { for (…) … } ; f()`): the body never
+re-enters at ip 0 after the first call, so the natural heat threshold is only
+reachable through backedges. OSR closes that gap without inventing a second
+frame format.
+
+#### Prior art
+
+- **V8 Maglev / TurboFan.** Maglev builds loop phis in a single forward pass
+  (pre-created from a bytecode prepass) and supports OSR compilation for hot
+  loops (`JumpLoop` can trigger optimization while the loop is still running).
+  Maglev peels loops on OSR compiles so the OSR entry lands on a clean header;
+  TurboFan retains the classic OSR-entry / deopt dual. Frame state is explicit;
+  deopt reconstructs Ignition. Cynic reuses the Maglev-shaped fact that loop
+  phis already exist as block parameters at every header
+  ([Maglev](https://v8.dev/blog/maglev)).
+- **JavaScriptCore DFG / FTL.** `prepareOSREntry` materializes a buffer of
+  locals at a loop-header bytecode index, then a thunk loads that buffer into
+  the optimized frame. Entry is rare and gated: OSR entry at arbitrary points
+  would forbid many loop opts, so JSC only enters when the profiler says the
+  loop has not yet terminated
+  ([speculation](https://webkit.org/blog/10308/speculation-in-javascriptcore/),
+  [`DFGOSREntry.cpp`](https://github.com/WebKit/WebKit/blob/main/Source/JavaScriptCore/dfg/DFGOSREntry.cpp)).
+  Cynic follows the same restriction surface: only loop headers, and only when
+  the compiled graph already has parameters for that header.
+- **SpiderMonkey Baseline / Warp.** Baseline counts loop iterations; Ion/Warp
+  OSR enters at loop headers from Baseline after a warm threshold. Bailout
+  reconstructs a Baseline Interpreter frame. Warp snapshots bytecode + IC data
+  on the main thread — the ownership split Ohaimark already mirrors
+  ([how we optimize](https://firefox-source-docs.mozilla.org/js/how-we-optimize.html)).
+- **Hermes.** Primarily AOT + a compact interpreter; the 2024 arm64 translator
+  is closer to Bistromath than to a speculative T2. Useful as a control for
+  "frame-compatible baseline OSR is enough for many mobile workloads," not as
+  the optimizing-entry model.
+- **Cynic Bistromath.** Already ships loop-header OSR (§12 3f in jit.md): a
+  `bc → code_off` table in the executable region, Lantern backedge precheck,
+  `osr_strikes` anti-thrash, and frame identity so entry is a jump. Ohaimark
+  OSR reuses that dispatcher shape; the new work is mapping Lantern values
+  onto SSA block parameters with representation conversions and deopt.
+
+#### Accepted design
+
+1. **Metadata first.** `runtime/ohaimark/osr.zig` walks the finished IR graph,
+   collects every unique backedge target (loop header), and records its
+   bytecode offset, block index, and ordered `ParamRole` list (accumulator +
+   liveness-derived live-in registers). The verifier recomputes the set and
+   rejects corrupted tables (missing accumulator, duplicate registers, bad
+   block ownership, non-header targets). Diamond-to-loop and multi-backedge
+   headers collapse to one entry per bytecode offset.
+
+2. **Same frame.** OSR never allocates a parallel optimized frame or stores
+   engine state on JS-visible objects. The entry stub loads the current
+   `CallFrame` accumulator and live registers, places them into the physical
+   locations already assigned to the header's block parameters (through the
+   existing parallel-move / conversion machinery), then jumps to the header
+   block label. A failed representation check or later guard uses the existing
+   cold exit: exact bytecode offset, accumulator, and live registers restored
+   for Lantern.
+
+3. **One transactional code allocation.** OSR stubs are emitted after the
+   ordinary function body into the same `Masm` buffer. Publication still
+   installs one owned executable handle; a separate chunk-owned
+   `bc → code_off` table (same `OsrEntry` layout as Bistromath) rides beside
+   it. Failed compile refuses T2 only (`dont_compile`); Bistromath/Lantern
+   stay executable.
+
+4. **Triggers.** Lantern backedges try Ohaimark OSR when
+   `Realm.ohaimark_osr_enabled` is true (and the master `jit_enabled` +
+   `ohaimark_enabled` gates allow). Bistromath backedges flush frame state and
+   attempt the same entry so a T1-resident hot loop can still promote. Both
+   reuse heat/`dont_compile`/`osr_strikes` — never retry compilation on every
+   backedge.
+
+5. **Refusals.** Constructors, generators, async Promise-wrapping frames, and
+   exception-region chunks stay out (same as function-entry T2). Headers whose
+   parameter representations or nodes the emitter cannot materialize refuse
+   that header's stub without mutating the live frame; the function may still
+   publish if the entry path is fine.
+
+6. **Default-off gate.** `Realm.ohaimark_osr_enabled` defaults false and is
+   inherited by `initChild`. Tests and the OSR rollout benchmark flip it
+   explicitly. No general user-facing CLI flag: OSR is a correctness-sensitive
+   sub-feature of an already-default-on tier, and enabling it before the
+   differential/performance gates would ship a half-validated path. A bench
+   harness sets the Realm field directly.
+
+#### Rejected alternatives
+
+- **Separate OSR-only compile unit** (compile only the loop body): doubles the
+  pipeline and breaks frame-state consistency with function-entry code; Maglev
+  and JSC compile the whole method with an extra entry.
+- **OSR into a new native frame format:** violates the frame-identity rule
+  that makes GC, deopt, and the watchdog tier-agnostic.
+- **Enter at arbitrary bytecode offsets:** forbids standard loop opts; every
+  production engine restricts optimizing OSR to headers (or rarer special
+  points).
+- **CLI flag for end users:** premature until gates pass; Realm policy + test
+  hooks are enough to validate.
+
+#### Graduation criteria (unchanged from the function-entry bar)
+
+Do **not** default `ohaimark_osr_enabled` on unless: forced baseline-vs-T2
+test262 pass sets are byte-identical, ReleaseSafe `--gc-threshold=1` over
+loop/Array/Object buckets is clean, bounded Fuzzilli crash + Lantern-vs-T2
+value differentials are clean, natural-threshold OSR geometric mean T2/T1 is
+`≤ 1.000×`, and no stable fixture exceeds `1.050×`.
+
 ## 6. Declined for v1
 
 - AST-to-IR compilation: bytecode is already the semantic and profiling unit.
@@ -1173,3 +1293,4 @@ continue through Bistromath/Lantern without changing JavaScript behavior.
 - Background compilation before synchronous compile cost is measured.
 - Deoptless continuation specialization: interesting later, but conventional
   deopt is the smaller correctness surface for the first tier.
+- Default-on OSR before the §3.17 graduation criteria pass.

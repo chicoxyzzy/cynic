@@ -72,12 +72,14 @@ fallthrough, and a one-word completion ABI. Its one-byte arithmetic profile
 distinguishes Int32/Double operand order so generated Number operations emit
 only the guards and conversions they need. Ohaimark now runs by default at its
 natural production threshold: `--no-ohaimark` isolates Bistromath, while
-`--no-jit` disables both tiers. The final 30-pair T2/T1 rollout measured
-`0.997x` geometric mean, a worst fixture of `1.041x`, and 0.8 KiB installed
-code, passing both rollout ceilings. Baseline and forced-T2 test262 sweeps
-produced the exact same 48,517-pass set; focused ReleaseSafe GC-pressure runs
-and bounded crash/value-differential fuzz campaigns found no verifier failure,
-host crash, or differential. See
+`--no-jit` disables both tiers. Loop-header OSR is implemented but **default-off**
+(`Realm.ohaimark_osr_enabled` / `--ohaimark-osr` for validation and the OSR
+rollout bench) until its own differential and performance gates pass. The final
+30-pair T2/T1 function-entry rollout measured `0.997x` geometric mean, a worst
+fixture of `1.041x`, and 0.8 KiB installed code, passing both rollout ceilings.
+Baseline and forced-T2 test262 sweeps produced the exact same 48,517-pass set;
+focused ReleaseSafe GC-pressure runs and bounded crash/value-differential fuzz
+campaigns found no verifier failure, host crash, or differential. See
 [`docs/ROADMAP.md`](docs/ROADMAP.md) for the thematic breakdown.
 
 ### Conformance
@@ -205,6 +207,7 @@ your local `zig version` reports an older dev tag, bump it.
 - `--threads=<n>` — worker count (`0` = auto, `1` = sequential, `>1` = pool).
 - `--only-failing` — skip-as-pass any path in `.test262-pass-cache.txt`. After a full sweep populates the cache, the next iteration runs only the ~7 k failing/skipped fixtures — ≤ 30 s vs ≤ 100 s. Don't use for score rows; use it for per-fix verification.
 - `--jit` / `--ohaimark` — force Bistromath alone, or default-on Ohaimark before Bistromath, at threshold 1 for independent pass-set differential runs.
+- `--ohaimark-osr` — enable loop-header OSR into Ohaimark (default off; validation and `zig build bench -- --ohaimark-osr-rollout` only until graduation).
 - `--ohaimark-stats` — with `--ohaimark`, print aggregate T2 compile attempts, publications/refusals, compile time, installed bytes, generated entries, completions, guard exits, refusal-stage counts, and the top unsupported bytecodes. Remains parallel-safe.
 - `--gc-threshold=<n>` — per-fixture allocation-pressure GC threshold (default 32,768; engine default 16,384). `0` falls through to the engine default. The engine also has a 16 MiB byte trigger so allocate-and-discard patterns GC promptly regardless of count.
 - `--write-results` — update `test262-results.md` with today's row. Re-running on the same date replaces that day's row rather than appending. The default run never touches that file.
