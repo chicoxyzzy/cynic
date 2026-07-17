@@ -444,11 +444,21 @@ const Builder = struct {
                             .jmp_if_nullish => .nullish,
                             else => unreachable,
                         };
-                        _ = try self.addNode(
+                        // Frame state lets codegen deopt when a tagged counter
+                        // is not int32 (countdown `while (i)` after OSR).
+                        const live_registers = try deopt_liveness.take(
+                            &deopt_live_cursor,
+                            @intCast(pc),
+                        );
+                        _ = try self.addDeoptNode(
                             .branch,
                             @intCast(pc),
                             &.{accumulator},
                             .{ .branch = condition },
+                            block_index,
+                            accumulator,
+                            registers,
+                            live_registers,
                         );
                         try self.addEdge(.branch_taken, block_index, target, accumulator, registers);
                         if (end >= self.chunk.code.len) return error.MalformedBytecode;
@@ -970,6 +980,15 @@ fn isDeoptCandidate(op: Op) bool {
         .add_smi,
         .add_smi8,
         .add_smi16,
+        .jmp_if_false,
+        .jmp_if_false8,
+        .jmp_if_false32,
+        .jmp_if_true,
+        .jmp_if_true8,
+        .jmp_if_true32,
+        .jmp_if_nullish,
+        .jmp_if_nullish8,
+        .jmp_if_nullish32,
         .jmp_if_strict_eq,
         .jmp_if_strict_eq8,
         .jmp_if_strict_eq32,

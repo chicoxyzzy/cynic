@@ -522,7 +522,8 @@ fn validateNodeContract(node: ir.Node, info: specialize.NodeInfo) !void {
             }
         },
         .branch => {
-            if (!hasPayload(node.payload, .branch) or info.lowering != .none or
+            if (!hasPayload(node.payload, .branch) or
+                (info.lowering != .none and info.lowering != .checked_branch) or
                 info.folded != null or info.assumption != null)
             {
                 return error.MalformedGraph;

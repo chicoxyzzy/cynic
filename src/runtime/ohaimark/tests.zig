@@ -532,7 +532,7 @@ test "Ohaimark specialization keeps overflowing int32 addition guarded" {
     var plan = try specialize.Plan.build(testing.allocator, &graph);
     defer plan.deinit();
     const info = plan.node_info[findNode(&graph, .add).?];
-    try testing.expect(info.result_type.eql(specialize.Type.number));
+    try testing.expect(info.result_type.eql(specialize.Type.int32));
     try testing.expectEqual(specialize.Lowering.checked_int32_add, info.lowering);
     try testing.expectEqual(@as(?ir.Immediate, null), info.folded);
 }
@@ -605,10 +605,13 @@ test "Ohaimark representation selection keeps guarded arithmetic int32" {
 }
 
 test "Ohaimark representation selection keeps generic arithmetic tagged" {
+    // Two open formals (no int32 evidence) keep add generic. A smi + unknown
+    // is now checked_int32_add (one-side int32 speculation for countdown).
     var builder = Builder.init(testing.allocator);
     defer builder.deinit();
     const lhs = try builder.reserveRegister();
-    try builder.emitLoadSmi(span, 1);
+    const rhs = try builder.reserveRegister();
+    try builder.emitLoadReg(span, rhs);
     try builder.emitOp(.add, span);
     try builder.emitU8(lhs);
     var chunk = try finish(&builder);
@@ -635,7 +638,7 @@ test "Ohaimark representation selection keeps generic arithmetic tagged" {
         try representations.nodeInputRequirement(&graph, add_id, 1),
     );
     try testing.expectEqual(
-        representation.Conversion.box_int32,
+        representation.Conversion.none,
         try representations.nodeInputConversion(&graph, add_id, 1),
     );
 
@@ -1496,7 +1499,7 @@ test "Ohaimark specialization preserves negative zero multiplication" {
     var plan = try specialize.Plan.build(testing.allocator, &graph);
     defer plan.deinit();
     const info = plan.node_info[findNode(&graph, .mul).?];
-    try testing.expect(info.result_type.eql(specialize.Type.number));
+    try testing.expect(info.result_type.eql(specialize.Type.int32));
     try testing.expectEqual(specialize.Lowering.checked_int32_mul, info.lowering);
     try testing.expectEqual(@as(?ir.Immediate, null), info.folded);
 }
@@ -1691,11 +1694,120 @@ test "Ohaimark value facts converge across loop phis" {
     }
     for (graph.blockParams(header.?)) |param| switch (param.role) {
         .register => |register| if (register == counter) {
-            try testing.expect(plan.node_info[param.value].result_type.eql(specialize.Type.number));
+            // Checked int32 arithmetic keeps an int32 result so loop phis
+            // stay int32 instead of widening to number→generic (OSR countdown).
+            try testing.expect(plan.node_info[param.value].result_type.eql(specialize.Type.int32));
             try testing.expectEqual(@as(?ir.Immediate, null), plan.node_info[param.value].folded);
             return;
         },
         else => {},
     };
     return error.TestExpectedEqual;
+}
+
+test "Ohaimark specialization keeps loop-carried add/sub as checked int32" {
+    // Shape of `while (i) { acc = acc + 1; i = i - 1; }` with int32 start
+    // values: both arithmetic sites must stay checked_int32 so AArch64 can
+    // publish (generic add/sub is UnsupportedNode in codegen).
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    const i_reg = try builder.reserveRegister();
+    const acc_reg = try builder.reserveRegister();
+    try builder.emitLoadSmi(span, 10);
+    try builder.emitStoreReg(span, i_reg);
+    try builder.emitOp(.lda_zero, span);
+    try builder.emitStoreReg(span, acc_reg);
+    try builder.emitLoadReg(span, i_reg);
+    const header = builder.here();
+    try builder.emitOp(.jmp_if_false, span);
+    const exit_patch = builder.here();
+    try builder.emitI16(0);
+    try builder.emitAddSmi(span, acc_reg, 1);
+    try builder.emitStoreReg(span, acc_reg);
+    try builder.emitOp(.lda_one, span);
+    try builder.emitOp(.sub, span);
+    try builder.emitU8(i_reg);
+    try builder.emitStoreReg(span, i_reg);
+    try builder.emitOp(.jmp, span);
+    const back_patch = builder.here();
+    try builder.emitI16(0);
+    const exit_target = builder.here();
+    try builder.emitLoadReg(span, acc_reg);
+    try builder.emitOp(.return_, span);
+    try builder.patchI16(exit_patch, exit_target);
+    try builder.patchI16(back_patch, header);
+    var chunk = try builder.finish();
+    defer chunk.deinit(testing.allocator);
+
+    var graph = try ir.Graph.build(testing.allocator, &chunk);
+    defer graph.deinit();
+    var plan = try specialize.Plan.build(testing.allocator, &graph);
+    defer plan.deinit();
+    try plan.verify(&graph);
+
+    const add_id = findNode(&graph, .add).?;
+    const sub_id = findNode(&graph, .sub).?;
+    try testing.expectEqual(specialize.Lowering.checked_int32_add, plan.node_info[add_id].lowering);
+    try testing.expectEqual(specialize.Lowering.checked_int32_sub, plan.node_info[sub_id].lowering);
+    try testing.expect(plan.node_info[add_id].result_type.eql(specialize.Type.int32));
+    try testing.expect(plan.node_info[sub_id].result_type.eql(specialize.Type.int32));
+}
+
+test "Ohaimark specialization refuses checked_branch on nullish any" {
+    // `x ?? y` / optional chains compile to jmp_if_nullish. Open formals are
+    // Type.any; checked_branch would publish codegen's always-fallthrough
+    // nullish path and miscompile when x is null/undefined.
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    const x = try builder.reserveRegister();
+    try builder.emitLoadReg(span, x);
+    try builder.emitOp(.jmp_if_nullish, span);
+    const taken_patch = builder.here();
+    try builder.emitI16(0);
+    try builder.emitLoadSmi(span, 1);
+    try builder.emitOp(.return_, span);
+    const taken = builder.here();
+    try builder.emitLoadSmi(span, 2);
+    try builder.emitOp(.return_, span);
+    try builder.patchI16(taken_patch, taken);
+    var chunk = try builder.finish();
+    defer chunk.deinit(testing.allocator);
+
+    var graph = try ir.Graph.build(testing.allocator, &chunk);
+    defer graph.deinit();
+    var plan = try specialize.Plan.build(testing.allocator, &graph);
+    defer plan.deinit();
+    try plan.verify(&graph);
+
+    const branch_id = findNode(&graph, .branch).?;
+    try testing.expectEqual(ir.BranchCondition.nullish, graph.nodes[branch_id].payload.branch);
+    try testing.expectEqual(specialize.Lowering.none, plan.node_info[branch_id].lowering);
+}
+
+test "Ohaimark specialization uses checked_branch for falsy any" {
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    const x = try builder.reserveRegister();
+    try builder.emitLoadReg(span, x);
+    try builder.emitOp(.jmp_if_false, span);
+    const exit_patch = builder.here();
+    try builder.emitI16(0);
+    try builder.emitLoadSmi(span, 1);
+    try builder.emitOp(.return_, span);
+    const exit = builder.here();
+    try builder.emitLoadSmi(span, 0);
+    try builder.emitOp(.return_, span);
+    try builder.patchI16(exit_patch, exit);
+    var chunk = try builder.finish();
+    defer chunk.deinit(testing.allocator);
+
+    var graph = try ir.Graph.build(testing.allocator, &chunk);
+    defer graph.deinit();
+    var plan = try specialize.Plan.build(testing.allocator, &graph);
+    defer plan.deinit();
+    try plan.verify(&graph);
+
+    const branch_id = findNode(&graph, .branch).?;
+    try testing.expectEqual(ir.BranchCondition.falsy, graph.nodes[branch_id].payload.branch);
+    try testing.expectEqual(specialize.Lowering.checked_branch, plan.node_info[branch_id].lowering);
 }

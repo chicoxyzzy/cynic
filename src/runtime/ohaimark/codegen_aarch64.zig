@@ -1090,15 +1090,26 @@ const Compiler = struct {
         }
         const output_kind = self.representations.outputs[producer];
         const input_conversion = try self.representations.conversionAt(self.graph, inputs.start);
+        const info = if (node_id < self.specialization.node_info.len)
+            self.specialization.node_info[node_id]
+        else
+            return error.MalformedGraph;
+        // Branch inputs request tagged; int32 producers convert with box_int32.
+        // Unboxed int32 conditions use checked_branch + output_kind.int32 below.
         const boxed_int32 = output_kind == .int32 and input_conversion == .box_int32;
         const strict_boolean = output_kind == .tagged and input_conversion == .none and switch (self.graph.nodes[producer].kind) {
             .strict_eq, .logical_not => true,
             else => false,
         };
-        if (!boxed_int32 and !strict_boolean) {
+        const checked_truthy = info.lowering == .checked_branch;
+        if (!boxed_int32 and !strict_boolean and !checked_truthy) {
             return error.UnsupportedNode;
         }
+        // Nullish always-fallthrough is valid only for proven non-nullish shapes
+        // (unboxed int32 / boolean). Speculative checked_branch must not reach
+        // here for nullish — specialize refuses that pairing.
         if (condition == .nullish) {
+            if (checked_truthy) return error.UnsupportedNode;
             try self.emitEdgeAndJump(try self.edgeForKind(block_index, .branch_fallthrough));
             return;
         }
@@ -1110,7 +1121,22 @@ const Compiler = struct {
             .destination_kind = output_kind,
             .conversion = .none,
         }, self.chunk.constants);
-        if (boxed_int32) {
+        if (boxed_int32 or (checked_truthy and output_kind == .int32)) {
+            // Unboxed / just-boxed int32: zero is falsy.
+            try self.machine.emit(a64.cmpImm(lhs_scratch, 0, false));
+        } else if (checked_truthy) {
+            // Int32-only truthiness speculation on a tagged value: prove int32
+            // (deopt otherwise), then zero-test the payload. Non-int32 tags
+            // resume Lantern for full ToBoolean.
+            const guard = try self.guardFor(node_id);
+            try self.machine.movImm64(
+                guard_scratch,
+                @as(u64, Value.tag_int32) << 48,
+            );
+            try self.machine.emit(a64.eorReg(guard_scratch, lhs_scratch, guard_scratch));
+            try self.machine.emit(a64.lsrImm(guard_scratch, guard_scratch, 48));
+            try self.jumpToGuardIfNonzero(guard_scratch, guard);
+            try self.machine.emit(a64.movRegW(lhs_scratch, lhs_scratch));
             try self.machine.emit(a64.cmpImm(lhs_scratch, 0, false));
         } else {
             try self.machine.movImm64(rhs_scratch, Value.false_.bits);
@@ -1329,6 +1355,29 @@ const Compiler = struct {
         var saw_accumulator = false;
         var seen_registers: [256]bool = @splat(false);
         for (self.graph.params[params.start..params.end()]) |param| {
+            if (param.value >= self.lowered.locations.len) return error.MalformedGraph;
+            // Dead block parameters have no ordinary location (unread before
+            // redefine / first-def kill). Leave the Lantern frame slot as-is:
+            // edge moves already skip .none destinations, and an unchanged
+            // slot stays a conservative GC root for interpreter resume.
+            if (self.lowered.locations[param.value] == .none) {
+                switch (param.role) {
+                    .accumulator => {
+                        if (saw_accumulator) return error.MalformedGraph;
+                        saw_accumulator = true;
+                    },
+                    .register => |register| {
+                        if (register >= self.graph.register_count or
+                            register >= self.chunk.register_count or
+                            seen_registers[register])
+                        {
+                            return error.MalformedGraph;
+                        }
+                        seen_registers[register] = true;
+                    },
+                }
+                continue;
+            }
             try self.emitTaggedValue(param.value, lhs_scratch);
             const destination_base: a64.Reg, const destination: u15 = switch (param.role) {
                 .accumulator => blk: {

@@ -70,6 +70,9 @@ pub const Lowering = enum {
     strict_eq,
     logical_not,
     checked_boolean_not,
+    /// Truthiness branch that may deopt when the condition is not a known
+    /// int32/bool shape (used for `while (i)` on loop-carried counters).
+    checked_branch,
     less_than,
     load_named_generic,
     load_named_own,
@@ -319,8 +322,40 @@ fn inferNode(graph: *const ir.Graph, facts: []const NodeInfo, id: ir.ValueId) !N
             .{ .result_type = Type.any, .lowering = .load_environment }
         else
             .{},
-        .jump, .branch, .return_ => .{},
+        .jump, .return_ => .{},
+        .branch => inferBranch(node, facts, inputs),
     };
+}
+
+fn inferBranch(node: ir.Node, facts: []const NodeInfo, inputs: []const ir.ValueId) NodeInfo {
+    if (inputs.len != 1) return .{};
+    const condition = facts[inputs[0]];
+    if (condition.result_type.isBottom()) return .{};
+    const branch_condition = switch (node.payload) {
+        .branch => |value| value,
+        else => return .{},
+    };
+    // Codegen's nullish path always falls through (int32/boolean cannot be
+    // nullish). That is only safe for shapes admitted without speculation —
+    // boxed int32 or strict boolean. Never mark nullish as checked_branch:
+    // Type.any + nullish would publish `x ?? y` / optional chains and return
+    // the left-hand value when it is actually null/undefined.
+    if (branch_condition == .nullish) return .{ .lowering = .none };
+
+    // Boolean conditions (strict_eq / logical_not) stay unguarded — fusion
+    // deopts on the comparison; the branch may also carry a frame_state from
+    // the IR builder but is not itself a guard for those shapes.
+    //
+    // truthy/falsy on Type.int32 or Type.any use checked_branch: loop phis are
+    // often specialize-int32 but representation-tagged (entry formal is
+    // tagged; CFG edges cannot check_int32). Codegen deopt-checks the tag and
+    // zero-tests the payload (int32-only truthiness speculation; other tags
+    // deopt to Lantern ToBoolean). Unboxed int32 still takes the fast cmp path.
+    if (condition.folded != null) return .{ .lowering = .none };
+    if (condition.result_type.eql(Type.int32) or condition.result_type.eql(Type.any)) {
+        return .{ .lowering = .checked_branch };
+    }
+    return .{ .lowering = .none };
 }
 
 fn inferConstant(node: ir.Node) NodeInfo {
@@ -368,9 +403,14 @@ fn inferArithmetic(
         }
     };
 
+    // Checked int32 arithmetic is optimistic: overflow deopts at runtime, so
+    // the SSA result stays int32. Reporting Type.number here used to widen loop
+    // phis (int32 entry ⊔ number backedge → number) and collapse the next
+    // iteration to generic add/sub, which AArch64 refuses to emit — killing
+    // every countdown-style loop under Ohaimark/OSR.
     if (lhs.result_type.eql(Type.int32) and rhs.result_type.eql(Type.int32)) {
         return .{
-            .result_type = Type.number,
+            .result_type = Type.int32,
             .lowering = switch (op) {
                 .add => .checked_int32_add,
                 .sub => .checked_int32_sub,
@@ -392,7 +432,22 @@ fn inferArithmetic(
             .lowering = .number_div,
             .number_shape = exactNumberShape(lhs.result_type, rhs.result_type),
         };
+        // Both operands are Number-shaped but not exact int32 pairs (e.g. a
+        // Double observation). Keep add/sub generic until a tagged Number
+        // lowering ships; do not silently claim checked int32.
         return .{ .result_type = Type.number, .lowering = .generic };
+    }
+    // One side is exact int32 and the other is still open (entry formals,
+    // untyped phis). Speculate checked int32 with a runtime check_int32 on
+    // the non-int32 input — same deopt contract as both-int32, and enough to
+    // close countdown loops that seed a counter from a parameter.
+    if ((op == .add or op == .sub) and
+        (lhs.result_type.eql(Type.int32) or rhs.result_type.eql(Type.int32)))
+    {
+        return .{
+            .result_type = Type.int32,
+            .lowering = if (op == .add) .checked_int32_add else .checked_int32_sub,
+        };
     }
     const number_lowering: ?Lowering = switch (op) {
         .mul => .number_mul,
@@ -564,8 +619,18 @@ fn mergeFacts(lhs: NodeInfo, rhs: NodeInfo) NodeInfo {
         lhs.folded
     else
         null;
+    // Optimistic loop-phi rule: exact int32 ⊔ Type.any stays int32. Formals
+    // seed `any` into countdown counters; without this the counter widens and
+    // kills checked int32 arithmetic. Wrong types deopt at checked uses.
+    const result_type: Type = blk: {
+        const a = lhs.result_type;
+        const b = rhs.result_type;
+        if (a.eql(Type.int32) and b.eql(Type.any)) break :blk Type.int32;
+        if (a.eql(Type.any) and b.eql(Type.int32)) break :blk Type.int32;
+        break :blk a.merge(b);
+    };
     return .{
-        .result_type = lhs.result_type.merge(rhs.result_type),
+        .result_type = result_type,
         .lowering = if (folded != null) .constant else .none,
         .folded = folded,
     };

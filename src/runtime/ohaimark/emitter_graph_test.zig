@@ -2336,10 +2336,13 @@ test "Ohaimark AArch64 malformed safepoint state is transactional" {
 }
 
 test "Ohaimark AArch64 graph rejection is transactional" {
+    // Both operands open (no int32 evidence) → generic add, still refused by
+    // AArch64 emit. (smi + unknown now lowers to checked_int32_add.)
     var builder = Builder.init(testing.allocator);
     defer builder.deinit();
     const unknown_lhs = try builder.reserveRegister();
-    try builder.emitLoadSmi(span, 1);
+    const unknown_rhs = try builder.reserveRegister();
+    try builder.emitLoadReg(span, unknown_rhs);
     try builder.emitOp(.add, span);
     try builder.emitU8(unknown_lhs);
     try builder.emitOp(.return_, span);
@@ -2465,4 +2468,91 @@ test "Ohaimark AArch64 OSR entry then backedge safepoint restores exact header" 
     try testing.expectEqual(loop.header, frame.ip);
     try testing.expectEqual(Value.fromInt32(0).bits, frame.accumulator.bits);
     try testing.expectEqual(heap_mod.taggedObject(root).bits, frame.registers[loop.root].bits);
+}
+
+test "Ohaimark AArch64 refuses nullish branch on open Type.any" {
+    // Defense for specialize's nullish gate: open formal + jmp_if_nullish must
+    // not publish always-fallthrough (would miscompile `x ?? 1` when x is null).
+    if (comptime !masm.native_aarch64) return error.SkipZigTest;
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    const x = try builder.reserveRegister();
+    try builder.emitLoadReg(span, x);
+    try builder.emitOp(.jmp_if_nullish, span);
+    const taken_patch = builder.here();
+    try builder.emitI16(0);
+    try builder.emitLoadSmi(span, 1);
+    try builder.emitOp(.return_, span);
+    const taken = builder.here();
+    try builder.emitLoadSmi(span, 2);
+    try builder.emitOp(.return_, span);
+    try builder.patchI16(taken_patch, taken);
+    var chunk = try builder.finish();
+    defer chunk.deinit(testing.allocator);
+    var native = try NativeGraph.build(&chunk);
+    defer native.deinit();
+    const branch_id = try findNode(&native, .branch);
+    try testing.expectEqual(
+        specialize.Lowering.none,
+        native.specialization.node_info[branch_id].lowering,
+    );
+    var machine = masm.Masm.init(testing.allocator);
+    defer machine.deinit();
+    try testing.expectError(error.UnsupportedNode, native.emit(&machine, &chunk));
+    try testing.expectEqual(@as(usize, 0), machine.code.items.len);
+}
+
+test "Ohaimark AArch64 compiles countdown loop with loop-carried int32" {
+    if (comptime !masm.native_aarch64) return error.SkipZigTest;
+    const compiler_mod = @import("../../bytecode/compiler.zig");
+    const parser_mod = @import("../../parser/parser.zig");
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = false;
+    const source =
+        \\function count(n) {
+        \\  let i = n;
+        \\  let acc = 0;
+        \\  while (i) {
+        \\    acc = acc + 1;
+        \\    i = i - 1;
+        \\  }
+        \\  return acc;
+        \\}
+        \\count(10);
+    ;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const program = try parser_mod.parseScript(arena.allocator(), source, null);
+    var chunk = try compiler_mod.compileScriptAsChunk(testing.allocator, &realm, &program, source, null);
+    defer chunk.deinit(testing.allocator);
+    const fn_chunk = blk: {
+        for (chunk.function_templates) |*t| {
+            if (t.name) |n| if (std.mem.eql(u8, n, "count")) break :blk &t.chunk;
+        }
+        return error.TestUnexpectedResult;
+    };
+    var native = try NativeGraph.build(fn_chunk);
+    defer native.deinit();
+    var machine = masm.Masm.init(testing.allocator);
+    defer machine.deinit();
+    var osr: std.ArrayListUnmanaged(chunk_mod.Chunk.JitState.OsrEntry) = .empty;
+    defer osr.deinit(testing.allocator);
+    try codegen.emitGraphCollectingOsr(
+        testing.allocator,
+        &machine,
+        fn_chunk,
+        &native.graph,
+        &native.specialization,
+        &native.representations,
+        &native.control_fusion,
+        &native.logical,
+        &native.homes,
+        &native.physical_deopt,
+        &native.allocated,
+        &native.lowered,
+        &osr,
+    );
+    try testing.expect(machine.code.items.len > 0);
+    try testing.expect(osr.items.len >= 1);
 }

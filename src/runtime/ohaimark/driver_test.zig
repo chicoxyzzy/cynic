@@ -584,3 +584,63 @@ test "Ohaimark OSR: completed result matches the known loop result" {
         else => return error.TestUnexpectedResult,
     }
 }
+
+test "Ohaimark does not miscompile nullish coalesce on open formals" {
+    // Regression for checked_branch + nullish always-fallthrough: with T2
+    // enabled, `x ?? 1` must still return 1 when x is null (either refuse T2
+    // and fall back, or emit a real nullish test — never always-fallthrough).
+    if (comptime !driver.supported) return error.SkipZigTest;
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+    realm.jit_threshold_override = 1;
+    realm.ohaimark_enabled = true;
+    realm.ohaimark_threshold_override = 1;
+    realm.ohaimark_osr_enabled = true;
+
+    const source =
+        \\function coalesce(x) {
+        \\  return x ?? 1;
+        \\}
+        \\coalesce(null);
+    ;
+    var chunk = try compileScript(&realm, source);
+    defer chunk.deinit(testing.allocator);
+    const value = try runValue(&realm, &chunk);
+    try testing.expectEqual(Value.fromInt32(1).bits, value.bits);
+}
+
+test "Ohaimark OSR: real JS countdown compiles, OSR-enters, and completes" {
+    if (comptime !driver.supported) return error.SkipZigTest;
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+    realm.jit_threshold_override = 1;
+    realm.ohaimark_enabled = true;
+    realm.ohaimark_threshold_override = 1;
+    realm.ohaimark_osr_enabled = true;
+    realm.heap.ohaimark_stats.enabled = true;
+
+    const source =
+        \\function count(n) {
+        \\  let i = n;
+        \\  let acc = 0;
+        \\  while (i) {
+        \\    acc = acc + 1;
+        \\    i = i - 1;
+        \\  }
+        \\  return acc;
+        \\}
+        \\count(100);
+    ;
+    var chunk = try compileScript(&realm, source);
+    defer chunk.deinit(testing.allocator);
+    const value = try runValue(&realm, &chunk);
+    try testing.expectEqual(Value.fromInt32(100).bits, value.bits);
+
+    const state = templateNamed(&chunk, "count").jit_state.?;
+    try testing.expectEqual(chunk_mod.Chunk.JitState.Tier.compiled, state.ohaimark.tier);
+    try testing.expect(state.hasOhaimarkOsr());
+    try testing.expect(realm.heap.ohaimark_stats.compile_successes >= 1);
+    try testing.expect(realm.heap.ohaimark_stats.executed_entries >= 1);
+}
