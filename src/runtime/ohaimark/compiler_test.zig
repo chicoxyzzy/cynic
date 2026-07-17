@@ -12,7 +12,11 @@ const codegen = @import("codegen_aarch64.zig");
 
 const testing = std.testing;
 const span: Span = .{ .start = 0, .end = 1 };
-const EntryFn = *const fn (*Realm, *lantern.CallFrame, [*]Value) callconv(.c) u32;
+const EntryFn = *const fn (
+    *Realm,
+    *lantern.CallFrame,
+    [*]Value,
+) callconv(.c) u64;
 
 fn foldedAddChunk() !chunk_mod.Chunk {
     var builder = Builder.init(testing.allocator);
@@ -64,11 +68,9 @@ test "Ohaimark compiler publishes owned code after temporary plans die" {
         .owns_registers = false,
     };
     const entry: EntryFn = @ptrCast(@alignCast(published_entry));
-    try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.done),
-        entry(&realm, &frame, registers.ptr),
-    );
-    try testing.expectEqual(Value.fromInt32(3).bits, frame.accumulator.bits);
+    const result_bits = entry(&realm, &frame, registers.ptr);
+    try testing.expectEqual(Value.fromInt32(3).bits, result_bits);
+    try testing.expectEqual(Value.undefined_.bits, frame.accumulator.bits);
 }
 
 test "Ohaimark install failure leaves Bistromath published and T2 empty" {

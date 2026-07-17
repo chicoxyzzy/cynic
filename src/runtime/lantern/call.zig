@@ -1007,8 +1007,8 @@ pub fn callJSFunction(
         return error.OutOfMemory;
     };
 
-    // Fresh-tier dispatch (docs/jit.md §4/§5): Ohaimark is considered only
-    // under its rollout gate, then Bistromath handles the shipping path. A
+    // Fresh-tier dispatch (docs/jit.md §4/§5): policy-enabled Ohaimark is
+    // considered first, then Bistromath handles cold/refused chunks. A
     // compiled callee completes
     // without ever entering the dispatch loop; tier-downs and cold
     // chunks fall through to Lantern below. A throw landed by a

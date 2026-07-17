@@ -31,11 +31,14 @@
 //! diverges from the --no-jit column's, bump --runs for it.
 //!
 //! Usage:
-//!   zig build bench                 # engine default (Bistromath on)
+//!   zig build bench                 # engine default (Ohaimark before T1)
+//!   zig build bench -- --jit        # Bistromath-only baseline
 //!   zig build bench -- --no-jit     # Lantern-only baseline column
 //!   zig build bench -- --runs=40    # wider budget; lights up p95
 //!   zig build bench -- --runs=200   # lights up p95 + p99
 //!   zig build bench -- --filter=mul_loop
+//!   zig build bench -- --ohaimark             # natural-threshold T2
+//!   zig build bench -- --ohaimark-rollout     # interleaved T1 vs T2 gate
 //!   zig build bench -- --macros     # Octane macro set (bench/macros/),
 //!                                   # run --unhardened; Splay is heavy,
 //!                                   # so --runs=3 for a quick pass
@@ -48,6 +51,9 @@
 //! Numbers across hosts are not directly comparable.
 
 const std = @import("std");
+const cynic = @import("cynic");
+
+const OhaimarkStats = cynic.runtime.OhaimarkStats;
 
 // Default 10 timed runs + 1 discarded warmup. Matched with the
 // cross-engine harness in `tools/bench-cross.sh` so single-engine
@@ -101,6 +107,19 @@ const BENCHES = [_]Bench{
     .{ .name = "tail_recursion", .path = "bench/micros/tail_recursion.js" },
 };
 
+// Natural-threshold Ohaimark workloads use repeatedly-called leaf functions.
+// The ordinary loop micros intentionally remain single-entry: they measure
+// cold-start T1 today and will become meaningful T2 workloads only when
+// Ohaimark grows on-stack replacement. Keeping this suite separate preserves
+// the historical microbench series while making the rollout gate exercise T2.
+const OHAIMARK_BENCHES = [_]Bench{
+    .{ .name = "number_mul", .path = "bench/ohaimark/number_mul.js" },
+    .{ .name = "number_div", .path = "bench/ohaimark/number_div.js" },
+    .{ .name = "named_load", .path = "bench/ohaimark/named_load.js" },
+    .{ .name = "branch_eq", .path = "bench/ohaimark/branch_eq.js" },
+    .{ .name = "call_refusal", .path = "bench/ohaimark/call_refusal.js" },
+};
+
 // Macro benchmarks — the compute core of the retired V8 Octane 2.0
 // suite (bench/macros/, vendored verbatim; see its README). Selected
 // with `--macros`; run under `--unhardened` because the ES5-era
@@ -120,6 +139,66 @@ const Sample = struct {
     wall_us: i64,
     rss_bytes: usize,
 };
+
+const Posture = enum {
+    lantern,
+    bistromath,
+    ohaimark,
+};
+
+const max_run_argv = 9;
+
+/// Build one child invocation in a fixed caller-owned array. Keeping this in
+/// one place prevents the timed and telemetry probes from drifting into
+/// different realm postures.
+fn buildRunArgv(
+    argv_buf: *[max_run_argv][]const u8,
+    cynic_bin: []const u8,
+    fixture: []const u8,
+    posture: Posture,
+    unhardened: bool,
+    ohaimark_stats: bool,
+) []const []const u8 {
+    std.debug.assert(!ohaimark_stats or posture == .ohaimark);
+    var argc: usize = 0;
+    argv_buf[argc] = cynic_bin;
+    argc += 1;
+    argv_buf[argc] = "--enable-experimental";
+    argc += 1;
+    if (unhardened) {
+        argv_buf[argc] = "--unhardened";
+        argc += 1;
+        argv_buf[argc] = "--allow=eval";
+        argc += 1;
+    }
+    switch (posture) {
+        .lantern => {
+            argv_buf[argc] = "--no-jit";
+            argc += 1;
+        },
+        .bistromath => {
+            argv_buf[argc] = "--jit";
+            argc += 1;
+            argv_buf[argc] = "--no-ohaimark";
+            argc += 1;
+        },
+        .ohaimark => {
+            argv_buf[argc] = "--jit";
+            argc += 1;
+            argv_buf[argc] = "--ohaimark";
+            argc += 1;
+        },
+    }
+    argv_buf[argc] = "run";
+    argc += 1;
+    if (ohaimark_stats) {
+        argv_buf[argc] = "--ohaimark-stats";
+        argc += 1;
+    }
+    argv_buf[argc] = fixture;
+    argc += 1;
+    return argv_buf[0..argc];
+}
 
 const Stats = struct {
     p50_wall_ms: f64,
@@ -147,8 +226,7 @@ fn runOnce(
     io: std.Io,
     cynic_bin: []const u8,
     fixture: []const u8,
-    jit: bool,
-    no_jit: bool,
+    posture: Posture,
     unhardened: bool,
 ) !Sample {
     const t0 = std.Io.Clock.now(.awake, io);
@@ -164,31 +242,10 @@ fn runOnce(
     // fixture: the Octane workloads monkey-patch primordial prototypes
     // (rejected by the default frozen-primordials SES posture) and use the
     // Function constructor (gated behind --allow=eval).
-    var argv_buf: [7][]const u8 = undefined;
-    var argc: usize = 0;
-    argv_buf[argc] = cynic_bin;
-    argc += 1;
-    argv_buf[argc] = "--enable-experimental";
-    argc += 1;
-    if (unhardened) {
-        argv_buf[argc] = "--unhardened";
-        argc += 1;
-        argv_buf[argc] = "--allow=eval";
-        argc += 1;
-    }
-    if (jit) {
-        argv_buf[argc] = "--jit";
-        argc += 1;
-    } else if (no_jit) {
-        argv_buf[argc] = "--no-jit";
-        argc += 1;
-    }
-    argv_buf[argc] = "run";
-    argc += 1;
-    argv_buf[argc] = fixture;
-    argc += 1;
+    var argv_buf: [max_run_argv][]const u8 = undefined;
+    const argv = buildRunArgv(&argv_buf, cynic_bin, fixture, posture, unhardened, false);
     var child = try std.process.spawn(io, .{
-        .argv = argv_buf[0..argc],
+        .argv = argv,
         // Suppress the fixture's print() output — the bench harness
         // doesn't care, and dumping it would scramble the report.
         .stdout = .ignore,
@@ -287,7 +344,20 @@ fn medianUsOf(samples: []const Sample) i64 {
     for (samples, 0..) |s, i| tmp[i] = s.wall_us;
     const slice = tmp[0..samples.len];
     std.mem.sort(i64, slice, {}, std.sort.asc(i64));
-    return slice[slice.len / 2];
+    if (slice.len & 1 == 1) return slice[slice.len / 2];
+    const lower = slice[slice.len / 2 - 1];
+    return lower + @divTrunc(slice[slice.len / 2] - lower, 2);
+}
+
+fn medianOfSortedF64(sorted: []const f64) f64 {
+    if (sorted.len & 1 == 1) return sorted[sorted.len / 2];
+    return (sorted[sorted.len / 2 - 1] + sorted[sorted.len / 2]) / 2.0;
+}
+
+fn nearestRankF64(sorted: []const f64, percentile: u8) f64 {
+    var rank = (@as(usize, percentile) * sorted.len + 99) / 100;
+    rank = std.math.clamp(rank, 1, sorted.len);
+    return sorted[rank - 1];
 }
 
 /// Interleaved A/B (`--ab-baseline=<binary>`). For each fixture, alternate
@@ -304,8 +374,7 @@ fn runInterleavedAb(
     base_bin: []const u8,
     fixtures: []const Bench,
     runs: usize,
-    jit: bool,
-    no_jit: bool,
+    posture: Posture,
     unhardened: bool,
 ) !void {
     var buf: [512]u8 = undefined;
@@ -319,8 +388,8 @@ fn runInterleavedAb(
     var ratio_buf: [MAX_RUNS]f64 = undefined;
     for (fixtures) |b| {
         // One warmup each, discarded.
-        _ = runOnce(io, head_bin, b.path, jit, no_jit, unhardened) catch {};
-        _ = runOnce(io, base_bin, b.path, jit, no_jit, unhardened) catch {};
+        _ = runOnce(io, head_bin, b.path, posture, unhardened) catch {};
+        _ = runOnce(io, base_bin, b.path, posture, unhardened) catch {};
 
         const head = head_buf[0..runs];
         const base = base_buf[0..runs];
@@ -328,11 +397,11 @@ fn runInterleavedAb(
         var failed = false;
         var i: usize = 0;
         while (i < runs) : (i += 1) {
-            head[i] = runOnce(io, head_bin, b.path, jit, no_jit, unhardened) catch {
+            head[i] = runOnce(io, head_bin, b.path, posture, unhardened) catch {
                 failed = true;
                 break;
             };
-            base[i] = runOnce(io, base_bin, b.path, jit, no_jit, unhardened) catch {
+            base[i] = runOnce(io, base_bin, b.path, posture, unhardened) catch {
                 failed = true;
                 break;
             };
@@ -356,14 +425,191 @@ fn runInterleavedAb(
     }
 }
 
+fn probeOhaimarkStats(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    cynic_bin: []const u8,
+    fixture: []const u8,
+    unhardened: bool,
+) !OhaimarkStats {
+    var argv_buf: [max_run_argv][]const u8 = undefined;
+    const argv = buildRunArgv(&argv_buf, cynic_bin, fixture, .ohaimark, unhardened, true);
+    const result = try std.process.run(allocator, io, .{
+        .argv = argv,
+        .stdout_limit = .limited(64 * 1024),
+        .stderr_limit = .limited(64 * 1024),
+    });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    if (!result.term.success()) return error.TelemetryProbeFailed;
+
+    var lines = std.mem.splitScalar(u8, result.stderr, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.startsWith(u8, line, "ohaimark-v1 ")) {
+            return OhaimarkStats.parseMachineLine(line);
+        }
+    }
+    return error.TelemetryMissing;
+}
+
+/// Natural-threshold T2 rollout gate. T1 and T2 use the same binary and
+/// alternate order within each pair, isolating only the realm's Ohaimark gate
+/// while cancelling slow host drift. Timed T2 runs include compilation. A
+/// separate untimed probe supplies deterministic publication/deopt counters.
+fn runOhaimarkRollout(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    cynic_bin: []const u8,
+    fixtures: []const Bench,
+    runs: usize,
+    unhardened: bool,
+) !void {
+    const stdout = std.Io.File.stdout();
+    try stdout.writeStreamingAll(
+        io,
+        "Ohaimark natural-threshold rollout (ratio = T2 / T1; lower is better).\n" ++
+            "Timed T2 samples include compilation; telemetry is from one separate probe.\n\n",
+    );
+
+    var buf: [1024]u8 = undefined;
+    const header = try std.fmt.bufPrint(
+        &buf,
+        "{s:<16} {s:>9} {s:>9} {s:>8} {s:>8} {s:>8} {s:>8} {s:>8} {s:>10} {s:>8} {s:>9} {s:>9} {s:>7}\n",
+        .{ "bench", "t1_ms", "t2_ms", "ratio", "iqr%", "attempts", "publish", "refuse", "compile_ms", "code_kb", "entries", "complete", "exits" },
+    );
+    try stdout.writeStreamingAll(io, header);
+
+    var t1_buf: [MAX_RUNS]Sample = undefined;
+    var t2_buf: [MAX_RUNS]Sample = undefined;
+    var ratio_buf: [MAX_RUNS]f64 = undefined;
+    var total: OhaimarkStats = .{ .enabled = true };
+    var ratio_log_sum: f64 = 0;
+    var ratio_count: usize = 0;
+    var worst_ratio: f64 = 0;
+    var worst_name: []const u8 = "";
+    var incomplete = false;
+
+    for (fixtures) |bench| {
+        _ = runOnce(io, cynic_bin, bench.path, .bistromath, unhardened) catch {};
+        _ = runOnce(io, cynic_bin, bench.path, .ohaimark, unhardened) catch {};
+
+        const t1 = t1_buf[0..runs];
+        const t2 = t2_buf[0..runs];
+        const ratios = ratio_buf[0..runs];
+        var failed = false;
+        var i: usize = 0;
+        while (i < runs) : (i += 1) {
+            if (i & 1 == 0) {
+                t1[i] = runOnce(io, cynic_bin, bench.path, .bistromath, unhardened) catch {
+                    failed = true;
+                    break;
+                };
+                t2[i] = runOnce(io, cynic_bin, bench.path, .ohaimark, unhardened) catch {
+                    failed = true;
+                    break;
+                };
+            } else {
+                t2[i] = runOnce(io, cynic_bin, bench.path, .ohaimark, unhardened) catch {
+                    failed = true;
+                    break;
+                };
+                t1[i] = runOnce(io, cynic_bin, bench.path, .bistromath, unhardened) catch {
+                    failed = true;
+                    break;
+                };
+            }
+            const t1_us: f64 = @floatFromInt(t1[i].wall_us);
+            const t2_us: f64 = @floatFromInt(t2[i].wall_us);
+            ratios[i] = if (t1_us > 0) t2_us / t1_us else 1.0;
+        }
+        if (failed) {
+            incomplete = true;
+            const line = try std.fmt.bufPrint(&buf, "{s:<16} run failed\n", .{bench.name});
+            try std.Io.File.stderr().writeStreamingAll(io, line);
+            continue;
+        }
+
+        const telemetry = probeOhaimarkStats(allocator, io, cynic_bin, bench.path, unhardened) catch |err| {
+            incomplete = true;
+            const line = try std.fmt.bufPrint(&buf, "{s:<16} telemetry failed: {s}\n", .{ bench.name, @errorName(err) });
+            try std.Io.File.stderr().writeStreamingAll(io, line);
+            continue;
+        };
+        total.merge(telemetry);
+
+        const t1_ms = usToMs(medianUsOf(t1));
+        const t2_ms = usToMs(medianUsOf(t2));
+        std.mem.sort(f64, ratios, {}, std.sort.asc(f64));
+        const ratio = medianOfSortedF64(ratios);
+        const ratio_iqr = if (ratio > 0)
+            (nearestRankF64(ratios, 75) - nearestRankF64(ratios, 25)) / ratio * 100.0
+        else
+            0.0;
+        if (ratio > 0) {
+            ratio_log_sum += @log(ratio);
+            ratio_count += 1;
+            if (ratio > worst_ratio) {
+                worst_ratio = ratio;
+                worst_name = bench.name;
+            }
+        }
+        const row = try std.fmt.bufPrint(
+            &buf,
+            "{s:<16} {d:>9.2} {d:>9.2} {d:>7.3}x {d:>8.1} {d:>8} {d:>8} {d:>8} {d:>10.3} {d:>8.1} {d:>9} {d:>9} {d:>7}\n",
+            .{
+                bench.name,
+                t1_ms,
+                t2_ms,
+                ratio,
+                ratio_iqr,
+                telemetry.compile_attempts,
+                telemetry.compile_successes,
+                telemetry.compile_refusals,
+                @as(f64, @floatFromInt(telemetry.compile_time_ns_total)) / std.time.ns_per_ms,
+                @as(f64, @floatFromInt(telemetry.code_bytes_installed)) / 1024.0,
+                telemetry.executed_entries,
+                telemetry.completed_entries,
+                telemetry.guard_exits,
+            },
+        );
+        try stdout.writeStreamingAll(io, row);
+    }
+
+    const summary = try std.fmt.bufPrint(
+        &buf,
+        "\nTotals: {d} attempts, {d} published, {d} refused, {d:.3} ms compile, {d:.1} KiB code, {d} entries, {d} completions, {d} exits.\n",
+        .{
+            total.compile_attempts,
+            total.compile_successes,
+            total.compile_refusals,
+            @as(f64, @floatFromInt(total.compile_time_ns_total)) / std.time.ns_per_ms,
+            @as(f64, @floatFromInt(total.code_bytes_installed)) / 1024.0,
+            total.executed_entries,
+            total.completed_entries,
+            total.guard_exits,
+        },
+    );
+    try stdout.writeStreamingAll(io, summary);
+    if (ratio_count != 0) {
+        const geometric_mean = @exp(ratio_log_sum / @as(f64, @floatFromInt(ratio_count)));
+        const performance = try std.fmt.bufPrint(
+            &buf,
+            "Performance: {d:.3}x geometric mean; worst {s} at {d:.3}x.\n",
+            .{ geometric_mean, worst_name, worst_ratio },
+        );
+        try stdout.writeStreamingAll(io, performance);
+    }
+    if (incomplete or ratio_count != fixtures.len) return error.RolloutIncomplete;
+}
+
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
 
     // Parse the sample budget, posture, fixture selection, and optional A/B
     // baseline. Unknown flags remain ignored for compatibility with wrappers.
     var runs: usize = DEFAULT_RUNS;
-    var jit = false;
-    var no_jit = false;
+    var posture: Posture = .ohaimark;
+    var ohaimark_rollout = false;
     var macros = false;
     var filter: ?[]const u8 = null;
     var ab_baseline: ?[]const u8 = null;
@@ -376,13 +622,17 @@ pub fn main(init: std.process.Init) !void {
                 if (runs < 1) runs = 1;
                 if (runs > MAX_RUNS) runs = MAX_RUNS;
             } else if (std.mem.eql(u8, a, "--jit")) {
-                // The engine default since 2026-06-11 — accepted
-                // for symmetry; spawns pass the flag through.
-                jit = true;
+                // Keep T1 available as an isolated baseline now that the
+                // optimizing tier is the production default.
+                posture = .bistromath;
             } else if (std.mem.eql(u8, a, "--no-jit")) {
                 // Interpreter-only baseline column
                 // (docs/jit.md §12 step 3b).
-                no_jit = true;
+                posture = .lantern;
+            } else if (std.mem.eql(u8, a, "--ohaimark")) {
+                posture = .ohaimark;
+            } else if (std.mem.eql(u8, a, "--ohaimark-rollout")) {
+                ohaimark_rollout = true;
             } else if (std.mem.eql(u8, a, "--macros")) {
                 // Run the Octane macro set (bench/macros/) instead of
                 // the default micros, under `--unhardened`.
@@ -400,7 +650,12 @@ pub fn main(init: std.process.Init) !void {
     // need it (they monkey-patch primordials and use the Function
     // constructor), and it keeps the comparison fair against the unhardened
     // peer engines — no SES tax on Cynic alone.
-    const all_fixtures: []const Bench = if (macros) &MACROS else &BENCHES;
+    const all_fixtures: []const Bench = if (macros)
+        &MACROS
+    else if (ohaimark_rollout)
+        &OHAIMARK_BENCHES
+    else
+        &BENCHES;
     var fixtures = all_fixtures;
     if (filter) |name| {
         for (all_fixtures, 0..) |fixture, index| {
@@ -430,10 +685,19 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(1);
     };
 
+    if (ohaimark_rollout and ab_baseline != null) {
+        try std.Io.File.stderr().writeStreamingAll(io, "bench: --ohaimark-rollout cannot be combined with --ab-baseline\n");
+        std.process.exit(2);
+    }
+    if (ohaimark_rollout) {
+        try runOhaimarkRollout(init.gpa, io, cynic_bin, fixtures, runs, unhardened);
+        return;
+    }
+
     // Interleaved A/B mode: HEAD (cynic-bench) vs the given baseline
     // binary, alternating per iteration so host drift cancels.
     if (ab_baseline) |base_bin| {
-        try runInterleavedAb(io, cynic_bin, base_bin, fixtures, runs, jit, no_jit, unhardened);
+        try runInterleavedAb(io, cynic_bin, base_bin, fixtures, runs, posture, unhardened);
         return;
     }
 
@@ -464,7 +728,7 @@ pub fn main(init: std.process.Init) !void {
         // the first recorded sample.
         var w: usize = 0;
         while (w < WARMUP_RUNS) : (w += 1) {
-            _ = runOnce(io, cynic_bin, b.path, jit, no_jit, unhardened) catch |err| {
+            _ = runOnce(io, cynic_bin, b.path, posture, unhardened) catch |err| {
                 const fail = try std.fmt.bufPrint(&buf, "{s:<16}  warmup failed: {s}\n", .{ b.name, @errorName(err) });
                 try std.Io.File.stderr().writeStreamingAll(io, fail);
             };
@@ -474,7 +738,7 @@ pub fn main(init: std.process.Init) !void {
         var any_failed = false;
         var i: usize = 0;
         while (i < runs) : (i += 1) {
-            samples[i] = runOnce(io, cynic_bin, b.path, jit, no_jit, unhardened) catch |err| {
+            samples[i] = runOnce(io, cynic_bin, b.path, posture, unhardened) catch |err| {
                 const fail = try std.fmt.bufPrint(&buf, "{s:<16}  run {d} failed: {s}\n", .{ b.name, i, @errorName(err) });
                 try std.Io.File.stderr().writeStreamingAll(io, fail);
                 any_failed = true;

@@ -19,9 +19,9 @@ cross-engine output comparison without Swift surgery, and the post-hoc
 (§1–§3, §5). The one differential variant that fits the native mode
 cleanly *and* is noise-free — **Cynic-interpreter-vs-Cynic-JIT** — has
 been **implemented as a working PoC** (§4): a fuzzout-comparison oracle
-in the local Fuzzilli fork, a `cynicDiff` profile, and three flags on
-`cynic-fuzz`. It demonstrably fires on an injected divergence and stays
-silent (0 false positives over ~7k execs) on real interpreter-vs-JIT.
+in the local Fuzzilli fork, a `cynicDiff` profile, and four flags on
+`cynic-fuzz`. It demonstrably fires on an injected divergence and stays silent
+(0 false positives over ~7k execs) on real interpreter-vs-JIT.
 
 ---
 
@@ -205,6 +205,9 @@ pair, so only `processArgs` vs `processArgsReference` can differ:
   `realm.jit_threshold_override = 1`, so even a function called once is
   Bistromath-compiled. The target half uses it; the reference half
   stays on Lantern.
+- `--ohaimark` — set both tier enables and both threshold overrides to 1,
+  attempting Ohaimark before Bistromath. It can augment the target half to
+  isolate T2 without changing the T1-only base profile.
 - `--diff` — after each sample, write a canonical **completion-value
   digest** to fd 103 (Fuzzilli's fuzzout sink). The digest is computed
   with no JS re-entry (no user `toString`) so it can't perturb GC state
@@ -260,6 +263,11 @@ swift build -c release
 .build/release/FuzzilliCli --profile=cynicDiff \
   --storagePath=/tmp/fzcd <cynic>/zig-out/bin/cynic-fuzz
 
+# Force Ohaimark at threshold 1 in the TARGET; reference remains Lantern:
+.build/release/FuzzilliCli --profile=cynicDiff \
+  --storagePath=/tmp/fzcd-t2 --additionalArguments=--ohaimark \
+  <cynic>/zig-out/bin/cynic-fuzz
+
 # Validate the oracle end-to-end (forces a divergence on every sample;
 # --additionalArguments reaches the TARGET only):
 .build/release/FuzzilliCli --profile=cynicDiff \
@@ -279,6 +287,7 @@ A matched pair on this host (arm64 macOS, Bistromath active):
 |---|---|---|
 | **Self-test** (perturbed) | target `--jit --diff --diff-self-test` vs ref `--diff` | **77** found and minimized into `differentials/` — proves the oracle fires |
 | **Real** | target `--jit --diff` vs ref `--diff` | **0** over ~7,400 execs (Correctness ~79%, Timeout ~1.2%) — proves no noise |
+| **Ohaimark graduation** | target `--jit --diff --ohaimark` vs ref `--diff` | **0** in a bounded five-minute campaign; 49 programs retained |
 
 The self-test divergence blocks read exactly as designed, e.g.
 `TARGET fuzzout: Vo#ST` vs `REFERENCE fuzzout: Vo`. The real run's zero

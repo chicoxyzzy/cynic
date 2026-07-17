@@ -412,9 +412,11 @@ profile changes in `CynicProfile.swift`.
 
 The base `cynic` profile finds crashes. To find **silent
 miscompiles** — a wrong value with no crash — `cynic-fuzz` also
-supports an interpreter-vs-JIT differential via three argv flags:
+supports interpreter-vs-JIT differentials via four argv flags:
 
 - `--jit` — run with Bistromath on, tier-up threshold forced to 1.
+- `--ohaimark` — force both native tiers to threshold 1 and try Ohaimark
+  before Bistromath; usable for crash campaigns or a T2 differential target.
 - `--diff` — after each sample, write a canonical completion-value
   digest to fd 103 so Fuzzilli's fuzzout oracle can compare two runs.
 - `--diff-self-test` — perturb that digest (harness validation only).
@@ -429,6 +431,12 @@ carve-outs below never fire as false positives. See
 [docs/fuzz-differential.md](fuzz-differential.md) for the full design,
 why a cross-engine (interpreter-conformance) differential is deferred,
 and the trigger condition to revisit it.
+
+Pass `--additionalArguments=--ohaimark` to the base profile for a forced-T2
+crash campaign, or to `cynicDiff` to compare forced T2 against Lantern. The
+graduation audit ran each posture for five bounded minutes: the crash campaign
+retained 216 programs and the value differential retained 49, with no crash or
+differential artifact.
 
 ## The coverage protocol
 

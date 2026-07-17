@@ -4,6 +4,7 @@ pub const feedback = @import("feedback.zig");
 pub const ir = @import("ir.zig");
 pub const specialize = @import("specialize.zig");
 pub const representation = @import("representation.zig");
+pub const control_fusion = @import("control_fusion.zig");
 pub const deopt = @import("deopt.zig");
 pub const deopt_physical = @import("deopt_physical.zig");
 pub const allocation = @import("allocation.zig");

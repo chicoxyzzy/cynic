@@ -4,6 +4,7 @@ const chunk_mod = @import("../../bytecode/chunk.zig");
 const Builder = chunk_mod.Builder;
 const Op = @import("../../bytecode/op.zig").Op;
 const Span = @import("../../source.zig").Span;
+const a64 = @import("../jit/asm_aarch64.zig");
 const code_alloc = @import("../jit/code_alloc.zig");
 const heap_mod = @import("../heap.zig");
 const lantern = @import("../lantern/interpreter.zig");
@@ -13,6 +14,7 @@ const Realm = @import("../realm.zig").Realm;
 const Value = @import("../value.zig").Value;
 const allocation = @import("allocation.zig");
 const codegen = @import("codegen_aarch64.zig");
+const control_fusion = @import("control_fusion.zig");
 const deopt = @import("deopt.zig");
 const deopt_physical = @import("deopt_physical.zig");
 const emitter = @import("emitter_aarch64.zig");
@@ -28,6 +30,7 @@ const NativeGraph = struct {
     graph: ir.Graph,
     specialization: specialize.Plan,
     representations: representation.Plan,
+    control_fusion: control_fusion.Plan,
     logical: deopt.Metadata,
     homes: deopt_physical.Homes,
     physical_deopt: deopt_physical.Metadata,
@@ -45,6 +48,13 @@ const NativeGraph = struct {
             &specialization,
         );
         errdefer representations.deinit();
+        var fused_control = try control_fusion.Plan.build(
+            testing.allocator,
+            &graph,
+            &specialization,
+            &representations,
+        );
+        errdefer fused_control.deinit();
         var logical = try deopt.Metadata.build(testing.allocator, &graph, &specialization);
         errdefer logical.deinit();
         var homes = try deopt_physical.Homes.build(
@@ -69,6 +79,7 @@ const NativeGraph = struct {
             &graph,
             &specialization,
             &representations,
+            &fused_control,
             &homes,
             .{ .register_count = lowering.value_registers.len },
         );
@@ -78,6 +89,7 @@ const NativeGraph = struct {
             &graph,
             &specialization,
             &representations,
+            &fused_control,
             &homes,
             &allocated,
         );
@@ -86,6 +98,7 @@ const NativeGraph = struct {
             .graph = graph,
             .specialization = specialization,
             .representations = representations,
+            .control_fusion = fused_control,
             .logical = logical,
             .homes = homes,
             .physical_deopt = physical_deopt,
@@ -100,6 +113,7 @@ const NativeGraph = struct {
         self.physical_deopt.deinit();
         self.homes.deinit();
         self.logical.deinit();
+        self.control_fusion.deinit();
         self.representations.deinit();
         self.specialization.deinit();
         self.graph.deinit();
@@ -114,6 +128,7 @@ const NativeGraph = struct {
             &self.graph,
             &self.specialization,
             &self.representations,
+            &self.control_fusion,
             &self.logical,
             &self.homes,
             &self.physical_deopt,
@@ -223,6 +238,17 @@ fn dynamicBinaryChunk(op: Op) !DynamicBinaryChunk {
     return .{ .chunk = chunk, .lhs = lhs, .rhs = rhs };
 }
 
+fn polymorphicDynamicBinaryChunk(op: Op) !DynamicBinaryChunk {
+    var binary = try dynamicBinaryChunk(op);
+    if (op == .mul or op == .div) {
+        const profile = &binary.chunk.inline_binary_profiles[0];
+        profile.observe(Value.fromInt32(1), Value.fromInt32(2));
+        profile.observe(Value.fromInt32(1), Value.fromDouble(2.5));
+        profile.observe(Value.fromDouble(1.5), Value.fromDouble(2.5));
+    }
+    return binary;
+}
+
 fn strictComparisonChunk(op: Op) !StrictComparisonChunk {
     if (op != .strict_eq and op != .strict_neq) return error.TestUnexpectedResult;
 
@@ -249,6 +275,46 @@ fn logicalNotChunk() !chunk_mod.Chunk {
     try builder.emitOp(.logical_not, span);
     try builder.emitOp(.return_, span);
     return builder.finish();
+}
+
+const DirectRecoveryCycleChunk = struct {
+    chunk: chunk_mod.Chunk,
+    guard_pc: u32,
+    lhs: u8,
+    rhs: u8,
+};
+
+fn directRecoveryCycleChunk() !DirectRecoveryCycleChunk {
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    const lhs = try builder.reserveRegister();
+    const rhs = try builder.reserveRegister();
+    const temporary = try builder.reserveRegister();
+
+    try builder.emitLoadReg(span, lhs);
+    try builder.emitStoreReg(span, temporary);
+    try builder.emitLoadReg(span, rhs);
+    try builder.emitStoreReg(span, lhs);
+    try builder.emitLoadReg(span, temporary);
+    try builder.emitStoreReg(span, rhs);
+    try builder.emitLoadReg(span, lhs);
+    const guard_pc = builder.here();
+    try builder.emitOp(.logical_not, span);
+    try builder.emitOp(.jmp_if_false, span);
+    const false_patch = builder.here();
+    try builder.emitI16(0);
+    try builder.emitLoadReg(span, rhs);
+    try builder.emitOp(.return_, span);
+    const false_target = builder.here();
+    try builder.emitLoadReg(span, lhs);
+    try builder.emitOp(.return_, span);
+    try builder.patchI16(false_patch, false_target);
+    return .{
+        .chunk = try builder.finish(),
+        .guard_pc = @intCast(guard_pc),
+        .lhs = lhs,
+        .rhs = rhs,
+    };
 }
 
 fn strictBranchChunk(op: Op) !StrictBranchChunk {
@@ -280,6 +346,42 @@ fn strictBranchChunk(op: Op) !StrictBranchChunk {
         .lhs = lhs,
         .rhs = rhs,
     };
+}
+
+fn selectStrictBranchChunk() !chunk_mod.Chunk {
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    const lhs = try builder.reserveRegister();
+    const rhs = try builder.reserveRegister();
+    try builder.emitLoadReg(span, rhs);
+    try builder.emitOp(.jmp_if_strict_neq, span);
+    try builder.emitU8(lhs);
+    const target_patch = builder.here();
+    try builder.emitI16(0);
+    try builder.emitLoadReg(span, lhs);
+    try builder.emitOp(.return_, span);
+    const target = builder.here();
+    try builder.emitLoadReg(span, rhs);
+    try builder.emitOp(.return_, span);
+    try builder.patchI16(target_patch, target);
+    return builder.finish();
+}
+
+fn materializedStrictBranchChunk() !chunk_mod.Chunk {
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    const lhs = try builder.reserveRegister();
+    const rhs = try builder.reserveRegister();
+    try builder.emitLoadReg(span, rhs);
+    try builder.emitOp(.strict_eq, span);
+    try builder.emitU8(lhs);
+    try builder.emitOp(.jmp_if_true, span);
+    try builder.emitI16(3);
+    try builder.emitLoadSmi(span, 11);
+    try builder.emitOp(.return_, span);
+    try builder.emitLoadSmi(span, 22);
+    try builder.emitOp(.return_, span);
+    return builder.finish();
 }
 
 fn namedLoadChunk(realm: *Realm) !chunk_mod.Chunk {
@@ -407,7 +509,11 @@ fn testFrame(chunk: *const chunk_mod.Chunk, registers: []Value) lantern.CallFram
     };
 }
 
-const NativeEntry = *const fn (*Realm, *lantern.CallFrame, [*]Value) callconv(.c) u32;
+const NativeEntry = *const fn (
+    *Realm,
+    *lantern.CallFrame,
+    [*]Value,
+) callconv(.c) u64;
 
 fn installNative(
     native: *const NativeGraph,
@@ -429,7 +535,16 @@ fn executeNative(
     var executable = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
     defer executable.deinit();
     const entry = try installNative(native, frame, &machine, &executable);
-    return entry(realm, frame, frame.registers.ptr);
+    return executeEntry(entry, realm, frame);
+}
+
+fn executeEntry(entry: NativeEntry, realm: *Realm, frame: *lantern.CallFrame) u32 {
+    const result_bits = entry(realm, frame, frame.registers.ptr);
+    if (result_bits == codegen.resume_sentinel_bits) {
+        return @intFromEnum(codegen.EntryResult.resume_interp);
+    }
+    frame.accumulator = .{ .bits = result_bits };
+    return @intFromEnum(codegen.EntryResult.done);
 }
 
 fn findNode(native: *const NativeGraph, kind: ir.NodeKind) !ir.ValueId {
@@ -444,6 +559,56 @@ fn findNodeInGraph(graph: *const ir.Graph, kind: ir.NodeKind) ?ir.ValueId {
         if (node.kind == kind) return @intCast(index);
     }
     return null;
+}
+
+fn codeContainsWord(code: []const u8, expected: u32) bool {
+    if (code.len % 4 != 0) return false;
+    var instruction: usize = 0;
+    while (instruction < code.len / 4) : (instruction += 1) {
+        const word = std.mem.readInt(
+            u32,
+            code[instruction * 4 ..][0..4],
+            .little,
+        );
+        if (word == expected) return true;
+    }
+    return false;
+}
+
+fn codeContainsMaskedTriple(
+    code: []const u8,
+    first: u32,
+    second: u32,
+    second_mask: u32,
+    third: u32,
+    third_mask: u32,
+) bool {
+    if (code.len % 4 != 0 or code.len < 12) return false;
+    var instruction: usize = 0;
+    while (instruction + 2 < code.len / 4) : (instruction += 1) {
+        const first_word = std.mem.readInt(
+            u32,
+            code[instruction * 4 ..][0..4],
+            .little,
+        );
+        const second_word = std.mem.readInt(
+            u32,
+            code[(instruction + 1) * 4 ..][0..4],
+            .little,
+        );
+        const third_word = std.mem.readInt(
+            u32,
+            code[(instruction + 2) * 4 ..][0..4],
+            .little,
+        );
+        if (first_word == first and
+            (second_word & second_mask) == (second & second_mask) and
+            (third_word & third_mask) == (third & third_mask))
+        {
+            return true;
+        }
+    }
+    return false;
 }
 
 fn resumeLantern(realm: *Realm, frame: lantern.CallFrame) !Value {
@@ -480,6 +645,13 @@ test "Ohaimark AArch64 emitter returns a folded graph value" {
         &specialization,
     );
     defer representations.deinit();
+    var fused_control = try control_fusion.Plan.build(
+        testing.allocator,
+        &graph,
+        &specialization,
+        &representations,
+    );
+    defer fused_control.deinit();
     var logical = try deopt.Metadata.build(testing.allocator, &graph, &specialization);
     defer logical.deinit();
     var homes = try deopt_physical.Homes.build(
@@ -495,6 +667,7 @@ test "Ohaimark AArch64 emitter returns a folded graph value" {
         &graph,
         &specialization,
         &representations,
+        &fused_control,
         &homes,
         .{ .register_count = 0 },
     );
@@ -504,6 +677,7 @@ test "Ohaimark AArch64 emitter returns a folded graph value" {
         &graph,
         &specialization,
         &representations,
+        &fused_control,
         &homes,
         &allocated,
     );
@@ -672,6 +846,79 @@ test "Ohaimark AArch64 int32 division guards every non-int32 result" {
     }
 }
 
+test "Ohaimark AArch64 profiled Number shape omits impossible conversions" {
+    var binary = try dynamicBinaryChunk(.div);
+    defer binary.chunk.deinit(testing.allocator);
+    var native = try NativeGraph.build(&binary.chunk);
+    defer native.deinit();
+    const div_id = try findNode(&native, .div);
+    try testing.expectEqual(
+        @as(?chunk_mod.BinaryNumberShape, .double_int32),
+        native.specialization.node_info[div_id].number_shape,
+    );
+
+    var machine = masm.Masm.init(testing.allocator);
+    defer machine.deinit();
+    try native.emit(&machine, &binary.chunk);
+    try testing.expect(codeContainsWord(
+        machine.code.items,
+        a64.fmovXtoD(.x16, .x14),
+    ));
+    try testing.expect(codeContainsWord(
+        machine.code.items,
+        a64.scvtfDfromW(.x17, .x13),
+    ));
+    try testing.expect(!codeContainsWord(
+        machine.code.items,
+        a64.scvtfDfromW(.x16, .x12),
+    ));
+    try testing.expect(!codeContainsWord(
+        machine.code.items,
+        a64.fmovXtoD(.x17, .x14),
+    ));
+}
+
+test "Ohaimark AArch64 profiled Number shape executes and deopts exactly" {
+    if (comptime !masm.native_aarch64) return error.SkipZigTest;
+    var binary = try dynamicBinaryChunk(.div);
+    defer binary.chunk.deinit(testing.allocator);
+    var native = try NativeGraph.build(&binary.chunk);
+    defer native.deinit();
+    const div_id = try findNode(&native, .div);
+
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = false;
+    const registers = try testing.allocator.alloc(Value, binary.chunk.register_count);
+    defer testing.allocator.free(registers);
+    var machine = masm.Masm.init(testing.allocator);
+    defer machine.deinit();
+    var executable = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
+    defer executable.deinit();
+    var frame = testFrame(&binary.chunk, registers);
+    const entry = try installNative(&native, &frame, &machine, &executable);
+
+    frame.registers[binary.lhs] = Value.fromDouble(7.5);
+    frame.registers[binary.rhs] = Value.fromInt32(2);
+    try testing.expectEqual(
+        @intFromEnum(codegen.EntryResult.done),
+        executeEntry(entry, &realm, &frame),
+    );
+    try testing.expectEqual(Value.fromDouble(3.75).bits, frame.accumulator.bits);
+
+    frame = testFrame(&binary.chunk, registers);
+    frame.registers[binary.lhs] = Value.fromInt32(7);
+    frame.registers[binary.rhs] = Value.fromDouble(2.5);
+    try testing.expectEqual(
+        @intFromEnum(codegen.EntryResult.resume_interp),
+        executeEntry(entry, &realm, &frame),
+    );
+    try testing.expectEqual(native.graph.nodes[div_id].bytecode_offset, frame.ip);
+    try testing.expectEqual(Value.fromDouble(2.5).bits, frame.accumulator.bits);
+    try testing.expectEqual(Value.fromInt32(7).bits, frame.registers[binary.lhs].bits);
+    try testing.expectEqual(Value.fromDouble(2.8).bits, (try resumeLantern(&realm, frame)).bits);
+}
+
 test "Ohaimark AArch64 tagged Number arithmetic handles finite and infinite paths" {
     if (comptime !masm.native_aarch64) return error.SkipZigTest;
     const Case = struct { lhs: Value, rhs: Value, expected: Value };
@@ -729,7 +976,7 @@ test "Ohaimark AArch64 tagged Number arithmetic handles finite and infinite path
         },
     };
     for (operations) |operation| {
-        var binary = try dynamicBinaryChunk(operation.op);
+        var binary = try polymorphicDynamicBinaryChunk(operation.op);
         defer binary.chunk.deinit(testing.allocator);
         var native = try NativeGraph.build(&binary.chunk);
         defer native.deinit();
@@ -755,11 +1002,10 @@ test "Ohaimark AArch64 tagged Number arithmetic handles finite and infinite path
             frame = testFrame(&binary.chunk, registers);
             frame.registers[binary.lhs] = case.lhs;
             frame.registers[binary.rhs] = case.rhs;
-            try testing.expectEqual(@intFromEnum(codegen.EntryResult.done), entry(
-                &realm,
-                &frame,
-                frame.registers.ptr,
-            ));
+            try testing.expectEqual(
+                @intFromEnum(codegen.EntryResult.done),
+                executeEntry(entry, &realm, &frame),
+            );
             try testing.expectEqual(case.expected.bits, frame.accumulator.bits);
         }
     }
@@ -824,11 +1070,10 @@ test "Ohaimark AArch64 tagged Number arithmetic deopts NaN and coercion exactly"
             frame = testFrame(&binary.chunk, registers);
             frame.registers[binary.lhs] = case.lhs;
             frame.registers[binary.rhs] = case.rhs;
-            try testing.expectEqual(@intFromEnum(codegen.EntryResult.resume_interp), entry(
-                &realm,
-                &frame,
-                frame.registers.ptr,
-            ));
+            try testing.expectEqual(
+                @intFromEnum(codegen.EntryResult.resume_interp),
+                executeEntry(entry, &realm, &frame),
+            );
             try testing.expectEqual(native.graph.nodes[node_id].bytecode_offset, frame.ip);
             try testing.expectEqual(case.rhs.bits, frame.accumulator.bits);
             try testing.expectEqual(case.lhs.bits, frame.registers[binary.lhs].bits);
@@ -899,6 +1144,154 @@ test "Ohaimark IR models every fused strict equality branch width with deopt sta
     }
 }
 
+test "Ohaimark control fusion elides only branch-exclusive strict equality values" {
+    const ops = [_]Op{
+        .jmp_if_strict_eq8,
+        .jmp_if_strict_eq,
+        .jmp_if_strict_eq32,
+        .jmp_if_strict_neq8,
+        .jmp_if_strict_neq,
+        .jmp_if_strict_neq32,
+    };
+    for (ops) |op| {
+        var branch_chunk = try strictBranchChunk(op);
+        defer branch_chunk.chunk.deinit(testing.allocator);
+        var native = try NativeGraph.build(&branch_chunk.chunk);
+        defer native.deinit();
+
+        const strict_eq_id = try findNode(&native, .strict_eq);
+        const branch_id = try findNode(&native, .branch);
+        try testing.expectEqual(
+            strict_eq_id,
+            (try native.control_fusion.strictEqualForBranch(branch_id)).?,
+        );
+        try testing.expect(try native.control_fusion.valueIsElided(strict_eq_id));
+        try testing.expectEqual(allocation.Location.none, native.allocated.locations[strict_eq_id]);
+        try native.control_fusion.verify(
+            &native.graph,
+            &native.specialization,
+            &native.representations,
+        );
+
+        const original = native.control_fusion.strict_eq_branches[branch_id];
+        native.control_fusion.strict_eq_branches[branch_id] = null;
+        try testing.expectError(
+            error.InvalidControlFusion,
+            native.control_fusion.verify(
+                &native.graph,
+                &native.specialization,
+                &native.representations,
+            ),
+        );
+        native.control_fusion.strict_eq_branches[branch_id] = original;
+
+        native.control_fusion.elided_values[strict_eq_id] = false;
+        try testing.expectError(
+            error.InvalidControlFusion,
+            native.control_fusion.verify(
+                &native.graph,
+                &native.specialization,
+                &native.representations,
+            ),
+        );
+        native.control_fusion.elided_values[strict_eq_id] = true;
+    }
+
+    var standalone_chunk = try strictComparisonChunk(.strict_eq);
+    defer standalone_chunk.chunk.deinit(testing.allocator);
+    var standalone = try NativeGraph.build(&standalone_chunk.chunk);
+    defer standalone.deinit();
+    const standalone_eq = try findNode(&standalone, .strict_eq);
+    try testing.expect(!(try standalone.control_fusion.valueIsElided(standalone_eq)));
+
+    var materialized_chunk = try materializedStrictBranchChunk();
+    defer materialized_chunk.deinit(testing.allocator);
+    var materialized = try NativeGraph.build(&materialized_chunk);
+    defer materialized.deinit();
+    const materialized_eq = try findNode(&materialized, .strict_eq);
+    const materialized_branch = try findNode(&materialized, .branch);
+    try testing.expectEqual(
+        @as(?ir.ValueId, null),
+        try materialized.control_fusion.strictEqualForBranch(materialized_branch),
+    );
+    try testing.expect(!(try materialized.control_fusion.valueIsElided(materialized_eq)));
+}
+
+test "Ohaimark AArch64 fused strict equality branch omits Boolean materialization" {
+    const cases = [_]struct { op: Op, fallthrough_branch: u32 }{
+        .{ .op = .jmp_if_strict_eq8, .fallthrough_branch = a64.cbnz(.x14, 0) },
+        .{ .op = .jmp_if_strict_neq8, .fallthrough_branch = a64.cbz(.x14, 0) },
+    };
+    for (cases) |case| {
+        var branch_chunk = try strictBranchChunk(case.op);
+        defer branch_chunk.chunk.deinit(testing.allocator);
+        var fused = try NativeGraph.build(&branch_chunk.chunk);
+        defer fused.deinit();
+        var fused_machine = masm.Masm.init(testing.allocator);
+        defer fused_machine.deinit();
+        try fused.emit(&fused_machine, &branch_chunk.chunk);
+        try testing.expect(!codeContainsWord(
+            fused_machine.code.items,
+            a64.csetW(.x14, .eq),
+        ));
+        try testing.expect(codeContainsMaskedTriple(
+            fused_machine.code.items,
+            a64.eorRegW(.x14, .x12, .x13),
+            case.fallthrough_branch,
+            0xFF00_001F,
+            a64.b(0),
+            0xFC00_0000,
+        ));
+    }
+
+    var comparison = try strictComparisonChunk(.strict_eq);
+    defer comparison.chunk.deinit(testing.allocator);
+    var standalone = try NativeGraph.build(&comparison.chunk);
+    defer standalone.deinit();
+    var standalone_machine = masm.Masm.init(testing.allocator);
+    defer standalone_machine.deinit();
+    try standalone.emit(&standalone_machine, &comparison.chunk);
+    try testing.expect(codeContainsWord(
+        standalone_machine.code.items,
+        a64.csetW(.x14, .eq),
+    ));
+}
+
+test "Ohaimark coalesces and falls through empty strict equality edges" {
+    var chunk = try selectStrictBranchChunk();
+    defer chunk.deinit(testing.allocator);
+    var native = try NativeGraph.build(&chunk);
+    defer native.deinit();
+
+    var saw_taken = false;
+    var saw_fallthrough = false;
+    for (native.graph.edges, 0..) |edge, edge_index| switch (edge.kind) {
+        .branch_taken => {
+            saw_taken = true;
+            try testing.expectEqual(@as(u32, 0), native.lowered.edges[edge_index].move_count);
+        },
+        .branch_fallthrough => {
+            saw_fallthrough = true;
+            try testing.expectEqual(@as(u32, 0), native.lowered.edges[edge_index].move_count);
+        },
+        .fallthrough, .jump => {},
+    };
+    try testing.expect(saw_taken);
+    try testing.expect(saw_fallthrough);
+
+    var machine = masm.Masm.init(testing.allocator);
+    defer machine.deinit();
+    try native.emit(&machine, &chunk);
+    try testing.expect(codeContainsMaskedTriple(
+        machine.code.items,
+        a64.eorRegW(.x14, .x12, .x13),
+        a64.cbz(.x14, 0),
+        0xFF00_001F,
+        a64.b(0),
+        0xFC00_0000,
+    ));
+}
+
 test "Ohaimark AArch64 executes every fused strict equality branch width" {
     if (comptime !masm.native_aarch64) return error.SkipZigTest;
     const ops = [_]Op{
@@ -954,10 +1347,13 @@ test "Ohaimark AArch64 fused strict equality deopts non-int32 operands at the ex
     frame.registers[branch_chunk.lhs] = lhs;
     frame.registers[branch_chunk.rhs] = rhs;
 
-    try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.resume_interp),
-        try executeNative(&native, &realm, &frame),
-    );
+    var machine = masm.Masm.init(testing.allocator);
+    defer machine.deinit();
+    var executable = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
+    defer executable.deinit();
+    const entry = try installNative(&native, &frame, &machine, &executable);
+    const result_bits = entry(&realm, &frame, frame.registers.ptr);
+    try testing.expectEqual(codegen.resume_sentinel_bits, result_bits);
     try testing.expectEqual(branch_chunk.branch_pc, frame.ip);
     try testing.expectEqual(rhs.bits, frame.accumulator.bits);
     try testing.expectEqual(lhs.bits, frame.registers[branch_chunk.lhs].bits);
@@ -1097,6 +1493,58 @@ test "Ohaimark AArch64 logical not deopts non-Boolean input at the exact opcode"
     try testing.expectEqual(@as(u32, 0), frame.ip);
     try testing.expectEqual(input.bits, frame.accumulator.bits);
     try testing.expectEqual(Value.true_.bits, (try resumeLantern(&realm, frame)).bits);
+}
+
+test "Ohaimark direct entry recovery eliminates homes and reconstructs cycles" {
+    var cycle = try directRecoveryCycleChunk();
+    defer cycle.chunk.deinit(testing.allocator);
+    var native = try NativeGraph.build(&cycle.chunk);
+    defer native.deinit();
+
+    try testing.expectEqual(@as(u32, 0), native.homes.tagged_slot_count);
+    try testing.expectEqual(@as(u32, 0), native.homes.int32_slot_count);
+    try testing.expectEqual(@as(u32, 0), native.allocated.tagged_slot_count);
+    try testing.expectEqual(@as(u32, 0), native.allocated.int32_slot_count);
+    try testing.expectEqual(@as(u32, 0), native.lowered.frame.spill_bytes);
+
+    var point = try native.physical_deopt.decode(testing.allocator, 0);
+    defer point.deinit();
+    try testing.expectEqual(
+        deopt_physical.Recovery{ .frame_register = cycle.rhs },
+        point.accumulator,
+    );
+    try testing.expectEqual(@as(usize, 2), point.slots.len);
+    try testing.expectEqual(cycle.lhs, point.slots[0].register);
+    try testing.expectEqual(
+        deopt_physical.Recovery{ .frame_register = cycle.rhs },
+        point.slots[0].recovery,
+    );
+    try testing.expectEqual(cycle.rhs, point.slots[1].register);
+    try testing.expectEqual(
+        deopt_physical.Recovery{ .frame_register = cycle.lhs },
+        point.slots[1].recovery,
+    );
+
+    if (comptime !masm.native_aarch64) return error.SkipZigTest;
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = false;
+    const registers = try testing.allocator.alloc(Value, cycle.chunk.register_count);
+    defer testing.allocator.free(registers);
+    var frame = testFrame(&cycle.chunk, registers);
+    const lhs = Value.fromInt32(7);
+    const rhs = Value.fromInt32(9);
+    frame.registers[cycle.lhs] = lhs;
+    frame.registers[cycle.rhs] = rhs;
+
+    try testing.expectEqual(
+        @intFromEnum(codegen.EntryResult.resume_interp),
+        try executeNative(&native, &realm, &frame),
+    );
+    try testing.expectEqual(cycle.guard_pc, frame.ip);
+    try testing.expectEqual(rhs.bits, frame.accumulator.bits);
+    try testing.expectEqual(rhs.bits, frame.registers[cycle.lhs].bits);
+    try testing.expectEqual(lhs.bits, frame.registers[cycle.rhs].bits);
 }
 
 test "Ohaimark AArch64 backedge safepoint exhausts fuel with exact loop-header state" {
@@ -1495,7 +1943,7 @@ test "Ohaimark AArch64 own named load guards live IC state" {
 
     try testing.expectEqual(
         @intFromEnum(codegen.EntryResult.done),
-        entry(&realm, &frame, frame.registers.ptr),
+        executeEntry(entry, &realm, &frame),
     );
     try testing.expectEqual(Value.fromInt32(42).bits, frame.accumulator.bits);
 
@@ -1503,7 +1951,7 @@ test "Ohaimark AArch64 own named load guards live IC state" {
     frame.registers[0] = Value.fromInt32(5);
     try testing.expectEqual(
         @intFromEnum(codegen.EntryResult.resume_interp),
-        entry(&realm, &frame, frame.registers.ptr),
+        executeEntry(entry, &realm, &frame),
     );
     try testing.expectEqual(native.graph.nodes[load_id].bytecode_offset, frame.ip);
     try testing.expectEqual(Value.fromInt32(5).bits, frame.accumulator.bits);
@@ -1515,7 +1963,7 @@ test "Ohaimark AArch64 own named load guards live IC state" {
     frame.registers[0] = heap_mod.taggedObject(other);
     try testing.expectEqual(
         @intFromEnum(codegen.EntryResult.resume_interp),
-        entry(&realm, &frame, frame.registers.ptr),
+        executeEntry(entry, &realm, &frame),
     );
     try testing.expectEqual(native.graph.nodes[load_id].bytecode_offset, frame.ip);
     try testing.expectEqual(heap_mod.taggedObject(other).bits, frame.accumulator.bits);
@@ -1527,7 +1975,7 @@ test "Ohaimark AArch64 own named load guards live IC state" {
     chunk.inline_load_caches[0].invalidate();
     try testing.expectEqual(
         @intFromEnum(codegen.EntryResult.resume_interp),
-        entry(&realm, &frame, frame.registers.ptr),
+        executeEntry(entry, &realm, &frame),
     );
     try testing.expectEqual(heap_mod.taggedObject(receiver).bits, frame.accumulator.bits);
     try testing.expectEqual(Value.fromInt32(42).bits, (try resumeLantern(&realm, frame)).bits);
@@ -1577,7 +2025,7 @@ test "Ohaimark AArch64 prototype named load guards holder and revision" {
 
     try testing.expectEqual(
         @intFromEnum(codegen.EntryResult.done),
-        entry(&realm, &frame, frame.registers.ptr),
+        executeEntry(entry, &realm, &frame),
     );
     try testing.expectEqual(Value.fromInt32(41).bits, frame.accumulator.bits);
     try realm.heap.storeProperty(proto, realm.allocator, "x", Value.fromInt32(42));
@@ -1585,7 +2033,7 @@ test "Ohaimark AArch64 prototype named load guards holder and revision" {
     frame.registers[0] = heap_mod.taggedObject(receiver);
     try testing.expectEqual(
         @intFromEnum(codegen.EntryResult.done),
-        entry(&realm, &frame, frame.registers.ptr),
+        executeEntry(entry, &realm, &frame),
     );
     try testing.expectEqual(Value.fromInt32(42).bits, frame.accumulator.bits);
 
@@ -1595,7 +2043,7 @@ test "Ohaimark AArch64 prototype named load guards holder and revision" {
     frame.registers[0] = heap_mod.taggedObject(receiver);
     try testing.expectEqual(
         @intFromEnum(codegen.EntryResult.resume_interp),
-        entry(&realm, &frame, frame.registers.ptr),
+        executeEntry(entry, &realm, &frame),
     );
     try testing.expectEqual(Value.fromInt32(77).bits, (try resumeLantern(&realm, frame)).bits);
 
@@ -1605,7 +2053,7 @@ test "Ohaimark AArch64 prototype named load guards holder and revision" {
     frame.registers[0] = heap_mod.taggedObject(receiver);
     try testing.expectEqual(
         @intFromEnum(codegen.EntryResult.done),
-        entry(&realm, &frame, frame.registers.ptr),
+        executeEntry(entry, &realm, &frame),
     );
     try testing.expectEqual(Value.fromInt32(77).bits, frame.accumulator.bits);
 
@@ -1614,7 +2062,7 @@ test "Ohaimark AArch64 prototype named load guards holder and revision" {
     frame.registers[0] = heap_mod.taggedObject(receiver);
     try testing.expectEqual(
         @intFromEnum(codegen.EntryResult.resume_interp),
-        entry(&realm, &frame, frame.registers.ptr),
+        executeEntry(entry, &realm, &frame),
     );
     try testing.expectEqual(Value.fromInt32(77).bits, (try resumeLantern(&realm, frame)).bits);
 
@@ -1623,7 +2071,7 @@ test "Ohaimark AArch64 prototype named load guards holder and revision" {
     frame.registers[0] = heap_mod.taggedObject(receiver);
     try testing.expectEqual(
         @intFromEnum(codegen.EntryResult.resume_interp),
-        entry(&realm, &frame, frame.registers.ptr),
+        executeEntry(entry, &realm, &frame),
     );
     try testing.expectEqual(Value.fromInt32(77).bits, (try resumeLantern(&realm, frame)).bits);
 }
@@ -1672,7 +2120,7 @@ test "Ohaimark AArch64 synthetic named load reads live value and guards mode" {
 
     try testing.expectEqual(
         @intFromEnum(codegen.EntryResult.done),
-        entry(&realm, &frame, frame.registers.ptr),
+        executeEntry(entry, &realm, &frame),
     );
     try testing.expectEqual(Value.fromInt32(70).bits, frame.accumulator.bits);
     chunk.inline_load_caches[0].synthetic_value = Value.fromInt32(71);
@@ -1680,7 +2128,7 @@ test "Ohaimark AArch64 synthetic named load reads live value and guards mode" {
     frame.registers[0] = heap_mod.taggedObject(receiver);
     try testing.expectEqual(
         @intFromEnum(codegen.EntryResult.done),
-        entry(&realm, &frame, frame.registers.ptr),
+        executeEntry(entry, &realm, &frame),
     );
     try testing.expectEqual(Value.fromInt32(71).bits, frame.accumulator.bits);
 
@@ -1690,7 +2138,7 @@ test "Ohaimark AArch64 synthetic named load reads live value and guards mode" {
     frame.registers[0] = heap_mod.taggedObject(receiver);
     try testing.expectEqual(
         @intFromEnum(codegen.EntryResult.resume_interp),
-        entry(&realm, &frame, frame.registers.ptr),
+        executeEntry(entry, &realm, &frame),
     );
     try testing.expectEqual(Value.fromInt32(88).bits, (try resumeLantern(&realm, frame)).bits);
 }
@@ -1862,7 +2310,7 @@ test "Ohaimark AArch64 malformed named-load assumption is transactional" {
 
     var machine = masm.Masm.init(testing.allocator);
     defer machine.deinit();
-    try testing.expectError(error.InvalidMetadata, native.emit(&machine, &chunk));
+    try testing.expectError(error.InvalidSpecialization, native.emit(&machine, &chunk));
     try testing.expectEqual(@as(usize, 0), machine.code.items.len);
 }
 

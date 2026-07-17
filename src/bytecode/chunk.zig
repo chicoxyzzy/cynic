@@ -173,14 +173,17 @@ pub const BinaryTypeProfile = struct {
     observations: u8 = 0,
 
     const int32_pair: u8 = 1 << 0;
-    const number_pair: u8 = 1 << 1;
-    const non_number_pair: u8 = 1 << 2;
+    const double_int32_pair: u8 = 1 << 1;
+    const int32_double_pair: u8 = 1 << 2;
+    const double_double_pair: u8 = 1 << 3;
+    const non_number_pair: u8 = 1 << 4;
+    const numeric_pairs = int32_pair | double_int32_pair | int32_double_pair | double_double_pair;
 
     pub fn observe(self: *BinaryTypeProfile, lhs: Value, rhs: Value) void {
         if (lhs.isInt32() and rhs.isInt32()) {
             self.recordInt32Pair();
         } else if (lhs.isNumber() and rhs.isNumber()) {
-            self.recordNumberPair();
+            self.recordNumberPair(lhs.isInt32(), rhs.isInt32());
         } else {
             self.recordNonNumberPair();
         }
@@ -190,8 +193,17 @@ pub const BinaryTypeProfile = struct {
         self.observations |= int32_pair;
     }
 
-    pub inline fn recordNumberPair(self: *BinaryTypeProfile) void {
-        self.observations |= number_pair;
+    pub inline fn recordNumberPair(
+        self: *BinaryTypeProfile,
+        lhs_int32: bool,
+        rhs_int32: bool,
+    ) void {
+        self.observations |= if (lhs_int32)
+            int32_double_pair
+        else if (rhs_int32)
+            double_int32_pair
+        else
+            double_double_pair;
     }
 
     pub inline fn recordNonNumberPair(self: *BinaryTypeProfile) void {
@@ -201,13 +213,33 @@ pub const BinaryTypeProfile = struct {
     pub fn mode(self: BinaryTypeProfile) BinaryTypeMode {
         if (self.observations == 0) return .cold;
         if ((self.observations & non_number_pair) != 0) {
-            return if ((self.observations & (int32_pair | number_pair)) == 0)
+            return if ((self.observations & numeric_pairs) == 0)
                 .non_number
             else
                 .mixed;
         }
-        return if ((self.observations & number_pair) == 0) .int32 else .number;
+        return if ((self.observations & ~int32_pair) == 0) .int32 else .number;
     }
+
+    pub fn numberShape(self: BinaryTypeProfile) BinaryNumberShape {
+        return switch (self.observations & numeric_pairs) {
+            0 => .cold,
+            int32_pair => .int32_int32,
+            double_int32_pair => .double_int32,
+            int32_double_pair => .int32_double,
+            double_double_pair => .double_double,
+            else => .polymorphic,
+        };
+    }
+};
+
+pub const BinaryNumberShape = enum(u8) {
+    cold,
+    int32_int32,
+    double_int32,
+    int32_double,
+    double_double,
+    polymorphic,
 };
 
 pub const BinaryTypeMode = enum(u8) {
@@ -2002,6 +2034,22 @@ test "Builder: profiled arithmetic owns compact binary type profiles" {
     try testing.expectEqual(BinaryTypeMode.cold, chunk.inline_binary_profiles[0].mode());
     try testing.expectEqual(BinaryTypeMode.cold, chunk.inline_binary_profiles[1].mode());
     try testing.expectEqual(@as(usize, 1), @sizeOf(BinaryTypeProfile));
+
+    const shape_cases = [_]struct {
+        lhs: Value,
+        rhs: Value,
+        expected: BinaryNumberShape,
+    }{
+        .{ .lhs = Value.fromInt32(6), .rhs = Value.fromInt32(2), .expected = .int32_int32 },
+        .{ .lhs = Value.fromDouble(1.5), .rhs = Value.fromInt32(2), .expected = .double_int32 },
+        .{ .lhs = Value.fromInt32(6), .rhs = Value.fromDouble(2.5), .expected = .int32_double },
+        .{ .lhs = Value.fromDouble(1.5), .rhs = Value.fromDouble(2.5), .expected = .double_double },
+    };
+    for (shape_cases) |case| {
+        var profile: BinaryTypeProfile = .{};
+        profile.observe(case.lhs, case.rhs);
+        try testing.expectEqual(case.expected, profile.numberShape());
+    }
 
     chunk.inline_binary_profiles[0].observe(Value.fromInt32(6), Value.fromInt32(2));
     try testing.expectEqual(BinaryTypeMode.int32, chunk.inline_binary_profiles[0].mode());

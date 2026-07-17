@@ -90,7 +90,7 @@
 //! Tier differentials:
 //!   --jit                   Force Bistromath T1 at threshold 1.
 //!   --ohaimark              Force Ohaimark T2 before T1, both at threshold 1.
-//!                           T2 remains default-off outside this test posture.
+//!                           Production CLI T2 remains at its natural threshold.
 //!   --ohaimark-stats        Print aggregate T2 compile/entry/exit telemetry,
 //!                           refusal stages, and top unsupported opcodes.
 //!                           Requires `--ohaimark`; works with the worker pool.
@@ -1164,8 +1164,8 @@ const SkipReason = enum {
 /// to one without it. Read-only after flag parsing.
 var g_jit_force: bool = false;
 
-/// `--ohaimark` — exercise the default-off optimizing tier before T1 and
-/// force both thresholds to 1. Kept separate from `--jit` so the established
+/// `--ohaimark` — force the default-on optimizing tier before T1 with both
+/// thresholds at 1. Kept separate from `--jit` so the established
 /// Bistromath differential pass set remains a stable gate of its own.
 var g_ohaimark_force: bool = false;
 

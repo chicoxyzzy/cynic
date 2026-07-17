@@ -16,12 +16,13 @@
 //! mutation — can get its own host entry later if it's worth the
 //! reduced reachable behavior.
 //!
-//! Three argv flags layer on top for native differential fuzzing
+//! Four argv flags layer on top for native differential fuzzing
 //! (docs/fuzz-differential.md), parsed in `fuzz_main`: `--jit` tiers
-//! the run up to Bistromath, `--diff` writes a completion-value
-//! digest to fd 103 after each sample, and `--diff-self-test`
-//! perturbs that digest to validate the parent's oracle. The plain
-//! crash-finding profile passes none of them and is unaffected.
+//! the run up to Bistromath, `--ohaimark` attempts T2 before T1,
+//! `--diff` writes a completion-value digest to fd 103 after each sample,
+//! and `--diff-self-test` perturbs that digest to validate the parent's
+//! oracle. The plain crash-finding profile passes none of them and is
+//! unaffected.
 //!
 //! Protocol summary (V8 / JSC / SpiderMonkey converge on this):
 //!   - fd 100 (CRFD): engine reads control commands from Fuzzilli
@@ -70,6 +71,10 @@ pub const Options = struct {
     /// correctness diff (docs/fuzz-differential.md). A comptime no-op
     /// on hosts without codegen support (docs/jit.md §8).
     jit: bool = false,
+    /// `--ohaimark`: force both native tiers to their first-call threshold
+    /// and attempt Ohaimark before Bistromath. This is independent from the
+    /// T1-only `--jit` differential posture so a campaign can isolate T2.
+    ohaimark: bool = false,
     /// `--diff`: after each sample, write a canonical digest of the
     /// completion outcome to fd 103 (Fuzzilli's differential sink) so
     /// the parent's fuzzout oracle can compare the two runs. Off for
@@ -240,13 +245,16 @@ fn executeOne(allocator: std.mem.Allocator, source: []const u8, options: Options
     // every `Function(string)` / direct `eval(...)` Fuzzilli emits.
     realm.hardened = false;
     realm.allow_eval = true;
-    if (options.jit) {
+    if (options.jit or options.ohaimark) {
         // docs/fuzz-differential.md — the differential target tiers up
-        // to Bistromath and force-compiles every eligible chunk on its
-        // first call so even a sample that runs each function once
-        // exercises the JIT path. The reference half leaves this off.
+        // on the first call so even a sample that runs each function once
+        // exercises the selected JIT path. The reference half leaves this off.
         realm.jit_enabled = true;
         realm.jit_threshold_override = 1;
+    }
+    if (options.ohaimark) {
+        realm.ohaimark_enabled = true;
+        realm.ohaimark_threshold_override = 1;
     }
     if (options.gc_threshold) |n| realm.heap.setGcThreshold(n);
     // Sweep-quarantine: hold each swept slab header poisoned out of its
@@ -486,7 +494,7 @@ test "fuzz_reprl: appendValueDigest distinguishes +0, -0, and NaN doubles" {
     ));
 }
 
-test "fuzz_reprl: executeOne agrees under JIT and interpreter on benign scripts" {
+test "fuzz_reprl: executeOne agrees under both JIT tiers and interpreter on benign scripts" {
     // The differential PoC's premise: for a correct engine the JIT and
     // interpreter halves return the same per-sample exit code. Exercise
     // the exact fuzz JIT posture (`jit_enabled` + `jit_threshold_override
@@ -502,7 +510,9 @@ test "fuzz_reprl: executeOne agrees under JIT and interpreter on benign scripts"
     for (cases) |src| {
         const interp = executeOne(testing.allocator, src, .{});
         const jit = executeOne(testing.allocator, src, .{ .jit = true });
+        const ohaimark = executeOne(testing.allocator, src, .{ .ohaimark = true });
         try testing.expectEqual(interp, jit);
+        try testing.expectEqual(interp, ohaimark);
     }
 }
 

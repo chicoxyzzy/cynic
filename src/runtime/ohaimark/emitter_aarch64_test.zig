@@ -25,33 +25,34 @@ test "Ohaimark AArch64 emitter builds and validates the native frame" {
 
     const frame = try lowering.FrameLayout.build(3, 2);
     try emitter.emitPrologue(&machine, frame);
-    try testing.expectEqual(a64.stpPreIdxSp(.fp, .lr, -16), wordAt(machine.code.items, 0));
-    try testing.expectEqual(a64.addRegSp(.fp, 0), wordAt(machine.code.items, 1));
-    try testing.expectEqual(a64.stpPreIdxSp(.x19, .x20, -16), wordAt(machine.code.items, 2));
-    try testing.expectEqual(a64.subSpImm(32), wordAt(machine.code.items, 7));
+    try testing.expectEqual(a64.subSpImm(32), wordAt(machine.code.items, 0));
     try testing.expectEqual(
         a64.addRegSp(lowering.spill_base_register, 0),
-        wordAt(machine.code.items, 8),
-    );
-    try testing.expectEqual(
-        a64.movReg(lowering.realm_register, .x0),
-        wordAt(machine.code.items, 9),
-    );
-    try testing.expectEqual(
-        a64.movReg(lowering.lantern_frame_register, .x1),
-        wordAt(machine.code.items, 10),
-    );
-    try testing.expectEqual(
-        a64.movReg(lowering.lantern_registers_register, .x2),
-        wordAt(machine.code.items, 11),
+        wordAt(machine.code.items, 1),
     );
     const prologue_bytes = machine.code.items.len;
     try emitter.emitEpilogue(&machine, frame);
     try testing.expect(machine.code.items.len > prologue_bytes);
     try testing.expectEqual(
+        a64.addSpImm(32),
+        wordAt(machine.code.items, machine.code.items.len / 4 - 2),
+    );
+    try testing.expectEqual(
         a64.ret(),
         wordAt(machine.code.items, machine.code.items.len / 4 - 1),
     );
+}
+
+test "Ohaimark helper-free frame emits no zero-spill prologue" {
+    var machine = masm.Masm.init(testing.allocator);
+    defer machine.deinit();
+
+    const frame = try lowering.FrameLayout.build(0, 0);
+    try emitter.emitPrologue(&machine, frame);
+    try testing.expectEqual(@as(usize, 0), machine.code.items.len);
+    try emitter.emitEpilogue(&machine, frame);
+    try testing.expectEqual(@as(usize, 4), machine.code.items.len);
+    try testing.expectEqual(a64.ret(), wordAt(machine.code.items, 0));
 }
 
 test "Ohaimark AArch64 emitter chunks large stack reservations" {
@@ -60,8 +61,8 @@ test "Ohaimark AArch64 emitter chunks large stack reservations" {
     const frame = try lowering.FrameLayout.build(512, 0);
     try testing.expectEqual(@as(u32, 4096), frame.spill_bytes);
     try emitter.emitPrologue(&machine, frame);
-    try testing.expectEqual(a64.subSpImm(4080), wordAt(machine.code.items, 7));
-    try testing.expectEqual(a64.subSpImm(16), wordAt(machine.code.items, 8));
+    try testing.expectEqual(a64.subSpImm(4080), wordAt(machine.code.items, 0));
+    try testing.expectEqual(a64.subSpImm(16), wordAt(machine.code.items, 1));
 }
 
 test "Ohaimark AArch64 emitter initializes tagged spills on native hardware" {

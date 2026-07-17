@@ -108,10 +108,12 @@ pub fn run(
     debug_globals: bool,
     gc_stats: bool,
     collect_bytecode_stats: bool,
+    ohaimark_stats: bool,
     unhardened: bool,
     allow_eval: bool,
     allow_wasm: bool,
     jit: bool,
+    ohaimark: bool,
 ) !void {
     std.debug.assert(paths.len > 0);
     if (collect_bytecode_stats and !cynic.bytecode.stats.enabled) {
@@ -141,8 +143,11 @@ pub fn run(
     // before `installBuiltins`. See `Realm.allow_eval`.
     if (allow_eval) realm.allow_eval = true;
     if (allow_wasm) realm.allow_wasm = true;
-    // `--jit` — enable the Bistromath tier-up path (docs/jit.md §10).
+    // Top-level tier policy: production defaults both JS JITs on; bytecode
+    // instrumentation keeps native execution disabled so counters stay exact.
     if (jit and !collect_bytecode_stats) realm.jit_enabled = true;
+    if (jit and ohaimark and !collect_bytecode_stats) realm.ohaimark_enabled = true;
+    realm.heap.ohaimark_stats.enabled = ohaimark_stats;
     // Apply the `--gc-threshold` knob before `installBuiltins`
     // so the builtin-install allocations themselves run at the
     // requested cadence (matters at `--gc-threshold=1` where every
@@ -305,6 +310,12 @@ pub fn run(
         const report = try cynic.bytecode.stats.formatReport(allocator, &static_stats, dynamic_stats, 20);
         defer allocator.free(report);
         try std.Io.File.stderr().writeStreamingAll(io, report);
+    }
+
+    if (ohaimark_stats) {
+        var stats_buf: [512]u8 = undefined;
+        const line = try realm.heap.ohaimark_stats.formatMachineLine(&stats_buf);
+        try std.Io.File.stderr().writeStreamingAll(io, line);
     }
 
     // Flush anything `print` / `console.log` buffered.

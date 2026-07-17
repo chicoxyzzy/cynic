@@ -1,9 +1,9 @@
 //! Low-level AArch64 frame, move, and immediate-return emission for Ohaimark.
 //!
-//! This module preserves every callee-saved register claimed by the lowering
-//! convention, pins the entry ABI, reserves the aligned spill area, initializes
-//! tagged slots, and emits representation-bearing physical moves. Verified CFG
-//! scheduling and guard exits live in `codegen_aarch64.zig`.
+//! The current helper-free ABI leaves every callee-saved register and FP/LR
+//! untouched. This module reserves the aligned spill area when needed,
+//! initializes tagged slots, and emits representation-bearing physical moves.
+//! Verified CFG scheduling and guard exits live in `codegen_aarch64.zig`.
 
 const std = @import("std");
 
@@ -22,18 +22,10 @@ pub fn emitPrologue(machine: *Masm, frame: lowering.FrameLayout) !void {
     const code_start = machine.code.items.len;
     errdefer machine.code.shrinkRetainingCapacity(code_start);
 
-    try machine.emit(a64.stpPreIdxSp(.fp, .lr, -16));
-    try machine.emit(a64.addRegSp(.fp, 0));
-    try machine.emit(a64.stpPreIdxSp(.x19, .x20, -16));
-    try machine.emit(a64.stpPreIdxSp(.x21, .x22, -16));
-    try machine.emit(a64.stpPreIdxSp(.x23, .x24, -16));
-    try machine.emit(a64.stpPreIdxSp(.x25, .x26, -16));
-    try machine.emit(a64.stpPreIdxSp(.x27, .x28, -16));
     try adjustStack(machine, frame.spill_bytes, .reserve);
-    try machine.emit(a64.addRegSp(lowering.spill_base_register, 0));
-    try machine.emit(a64.movReg(lowering.realm_register, .x0));
-    try machine.emit(a64.movReg(lowering.lantern_frame_register, .x1));
-    try machine.emit(a64.movReg(lowering.lantern_registers_register, .x2));
+    if (frame.spill_bytes != 0) {
+        try machine.emit(a64.addRegSp(lowering.spill_base_register, 0));
+    }
 
     if (frame.tagged_slot_count != 0) {
         try machine.movImm64(lowering.transfer_scratch, Value.undefined_.bits);
@@ -54,12 +46,6 @@ pub fn emitEpilogue(machine: *Masm, frame: lowering.FrameLayout) !void {
     errdefer machine.code.shrinkRetainingCapacity(code_start);
 
     try adjustStack(machine, frame.spill_bytes, .release);
-    try machine.emit(a64.ldpPostIdxSp(.x27, .x28, 16));
-    try machine.emit(a64.ldpPostIdxSp(.x25, .x26, 16));
-    try machine.emit(a64.ldpPostIdxSp(.x23, .x24, 16));
-    try machine.emit(a64.ldpPostIdxSp(.x21, .x22, 16));
-    try machine.emit(a64.ldpPostIdxSp(.x19, .x20, 16));
-    try machine.emit(a64.ldpPostIdxSp(.fp, .lr, 16));
     try machine.emit(a64.ret());
 }
 
@@ -247,5 +233,6 @@ fn adjustStack(machine: *Masm, byte_count: u32, direction: StackAdjustment) !voi
 }
 
 comptime {
-    std.debug.assert(lowering.callee_save_bytes == 6 * 16);
+    std.debug.assert(!lowering.helper_calls_supported);
+    std.debug.assert(lowering.callee_save_bytes == 0);
 }

@@ -61,6 +61,7 @@ pub fn main(init: std.process.Init) !void {
     const allow_eval = parsed.allow_eval;
     const allow_wasm = parsed.allow_wasm;
     const jit = parsed.jit;
+    const ohaimark = parsed.ohaimark;
 
     if (std.mem.eql(u8, sub, "lex")) {
         if (args.len != 1) {
@@ -105,7 +106,7 @@ pub fn main(init: std.process.Init) !void {
             try printUsage(io);
             return error.MissingArgument;
         }
-        try eval_cmd.run(allocator, io, args[0], feature_flags, gc_threshold, unhardened, allow_eval, allow_wasm, jit);
+        try eval_cmd.run(allocator, io, args[0], feature_flags, gc_threshold, unhardened, allow_eval, allow_wasm, jit, ohaimark);
     } else if (std.mem.eql(u8, sub, "run")) {
         // `cynic run a.js b.js c.js` evaluates each file in order
         // against one realm — the same shape every other engine's
@@ -117,6 +118,7 @@ pub fn main(init: std.process.Init) !void {
         var debug_globals = false;
         var gc_stats = false;
         var bytecode_stats = false;
+        var ohaimark_stats = false;
         var run_args = args;
         while (run_args.len > 0 and std.mem.startsWith(u8, run_args[0], "--")) {
             if (std.mem.eql(u8, run_args[0], "--dump-bytecode")) {
@@ -131,6 +133,9 @@ pub fn main(init: std.process.Init) !void {
             } else if (std.mem.eql(u8, run_args[0], "--bytecode-stats")) {
                 bytecode_stats = true;
                 run_args = run_args[1..];
+            } else if (std.mem.eql(u8, run_args[0], "--ohaimark-stats")) {
+                ohaimark_stats = true;
+                run_args = run_args[1..];
             } else {
                 try printUsage(io);
                 return error.UnknownArgument;
@@ -140,7 +145,27 @@ pub fn main(init: std.process.Init) !void {
             try printUsage(io);
             return error.MissingArgument;
         }
-        try run_cmd.run(allocator, io, run_args, feature_flags, gc_threshold, dump_bytecode, debug_globals, gc_stats, bytecode_stats, unhardened, allow_eval, allow_wasm, jit);
+        if (ohaimark_stats and !ohaimark) {
+            try std.Io.File.stderr().writeStreamingAll(io, "error: run --ohaimark-stats is incompatible with --no-ohaimark\n");
+            return error.InvalidOptionCombination;
+        }
+        try run_cmd.run(
+            allocator,
+            io,
+            run_args,
+            feature_flags,
+            gc_threshold,
+            dump_bytecode,
+            debug_globals,
+            gc_stats,
+            bytecode_stats,
+            ohaimark_stats,
+            unhardened,
+            allow_eval,
+            allow_wasm,
+            jit,
+            ohaimark,
+        );
     } else if (std.mem.eql(u8, sub, "repl")) {
         // `cynic repl [--debug-globals]` — interactive read-eval-print
         // loop with a persistent realm. Same `--debug-globals` opt-in
@@ -162,7 +187,7 @@ pub fn main(init: std.process.Init) !void {
             try printUsage(io);
             return error.UnexpectedArgument;
         }
-        try repl_cmd.run(allocator, io, feature_flags, gc_threshold, repl_debug_globals, unhardened, allow_eval, allow_wasm, jit);
+        try repl_cmd.run(allocator, io, feature_flags, gc_threshold, repl_debug_globals, unhardened, allow_eval, allow_wasm, jit, ohaimark);
     } else if (std.mem.eql(u8, sub, "help") or std.mem.eql(u8, sub, "--help") or std.mem.eql(u8, sub, "-h")) {
         try printUsage(io);
     } else {
@@ -187,7 +212,8 @@ fn printUsage(io: std.Io) !void {
         \\                                   script mode against a `.mjs` path.
         \\  eval <expr>                      Compile and execute a single
         \\                                   expression; print the result.
-        \\  run [--dump-bytecode] [--bytecode-stats] [--debug-globals] <file>...
+        \\  run [--dump-bytecode] [--bytecode-stats] [--ohaimark-stats]
+        \\      [--debug-globals] <file>...
         \\                                   Compile and execute each <file>
         \\                                   against one realm; print the final
         \\                                   completion value. Files ending in
@@ -201,6 +227,9 @@ fn printUsage(io: std.Io) !void {
         \\                                   `--bytecode-stats` prints static operand-
         \\                                   width and dynamic dispatch hot spots;
         \\                                   build with -Dbytecode-stats=true.
+        \\                                   `--ohaimark-stats` writes one versioned
+        \\                                   T2 telemetry record to stderr; incompatible
+        \\                                   with top-level `--no-ohaimark`.
         \\                                   `--debug-globals` installs
         \\                                   `__collectGarbage` / `__clearKeptObjects` /
         \\                                   `__drainMicrotasks` for debugging. Off
@@ -253,6 +282,11 @@ fn printUsage(io: std.Io) !void {
         \\                                   or isolating a suspected JIT bug.
         \\                                   --jit is accepted as an explicit
         \\                                   no-op.
+        \\  --no-ohaimark                    Disable the Ohaimark optimizing JIT while
+        \\                                   retaining Bistromath. Ohaimark is ON by
+        \\                                   default at its natural production threshold;
+        \\                                   --ohaimark is an explicit no-op and --no-jit
+        \\                                   remains the master opt-out for both tiers.
         \\
     );
 }
@@ -423,6 +457,10 @@ pub const ParsedFlags = struct {
     /// `--jit` is still accepted as an explicit no-op. Sets
     /// `realm.jit_enabled`; a comptime no-op off aarch64.
     jit: bool = true,
+    /// Ohaimark (docs/ohaimark.md) — ON by default after its performance,
+    /// differential, GC-pressure, and fuzz gates passed. `--no-ohaimark`
+    /// isolates Bistromath; `--no-jit` remains the master opt-out.
+    ohaimark: bool = true,
     /// The unconsumed tail of the argv slice (subcommand + its
     /// arguments). Empty when no subcommand was supplied — the
     /// caller prints usage in that case.
@@ -473,6 +511,12 @@ pub fn parseTopLevelFlags(args: []const []const u8) ParsedFlags {
             rest = rest[1..];
         } else if (std.mem.eql(u8, a, "--no-jit")) {
             out.jit = false;
+            rest = rest[1..];
+        } else if (std.mem.eql(u8, a, "--ohaimark")) {
+            out.ohaimark = true;
+            rest = rest[1..];
+        } else if (std.mem.eql(u8, a, "--no-ohaimark")) {
+            out.ohaimark = false;
             rest = rest[1..];
         } else if (std.mem.startsWith(u8, a, "--allow=")) {
             // `--allow=<name>` relaxes a default-on restriction
@@ -591,6 +635,25 @@ test "parseTopLevelFlags: jit — explicit --jit is still accepted" {
     const parsed = parseTopLevelFlags(&args);
     try testing.expectEqual(@as(?FlagError, null), parsed.err);
     try testing.expect(parsed.jit);
+}
+
+test "parseTopLevelFlags: Ohaimark defaults on with an independent opt-out" {
+    const baseline_args = [_][]const u8{ "run", "foo.js" };
+    const baseline = parseTopLevelFlags(&baseline_args);
+    try testing.expect(baseline.ohaimark);
+
+    const disabled_args = [_][]const u8{ "--no-ohaimark", "run", "foo.js" };
+    const disabled = parseTopLevelFlags(&disabled_args);
+    try testing.expectEqual(@as(?FlagError, null), disabled.err);
+    try testing.expect(disabled.jit);
+    try testing.expect(!disabled.ohaimark);
+
+    const optimized_args = [_][]const u8{ "--ohaimark", "run", "foo.js" };
+    const optimized = parseTopLevelFlags(&optimized_args);
+    try testing.expectEqual(@as(?FlagError, null), optimized.err);
+    try testing.expect(optimized.jit);
+    try testing.expect(optimized.ohaimark);
+    try testing.expectEqualStrings("run", optimized.remaining[0]);
 }
 
 test "parseTopLevelFlags: --gc-threshold=0 is rejected" {

@@ -435,10 +435,9 @@ runs the comparison as the gating `test262-jit-differential`
 job. The harness flag is independent of the `cynic` CLI, where
 the tier is on by default at natural thresholds and `--no-jit`
 opts out),
-`--ohaimark` (run every realm with default-off Ohaimark attempted
-before Bistromath and both thresholds forced to 1. This is the T2
-differential posture; it remains separate from the established
-T1-only `--jit` pass set),
+`--ohaimark` (force the default-on Ohaimark tier before Bistromath and
+set both thresholds to 1. This is the T2 differential posture; it
+remains separate from the established T1-only `--jit` pass set),
 `--ohaimark-stats` (requires `--ohaimark`; print heap-scoped T2 compile,
 code-size, entry, completion, guard-exit, refusal-stage, and top unsupported-
 opcode counters aggregated across fixtures and harness workers),
@@ -676,7 +675,8 @@ reviewed in PRs against `test262-results.md`.
                           (`tests.zig`). Bistromath (T1) lives
                           alongside in `bistromath/` (default-on;
                           `--no-jit` opts out
-                          — docs/jit.md); `ohaimark/` (T2) is planned.
+                          — docs/jit.md); `ohaimark/` is the default-on T2
+                          (`--no-ohaimark` isolates T1).
     src/runtime/jit/      The shared codegen substrate (docs/jit.md
                           §7-§8): per-ISA encoders, the masm facade,
                           and the executable-memory allocator under

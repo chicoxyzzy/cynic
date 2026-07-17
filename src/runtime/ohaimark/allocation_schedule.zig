@@ -6,6 +6,7 @@
 
 const std = @import("std");
 
+const control_fusion = @import("control_fusion.zig");
 const ir = @import("ir.zig");
 const representation = @import("representation.zig");
 
@@ -19,6 +20,7 @@ pub fn compute(
     allocator: std.mem.Allocator,
     graph: *const ir.Graph,
     representations: *const representation.Plan,
+    fused_control: *const control_fusion.Plan,
     ranges: []?LiveRange,
 ) !void {
     if (ranges.len != graph.nodes.len or representations.outputs.len != graph.nodes.len or
@@ -65,7 +67,14 @@ pub fn compute(
             claimed_nodes[node_index] = true;
             const node = graph.nodes[node_index];
             const inputs = try checkedRange(graph.inputs.len, node.input_start, node.input_count);
+            const fused_comparison = try fused_control.strictEqualForBranch(node_id);
             for (inputs.start..inputs.end()) |input_index| {
+                if (fused_comparison) |comparison| {
+                    if (inputs.len != 1 or graph.inputs[input_index] != comparison) {
+                        return error.InvalidControlFusion;
+                    }
+                    continue;
+                }
                 if (representations.input_requirements[input_index] == .none) continue;
                 try noteUse(graph, ranges, graph.inputs[input_index], position);
             }

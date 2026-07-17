@@ -1132,11 +1132,11 @@ pub const Realm = struct {
     /// `allow_eval`). `WebAssembly.validate` is ungated — it only
     /// inspects bytes. Set `true` to open the gate.
     allow_wasm: bool = false,
-    /// `--jit` posture toggle (docs/jit.md §10). When `true` the
-    /// engine tiers hot chunks up to Bistromath-compiled code; when
-    /// `false` (the default while the tier lands) everything stays
-    /// on Lantern and the chunk warmth counters merely accumulate.
-    /// Targets without codegen support (docs/jit.md §8) ignore it.
+    /// Host policy for native JS tiers (docs/jit.md §10). When `true` the
+    /// engine tiers hot chunks up to Bistromath-compiled code; when `false`
+    /// everything stays on Lantern and warmth counters merely accumulate.
+    /// The production CLI enables this by default, while direct embedders must
+    /// opt in explicitly. Targets without codegen support (§8) ignore it.
     jit_enabled: bool = false,
     /// Tier-up threshold override for the differential gate
     /// (docs/jit.md §10 step 2): `1` force-compiles every eligible
@@ -1144,10 +1144,10 @@ pub const Realm = struct {
     /// Bistromath everywhere. `null` uses the size-scaled default
     /// (docs/jit.md §4.7).
     jit_threshold_override: ?u32 = null,
-    /// Ohaimark T2 rollout gate (docs/ohaimark.md §5). This is subordinate to
-    /// `jit_enabled`: `--no-jit` remains a master opt-out for every JS tier.
-    /// The optimizing tier stays off by default until forced differential,
-    /// GC-pressure, fuzz, and performance gates pass.
+    /// Host policy for Ohaimark T2 (docs/ohaimark.md §5), subordinate to
+    /// `jit_enabled`. The production CLI enables it by default after the
+    /// differential, GC-pressure, fuzz, and performance gates passed; direct
+    /// embedders retain an explicit opt-in and can select T1 independently.
     ohaimark_enabled: bool = false,
     /// T2-only threshold override. Tests and the test262 differential harness
     /// use `1` to attempt every eligible warm function; `null` uses the

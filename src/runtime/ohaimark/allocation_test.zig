@@ -5,6 +5,7 @@ const Builder = chunk_mod.Builder;
 const Chunk = chunk_mod.Chunk;
 const Span = @import("../../source.zig").Span;
 const allocation = @import("allocation.zig");
+const control_fusion = @import("control_fusion.zig");
 const deopt = @import("deopt.zig");
 const deopt_physical = @import("deopt_physical.zig");
 const ir = @import("ir.zig");
@@ -53,6 +54,13 @@ test "Ohaimark allocation bounds registers and partitions spills" {
         &specialization,
     );
     defer representations.deinit();
+    var fused_control = try control_fusion.Plan.build(
+        testing.allocator,
+        &graph,
+        &specialization,
+        &representations,
+    );
+    defer fused_control.deinit();
     var logical = try deopt.Metadata.build(testing.allocator, &graph, &specialization);
     defer logical.deinit();
     var homes = try deopt_physical.Homes.build(
@@ -64,7 +72,7 @@ test "Ohaimark allocation bounds registers and partitions spills" {
     );
     defer homes.deinit();
     try testing.expectEqual(@as(usize, 3), logical.points.len);
-    try testing.expectEqual(@as(u32, 6), homes.tagged_slot_count);
+    try testing.expectEqual(@as(u32, 2), homes.tagged_slot_count);
     try testing.expectEqual(@as(u32, 0), homes.int32_slot_count);
 
     var plan = try allocation.Plan.build(
@@ -72,11 +80,12 @@ test "Ohaimark allocation bounds registers and partitions spills" {
         &graph,
         &specialization,
         &representations,
+        &fused_control,
         &homes,
         .{ .register_count = 1 },
     );
     defer plan.deinit();
-    try plan.verify(&graph, &specialization, &representations, &homes);
+    try plan.verify(&graph, &specialization, &representations, &fused_control, &homes);
     try testing.expectEqual(@as(u8, 1), plan.register_count);
     try testing.expect(plan.tagged_slot_count >= 2);
     try testing.expectEqual(@as(u32, 0), plan.int32_slot_count);
@@ -108,7 +117,7 @@ test "Ohaimark allocation bounds registers and partitions spills" {
     plan.locations[value_id] = .{ .register = plan.register_count };
     try testing.expectError(
         error.InvalidAllocation,
-        plan.verify(&graph, &specialization, &representations, &homes),
+        plan.verify(&graph, &specialization, &representations, &fused_control, &homes),
     );
     plan.locations[value_id] = original;
 
@@ -117,7 +126,7 @@ test "Ohaimark allocation bounds registers and partitions spills" {
     plan.locations[spilled_value] = .{ .tagged_stack = plan.tagged_slot_count };
     try testing.expectError(
         error.InvalidAllocation,
-        plan.verify(&graph, &specialization, &representations, &homes),
+        plan.verify(&graph, &specialization, &representations, &fused_control, &homes),
     );
     plan.locations[spilled_value] = spilled_original;
 }
@@ -156,6 +165,13 @@ test "Ohaimark allocation rematerializes constants and reuses deopt homes" {
         &specialization,
     );
     defer representations.deinit();
+    var fused_control = try control_fusion.Plan.build(
+        testing.allocator,
+        &graph,
+        &specialization,
+        &representations,
+    );
+    defer fused_control.deinit();
     var logical = try deopt.Metadata.build(testing.allocator, &graph, &specialization);
     defer logical.deinit();
     var homes = try deopt_physical.Homes.build(
@@ -173,11 +189,12 @@ test "Ohaimark allocation rematerializes constants and reuses deopt homes" {
         &graph,
         &specialization,
         &representations,
+        &fused_control,
         &homes,
         .{ .register_count = 0 },
     );
     defer plan.deinit();
-    try plan.verify(&graph, &specialization, &representations, &homes);
+    try plan.verify(&graph, &specialization, &representations, &fused_control, &homes);
 
     var decoded = try logical.decode(testing.allocator, 0);
     defer decoded.deinit();

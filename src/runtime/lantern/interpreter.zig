@@ -475,7 +475,7 @@ pub const RunResult = union(enum) {
 };
 
 /// Fresh-frame tier selection. Ohaimark gets first refusal only when its
-/// separate rollout gate is enabled; a cold or unsupported T2 attempt leaves
+/// separate host policy is enabled; a cold or unsupported T2 attempt leaves
 /// the frame untouched and falls through to Bistromath. A T2 guard exit has
 /// already reconstructed the frame, so it resumes Lantern directly instead
 /// of restarting the activation in T1.
@@ -1307,7 +1307,7 @@ inline fn profiledNumberArithmetic(
         return null;
     }
 
-    profile.recordNumberPair();
+    profile.recordNumberPair(lhs_int32, rhs_int32);
     const x: f64 = if (lhs_int32) @floatFromInt(lhs.asInt32()) else lhs.asDouble();
     const y: f64 = if (rhs_int32) @floatFromInt(rhs.asInt32()) else rhs.asDouble();
     return Value.fromDouble(switch (op) {

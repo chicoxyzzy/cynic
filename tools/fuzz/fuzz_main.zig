@@ -80,6 +80,8 @@ pub fn main(init: std.process.Init) !void {
     while (arg_it.next()) |arg| {
         if (std.mem.eql(u8, arg, "--jit")) {
             options.jit = true;
+        } else if (std.mem.eql(u8, arg, "--ohaimark")) {
+            options.ohaimark = true;
         } else if (std.mem.eql(u8, arg, "--diff")) {
             options.emit_digest = true;
         } else if (std.mem.eql(u8, arg, "--diff-self-test")) {

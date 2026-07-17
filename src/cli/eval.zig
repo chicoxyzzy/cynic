@@ -20,6 +20,7 @@ pub fn run(
     allow_eval: bool,
     allow_wasm: bool,
     jit: bool,
+    ohaimark: bool,
 ) !void {
     var arena: std.heap.ArenaAllocator = .init(allocator);
     defer arena.deinit();
@@ -53,8 +54,10 @@ pub fn run(
     // realm (§19.2.1 / §20.2.1.1.1). See `Realm.allow_eval`.
     if (allow_eval) realm.allow_eval = true;
     if (allow_wasm) realm.allow_wasm = true;
-    // `--jit` — enable the Bistromath tier-up path (docs/jit.md §10).
+    // Top-level tier policy: production defaults both JS JITs on; embedders
+    // constructing Realm directly retain explicit per-tier opt-in.
     if (jit) realm.jit_enabled = true;
+    if (jit and ohaimark) realm.ohaimark_enabled = true;
     if (gc_threshold) |n| realm.heap.setGcThreshold(n);
     try realm.installBuiltins();
 

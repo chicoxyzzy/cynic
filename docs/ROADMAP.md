@@ -1094,6 +1094,7 @@ sampling by `/profile`.
   the final move. The verifier rebuilds the frame, locations, edge ranges, and
   move stream. Prologue/epilogue, tagged-slot initialization, safepoints,
   instructions, guard exits, and executable installation remain gated.
+  The helper-free volatile ABI recorded below supersedes this first mapping.
   See [ohaimark.md](ohaimark.md).
 - **Ohaimark native frame emission (2026-07-16).** The first AArch64 emitter
   transactionally writes a full AAPCS64 prologue/epilogue: FP/LR and `x19`-`x28`
@@ -1104,6 +1105,7 @@ sampling by `/profile`.
   frame, reads an initialized spill through `x22`, restores SP, and returns the
   exact NaN-boxed value. SSA nodes, guards, helper calls, code ownership, and
   tier-up remain disabled.
+  The measured helper-free follow-up below supersedes this full save frame.
   See [ohaimark.md](ohaimark.md).
 - **Ohaimark typed moves and folded native returns (2026-07-16).** Physical
   moves now carry source/destination representations through cycle resolution
@@ -1303,6 +1305,93 @@ sampling by `/profile`.
   strict-only failure. A 200-pair no-JIT `mul_loop` A/B observed `1.012x`, but
   its noisy spread supports only a no-large-regression conclusion. See
   [ohaimark.md](ohaimark.md) §3.20.
+- **Ohaimark natural-threshold rollout gate (2026-07-17).** The production CLI
+  now accepts top-level `--ohaimark`; `run --ohaimark-stats` emits a versioned,
+  fail-closed machine record. The benchmark harness adds an interleaved T1 vs
+  T1+T2 mode and dedicated repeated-entry fixtures without changing the
+  historical single-entry micro suite. A 30-pair Darwin arm64 sample attempted
+  six compilations, published five, refused one unsupported call wrapper,
+  installed 1.7 KiB, spent 0.254 ms compiling, and completed 24,997,383 native
+  entries with zero exits. Throughput nevertheless measured `1.032x` geometric
+  mean; `named_load` (`1.123x`) and `branch_eq` (`1.121x`) fail the 5% rollout
+  ceiling. Ohaimark remains default-off. This made fixed entry/frame cost the
+  next target, completed by the follow-up below. See
+  [ohaimark.md](ohaimark.md) §3.21 and [benchmarking.md](benchmarking.md).
+- **Ohaimark helper-free volatile ABI (2026-07-17).** AAPCS64 argument and
+  caller-saved registers now carry the helper-free tier: realm/frame/register
+  pointers remain in `x0`-`x2`, allocator values use `x3`-`x8`, existing
+  scratch uses `x9`-`x15`, and `x16` anchors optional spills. The prologue no
+  longer saves FP/LR or `x19`-`x28`; zero-spill graphs emit no prologue at all.
+  Adding a generated helper call explicitly requires rooted call-aware
+  preservation. Golden/native tests cover zero and chunked spills, typed moves,
+  Number arithmetic, property/global/environment loads, guard exits, and
+  safepoints; all 92 Ohaimark Debug tests and the 3,244-pass ReleaseSafe suite
+  remain green. A repeated 30-pair rollout reduced installed code from 1.7 KiB
+  to 1.3 KiB and improved geometric mean from `1.032x` to `1.017x`, but
+  `number_div` (`1.067x`) and `branch_eq` (`1.085x`) still exceed the 5%
+  ceiling. T2 remains default-off; direct deopt recovery is completed by the
+  follow-up below. See [ohaimark.md](ohaimark.md) §3.22.
+- **Ohaimark direct entry-frame recovery (2026-07-17).** Physical deopt now
+  recovers block-0 accumulator/register parameters from the untouched Lantern
+  frame instead of copying them into stable homes on every optimized entry.
+  Derived values, loop phis, and overwritten state retain representation-split
+  homes. The evaluator keeps immutable entry sources; AArch64 cold exits apply
+  direct frame assignments before spill/immediate writes and break alias cycles
+  with bounded `x15` scheduling. Metadata tests cover accumulator/register,
+  stable, immediate, malformed, and zero-spill recipes; native tests prove an
+  exact cyclic register swap. All 93 Ohaimark Debug tests and the complete
+  ReleaseSafe suite remain green. A 30-pair rollout cut code from 1.3 KiB to
+  1.0 KiB and improved geometric mean from `1.017x` to `1.002x`;
+  `number_div` is now `0.991x`, while `branch_eq` remains `1.054x`. The
+  `<=1.000x` aggregate and `<=1.050x` per-fixture gates both miss narrowly, so
+  T2 remains default-off. Fuse strict-equality branching without materializing
+  a tagged Boolean next. See [ohaimark.md](ohaimark.md) §3.23.
+- **Ohaimark strict-equality control fusion (2026-07-17).** A verified side
+  plan recognizes only adjacent, branch-exclusive checked-int32 `strict_eq`
+  values with an exact deopt point. The graph and logical/physical recovery
+  records remain unchanged, while allocation gives the transient Boolean no
+  location and AArch64 consumes the original operands at the terminator.
+  Standalone equality and ordinary comparison results carried through CFG
+  state remain materialized. The first `cmp` + `b.cond` lowering was rejected
+  after a 300-pair same-tree T2 A/B measured `1.044x`; `eor` + `cbz/cbnz`
+  measured `0.986x` against the same materialized baseline and is retained.
+  Generated `branch_eq` code fell from 168 to 140 bytes. The latest full
+  30-pair T2/T1 rollout nevertheless measured `1.026x` geometric mean and
+  `branch_eq` at `1.059x`, so neither rollout gate passes and T2 remains
+  default-off. The full Ohaimark Debug bucket and complete ReleaseSafe suite
+  pass. See [ohaimark.md](ohaimark.md) §3.24.
+- **Ohaimark CFG transfer + one-word completion ABI (2026-07-17).** A verified
+  single-predecessor allocation hint now reuses an incoming register only for
+  representation-identical, conversion-free block arguments. Empty transfers
+  into the next bytecode-order block physically fall through instead of
+  emitting a branch. Generated entries return either tagged `Value` bits or a
+  reserved non-canonical-NaN resume sentinel in AAPCS64 `x0`; guard exits still
+  reconstruct the exact Lantern frame first. A two-word `x0`/`x1` aggregate was
+  implemented and rejected after a same-tree `1.018x` result. The retained
+  path passed the Ohaimark and ReleaseSafe suites and brought the intermediate
+  30-pair rollout to `1.014x` geometric mean and 0.9 KiB, with `number_div`
+  (`1.076x`) identifying the remaining shape-generic cost. See
+  [ohaimark.md](ohaimark.md) §3.25.
+- **Ohaimark exact Number operand shapes (2026-07-17).** The existing one-byte
+  arithmetic profile now distinguishes Int32/Int32, Double/Int32,
+  Int32/Double, Double/Double, and non-Number observations. Mature exact sites
+  emit one tag guard and only the needed decode/conversion per operand;
+  polymorphic Number sites retain the generic path. A deterministic
+  specialization verifier rebuilds every node decision and assumption before
+  codegen. The final 30-pair rollout measured `0.997x` geometric mean,
+  `1.041x` worst fixture, and 0.8 KiB, passing both rollout ceilings. See
+  [ohaimark.md](ohaimark.md) §3.26.
+- **Ohaimark default-on graduation (2026-07-17).** Baseline and forced-T2 full
+  test262 runs matched at 48,517 pass / 1,324 fail, with identical sorted pass
+  SHA-256 `52146dd368643d2eedd21f60c731589f7fd6a0245dadeb26f8cdd70a95ec2ae3`.
+  The forced run attempted 217,427 compilations, published 6,872, installed
+  135 KiB, and recorded 141,354 entries with 106 exits. ReleaseSafe
+  `--gc-threshold=1` over the CI T2 matrix found no verifier failure or host
+  crash, and two five-minute Fuzzilli campaigns found neither a crash nor a
+  Lantern/T2 completion-value differential. The production CLI now enables T2
+  at natural thresholds; `--no-ohaimark` isolates T1 and `--no-jit` disables
+  both tiers. The CI T2 pass-set comparison is gating. See
+  [ohaimark.md](ohaimark.md) §3.26.
 - **Generational GC.** A JSC-Riptide-style non-moving
   generational collector — store-site routing, generation header
   bits, a write barrier + remembered set, `collectYoung` with
@@ -1690,15 +1779,17 @@ and the per-builtin checklist; this section tracks status.
   from inline caches, deopt back to Lantern on guard failure.
   Modeled on JSC DFG / V8 Maglev / SpiderMonkey Warp. The feedback snapshot,
   block-argument SSA, initial specialization and representation planners, and
-  logical plus stable-spill physical deopt metadata and a bounded differential
-  evaluator, abstract register/spill allocation, and AArch64 frame/edge
+  logical plus direct-entry/stable-home physical deopt metadata and a bounded
+  differential evaluator, abstract register/spill allocation, and AArch64 frame/edge
   lowering plus native frame entry/exit, typed moves, and folded returns ship;
   checked int32 arithmetic/control and direct Lantern-frame guard exits now
   execute, as do live-cell property/global loads, guarded frame/environment
   loads, and frame-reconstructing backedge safepoints. Transactional
-  full-pipeline compilation, chunk-owned executable lifetime, and default-off
-  ordinary-function tier-up now ship. Ohaimark OSR, rooted helper calls,
-  broader opcode coverage, and default-on rollout remain planned. See
+  full-pipeline compilation, chunk-owned executable lifetime, verified CFG
+  transfer coalescing/fallthrough, one-word completion, and exact Number
+  operand-shape specialization now ship. Ohaimark is on by default at natural
+  thresholds; `--no-ohaimark` isolates T1. OSR, rooted helper calls, broader
+  opcode coverage, and additional architectures remain planned. See
   [ohaimark.md](ohaimark.md).
 - **Spasm** — wasm baseline JIT (T1), Sarcasm's compiled tier.
   Single-pass over the validated module + branch side-table,

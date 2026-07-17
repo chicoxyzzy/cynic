@@ -57,6 +57,7 @@ bench/prologue.js                Shared per-engine probe shim
 bench/jetstream2/                JetStream 2.0 (submodule of WebKit/PerformanceTests)
 bench/octane/                    Octane archive (V8 retired suite, still tracked)
 bench/micros/                    Cynic-specific microbenchmarks
+bench/ohaimark/                  Natural-threshold T1/T2 rollout fixtures
 ```
 
 ### Suite selection
@@ -66,6 +67,7 @@ bench/micros/                    Cynic-specific microbenchmarks
 | **JetStream 2** | Mixed throughput + latency + startup across 64 subtests | Industry-standard; every major engine team publishes JS2 numbers |
 | **Octane** | 15 throughput microbenches (Crypto, Splay, Mandreel, …) | Older but stable; trivially comparable across engines. The pure-compute **six** (Richards, DeltaBlue, Crypto, RayTrace, NavierStokes, Splay) are vendored in `bench/macros/` — see below. |
 | **Custom micros** | Cynic-specific hot paths | Catches regressions in opcodes we own |
+| **Ohaimark rollout** | Repeated hot leaf calls under natural T1/T2 thresholds | Guards default-on T2 publication, steady-state entry cost, refusal economics, and guard exits |
 
 Octane is *retired* by its own authors (engines over-tuned to it), so
 the macro suite is for **relative tracking** and **cross-engine
@@ -111,6 +113,43 @@ Adding a fixture: drop a `.js` file in `bench/micros/`, append the
 fixture name to the `BENCHES` array in `tools/bench.zig`, then
 document it in the table above. Cross-engine picks it up
 automatically (`tools/bench-cross.sh` globs `bench/micros/*.js`).
+
+### Ohaimark natural-threshold gate
+
+`zig build bench -- --ohaimark-rollout` selects the dedicated
+`bench/ohaimark/*.js` suite. It compares the same ReleaseFast binary under
+Bistromath alone (`--jit --no-ohaimark`) and Bistromath plus Ohaimark
+(`--jit --ohaimark`), using production thresholds in both cases. Each fixture
+gets one discarded warmup per posture, then alternating T1/T2 and T2/T1 process
+pairs so slow host drift does not consistently favor one tier. T2 compilation
+remains inside the timed child lifetime.
+
+The report uses the median paired `T2 / T1` ratio (`<1` is faster), with `iqr%`
+showing the middle 50% of those ratios. It also prints the geometric mean and
+worst fixture. One separate T2 probe emits a versioned machine record with
+compile attempts, publications/refusals, compile time, installed bytes,
+entries, completions, and exits; separating that probe keeps counter formatting
+out of the timed samples. Increase confidence with:
+
+    zig build bench -- --ohaimark-rollout --runs=30
+
+The ordinary `bench/micros/mul_loop.js` and `div_loop.js` intentionally invoke
+their hot function once. Backedges heat those chunks, but an entry-only T2 has
+no later entry at which to compile them; they remain valid T1 and future-OSR
+benchmarks. The rollout fixtures repeatedly call small leaf functions instead,
+covering tagged Number multiplication/division, monomorphic named loads,
+strict-equality control flow, and a call wrapper that should refuse once while
+its numeric callee publishes. No default-on decision passes if any stable
+fixture regresses by more than 5% or if the geometric mean exceeds `1.000x`,
+matching the JIT gate in [`jit.md`](jit.md) §10.
+
+The graduation 30-pair arm64 sample measured `0.997x` geometric mean, with
+`branch_eq` worst at `1.041x`, and installed 0.8 KiB. Both rollout limits pass,
+so the production CLI now enables Ohaimark at its natural threshold. The
+benchmark command defaults to that production T2 posture; its `--jit` posture
+explicitly passes `--no-ohaimark` to isolate T1. Full results, including the
+earlier failed samples and same-tree A/B decisions, are recorded in
+[`ohaimark.md`](ohaimark.md) §§3.21-3.26.
 
 ### Macro fixtures (Octane compute-six)
 

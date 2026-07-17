@@ -45,7 +45,11 @@ pub const EnterOutcome = union(enum) {
 
 /// Ohaimark uses the established frame-compatible JIT ABI. The register-file
 /// base is explicit so generated code never depends on Zig slice layout.
-const EntryFn = *const fn (*Realm, *lantern.CallFrame, [*]Value) callconv(.c) u32;
+const EntryFn = *const fn (
+    *Realm,
+    *lantern.CallFrame,
+    [*]Value,
+) callconv(.c) u64;
 
 inline fn frameKindCompilable(frame: *const lantern.CallFrame) bool {
     // Function-entry only for the first runtime checkpoint. Constructor result
@@ -91,21 +95,15 @@ pub fn tryEnterTop(
     const entry: EntryFn = @ptrCast(@alignCast(raw_entry));
     const telemetry = &realm.heap.ohaimark_stats;
     telemetry.recordEntry();
-    return switch (@as(
-        codegen.EntryResult,
-        @enumFromInt(entry(realm, frame, frame.registers.ptr)),
-    )) {
-        .resume_interp => blk: {
-            state.ohaimark_guard_exits +|= 1;
-            telemetry.recordGuardExit();
-            break :blk .resumed;
-        },
-        .done => blk: {
-            telemetry.recordCompletion();
-            const result = frame.accumulator;
-            frame.releaseRegisters(realm, allocator);
-            _ = frames.pop();
-            break :blk .{ .completed = result };
-        },
-    };
+    const result_bits = entry(realm, frame, frame.registers.ptr);
+    if (result_bits == codegen.resume_sentinel_bits) {
+        state.ohaimark_guard_exits +|= 1;
+        telemetry.recordGuardExit();
+        return .resumed;
+    }
+    telemetry.recordCompletion();
+    const value = Value{ .bits = result_bits };
+    frame.releaseRegisters(realm, allocator);
+    _ = frames.pop();
+    return .{ .completed = value };
 }

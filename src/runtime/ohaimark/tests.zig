@@ -744,7 +744,74 @@ test "Ohaimark deopt metadata rejects malformed frame values" {
     );
 }
 
-test "Ohaimark physical deopt metadata separates tagged and int32 homes" {
+test "Ohaimark physical deopt metadata recovers entry values without homes" {
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    try builder.emitOp(.logical_not, span);
+    var chunk = try finish(&builder);
+    defer chunk.deinit(testing.allocator);
+
+    var graph = try ir.Graph.build(testing.allocator, &chunk);
+    defer graph.deinit();
+    var specialization = try specialize.Plan.build(testing.allocator, &graph);
+    defer specialization.deinit();
+    var representations = try representation.Plan.build(
+        testing.allocator,
+        &graph,
+        &specialization,
+    );
+    defer representations.deinit();
+    var logical = try deopt.Metadata.build(testing.allocator, &graph, &specialization);
+    defer logical.deinit();
+    try testing.expectEqual(@as(usize, 1), logical.points.len);
+
+    var logical_point = try logical.decode(testing.allocator, 0);
+    defer logical_point.deinit();
+    const entry_accumulator = switch (logical_point.accumulator) {
+        .value => |value| value,
+        .immediate => return error.TestUnexpectedResult,
+    };
+
+    var homes = try deopt_physical.Homes.build(
+        testing.allocator,
+        &graph,
+        &specialization,
+        &representations,
+        &logical,
+    );
+    defer homes.deinit();
+    try testing.expectEqual(@as(u32, 0), homes.tagged_slot_count);
+    try testing.expectEqual(@as(u32, 0), homes.int32_slot_count);
+    try testing.expectError(error.MissingRecoveryHome, homes.homeFor(entry_accumulator));
+
+    var physical = try deopt_physical.Metadata.build(
+        testing.allocator,
+        &graph,
+        &specialization,
+        &representations,
+        &logical,
+        &homes,
+    );
+    defer physical.deinit();
+    var physical_point = try physical.decode(testing.allocator, 0);
+    defer physical_point.deinit();
+    try testing.expectEqual(
+        deopt_physical.Recovery.frame_accumulator,
+        physical_point.accumulator,
+    );
+    try testing.expectEqual(
+        Value.null_.bits,
+        (try physical_point.accumulator.materialize(.{
+            .frame_accumulator = Value.null_,
+            .frame_registers = &.{},
+            .tagged_spills = &.{},
+            .int32_spills = &.{},
+            .constants = chunk.constants,
+        })).bits,
+    );
+}
+
+test "Ohaimark physical deopt metadata mixes entry stable and immediate recovery" {
     var builder = Builder.init(testing.allocator);
     defer builder.deinit();
     const receiver = try builder.reserveRegister();
@@ -788,7 +855,7 @@ test "Ohaimark physical deopt metadata separates tagged and int32 homes" {
     );
     defer homes.deinit();
     try homes.verify(&graph, &specialization, &representations, &logical);
-    try testing.expectEqual(@as(u32, 1), homes.tagged_slot_count);
+    try testing.expectEqual(@as(u32, 0), homes.tagged_slot_count);
     try testing.expectEqual(@as(u32, 1), homes.int32_slot_count);
 
     var first_logical = try logical.decode(testing.allocator, 0);
@@ -797,10 +864,7 @@ test "Ohaimark physical deopt metadata separates tagged and int32 homes" {
         .value => |value| value,
         .immediate => return error.TestUnexpectedResult,
     };
-    try testing.expectEqual(
-        deopt_physical.Home{ .tagged_stack = 0 },
-        try homes.homeFor(receiver_value),
-    );
+    try testing.expectError(error.MissingRecoveryHome, homes.homeFor(receiver_value));
 
     var second_logical = try logical.decode(testing.allocator, 1);
     defer second_logical.deinit();
@@ -836,7 +900,7 @@ test "Ohaimark physical deopt metadata separates tagged and int32 homes" {
     var first_physical = try physical.decode(testing.allocator, 0);
     defer first_physical.deinit();
     try testing.expectEqual(
-        deopt_physical.Recovery{ .tagged_stack = 0 },
+        deopt_physical.Recovery{ .frame_register = receiver },
         first_physical.accumulator,
     );
     var second_physical = try physical.decode(testing.allocator, 1);
@@ -845,32 +909,42 @@ test "Ohaimark physical deopt metadata separates tagged and int32 homes" {
         deopt_physical.Recovery{ .int32_stack = 0 },
         second_physical.slots[0].recovery,
     );
+    try testing.expectEqual(
+        deopt_physical.Recovery{ .immediate = .{ .int32 = std.math.maxInt(i32) } },
+        second_physical.accumulator,
+    );
 
-    const tagged_spills = [_]Value{Value.null_};
+    const frame_registers = [_]Value{ Value.null_, Value.true_ };
     const int32_spills = [_]i32{42};
     try testing.expectEqual(
         Value.null_.bits,
-        (try first_physical.accumulator.materialize(
-            &tagged_spills,
-            &int32_spills,
-            chunk.constants,
-        )).bits,
+        (try first_physical.accumulator.materialize(.{
+            .frame_accumulator = Value.false_,
+            .frame_registers = &frame_registers,
+            .tagged_spills = &.{},
+            .int32_spills = &int32_spills,
+            .constants = chunk.constants,
+        })).bits,
     );
     try testing.expectEqual(
         Value.fromInt32(42).bits,
-        (try second_physical.slots[0].recovery.materialize(
-            &tagged_spills,
-            &int32_spills,
-            chunk.constants,
-        )).bits,
+        (try second_physical.slots[0].recovery.materialize(.{
+            .frame_accumulator = Value.false_,
+            .frame_registers = &frame_registers,
+            .tagged_spills = &.{},
+            .int32_spills = &int32_spills,
+            .constants = chunk.constants,
+        })).bits,
     );
     try testing.expectError(
         error.InvalidRecovery,
-        (deopt_physical.Recovery{ .int32_stack = 1 }).materialize(
-            &tagged_spills,
-            &int32_spills,
-            chunk.constants,
-        ),
+        (deopt_physical.Recovery{ .int32_stack = 1 }).materialize(.{
+            .frame_accumulator = Value.false_,
+            .frame_registers = &frame_registers,
+            .tagged_spills = &.{},
+            .int32_spills = &int32_spills,
+            .constants = chunk.constants,
+        }),
     );
 
     const original_home = homes.values[receiver_value];
@@ -894,6 +968,20 @@ test "Ohaimark physical deopt metadata separates tagged and int32 homes" {
         ),
     );
     physical.stream[4] = original_tag;
+
+    const original_entry_register = physical.stream[5];
+    physical.stream[5] = receiver + 1;
+    try testing.expectError(
+        error.InvalidMetadata,
+        physical.verify(
+            &graph,
+            &specialization,
+            &representations,
+            &logical,
+            &homes,
+        ),
+    );
+    physical.stream[5] = original_entry_register;
 
     physical.tagged_slot_count += 1;
     try testing.expectError(
@@ -1457,25 +1545,35 @@ test "Ohaimark specializes unknown profiled arithmetic only from numeric site fe
     const cases = [_]struct {
         observations: []const [2]Value,
         mode: chunk_mod.BinaryTypeMode,
+        shape: chunk_mod.BinaryNumberShape,
         result_type: specialize.Type,
         numeric: bool,
     }{
-        .{ .observations = &.{}, .mode = .cold, .result_type = specialize.Type.any, .numeric = false },
+        .{
+            .observations = &.{},
+            .mode = .cold,
+            .shape = .cold,
+            .result_type = specialize.Type.any,
+            .numeric = false,
+        },
         .{
             .observations = &.{.{ Value.fromInt32(6), Value.fromInt32(2) }},
             .mode = .int32,
+            .shape = .int32_int32,
             .result_type = specialize.Type.number,
             .numeric = true,
         },
         .{
             .observations = &.{.{ Value.fromDouble(1.5), Value.fromInt32(2) }},
             .mode = .number,
+            .shape = .double_int32,
             .result_type = specialize.Type.number,
             .numeric = true,
         },
         .{
             .observations = &.{.{ Value.true_, Value.fromInt32(2) }},
             .mode = .non_number,
+            .shape = .cold,
             .result_type = specialize.Type.any,
             .numeric = false,
         },
@@ -1485,6 +1583,7 @@ test "Ohaimark specializes unknown profiled arithmetic only from numeric site fe
                 .{ Value.true_, Value.fromInt32(2) },
             },
             .mode = .mixed,
+            .shape = .int32_int32,
             .result_type = specialize.Type.any,
             .numeric = false,
         },
@@ -1515,6 +1614,7 @@ test "Ohaimark specializes unknown profiled arithmetic only from numeric site fe
             var graph = try ir.Graph.build(testing.allocator, &chunk);
             defer graph.deinit();
             try testing.expectEqual(case.mode, graph.feedback.binary[0].mode);
+            try testing.expectEqual(case.shape, graph.feedback.binary[0].shape);
             var plan = try specialize.Plan.build(testing.allocator, &graph);
             defer plan.deinit();
             const node_id = findNode(&graph, operation.kind).?;
@@ -1524,10 +1624,36 @@ test "Ohaimark specializes unknown profiled arithmetic only from numeric site fe
                 if (case.numeric) operation.numeric_lowering else specialize.Lowering.generic,
                 info.lowering,
             );
+            try testing.expectEqual(
+                if (case.numeric) case.shape else null,
+                info.number_shape,
+            );
             try testing.expectEqual(@as(u16, 0), graph.nodes[node_id].payload.binary_profile);
             try testing.expect(graph.nodes[node_id].frame_state != null);
         }
     }
+}
+
+test "Ohaimark specialization verifier rejects a corrupted Number shape" {
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    const lhs = try builder.reserveRegister();
+    const rhs = try builder.reserveRegister();
+    try builder.emitLoadReg(span, rhs);
+    try builder.emitBinary(.div, span, lhs);
+    var chunk = try finish(&builder);
+    defer chunk.deinit(testing.allocator);
+    chunk.inline_binary_profiles[0].observe(Value.fromDouble(1.5), Value.fromInt32(2));
+
+    var graph = try ir.Graph.build(testing.allocator, &chunk);
+    defer graph.deinit();
+    var plan = try specialize.Plan.build(testing.allocator, &graph);
+    defer plan.deinit();
+    try plan.verify(&graph);
+
+    const div_id = findNode(&graph, .div).?;
+    plan.node_info[div_id].number_shape = .int32_double;
+    try testing.expectError(error.InvalidSpecialization, plan.verify(&graph));
 }
 
 test "Ohaimark value facts converge across loop phis" {

@@ -1,23 +1,19 @@
 # JIT tiers — Bistromath (T1), Ohaimark (T2), Spasm (wasm T1), and the shared substrate
 
-Status: **Bistromath shipped and on by default** (2026-06; `--no-jit`
-opts out, the CI differential gates merges). Ohaimark's feedback/SSA,
-specialization, representation-selection, and logical deopt-metadata front end
-plus stable physical deopt homes, graph/Lantern differential evaluation, and
-abstract register/spill allocation plus AArch64 frame/edge lowering have
-landed. Transactional prologue/epilogue emission now has native AArch64 proof,
-and typed moves, folded-value returns, checked int32 arithmetic/control,
-profile-gated tagged Number multiplication/division, and frame-reconstructing
-guard exits
-execute natively in tests. Guarded
-own/prototype/synthetic named loads now execute through live typed IC cells.
-Taken backedges now poll fuel, interrupts, hooks, and pending GC work, with a
-slow poll transferring exact loop-header state back to Lantern before any
-collection or host call. Chunk-owned executable lifetime and Ohaimark's
-transactional full-pipeline compile/install boundary now ship. Default-off
-ordinary-function tier-up tries T2 before T1, resumes Lantern exactly after a
-guard exit, and bypasses an installed entry after four repeated exits;
-Ohaimark OSR and default-on rollout remain future work. Spasm's
+Status: **Bistromath and Ohaimark ship on by default** (`--no-ohaimark`
+isolates T1; `--no-jit` selects Lantern). Ohaimark's feedback/SSA,
+specialization, representation/deopt plans, allocation, AArch64 codegen,
+live-cell property guards, exact Lantern recovery, backedge safepoints, and
+transactional executable ownership have landed. Its helper-free ABI now adds
+single-predecessor edge coalescing, physical next-block fallthrough, a one-word
+completion result, and exact Int32/Double operand-shape specialization. The
+graduation 30-pair T2/T1 run measured `0.997x` geometric mean, `1.041x` worst,
+and 0.8 KiB installed code. Baseline and forced-T2 test262 pass lists match at
+48,517 paths; focused ReleaseSafe GC-pressure runs and bounded crash/value
+differential fuzz campaigns found no verifier failure, host crash, or
+differential. CI now gates both T1 and T2 pass-set equality. Ohaimark OSR,
+rooted helper calls, broader opcode coverage, and additional codegen targets
+remain future work. Spasm's
 delivery state is tracked below. The document
 doubles as the design record that pinned the architecture before the first
 emitter was written and as the delivery ledger (the "Delivery order" section
@@ -447,25 +443,29 @@ The accepted design and delivery gates are in
 typed-IC feedback snapshot, a linear CFG SSA graph with block arguments, a
 pure specialization plan carrying value facts and pointer-free IC assumptions,
 a verified tagged/int32 representation plan with explicit per-use conversions,
-and logical deopt metadata mapping Lantern frame slots to SSA values. Physical
-metadata gives every referenced non-constant value a stable tagged or int32
-spill home and records the required boxing recipe. A bounded graph evaluator
+a verified branch-control fusion plan, and logical deopt metadata mapping
+Lantern frame slots to SSA values. Physical
+metadata recovers exact entry parameters from the untouched Lantern frame and
+gives other referenced non-constant values a stable tagged or int32 home with
+the required boxing recipe. A bounded graph evaluator
 now proves checked-int32 success and physical-deopt Lantern resumption against
 full Lantern runs. A deterministic linear-scan plan assigns bounded abstract
 registers or representation-partitioned spills, rematerializes immediates, and
-reuses stable homes when a recoverable value spills. A physical plan now maps
-six values to `x23`-`x28`, lays out aligned tagged/int32 frame regions, and
-resolves parallel edge moves through a dedicated cycle scratch while preserving
-boxing conversions. The native prologue/epilogue now saves that convention,
-chunks aligned spill reservation, and initializes tagged slots safely. Typed
+reuses stable homes when a recoverable value spills. The helper-free physical
+plan preserves entry arguments in volatile `x0`-`x2`, maps six values to
+`x3`-`x8`, lays out aligned tagged/int32 frame regions from `x16`, and resolves
+parallel edge moves through a dedicated cycle scratch while preserving boxing
+conversions. The native prologue/epilogue reserves only optional spills and
+initializes tagged slots safely; zero-spill graphs have no prologue. Typed
 register/stack moves and folded returns now emit, including int32 boxing, while
 heap constant-pool literals refuse raw code embedding. A verified AArch64 graph
 compiler now emits checked int32 add/sub/mul, constant and int32 control flow,
-parallel edge transfers, stable deopt-home writes, normal returns, and cold
-guard exits. An exit decodes the physical recipe at compile time and writes the
-pre-operation accumulator, live registers, and bytecode offset directly into
-the existing Lantern frame before returning `resume_interp`; the bailout path
-allocates nothing and calls no helper. The graph compiler also emits specialized
+parallel edge transfers, required derived-home writes, normal returns, and cold
+guard exits. An exit decodes the physical recipe at compile time, resolves
+direct frame aliases as bounded parallel moves, and writes the pre-operation
+accumulator, live registers, and bytecode offset directly into the existing
+Lantern frame before returning `resume_interp`; the bailout path allocates
+nothing and calls no helper. The graph compiler also emits specialized
 own-data, prototype-data, and frozen synthetic-accessor named loads. It validates
 the snapshot's realm-stable shape/slot/revision facts against the live
 chunk-owned `LoadICCell`, then reads the GC-managed prototype or synthetic value
@@ -481,13 +481,33 @@ collection that preserves a loop-carried object and reclaims an unrooted peer.
 The supported native subset still makes no helper call or allocation; such
 nodes continue to reject until rooted call safepoints land. Completed code now
 publishes transactionally into a chunk-owned T2 record, independently of
-Bistromath's owned main/continuation records. A realm-local default-off driver
-enters fresh ordinary functions after sustained heat (or threshold 1 under the
-test262 `--ohaimark` differential), then returns completed frames or resumes
-Lantern's reconstructed frame without offering that bailout to T1. Constructors,
-generators, async frames, and Ohaimark OSR remain lower-tier paths. The first
-full differential is green: the baseline and forced-T2 sweeps produced the same
-sorted 48,517-entry pass set.
+Bistromath's owned main/continuation records. The production CLI's default-on
+driver enters fresh ordinary functions after sustained heat (or threshold 1
+under the test262 `--ohaimark` differential), then returns a tagged completion
+in AAPCS64 `x0` or resumes Lantern's reconstructed frame after receiving the
+reserved one-word sentinel. `--no-ohaimark` retains Bistromath; `--no-jit`
+retains Lantern alone. Constructors, generators, async frames, and Ohaimark OSR
+remain lower-tier paths.
+The production-threshold rollout harness in [benchmarking.md](benchmarking.md)
+now compares T1 and T1+T2 with interleaved process pairs and machine-readable
+publication telemetry. Its first 30-pair arm64 sample published five supported
+leaves with no exits and negligible compile time, but measured `1.032x`
+geometric mean. Removing unconditional callee-save traffic improved the repeat
+to `1.017x` and 1.3 KiB. Recovering entry values directly from the Lantern
+frame improved the next sample to `1.002x` and 1.0 KiB. Branch-exclusive strict
+equality now keeps its original deopt node but receives no output location;
+AArch64 guards both int32 operands and branches on `eor` with `cbz/cbnz` without
+constructing a tagged Boolean. Single-predecessor register coalescing,
+next-block fallthrough, and a one-word completion ABI brought the next full run
+to `1.014x` and 0.9 KiB. Finally, the existing one-byte arithmetic profile was
+refined to distinguish Int32/Double operand order; exact-shape Number nodes now
+emit only one guard and the required conversion per input, while polymorphic
+sites retain the generic path. The final 30-pair rollout measured `0.997x`
+geometric mean, `1.041x` worst, and 0.8 KiB, passing both §10 gates. Forced-T2
+test262 matched the baseline's 48,517 sorted paths at SHA-256
+`52146dd368643d2eedd21f60c731589f7fd6a0245dadeb26f8cdd70a95ec2ae3`;
+GC-pressure and bounded fuzz campaigns completed without a verifier failure,
+host crash, or value differential.
 The decisions Bistromath must preserve are:
 
 - **Method JIT over a CFG SSA IR with linear storage.** Not sea of
@@ -777,7 +797,7 @@ The tier ships dark, proves equivalence, then flips on:
    sweep can't tell them apart.
    Ohaimark repeats this gate independently with test262 `--ohaimark`, which
    forces T2 before T1 without changing the established T1-only `--jit` pass
-   set. CI reruns that exact comparison as an advisory step and adds
+   set. CI reruns that exact comparison as a gating step and adds
    `--ohaimark-stats` so publication/refusal, refusal-stage/unsupported-opcode,
    and guard-exit evidence is visible on every PR.
 3. **gc-stress with force-compile.** `test262-safe` +
@@ -790,19 +810,17 @@ The tier ships dark, proves equivalence, then flips on:
    >5% elsewhere (compile-time inclusion makes warm-up visible —
    the fixtures are sized 50–100 ms, so a millisecond-class compile
    shows up honestly).
-5. **Flag posture.** `--jit` (off) while landing; defaults flip to
-   on only after gates 2–4 hold on full sweeps, leaving `--no-jit`
-   behind permanently (§8). The headline test262 score row never
-   changes meaning — same posture, same binary scoring; a
-   JIT-on differential sweep is an *additional* CI job, mirroring
-   how gc-stress runs today.
-6. **Cross-engine bench policy** ([benchmarking.md](benchmarking.md))
-   gains a second table when the default flips: the existing
-   interpreter-tier table (everyone `--jitless`) stays — it tracks
-   Lantern — and a baseline-tier table (V8
-   `--no-opt --sparkplug`-class configs, JSC
-   `JSC_useDFGJIT=0`-class) gets added then, not before. The
-   fuzzilli profile note ("No JIT") updates at the same moment.
+5. **Flag posture.** Each tier lands behind an independent off switch and flips
+   only after gates 2–4 hold. Both JS tiers have now graduated: production uses
+   T2 at natural thresholds, `--no-ohaimark` isolates T1, and `--no-jit`
+   remains the master Lantern-only opt-out (§8). The headline test262 score row
+   never changes meaning; force-tier differential sweeps remain additional CI
+   jobs.
+6. **Cross-engine bench policy** ([benchmarking.md](benchmarking.md)) retains
+   the interpreter-tier table (everyone `--jitless`) to track Lantern. The
+   local benchmark defaults to the production T2 posture and can select T1 or
+   T0 explicitly; a fair baseline-tier cross-engine table still requires
+   comparable per-engine tier controls.
 
 ## 11. Performance expectations
 
@@ -831,9 +849,11 @@ harnesses, recorded in `bench-results.md` / `wasm-bench-results.md`:
   the post-2018 norm (§7.1) — measured by the `wasm_boundary`
   micros. Anything worse means the thunk path picked up an
   indirect hop or an allocation it shouldn't have.
-- **Ohaimark:** unspecified here; its ADR sets targets off
-  Bistromath's measured numbers (the field says a further 2–3×
-  on JS, with deopt machinery as the price).
+- **Ohaimark:** the production rollout gate compares T2 directly with T1 at
+  natural thresholds: geometric-mean `T2/T1 <= 1.000x`, with no stable fixture
+  above `1.050x`. Graduation measured `0.997x` and `1.041x` respectively.
+  Broader speedup targets follow supported-surface growth; they do not weaken
+  the no-regression gate.
 
 ## 12. Delivery order (M5)
 
@@ -1221,16 +1241,20 @@ useful:
    that would make multi-target `br_table` cheap.
 5. **Ohaimark** — the ADR plus bytecode/feedback/SSA, initial specialization,
    tagged/int32 representation selection, and verified logical deopt metadata
-   plus stable physical spill homes have landed against measured Bistromath
-   data. A bounded graph evaluator also proves checked success and overflow
-   recovery against Lantern. Register allocation, AArch64 frame/edge lowering,
+   plus direct-entry/stable-home physical recovery have landed against measured
+   Bistromath data. A bounded graph evaluator also proves checked success and
+   overflow recovery against Lantern. Register allocation, AArch64 frame/edge lowering,
    checked int32 arithmetic/control emission, and direct guard-exit frame
-   reconstruction now also ship in the default-off tier, along with guarded
+   reconstruction now also ship in the default-on tier, along with guarded
    own/prototype/synthetic named loads through live IC cells and
    frame-reconstructing backedge safepoints. Transactional full-pipeline
    compilation now publishes owned code into independent T1/T2 chunk state.
-   Ordinary-function entry now reaches T2 through the disabled-by-default
-   realm gate. Next: broader GC/fuzz/performance evidence and OSR; see
+   Single-predecessor edge coalescing, physical fallthrough, one-word
+   completion, and exact Number operand-shape specialization passed the
+   performance gate; full differential, focused GC-pressure, and bounded fuzz
+   evidence passed the rollout audit. Ordinary-function entry now reaches T2
+   by default at natural thresholds. Next: OSR, rooted helper calls, broader
+   opcode coverage, and additional architectures; see
    [ohaimark.md](ohaimark.md).
 
 ## 13. Considered and declined

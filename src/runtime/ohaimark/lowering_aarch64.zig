@@ -1,31 +1,40 @@
 //! AArch64 physical-location and CFG-edge lowering plan for Ohaimark.
 //!
-//! This pass emits no machine code. It fixes the register convention, lays
-//! out the precise tagged/int32 spill regions, maps abstract allocation
-//! locations to physical ones, and sequentializes parallel block-argument
-//! assignments. Code generation consumes only this verified plan.
+//! This pass emits no machine code. It fixes the helper-free register
+//! convention, lays out the precise tagged/int32 spill regions, maps abstract
+//! allocation locations to physical ones, and sequentializes parallel
+//! block-argument assignments. Code generation consumes only this verified
+//! plan.
 
 const std = @import("std");
 
 const a64 = @import("../jit/asm_aarch64.zig");
 const allocation = @import("allocation.zig");
+const control_fusion = @import("control_fusion.zig");
 const deopt_physical = @import("deopt_physical.zig");
 const ir = @import("ir.zig");
 const parallel_moves = @import("parallel_moves.zig");
 const representation = @import("representation.zig");
 const specialize = @import("specialize.zig");
 
-pub const realm_register: a64.Reg = .x19;
-pub const lantern_frame_register: a64.Reg = .x20;
-pub const lantern_registers_register: a64.Reg = .x21;
-pub const spill_base_register: a64.Reg = .x22;
-pub const value_registers = [_]a64.Reg{ .x23, .x24, .x25, .x26, .x27, .x28 };
+/// The executable subset makes no helper call. Preserve the AAPCS64 incoming
+/// arguments in place and use only caller-saved registers, leaving FP/LR and
+/// x19-x28 untouched. A rooted helper-call lowering must introduce an explicit
+/// call-aware ABI before changing this invariant.
+pub const helper_calls_supported = false;
+pub const realm_register: a64.Reg = .x0;
+pub const lantern_frame_register: a64.Reg = .x1;
+pub const lantern_registers_register: a64.Reg = .x2;
+pub const value_registers = [_]a64.Reg{ .x3, .x4, .x5, .x6, .x7, .x8 };
 pub const cycle_scratch: a64.Reg = .x9;
 pub const transfer_scratch: a64.Reg = .x10;
 pub const boxing_scratch: a64.Reg = .x11;
+/// x12-x15 are graph/property/safepoint scratch. x16 anchors the native spill
+/// region; vector v16/v17 used by Number arithmetic are a separate register
+/// file and do not alias this general-purpose value.
+pub const spill_base_register: a64.Reg = .x16;
 
-/// FP/LR plus x19-x28, saved as six 16-byte pairs.
-pub const callee_save_bytes: u32 = 96;
+pub const callee_save_bytes: u32 = 0;
 const max_tagged_offset: u32 = 32_760;
 const max_int32_offset: u32 = 16_380;
 
@@ -105,10 +114,11 @@ pub const Plan = struct {
         graph: *const ir.Graph,
         specialization: *const specialize.Plan,
         representations: *const representation.Plan,
+        fused_control: *const control_fusion.Plan,
         homes: *const deopt_physical.Homes,
         allocated: *const allocation.Plan,
     ) !Plan {
-        try allocated.verify(graph, specialization, representations, homes);
+        try allocated.verify(graph, specialization, representations, fused_control, homes);
         if (allocated.register_count > value_registers.len) {
             return error.UnsupportedRegisterCount;
         }
@@ -142,7 +152,14 @@ pub const Plan = struct {
             .moves = move_slice,
         };
         errdefer plan.deinit();
-        try plan.verify(graph, specialization, representations, homes, allocated);
+        try plan.verify(
+            graph,
+            specialization,
+            representations,
+            fused_control,
+            homes,
+            allocated,
+        );
         return plan;
     }
 
@@ -158,10 +175,11 @@ pub const Plan = struct {
         graph: *const ir.Graph,
         specialization: *const specialize.Plan,
         representations: *const representation.Plan,
+        fused_control: *const control_fusion.Plan,
         homes: *const deopt_physical.Homes,
         allocated: *const allocation.Plan,
     ) !void {
-        try allocated.verify(graph, specialization, representations, homes);
+        try allocated.verify(graph, specialization, representations, fused_control, homes);
         if (allocated.register_count > value_registers.len or
             self.locations.len != graph.nodes.len or self.edges.len != graph.edges.len)
         {

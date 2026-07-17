@@ -1,10 +1,12 @@
 const std = @import("std");
 
 const chunk_mod = @import("../../bytecode/chunk.zig");
+const a64 = @import("../jit/asm_aarch64.zig");
 const Builder = chunk_mod.Builder;
 const Chunk = chunk_mod.Chunk;
 const Span = @import("../../source.zig").Span;
 const allocation = @import("allocation.zig");
+const control_fusion = @import("control_fusion.zig");
 const deopt = @import("deopt.zig");
 const deopt_physical = @import("deopt_physical.zig");
 const ir = @import("ir.zig");
@@ -28,10 +30,21 @@ test "Ohaimark AArch64 lowering lays out aligned representation regions" {
     try testing.expectEqual(@as(u32, 24), try frame.int32ByteOffset(0));
     try testing.expectEqual(@as(u32, 28), try frame.int32ByteOffset(1));
     try testing.expectEqual(@as(u32, 32), frame.spill_bytes);
-    try testing.expectEqual(@as(u32, 128), frame.native_frame_bytes);
+    try testing.expectEqual(@as(u32, 32), frame.native_frame_bytes);
     try testing.expectEqual(@as(u32, 0), frame.tagged_start);
     try testing.expectEqual(@as(u32, 24), frame.int32_start);
     try testing.expectEqual(@as(u32, 0), frame.spill_bytes % 16);
+    try testing.expect(!lowering.helper_calls_supported);
+    try testing.expectEqual(@as(u32, 0), lowering.callee_save_bytes);
+    try testing.expectEqual(a64.Reg.x0, lowering.realm_register);
+    try testing.expectEqual(a64.Reg.x1, lowering.lantern_frame_register);
+    try testing.expectEqual(a64.Reg.x2, lowering.lantern_registers_register);
+    try testing.expectEqual(a64.Reg.x16, lowering.spill_base_register);
+    try testing.expectEqualSlices(
+        a64.Reg,
+        &.{ .x3, .x4, .x5, .x6, .x7, .x8 },
+        &lowering.value_registers,
+    );
 
     try testing.expectEqual(lowering.value_registers[0], try lowering.valueRegister(0));
     try testing.expectEqual(lowering.value_registers[5], try lowering.valueRegister(5));
@@ -40,8 +53,8 @@ test "Ohaimark AArch64 lowering lays out aligned representation regions" {
 }
 
 test "Ohaimark parallel moves preserve cycles and fanout" {
-    const a: parallel_moves.Location = .{ .register = .x23 };
-    const b: parallel_moves.Location = .{ .register = .x24 };
+    const a: parallel_moves.Location = .{ .register = lowering.value_registers[0] };
+    const b: parallel_moves.Location = .{ .register = lowering.value_registers[1] };
     const spill: parallel_moves.Location = .{ .tagged_stack = 0 };
     const assignments = [_]parallel_moves.Assignment{
         .{
@@ -183,6 +196,13 @@ test "Ohaimark AArch64 lowering boxes edge values and verifies the plan" {
         &specialization,
     );
     defer representations.deinit();
+    var fused_control = try control_fusion.Plan.build(
+        testing.allocator,
+        &graph,
+        &specialization,
+        &representations,
+    );
+    defer fused_control.deinit();
     var logical = try deopt.Metadata.build(testing.allocator, &graph, &specialization);
     defer logical.deinit();
     var homes = try deopt_physical.Homes.build(
@@ -198,6 +218,7 @@ test "Ohaimark AArch64 lowering boxes edge values and verifies the plan" {
         &graph,
         &specialization,
         &representations,
+        &fused_control,
         &homes,
         .{ .register_count = 0 },
     );
@@ -207,6 +228,7 @@ test "Ohaimark AArch64 lowering boxes edge values and verifies the plan" {
         &graph,
         &specialization,
         &representations,
+        &fused_control,
         &homes,
         &allocated,
     );
@@ -215,6 +237,7 @@ test "Ohaimark AArch64 lowering boxes edge values and verifies the plan" {
         &graph,
         &specialization,
         &representations,
+        &fused_control,
         &homes,
         &allocated,
     );
@@ -243,6 +266,7 @@ test "Ohaimark AArch64 lowering boxes edge values and verifies the plan" {
             &graph,
             &specialization,
             &representations,
+            &fused_control,
             &homes,
             &allocated,
         ),

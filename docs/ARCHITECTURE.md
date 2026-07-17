@@ -43,7 +43,7 @@ that will be settled with an ADR when the time comes.
         │  hotter
         ▼
    ┌──────────────────┐
-   │  Ohaimark (T2)   │  ◄── owned checked/IC AArch64 code; default-off entry (M6)
+   │  Ohaimark (T2)   │  ◄── default-on checked/IC AArch64 code (M6)
    └──────────────────┘
    data flows T0→T1→T2; deopt can fall all the way back to Lantern (T0)
 
@@ -242,14 +242,14 @@ i8/i16/i32, and remaps source, handler, and dense-switch side tables.
 Load, store, and computed property sites use separate typed IC arrays
 so their layouts and index spaces stay small. Bytecode is the source
 of truth for IR — Bistromath (default-on since 2026-06; `--no-jit`
-opts out) and Ohaimark
-(feedback/SSA/specialization/representation/deopt-home front end plus
-differential evaluator and a checked-int32/property-IC AArch64 subset with
-frame-reconstructing backedge safepoints plus transactional chunk-owned code
-installation landed; default-off ordinary-function entry now dispatches T2
-before T1, while OSR and default-on rollout remain future work)
-consume bytecode +
-warmth/IC data, not the AST. Ohaimark's accepted design and GC-pointer-free
+opts out) and Ohaimark (default-on at natural thresholds;
+`--no-ohaimark` isolates T1, while `--no-jit` disables both). Ohaimark's
+feedback/SSA/specialization/representation/deopt-home front end, differential
+evaluator, checked-int32/Number/property-IC AArch64 subset,
+frame-reconstructing backedge safepoints, transactional chunk-owned code,
+single-predecessor edge coalescing, and one-word completion ABI have landed;
+OSR and rooted helper calls remain future work. Both tiers consume bytecode
+plus warmth/IC data, not the AST. Ohaimark's accepted design and GC-pointer-free
 feedback boundary are in [ohaimark.md](ohaimark.md).
 
 An opt-in instrumentation build (`-Dbytecode-stats=true`, then

@@ -85,7 +85,8 @@ pub const ForIn = struct {
 };
 
 pub const Binary = struct {
-    mode: chunk_mod.BinaryTypeMode,
+    mode: chunk_mod.BinaryTypeMode = .cold,
+    shape: chunk_mod.BinaryNumberShape = .cold,
 };
 
 pub const Snapshot = struct {
@@ -197,7 +198,10 @@ pub const Snapshot = struct {
         }
 
         for (chunk.inline_binary_profiles, binary) |profile, *out| {
-            out.* = .{ .mode = profile.mode() };
+            out.* = .{
+                .mode = profile.mode(),
+                .shape = profile.numberShape(),
+            };
         }
 
         return .{

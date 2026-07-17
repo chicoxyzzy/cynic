@@ -324,7 +324,7 @@ fn driveTop(
             },
             .frame_pushed => {
                 // A compiled call/construct site pushed the callee at the top.
-                // Offer the fresh frame to default-off T2 first; if T2 refuses,
+                // Offer the fresh frame to policy-enabled T2 first; if it refuses,
                 // select T1 without nesting another `driveTop`. A T2 completion
                 // pops the callee, so resume this compiled caller exactly like
                 // the `.done` path above. A guard exit leaves the callee parked

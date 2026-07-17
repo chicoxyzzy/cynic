@@ -9,6 +9,7 @@
 
 const std = @import("std");
 
+const BinaryNumberShape = @import("../../bytecode/chunk.zig").BinaryNumberShape;
 const Chunk = @import("../../bytecode/chunk.zig").Chunk;
 const a64 = @import("../jit/asm_aarch64.zig");
 const layout = @import("../jit/layout.zig");
@@ -16,6 +17,7 @@ const Masm = @import("../jit/masm.zig").Masm;
 const arith = @import("../lantern/arith.zig");
 const Value = @import("../value.zig").Value;
 const allocation = @import("allocation.zig");
+const control_fusion = @import("control_fusion.zig");
 const deopt = @import("deopt.zig");
 const deopt_physical = @import("deopt_physical.zig");
 const emitter = @import("emitter_aarch64.zig");
@@ -34,6 +36,19 @@ pub const EntryResult = enum(u32) {
     done = 1,
 };
 
+/// Generated entries return one word in x0: a canonical tagged `Value` on
+/// completion, or this noncanonical encoded-NaN payload after reconstructing
+/// the Lantern frame. `Value.fromDouble` canonicalizes every NaN to payload
+/// zero, and non-double values occupy the 0xFFF9..0xFFFF tag range, so valid JS
+/// values cannot collide with this internal control sentinel.
+pub const resume_sentinel_bits: u64 = 0x7FFA_0000_0000_0001;
+
+comptime {
+    const decoded: f64 = @bitCast(resume_sentinel_bits -% Value.double_encode_offset);
+    std.debug.assert(std.math.isNan(decoded));
+    std.debug.assert(resume_sentinel_bits != Value.fromDouble(std.math.nan(f64)).bits);
+}
+
 const max_graph_items = 16 * 1024;
 const max_graph_nodes = 4 * 1024;
 
@@ -42,6 +57,38 @@ const rhs_scratch: a64.Reg = .x13;
 const result_scratch: a64.Reg = .x14;
 const guard_scratch: a64.Reg = .x15;
 
+const NumberInputKind = enum {
+    generic,
+    int32,
+    double,
+};
+
+fn numberInputKind(shape: ?BinaryNumberShape, operand: usize) NumberInputKind {
+    const exact = shape orelse return .generic;
+    return switch (exact) {
+        .int32_int32 => .int32,
+        .double_int32 => if (operand == 0) .double else .int32,
+        .int32_double => if (operand == 0) .int32 else .double,
+        .double_double => .double,
+        .cold, .polymorphic => .generic,
+    };
+}
+
+const FrameLocation = union(enum) {
+    accumulator,
+    register: u8,
+};
+
+const FrameMoveSource = union(enum) {
+    frame: FrameLocation,
+    cycle_scratch,
+};
+
+const FrameMove = struct {
+    source: FrameMoveSource,
+    destination: FrameLocation,
+};
+
 pub fn emitGraph(
     allocator: std.mem.Allocator,
     machine: *Masm,
@@ -49,6 +96,7 @@ pub fn emitGraph(
     graph: *const ir.Graph,
     specialization: *const specialize.Plan,
     representations: *const representation.Plan,
+    fused_control: *const control_fusion.Plan,
     logical: *const deopt.Metadata,
     homes: *const deopt_physical.Homes,
     physical_deopt: *const deopt_physical.Metadata,
@@ -64,9 +112,18 @@ pub fn emitGraph(
     {
         return error.GraphTooLarge;
     }
+    try specialization.verify(graph);
+    try fused_control.verify(graph, specialization, representations);
     try physical_deopt.verify(graph, specialization, representations, logical, homes);
-    try allocated.verify(graph, specialization, representations, homes);
-    try lowered.verify(graph, specialization, representations, homes, allocated);
+    try allocated.verify(graph, specialization, representations, fused_control, homes);
+    try lowered.verify(
+        graph,
+        specialization,
+        representations,
+        fused_control,
+        homes,
+        allocated,
+    );
 
     const block_labels = try allocator.alloc(Masm.Label, graph.blocks.len);
     defer {
@@ -99,6 +156,7 @@ pub fn emitGraph(
         .graph = graph,
         .specialization = specialization,
         .representations = representations,
+        .fused_control = fused_control,
         .homes = homes,
         .physical_deopt = physical_deopt,
         .lowered = lowered,
@@ -118,6 +176,7 @@ const Compiler = struct {
     graph: *const ir.Graph,
     specialization: *const specialize.Plan,
     representations: *const representation.Plan,
+    fused_control: *const control_fusion.Plan,
     homes: *const deopt_physical.Homes,
     physical_deopt: *const deopt_physical.Metadata,
     lowered: *const lowering.Plan,
@@ -208,6 +267,16 @@ const Compiler = struct {
                 return false;
             },
             .strict_eq => {
+                if (try self.fused_control.valueIsElided(node_id)) {
+                    if (info.lowering != .strict_eq or
+                        self.representations.outputs[node_id] != .tagged or
+                        self.lowered.locations[node_id] != .none or
+                        self.homes.values[node_id] != null)
+                    {
+                        return error.InvalidControlFusion;
+                    }
+                    return false;
+                }
                 if (info.lowering == .constant) return false;
                 try self.emitStrictEqual(node_id, info.lowering);
                 return false;
@@ -403,10 +472,21 @@ const Compiler = struct {
             return error.InvalidRepresentation;
         }
         const guard = try self.guardFor(node_id);
+        const number_shape = self.specialization.node_info[node_id].number_shape;
         try self.emitTaggedInput(node_id, 0, lhs_scratch);
         try self.emitTaggedInput(node_id, 1, rhs_scratch);
-        try self.emitTaggedNumberAsDouble(lhs_scratch, .x16, guard);
-        try self.emitTaggedNumberAsDouble(rhs_scratch, .x17, guard);
+        try self.emitTaggedNumberAsDouble(
+            lhs_scratch,
+            .x16,
+            guard,
+            numberInputKind(number_shape, 0),
+        );
+        try self.emitTaggedNumberAsDouble(
+            rhs_scratch,
+            .x17,
+            guard,
+            numberInputKind(number_shape, 1),
+        );
         try self.machine.emit(switch (kind) {
             .mul => a64.fmulD(.x16, .x16, .x17),
             .div => a64.fdivD(.x16, .x16, .x17),
@@ -429,7 +509,27 @@ const Compiler = struct {
         value: a64.Reg,
         fp: a64.Reg,
         guard: *Masm.Label,
+        input_kind: NumberInputKind,
     ) !void {
+        if (input_kind == .int32) {
+            try self.machine.emit(a64.lsrImm(result_scratch, value, 48));
+            try self.machine.movImm64(guard_scratch, Value.tag_int32);
+            try self.machine.emit(a64.cmpReg(result_scratch, guard_scratch));
+            try self.jumpToGuardIf(.ne, guard);
+            try self.machine.emit(a64.scvtfDfromW(fp, value));
+            return;
+        }
+        if (input_kind == .double) {
+            try self.machine.emit(a64.lsrImm(result_scratch, value, 48));
+            try self.machine.movImm64(guard_scratch, Value.tag_object);
+            try self.machine.emit(a64.cmpReg(result_scratch, guard_scratch));
+            try self.jumpToGuardIf(.cs, guard);
+            try self.machine.movImm64(guard_scratch, Value.double_encode_offset);
+            try self.machine.emit(a64.subReg(result_scratch, value, guard_scratch));
+            try self.machine.emit(a64.fmovXtoD(fp, result_scratch));
+            return;
+        }
+
         var int32_value: Masm.Label = .{};
         defer int32_value.deinit(self.allocator);
         var done: Masm.Label = .{};
@@ -822,13 +922,7 @@ const Compiler = struct {
         if (try self.representations.conversionAt(self.graph, inputs.start) != expected_conversion) {
             return error.InvalidRepresentation;
         }
-        try self.emitTaggedValue(producer, lhs_scratch);
-        try self.machine.emit(a64.strImm(
-            lhs_scratch,
-            lowering.lantern_frame_register,
-            layout.frame.accumulator,
-        ));
-        try self.machine.emit(a64.movz(.x0, @intFromEnum(EntryResult.done), 0));
+        try self.emitTaggedValue(producer, .x0);
         try emitter.emitEpilogue(self.machine, self.lowered.frame);
     }
 
@@ -836,6 +930,14 @@ const Compiler = struct {
         const node = self.graph.nodes[node_id];
         const inputs = try checkedRange(self.graph.inputs.len, node.input_start, node.input_count);
         if (inputs.len != 1) return error.MalformedGraph;
+        const condition = switch (node.payload) {
+            .branch => |value| value,
+            else => return error.MalformedGraph,
+        };
+        if (try self.fused_control.strictEqualForBranch(node_id)) |comparison| {
+            try self.emitFusedStrictEqualBranch(block_index, comparison, condition);
+            return;
+        }
         const producer = self.graph.inputs[inputs.start];
         const location = try self.valueLocation(producer);
         if (location == .immediate) {
@@ -856,10 +958,6 @@ const Compiler = struct {
         if (!boxed_int32 and !strict_boolean) {
             return error.UnsupportedNode;
         }
-        const condition = switch (node.payload) {
-            .branch => |value| value,
-            else => return error.MalformedGraph,
-        };
         if (condition == .nullish) {
             try self.emitEdgeAndJump(try self.edgeForKind(block_index, .branch_fallthrough));
             return;
@@ -878,15 +976,127 @@ const Compiler = struct {
             try self.machine.movImm64(rhs_scratch, Value.false_.bits);
             try self.machine.emit(a64.cmpReg(lhs_scratch, rhs_scratch));
         }
+        try self.emitConditionalEdges(
+            block_index,
+            if (condition == .truthy) .ne else .eq,
+        );
+    }
+
+    fn emitFusedStrictEqualBranch(
+        self: *Compiler,
+        block_index: usize,
+        comparison: ir.ValueId,
+        condition: ir.BranchCondition,
+    ) !void {
+        if (condition == .nullish or comparison >= self.graph.nodes.len or
+            comparison >= self.specialization.node_info.len or
+            comparison >= self.representations.outputs.len or
+            comparison >= self.lowered.locations.len or comparison >= self.homes.values.len)
+        {
+            return error.InvalidControlFusion;
+        }
+        const node = self.graph.nodes[comparison];
+        const info = self.specialization.node_info[comparison];
+        if (node.kind != .strict_eq or node.frame_state == null or
+            info.lowering != .strict_eq or self.representations.outputs[comparison] != .tagged or
+            self.lowered.locations[comparison] != .none or self.homes.values[comparison] != null)
+        {
+            return error.InvalidControlFusion;
+        }
+
+        const guard = try self.guardFor(comparison);
+        try self.emitInt32Input(comparison, 0, lhs_scratch, guard);
+        try self.emitInt32Input(comparison, 1, rhs_scratch, guard);
+        try self.machine.emit(a64.eorRegW(result_scratch, lhs_scratch, rhs_scratch));
+        try self.emitZeroConditionalEdges(
+            block_index,
+            result_scratch,
+            condition == .truthy,
+        );
+    }
+
+    fn emitZeroConditionalEdges(
+        self: *Compiler,
+        block_index: usize,
+        value: a64.Reg,
+        take_if_zero: bool,
+    ) !void {
+        if (try self.canElideFallthroughEdge(block_index)) {
+            var fallthrough: Masm.Label = .{};
+            defer fallthrough.deinit(self.allocator);
+            if (take_if_zero) {
+                try self.machine.jumpCbnz(value, &fallthrough);
+            } else {
+                try self.machine.jumpCbz(value, &fallthrough);
+            }
+            try self.emitEdgeAndJump(try self.edgeForKind(block_index, .branch_taken));
+            self.machine.bind(&fallthrough);
+            return;
+        }
         var taken: Masm.Label = .{};
         defer taken.deinit(self.allocator);
-        try self.machine.jumpCond(
-            if (condition == .truthy) .ne else .eq,
-            &taken,
-        );
+        if (take_if_zero) {
+            try self.machine.jumpCbz(value, &taken);
+        } else {
+            try self.machine.jumpCbnz(value, &taken);
+        }
         try self.emitEdgeAndJump(try self.edgeForKind(block_index, .branch_fallthrough));
         self.machine.bind(&taken);
         try self.emitEdgeAndJump(try self.edgeForKind(block_index, .branch_taken));
+    }
+
+    fn emitConditionalEdges(
+        self: *Compiler,
+        block_index: usize,
+        taken_condition: a64.Cond,
+    ) !void {
+        if (try self.canElideFallthroughEdge(block_index)) {
+            var fallthrough: Masm.Label = .{};
+            defer fallthrough.deinit(self.allocator);
+            const inverse: a64.Cond = @enumFromInt(@intFromEnum(taken_condition) ^ 1);
+            try self.machine.jumpCond(inverse, &fallthrough);
+            try self.emitEdgeAndJump(try self.edgeForKind(block_index, .branch_taken));
+            self.machine.bind(&fallthrough);
+            return;
+        }
+        var taken: Masm.Label = .{};
+        defer taken.deinit(self.allocator);
+        try self.machine.jumpCond(taken_condition, &taken);
+        try self.emitEdgeAndJump(try self.edgeForKind(block_index, .branch_fallthrough));
+        self.machine.bind(&taken);
+        try self.emitEdgeAndJump(try self.edgeForKind(block_index, .branch_taken));
+    }
+
+    /// Blocks are emitted in bytecode order. When the fallthrough successor is
+    /// physically next and its verified transfer is empty, branch over only
+    /// the taken-edge transfer and let execution enter that block directly.
+    fn canElideFallthroughEdge(self: *const Compiler, block_index: usize) !bool {
+        if (block_index >= self.graph.blocks.len) return error.MalformedGraph;
+        var next = block_index + 1;
+        while (next < self.graph.blocks.len and !self.graph.blocks[next].reachable) : (next += 1) {}
+        if (next >= self.graph.blocks.len) return false;
+
+        const edge_index = try self.edgeForKind(block_index, .branch_fallthrough);
+        if (edge_index >= self.graph.edges.len or edge_index >= self.lowered.edges.len) {
+            return error.MalformedGraph;
+        }
+        const edge = self.graph.edges[edge_index];
+        if (edge.from != block_index or edge.to != next) return false;
+        const edge_plan = self.lowered.edges[edge_index];
+        _ = try checkedRange(
+            self.lowered.moves.len,
+            edge_plan.move_start,
+            edge_plan.move_count,
+        );
+        if (edge_plan.move_count != 0) return false;
+
+        const target = self.graph.blocks[edge.to];
+        const params = try checkedRange(self.graph.params.len, target.param_start, target.param_count);
+        for (self.graph.params[params.start..params.end()]) |param| {
+            if (param.value >= self.homes.values.len) return error.InvalidMetadata;
+            if (self.homes.values[param.value] != null) return false;
+        }
+        return true;
     }
 
     fn emitEdgeAndJump(self: *Compiler, edge_index: usize) !void {
@@ -1017,7 +1227,7 @@ const Compiler = struct {
             lowering.lantern_frame_register,
             layout.frame.ip,
         ));
-        try self.machine.emit(a64.movz(.x0, @intFromEnum(EntryResult.resume_interp), 0));
+        try self.machine.movImm64(.x0, resume_sentinel_bits);
         try emitter.emitEpilogue(self.machine, self.lowered.frame);
     }
 
@@ -1049,19 +1259,13 @@ const Compiler = struct {
     fn emitGuardExit(self: *Compiler, point_index: usize) !void {
         var point = try self.physical_deopt.decode(self.allocator, point_index);
         defer point.deinit();
-        try self.emitRecovery(point.accumulator);
-        try self.machine.emit(a64.strImm(
-            lhs_scratch,
-            lowering.lantern_frame_register,
-            layout.frame.accumulator,
-        ));
+        try self.emitDirectFrameRecoveries(point);
+        try self.emitExternalRecovery(point.accumulator, .accumulator);
         for (point.slots) |slot| {
-            try self.emitRecovery(slot.recovery);
-            try self.machine.emit(a64.strImm(
-                lhs_scratch,
-                lowering.lantern_registers_register,
-                try registerOffset(slot.register),
-            ));
+            try self.emitExternalRecovery(
+                slot.recovery,
+                .{ .register = slot.register },
+            );
         }
         try self.machine.movImm64(lhs_scratch, point.bytecode_offset);
         try self.machine.emit(a64.strImm(
@@ -1069,12 +1273,129 @@ const Compiler = struct {
             lowering.lantern_frame_register,
             layout.frame.ip,
         ));
-        try self.machine.emit(a64.movz(.x0, @intFromEnum(EntryResult.resume_interp), 0));
+        try self.machine.movImm64(.x0, resume_sentinel_bits);
         try emitter.emitEpilogue(self.machine, self.lowered.frame);
+    }
+
+    /// Entry-frame recoveries are parallel assignments: a destination may
+    /// still hold another recipe's source. Resolve those moves before any
+    /// spill/immediate write can overwrite an original Lantern value.
+    fn emitDirectFrameRecoveries(
+        self: *Compiler,
+        point: deopt_physical.DecodedPoint,
+    ) !void {
+        var pending: std.ArrayListUnmanaged(FrameMove) = .empty;
+        defer pending.deinit(self.allocator);
+        try appendFrameMove(&pending, self.allocator, point.accumulator, .accumulator);
+        for (point.slots) |slot| {
+            try appendFrameMove(
+                &pending,
+                self.allocator,
+                slot.recovery,
+                .{ .register = slot.register },
+            );
+        }
+
+        var steps_left = pending.items.len * 2 + 1;
+        while (pending.items.len != 0) {
+            if (steps_left == 0) return error.InvalidMetadata;
+            steps_left -= 1;
+            var ready: ?usize = null;
+            for (pending.items, 0..) |move, index| {
+                if (!frameDestinationIsSource(move.destination, pending.items)) {
+                    ready = index;
+                    break;
+                }
+            }
+            if (ready) |index| {
+                try self.emitFrameMove(pending.orderedRemove(index));
+                continue;
+            }
+
+            var cycle_source: ?FrameLocation = null;
+            for (pending.items) |move| switch (move.source) {
+                .frame => |source| {
+                    cycle_source = source;
+                    break;
+                },
+                .cycle_scratch => {},
+            };
+            const source = cycle_source orelse return error.InvalidMetadata;
+            try self.emitFrameLoad(source, guard_scratch);
+            for (pending.items) |*move| switch (move.source) {
+                .frame => |candidate| {
+                    if (frameLocationEql(candidate, source)) {
+                        move.source = .cycle_scratch;
+                    }
+                },
+                .cycle_scratch => {},
+            };
+        }
+    }
+
+    fn emitFrameMove(self: *Compiler, move: FrameMove) !void {
+        switch (move.source) {
+            .frame => |source| try self.emitFrameLoad(source, lhs_scratch),
+            .cycle_scratch => try self.machine.emit(a64.movReg(
+                lhs_scratch,
+                guard_scratch,
+            )),
+        }
+        try self.emitFrameStore(move.destination, lhs_scratch);
+    }
+
+    fn emitFrameLoad(
+        self: *Compiler,
+        source: FrameLocation,
+        destination: a64.Reg,
+    ) !void {
+        const base: a64.Reg, const offset: u15 = switch (source) {
+            .accumulator => .{
+                lowering.lantern_frame_register,
+                layout.frame.accumulator,
+            },
+            .register => |register| .{
+                lowering.lantern_registers_register,
+                try registerOffset(register),
+            },
+        };
+        try self.machine.emit(a64.ldrImm(destination, base, offset));
+    }
+
+    fn emitFrameStore(
+        self: *Compiler,
+        destination: FrameLocation,
+        source: a64.Reg,
+    ) !void {
+        const base: a64.Reg, const offset: u15 = switch (destination) {
+            .accumulator => .{
+                lowering.lantern_frame_register,
+                layout.frame.accumulator,
+            },
+            .register => |register| .{
+                lowering.lantern_registers_register,
+                try registerOffset(register),
+            },
+        };
+        try self.machine.emit(a64.strImm(source, base, offset));
+    }
+
+    fn emitExternalRecovery(
+        self: *Compiler,
+        recovery: deopt_physical.Recovery,
+        destination: FrameLocation,
+    ) !void {
+        switch (recovery) {
+            .frame_accumulator, .frame_register => return,
+            .tagged_stack, .int32_stack, .immediate => {},
+        }
+        try self.emitRecovery(recovery);
+        try self.emitFrameStore(destination, lhs_scratch);
     }
 
     fn emitRecovery(self: *Compiler, recovery: deopt_physical.Recovery) !void {
         const source: parallel_moves.Location, const source_kind: representation.Kind = switch (recovery) {
+            .frame_accumulator, .frame_register => return error.InvalidMetadata,
             .tagged_stack => |slot| .{
                 .{ .tagged_stack = try self.lowered.frame.taggedByteOffset(slot) },
                 .tagged,
@@ -1176,6 +1497,43 @@ const Compiler = struct {
         return target.start <= source.start;
     }
 };
+
+fn appendFrameMove(
+    pending: *std.ArrayListUnmanaged(FrameMove),
+    allocator: std.mem.Allocator,
+    recovery: deopt_physical.Recovery,
+    destination: FrameLocation,
+) !void {
+    const source = switch (recovery) {
+        .frame_accumulator => FrameLocation.accumulator,
+        .frame_register => |register| FrameLocation{ .register = register },
+        .tagged_stack, .int32_stack, .immediate => return,
+    };
+    if (frameLocationEql(source, destination)) return;
+    try pending.append(allocator, .{
+        .source = .{ .frame = source },
+        .destination = destination,
+    });
+}
+
+fn frameDestinationIsSource(
+    destination: FrameLocation,
+    pending: []const FrameMove,
+) bool {
+    for (pending) |move| switch (move.source) {
+        .frame => |source| if (frameLocationEql(destination, source)) return true,
+        .cycle_scratch => {},
+    };
+    return false;
+}
+
+fn frameLocationEql(lhs: FrameLocation, rhs: FrameLocation) bool {
+    if (std.meta.activeTag(lhs) != std.meta.activeTag(rhs)) return false;
+    return switch (lhs) {
+        .accumulator => true,
+        .register => |register| register == rhs.register,
+    };
+}
 
 fn immediateValue(chunk: *const Chunk, immediate: ir.Immediate) !Value {
     return switch (immediate) {

@@ -9,6 +9,7 @@
 const std = @import("std");
 
 const schedule = @import("allocation_schedule.zig");
+const control_fusion = @import("control_fusion.zig");
 const deopt_physical = @import("deopt_physical.zig");
 const ir = @import("ir.zig");
 const representation = @import("representation.zig");
@@ -46,10 +47,12 @@ pub const Plan = struct {
         graph: *const ir.Graph,
         specialization: *const specialize.Plan,
         representations: *const representation.Plan,
+        fused_control: *const control_fusion.Plan,
         homes: *const deopt_physical.Homes,
         options: Options,
     ) !Plan {
         try representations.verify(graph, specialization);
+        try fused_control.verify(graph, specialization, representations);
         try validateHomes(graph, specialization, representations, homes);
 
         const locations = try allocator.alloc(Location, graph.nodes.len);
@@ -61,6 +64,7 @@ pub const Plan = struct {
             graph,
             specialization,
             representations,
+            fused_control,
             homes,
             options,
             locations,
@@ -76,7 +80,7 @@ pub const Plan = struct {
             .int32_slot_count = counts.int32,
         };
         errdefer plan.deinit();
-        try plan.verify(graph, specialization, representations, homes);
+        try plan.verify(graph, specialization, representations, fused_control, homes);
         return plan;
     }
 
@@ -91,9 +95,11 @@ pub const Plan = struct {
         graph: *const ir.Graph,
         specialization: *const specialize.Plan,
         representations: *const representation.Plan,
+        fused_control: *const control_fusion.Plan,
         homes: *const deopt_physical.Homes,
     ) !void {
         try representations.verify(graph, specialization);
+        try fused_control.verify(graph, specialization, representations);
         try validateHomes(graph, specialization, representations, homes);
         if (self.locations.len != graph.nodes.len or self.ranges.len != graph.nodes.len) {
             return error.InvalidAllocation;
@@ -108,6 +114,7 @@ pub const Plan = struct {
             graph,
             specialization,
             representations,
+            fused_control,
             homes,
             .{ .register_count = self.register_count },
             expected_locations,
@@ -174,6 +181,7 @@ fn compute(
     graph: *const ir.Graph,
     specialization: *const specialize.Plan,
     representations: *const representation.Plan,
+    fused_control: *const control_fusion.Plan,
     homes: *const deopt_physical.Homes,
     options: Options,
     locations: []Location,
@@ -186,7 +194,12 @@ fn compute(
         return error.MalformedGraph;
     }
     @memset(locations, .none);
-    try schedule.compute(allocator, graph, representations, ranges);
+    try schedule.compute(allocator, graph, representations, fused_control, ranges);
+    for (ranges, homes.values, 0..) |maybe_range, home, value_index| {
+        if (!(try fused_control.valueIsElided(try valueId(value_index)))) continue;
+        const range = maybe_range orelse return error.InvalidControlFusion;
+        if (range.use_count != 0 or home != null) return error.InvalidControlFusion;
+    }
 
     for (graph.nodes, specialization.node_info, representations.outputs, 0..) |
         node,
@@ -208,11 +221,15 @@ fn compute(
         try candidates.append(allocator, try valueId(value_index));
     }
     sortValues(candidates.items, ranges);
+    const register_hints = try allocator.alloc(?ir.ValueId, graph.nodes.len);
+    defer allocator.free(register_hints);
+    try buildRegisterHints(allocator, graph, representations, register_hints);
     try allocateRegisters(
         allocator,
         candidates.items,
         ranges,
         locations,
+        register_hints,
         options.register_count,
     );
 
@@ -239,8 +256,10 @@ fn allocateRegisters(
     candidates: []const ir.ValueId,
     ranges: []const ?LiveRange,
     locations: []Location,
+    register_hints: []const ?ir.ValueId,
     register_count: u8,
 ) !void {
+    if (register_hints.len != locations.len) return error.MalformedGraph;
     const owners = try allocator.alloc(?ir.ValueId, register_count);
     defer allocator.free(owners);
     @memset(owners, null);
@@ -254,9 +273,17 @@ fn allocateRegisters(
             }
         }
 
-        var free_register: ?usize = null;
+        var free_register: ?usize = if (register_hints[value]) |source| blk: {
+            if (source >= locations.len) return error.MalformedGraph;
+            const preferred = switch (locations[source]) {
+                .register => |register| register,
+                .none, .immediate, .tagged_stack, .int32_stack => break :blk null,
+            };
+            if (preferred >= owners.len) return error.InvalidAllocation;
+            break :blk if (owners[preferred] == null) preferred else null;
+        } else null;
         for (owners, 0..) |owner, register| {
-            if (owner == null) {
+            if (free_register == null and owner == null) {
                 free_register = register;
                 break;
             }
@@ -284,6 +311,59 @@ fn allocateRegisters(
         locations[victim] = .none;
         locations[value] = .{ .register = @intCast(victim_register) };
         owners[victim_register] = value;
+    }
+}
+
+/// A single-predecessor block argument can reuse its incoming register without
+/// constraining any merge. Keep the hint conservative: representation changes
+/// and edge conversions still need an explicit transfer.
+fn buildRegisterHints(
+    allocator: std.mem.Allocator,
+    graph: *const ir.Graph,
+    representations: *const representation.Plan,
+    hints: []?ir.ValueId,
+) !void {
+    if (hints.len != graph.nodes.len or
+        representations.outputs.len != graph.nodes.len or
+        representations.input_requirements.len != graph.inputs.len)
+    {
+        return error.MalformedGraph;
+    }
+    @memset(hints, null);
+    const incoming = try allocator.alloc(?usize, graph.blocks.len);
+    defer allocator.free(incoming);
+    @memset(incoming, null);
+
+    for (graph.edges, 0..) |edge, edge_index| {
+        if (edge.to >= graph.blocks.len) return error.MalformedGraph;
+        if (graph.blocks[edge.to].predecessor_count != 1) continue;
+        if (incoming[edge.to] != null) return error.MalformedGraph;
+        incoming[edge.to] = edge_index;
+    }
+
+    for (graph.blocks, 0..) |block, block_index| {
+        if (!block.reachable or block.predecessor_count != 1) continue;
+        const edge_index = incoming[block_index] orelse return error.MalformedGraph;
+        const edge = graph.edges[edge_index];
+        const params = try checkedRange(graph.params.len, block.param_start, block.param_count);
+        const arguments = try checkedRange(
+            graph.inputs.len,
+            edge.argument_start,
+            edge.argument_count,
+        );
+        if (params.len != arguments.len) return error.MalformedGraph;
+        for (0..params.len) |offset| {
+            const parameter = graph.params[params.start + offset].value;
+            const input_index = arguments.start + offset;
+            const source = graph.inputs[input_index];
+            if (parameter >= hints.len or source >= hints.len) return error.MalformedGraph;
+            if (representations.outputs[parameter] != representations.outputs[source] or
+                try representations.conversionAt(graph, input_index) != .none)
+            {
+                continue;
+            }
+            hints[parameter] = source;
+        }
     }
 }
 

@@ -7,7 +7,7 @@ const std = @import("std");
 
 const feedback = @import("feedback.zig");
 const ir = @import("ir.zig");
-const BinaryTypeMode = @import("../../bytecode/chunk.zig").BinaryTypeMode;
+const BinaryNumberShape = @import("../../bytecode/chunk.zig").BinaryNumberShape;
 const Shape = @import("../shape.zig").Shape;
 
 pub const Type = struct {
@@ -107,6 +107,7 @@ pub const NodeInfo = struct {
     lowering: Lowering = .none,
     folded: ?ir.Immediate = null,
     assumption: ?u32 = null,
+    number_shape: ?BinaryNumberShape = null,
 };
 
 pub const Plan = struct {
@@ -238,6 +239,25 @@ pub const Plan = struct {
         self.allocator.free(self.assumptions);
         self.* = undefined;
     }
+
+    /// Recompute the pure analysis from the immutable graph before codegen.
+    /// Shape facts select tag guards, so accepting a stale or corrupted fact
+    /// would be a wrong-code bug rather than a recoverable optimization miss.
+    pub fn verify(self: *const Plan, graph: *const ir.Graph) !void {
+        if (self.node_info.len != graph.nodes.len) return error.InvalidSpecialization;
+
+        var expected = try Plan.build(self.allocator, graph);
+        defer expected.deinit();
+        if (self.assumptions.len != expected.assumptions.len) {
+            return error.InvalidSpecialization;
+        }
+        for (self.node_info, expected.node_info) |actual, recomputed| {
+            if (!infoEql(actual, recomputed)) return error.InvalidSpecialization;
+        }
+        for (self.assumptions, expected.assumptions) |actual, recomputed| {
+            if (!assumptionEql(actual, recomputed)) return error.InvalidSpecialization;
+        }
+    }
 };
 
 const LoadDecision = struct {
@@ -274,8 +294,8 @@ fn inferNode(graph: *const ir.Graph, facts: []const NodeInfo, id: ir.ValueId) !N
         .constant => inferConstant(node),
         .add => inferArithmetic(.add, facts, inputs, null),
         .sub => inferArithmetic(.sub, facts, inputs, null),
-        .mul => inferArithmetic(.mul, facts, inputs, try binaryProfileMode(graph, node)),
-        .div => inferArithmetic(.div, facts, inputs, try binaryProfileMode(graph, node)),
+        .mul => inferArithmetic(.mul, facts, inputs, try binaryProfile(graph, node)),
+        .div => inferArithmetic(.div, facts, inputs, try binaryProfile(graph, node)),
         .strict_eq => inferStrictEq(facts, inputs),
         .logical_not => inferLogicalNot(facts, inputs),
         .less_than => inferLessThan(facts, inputs),
@@ -324,7 +344,7 @@ fn inferArithmetic(
     op: Arithmetic,
     facts: []const NodeInfo,
     inputs: []const ir.ValueId,
-    binary_mode: ?BinaryTypeMode,
+    binary_feedback: ?feedback.Binary,
 ) NodeInfo {
     if (inputs.len != 2) return .{};
     const lhs = facts[inputs[0]];
@@ -340,7 +360,11 @@ fn inferArithmetic(
             };
         }
         if (op == .div) {
-            return .{ .result_type = Type.number, .lowering = .number_div };
+            return .{
+                .result_type = Type.number,
+                .lowering = .number_div,
+                .number_shape = .int32_int32,
+            };
         }
     };
 
@@ -358,8 +382,16 @@ fn inferArithmetic(
     if (lhs.result_type.isSubsetOf(Type.number) and
         rhs.result_type.isSubsetOf(Type.number))
     {
-        if (op == .mul) return .{ .result_type = Type.number, .lowering = .number_mul };
-        if (op == .div) return .{ .result_type = Type.number, .lowering = .number_div };
+        if (op == .mul) return .{
+            .result_type = Type.number,
+            .lowering = .number_mul,
+            .number_shape = exactNumberShape(lhs.result_type, rhs.result_type),
+        };
+        if (op == .div) return .{
+            .result_type = Type.number,
+            .lowering = .number_div,
+            .number_shape = exactNumberShape(lhs.result_type, rhs.result_type),
+        };
         return .{ .result_type = Type.number, .lowering = .generic };
     }
     const number_lowering: ?Lowering = switch (op) {
@@ -372,24 +404,43 @@ fn inferArithmetic(
         // Cold, coercive, and mixed sites remain generic and are refused by
         // the current code generator instead of publishing enter-and-bail
         // code from a single speculative observation.
-        return switch (binary_mode orelse .cold) {
-            .int32, .number => .{ .result_type = Type.number, .lowering = lowering },
+        const observed = binary_feedback orelse feedback.Binary{};
+        return switch (observed.mode) {
+            .int32, .number => .{
+                .result_type = Type.number,
+                .lowering = lowering,
+                .number_shape = switch (observed.shape) {
+                    .cold, .polymorphic => null,
+                    else => observed.shape,
+                },
+            },
             .cold, .non_number, .mixed => .{ .result_type = Type.any, .lowering = .generic },
         };
     }
     return .{ .result_type = Type.any, .lowering = .generic };
 }
 
-fn binaryProfileMode(
+fn binaryProfile(
     graph: *const ir.Graph,
     node: ir.Node,
-) !BinaryTypeMode {
+) !feedback.Binary {
     const index = switch (node.payload) {
         .binary_profile => |profile_index| profile_index,
         else => return error.MalformedGraph,
     };
     if (index >= graph.feedback.binary.len) return error.MalformedGraph;
-    return graph.feedback.binary[index].mode;
+    return graph.feedback.binary[index];
+}
+
+fn exactNumberShape(lhs: Type, rhs: Type) ?BinaryNumberShape {
+    if (lhs.eql(Type.int32)) {
+        if (rhs.eql(Type.int32)) return .int32_int32;
+        if (rhs.eql(Type.double)) return .int32_double;
+    } else if (lhs.eql(Type.double)) {
+        if (rhs.eql(Type.int32)) return .double_int32;
+        if (rhs.eql(Type.double)) return .double_double;
+    }
+    return null;
 }
 
 fn inferStrictEq(facts: []const NodeInfo, inputs: []const ir.ValueId) NodeInfo {
@@ -537,9 +588,18 @@ fn immediateEql(lhs: ir.Immediate, rhs: ir.Immediate) bool {
     };
 }
 
+fn assumptionEql(lhs: Assumption, rhs: Assumption) bool {
+    return lhs.kind == rhs.kind and
+        lhs.feedback_index == rhs.feedback_index and
+        lhs.receiver_shape == rhs.receiver_shape and
+        lhs.holder_shape == rhs.holder_shape and
+        lhs.slot == rhs.slot and
+        lhs.revision == rhs.revision;
+}
+
 fn infoEql(lhs: NodeInfo, rhs: NodeInfo) bool {
     if (!lhs.result_type.eql(rhs.result_type) or lhs.lowering != rhs.lowering or
-        lhs.assumption != rhs.assumption)
+        lhs.assumption != rhs.assumption or lhs.number_shape != rhs.number_shape)
     {
         return false;
     }

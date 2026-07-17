@@ -1,25 +1,21 @@
 # Ohaimark optimizing JIT
 
-Status: **ADR accepted; bytecode/feedback/SSA, pure specialization,
-representation selection, and logical plus stable-spill physical deopt
-metadata, graph/Lantern differential evaluation, and abstract register/spill
-allocation plus AArch64 physical frame/edge lowering landed** (2026-07-17).
-Verified native frame entry/exit, typed physical moves, folded-value returns,
-checked int32 arithmetic/control, guarded tagged-Number multiplication and
-division, strict
-equality, every fused strict equality/inequality branch width, standalone
-strict inequality, Boolean logical
-not, frame/realm loads, and direct Lantern-frame guard exits have also landed.
-Provably unobservable zero-slot environment creation is elided through a shared
-bytecode analysis; inherited lexical environments remain live. Guarded
-own/prototype/synthetic named-property loads now execute through live typed IC
-cells, as do named global and global lexical-slot loads. Frame-reconstructing
-backedge safepoints now poll fuel,
-interrupts, hooks, and pending GC work. Chunk-owned executable lifetime and
-transactional full-pipeline compilation/installation now ship. Runtime tier-up
-now enters ordinary functions behind a realm-local default-off gate; the full
-test262 differential remains exact, while broader GC-pressure, fuzz, and
-performance gates remain.
+Status: **default-on for production CLI ordinary-function entry** (2026-07-17).
+The accepted bytecode/feedback/SSA pipeline, pure specialization and
+representation plans, verified logical/physical deopt metadata, allocator,
+AArch64 lowering, live-cell property guards, backedge safepoints, and
+transactional executable ownership now ship. Single-predecessor edge
+coalescing, physical next-block fallthrough, a one-word completion ABI, and
+exact Int32/Double operand-shape specialization closed the remaining rollout
+cost. The graduation 30-pair T2/T1 run measured `0.997x` geometric mean, a
+worst fixture of `1.041x`, and 0.8 KiB installed code. Baseline and forced-T2
+test262 sweeps produced the same 48,517-pass set and SHA-256; focused
+ReleaseSafe GC-pressure runs and bounded crash/value-differential fuzz
+campaigns found no verifier failure, host crash, or differential. The
+production CLI enables Ohaimark at its natural threshold; `--no-ohaimark`
+isolates Bistromath, while `--no-jit` disables both tiers. Ohaimark OSR, rooted
+helper calls, broader opcode coverage, and additional architectures remain
+future work.
 
 Ohaimark is Cynic's T2 method JIT. It consumes finalized Lantern bytecode
 and runtime feedback, builds a compact control-flow SSA graph, specializes
@@ -99,8 +95,9 @@ The snapshot may contain:
 - slots, inline computed-key bytes, revisions, and guard epochs;
 - a classified site mode such as `cold`, `own_data`, `transition`,
   `construct`, or `megamorphic`;
-- one-byte, pointer-free binary operand modes: `cold`, `int32`, `number`,
-  `non_number`, or `mixed`.
+- one-byte, pointer-free arithmetic observations: Int32/Int32,
+  Double/Int32, Int32/Double, Double/Double, and non-Number. The derived
+  optimizer shape is cold, one exact pair, polymorphic Number, or non-Number.
 
 It must not contain GC-managed `JSObject*` or `JSFunction*` values. In
 particular it never copies prototype, callee, or for-in snapshot pointers.
@@ -233,15 +230,17 @@ malformed graphs or homes remain normal compilation errors.
 ### 3.6 AArch64 physical lowering
 
 `runtime/ohaimark/lowering_aarch64.zig` maps the abstract plan onto one fixed
-AAPCS64 convention without emitting code. `x19`-`x22` pin the realm, Lantern
-frame, Lantern register-file base, and optimized spill base. Six optimizer
-values map to callee-saved `x23`-`x28`. `x9` is reserved exclusively for
-parallel-move cycles; `x10` remains available for a future emitter's
-stack-to-stack transfer. FP/LR and `x19`-`x28` occupy a 96-byte save area.
+AAPCS64 convention without emitting code. The current executable subset is
+helper-free, so it preserves its three incoming arguments in volatile
+`x0`-`x2` (realm, Lantern frame, register-file base), maps six optimizer values
+to `x3`-`x8`, reserves `x9`-`x15` for move/boxing/graph scratch, and uses `x16`
+as the spill base. It avoids platform register `x18` and leaves FP/LR plus every
+callee-saved `x19`-`x28` untouched. Number arithmetic uses vector `v16`/`v17`,
+which do not alias general-purpose `x16`/`x17`.
 
 The native spill area starts with contiguous 8-byte tagged slots, followed by
 contiguous 4-byte int32 slots, then rounds up to the AAPCS64 16-byte alignment.
-Physical locations carry byte offsets from `x22`. The first emitter uses direct
+Physical locations carry byte offsets from `x16`. The first emitter uses direct
 scaled loads/stores, so a tagged offset beyond 32,760 or an int32 offset beyond
 16,380 returns `FrameTooLarge` and leaves the chunk in lower tiers; widening
 address materialization is deferred until a real fixture needs it.
@@ -255,24 +254,26 @@ attached. Duplicate destinations, scratch aliasing, and edge-level
 `check_int32` return normal compiler errors.
 
 The lowering verifier rebuilds the frame, physical value locations, per-edge
-stream ranges, and resolved move sequence. This is still non-executable: code
-generation must initialize every tagged slot to a non-pointer value before the
-first safepoint and must spill or stack-map live tagged registers before any
-helper call or GC poll.
+stream ranges, and resolved move sequence. Code generation must initialize
+every tagged slot to a non-pointer value before the first safepoint. A future
+rooted helper-call lowering must introduce explicit live-register preservation
+and stack maps before changing the helper-free ABI; GC polls currently transfer
+exact state to Lantern instead of calling.
 
 ### 3.7 Native frame entry and exit
 
 `runtime/ohaimark/emitter_aarch64.zig` is the first machine-code checkpoint.
-The prologue saves FP/LR and all ten pinned/value callee-saved registers, sets
-FP, reserves the spill area in 4,080-byte-or-smaller aligned chunks, pins the
-three-argument entry ABI, and initializes every tagged slot to Cynic's
-non-pointer `undefined` bits. The epilogue releases the exact spill size,
-restores each pair in reverse order, and returns. Both operations verify the
-layout before writing and roll the assembler buffer back on allocation failure.
+The helper-free prologue leaves incoming argument registers in place, reserves
+only the spill area in 4,080-byte-or-smaller aligned chunks, anchors it in
+`x16`, and initializes every tagged slot to Cynic's non-pointer `undefined`
+bits. A zero-spill graph emits no prologue instruction. The epilogue releases
+the exact spill size and returns without touching FP/LR or a callee-saved
+register. Both operations verify the layout before writing and roll the
+assembler buffer back on allocation failure.
 
 Golden-word tests pin the convention and immediate chunking. On AArch64, an
 executable-memory test enters the generated frame, reads the last initialized
-tagged slot through `x22`, restores the native stack, and returns the exact
+tagged slot through `x16`, restores the native stack, and returns the exact
 NaN-boxed bits. Higher-level graph scheduling and guard exits live separately
 in `runtime/ohaimark/codegen_aarch64.zig`.
 
@@ -424,15 +425,18 @@ installed continuation table through the same mechanism. Recursive
 alive; parent and child realm teardown both complete before the owning heap
 unmaps the shared region. No temporary graph/plan pointer survives publication.
 
-### 3.15 Default-off function-entry tiering
+### 3.15 Function-entry tiering and independent opt-out
 
 `runtime/ohaimark/driver.zig` consults T2 before Bistromath whenever both the
 master `Realm.jit_enabled` switch and the separate
-`Realm.ohaimark_enabled` rollout gate are true. Cold T2 waits for
-`8192 + 32 * bytecode_length` warmth unless the host supplies an override;
-the test262 `--ohaimark` posture forces both T1 and T2 thresholds to 1. Child
-realms inherit all four tier policy fields, so `$262.createRealm()` and
-ShadowRealm do not silently leave a differential run.
+`Realm.ohaimark_enabled` policy are true. Cold T2 waits for
+`8192 + 32 * bytecode_length` warmth unless the host supplies an override.
+The production CLI now enables both fields by default; `--no-ohaimark` keeps
+Bistromath active, and `--no-jit` remains the master opt-out. Direct embedders
+constructing `Realm` retain explicit opt-in policy for both native tiers. The
+test262 `--ohaimark` posture forces both thresholds to 1, while `--jit`
+continues to isolate T1. Child realms inherit all four tier policy fields, so
+`$262.createRealm()` and ShadowRealm do not silently leave a selected posture.
 
 Fresh-entry heat is recorded before either tier is selected, including callees
 pushed by Bistromath's in-place call driver. T1 therefore keeps accumulating
@@ -454,8 +458,8 @@ spent, dispatch bypasses that entry and lets T1/Lantern run directly. The
 chunk still owns and frees the generated bytes, and Ohaimark has no
 recompilation ladder yet, so this is bounded anti-thrash rather than
 jettison/reoptimization. The natural `8192 + 32 * bytecode_length` heat policy
-is unchanged: current telemetry justifies suppressing bad speculation, not
-arbitrarily moving a threshold whose steady-state benchmark gate has not run.
+is unchanged after graduation: the measured gate justified enabling the tier,
+not changing when a production function becomes eligible.
 
 ### 3.16 Opt-in rollout telemetry
 
@@ -478,7 +482,7 @@ workers with saturating counters, and prints one main-phase summary plus the top
 unsupported opcodes in deterministic count/opcode order. Every compiler pass
 stamps its stage before it can fail; the IR builder carries the exact opcode at
 its two explicit `UnsupportedOp` exits instead of reparsing bytecode after the
-fact. CI pairs that report with the full advisory `--ohaimark` pass-set
+fact. CI pairs that report with the full gating `--ohaimark` pass-set
 differential and runs both T1 and T2 postures in the ReleaseSafe
 `--gc-threshold=1` matrix.
 
@@ -717,6 +721,308 @@ measured `mul_loop` at 44.92 ms versus 44.38 ms (`1.012x` median), but the
 81.8% max/min ratio spread permits only the conclusion that no large Lantern
 regression was observed.
 
+### 3.21 Natural-threshold rollout benchmark
+
+The initial rollout exposed the realm-local gate as top-level `--ohaimark`;
+after graduation that spelling remains an explicit no-op, `--no-ohaimark`
+isolates T1, and `--no-jit` remains the master opt-out. `cynic run
+--ohaimark-stats file.js` writes one versioned, fail-closed machine record to
+stderr. Its parser rejects unknown, duplicate, missing, or internally
+inconsistent fields, so benchmark automation cannot silently consume a changed
+telemetry schema.
+
+`zig build bench -- --ohaimark-rollout` compares T1 against T1+T2 in the same
+ReleaseFast binary at natural thresholds. It alternates process order within
+each pair, includes synchronous compile time in T2 samples, and obtains
+telemetry from a separate probe. Existing single-entry loop micros correctly
+produce no T2 attempt because this checkpoint has no OSR. A dedicated suite
+therefore drives roughly five million entries through small numeric, property,
+and branch leaves plus one intentionally unsupported call wrapper.
+
+The first 30-pair Darwin arm64 run measured:
+
+| Fixture | Median T2/T1 | Ratio IQR | Publication result |
+|---|---:|---:|---|
+| `number_mul` | `0.940x` | 41.1% | 1 published, 0 exits |
+| `number_div` | `1.037x` | 23.4% | 1 published, 0 exits |
+| `named_load` | `1.123x` | 18.9% | 1 published, 0 exits |
+| `branch_eq` | `1.121x` | 18.2% | 1 published, 0 exits |
+| `call_refusal` | `0.956x` | 21.7% | numeric leaf published; call wrapper refused |
+
+The geometric mean was `1.032x`. Across the five telemetry probes Ohaimark
+attempted six compilations, published five, refused one, installed 1.7 KiB,
+spent 0.254 ms compiling, and completed all 24,997,383 generated entries with
+zero guard exit. A preceding independent 10-pair run also put `named_load` and
+`branch_eq` more than 10% behind T1, so those regressions are not inferred from
+one outlier even though this shared-host sample remains noisy.
+
+Correctness, speculation stability, code size, and compile latency all pass
+this checkpoint; throughput does not. The >5% per-fixture rule in `jit.md` §10
+keeps Ohaimark default-off. This made the unconditional x19-x28 save/restore
+sequence the first measured tuning target before broader opcode coverage or
+threshold changes.
+
+### 3.22 Helper-free volatile-register ABI
+
+The follow-up applies the platform convention rather than inventing a private
+one. AAPCS64 classifies `x0`-`x17` as caller-saved (`x16`/`x17` are IP0/IP1),
+`x18` as platform-specific, and `x19`-`x29` as callee-saved
+([Arm AAPCS64](https://github.com/ARM-software/abi-aa/blob/main/aapcs64/aapcs64.rst)).
+Ohaimark makes no helper call, so preserving ten callee-saved registers and
+FP/LR on every entry paid for a capability it could not use. V8 Maglev likewise
+saves a snapshot's live registers around an actual call/safepoint rather than
+unconditionally for helper-free code
+([Maglev assembler](https://chromium.googlesource.com/v8/v8/+/d8fd81812d5a4c5c3449673b6a803279c4bdb2f2/src/maglev/maglev-assembler.h)).
+
+The lowering contract now marks helper calls unsupported, keeps the realm,
+Lantern frame, and Lantern register-file pointers in incoming `x0`-`x2`, maps
+the allocator to `x3`-`x8`, keeps existing scratch in `x9`-`x15`, and anchors
+spills in `x16`. The prologue contains only optional aligned spill reservation,
+spill-base setup, and tagged-home initialization; a zero-spill graph starts at
+its first body instruction. The epilogue releases optional spills and returns.
+Adding a generated helper call now explicitly requires a call-aware ABI plus
+rooted live-register preservation; it cannot quietly invalidate this layout.
+
+Golden tests cover the zero-spill and chunked-spill instruction streams.
+Native tests execute typed moves and every graph path under the new mapping,
+including Number arithmetic (`v16`/`v17` are a separate register file), exact
+guard exits, own/prototype/synthetic property loads, globals/environments, fuel
+and interrupt polls, and a GC safepoint with a live tagged root. The full
+Ohaimark Debug bucket retained 92/92 passes; the complete ReleaseSafe suite
+retained 3,244 passes with 260 intentional skips.
+
+The repeated 30-pair Darwin arm64 rollout measured:
+
+| Fixture | Median T2/T1 | Ratio IQR | Publication result |
+|---|---:|---:|---|
+| `number_mul` | `0.980x` | 8.1% | 1 published, 0 exits |
+| `number_div` | `1.067x` | 8.9% | 1 published, 0 exits |
+| `named_load` | `1.049x` | 12.2% | 1 published, 0 exits |
+| `branch_eq` | `1.085x` | 8.2% | 1 published, 0 exits |
+| `call_refusal` | `0.915x` | 19.7% | numeric leaf published; call wrapper refused |
+
+The geometric mean improved from `1.032x` to `1.017x`; installed code across
+the five probes fell from 1.7 KiB to 1.3 KiB. The follow-up attempted six
+compilations, published five, refused the call wrapper once, spent 0.375 ms
+compiling, and completed all 24,997,383 generated entries with zero exit.
+Division (`+6.7%`) and strict-equality branching (`+8.5%`) still fail the 5%
+ceiling, so the default does not flip. With unconditional callee-save traffic
+removed, the next evidence-driven targets are deopt-home preparation on tiny
+leaves and the emitted Number/strict-equality paths; adding unrelated opcodes,
+changing heat, OSR, or inlining would not explain these residual regressions.
+The direct-recovery follow-up below completes the deopt-home target.
+
+### 3.23 Direct entry-frame deopt recovery
+
+Physical recovery metadata should describe an authoritative source rather than
+force every logical value through one storage class. V8's frame translations
+likewise distinguish machine registers, typed stack slots, and literals
+([translation opcodes](https://chromium.googlesource.com/v8/v8/+/ebe97b7e03a1990f88d5b76d83136c73e3432a27/src/deoptimizer/translation-opcode.h)).
+Cynic has a narrower source that is especially cheap: helper-free Ohaimark
+never mutates the executing Lantern `CallFrame` or register file before a
+terminal return, safepoint exit, or guard exit. Block-0 parameters therefore
+remain recoverable from their original accumulator/register locations for the
+whole optimized invocation.
+
+The home planner now validates block 0's complete parameter table and omits a
+home only for those exact SSA values. The physical stream encodes
+`frame_accumulator` and `frame_register` recipes alongside tagged-stack,
+int32-stack, and immediate recipes. Derived values, non-entry block parameters
+and loop phis, and state created by overwrites still receive stable
+definition-time homes. Verification recomputes entry eligibility from the
+graph; it does not trust a serialized bit. The differential evaluator keeps the
+immutable entry accumulator/register slice next to its spill arrays and uses
+the same physical recipes on guard failure.
+
+A native guard exit cannot write direct recipes sequentially because one
+destination may still contain another recipe's source. Codegen first resolves
+all direct frame assignments as a bounded parallel-move set, omits identity
+moves, and uses volatile `x15` to break cycles. Only after those source-dependent
+moves finish does it write spill and immediate recoveries. This keeps the hot
+path free of entry-home stores and gives cold exits exact alias behavior without
+allocating or calling a helper.
+
+Tests cover direct accumulator/register materialization, mixed direct/stable/
+immediate streams, malformed direct-register metadata, retained derived homes,
+zero-spill lowering, and a native cyclic reconstruction (`r0 <- entry r1`,
+`r1 <- entry r0`). All 93 Ohaimark Debug tests and the full ReleaseSafe suite
+pass.
+
+The repeated 30-pair Darwin arm64 rollout measured:
+
+| Fixture | Median T2/T1 | Ratio IQR | Publication result |
+|---|---:|---:|---|
+| `number_mul` | `0.985x` | 4.5% | 1 published, 0 exits |
+| `number_div` | `0.991x` | 15.1% | 1 published, 0 exits |
+| `named_load` | `1.024x` | 12.4% | 1 published, 0 exits |
+| `branch_eq` | `1.054x` | 4.3% | 1 published, 0 exits |
+| `call_refusal` | `0.960x` | 9.2% | numeric leaf published; call wrapper refused |
+
+The geometric mean improved from `1.017x` to `1.002x`; installed code fell
+from 1.3 KiB to 1.0 KiB. Six attempts published five leaves, refused the call
+wrapper once, spent 0.167 ms compiling, and completed all 24,997,383 native
+entries with zero exits. Direct recovery removes division's prior regression,
+but equality remains 5.4% behind and the aggregate is 0.2% behind. The strict
+`<=1.050x` per-fixture and `<=1.000x` aggregate gates therefore both miss.
+Ohaimark remains default-off; the next measured change is a fused
+strict-equality branch that avoids materializing a tagged Boolean.
+
+### 3.24 Strict-equality control fusion
+
+ECMA-262 [§7.2.14 IsStrictlyEqual](https://tc39.es/ecma262/#sec-isstrictlyequal)
+defines the comparison result, but an implementation need not allocate a
+Boolean when control is its only observer. V8 Maglev makes that distinction
+explicit: its graph builder replaces single-use comparisons with
+`BranchIfInt32Compare` / `BranchIfReferenceEqual`, and codegen compares the
+original inputs at the control node
+([builder](https://chromium.googlesource.com/v8/v8.git/+/refs/heads/12.0.78/src/maglev/maglev-graph-builder.cc),
+[emission](https://chromium.googlesource.com/v8/v8/+/852a76c0b3c84c007c11813cd20df241dfd7a421/src/maglev/maglev-ir.cc)).
+Cynic follows the consumption model but keeps the `strict_eq` SSA node: that
+node owns the original fused bytecode's pre-operation deopt point, so deleting
+it would couple a local codegen optimization to recovery semantics.
+
+`runtime/ohaimark/control_fusion.zig` is a separately verified side plan. It
+selects only an adjacent `strict_eq -> branch` pair where the comparison has
+one total SSA use, lowers through checked int32 equality, carries an exact frame
+state, and feeds truthy/falsy rather than nullish control. Shared comparisons,
+ordinary `===` results carried as the accumulator on successor edges, folded
+comparisons, and non-adjacent consumers stay materialized. Verification
+recomputes both the branch-to-comparison map and elided-value bitmap; the
+compiler reports plan failure in its own appended telemetry bucket.
+
+Allocation omits the fused branch input from effective liveness, requires the
+comparison to have no deopt home, and assigns its tagged Boolean no register or
+spill. Codegen emits no definition at the retained SSA node. At the terminating
+branch it uses that node's guard label, checks both original operands as int32,
+XORs their 32-bit payloads, and takes equality with `cbz` or inequality with
+`cbnz`. A failed operand check still reconstructs the original accumulator and
+live registers and resumes Lantern at the fused equality opcode. Standalone
+equality continues to use `cset` and a tagged Boolean, so this changes no
+user-visible value or hardened-realm surface.
+
+The machine-level choice was measured rather than inferred from instruction
+count. The first direct lowering used `cmp` + `b.cond`; although it removed seven
+instructions and passed every native test, a 300-pair same-tree T2 A/B measured
+`1.044x` versus materialization, so it was rejected. Replacing it with `eor` +
+`cbz/cbnz` measured `0.986x` in the same 300-pair protocol. Generated
+`branch_eq` code is 140 bytes instead of 168. Tests pin both equality and
+inequality instruction shapes, all i8/i16/i32 branch widths and directions,
+exact Double-operand guard recovery, standalone materialization, location
+elision, carried-result refusal, and independently corrupted plan fields.
+The full Ohaimark Debug bucket and complete ReleaseSafe suite pass with the
+retained lowering.
+
+The retained lowering's repeated 30-pair Darwin arm64 rollout measured:
+
+| Fixture | Median T2/T1 | Ratio IQR | Publication result |
+|---|---:|---:|---|
+| `number_mul` | `1.050x` | 12.6% | 1 published, 0 exits |
+| `number_div` | `1.031x` | 15.6% | 1 published, 0 exits |
+| `named_load` | `1.038x` | 6.1% | 1 published, 0 exits |
+| `branch_eq` | `1.059x` | 5.1% | 1 published, 0 exits |
+| `call_refusal` | `0.956x` | 3.9% | numeric leaf published; call wrapper refused |
+
+Six attempts published five leaves, refused the call wrapper once, spent 0.188
+ms compiling, installed 1.0 KiB, and completed all 24,997,383 generated entries
+with zero exits. The geometric mean was `1.026x`; `branch_eq` still exceeds the
+`1.050x` fixture ceiling. The T2-only A/B establishes that fusion improves the
+Ohaimark leaf, but it does not substitute for the public T2/T1 gate. At this
+checkpoint Ohaimark therefore remained default-off; the next two measured
+changes addressed entry/CFG transfer and Number operand shape directly.
+
+### 3.25 CFG transfer and one-word completion ABI
+
+An edge into a block with one predecessor is a constrained parallel copy, not
+an arbitrary join. The allocator now gives a block parameter its incoming
+register when the source representation is identical and no conversion is
+required. The verifier recomputes that eligibility from the CFG and rejects a
+hint that crosses a representation conversion or multi-predecessor join. When
+the next bytecode-order block consequently needs neither edge moves nor deopt
+home stores, AArch64 codegen also omits the explicit branch and uses physical
+fallthrough. This follows Maglev's distinction between a next-block edge and a
+general control transfer
+([V8 edge emission](https://chromium.googlesource.com/v8/v8.git/%2B/0a96df301fdaadc26a059ee5cd06fc47f9a662b6/src/maglev/maglev-ir.cc),
+[Maglev assembler](https://chromium.googlesource.com/v8/v8/%2B/0a07adec84357fafdd9e6e69aa95f2d1e9f33734/src/maglev/maglev-assembler-inl.h)).
+
+Generated entries now return one 64-bit word in AAPCS64 `x0`: an ordinary
+completion is the tagged `Value` bits, while a guard/safepoint exit first
+reconstructs the Lantern frame and returns the encoded non-canonical-NaN
+sentinel `0x7FFA000000000001`. Cynic canonicalizes every JS NaN and uses a
+disjoint NaN-box tag range, so no user-visible value can equal that control
+word; compile-time assertions pin both facts. This keeps the generated/native
+boundary inside the ordinary single-register result convention
+([AAPCS64](https://github.com/ARM-software/abi-aa/blob/main/aapcs64/aapcs64.rst))
+and follows JavaScriptCore's precedent that spare encoded `JSValue` patterns
+may carry internal control state
+([JSCJSValue](https://github.com/WebKit/WebKit/blob/main/Source/JavaScriptCore/runtime/JSCJSValue.h)).
+
+A two-word `x0`/`x1` completion aggregate was implemented and rejected: the
+same-tree comparison measured `1.018x`, and its public rollout repeat was about
+`1.022x`, with no semantic benefit. The retained one-word ABI plus CFG changes
+passed the complete Ohaimark and ReleaseSafe suites. Their intermediate
+30-pair rollout installed 0.9 KiB and measured `1.014x` geometric mean, but
+`number_div` at `1.076x` still failed the per-fixture ceiling. Inspection then
+showed that Number-only feedback still generated both Int32 and Double paths
+for each operand even when every observed pair had one stable shape.
+
+### 3.26 Operand-shape specialization and default-on graduation
+
+The one-byte `BinaryTypeProfile` now records five independent observations:
+Int32/Int32, Double/Int32, Int32/Double, Double/Double, and any non-Number pair.
+The immutable feedback snapshot derives one exact shape only after the site's
+existing maturity rule; multiple numeric bits become polymorphic and any
+non-Number observation keeps generic coercion in Lantern. This is the compact
+equivalent of Maglev selecting operand-specific Number checks and conversions
+from feedback rather than emitting every representation path
+([Maglev graph builder](https://chromium.googlesource.com/v8/v8/%2B/main/src/maglev/maglev-graph-builder.cc),
+[Number specialization](https://chromium.googlesource.com/v8/v8/%2B/78dd4b31847ab1f5b06ef3d8742a9f3835fb6919/src/maglev/maglev-graph-builder.cc)).
+
+For an exact shape, each input emits one matching tag guard; an Int32 input
+uses `scvtf`, while a Double input decodes and moves directly into the FP
+register. Polymorphic Number sites retain the old checked Int32-or-Double
+conversion, so the optimization narrows code only when the profile proves it.
+`specialize.Plan.verify` independently rebuilds the pure specialization plan
+immediately before codegen and compares every node decision and assumption;
+corrupted or stale shape metadata fails compilation transactionally.
+
+The graduation 30-pair Darwin arm64 rollout measured:
+
+| Fixture | Median T2/T1 | Ratio IQR | Publication result |
+|---|---:|---:|---|
+| `number_mul` | `0.970x` | 2.3% | 1 published, 0 exits |
+| `number_div` | `1.037x` | 2.9% | 1 published, 0 exits |
+| `named_load` | `1.013x` | 5.2% | 1 published, 0 exits |
+| `branch_eq` | `1.041x` | 4.3% | 1 published, 0 exits |
+| `call_refusal` | `0.929x` | 2.9% | numeric leaf published; call wrapper refused |
+
+Six attempts published five leaves, refused the call wrapper once, spent
+0.217 ms compiling, installed 0.8 KiB, and completed all 24,997,383 generated
+entries with zero exit. The `0.997x` geometric mean and `1.041x` worst fixture
+pass the `<=1.000x` aggregate and `<=1.050x` per-fixture gates.
+
+The forced-T2 full test262 sweep then matched the baseline at 48,517 pass and
+1,324 fail; both sorted pass lists have SHA-256
+`52146dd368643d2eedd21f60c731589f7fd6a0245dadeb26f8cdd70a95ec2ae3`.
+It attempted 217,427 compilations, published 6,872 (3.16%), refused 210,555,
+installed 135 KiB, and recorded 141,354 entries, 141,248 completions, and 106
+guard exits (0.07%). Compilation consumed 4.825 s in aggregate (22 us average,
+32.323 ms maximum).
+
+ReleaseSafe threshold-1 sweeps over `built-ins/Object`, `built-ins/Array`, and
+`language/expressions/object` found no GC-verifier failure or host crash; the
+Array bucket retained one known 60-second watchdog. A five-minute forced-T2
+crash campaign retained 216 programs with no crash artifact, and a separate
+five-minute Lantern-vs-T2 completion-value differential retained 49 programs
+with no differential. The fuzz host exposes `--ohaimark` so both campaigns
+force T2 at threshold 1 rather than depending on natural heat.
+
+These results graduate Ohaimark for the production CLI. It is enabled at the
+natural threshold before Bistromath; `--no-ohaimark` selects T1-only and
+`--no-jit` selects Lantern-only. Direct `Realm` embedders still choose their
+tier policy explicitly. The full CI Ohaimark pass-set comparison is now gating,
+while its GC-stress matrix remains advisory until the independent watchdog
+flake is resolved.
+
 ## 4. Deoptimization contract
 
 Every speculative node will carry an explicit assumption and deopt point.
@@ -746,32 +1052,34 @@ in-range register slots, and exact stream decoding. Corrupt metadata returns
 `InvalidMetadata` or `MalformedGraph`; it cannot become an unchecked slice or
 cast trap.
 
-`runtime/ohaimark/deopt_physical.zig` now turns those logical values into a
-conservative first physical policy. Every non-constant SSA value referenced by
-any deopt point receives one stable definition-time spill home; values absent
-from every frame state receive none. Tagged and int32 homes occupy separate
-regions, following Maglev's single split-point design
+`runtime/ohaimark/deopt_physical.zig` turns those logical values into verified
+physical recipes. Entry-block parameters recover directly from the untouched
+Lantern accumulator/register file. Every other non-constant SSA value
+referenced by a deopt point receives one stable definition-time spill home;
+values absent from every frame state receive none. Tagged and int32 homes
+occupy separate regions, following Maglev's single split-point design
 ([V8 Maglev](https://v8.dev/blog/maglev#register-allocation)), so a future stack
 walker scans only the tagged region. Repeated recoveries share a home.
 
-The physical translation stream contains tagged-stack, int32-stack, or
-immediate recipes. Materializing a tagged slot is a direct `Value` load;
-materializing an int32 slot boxes with `Value.fromInt32`; singleton and
-constant-pool recipes remain embedded. Every lookup and stream read is
-bounds-checked, and the logical and physical formats share one parser
-substrate. Tampered homes, region counts, tags, offsets, and spill indices
-return `InvalidMetadata` or `InvalidRecovery` without unchecked access or
-panicking.
+The physical translation stream contains frame-accumulator, frame-register,
+tagged-stack, int32-stack, or immediate recipes. Materializing a direct or
+tagged slot is a `Value` load; materializing an int32 slot boxes with
+`Value.fromInt32`; singleton and constant-pool recipes remain embedded. Every
+lookup and stream read is bounds-checked, and the logical and physical formats
+share one parser substrate. Tampered homes, region counts, tags, direct
+registers, offsets, and spill indices return `InvalidMetadata` or
+`InvalidRecovery` without unchecked access or panicking.
 
 `runtime/ohaimark/evaluator.zig` now provides that pre-codegen proof for the
 pure supported subset. It executes constants, block arguments, branches,
 loops, folded nodes, checked int32 arithmetic, strict equality/inequality,
 guarded tagged-Number multiplication/division, Boolean logical not, numeric
 less-than, and
-returns while applying the selected per-use conversions. Every definition
-writes its required physical home. A failed type/overflow/NaN guard
-decodes the physical stream, materializes the accumulator and live registers,
-and can resume `lantern.runFrames` at the original operation.
+returns while applying the selected per-use conversions. Every derived
+definition writes its required physical home; entry recipes read the immutable
+entry state. A failed type/overflow/NaN guard decodes the physical stream,
+materializes the accumulator and live registers, and can resume
+`lantern.runFrames` at the original operation.
 
 The differential tests cover both sides of a checked add after a diamond phi:
 the in-range optimized result is bit-identical to a full Lantern run; overflow
@@ -784,13 +1092,16 @@ named load as a guard failure; executable tests now cover the native hit and
 resumed-Lantern miss paths directly.
 
 The evaluator remains the target-independent oracle. Its first executable
-counterpart now emits checked int32 definitions/control and strict equality,
+counterpart now emits checked int32 definitions/control, strict equality, and
+verified branch-exclusive equality control fusion,
 required home stores, direct guard exits that reconstruct the existing Lantern
 frame, and live-cell named-property guards. Taken backedges also transfer
 loop-header state to Lantern whenever host or GC work is pending. Owned code
-survives destruction of every temporary compiler plan, and the default-off
-function-entry driver now executes it through normal call dispatch. Production
-traffic remains on T1/T0 until the rollout gates pass.
+survives destruction of every temporary compiler plan. The default-on
+function-entry driver executes it through normal call dispatch, returning a
+tagged completion in one word or reconstructing Lantern state before returning
+the reserved resume sentinel. Unsupported or repeatedly deoptimizing chunks
+continue through Bistromath/Lantern without changing JavaScript behavior.
 
 ## 5. Delivery order
 
@@ -798,51 +1109,57 @@ traffic remains on T1/T0 until the rollout gates pass.
    snapshots, linear block-argument SSA, loop/diamond tests, graceful reject.
 2. **Typed specialization, initial pass shipped:** small value lattice,
    fixed-point block-argument facts, IC-to-assumption transpilation,
-   semantics-safe int32 folding, explicit lowering choices, and verified
-   tagged/int32 representation selection. Local DCE and a measured need for a
-   Double representation remain.
-3. **Deopt first, logical + physical-home metadata shipped:** pre-operation
-   frame-state capture, liveness-compacted logical stream, stable tagged/int32
-   spill homes, physical boxing recipes, bounds-checked verifiers, and a bounded
-   graph evaluator proving checked success plus overflow recovery against
-   Lantern. Native guard exits now ship for the checked-int32 execution subset;
-   own/prototype/synthetic property guards use those same exits.
+   semantics-safe int32 folding, explicit lowering choices, verified
+   tagged/int32 representation selection, and a verified adjacent/sole-use
+   control-fusion side plan. Local DCE and a measured need for a Double
+   representation remain.
+3. **Deopt first, logical + physical metadata shipped:** pre-operation
+   frame-state capture, liveness-compacted logical stream, direct entry-frame
+   recipes, stable tagged/int32 homes for derived state, physical boxing,
+   bounds-checked verifiers, and a bounded graph evaluator proving checked
+   success plus overflow recovery against Lantern. Native guard exits now ship
+   for the checked-int32 execution subset; own/prototype/synthetic property
+   guards use those same exits.
 4. **Abstract allocation, shipped:** CFG-scheduled live intervals, bounded
    general-purpose register ids, immediate rematerialization, deterministic
    eviction, representation-partitioned spill reuse, and stable-home reuse.
-5. **AArch64 physical planning, shipped:** fixed callee-saved register mapping,
-   aligned tagged/int32 frame regions, bounded direct offsets, and deterministic
-   cycle-safe parallel edge moves with conversion preservation.
+5. **AArch64 physical planning, shipped:** helper-free volatile-register
+   mapping, aligned tagged/int32 frame regions, bounded direct offsets, and
+   deterministic cycle-safe parallel edge moves with conversion preservation.
 6. **AArch64 frame emission, shipped:** transactional prologue/epilogue,
-   chunked aligned stack reservation, pinned ABI setup, safe tagged-slot
-   initialization, golden words, and native-hardware execution proof.
+   optional chunked aligned spill reservation, safe tagged-slot initialization,
+   zero-spill leaf entry, golden words, and native-hardware execution proof.
 7. **Typed moves + folded returns, shipped:** representation-bearing physical
    moves, raw int32 spill stores, boxing, checked offsets, non-heap constant
    rematerialization, and an end-to-end folded graph native return.
 8. **AArch64 optimized execution, initial slice shipped:** checked int32
    add/sub/mul/div plus guarded tagged-Number multiplication/division, strict
-   equality and all
-   fused strict equality/inequality branch
-   widths, standalone strict inequality, guarded Boolean logical not, int32
-   control flow, stable-home writes, returns, and direct Lantern-frame guard
-   exits, plus live-cell own/prototype/synthetic named loads with inline/overflow
-   slot reads. Frame `this`, inherited environments, named globals, and global
-   lexical slots now use the same exact-exit contract; shared analysis safely
+   equality and all fused strict equality/inequality branch widths, direct
+   `eor` + `cbz/cbnz` control for branch-exclusive results, standalone strict
+   inequality, guarded Boolean logical not, int32
+   control flow, required derived-home writes, returns, and cycle-safe direct
+   Lantern-frame guard exits, plus live-cell own/prototype/synthetic named loads
+   with inline/overflow slot reads. Frame `this`, inherited environments, named
+   globals, and global lexical slots now use the same exact-exit contract;
+   shared analysis safely
    erases only unobservable zero-slot environments. Taken backedges now poll
    fuel, interrupts, hooks, and GC work, transferring exact loop-header state
    before Lantern handles a slow condition. Transactional compilation now
    publishes an owned executable handle only after the full pipeline succeeds;
    per-tier refusal and chunk teardown preserve Bistromath independently.
-   Default-off ordinary-function tier-up now ships with exact
-   bailout-vs-fallback routing
-   and child-realm policy inheritance; Ohaimark OSR remains deferred.
-9. **Gates and tuning:** full test262 pass-set differential, SES suite,
+   Default-on ordinary-function tier-up now ships with exact
+   bailout-vs-fallback routing, one-word completion, and child-realm policy
+   inheritance; Ohaimark OSR remains deferred.
+9. **Gates and tuning, shipped:** full test262 pass-set differential, SES suite,
    GC-pressure runs, fuzzing, and compile-time/code-size/performance budgets.
-   The current full differential (48,653 passing paths in each posture), SES
-   suite, and focused ReleaseSafe `--gc-threshold=1` runs without verifier
-   failures are complete. CI now repeats the T2 differential advisory, expands
-   the GC matrix across T1/T2, and reports opt-in heap-scoped rollout telemetry;
-   broaden fuzz and performance evidence before default-on rollout.
+   CFG edge coalescing/fallthrough and exact Number operand shapes brought the
+   final 30-pair rollout to `0.997x` geometric mean, `1.041x` worst fixture,
+   and 0.8 KiB. Baseline and forced-T2 test262 pass lists are identical at
+   48,517 paths; focused ReleaseSafe threshold-1 GC runs and two bounded fuzz
+   campaigns found no verifier failure, host crash, or value differential. CI
+   treats the T2 pass-set comparison as gating. The production CLI therefore
+   enables T2 at natural thresholds, with `--no-ohaimark` retaining a T1-only
+   posture and `--no-jit` retaining Lantern-only execution.
 10. **Only if measured:** background compilation, polymorphic feedback,
    inlining, x86_64 lowering, and exception-region compilation.
 

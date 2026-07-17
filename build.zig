@@ -639,6 +639,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = .ReleaseFast,
     });
+    bench_mod.addImport("cynic", lib_mod_fast);
     const bench_exe = b.addExecutable(.{
         .name = "bench",
         .root_module = bench_mod,

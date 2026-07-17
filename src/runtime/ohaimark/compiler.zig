@@ -14,6 +14,7 @@ const masm = @import("../jit/masm.zig");
 const Realm = @import("../realm.zig").Realm;
 const allocation = @import("allocation.zig");
 const codegen = @import("codegen_aarch64.zig");
+const control_fusion = @import("control_fusion.zig");
 const deopt = @import("deopt.zig");
 const deopt_physical = @import("deopt_physical.zig");
 const ir = @import("ir.zig");
@@ -143,6 +144,14 @@ fn compileUnpublished(
         &specialization,
     );
     defer representations.deinit();
+    refusal.* = .{ .stage = .control_fusion };
+    var fused_control = try control_fusion.Plan.build(
+        allocator,
+        &graph,
+        &specialization,
+        &representations,
+    );
+    defer fused_control.deinit();
     refusal.* = .{ .stage = .logical_deopt };
     var logical = try deopt.Metadata.build(allocator, &graph, &specialization);
     defer logical.deinit();
@@ -171,6 +180,7 @@ fn compileUnpublished(
         &graph,
         &specialization,
         &representations,
+        &fused_control,
         &homes,
         .{ .register_count = lowering.value_registers.len },
     );
@@ -181,6 +191,7 @@ fn compileUnpublished(
         &graph,
         &specialization,
         &representations,
+        &fused_control,
         &homes,
         &allocated,
     );
@@ -196,6 +207,7 @@ fn compileUnpublished(
         &graph,
         &specialization,
         &representations,
+        &fused_control,
         &logical,
         &homes,
         &physical_deopt,

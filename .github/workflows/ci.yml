@@ -518,15 +518,13 @@ jobs:
           diff -u /tmp/pass-interp.txt /tmp/pass-jit.txt
           echo "pass-sets identical: $(wc -l < /tmp/pass-interp.txt) fixtures (Atomics wait/notify + copyWithin coerced-detached excluded from the differential)"
 
-      - name: Ohaimark differential + telemetry (advisory)
-        continue-on-error: true
+      - name: Ohaimark differential + telemetry (gating)
         timeout-minutes: 20
         run: |
           set -euo pipefail
-          # Reuse the completed interpreter pass set from the gating step, then
-          # force default-off T2 before T1. A divergence remains advisory until
-          # Ohaimark graduates, but the exact diff and telemetry stay visible on
-          # every PR instead of relying on a local rollout run.
+          # Reuse the completed interpreter pass set, then force default-on T2
+          # before T1. Ohaimark has graduated, so any pass-set divergence now
+          # fails the same job as the established Bistromath differential.
           test -s /tmp/pass-interp.txt
           EXCLUDES=(--exclude=built-ins/Atomics/wait/ --exclude=built-ins/Atomics/notify/ --exclude=built-ins/TypedArray/prototype/copyWithin/coerced)
           zig build test262 -- --quiet --threads=0 --ohaimark --ohaimark-stats "${EXCLUDES[@]}" --pass-list-out=/tmp/pass-ohaimark.txt

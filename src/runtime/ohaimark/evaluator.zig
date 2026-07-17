@@ -2,9 +2,10 @@
 //!
 //! This is a correctness oracle before native code generation, not a shipping
 //! execution tier. It applies the specialization and representation plans,
-//! writes stable deopt homes at value definitions, and reconstructs a Lantern
-//! continuation from physical metadata when a guard fails. A mandatory step
-//! limit keeps malformed or non-terminating graphs from hanging the host.
+//! keeps the immutable entry frame available alongside stable deopt homes, and
+//! reconstructs a Lantern continuation from physical metadata when a guard
+//! fails. A mandatory step limit keeps malformed or non-terminating graphs
+//! from hanging the host.
 
 const std = @import("std");
 
@@ -145,6 +146,8 @@ const Runner = struct {
     int32_spills: []i32,
     steps_left: usize,
     this_value: Value,
+    entry_accumulator: Value,
+    entry_registers: []const Value,
 
     fn init(
         allocator: std.mem.Allocator,
@@ -182,6 +185,8 @@ const Runner = struct {
             .int32_spills = int32_spills,
             .steps_left = entry.step_limit,
             .this_value = entry.this_value,
+            .entry_accumulator = entry.accumulator,
+            .entry_registers = entry.registers,
         };
     }
 
@@ -606,24 +611,26 @@ const Runner = struct {
         @memset(registers, Value.undefined_);
         for (point.slots) |slot| {
             if (slot.register >= registers.len) return error.InvalidMetadata;
-            registers[slot.register] = try slot.recovery.materialize(
-                self.tagged_spills,
-                self.int32_spills,
-                self.chunk.constants,
-            );
+            registers[slot.register] = try self.materialize(slot.recovery);
         }
         return .{ .deopt = .{
             .allocator = self.allocator,
             .node = node_id,
             .bytecode_offset = point.bytecode_offset,
-            .accumulator = try point.accumulator.materialize(
-                self.tagged_spills,
-                self.int32_spills,
-                self.chunk.constants,
-            ),
+            .accumulator = try self.materialize(point.accumulator),
             .registers = registers,
             .this_value = self.this_value,
         } };
+    }
+
+    fn materialize(self: *const Runner, recovery: deopt_physical.Recovery) !Value {
+        return recovery.materialize(.{
+            .frame_accumulator = self.entry_accumulator,
+            .frame_registers = self.entry_registers,
+            .tagged_spills = self.tagged_spills,
+            .int32_spills = self.int32_spills,
+            .constants = self.chunk.constants,
+        });
     }
 
     fn runtimeFromImmediate(
