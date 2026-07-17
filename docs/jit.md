@@ -6,15 +6,17 @@ specialization, representation-selection, and logical deopt-metadata front end
 plus stable physical deopt homes, graph/Lantern differential evaluation, and
 abstract register/spill allocation plus AArch64 frame/edge lowering have
 landed. Transactional prologue/epilogue emission now has native AArch64 proof,
-and typed moves, folded-value returns, checked int32 arithmetic/control, and
-frame-reconstructing guard exits execute natively in tests. Guarded
+and typed moves, folded-value returns, checked int32 arithmetic/control,
+profile-gated tagged Number division, and frame-reconstructing guard exits
+execute natively in tests. Guarded
 own/prototype/synthetic named loads now execute through live typed IC cells.
 Taken backedges now poll fuel, interrupts, hooks, and pending GC work, with a
 slow poll transferring exact loop-header state back to Lantern before any
 collection or host call. Chunk-owned executable lifetime and Ohaimark's
 transactional full-pipeline compile/install boundary now ship. Default-off
-ordinary-function tier-up tries T2 before T1 and resumes Lantern exactly after
-a guard exit; Ohaimark OSR and default-on rollout remain future work. Spasm's
+ordinary-function tier-up tries T2 before T1, resumes Lantern exactly after a
+guard exit, and bypasses an installed entry after four repeated exits;
+Ohaimark OSR and default-on rollout remain future work. Spasm's
 delivery state is tracked below. The document
 doubles as the design record that pinned the architecture before the first
 emitter was written and as the delivery ledger (the "Delivery order" section

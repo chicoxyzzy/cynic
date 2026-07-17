@@ -80,6 +80,7 @@ const Bench = struct {
 
 const BENCHES = [_]Bench{
     .{ .name = "arith_loop", .path = "bench/micros/arith_loop.js" },
+    .{ .name = "div_loop", .path = "bench/micros/div_loop.js" },
     .{ .name = "prop_access", .path = "bench/micros/prop_access.js" },
     .{ .name = "prop_write", .path = "bench/micros/prop_write.js" },
     .{ .name = "array_iter", .path = "bench/micros/array_iter.js" },

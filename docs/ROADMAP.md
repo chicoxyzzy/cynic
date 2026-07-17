@@ -1271,6 +1271,21 @@ sampling by `/profile`.
   evidence rather than a speed claim: operand-type feedback and threshold
   tuning now precede default-on T2. Forced T2 and lower-tier pass lists remain
   byte-identical at 48,653 paths. See [ohaimark.md](ohaimark.md) §3.18.
+- **Ohaimark arithmetic feedback + anti-thrash policy (2026-07-17).** Every
+  `div` now indexes a one-byte, pointer-free raw-operand profile. Lantern
+  distinguishes Int32-only, Number-only, coercive, and mixed sites before
+  ToNumeric; Ohaimark publishes tagged Number division only from mature
+  numeric-only feedback, so threshold-1 cold entry values no longer trigger
+  blind speculation. A fused Lantern Number path classifies, records, and
+  divides in one tag walk. Independently, four function-entry guard exits park
+  an installed T2 entry and route later calls directly to lower tiers, bounding
+  enter-and-bail loops without adding a premature recompilation ladder. Full
+  forced-T2 telemetry fell from 38,949 publications / 48,710 KiB / 69.93%
+  exits to 6,896 / 670 KiB / 0.07% (106 exits); the exact 48,653-path hash is
+  unchanged. A 40-pair no-JIT A/B measured the new division micro at `0.727x`
+  while `arith_loop` stayed `1.003x`. The natural heat threshold remains
+  unchanged pending steady-state rollout benchmarks. See
+  [ohaimark.md](ohaimark.md) §3.19.
 - **Generational GC.** A JSC-Riptide-style non-moving
   generational collector — store-site routing, generation header
   bits, a write barrier + remembered set, `collectYoung` with

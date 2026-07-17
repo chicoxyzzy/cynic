@@ -56,8 +56,7 @@ fn diamondInt32BinaryChunk(
     const join_target = builder.here();
     try builder.emitStoreReg(span, lhs);
     try builder.emitLoadSmi(span, rhs);
-    try builder.emitOp(op, span);
-    try builder.emitU8(lhs);
+    try builder.emitBinary(op, span, lhs);
     try builder.patchI16(else_patch, else_target);
     try builder.patchI16(join_patch, join_target);
     return finish(&builder);
@@ -1008,10 +1007,10 @@ test "Ohaimark graph evaluator executes tagged Number division and deopts NaN" {
     const lhs = try builder.reserveRegister();
     const rhs = try builder.reserveRegister();
     try builder.emitLoadReg(span, rhs);
-    try builder.emitOp(.div, span);
-    try builder.emitU8(lhs);
+    try builder.emitBinary(.div, span, lhs);
     var chunk = try finish(&builder);
     defer chunk.deinit(testing.allocator);
+    chunk.inline_binary_profiles[0].observe(Value.fromDouble(1.5), Value.fromInt32(2));
 
     var graph = try ir.Graph.build(testing.allocator, &chunk);
     defer graph.deinit();
@@ -1408,8 +1407,7 @@ test "Ohaimark specialization folds only exact int32 division" {
         try builder.emitLoadSmi(span, case.lhs);
         try builder.emitStoreReg(span, lhs);
         try builder.emitLoadSmi(span, case.rhs);
-        try builder.emitOp(.div, span);
-        try builder.emitU8(lhs);
+        try builder.emitBinary(.div, span, lhs);
         var chunk = try finish(&builder);
         defer chunk.deinit(testing.allocator);
 
@@ -1429,26 +1427,66 @@ test "Ohaimark specialization folds only exact int32 division" {
     }
 }
 
-test "Ohaimark specialization guards unknown division as Number" {
-    var builder = Builder.init(testing.allocator);
-    defer builder.deinit();
-    const lhs = try builder.reserveRegister();
-    const rhs = try builder.reserveRegister();
-    try builder.emitLoadReg(span, rhs);
-    try builder.emitOp(.div, span);
-    try builder.emitU8(lhs);
-    var chunk = try finish(&builder);
-    defer chunk.deinit(testing.allocator);
+test "Ohaimark specializes unknown division only from numeric site feedback" {
+    const cases = [_]struct {
+        observations: []const [2]Value,
+        mode: chunk_mod.BinaryTypeMode,
+        result_type: specialize.Type,
+        lowering: specialize.Lowering,
+    }{
+        .{ .observations = &.{}, .mode = .cold, .result_type = specialize.Type.any, .lowering = .generic },
+        .{
+            .observations = &.{.{ Value.fromInt32(6), Value.fromInt32(2) }},
+            .mode = .int32,
+            .result_type = specialize.Type.number,
+            .lowering = .number_div,
+        },
+        .{
+            .observations = &.{.{ Value.fromDouble(1.5), Value.fromInt32(2) }},
+            .mode = .number,
+            .result_type = specialize.Type.number,
+            .lowering = .number_div,
+        },
+        .{
+            .observations = &.{.{ Value.true_, Value.fromInt32(2) }},
+            .mode = .non_number,
+            .result_type = specialize.Type.any,
+            .lowering = .generic,
+        },
+        .{
+            .observations = &.{
+                .{ Value.fromInt32(6), Value.fromInt32(2) },
+                .{ Value.true_, Value.fromInt32(2) },
+            },
+            .mode = .mixed,
+            .result_type = specialize.Type.any,
+            .lowering = .generic,
+        },
+    };
 
-    var graph = try ir.Graph.build(testing.allocator, &chunk);
-    defer graph.deinit();
-    var plan = try specialize.Plan.build(testing.allocator, &graph);
-    defer plan.deinit();
-    const div_id = findNode(&graph, .div).?;
-    const info = plan.node_info[div_id];
-    try testing.expect(info.result_type.eql(specialize.Type.number));
-    try testing.expectEqual(specialize.Lowering.number_div, info.lowering);
-    try testing.expect(graph.nodes[div_id].frame_state != null);
+    for (cases) |case| {
+        var builder = Builder.init(testing.allocator);
+        defer builder.deinit();
+        const lhs = try builder.reserveRegister();
+        const rhs = try builder.reserveRegister();
+        try builder.emitLoadReg(span, rhs);
+        try builder.emitBinary(.div, span, lhs);
+        var chunk = try finish(&builder);
+        defer chunk.deinit(testing.allocator);
+        for (case.observations) |pair| chunk.inline_binary_profiles[0].observe(pair[0], pair[1]);
+
+        var graph = try ir.Graph.build(testing.allocator, &chunk);
+        defer graph.deinit();
+        try testing.expectEqual(case.mode, graph.feedback.binary[0].mode);
+        var plan = try specialize.Plan.build(testing.allocator, &graph);
+        defer plan.deinit();
+        const div_id = findNode(&graph, .div).?;
+        const info = plan.node_info[div_id];
+        try testing.expect(info.result_type.eql(case.result_type));
+        try testing.expectEqual(case.lowering, info.lowering);
+        try testing.expectEqual(@as(u16, 0), graph.nodes[div_id].payload.binary_profile);
+        try testing.expect(graph.nodes[div_id].frame_state != null);
+    }
 }
 
 test "Ohaimark value facts converge across loop phis" {

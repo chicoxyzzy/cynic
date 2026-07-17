@@ -164,6 +164,60 @@ pub const computed_key_megamorphic: u8 = 0xFF;
 /// never counts; a 2+-way rotating site converges to the slow path fast.
 pub const computed_key_megamorphic_after: u8 = 4;
 
+/// Pointer-free operand feedback for one arithmetic bytecode site. The three
+/// observation bits are monotonic for the chunk's lifetime, so Lantern can
+/// update the cell without allocating and Ohaimark can copy it into an
+/// immutable compiler snapshot. Raw operands are classified before any
+/// ToNumeric coercion: a coercive site must not masquerade as Number-only.
+pub const BinaryTypeProfile = struct {
+    observations: u8 = 0,
+
+    const int32_pair: u8 = 1 << 0;
+    const number_pair: u8 = 1 << 1;
+    const non_number_pair: u8 = 1 << 2;
+
+    pub fn observe(self: *BinaryTypeProfile, lhs: Value, rhs: Value) void {
+        if (lhs.isInt32() and rhs.isInt32()) {
+            self.recordInt32Pair();
+        } else if (lhs.isNumber() and rhs.isNumber()) {
+            self.recordNumberPair();
+        } else {
+            self.recordNonNumberPair();
+        }
+    }
+
+    pub inline fn recordInt32Pair(self: *BinaryTypeProfile) void {
+        self.observations |= int32_pair;
+    }
+
+    pub inline fn recordNumberPair(self: *BinaryTypeProfile) void {
+        self.observations |= number_pair;
+    }
+
+    pub inline fn recordNonNumberPair(self: *BinaryTypeProfile) void {
+        self.observations |= non_number_pair;
+    }
+
+    pub fn mode(self: BinaryTypeProfile) BinaryTypeMode {
+        if (self.observations == 0) return .cold;
+        if ((self.observations & non_number_pair) != 0) {
+            return if ((self.observations & (int32_pair | number_pair)) == 0)
+                .non_number
+            else
+                .mixed;
+        }
+        return if ((self.observations & number_pair) == 0) .int32 else .number;
+    }
+};
+
+pub const BinaryTypeMode = enum(u8) {
+    cold,
+    int32,
+    number,
+    non_number,
+    mixed,
+};
+
 /// Inline-cache cell for `call_method` / `call` / `new_call`.
 /// Caches the last callee observed at the call site so subsequent
 /// calls can skip the callable check, the proxy / revocable-proxy /
@@ -643,6 +697,10 @@ pub const Chunk = struct {
     inline_load_caches: []LoadICCell = &.{},
     inline_store_caches: []StoreICCell = &.{},
     inline_computed_caches: []ComputedICCell = &.{},
+    /// One-byte raw operand profiles for arithmetic sites that can benefit
+    /// from speculative Number lowering. Indexed by an explicit bytecode
+    /// operand; no JS or GC-managed pointers are retained here.
+    inline_binary_profiles: []BinaryTypeProfile = &.{},
     /// Sister table for `call_method` callsite caching. Cell at
     /// index `i` is the IC cell for the i-th call_method emit;
     /// the heap mark walks every reachable chunk's cells and
@@ -702,6 +760,10 @@ pub const Chunk = struct {
         /// before the heap unmaps the shared code allocator.
         bistromath: BistromathState = .{},
         ohaimark: TierCode = .{},
+        /// Function-entry T2 guard exits. Once the bounded budget is spent,
+        /// dispatch bypasses this installed entry to avoid permanent
+        /// Ohaimark-to-Lantern ping-pong on a changed type profile.
+        ohaimark_guard_exits: u8 = 0,
 
         pub const OsrEntry = extern struct { bc: u32, code_off: u32 };
 
@@ -837,6 +899,7 @@ pub const Chunk = struct {
         allocator.free(self.inline_load_caches);
         allocator.free(self.inline_store_caches);
         allocator.free(self.inline_computed_caches);
+        allocator.free(self.inline_binary_profiles);
         allocator.free(self.inline_call_caches);
         allocator.free(self.inline_forin_caches);
         for (self.literal_shape_templates) |*t| allocator.free(t.keys);
@@ -886,6 +949,7 @@ pub const Builder = struct {
     inline_load_cache_count: u16 = 0,
     inline_store_cache_count: u16 = 0,
     inline_computed_cache_count: u16 = 0,
+    inline_binary_profile_count: u16 = 0,
     /// Running count of call-IC cells handed out via `allocCallIC`.
     /// Sizes `Chunk.inline_call_caches` at `finish`.
     inline_call_cache_count: u16 = 0,
@@ -1187,6 +1251,24 @@ pub const Builder = struct {
         std.debug.assert(op == .inc_reg or op == .dec_reg);
         try self.emitOp(op, span);
         try self.emitU8(r);
+    }
+
+    /// Emit a binary accumulator operation. Division carries a profile index:
+    /// `[op] [lhs:u8] [profile:u16]`. Other binary operators retain their
+    /// historical `[op] [lhs:u8]` encoding until they gain a specialization
+    /// that consumes operand feedback.
+    pub fn emitBinary(self: *Builder, op: Op, span: Span, lhs: u8) !void {
+        std.debug.assert(op == .div or op.spec().layout == .reg);
+        if (op == .div and self.inline_binary_profile_count == std.math.maxInt(u16)) {
+            return error.TooManyInlineCaches;
+        }
+        try self.emitOp(op, span);
+        try self.emitU8(lhs);
+        if (op == .div) {
+            const profile = self.inline_binary_profile_count;
+            self.inline_binary_profile_count += 1;
+            try self.emitU16(profile);
+        }
     }
 
     /// Emit a Smi load, choosing the operand-free `LdaZero` / `LdaOne`
@@ -1808,6 +1890,8 @@ pub const Builder = struct {
         for (store_ics) |*c| c.* = .{};
         const computed_ics = try self.allocator.alloc(ComputedICCell, self.inline_computed_cache_count);
         for (computed_ics) |*c| c.* = .{};
+        const binary_profiles = try self.allocator.alloc(BinaryTypeProfile, self.inline_binary_profile_count);
+        for (binary_profiles) |*profile| profile.* = .{};
         const call_ics = try self.allocator.alloc(CallICCell, self.inline_call_cache_count);
         for (call_ics) |*c| c.* = .{};
         const forin_ics = try self.allocator.alloc(ForInICCell, self.inline_forin_cache_count);
@@ -1837,6 +1921,7 @@ pub const Builder = struct {
             .inline_load_caches = load_ics,
             .inline_store_caches = store_ics,
             .inline_computed_caches = computed_ics,
+            .inline_binary_profiles = binary_profiles,
             .inline_call_caches = call_ics,
             .inline_forin_caches = forin_ics,
             .jit_state = jit_state,
@@ -1890,6 +1975,37 @@ test "Builder: integer immediates choose the narrowest lossless encoding" {
         pc += 1 + op.operandSize();
     }
     try testing.expectEqual(chunk.code.len, pc);
+}
+
+test "Builder: division owns a compact binary type profile" {
+    var b = Builder.init(testing.allocator);
+    errdefer b.deinit();
+    const span: Span = .{ .start = 0, .end = 1 };
+    const lhs = try b.reserveRegister();
+
+    try b.emitBinary(.div, span, lhs);
+    var chunk = try b.finish();
+    defer chunk.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 4), chunk.code.len);
+    try testing.expectEqual(Op.div, @as(Op, @enumFromInt(chunk.code[0])));
+    try testing.expectEqual(lhs, chunk.code[1]);
+    try testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, chunk.code[2..4], .little));
+    try testing.expectEqual(@as(u8, 3), Op.operandSize(.div));
+    try testing.expectEqual(@as(usize, 1), chunk.inline_binary_profiles.len);
+    try testing.expectEqual(BinaryTypeMode.cold, chunk.inline_binary_profiles[0].mode());
+    try testing.expectEqual(@as(usize, 1), @sizeOf(BinaryTypeProfile));
+
+    chunk.inline_binary_profiles[0].observe(Value.fromInt32(6), Value.fromInt32(2));
+    try testing.expectEqual(BinaryTypeMode.int32, chunk.inline_binary_profiles[0].mode());
+    chunk.inline_binary_profiles[0].observe(Value.fromDouble(1.5), Value.fromInt32(2));
+    try testing.expectEqual(BinaryTypeMode.number, chunk.inline_binary_profiles[0].mode());
+    chunk.inline_binary_profiles[0].observe(Value.true_, Value.fromInt32(2));
+    try testing.expectEqual(BinaryTypeMode.mixed, chunk.inline_binary_profiles[0].mode());
+
+    var coercive: BinaryTypeProfile = .{};
+    coercive.observe(Value.true_, Value.fromInt32(2));
+    try testing.expectEqual(BinaryTypeMode.non_number, coercive.mode());
 }
 
 test "Builder: hot IC sites use byte indexes and retain u16 fallbacks" {

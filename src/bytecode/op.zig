@@ -1511,7 +1511,7 @@ pub const Op = enum(u8) {
             .add => baselineInstruction("Add", .reg),
             .sub => baselineInstruction("Sub", .reg),
             .mul => baselineInstruction("Mul", .reg),
-            .div => instruction("Div", .reg),
+            .div => instruction("Div", .reg_u16),
             .mod => instruction("Mod", .reg),
             .pow => instruction("Pow", .reg),
             .add_smi => baselineInstruction("AddSmi", .reg_i32),
@@ -1864,6 +1864,9 @@ test "Op: operandSize agrees with the documented encoding" {
     try testing.expectEqual(@as(u8, 0), Op.operandSize(.return_));
     try testing.expectEqual(@as(u8, 1), Op.operandSize(.ldar));
     try testing.expectEqual(@as(u8, 1), Op.operandSize(.add));
+    // `div` carries a raw-operand type-profile index in addition to its lhs
+    // register: `[op] [r:u8] [profile:u16]`.
+    try testing.expectEqual(@as(u8, 3), Op.operandSize(.div));
     try testing.expectEqual(@as(u8, 2), Op.operandSize(.mov));
     try testing.expectEqual(@as(u8, 2), Op.operandSize(.lda_constant));
     try testing.expectEqual(@as(u8, 2), Op.operandSize(.jmp));

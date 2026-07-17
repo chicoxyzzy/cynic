@@ -84,6 +84,10 @@ pub const ForIn = struct {
     guard_epoch: u64,
 };
 
+pub const Binary = struct {
+    mode: chunk_mod.BinaryTypeMode,
+};
+
 pub const Snapshot = struct {
     allocator: std.mem.Allocator,
     loads: []Load,
@@ -91,6 +95,7 @@ pub const Snapshot = struct {
     computed: []Computed,
     calls: []Call,
     for_in: []ForIn,
+    binary: []Binary,
 
     pub fn capture(allocator: std.mem.Allocator, chunk: *const Chunk) !Snapshot {
         const loads = try allocator.alloc(Load, chunk.inline_load_caches.len);
@@ -103,6 +108,8 @@ pub const Snapshot = struct {
         errdefer allocator.free(calls);
         const for_in = try allocator.alloc(ForIn, chunk.inline_forin_caches.len);
         errdefer allocator.free(for_in);
+        const binary = try allocator.alloc(Binary, chunk.inline_binary_profiles.len);
+        errdefer allocator.free(binary);
 
         for (chunk.inline_load_caches, loads) |cell, *out| {
             const mode: LoadMode = if (cell.shape == null)
@@ -189,6 +196,10 @@ pub const Snapshot = struct {
             };
         }
 
+        for (chunk.inline_binary_profiles, binary) |profile, *out| {
+            out.* = .{ .mode = profile.mode() };
+        }
+
         return .{
             .allocator = allocator,
             .loads = loads,
@@ -196,6 +207,7 @@ pub const Snapshot = struct {
             .computed = computed,
             .calls = calls,
             .for_in = for_in,
+            .binary = binary,
         };
     }
 
@@ -205,6 +217,7 @@ pub const Snapshot = struct {
         self.allocator.free(self.computed);
         self.allocator.free(self.calls);
         self.allocator.free(self.for_in);
+        self.allocator.free(self.binary);
         self.* = undefined;
     }
 };

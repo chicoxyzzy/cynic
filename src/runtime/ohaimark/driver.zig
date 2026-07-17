@@ -22,6 +22,12 @@ pub const supported = compiler.supported;
 /// gates in docs/ohaimark.md §5 complete.
 pub const tier_up_base: u32 = 8 * 1024;
 
+/// An installed T2 entry that repeatedly reconstructs the interpreter frame
+/// is no longer paying for itself. Four exits preserve a short transient
+/// window while bounding entry-and-bail overhead for a permanently changed
+/// site. The code remains owned by the chunk; lower tiers simply bypass it.
+pub const guard_exit_limit: u8 = 4;
+
 pub fn tierUpThreshold(code_len: usize) u32 {
     const len: u32 = @intCast(@min(code_len, 1 << 20));
     return tier_up_base +| (32 *| len);
@@ -72,6 +78,7 @@ pub fn tryEnterTop(
     if (!realm.jit_enabled or !realm.ohaimark_enabled) return .not_entered;
     if (!frameKindCompilable(frame)) return .not_entered;
     const state = frame.chunk.jit_state orelse return .not_entered;
+    if (state.ohaimark_guard_exits >= guard_exit_limit) return .not_entered;
     if (state.ohaimark.entry() == null) {
         if (state.ohaimark.tier != .cold) return .not_entered;
         const threshold = realm.ohaimark_threshold_override orelse
@@ -89,6 +96,7 @@ pub fn tryEnterTop(
         @enumFromInt(entry(realm, frame, frame.registers.ptr)),
     )) {
         .resume_interp => blk: {
+            state.ohaimark_guard_exits +|= 1;
             telemetry.recordGuardExit();
             break :blk .resumed;
         },

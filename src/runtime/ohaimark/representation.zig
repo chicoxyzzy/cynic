@@ -470,9 +470,10 @@ fn validateNodeContract(node: ir.Node, info: specialize.NodeInfo) !void {
                 return error.MalformedGraph;
             }
         },
-        .add, .sub, .mul, .div, .strict_eq, .logical_not, .less_than => {
+        .add, .sub, .mul, .strict_eq, .logical_not, .less_than => {
             if (!hasPayload(node.payload, .none)) return error.MalformedGraph;
         },
+        .div => if (!hasPayload(node.payload, .binary_profile)) return error.MalformedGraph,
         .load_named => {
             if (!hasPayload(node.payload, .named_load)) return error.MalformedGraph;
         },

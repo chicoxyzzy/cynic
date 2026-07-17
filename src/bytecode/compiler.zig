@@ -3500,8 +3500,7 @@ pub const Compiler = struct {
         try self.builder.emitStoreReg(a.span, r_old);
         try self.compileExpression(a.value);
         const op = compoundOp(a.op) orelse return error.UnsupportedExpression;
-        try self.builder.emitOp(op, a.span);
-        try self.builder.emitU8(r_old);
+        try self.builder.emitBinary(op, a.span, r_old);
         try Helper.emitStore(self, a.span, r_obj, name_k, private_k, computed_r);
     }
 
@@ -4903,8 +4902,7 @@ pub const Compiler = struct {
                     }
                 }
                 try self.compileExpression(a.value);
-                try self.builder.emitOp(op, a.span);
-                try self.builder.emitU8(binding.register);
+                try self.builder.emitBinary(op, a.span, binding.register);
                 try self.emitStoreBinding(binding, a.span);
                 return;
             }
@@ -4916,8 +4914,7 @@ pub const Compiler = struct {
             try self.emitLoadBinding(binding, a.target.span());
             try self.builder.emitStoreReg(a.target.span(), t);
             try self.compileExpression(a.value);
-            try self.builder.emitOp(op, a.span);
-            try self.builder.emitU8(t);
+            try self.builder.emitBinary(op, a.span, t);
         }
         if (r_unresolved_flag) |r| {
             // `sta_global_strict` consumes the snapshot taken
@@ -5423,8 +5420,7 @@ pub const Compiler = struct {
                     }
                 }
                 try self.compileExpression(b.rhs);
-                try self.builder.emitOp(op, b.span);
-                try self.builder.emitU8(r_lhs);
+                try self.builder.emitBinary(op, b.span, r_lhs);
                 return;
             }
         }
@@ -5435,8 +5431,7 @@ pub const Compiler = struct {
         defer self.releaseTemp();
         try self.builder.emitStoreReg(b.lhs.span(), r);
         try self.compileExpression(b.rhs);
-        try self.builder.emitOp(op, b.span);
-        try self.builder.emitU8(r);
+        try self.builder.emitBinary(op, b.span, r);
     }
 
     /// Returns the register index when `expr` is a direct

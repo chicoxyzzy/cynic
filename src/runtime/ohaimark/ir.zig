@@ -86,6 +86,7 @@ pub const Payload = union(enum) {
     global_load: GlobalLoad,
     global_slot: u32,
     environment_load: EnvironmentLoad,
+    binary_profile: u16,
 };
 
 pub const Node = struct {
@@ -545,6 +546,13 @@ const Builder = struct {
                 },
                 .add, .sub, .mul, .div => |binary| {
                     const lhs = try readRegister(registers, self.chunk.code[pc + 1]);
+                    const payload: Payload = if (binary == .div) blk: {
+                        const profile_index = readU16(self.chunk.code, pc + 2);
+                        if (profile_index >= self.chunk.inline_binary_profiles.len) {
+                            return error.MalformedBytecode;
+                        }
+                        break :blk .{ .binary_profile = profile_index };
+                    } else .none;
                     const live_registers = try deopt_liveness.take(&deopt_live_cursor, @intCast(pc));
                     accumulator = try self.addDeoptNode(
                         switch (binary) {
@@ -556,7 +564,7 @@ const Builder = struct {
                         },
                         @intCast(pc),
                         &.{ lhs, accumulator },
-                        .none,
+                        payload,
                         block_index,
                         accumulator,
                         registers,

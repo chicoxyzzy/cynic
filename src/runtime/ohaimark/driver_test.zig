@@ -208,6 +208,86 @@ test "Ohaimark function-entry guard exit resumes the same Lantern frame" {
     try testing.expectEqual(@as(f64, 2_147_483_648), resumed.asDouble());
 }
 
+test "Lantern records raw operand types at division sites" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = false;
+
+    const source =
+        \\function divide(a, b) { return a / b; }
+        \\divide(6, 2);
+        \\divide(1.5, 2);
+        \\divide("6", 2);
+    ;
+    var chunk = try compileScript(&realm, source);
+    defer chunk.deinit(testing.allocator);
+    _ = try runValue(&realm, &chunk);
+
+    const body = templateNamed(&chunk, "divide");
+    try testing.expectEqual(@as(usize, 1), body.inline_binary_profiles.len);
+    try testing.expectEqual(chunk_mod.BinaryTypeMode.mixed, body.inline_binary_profiles[0].mode());
+}
+
+test "Ohaimark stops re-entering a function after its guard-exit budget" {
+    if (comptime !driver.supported) return error.SkipZigTest;
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+    realm.ohaimark_enabled = true;
+    realm.ohaimark_threshold_override = 1;
+    realm.heap.ohaimark_stats.enabled = true;
+
+    var chunk = try overflowChunk();
+    defer chunk.deinit(testing.allocator);
+    chunk.jit_state.?.warmth = 1;
+
+    var frames: std.ArrayListUnmanaged(lantern.CallFrame) = .empty;
+    defer {
+        for (frames.items) |*frame| frame.releaseRegisters(&realm, testing.allocator);
+        frames.deinit(testing.allocator);
+    }
+    for (0..driver.guard_exit_limit) |_| {
+        const registers = try realm.frame_pool.acquire(testing.allocator, chunk.register_count);
+        @memset(registers, Value.undefined_);
+        try frames.append(testing.allocator, .{
+            .chunk = &chunk,
+            .ip = 0,
+            .accumulator = Value.undefined_,
+            .registers = registers,
+            .env = null,
+            .this_value = Value.undefined_,
+        });
+        switch (try driver.tryEnterTop(testing.allocator, &realm, &frames)) {
+            .resumed => {},
+            else => return error.TestUnexpectedResult,
+        }
+        _ = switch (try lantern.runFrames(testing.allocator, &realm, &frames)) {
+            .value => |value| value,
+            else => return error.TestUnexpectedResult,
+        };
+    }
+
+    try testing.expectEqual(driver.guard_exit_limit, chunk.jit_state.?.ohaimark_guard_exits);
+    try testing.expectEqual(@as(u64, driver.guard_exit_limit), realm.heap.ohaimark_stats.executed_entries);
+    try testing.expectEqual(@as(u64, driver.guard_exit_limit), realm.heap.ohaimark_stats.guard_exits);
+
+    const registers = try realm.frame_pool.acquire(testing.allocator, chunk.register_count);
+    @memset(registers, Value.undefined_);
+    try frames.append(testing.allocator, .{
+        .chunk = &chunk,
+        .ip = 0,
+        .accumulator = Value.undefined_,
+        .registers = registers,
+        .env = null,
+        .this_value = Value.undefined_,
+    });
+    switch (try driver.tryEnterTop(testing.allocator, &realm, &frames)) {
+        .not_entered => {},
+        else => return error.TestUnexpectedResult,
+    }
+    try testing.expectEqual(@as(u64, driver.guard_exit_limit), realm.heap.ohaimark_stats.executed_entries);
+}
+
 test "Ohaimark refusal preserves Bistromath fallback" {
     if (comptime !driver.supported) return error.SkipZigTest;
     var realm = Realm.init(testing.allocator);

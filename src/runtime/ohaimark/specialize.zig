@@ -7,6 +7,7 @@ const std = @import("std");
 
 const feedback = @import("feedback.zig");
 const ir = @import("ir.zig");
+const BinaryTypeMode = @import("../../bytecode/chunk.zig").BinaryTypeMode;
 const Shape = @import("../shape.zig").Shape;
 
 pub const Type = struct {
@@ -270,10 +271,10 @@ fn inferNode(graph: *const ir.Graph, facts: []const NodeInfo, id: ir.ValueId) !N
     return switch (node.kind) {
         .block_parameter => facts[id],
         .constant => inferConstant(node),
-        .add => inferArithmetic(.add, facts, inputs),
-        .sub => inferArithmetic(.sub, facts, inputs),
-        .mul => inferArithmetic(.mul, facts, inputs),
-        .div => inferArithmetic(.div, facts, inputs),
+        .add => inferArithmetic(.add, facts, inputs, null),
+        .sub => inferArithmetic(.sub, facts, inputs, null),
+        .mul => inferArithmetic(.mul, facts, inputs, null),
+        .div => inferArithmetic(.div, facts, inputs, try binaryProfileMode(graph, node)),
         .strict_eq => inferStrictEq(facts, inputs),
         .logical_not => inferLogicalNot(facts, inputs),
         .less_than => inferLessThan(facts, inputs),
@@ -318,7 +319,12 @@ fn inferConstant(node: ir.Node) NodeInfo {
 
 const Arithmetic = enum { add, sub, mul, div };
 
-fn inferArithmetic(op: Arithmetic, facts: []const NodeInfo, inputs: []const ir.ValueId) NodeInfo {
+fn inferArithmetic(
+    op: Arithmetic,
+    facts: []const NodeInfo,
+    inputs: []const ir.ValueId,
+    binary_mode: ?BinaryTypeMode,
+) NodeInfo {
     if (inputs.len != 2) return .{};
     const lhs = facts[inputs[0]];
     const rhs = facts[inputs[1]];
@@ -357,11 +363,28 @@ fn inferArithmetic(op: Arithmetic, facts: []const NodeInfo, inputs: []const ir.V
         return .{ .result_type = Type.number, .lowering = .generic };
     }
     if (op == .div) {
-        // The successful path refines both guarded operands to Number. Any
-        // coercion or BigInt case resumes Lantern at the pre-operation state.
-        return .{ .result_type = Type.number, .lowering = .number_div };
+        // Only mature Number-only feedback justifies tagged Number guards.
+        // Cold, coercive, and mixed sites remain generic and are refused by
+        // the current code generator instead of publishing enter-and-bail
+        // code from a single speculative observation.
+        return switch (binary_mode orelse .cold) {
+            .int32, .number => .{ .result_type = Type.number, .lowering = .number_div },
+            .cold, .non_number, .mixed => .{ .result_type = Type.any, .lowering = .generic },
+        };
     }
     return .{ .result_type = Type.any, .lowering = .generic };
+}
+
+fn binaryProfileMode(
+    graph: *const ir.Graph,
+    node: ir.Node,
+) !BinaryTypeMode {
+    const index = switch (node.payload) {
+        .binary_profile => |profile_index| profile_index,
+        else => return error.MalformedGraph,
+    };
+    if (index >= graph.feedback.binary.len) return error.MalformedGraph;
+    return graph.feedback.binary[index].mode;
 }
 
 fn inferStrictEq(facts: []const NodeInfo, inputs: []const ir.ValueId) NodeInfo {

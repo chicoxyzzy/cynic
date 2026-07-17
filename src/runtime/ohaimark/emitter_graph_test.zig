@@ -148,8 +148,7 @@ fn diamondBinaryChunk(
     const join_target = builder.here();
     try builder.emitStoreReg(span, lhs);
     try builder.emitLoadSmi(span, rhs);
-    try builder.emitOp(op, span);
-    try builder.emitU8(lhs);
+    try builder.emitBinary(op, span, lhs);
     try builder.emitOp(.return_, span);
     try builder.patchI16(else_patch, else_target);
     try builder.patchI16(join_patch, join_target);
@@ -215,10 +214,13 @@ fn dynamicBinaryChunk(op: Op) !DynamicBinaryChunk {
     const lhs = try builder.reserveRegister();
     const rhs = try builder.reserveRegister();
     try builder.emitLoadReg(span, rhs);
-    try builder.emitOp(op, span);
-    try builder.emitU8(lhs);
+    try builder.emitBinary(op, span, lhs);
     try builder.emitOp(.return_, span);
-    return .{ .chunk = try builder.finish(), .lhs = lhs, .rhs = rhs };
+    var chunk = try builder.finish();
+    if (op == .div) {
+        chunk.inline_binary_profiles[0].observe(Value.fromDouble(1.5), Value.fromInt32(2));
+    }
+    return .{ .chunk = chunk, .lhs = lhs, .rhs = rhs };
 }
 
 fn strictComparisonChunk(op: Op) !StrictComparisonChunk {

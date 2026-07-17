@@ -17,6 +17,35 @@ new run against the previous section with the *same host*.
 
 ## History
 
+### 2026-07-17 — division operand profile + fused Number path, host `Darwin 25.6.0 arm64`
+
+Interleaved A/B against `bb7aa7dd` (pre-profile), Lantern-only (`--no-jit`),
+40 pairs per fixture. `div` now carries a one-byte raw-operand profile, but the
+interpreter records it inside a fused Number path that also removes the old
+Int32/Int32 fallthrough through generic `numericBinary`.
+
+| bench | base_ms | head_ms | ratio | spread% |
+|---|---:|---:|---:|---:|
+| arith_loop | 54.96 | 55.57 | 1.003x | 23.1 |
+| div_loop | 63.09 | 46.13 | 0.727x | 12.3 |
+| prop_access | 25.06 | 22.71 | 0.914x | 38.7 |
+| prop_write | 33.92 | 34.58 | 1.014x | 32.0 |
+| array_iter | 29.18 | 29.12 | 1.003x | 27.3 |
+| string_concat | 30.10 | 30.00 | 1.001x | 20.3 |
+| promise_chain | 10.42 | 10.56 | 1.006x | 41.0 |
+| object_alloc | 14.78 | 14.58 | 0.997x | 19.3 |
+| method_call | 29.50 | 30.38 | 1.028x | 26.2 |
+| class_instantiate | 32.38 | 32.63 | 1.001x | 22.4 |
+| ctor_array_build | 245.23 | 248.18 | 1.009x | 11.2 |
+| json_stringify | 25.10 | 25.14 | 0.997x | 32.0 |
+| tail_recursion | 37.59 | 37.50 | 1.008x | 16.8 |
+
+The targeted result is `div_loop`: **0.727x, about 27% faster despite profile
+recording**. The primary untouched control, `arith_loop`, is flat (`1.003x`),
+as are almost all other controls within their noisy local spreads. The
+faster-looking `prop_access` row has 38.7% ratio spread and no related code
+change, so it is noise rather than a claimed gain.
+
 ### 2026-07-13 — cynic `6bd673c4` (JSObject header shrink — cold clusters behind `extension`), host `Linux 6.8.0-117-generic x86_64` (remote bench box)
 
 Results-refresh snapshot at `origin/main` (no code change this session) — the

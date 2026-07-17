@@ -91,6 +91,7 @@ the fixture drops below ~50 ms on the lead engine.
 | Fixture | Iters | Stresses |
 |---|---:|---|
 | `arith_loop` | 5,000,000 | Bytecode dispatch density on `Op.add` / `Op.lt` / `Op.jmp` — int32 fast-path + the threaded-dispatch loop with no property access. Smi-overflow paths are NOT exercised (every step stays int32-clean via `\| 0`). |
+| `div_loop` | 3,000,000 | Numeric `Op.div` dispatch with Int32 raw operands and a Double result. Pins Lantern's one-byte per-site operand profile plus the fused Number division path; the changing numerator prevents constant folding. |
 | `prop_access` | 500,000 | Hot named-property reads on a same-shape object — `lda_property` IC hit-rate. Pre-IC: ~3× behind QuickJS-NG. Post-IC (e03f5cd): −66 % on Cynic. The headline cache-effectiveness bench. |
 | `prop_write` | 500,000 | Hot named-property writes on a same-shape object — `sta_property` IC + shape-shadow update + property-bag put. The mirror of `prop_access`. Post-IC (7bad504): −63 % on Cynic. |
 | `array_iter` | 10,000×100 passes | `for-of` over a packed Array — iterator protocol + indexed reads on §10.4.2 Array exotic. The env-hoist (`f719ae3`) was measured here at −69.6 %. |

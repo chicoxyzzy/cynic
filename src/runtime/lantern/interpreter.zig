@@ -1280,6 +1280,38 @@ inline fn intArith(comptime op: enum { add, sub, mul }, a: Value, b: Value) ?Val
     });
 }
 
+/// §6.1.6.1.5 Number::divide plus raw-operand feedback in one tag walk. Unlike
+/// `numArith`, division has no int32 result path: even an exact quotient is a
+/// Number operation whose interpreter representation is produced through the
+/// same Double path as `numericBinary`. Non-Number pairs are recorded before
+/// returning null so the generic coercion / BigInt path retains exact ordering.
+inline fn profiledNumberDiv(
+    profile: *chunk_mod.BinaryTypeProfile,
+    lhs: Value,
+    rhs: Value,
+) ?Value {
+    const lhs_int32 = lhs.isInt32();
+    const rhs_int32 = rhs.isInt32();
+    if (lhs_int32 and rhs_int32) {
+        profile.recordInt32Pair();
+        return Value.fromDouble(
+            @as(f64, @floatFromInt(lhs.asInt32())) / @as(f64, @floatFromInt(rhs.asInt32())),
+        );
+    }
+
+    const lhs_double = !lhs_int32 and lhs.isDouble();
+    const rhs_double = !rhs_int32 and rhs.isDouble();
+    if ((!lhs_int32 and !lhs_double) or (!rhs_int32 and !rhs_double)) {
+        profile.recordNonNumberPair();
+        return null;
+    }
+
+    profile.recordNumberPair();
+    const x: f64 = if (lhs_int32) @floatFromInt(lhs.asInt32()) else lhs.asDouble();
+    const y: f64 = if (rhs_int32) @floatFromInt(rhs.asInt32()) else rhs.asDouble();
+    return Value.fromDouble(x / y);
+}
+
 /// §6.1.6.1 / §13.15 — `+` `-` `*` `/` `%` on two numeric operands where
 /// at least one is a Double (int32+int32 stays on the int path so an
 /// in-range integer result keeps its int32 tag). Returns
@@ -1707,8 +1739,10 @@ pub fn runFrames(
         },
         .div => {
             const r = code[ip];
-            ip += 1;
-            if (numArith(.div, registers[r], acc)) |res| {
+            const profile_index = readU16(code, ip + 1);
+            ip += 3;
+            if (profile_index >= local_chunk.inline_binary_profiles.len) return error.InvalidOpcode;
+            if (profiledNumberDiv(&local_chunk.inline_binary_profiles[profile_index], registers[r], acc)) |res| {
                 acc = res;
                 continue :dispatch try decodeNext(code, &ip, &committed);
             }
