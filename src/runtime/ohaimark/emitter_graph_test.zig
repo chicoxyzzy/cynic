@@ -2470,6 +2470,113 @@ test "Ohaimark AArch64 OSR entry then backedge safepoint restores exact header" 
     try testing.expectEqual(heap_mod.taggedObject(root).bits, frame.registers[loop.root].bits);
 }
 
+test "Ohaimark AArch64 checked int32 add deopts on overflow" {
+    // result_type stays int32 under checked_int32_add; overflow must still
+    // resume Lantern (not wrap or finish with a wrong int32).
+    if (comptime !masm.native_aarch64) return error.SkipZigTest;
+    var chunk = try diamondBinaryChunk(.add, std.math.maxInt(i32), std.math.maxInt(i32) - 1, 1);
+    defer chunk.deinit(testing.allocator);
+    var native = try NativeGraph.build(&chunk);
+    defer native.deinit();
+    const add_id = try findNode(&native, .add);
+    try testing.expectEqual(
+        specialize.Lowering.checked_int32_add,
+        native.specialization.node_info[add_id].lowering,
+    );
+    try testing.expect(native.specialization.node_info[add_id].result_type.eql(specialize.Type.int32));
+
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = false;
+    const registers = try testing.allocator.alloc(Value, chunk.register_count);
+    defer testing.allocator.free(registers);
+    var frame = testFrame(&chunk, registers);
+    try testing.expectEqual(
+        @intFromEnum(codegen.EntryResult.resume_interp),
+        try executeNative(&native, &realm, &frame),
+    );
+    try testing.expectEqual(native.graph.nodes[add_id].bytecode_offset, frame.ip);
+    const resumed = try resumeLantern(&realm, frame);
+    try testing.expectEqual(Value.fromDouble(@as(f64, @floatFromInt(std.math.maxInt(i32))) + 1.0).bits, resumed.bits);
+}
+
+test "Ohaimark AArch64 checked_branch deopts non-int32 condition" {
+    // Int32-only truthiness: a double formal must deopt, then Lantern ToBoolean.
+    if (comptime !masm.native_aarch64) return error.SkipZigTest;
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    const x = try builder.reserveRegister();
+    try builder.emitLoadReg(span, x);
+    const branch_pc = builder.here();
+    try builder.emitOp(.jmp_if_false, span);
+    const false_patch = builder.here();
+    try builder.emitI16(0);
+    try builder.emitLoadSmi(span, 11);
+    try builder.emitOp(.return_, span);
+    const false_target = builder.here();
+    try builder.emitLoadSmi(span, 22);
+    try builder.emitOp(.return_, span);
+    try builder.patchI16(false_patch, false_target);
+    var chunk = try builder.finish();
+    defer chunk.deinit(testing.allocator);
+    var native = try NativeGraph.build(&chunk);
+    defer native.deinit();
+    const branch_id = try findNode(&native, .branch);
+    try testing.expectEqual(
+        specialize.Lowering.checked_branch,
+        native.specialization.node_info[branch_id].lowering,
+    );
+
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = false;
+    const registers = try testing.allocator.alloc(Value, chunk.register_count);
+    defer testing.allocator.free(registers);
+    var frame = testFrame(&chunk, registers);
+    frame.registers[x] = Value.fromDouble(1.5);
+    try testing.expectEqual(
+        @intFromEnum(codegen.EntryResult.resume_interp),
+        try executeNative(&native, &realm, &frame),
+    );
+    try testing.expectEqual(branch_pc, frame.ip);
+    // 1.5 is truthy — fallthrough returns 11.
+    try testing.expectEqual(Value.fromInt32(11).bits, (try resumeLantern(&realm, frame)).bits);
+}
+
+test "Ohaimark AArch64 checked_branch treats negative int32 as truthy" {
+    if (comptime !masm.native_aarch64) return error.SkipZigTest;
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    const x = try builder.reserveRegister();
+    try builder.emitLoadReg(span, x);
+    try builder.emitOp(.jmp_if_false, span);
+    const false_patch = builder.here();
+    try builder.emitI16(0);
+    try builder.emitLoadSmi(span, 11);
+    try builder.emitOp(.return_, span);
+    const false_target = builder.here();
+    try builder.emitLoadSmi(span, 22);
+    try builder.emitOp(.return_, span);
+    try builder.patchI16(false_patch, false_target);
+    var chunk = try builder.finish();
+    defer chunk.deinit(testing.allocator);
+    var native = try NativeGraph.build(&chunk);
+    defer native.deinit();
+
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = false;
+    const registers = try testing.allocator.alloc(Value, chunk.register_count);
+    defer testing.allocator.free(registers);
+    var frame = testFrame(&chunk, registers);
+    frame.registers[x] = Value.fromInt32(-3);
+    try testing.expectEqual(
+        @intFromEnum(codegen.EntryResult.done),
+        try executeNative(&native, &realm, &frame),
+    );
+    try testing.expectEqual(Value.fromInt32(11).bits, frame.accumulator.bits);
+}
+
 test "Ohaimark AArch64 refuses nullish branch on open Type.any" {
     // Defense for specialize's nullish gate: open formal + jmp_if_nullish must
     // not publish always-fallthrough (would miscompile `x ?? 1` when x is null).

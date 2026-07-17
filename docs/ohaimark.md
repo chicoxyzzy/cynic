@@ -1262,9 +1262,11 @@ frame format.
    inherited by `initChild`. The CLI flag `--ohaimark-osr` (requires
    `--jit`/`--ohaimark`) exists only so validation and
    `zig build bench -- --ohaimark-osr-rollout` can flip the Realm policy
-   without a separate binary; it is not a production default and is not a
-   test262 harness flag today. Enabling OSR by default waits on the
-   graduation criteria below.
+   without a separate binary — not a production default. The test262
+   harness mirrors that opt-in as `--ohaimark --ohaimark-osr` (OSR requires
+   `--ohaimark`; same exclude set as the T2 differential) so the
+   baseline-vs-OSR pass-set gate can run before graduation. Enabling OSR by
+   default waits on the graduation criteria below.
 
 #### Rejected alternatives
 

@@ -585,6 +585,65 @@ test "Ohaimark OSR: completed result matches the known loop result" {
     }
 }
 
+test "Ohaimark OSR countdown with negative int32 start completes" {
+    // Negative int32 is truthy. Climb toward zero (i = i + 1); i = i - 1 from
+    // a negative start never hits 0 and is an infinite loop in every engine.
+    if (comptime !driver.supported) return error.SkipZigTest;
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+    realm.jit_threshold_override = 1;
+    realm.ohaimark_enabled = true;
+    realm.ohaimark_threshold_override = 1;
+    realm.ohaimark_osr_enabled = true;
+
+    const source =
+        \\function countUp(n) {
+        \\  let i = n;
+        \\  let acc = 0;
+        \\  while (i) {
+        \\    acc = acc + 1;
+        \\    i = i + 1;
+        \\  }
+        \\  return acc;
+        \\}
+        \\countUp(-3);
+    ;
+    var chunk = try compileScript(&realm, source);
+    defer chunk.deinit(testing.allocator);
+    const value = try runValue(&realm, &chunk);
+    try testing.expectEqual(Value.fromInt32(3).bits, value.bits);
+}
+
+test "Ohaimark OSR countdown with non-int32 formal still completes" {
+    // Boolean formal deopts int32-only truthiness / arithmetic; Lantern finishes.
+    if (comptime !driver.supported) return error.SkipZigTest;
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+    realm.jit_threshold_override = 1;
+    realm.ohaimark_enabled = true;
+    realm.ohaimark_threshold_override = 1;
+    realm.ohaimark_osr_enabled = true;
+
+    const source =
+        \\function once(flag) {
+        \\  let i = flag;
+        \\  let acc = 0;
+        \\  while (i) {
+        \\    acc = acc + 1;
+        \\    i = false;
+        \\  }
+        \\  return acc;
+        \\}
+        \\once(true);
+    ;
+    var chunk = try compileScript(&realm, source);
+    defer chunk.deinit(testing.allocator);
+    const value = try runValue(&realm, &chunk);
+    try testing.expectEqual(Value.fromInt32(1).bits, value.bits);
+}
+
 test "Ohaimark does not miscompile nullish coalesce on open formals" {
     // Regression for checked_branch + nullish always-fallthrough: with T2
     // enabled, `x ?? 1` must still return 1 when x is null (either refuse T2
