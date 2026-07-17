@@ -202,7 +202,7 @@ const Compiler = struct {
                 if (self.homes.values[node_id] != null) return error.InvalidMetadata;
                 return false;
             },
-            .add, .sub, .mul => {
+            .add, .sub, .mul, .div => {
                 if (info.lowering == .constant) return false;
                 try self.emitCheckedArithmetic(node_id, node.kind, info.lowering);
                 return false;
@@ -260,10 +260,15 @@ const Compiler = struct {
         kind: ir.NodeKind,
         lowering_kind: specialize.Lowering,
     ) !void {
+        if (kind == .div and lowering_kind == .number_div) {
+            try self.emitNumberDivide(node_id);
+            return;
+        }
         const expected: specialize.Lowering = switch (kind) {
             .add => .checked_int32_add,
             .sub => .checked_int32_sub,
             .mul => .checked_int32_mul,
+            .div => .checked_int32_div,
             else => return error.MalformedGraph,
         };
         if (lowering_kind != expected or self.representations.outputs[node_id] != .int32) {
@@ -282,6 +287,7 @@ const Compiler = struct {
                 try self.jumpToGuardIf(.vs, guard);
             },
             .mul => try self.emitCheckedMultiply(guard),
+            .div => try self.emitCheckedDivide(guard),
             else => unreachable,
         }
 
@@ -357,6 +363,82 @@ const Compiler = struct {
         try self.machine.emit(a64.eorReg(guard_scratch, lhs_scratch, rhs_scratch));
         try self.jumpToGuardIfBitSet(guard_scratch, 31, guard);
         self.machine.bind(&nonzero);
+    }
+
+    /// §6.1.6.1.5 Number::divide, exact-int32 subset. AArch64 `sdiv` is
+    /// non-trapping for zero and INT_MIN/-1; explicit guards preserve the JS
+    /// infinity/-0 cases, while the widened product catches overflow and any
+    /// fractional remainder before the int32 result becomes observable.
+    fn emitCheckedDivide(self: *Compiler, guard: *Masm.Label) !void {
+        var nonzero_lhs: Masm.Label = .{};
+        defer nonzero_lhs.deinit(self.allocator);
+
+        try self.machine.emit(a64.cmpImm(rhs_scratch, 0, false));
+        try self.jumpToGuardIf(.eq, guard);
+        try self.machine.emit(a64.cmpImm(lhs_scratch, 0, false));
+        try self.machine.jumpCond(.ne, &nonzero_lhs);
+        try self.jumpToGuardIfBitSet(rhs_scratch, 31, guard);
+        self.machine.bind(&nonzero_lhs);
+
+        try self.machine.emit(a64.sdivW(result_scratch, lhs_scratch, rhs_scratch));
+        try self.machine.emit(a64.smull(guard_scratch, result_scratch, rhs_scratch));
+        try self.machine.emit(a64.sxtw(lhs_scratch, lhs_scratch));
+        try self.machine.emit(a64.cmpReg(guard_scratch, lhs_scratch));
+        try self.jumpToGuardIf(.ne, guard);
+    }
+
+    /// §6.1.6.1.5 Number::divide. Tagged Int32 and Double operands bridge
+    /// through caller-saved v16/v17, and the result is immediately re-boxed.
+    /// Coercion, BigInt, and NaN canonicalization stay on Lantern's slow path.
+    fn emitNumberDivide(self: *Compiler, node_id: ir.ValueId) !void {
+        if (self.representations.outputs[node_id] != .tagged) {
+            return error.InvalidRepresentation;
+        }
+        const guard = try self.guardFor(node_id);
+        try self.emitTaggedInput(node_id, 0, lhs_scratch);
+        try self.emitTaggedInput(node_id, 1, rhs_scratch);
+        try self.emitTaggedNumberAsDouble(lhs_scratch, .x16, guard);
+        try self.emitTaggedNumberAsDouble(rhs_scratch, .x17, guard);
+        try self.machine.emit(a64.fdivD(.x16, .x16, .x17));
+        try self.machine.emit(a64.fcmpD(.x16, .x16));
+        try self.jumpToGuardIf(.vs, guard);
+        try self.machine.emit(a64.fmovDtoX(result_scratch, .x16));
+        try self.machine.movImm64(guard_scratch, Value.double_encode_offset);
+        try self.machine.emit(a64.addReg(
+            result_scratch,
+            result_scratch,
+            guard_scratch,
+        ));
+        try self.emitTaggedResult(node_id, result_scratch);
+    }
+
+    fn emitTaggedNumberAsDouble(
+        self: *Compiler,
+        value: a64.Reg,
+        fp: a64.Reg,
+        guard: *Masm.Label,
+    ) !void {
+        var int32_value: Masm.Label = .{};
+        defer int32_value.deinit(self.allocator);
+        var done: Masm.Label = .{};
+        defer done.deinit(self.allocator);
+
+        try self.machine.emit(a64.lsrImm(result_scratch, value, 48));
+        try self.machine.movImm64(guard_scratch, Value.tag_int32);
+        try self.machine.emit(a64.cmpReg(result_scratch, guard_scratch));
+        try self.machine.jumpCond(.eq, &int32_value);
+        try self.machine.movImm64(guard_scratch, Value.tag_object);
+        try self.machine.emit(a64.cmpReg(result_scratch, guard_scratch));
+        try self.jumpToGuardIf(.cs, guard);
+
+        try self.machine.movImm64(guard_scratch, Value.double_encode_offset);
+        try self.machine.emit(a64.subReg(result_scratch, value, guard_scratch));
+        try self.machine.emit(a64.fmovXtoD(fp, result_scratch));
+        try self.machine.jump(&done);
+
+        self.machine.bind(&int32_value);
+        try self.machine.emit(a64.scvtfDfromW(fp, value));
+        self.machine.bind(&done);
     }
 
     fn emitInt32Input(

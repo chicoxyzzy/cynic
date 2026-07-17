@@ -1256,6 +1256,21 @@ sampling by `/profile`.
   `lda_global8` left the leading refusal list and `make_environment` fell from
   38,799 to 21,163. The full forced-T2 and fresh lower-tier runs retained
   byte-identical 48,653-path pass lists. See [ohaimark.md](ohaimark.md) §3.17.
+- **Ohaimark numeric division (2026-07-17).** `div` now lowers through an
+  exact-int32 path and a guarded tagged-Number path. The former folds or uses
+  non-trapping AArch64 `sdiv` only when zero, signed-zero, overflow, and
+  fractional-result checks pass. The latter accepts Int32/Double operands,
+  bridges through caller-saved FP scratch registers, executes `fdiv`, and
+  immediately reboxes without a helper call, allocation, or persistent Double
+  SSA representation; coercion, BigInt, and NaN canonicalization resume
+  Lantern from exact pre-operation state. The exact-int32 slice alone moved
+  `div` from IR to codegen refusal without publishing more functions; the
+  tagged path raised full forced-T2 publications from 6,896 to 38,949 and cut
+  codegen refusals from 43,000 to 10,947. The threshold-1 posture also measured
+  a 69.93% guard-exit rate and 48,710 KiB installed code, so this is coverage
+  evidence rather than a speed claim: operand-type feedback and threshold
+  tuning now precede default-on T2. Forced T2 and lower-tier pass lists remain
+  byte-identical at 48,653 paths. See [ohaimark.md](ohaimark.md) §3.18.
 - **Generational GC.** A JSC-Riptide-style non-moving
   generational collector — store-site routing, generation header
   bits, a write barrier + remembered set, `collectYoung` with

@@ -213,6 +213,7 @@ const Runner = struct {
                     .add,
                     .sub,
                     .mul,
+                    .div,
                     .strict_eq,
                     .logical_not,
                     .less_than,
@@ -285,6 +286,7 @@ const Runner = struct {
             .add => self.arithmetic(node_id, info, .add),
             .sub => self.arithmetic(node_id, info, .sub),
             .mul => self.arithmetic(node_id, info, .mul),
+            .div => self.arithmetic(node_id, info, .div),
             .strict_eq => self.strictEqual(node_id, info),
             .logical_not => self.logicalNot(node_id, info),
             .less_than => self.lessThan(node_id, info),
@@ -322,7 +324,7 @@ const Runner = struct {
         return self.runtimeFromImmediate(immediate, self.outputKind(node_id));
     }
 
-    const Arithmetic = enum { add, sub, mul };
+    const Arithmetic = enum { add, sub, mul, div };
 
     fn arithmetic(
         self: *Runner,
@@ -336,10 +338,25 @@ const Runner = struct {
                 self.outputKind(node_id),
             ) };
         }
+        if (op == .div and info.lowering == .number_div) {
+            const lhs_value = try self.taggedNodeInput(node_id, 0);
+            const rhs_value = try self.taggedNodeInput(node_id, 1);
+            if ((!lhs_value.isInt32() and !lhs_value.isDouble()) or
+                (!rhs_value.isInt32() and !rhs_value.isDouble()))
+            {
+                return .guard_failed;
+            }
+            const result = (try numberValue(lhs_value)) / (try numberValue(rhs_value));
+            // Value.fromDouble canonicalizes NaN. Leave that uncommon case to
+            // Lantern so native and evaluator paths preserve identical bits.
+            if (std.math.isNan(result)) return .guard_failed;
+            return .{ .value = .{ .tagged = Value.fromDouble(result) } };
+        }
         const expected = switch (op) {
             .add => specialize.Lowering.checked_int32_add,
             .sub => specialize.Lowering.checked_int32_sub,
             .mul => specialize.Lowering.checked_int32_mul,
+            .div => specialize.Lowering.checked_int32_div,
         };
         if (info.lowering != expected) {
             if (info.lowering == .generic) return error.UnsupportedNode;
@@ -347,10 +364,20 @@ const Runner = struct {
         }
         const lhs = (try self.int32NodeInput(node_id, 0)) orelse return .guard_failed;
         const rhs = (try self.int32NodeInput(node_id, 1)) orelse return .guard_failed;
+        if (op == .div) {
+            if (rhs == 0 or
+                (lhs == std.math.minInt(i32) and rhs == -1) or
+                (lhs == 0 and rhs < 0) or @rem(lhs, rhs) != 0)
+            {
+                return .guard_failed;
+            }
+            return .{ .value = .{ .int32 = @divTrunc(lhs, rhs) } };
+        }
         const result = switch (op) {
             .add => @addWithOverflow(lhs, rhs),
             .sub => @subWithOverflow(lhs, rhs),
             .mul => @mulWithOverflow(lhs, rhs),
+            .div => unreachable,
         };
         if (result[1] != 0 or
             (op == .mul and result[0] == 0 and ((lhs < 0) != (rhs < 0))))

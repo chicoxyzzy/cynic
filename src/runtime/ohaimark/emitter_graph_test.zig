@@ -129,7 +129,9 @@ fn diamondBinaryChunk(
     else_value: i32,
     rhs: i32,
 ) !chunk_mod.Chunk {
-    if (op != .add and op != .sub and op != .mul) return error.TestUnexpectedResult;
+    if (op != .add and op != .sub and op != .mul and op != .div) {
+        return error.TestUnexpectedResult;
+    }
     var builder = Builder.init(testing.allocator);
     defer builder.deinit();
     const lhs = try builder.reserveRegister();
@@ -200,6 +202,24 @@ const StrictComparisonChunk = struct {
     lhs: u8,
     rhs: u8,
 };
+
+const DynamicBinaryChunk = struct {
+    chunk: chunk_mod.Chunk,
+    lhs: u8,
+    rhs: u8,
+};
+
+fn dynamicBinaryChunk(op: Op) !DynamicBinaryChunk {
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    const lhs = try builder.reserveRegister();
+    const rhs = try builder.reserveRegister();
+    try builder.emitLoadReg(span, rhs);
+    try builder.emitOp(op, span);
+    try builder.emitU8(lhs);
+    try builder.emitOp(.return_, span);
+    return .{ .chunk = try builder.finish(), .lhs = lhs, .rhs = rhs };
+}
 
 fn strictComparisonChunk(op: Op) !StrictComparisonChunk {
     if (op != .strict_eq and op != .strict_neq) return error.TestUnexpectedResult;
@@ -573,6 +593,181 @@ test "Ohaimark AArch64 graph executes checked int32 sub and mul" {
             try executeNative(&native, &realm, &frame),
         );
         try testing.expectEqual(Value.fromInt32(case.expected).bits, frame.accumulator.bits);
+    }
+}
+
+test "Ohaimark AArch64 graph executes exact int32 division" {
+    if (comptime !masm.native_aarch64) return error.SkipZigTest;
+    var chunk = try diamondBinaryChunk(.div, 84, 86, 2);
+    defer chunk.deinit(testing.allocator);
+    var native = try NativeGraph.build(&chunk);
+    defer native.deinit();
+    const div_id = try findNode(&native, .div);
+    try testing.expectEqual(
+        specialize.Lowering.checked_int32_div,
+        native.specialization.node_info[div_id].lowering,
+    );
+
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = false;
+    const registers = try testing.allocator.alloc(Value, chunk.register_count);
+    defer testing.allocator.free(registers);
+    var frame = testFrame(&chunk, registers);
+    try testing.expectEqual(
+        @intFromEnum(codegen.EntryResult.done),
+        try executeNative(&native, &realm, &frame),
+    );
+    try testing.expectEqual(Value.fromInt32(42).bits, frame.accumulator.bits);
+}
+
+test "Ohaimark AArch64 int32 division guards every non-int32 result" {
+    if (comptime !masm.native_aarch64) return error.SkipZigTest;
+    const cases = [_]struct {
+        lhs: i32,
+        other_lhs: i32,
+        rhs: i32,
+        expected: f64,
+    }{
+        .{ .lhs = 7, .other_lhs = 9, .rhs = 2, .expected = 3.5 },
+        .{ .lhs = 1, .other_lhs = 2, .rhs = 0, .expected = std.math.inf(f64) },
+        .{ .lhs = 0, .other_lhs = 2, .rhs = -1, .expected = -0.0 },
+        .{
+            .lhs = std.math.minInt(i32),
+            .other_lhs = std.math.minInt(i32) + 1,
+            .rhs = -1,
+            .expected = 2_147_483_648,
+        },
+    };
+    for (cases) |case| {
+        var chunk = try diamondBinaryChunk(.div, case.lhs, case.other_lhs, case.rhs);
+        defer chunk.deinit(testing.allocator);
+        var native = try NativeGraph.build(&chunk);
+        defer native.deinit();
+        const div_id = try findNode(&native, .div);
+
+        var realm = Realm.init(testing.allocator);
+        defer realm.deinit();
+        realm.jit_enabled = false;
+        const registers = try testing.allocator.alloc(Value, chunk.register_count);
+        defer testing.allocator.free(registers);
+        var frame = testFrame(&chunk, registers);
+        try testing.expectEqual(
+            @intFromEnum(codegen.EntryResult.resume_interp),
+            try executeNative(&native, &realm, &frame),
+        );
+        try testing.expectEqual(native.graph.nodes[div_id].bytecode_offset, frame.ip);
+        try testing.expectEqual(Value.fromInt32(case.rhs).bits, frame.accumulator.bits);
+        try testing.expectEqual(Value.fromInt32(case.lhs).bits, frame.registers[0].bits);
+
+        const resumed = try resumeLantern(&realm, frame);
+        try testing.expectEqual(Value.fromDouble(case.expected).bits, resumed.bits);
+        const interpreted = switch (try lantern.run(testing.allocator, &realm, &chunk)) {
+            .value => |value| value,
+            else => return error.TestUnexpectedResult,
+        };
+        try testing.expectEqual(interpreted.bits, resumed.bits);
+    }
+}
+
+test "Ohaimark AArch64 tagged Number division handles the full finite and infinite path" {
+    if (comptime !masm.native_aarch64) return error.SkipZigTest;
+    var binary = try dynamicBinaryChunk(.div);
+    defer binary.chunk.deinit(testing.allocator);
+    var native = try NativeGraph.build(&binary.chunk);
+    defer native.deinit();
+    const div_id = try findNode(&native, .div);
+    try testing.expectEqual(
+        specialize.Lowering.number_div,
+        native.specialization.node_info[div_id].lowering,
+    );
+
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = false;
+    const registers = try testing.allocator.alloc(Value, binary.chunk.register_count);
+    defer testing.allocator.free(registers);
+    var machine = masm.Masm.init(testing.allocator);
+    defer machine.deinit();
+    var executable = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
+    defer executable.deinit();
+    var frame = testFrame(&binary.chunk, registers);
+    const entry = try installNative(&native, &frame, &machine, &executable);
+
+    const cases = [_]struct { lhs: Value, rhs: Value, expected: f64 }{
+        .{ .lhs = Value.fromInt32(7), .rhs = Value.fromInt32(2), .expected = 3.5 },
+        .{ .lhs = Value.fromDouble(7.5), .rhs = Value.fromInt32(2), .expected = 3.75 },
+        .{ .lhs = Value.fromInt32(1), .rhs = Value.fromInt32(0), .expected = std.math.inf(f64) },
+        .{
+            .lhs = Value.fromInt32(1),
+            .rhs = Value.fromDouble(-0.0),
+            .expected = -std.math.inf(f64),
+        },
+        .{ .lhs = Value.fromInt32(0), .rhs = Value.fromInt32(-1), .expected = -0.0 },
+        .{
+            .lhs = Value.fromInt32(std.math.minInt(i32)),
+            .rhs = Value.fromInt32(-1),
+            .expected = 2_147_483_648,
+        },
+    };
+    for (cases) |case| {
+        frame = testFrame(&binary.chunk, registers);
+        frame.registers[binary.lhs] = case.lhs;
+        frame.registers[binary.rhs] = case.rhs;
+        try testing.expectEqual(@intFromEnum(codegen.EntryResult.done), entry(
+            &realm,
+            &frame,
+            frame.registers.ptr,
+        ));
+        try testing.expectEqual(Value.fromDouble(case.expected).bits, frame.accumulator.bits);
+    }
+}
+
+test "Ohaimark AArch64 tagged Number division deopts NaN and coercion exactly" {
+    if (comptime !masm.native_aarch64) return error.SkipZigTest;
+    var binary = try dynamicBinaryChunk(.div);
+    defer binary.chunk.deinit(testing.allocator);
+    var native = try NativeGraph.build(&binary.chunk);
+    defer native.deinit();
+    const div_id = try findNode(&native, .div);
+
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = false;
+    const registers = try testing.allocator.alloc(Value, binary.chunk.register_count);
+    defer testing.allocator.free(registers);
+    var machine = masm.Masm.init(testing.allocator);
+    defer machine.deinit();
+    var executable = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
+    defer executable.deinit();
+    var frame = testFrame(&binary.chunk, registers);
+    const entry = try installNative(&native, &frame, &machine, &executable);
+
+    const cases = [_]struct { lhs: Value, rhs: Value, expected: Value }{
+        .{
+            .lhs = Value.fromInt32(0),
+            .rhs = Value.fromInt32(0),
+            .expected = Value.fromDouble(std.math.nan(f64)),
+        },
+        .{
+            .lhs = Value.fromString(try realm.heap.allocateString("6")),
+            .rhs = Value.fromInt32(2),
+            .expected = Value.fromDouble(3),
+        },
+    };
+    for (cases) |case| {
+        frame = testFrame(&binary.chunk, registers);
+        frame.registers[binary.lhs] = case.lhs;
+        frame.registers[binary.rhs] = case.rhs;
+        try testing.expectEqual(@intFromEnum(codegen.EntryResult.resume_interp), entry(
+            &realm,
+            &frame,
+            frame.registers.ptr,
+        ));
+        try testing.expectEqual(native.graph.nodes[div_id].bytecode_offset, frame.ip);
+        try testing.expectEqual(case.rhs.bits, frame.accumulator.bits);
+        try testing.expectEqual(case.lhs.bits, frame.registers[binary.lhs].bits);
+        try testing.expectEqual(case.expected.bits, (try resumeLantern(&realm, frame)).bits);
     }
 }
 

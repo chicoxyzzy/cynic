@@ -34,6 +34,35 @@ fn findNode(graph: *const ir.Graph, kind: ir.NodeKind) ?ir.ValueId {
     return null;
 }
 
+fn diamondInt32BinaryChunk(
+    op: Op,
+    then_value: i32,
+    else_value: i32,
+    rhs: i32,
+) !Chunk {
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    const lhs = try builder.reserveRegister();
+    try builder.emitOp(.lda_true, span);
+    try builder.emitOp(.jmp_if_false, span);
+    const else_patch = builder.here();
+    try builder.emitI16(0);
+    try builder.emitLoadSmi(span, then_value);
+    try builder.emitOp(.jmp, span);
+    const join_patch = builder.here();
+    try builder.emitI16(0);
+    const else_target = builder.here();
+    try builder.emitLoadSmi(span, else_value);
+    const join_target = builder.here();
+    try builder.emitStoreReg(span, lhs);
+    try builder.emitLoadSmi(span, rhs);
+    try builder.emitOp(op, span);
+    try builder.emitU8(lhs);
+    try builder.patchI16(else_patch, else_target);
+    try builder.patchI16(join_patch, join_target);
+    return finish(&builder);
+}
+
 test "Ohaimark feedback snapshot preserves stable guards without GC pointers" {
     var builder = Builder.init(testing.allocator);
     defer builder.deinit();
@@ -874,6 +903,219 @@ test "Ohaimark graph evaluator matches Lantern on checked int32 success" {
     try testing.expectEqual(Value.fromInt32(11).bits, optimized.bits);
 }
 
+test "Ohaimark graph evaluator executes exact division and deopts fractional division" {
+    const cases = [_]struct {
+        lhs: i32,
+        other_lhs: i32,
+        rhs: i32,
+        expected: Value,
+        deopts: bool,
+    }{
+        .{
+            .lhs = 84,
+            .other_lhs = 86,
+            .rhs = 2,
+            .expected = Value.fromInt32(42),
+            .deopts = false,
+        },
+        .{
+            .lhs = 7,
+            .other_lhs = 9,
+            .rhs = 2,
+            .expected = Value.fromDouble(3.5),
+            .deopts = true,
+        },
+    };
+    for (cases) |case| {
+        var chunk = try diamondInt32BinaryChunk(.div, case.lhs, case.other_lhs, case.rhs);
+        defer chunk.deinit(testing.allocator);
+        var graph = try ir.Graph.build(testing.allocator, &chunk);
+        defer graph.deinit();
+        var specialization = try specialize.Plan.build(testing.allocator, &graph);
+        defer specialization.deinit();
+        var representations = try representation.Plan.build(
+            testing.allocator,
+            &graph,
+            &specialization,
+        );
+        defer representations.deinit();
+        var logical = try deopt.Metadata.build(testing.allocator, &graph, &specialization);
+        defer logical.deinit();
+        var homes = try deopt_physical.Homes.build(
+            testing.allocator,
+            &graph,
+            &specialization,
+            &representations,
+            &logical,
+        );
+        defer homes.deinit();
+        var physical = try deopt_physical.Metadata.build(
+            testing.allocator,
+            &graph,
+            &specialization,
+            &representations,
+            &logical,
+            &homes,
+        );
+        defer physical.deinit();
+
+        const entry_registers = [_]Value{Value.undefined_};
+        var outcome = try evaluator.evaluate(
+            testing.allocator,
+            &chunk,
+            &graph,
+            &specialization,
+            &representations,
+            &logical,
+            &homes,
+            &physical,
+            .{
+                .accumulator = Value.undefined_,
+                .registers = &entry_registers,
+                .step_limit = 1_000,
+            },
+        );
+        defer outcome.deinit();
+        switch (outcome) {
+            .returned => |value| {
+                try testing.expect(!case.deopts);
+                try testing.expectEqual(case.expected.bits, value.bits);
+            },
+            .deopt => |*state| {
+                try testing.expect(case.deopts);
+                const div_id = findNode(&graph, .div).?;
+                try testing.expectEqual(div_id, state.node);
+                var realm = Realm.init(testing.allocator);
+                defer realm.deinit();
+                realm.jit_enabled = false;
+                const resumed = switch (try state.resumeLantern(
+                    testing.allocator,
+                    &realm,
+                    &chunk,
+                )) {
+                    .value => |value| value,
+                    else => return error.TestUnexpectedResult,
+                };
+                try testing.expectEqual(case.expected.bits, resumed.bits);
+            },
+        }
+    }
+}
+
+test "Ohaimark graph evaluator executes tagged Number division and deopts NaN" {
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    const lhs = try builder.reserveRegister();
+    const rhs = try builder.reserveRegister();
+    try builder.emitLoadReg(span, rhs);
+    try builder.emitOp(.div, span);
+    try builder.emitU8(lhs);
+    var chunk = try finish(&builder);
+    defer chunk.deinit(testing.allocator);
+
+    var graph = try ir.Graph.build(testing.allocator, &chunk);
+    defer graph.deinit();
+    var specialization = try specialize.Plan.build(testing.allocator, &graph);
+    defer specialization.deinit();
+    const div_id = findNode(&graph, .div).?;
+    try testing.expectEqual(
+        specialize.Lowering.number_div,
+        specialization.node_info[div_id].lowering,
+    );
+    var representations = try representation.Plan.build(
+        testing.allocator,
+        &graph,
+        &specialization,
+    );
+    defer representations.deinit();
+    var logical = try deopt.Metadata.build(testing.allocator, &graph, &specialization);
+    defer logical.deinit();
+    var homes = try deopt_physical.Homes.build(
+        testing.allocator,
+        &graph,
+        &specialization,
+        &representations,
+        &logical,
+    );
+    defer homes.deinit();
+    var physical = try deopt_physical.Metadata.build(
+        testing.allocator,
+        &graph,
+        &specialization,
+        &representations,
+        &logical,
+        &homes,
+    );
+    defer physical.deinit();
+
+    const cases = [_]struct {
+        lhs: Value,
+        rhs: Value,
+        expected: Value,
+        deopts: bool,
+    }{
+        .{
+            .lhs = Value.fromInt32(7),
+            .rhs = Value.fromInt32(2),
+            .expected = Value.fromDouble(3.5),
+            .deopts = false,
+        },
+        .{
+            .lhs = Value.fromDouble(7.5),
+            .rhs = Value.fromInt32(2),
+            .expected = Value.fromDouble(3.75),
+            .deopts = false,
+        },
+        .{
+            .lhs = Value.fromInt32(0),
+            .rhs = Value.fromInt32(0),
+            .expected = Value.fromDouble(std.math.nan(f64)),
+            .deopts = true,
+        },
+    };
+    for (cases) |case| {
+        const entry_registers = [_]Value{ case.lhs, case.rhs };
+        var outcome = try evaluator.evaluate(
+            testing.allocator,
+            &chunk,
+            &graph,
+            &specialization,
+            &representations,
+            &logical,
+            &homes,
+            &physical,
+            .{
+                .accumulator = Value.undefined_,
+                .registers = &entry_registers,
+                .step_limit = 1_000,
+            },
+        );
+        defer outcome.deinit();
+        switch (outcome) {
+            .returned => |value| {
+                try testing.expect(!case.deopts);
+                try testing.expectEqual(case.expected.bits, value.bits);
+            },
+            .deopt => |*state| {
+                try testing.expect(case.deopts);
+                try testing.expectEqual(div_id, state.node);
+                var realm = Realm.init(testing.allocator);
+                defer realm.deinit();
+                realm.jit_enabled = false;
+                const resumed = switch (try state.resumeLantern(
+                    testing.allocator,
+                    &realm,
+                    &chunk,
+                )) {
+                    .value => |value| value,
+                    else => return error.TestUnexpectedResult,
+                };
+                try testing.expectEqual(case.expected.bits, resumed.bits);
+            },
+        }
+    }
+}
+
 test "Ohaimark graph evaluator deopt resumes Lantern before overflow" {
     var builder = Builder.init(testing.allocator);
     defer builder.deinit();
@@ -1144,6 +1386,69 @@ test "Ohaimark specialization preserves negative zero multiplication" {
     try testing.expect(info.result_type.eql(specialize.Type.number));
     try testing.expectEqual(specialize.Lowering.checked_int32_mul, info.lowering);
     try testing.expectEqual(@as(?ir.Immediate, null), info.folded);
+}
+
+test "Ohaimark specialization folds only exact int32 division" {
+    const cases = [_]struct {
+        lhs: i32,
+        rhs: i32,
+        folded: ?i32,
+    }{
+        .{ .lhs = 84, .rhs = 2, .folded = 42 },
+        .{ .lhs = -84, .rhs = 2, .folded = -42 },
+        .{ .lhs = 7, .rhs = 2, .folded = null },
+        .{ .lhs = 1, .rhs = 0, .folded = null },
+        .{ .lhs = 0, .rhs = -1, .folded = null },
+        .{ .lhs = std.math.minInt(i32), .rhs = -1, .folded = null },
+    };
+    for (cases) |case| {
+        var builder = Builder.init(testing.allocator);
+        defer builder.deinit();
+        const lhs = try builder.reserveRegister();
+        try builder.emitLoadSmi(span, case.lhs);
+        try builder.emitStoreReg(span, lhs);
+        try builder.emitLoadSmi(span, case.rhs);
+        try builder.emitOp(.div, span);
+        try builder.emitU8(lhs);
+        var chunk = try finish(&builder);
+        defer chunk.deinit(testing.allocator);
+
+        var graph = try ir.Graph.build(testing.allocator, &chunk);
+        defer graph.deinit();
+        var plan = try specialize.Plan.build(testing.allocator, &graph);
+        defer plan.deinit();
+        const info = plan.node_info[findNode(&graph, .div).?];
+        try testing.expect(info.result_type.isSubsetOf(specialize.Type.number));
+        if (case.folded) |folded| {
+            try testing.expectEqual(specialize.Lowering.constant, info.lowering);
+            try testing.expectEqual(ir.Immediate{ .int32 = folded }, info.folded.?);
+        } else {
+            try testing.expectEqual(specialize.Lowering.number_div, info.lowering);
+            try testing.expectEqual(@as(?ir.Immediate, null), info.folded);
+        }
+    }
+}
+
+test "Ohaimark specialization guards unknown division as Number" {
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    const lhs = try builder.reserveRegister();
+    const rhs = try builder.reserveRegister();
+    try builder.emitLoadReg(span, rhs);
+    try builder.emitOp(.div, span);
+    try builder.emitU8(lhs);
+    var chunk = try finish(&builder);
+    defer chunk.deinit(testing.allocator);
+
+    var graph = try ir.Graph.build(testing.allocator, &chunk);
+    defer graph.deinit();
+    var plan = try specialize.Plan.build(testing.allocator, &graph);
+    defer plan.deinit();
+    const div_id = findNode(&graph, .div).?;
+    const info = plan.node_info[div_id];
+    try testing.expect(info.result_type.eql(specialize.Type.number));
+    try testing.expectEqual(specialize.Lowering.number_div, info.lowering);
+    try testing.expect(graph.nodes[div_id].frame_state != null);
 }
 
 test "Ohaimark value facts converge across loop phis" {

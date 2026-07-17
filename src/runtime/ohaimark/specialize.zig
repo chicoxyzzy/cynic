@@ -63,6 +63,8 @@ pub const Lowering = enum {
     checked_int32_add,
     checked_int32_sub,
     checked_int32_mul,
+    checked_int32_div,
+    number_div,
     strict_eq,
     logical_not,
     checked_boolean_not,
@@ -271,6 +273,7 @@ fn inferNode(graph: *const ir.Graph, facts: []const NodeInfo, id: ir.ValueId) !N
         .add => inferArithmetic(.add, facts, inputs),
         .sub => inferArithmetic(.sub, facts, inputs),
         .mul => inferArithmetic(.mul, facts, inputs),
+        .div => inferArithmetic(.div, facts, inputs),
         .strict_eq => inferStrictEq(facts, inputs),
         .logical_not => inferLogicalNot(facts, inputs),
         .less_than => inferLessThan(facts, inputs),
@@ -313,7 +316,7 @@ fn inferConstant(node: ir.Node) NodeInfo {
     };
 }
 
-const Arithmetic = enum { add, sub, mul };
+const Arithmetic = enum { add, sub, mul, div };
 
 fn inferArithmetic(op: Arithmetic, facts: []const NodeInfo, inputs: []const ir.ValueId) NodeInfo {
     if (inputs.len != 2) return .{};
@@ -329,6 +332,9 @@ fn inferArithmetic(op: Arithmetic, facts: []const NodeInfo, inputs: []const ir.V
                 .folded = .{ .int32 = folded },
             };
         }
+        if (op == .div) {
+            return .{ .result_type = Type.number, .lowering = .number_div };
+        }
     };
 
     if (lhs.result_type.eql(Type.int32) and rhs.result_type.eql(Type.int32)) {
@@ -338,13 +344,22 @@ fn inferArithmetic(op: Arithmetic, facts: []const NodeInfo, inputs: []const ir.V
                 .add => .checked_int32_add,
                 .sub => .checked_int32_sub,
                 .mul => .checked_int32_mul,
+                .div => .checked_int32_div,
             },
         };
     }
     if (lhs.result_type.isSubsetOf(Type.number) and
         rhs.result_type.isSubsetOf(Type.number))
     {
+        if (op == .div) {
+            return .{ .result_type = Type.number, .lowering = .number_div };
+        }
         return .{ .result_type = Type.number, .lowering = .generic };
+    }
+    if (op == .div) {
+        // The successful path refines both guarded operands to Number. Any
+        // coercion or BigInt case resumes Lantern at the pre-operation state.
+        return .{ .result_type = Type.number, .lowering = .number_div };
     }
     return .{ .result_type = Type.any, .lowering = .generic };
 }
@@ -400,16 +415,28 @@ fn inferLessThan(facts: []const NodeInfo, inputs: []const ir.ValueId) NodeInfo {
 }
 
 fn foldIntArithmetic(op: Arithmetic, lhs: i32, rhs: i32) ?i32 {
+    if (op == .div) return foldIntDivision(lhs, rhs);
     const result = switch (op) {
         .add => @addWithOverflow(lhs, rhs),
         .sub => @subWithOverflow(lhs, rhs),
         .mul => @mulWithOverflow(lhs, rhs),
+        .div => unreachable,
     };
     if (result[1] != 0) return null;
     // ECMAScript multiplication preserves negative zero. Int32 constants do
     // not encode -0, so leave a sign-negative zero product to generic code.
     if (op == .mul and result[0] == 0 and ((lhs < 0) != (rhs < 0))) return null;
     return result[0];
+}
+
+/// §6.1.6.1.5 Number::divide. An int32 result is valid only when division is
+/// exact and cannot produce infinity, a fractional Double, overflow, or -0.
+fn foldIntDivision(lhs: i32, rhs: i32) ?i32 {
+    if (rhs == 0) return null;
+    if (lhs == std.math.minInt(i32) and rhs == -1) return null;
+    if (lhs == 0 and rhs < 0) return null;
+    if (@rem(lhs, rhs) != 0) return null;
+    return @divTrunc(lhs, rhs);
 }
 
 fn immediateType(value: ir.Immediate) Type {

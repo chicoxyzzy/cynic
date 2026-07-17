@@ -3,10 +3,11 @@
 Status: **ADR accepted; bytecode/feedback/SSA, pure specialization,
 representation selection, and logical plus stable-spill physical deopt
 metadata, graph/Lantern differential evaluation, and abstract register/spill
-allocation plus AArch64 physical frame/edge lowering landed** (2026-07-16).
+allocation plus AArch64 physical frame/edge lowering landed** (2026-07-17).
 Verified native frame entry/exit, typed physical moves, folded-value returns,
-checked int32 arithmetic/control and strict equality, every fused strict
-equality/inequality branch width, standalone strict inequality, Boolean logical
+checked int32 arithmetic/control, guarded tagged-Number division, strict
+equality, every fused strict equality/inequality branch width, standalone
+strict inequality, Boolean logical
 not, frame/realm loads, and direct Lantern-frame guard exits have also landed.
 Provably unobservable zero-slot environment creation is elided through a shared
 bytecode analysis; inherited lexical environments remain live. Guarded
@@ -125,7 +126,7 @@ arguments:
 Because target parameters exist before translation, backward edges require no
 repair pass. Unreachable blocks are not translated, so unsupported dead code
 does not reject an otherwise eligible function. The initial node set covers
-constants, register moves, `add`/`sub`/`mul`, strict equality, logical not,
+constants, register moves, `add`/`sub`/`mul`/`div`, strict equality, logical not,
 less-than, immediate addition, generic named-property loads, branches, jumps,
 and returns. All three displacement widths of the fused strict-equality and
 strict-inequality branches canonicalize to one guarded strict-equality value
@@ -144,7 +145,9 @@ Each node receives a result type, lowering choice, optional folded immediate,
 and optional removable assumption. Int32 arithmetic folds only when the exact
 result is representable: overflow stays on a checked Number lowering, and a
 sign-negative zero product stays unfolded because the int32 encoding cannot
-represent `-0`. Named loads consult their same-index feedback snapshot and
+represent `-0`. Division additionally requires a nonzero divisor, an exact
+quotient, no `INT_MIN / -1` overflow, and no negative-zero result before it may
+remain int32. Named loads consult their same-index feedback snapshot and
 select generic, own-data, prototype-data, or synthetic-accessor lowering.
 
 An assumption contains the live typed-IC index, arena-stable shape pointers,
@@ -183,6 +186,12 @@ argument counts, disjoint complete coverage of the flat input array, producer
 bounds, and conversion legality. Corrupt plans or graphs return
 `InvalidRepresentation` or `MalformedGraph`; they cannot reach unchecked
 slicing or casts.
+
+Tagged Number division deliberately does not add a persistent Double
+representation to this lattice. It consumes tagged operands, bridges Int32 and
+Double values through caller-saved FP scratch registers, and immediately
+reboxes the result. A Double SSA kind remains deferred until more than one
+lowering can keep values unboxed across nodes.
 
 ### 3.5 Register and spill allocation
 
@@ -292,7 +301,9 @@ the resolved parallel edge streams, and writes every separate stable recovery
 home at definition time. Constant branches and dynamic int32 truthiness feed
 their own edge streams; checked add/sub use AArch64's signed overflow flag,
 while multiply compares the full signed product and separately guards the
-ECMAScript negative-zero case.
+ECMAScript negative-zero case. Exact int32 division guards zero and signed zero,
+uses non-trapping `sdiv`, and compares the widened quotient/divisor product with
+the dividend to reject overflow or a fractional result.
 
 Each speculative node branches to one cold out-of-line exit. Physical recovery
 metadata is decoded while compiling, then emitted as direct tagged/int32 spill
@@ -560,6 +571,47 @@ global sites now reach the transactional generic-load boundary. Forced T2 and a
 fresh lower-tier run retained byte-identical 48,653-path pass lists (SHA-256
 `10f024349d3467c72112da03dd57e0d7e543cdb819a00b3082dfecedaec614ca`).
 
+### 3.18 Exact-int32 and tagged-Number division
+
+Division follows
+[§6.1.6.1.5 Number::divide](https://tc39.es/ecma262/#sec-numeric-types-number-divide),
+including fractional results, infinities, signed zero, and NaN. The split
+matches the established optimizing-engine shape: V8 Maglev separates
+`Int32DivideWithOverflow` from `Float64Divide`
+([Maglev IR](https://chromium.googlesource.com/v8/v8/+/refs/heads/main/src/maglev/maglev-ir.h));
+JavaScriptCore DFG uses a fallible integer `sdiv` path beside `DoubleRep`
+([DFG speculative JIT](https://github.com/WebKit/WebKit/blob/main/Source/JavaScriptCore/dfg/DFGSpeculativeJIT.cpp));
+and SpiderMonkey's `MDiv` carries fallible int32 and Double specializations
+([MIR](https://searchfox.org/mozilla-central/source/js/src/jit/MIR.h)).
+
+Ohaimark folds an int32 division only when the quotient is exact and remains a
+representable non-negative-zero int32. A dynamic statically-int32 node uses the
+same checked conditions in the evaluator and AArch64 emitter. A tagged node
+guards both operands as Int32 or Double, converts them into caller-saved
+`v16`/`v17`, executes `fdiv`, and re-applies Cynic's NaN-box Double offset before
+the result becomes visible. This path calls no helper, allocates nothing, and
+does not introduce a Double spill class. Non-Number coercion and BigInt cases
+resume Lantern from the pre-operation frame state. A NaN result also resumes
+Lantern so `Value.fromDouble` remains the sole canonical-NaN authority.
+
+The exact-int32 implementation alone moved approximately 36,875 `div` sites
+from IR refusal to codegen refusal but published no additional function: the
+corpus sites arrived as tagged entry values. The guarded tagged path retained
+218,345 compile attempts and converted 32,053 of those codegen refusals into
+publications: 38,949 published, 179,396 refused (168,447 IR, 2 allocation,
+10,947 codegen), with 48,710 KiB installed. It entered generated code 1,839,963
+times, completed 553,362 times, and took 1,286,601 guard exits (69.93%) under
+the deliberately hostile threshold-1 test262 posture. Aggregate compilation
+cost was 10.379 s (47 us average, 82.682 ms maximum).
+
+The forced-T2 and fresh lower-tier pass lists remained byte-identical at 48,653
+paths with SHA-256
+`10f024349d3467c72112da03dd57e0d7e543cdb819a00b3082dfecedaec614ca`.
+The publication gain is therefore executable-coverage evidence, not a speed
+claim. The high guard rate and code footprint make operand-type feedback plus
+threshold tuning prerequisites for default-on T2; broadening more tagged
+arithmetic before that measurement would repeat the same avoidable exits.
+
 ## 4. Deoptimization contract
 
 Every speculative node will carry an explicit assumption and deopt point.
@@ -579,8 +631,8 @@ once. A single reverse-liveness scan per block selects those registers; dead
 defined registers do not inflate every guard state.
 
 After specialization, `runtime/ohaimark/deopt.zig` emits points only for
-checked-int32, feedback-specialized property/global loads, and guarded
-frame/environment loads. Its byte stream
+checked-int32 arithmetic, tagged-Number division, feedback-specialized
+property/global loads, and guarded frame/environment loads. Its byte stream
 embeds constants directly and uses `ValueId` recoveries for non-constant SSA
 values. The verifier checks point order and bounds, lowering/assumption
 compatibility, same-block/parameter value availability, strictly ordered
@@ -608,9 +660,9 @@ panicking.
 `runtime/ohaimark/evaluator.zig` now provides that pre-codegen proof for the
 pure supported subset. It executes constants, block arguments, branches,
 loops, folded nodes, checked int32 arithmetic, strict equality/inequality,
-Boolean logical not, numeric less-than, and returns while applying the selected
-per-use conversions. Every definition writes its required physical home. A
-failed type/overflow guard
+guarded tagged-Number division, Boolean logical not, numeric less-than, and
+returns while applying the selected per-use conversions. Every definition
+writes its required physical home. A failed type/overflow/NaN guard
 decodes the physical stream, materializes the accumulator and live registers,
 and can resume `lantern.runFrames` at the original operation.
 
@@ -661,7 +713,8 @@ traffic remains on T1/T0 until the rollout gates pass.
    moves, raw int32 spill stores, boxing, checked offsets, non-heap constant
    rematerialization, and an end-to-end folded graph native return.
 8. **AArch64 optimized execution, initial slice shipped:** checked int32
-   add/sub/mul, strict equality and all fused strict equality/inequality branch
+   add/sub/mul/div plus guarded tagged-Number division, strict equality and all
+   fused strict equality/inequality branch
    widths, standalone strict inequality, guarded Boolean logical not, int32
    control flow, stable-home writes, returns, and direct Lantern-frame guard
    exits, plus live-cell own/prototype/synthetic named loads with inline/overflow

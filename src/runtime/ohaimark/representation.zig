@@ -267,6 +267,7 @@ fn initialOutput(node: ir.Node, info: specialize.NodeInfo) !Kind {
         .add => arithmeticOutput(info, .checked_int32_add),
         .sub => arithmeticOutput(info, .checked_int32_sub),
         .mul => arithmeticOutput(info, .checked_int32_mul),
+        .div => divisionOutput(info),
         .strict_eq => switch (info.lowering) {
             .constant, .strict_eq => .tagged,
             else => error.MalformedGraph,
@@ -319,6 +320,14 @@ fn arithmeticOutput(info: specialize.NodeInfo, checked: specialize.Lowering) !Ki
     };
 }
 
+fn divisionOutput(info: specialize.NodeInfo) !Kind {
+    if (info.lowering == .number_div) {
+        if (info.folded != null) return error.MalformedGraph;
+        return .tagged;
+    }
+    return arithmeticOutput(info, .checked_int32_div);
+}
+
 fn nodeInputKind(node: ir.Node, info: specialize.NodeInfo) !Kind {
     return switch (node.kind) {
         .block_parameter,
@@ -332,6 +341,7 @@ fn nodeInputKind(node: ir.Node, info: specialize.NodeInfo) !Kind {
         .add => arithmeticInput(info, .checked_int32_add),
         .sub => arithmeticInput(info, .checked_int32_sub),
         .mul => arithmeticInput(info, .checked_int32_mul),
+        .div => divisionInput(info),
         .strict_eq => switch (info.lowering) {
             .constant => .none,
             .strict_eq => .int32,
@@ -368,6 +378,14 @@ fn arithmeticInput(info: specialize.NodeInfo, checked: specialize.Lowering) !Kin
     };
 }
 
+fn divisionInput(info: specialize.NodeInfo) !Kind {
+    if (info.lowering == .number_div) {
+        if (info.folded != null) return error.MalformedGraph;
+        return .tagged;
+    }
+    return arithmeticInput(info, .checked_int32_div);
+}
+
 fn nodeInputCount(kind: ir.NodeKind) u16 {
     return switch (kind) {
         .block_parameter,
@@ -379,7 +397,7 @@ fn nodeInputCount(kind: ir.NodeKind) u16 {
         .jump,
         => 0,
         .logical_not, .load_named, .branch, .return_ => 1,
-        .add, .sub, .mul, .strict_eq, .less_than => 2,
+        .add, .sub, .mul, .div, .strict_eq, .less_than => 2,
     };
 }
 
@@ -427,6 +445,7 @@ fn isCheckedInt32(kind: ir.NodeKind, lowering: specialize.Lowering) bool {
         .add => lowering == .checked_int32_add,
         .sub => lowering == .checked_int32_sub,
         .mul => lowering == .checked_int32_mul,
+        .div => lowering == .checked_int32_div,
         .strict_eq => lowering == .strict_eq,
         else => false,
     };
@@ -451,7 +470,7 @@ fn validateNodeContract(node: ir.Node, info: specialize.NodeInfo) !void {
                 return error.MalformedGraph;
             }
         },
-        .add, .sub, .mul, .strict_eq, .logical_not, .less_than => {
+        .add, .sub, .mul, .div, .strict_eq, .logical_not, .less_than => {
             if (!hasPayload(node.payload, .none)) return error.MalformedGraph;
         },
         .load_named => {
