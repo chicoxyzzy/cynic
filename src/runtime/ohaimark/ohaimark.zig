@@ -18,4 +18,5 @@ pub const compiler = @import("compiler.zig");
 pub const driver = @import("driver.zig");
 pub const evaluator = @import("evaluator.zig");
 pub const osr = @import("osr.zig");
+pub const policy = @import("policy.zig");
 pub const stats = @import("stats.zig");

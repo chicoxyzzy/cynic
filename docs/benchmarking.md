@@ -136,8 +136,7 @@ out of the timed samples. Increase confidence with:
 The ordinary `bench/micros/mul_loop.js` and `div_loop.js` intentionally invoke
 their hot function once. Backedges heat those chunks, but an entry-only T2 has
 no later entry at which to compile them; they remain valid T1 benchmarks and
-are the shape the **OSR rollout** suite targets. Function-entry rollout
-fixtures repeatedly call small leaf functions instead,
+are the shape the **OSR rollout** suite targets.
 
 ### Ohaimark OSR natural-threshold gate
 
@@ -157,12 +156,12 @@ geometric mean, and worst fixture.
 Do **not** default OSR on unless geometric mean T2/T1 is `≤ 1.000×` and no
 stable fixture exceeds `1.050×`, with clean differential/GC/fuzz gates.
 
-The ordinary function-entry rollout fixtures repeatedly call small leaf functions instead,
-covering tagged Number multiplication/division, monomorphic named loads,
-strict-equality control flow, and a call wrapper that should refuse once while
-its numeric callee publishes. No default-on decision passes if any stable
-fixture regresses by more than 5% or if the geometric mean exceeds `1.000x`,
-matching the JIT gate in [`jit.md`](jit.md) §10.
+The ordinary function-entry rollout fixtures repeatedly call small leaf
+functions instead, covering tagged Number multiplication/division, monomorphic
+named loads, strict-equality control flow, and a call wrapper that should
+refuse once while its numeric callee publishes. No default-on decision passes
+if any stable fixture regresses by more than 5% or if the geometric mean
+exceeds `1.000x`, matching the JIT gate in [`jit.md`](jit.md) §10.
 
 The graduation 30-pair arm64 sample measured `0.997x` geometric mean, with
 `branch_eq` worst at `1.041x`, and installed 0.8 KiB. Both rollout limits pass,

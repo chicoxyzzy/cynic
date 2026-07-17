@@ -49,6 +49,7 @@ const a64 = @import("../jit/asm_aarch64.zig");
 const layout = @import("../jit/layout.zig");
 const JSObject = @import("../object.zig").JSObject;
 const heap_mod = @import("../heap.zig");
+const ohaimark_policy = @import("../ohaimark/policy.zig");
 
 /// Bistromath needs both an executable-memory target and an
 /// emitter for the host ISA. x86_64 hosts run the engine fine but
@@ -479,9 +480,8 @@ const bool_tag_bits: u64 = Value.false_.bits;
 /// compiles — compilation stays on the Lantern OSR path so refusal cannot
 /// leave a half-updated activation.
 ///
-/// Constants mirror `ohaimark/driver.zig` rather than importing it: the
-/// lantern ↔ bistromath ↔ ohaimark import cycle would otherwise form at
-/// module load.
+/// Policy numbers come from `ohaimark/policy.zig` (cycle-free) rather than
+/// driver.zig so lantern ↔ bistromath ↔ ohaimark cannot form at module load.
 fn ohaimarkOsrYieldProbe(
     r: *Realm,
     frame: *CallFrame,
@@ -489,20 +489,15 @@ fn ohaimarkOsrYieldProbe(
 ) callconv(.c) u32 {
     if (!r.ohaimark_osr_enabled or !r.ohaimark_enabled or !r.jit_enabled) return 0;
     if (comptime !supported) return 0;
-    // Keep in lockstep with ohaimark/driver.zig.
-    const ohaimark_osr_strike_limit: u8 = 8;
-    const ohaimark_tier_up_base: u32 = 8 * 1024;
     const state = frame.chunk.jit_state orelse return 0;
-    if (state.ohaimark_osr_strikes >= ohaimark_osr_strike_limit) return 0;
+    if (state.ohaimark_osr_strikes >= ohaimark_policy.osr_strike_limit) return 0;
     if (target_bc > std.math.maxInt(u32)) return 0;
     const bc: u32 = @intCast(target_bc);
     return switch (state.ohaimark.tier) {
         .dont_compile => 0,
         .cold => blk: {
-            const threshold = r.ohaimark_threshold_override orelse blk2: {
-                const len: u32 = @intCast(@min(frame.chunk.code.len, 1 << 20));
-                break :blk2 ohaimark_tier_up_base +| (32 *| len);
-            };
+            const threshold = r.ohaimark_threshold_override orelse
+                ohaimark_policy.tierUpThreshold(frame.chunk.code.len);
             break :blk if (state.warmth >= threshold) 1 else 0;
         },
         .compiled => if (state.ohaimarkOsrCodeOffset(bc) != null) 1 else 0,

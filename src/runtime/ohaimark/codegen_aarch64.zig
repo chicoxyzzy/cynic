@@ -44,10 +44,19 @@ pub const EntryResult = enum(u32) {
 /// values cannot collide with this internal control sentinel.
 pub const resume_sentinel_bits: u64 = 0x7FFA_0000_0000_0001;
 
+/// OSR entry refused before any optimized body ran (e.g. int32 tag check on a
+/// header parameter). Distinct from `resume_sentinel_bits` so the driver can
+/// strike enter-and-bail thrash without charging cooperative safepoint exits.
+pub const osr_bail_sentinel_bits: u64 = 0x7FFA_0000_0000_0002;
+
 comptime {
     const decoded: f64 = @bitCast(resume_sentinel_bits -% Value.double_encode_offset);
     std.debug.assert(std.math.isNan(decoded));
     std.debug.assert(resume_sentinel_bits != Value.fromDouble(std.math.nan(f64)).bits);
+    const bail_decoded: f64 = @bitCast(osr_bail_sentinel_bits -% Value.double_encode_offset);
+    std.debug.assert(std.math.isNan(bail_decoded));
+    std.debug.assert(osr_bail_sentinel_bits != resume_sentinel_bits);
+    std.debug.assert(osr_bail_sentinel_bits != Value.fromDouble(std.math.nan(f64)).bits);
 }
 
 const max_graph_items = 16 * 1024;
@@ -308,6 +317,10 @@ const Compiler = struct {
                     try self.machine.emit(a64.eorReg(guard_scratch, lhs_scratch, guard_scratch));
                     try self.machine.emit(a64.lsrImm(guard_scratch, guard_scratch, 48));
                     try self.machine.jumpCbnz(guard_scratch, fail);
+                    // SSA int32 homes are unboxed (W arithmetic / zero checks).
+                    // Drop the NaN-box tag so a register-homed counter of 0 is
+                    // falsy and a zero divisor still deopts (docs/ohaimark.md §3.17).
+                    try self.machine.emit(a64.movRegW(lhs_scratch, lhs_scratch));
                     try emitter.emitMove(self.machine, .{
                         .source = .{ .register = lhs_scratch },
                         .destination = destination,
@@ -355,9 +368,11 @@ const Compiler = struct {
 
             if (needs_int32) {
                 // Frame already holds loop-header state (OSR loads never
-                // write it). Release the spill area and resume Lantern.
+                // write it). Release the spill area and bail to Lantern —
+                // use the OSR-bail sentinel so thrash accounting only
+                // charges true enter-and-bail, not safepoint resumes.
                 self.machine.bind(&int32_fail);
-                try self.machine.movImm64(.x0, resume_sentinel_bits);
+                try self.machine.movImm64(.x0, osr_bail_sentinel_bits);
                 try emitter.emitEpilogue(self.machine, self.lowered.frame);
             }
         }

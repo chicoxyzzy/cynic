@@ -1228,39 +1228,43 @@ frame format.
 
 2. **Same frame.** OSR never allocates a parallel optimized frame or stores
    engine state on JS-visible objects. The entry stub loads the current
-   `CallFrame` accumulator and live registers, places them into the physical
-   locations already assigned to the header's block parameters (through the
-   existing parallel-move / conversion machinery), then jumps to the header
-   block label. A failed representation check or later guard uses the existing
-   cold exit: exact bytecode offset, accumulator, and live registers restored
-   for Lantern.
+   `CallFrame` accumulator and live registers sequentially into the physical
+   locations already assigned to the header's block parameters (tagged load +
+   optional int32 tag-check then `movRegW` unbox + `emitMove`; it does **not**
+   run `parallel_moves.resolve` — that remains for in-graph edge transfers),
+   then jumps to the header block label. A failed entry materialization returns
+   a distinct OSR-bail sentinel; mid-body guards and cooperative safepoints use
+   the ordinary resume sentinel and restore exact Lantern state.
 
 3. **One transactional code allocation.** OSR stubs are emitted after the
    ordinary function body into the same `Masm` buffer. Publication still
    installs one owned executable handle; a separate chunk-owned
    `bc → code_off` table (same `OsrEntry` layout as Bistromath) rides beside
    it. Failed compile refuses T2 only (`dont_compile`); Bistromath/Lantern
-   stay executable.
+   stay executable. Today materialization failure is all-or-nothing for the
+   compile (the whole T2 publish is refused); per-header skip-and-still-
+   publish is a future refinement.
 
 4. **Triggers.** Lantern backedges try Ohaimark OSR when
    `Realm.ohaimark_osr_enabled` is true (and the master `jit_enabled` +
    `ohaimark_enabled` gates allow). Bistromath backedges flush frame state and
-   attempt the same entry so a T1-resident hot loop can still promote. Both
-   reuse heat/`dont_compile`/`osr_strikes` — never retry compilation on every
-   backedge.
+   yield to the loop header so Lantern can enter a published stub. Both reuse
+   heat/`dont_compile`; true enter-and-bail (OSR-bail sentinel) charges
+   `osr_strikes`. Cooperative safepoint resumes do **not** charge strikes or
+   the function-entry `guard_exit` budget.
 
 5. **Refusals.** Constructors, generators, async Promise-wrapping frames, and
-   exception-region chunks stay out (same as function-entry T2). Headers whose
-   parameter representations or nodes the emitter cannot materialize refuse
-   that header's stub without mutating the live frame; the function may still
-   publish if the entry path is fine.
+   exception-region chunks stay out (same as function-entry T2). Unsupported
+   opcodes or OSR materialization errors refuse the whole T2 compile for that
+   chunk without mutating the live frame.
 
 6. **Default-off gate.** `Realm.ohaimark_osr_enabled` defaults false and is
-   inherited by `initChild`. Tests and the OSR rollout benchmark flip it
-   explicitly. No general user-facing CLI flag: OSR is a correctness-sensitive
-   sub-feature of an already-default-on tier, and enabling it before the
-   differential/performance gates would ship a half-validated path. A bench
-   harness sets the Realm field directly.
+   inherited by `initChild`. The CLI flag `--ohaimark-osr` (requires
+   `--jit`/`--ohaimark`) exists only so validation and
+   `zig build bench -- --ohaimark-osr-rollout` can flip the Realm policy
+   without a separate binary; it is not a production default and is not a
+   test262 harness flag today. Enabling OSR by default waits on the
+   graduation criteria below.
 
 #### Rejected alternatives
 
@@ -1272,8 +1276,9 @@ frame format.
 - **Enter at arbitrary bytecode offsets:** forbids standard loop opts; every
   production engine restricts optimizing OSR to headers (or rarer special
   points).
-- **CLI flag for end users:** premature until gates pass; Realm policy + test
-  hooks are enough to validate.
+- **Default-on CLI for end users before gates pass:** the validation-only
+  `--ohaimark-osr` flag is the compromise — opt-in for benches/tests, never
+  the production default until graduation.
 
 #### Graduation criteria (unchanged from the function-entry bar)
 

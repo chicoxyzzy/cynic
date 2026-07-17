@@ -14,29 +14,14 @@ const Realm = @import("../realm.zig").Realm;
 const Value = @import("../value.zig").Value;
 const codegen = @import("codegen_aarch64.zig");
 const compiler = @import("compiler.zig");
+const policy = @import("policy.zig");
 
 pub const supported = compiler.supported;
 
-/// Starting T2 heat policy. T1 gets the first chance to amortize its much
-/// cheaper compiler; Ohaimark waits for mature feedback and sustained heat.
-/// These constants remain provisional until the differential and benchmark
-/// gates in docs/ohaimark.md §5 complete.
-pub const tier_up_base: u32 = 8 * 1024;
-
-/// An installed T2 entry that repeatedly reconstructs the interpreter frame
-/// is no longer paying for itself. Four exits preserve a short transient
-/// window while bounding entry-and-bail overhead for a permanently changed
-/// site. The code remains owned by the chunk; lower tiers simply bypass it.
-pub const guard_exit_limit: u8 = 4;
-
-/// Same shape as Bistromath's OSR strike budget: enter-and-bail on every
-/// iteration is worse than staying in the lower tier.
-pub const osr_strike_limit: u8 = 8;
-
-pub fn tierUpThreshold(code_len: usize) u32 {
-    const len: u32 = @intCast(@min(code_len, 1 << 20));
-    return tier_up_base +| (32 *| len);
-}
+pub const tier_up_base = policy.tier_up_base;
+pub const guard_exit_limit = policy.guard_exit_limit;
+pub const osr_strike_limit = policy.osr_strike_limit;
+pub const tierUpThreshold = policy.tierUpThreshold;
 
 pub const EnterOutcome = union(enum) {
     /// T2 did not touch the frame. The shared dispatcher may try T1.
@@ -127,7 +112,10 @@ pub fn osrWorth(realm: *const Realm, chunk: *const Chunk) bool {
     if (state.ohaimark_osr_strikes >= osr_strike_limit) return false;
     return switch (state.ohaimark.tier) {
         .dont_compile => false,
-        .cold => state.warmth >= (realm.ohaimark_threshold_override orelse tier_up_base),
+        // Match tryOsrEnterTop / Bistromath probe so the precheck is a true
+        // no-call filter (not a floor that still calls compile every edge).
+        .cold => state.warmth >= (realm.ohaimark_threshold_override orelse
+            tierUpThreshold(chunk.code.len)),
         .compiled => state.hasOhaimarkOsr(),
     };
 }
@@ -158,7 +146,8 @@ pub fn tryOsrEnterTop(
         if (!compiler.compile(realm, frame.chunk)) return .not_entered;
     }
 
-    const code_off = state.ohaimarkOsrCodeOffset(@intCast(frame.ip)) orelse {
+    const header_bc = std.math.cast(u32, frame.ip) orelse return .not_entered;
+    const code_off = state.ohaimarkOsrCodeOffset(header_bc) orelse {
         // Compiled without a stub for this header (or no loops). Do not strike
         // — the backedge simply stays in the lower tier.
         return .not_entered;
@@ -168,9 +157,17 @@ pub fn tryOsrEnterTop(
     const telemetry = &realm.heap.ohaimark_stats;
     telemetry.recordEntry();
     const result_bits = stub(realm, frame, frame.registers.ptr);
-    if (result_bits == codegen.resume_sentinel_bits) {
+    if (result_bits == codegen.osr_bail_sentinel_bits) {
+        // True enter-and-bail (failed header materialization). Do not charge
+        // function-entry guard_exits — OSR is independent of that budget.
         state.ohaimark_osr_strikes +|= 1;
-        state.ohaimark_guard_exits +|= 1;
+        telemetry.recordGuardExit();
+        return .resumed;
+    }
+    if (result_bits == codegen.resume_sentinel_bits) {
+        // Cooperative safepoint or mid-body guard exit already reconstructed
+        // the Lantern frame. Count telemetry only — safepoints must not burn
+        // OSR strikes or disable function-entry T2.
         telemetry.recordGuardExit();
         return .resumed;
     }

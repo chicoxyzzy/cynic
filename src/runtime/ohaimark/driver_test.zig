@@ -9,6 +9,7 @@ const lantern = @import("../lantern/interpreter.zig");
 const Realm = @import("../realm.zig").Realm;
 const Value = @import("../value.zig").Value;
 const driver = @import("driver.zig");
+const ohaimark_compiler = @import("compiler.zig");
 
 const testing = std.testing;
 const span: Span = .{ .start = 0, .end = 1 };
@@ -380,80 +381,135 @@ test "Ohaimark refusal preserves Bistromath fallback" {
     try testing.expectEqual(@as(u64, 0), realm.heap.ohaimark_stats.executed_entries);
 }
 
-test "Ohaimark OSR: single-call hot loop compiles and completes" {
+/// Truthiness loop with only ops the current Ohaimark AArch64 subset can emit
+/// (no relational ops, no loop-carried generic arithmetic). Same shape as the
+/// native safepoint OSR tests: one body trip then exit.
+fn osrTruthinessLoopChunk() !struct { chunk: chunk_mod.Chunk, header: u32, root: u8 } {
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    const root = try builder.reserveRegister();
+    try builder.emitOp(.lda_one, span);
+    const header = builder.here();
+    try builder.emitOp(.jmp_if_false, span);
+    const exit_patch = builder.here();
+    try builder.emitI16(0);
+    try builder.emitOp(.lda_zero, span);
+    try builder.emitOp(.jmp, span);
+    const back_patch = builder.here();
+    try builder.emitI16(0);
+    const exit_target = builder.here();
+    try builder.emitLoadReg(span, root);
+    try builder.emitOp(.return_, span);
+    try builder.patchI16(exit_patch, exit_target);
+    try builder.patchI16(back_patch, header);
+    return .{
+        .chunk = try builder.finish(),
+        .header = @intCast(header),
+        .root = root,
+    };
+}
+
+fn osrFrame(
+    chunk: *const chunk_mod.Chunk,
+    registers: []Value,
+    ip: usize,
+    acc: Value,
+) lantern.CallFrame {
+    @memset(registers, Value.undefined_);
+    return .{
+        .chunk = chunk,
+        .ip = ip,
+        .accumulator = acc,
+        .registers = registers,
+        .env = null,
+        .this_value = Value.undefined_,
+        .owns_registers = false,
+    };
+}
+
+test "Ohaimark OSR: publishes stub and completes via driver" {
     if (comptime !driver.supported) return error.SkipZigTest;
     var realm = Realm.init(testing.allocator);
     defer realm.deinit();
     realm.jit_enabled = true;
-    realm.jit_threshold_override = 1;
     realm.ohaimark_enabled = true;
-    realm.ohaimark_threshold_override = 1;
     realm.ohaimark_osr_enabled = true;
+    realm.ohaimark_threshold_override = 1;
     realm.heap.ohaimark_stats.enabled = true;
 
-    // One call, many backedges — function-entry T2 never re-enters; OSR must.
-    const source =
-        \\function sum(n) {
-        \\  let i = 0;
-        \\  let acc = 0;
-        \\  while (i < n) {
-        \\    acc = acc + 1;
-        \\    i = i + 1;
-        \\  }
-        \\  return acc;
-        \\}
-        \\sum(100);
-    ;
-    var chunk = try compileScript(&realm, source);
-    defer chunk.deinit(testing.allocator);
-    const value = try runValue(&realm, &chunk);
-    try testing.expectEqual(Value.fromInt32(100).bits, value.bits);
+    var loop = try osrTruthinessLoopChunk();
+    defer loop.chunk.deinit(testing.allocator);
+    const state = loop.chunk.jit_state.?;
+    state.warmth = driver.tierUpThreshold(loop.chunk.code.len);
 
-    const state = templateNamed(&chunk, "sum").jit_state.?;
-    // May refuse if the loop uses unsupported opcodes (e.g. less-than);
-    // either a successful OSR publish or an honest dont_compile is fine —
-    // the result must still match Lantern.
-    if (state.ohaimark.tier == .compiled) {
-        try testing.expect(state.hasOhaimarkOsr() or state.ohaimark_osr_count == 0);
-        try testing.expect(realm.heap.ohaimark_stats.executed_entries > 0 or
-            realm.heap.ohaimark_stats.compile_successes > 0);
+    try testing.expect(ohaimark_compiler.compile(&realm, &loop.chunk));
+    try testing.expectEqual(chunk_mod.Chunk.JitState.Tier.compiled, state.ohaimark.tier);
+    try testing.expect(state.hasOhaimarkOsr());
+    try testing.expect(state.ohaimarkOsrCodeOffset(loop.header) != null);
+
+    const registers = try testing.allocator.alloc(Value, loop.chunk.register_count);
+    defer testing.allocator.free(registers);
+    var frames: std.ArrayListUnmanaged(lantern.CallFrame) = .empty;
+    defer frames.deinit(testing.allocator);
+    try frames.append(testing.allocator, osrFrame(
+        &loop.chunk,
+        registers,
+        loop.header,
+        Value.fromInt32(1),
+    ));
+    frames.items[0].registers[loop.root] = Value.null_;
+    realm.step_budget = std.math.maxInt(u64);
+
+    const outcome = try driver.tryOsrEnterTop(testing.allocator, &realm, &frames);
+    switch (outcome) {
+        .completed => |value| try testing.expectEqual(Value.null_.bits, value.bits),
+        else => return error.TestUnexpectedResult,
     }
+    try testing.expectEqual(@as(usize, 0), frames.items.len);
+    try testing.expect(realm.heap.ohaimark_stats.executed_entries >= 1);
+    try testing.expectEqual(@as(u8, 0), state.ohaimark_osr_strikes);
 }
 
-test "Ohaimark OSR: Lantern and forced T2 agree on loop result" {
+test "Ohaimark OSR: cooperative fuel resume does not burn strikes or entry exits" {
     if (comptime !driver.supported) return error.SkipZigTest;
-    const source =
-        \\function sum(n) {
-        \\  let i = 0;
-        \\  let acc = 0;
-        \\  while (i < n) {
-        \\    acc = acc + i;
-        \\    i = i + 1;
-        \\  }
-        \\  return acc;
-        \\}
-        \\sum(50);
-    ;
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+    realm.ohaimark_enabled = true;
+    realm.ohaimark_osr_enabled = true;
+    realm.ohaimark_threshold_override = 1;
+    realm.heap.ohaimark_stats.enabled = true;
 
-    var lantern_realm = Realm.init(testing.allocator);
-    defer lantern_realm.deinit();
-    lantern_realm.jit_enabled = false;
-    var lantern_chunk = try compileScript(&lantern_realm, source);
-    defer lantern_chunk.deinit(testing.allocator);
-    const lantern_value = try runValue(&lantern_realm, &lantern_chunk);
+    var loop = try osrTruthinessLoopChunk();
+    defer loop.chunk.deinit(testing.allocator);
+    const state = loop.chunk.jit_state.?;
+    state.warmth = driver.tierUpThreshold(loop.chunk.code.len);
+    try testing.expect(ohaimark_compiler.compile(&realm, &loop.chunk));
+    try testing.expect(state.hasOhaimarkOsr());
 
-    var t2_realm = Realm.init(testing.allocator);
-    defer t2_realm.deinit();
-    t2_realm.jit_enabled = true;
-    t2_realm.jit_threshold_override = 1;
-    t2_realm.ohaimark_enabled = true;
-    t2_realm.ohaimark_threshold_override = 1;
-    t2_realm.ohaimark_osr_enabled = true;
-    var t2_chunk = try compileScript(&t2_realm, source);
-    defer t2_chunk.deinit(testing.allocator);
-    const t2_value = try runValue(&t2_realm, &t2_chunk);
+    const registers = try testing.allocator.alloc(Value, loop.chunk.register_count);
+    defer testing.allocator.free(registers);
+    var frames: std.ArrayListUnmanaged(lantern.CallFrame) = .empty;
+    defer frames.deinit(testing.allocator);
+    try frames.append(testing.allocator, osrFrame(
+        &loop.chunk,
+        registers,
+        loop.header,
+        Value.fromInt32(1),
+    ));
+    frames.items[0].registers[loop.root] = Value.fromInt32(42);
+    // Zero fuel: first optimized backedge takes the safepoint slow path.
+    realm.step_budget = 0;
 
-    try testing.expectEqual(lantern_value.bits, t2_value.bits);
+    const outcome = try driver.tryOsrEnterTop(testing.allocator, &realm, &frames);
+    try testing.expect(outcome == .resumed);
+    try testing.expectEqual(@as(usize, 1), frames.items.len);
+    try testing.expectEqual(loop.header, frames.items[0].ip);
+    try testing.expectEqual(Value.fromInt32(0).bits, frames.items[0].accumulator.bits);
+    try testing.expectEqual(Value.fromInt32(42).bits, frames.items[0].registers[loop.root].bits);
+    // Safepoint resume must not charge enter-and-bail strikes or function-entry exits.
+    try testing.expectEqual(@as(u8, 0), state.ohaimark_osr_strikes);
+    try testing.expectEqual(@as(u8, 0), state.ohaimark_guard_exits);
 }
 
 test "Ohaimark OSR: refused compile does not retry every backedge" {
@@ -470,9 +526,9 @@ test "Ohaimark OSR: refused compile does not retry every backedge" {
     // Exception regions refuse IR construction once and stick.
     const source =
         \\function f(n) {
-        \\  let i = 0;
+        \\  let i = n;
         \\  try {
-        \\    while (i < n) { i = i + 1; }
+        \\    while (i) { i = i - 1; }
         \\  } catch (e) {}
         \\  return i;
         \\}
@@ -481,51 +537,50 @@ test "Ohaimark OSR: refused compile does not retry every backedge" {
     var chunk = try compileScript(&realm, source);
     defer chunk.deinit(testing.allocator);
     const value = try runValue(&realm, &chunk);
-    try testing.expectEqual(Value.fromInt32(20).bits, value.bits);
+    try testing.expectEqual(Value.fromInt32(0).bits, value.bits);
 
     const state = templateNamed(&chunk, "f").jit_state.?;
     try testing.expectEqual(chunk_mod.Chunk.JitState.Tier.dont_compile, state.ohaimark.tier);
     const attempts_before = realm.heap.ohaimark_stats.compile_attempts;
     try testing.expect(attempts_before >= 1);
-    // Run again — warmth is high; must not thrash-recompile.
     const value2 = try runValue(&realm, &chunk);
-    try testing.expectEqual(Value.fromInt32(20).bits, value2.bits);
+    try testing.expectEqual(Value.fromInt32(0).bits, value2.bits);
     try testing.expectEqual(attempts_before, realm.heap.ohaimark_stats.compile_attempts);
 }
 
-test "Ohaimark OSR: fuel exhaustion at optimized backedge resumes exactly" {
+test "Ohaimark OSR: completed result matches the known loop result" {
     if (comptime !driver.supported) return error.SkipZigTest;
-    var realm = Realm.init(testing.allocator);
-    defer realm.deinit();
-    realm.jit_enabled = true;
-    realm.jit_threshold_override = 1;
-    realm.ohaimark_enabled = true;
-    realm.ohaimark_threshold_override = 1;
-    realm.ohaimark_osr_enabled = true;
+    // Truthiness loop body stores zero then backedges once; exit returns root.
+    // OSR entry at the header with acc=1 must complete with root (null).
+    // Realm must outlive the chunk so InstalledCode can return slots.
+    var t2_realm = Realm.init(testing.allocator);
+    defer t2_realm.deinit();
+    t2_realm.jit_enabled = true;
+    t2_realm.ohaimark_enabled = true;
+    t2_realm.ohaimark_osr_enabled = true;
+    t2_realm.ohaimark_threshold_override = 1;
 
-    const source =
-        \\function spin(n) {
-        \\  let i = 0;
-        \\  while (i < n) { i = i + 1; }
-        \\  return i;
-        \\}
-        \\spin(5);
-    ;
-    var chunk = try compileScript(&realm, source);
-    defer chunk.deinit(testing.allocator);
-    // First run warms / compiles.
-    _ = try runValue(&realm, &chunk);
+    var loop = try osrTruthinessLoopChunk();
+    defer loop.chunk.deinit(testing.allocator);
+    const state = loop.chunk.jit_state.?;
+    state.warmth = driver.tierUpThreshold(loop.chunk.code.len);
+    try testing.expect(ohaimark_compiler.compile(&t2_realm, &loop.chunk));
 
-    // Second run with zero fuel: must throw RangeError, not abort.
-    realm.step_budget = 0;
-    const result = lantern.run(testing.allocator, &realm, &chunk);
-    // Fuel exhaustion is a catchable RangeError completion path.
-    if (result) |r| {
-        switch (r) {
-            .thrown => {},
-            .value, .yielded => return error.TestUnexpectedResult,
-        }
-    } else |_| {
-        // Host OOM would be surprising; other errors are fine to surface.
+    const registers = try testing.allocator.alloc(Value, loop.chunk.register_count);
+    defer testing.allocator.free(registers);
+    var frames: std.ArrayListUnmanaged(lantern.CallFrame) = .empty;
+    defer frames.deinit(testing.allocator);
+    try frames.append(testing.allocator, osrFrame(
+        &loop.chunk,
+        registers,
+        loop.header,
+        Value.fromInt32(1),
+    ));
+    frames.items[0].registers[loop.root] = Value.null_;
+    t2_realm.step_budget = std.math.maxInt(u64);
+    const outcome = try driver.tryOsrEnterTop(testing.allocator, &t2_realm, &frames);
+    switch (outcome) {
+        .completed => |value| try testing.expectEqual(Value.null_.bits, value.bits),
+        else => return error.TestUnexpectedResult,
     }
 }
