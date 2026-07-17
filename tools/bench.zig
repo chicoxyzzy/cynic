@@ -39,6 +39,7 @@
 //!   zig build bench -- --filter=mul_loop
 //!   zig build bench -- --ohaimark             # natural-threshold T2
 //!   zig build bench -- --ohaimark-rollout     # interleaved T1 vs T2 gate
+//!   zig build bench -- --ohaimark-osr-rollout # T1 vs T1+T2 OSR (default-off gate)
 //!   zig build bench -- --macros     # Octane macro set (bench/macros/),
 //!                                   # run --unhardened; Splay is heavy,
 //!                                   # so --runs=3 for a quick pass
@@ -120,6 +121,14 @@ const OHAIMARK_BENCHES = [_]Bench{
     .{ .name = "call_refusal", .path = "bench/ohaimark/call_refusal.js" },
 };
 
+// Single-entry hot loops: function-entry T2 never re-enters, so only loop-
+// header OSR can promote the body. Compared under `--ohaimark-osr-rollout`.
+const OHAIMARK_OSR_BENCHES = [_]Bench{
+    .{ .name = "count_loop", .path = "bench/ohaimark_osr/count_loop.js" },
+    .{ .name = "sum_loop", .path = "bench/ohaimark_osr/sum_loop.js" },
+    .{ .name = "mul_acc_loop", .path = "bench/ohaimark_osr/mul_acc_loop.js" },
+};
+
 // Macro benchmarks — the compute core of the retired V8 Octane 2.0
 // suite (bench/macros/, vendored verbatim; see its README). Selected
 // with `--macros`; run under `--unhardened` because the ES5-era
@@ -144,9 +153,11 @@ const Posture = enum {
     lantern,
     bistromath,
     ohaimark,
+    /// Function-entry T2 plus loop-header OSR (docs/ohaimark.md §3.17).
+    ohaimark_osr,
 };
 
-const max_run_argv = 9;
+const max_run_argv = 12;
 
 /// Build one child invocation in a fixed caller-owned array. Keeping this in
 /// one place prevents the timed and telemetry probes from drifting into
@@ -159,7 +170,7 @@ fn buildRunArgv(
     unhardened: bool,
     ohaimark_stats: bool,
 ) []const []const u8 {
-    std.debug.assert(!ohaimark_stats or posture == .ohaimark);
+    std.debug.assert(!ohaimark_stats or posture == .ohaimark or posture == .ohaimark_osr);
     var argc: usize = 0;
     argv_buf[argc] = cynic_bin;
     argc += 1;
@@ -186,6 +197,14 @@ fn buildRunArgv(
             argv_buf[argc] = "--jit";
             argc += 1;
             argv_buf[argc] = "--ohaimark";
+            argc += 1;
+        },
+        .ohaimark_osr => {
+            argv_buf[argc] = "--jit";
+            argc += 1;
+            argv_buf[argc] = "--ohaimark";
+            argc += 1;
+            argv_buf[argc] = "--ohaimark-osr";
             argc += 1;
         },
     }
@@ -431,9 +450,11 @@ fn probeOhaimarkStats(
     cynic_bin: []const u8,
     fixture: []const u8,
     unhardened: bool,
+    optimized: Posture,
 ) !OhaimarkStats {
+    std.debug.assert(optimized == .ohaimark or optimized == .ohaimark_osr);
     var argv_buf: [max_run_argv][]const u8 = undefined;
-    const argv = buildRunArgv(&argv_buf, cynic_bin, fixture, .ohaimark, unhardened, true);
+    const argv = buildRunArgv(&argv_buf, cynic_bin, fixture, optimized, unhardened, true);
     const result = try std.process.run(allocator, io, .{
         .argv = argv,
         .stdout_limit = .limited(64 * 1024),
@@ -463,13 +484,17 @@ fn runOhaimarkRollout(
     fixtures: []const Bench,
     runs: usize,
     unhardened: bool,
+    optimized: Posture,
 ) !void {
+    std.debug.assert(optimized == .ohaimark or optimized == .ohaimark_osr);
     const stdout = std.Io.File.stdout();
-    try stdout.writeStreamingAll(
-        io,
+    const title = if (optimized == .ohaimark_osr)
+        "Ohaimark OSR natural-threshold rollout (ratio = T2+OSR / T1; lower is better).\n" ++
+            "Timed T2 samples include compilation; telemetry is from one separate probe.\n\n"
+    else
         "Ohaimark natural-threshold rollout (ratio = T2 / T1; lower is better).\n" ++
-            "Timed T2 samples include compilation; telemetry is from one separate probe.\n\n",
-    );
+            "Timed T2 samples include compilation; telemetry is from one separate probe.\n\n";
+    try stdout.writeStreamingAll(io, title);
 
     var buf: [1024]u8 = undefined;
     const header = try std.fmt.bufPrint(
@@ -491,7 +516,7 @@ fn runOhaimarkRollout(
 
     for (fixtures) |bench| {
         _ = runOnce(io, cynic_bin, bench.path, .bistromath, unhardened) catch {};
-        _ = runOnce(io, cynic_bin, bench.path, .ohaimark, unhardened) catch {};
+        _ = runOnce(io, cynic_bin, bench.path, optimized, unhardened) catch {};
 
         const t1 = t1_buf[0..runs];
         const t2 = t2_buf[0..runs];
@@ -504,12 +529,12 @@ fn runOhaimarkRollout(
                     failed = true;
                     break;
                 };
-                t2[i] = runOnce(io, cynic_bin, bench.path, .ohaimark, unhardened) catch {
+                t2[i] = runOnce(io, cynic_bin, bench.path, optimized, unhardened) catch {
                     failed = true;
                     break;
                 };
             } else {
-                t2[i] = runOnce(io, cynic_bin, bench.path, .ohaimark, unhardened) catch {
+                t2[i] = runOnce(io, cynic_bin, bench.path, optimized, unhardened) catch {
                     failed = true;
                     break;
                 };
@@ -529,7 +554,7 @@ fn runOhaimarkRollout(
             continue;
         }
 
-        const telemetry = probeOhaimarkStats(allocator, io, cynic_bin, bench.path, unhardened) catch |err| {
+        const telemetry = probeOhaimarkStats(allocator, io, cynic_bin, bench.path, unhardened, optimized) catch |err| {
             incomplete = true;
             const line = try std.fmt.bufPrint(&buf, "{s:<16} telemetry failed: {s}\n", .{ bench.name, @errorName(err) });
             try std.Io.File.stderr().writeStreamingAll(io, line);
@@ -610,6 +635,7 @@ pub fn main(init: std.process.Init) !void {
     var runs: usize = DEFAULT_RUNS;
     var posture: Posture = .ohaimark;
     var ohaimark_rollout = false;
+    var ohaimark_osr_rollout = false;
     var macros = false;
     var filter: ?[]const u8 = null;
     var ab_baseline: ?[]const u8 = null;
@@ -633,6 +659,8 @@ pub fn main(init: std.process.Init) !void {
                 posture = .ohaimark;
             } else if (std.mem.eql(u8, a, "--ohaimark-rollout")) {
                 ohaimark_rollout = true;
+            } else if (std.mem.eql(u8, a, "--ohaimark-osr-rollout")) {
+                ohaimark_osr_rollout = true;
             } else if (std.mem.eql(u8, a, "--macros")) {
                 // Run the Octane macro set (bench/macros/) instead of
                 // the default micros, under `--unhardened`.
@@ -652,6 +680,8 @@ pub fn main(init: std.process.Init) !void {
     // peer engines — no SES tax on Cynic alone.
     const all_fixtures: []const Bench = if (macros)
         &MACROS
+    else if (ohaimark_osr_rollout)
+        &OHAIMARK_OSR_BENCHES
     else if (ohaimark_rollout)
         &OHAIMARK_BENCHES
     else
@@ -685,12 +715,20 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(1);
     };
 
-    if (ohaimark_rollout and ab_baseline != null) {
-        try std.Io.File.stderr().writeStreamingAll(io, "bench: --ohaimark-rollout cannot be combined with --ab-baseline\n");
+    if ((ohaimark_rollout or ohaimark_osr_rollout) and ab_baseline != null) {
+        try std.Io.File.stderr().writeStreamingAll(io, "bench: rollout modes cannot be combined with --ab-baseline\n");
+        std.process.exit(2);
+    }
+    if (ohaimark_rollout and ohaimark_osr_rollout) {
+        try std.Io.File.stderr().writeStreamingAll(io, "bench: --ohaimark-rollout and --ohaimark-osr-rollout are mutually exclusive\n");
         std.process.exit(2);
     }
     if (ohaimark_rollout) {
-        try runOhaimarkRollout(init.gpa, io, cynic_bin, fixtures, runs, unhardened);
+        try runOhaimarkRollout(init.gpa, io, cynic_bin, fixtures, runs, unhardened, .ohaimark);
+        return;
+    }
+    if (ohaimark_osr_rollout) {
+        try runOhaimarkRollout(init.gpa, io, cynic_bin, fixtures, runs, unhardened, .ohaimark_osr);
         return;
     }
 
