@@ -65,6 +65,7 @@ pub const Lowering = enum {
     checked_int32_sub,
     checked_int32_mul,
     checked_int32_div,
+    number_mul,
     number_div,
     strict_eq,
     logical_not,
@@ -273,7 +274,7 @@ fn inferNode(graph: *const ir.Graph, facts: []const NodeInfo, id: ir.ValueId) !N
         .constant => inferConstant(node),
         .add => inferArithmetic(.add, facts, inputs, null),
         .sub => inferArithmetic(.sub, facts, inputs, null),
-        .mul => inferArithmetic(.mul, facts, inputs, null),
+        .mul => inferArithmetic(.mul, facts, inputs, try binaryProfileMode(graph, node)),
         .div => inferArithmetic(.div, facts, inputs, try binaryProfileMode(graph, node)),
         .strict_eq => inferStrictEq(facts, inputs),
         .logical_not => inferLogicalNot(facts, inputs),
@@ -357,18 +358,22 @@ fn inferArithmetic(
     if (lhs.result_type.isSubsetOf(Type.number) and
         rhs.result_type.isSubsetOf(Type.number))
     {
-        if (op == .div) {
-            return .{ .result_type = Type.number, .lowering = .number_div };
-        }
+        if (op == .mul) return .{ .result_type = Type.number, .lowering = .number_mul };
+        if (op == .div) return .{ .result_type = Type.number, .lowering = .number_div };
         return .{ .result_type = Type.number, .lowering = .generic };
     }
-    if (op == .div) {
+    const number_lowering: ?Lowering = switch (op) {
+        .mul => .number_mul,
+        .div => .number_div,
+        .add, .sub => null,
+    };
+    if (number_lowering) |lowering| {
         // Only mature Number-only feedback justifies tagged Number guards.
         // Cold, coercive, and mixed sites remain generic and are refused by
         // the current code generator instead of publishing enter-and-bail
         // code from a single speculative observation.
         return switch (binary_mode orelse .cold) {
-            .int32, .number => .{ .result_type = Type.number, .lowering = .number_div },
+            .int32, .number => .{ .result_type = Type.number, .lowering = lowering },
             .cold, .non_number, .mixed => .{ .result_type = Type.any, .lowering = .generic },
         };
     }

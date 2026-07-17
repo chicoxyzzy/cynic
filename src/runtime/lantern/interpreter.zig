@@ -1280,12 +1280,13 @@ inline fn intArith(comptime op: enum { add, sub, mul }, a: Value, b: Value) ?Val
     });
 }
 
-/// §6.1.6.1.5 Number::divide plus raw-operand feedback in one tag walk. Unlike
-/// `numArith`, division has no int32 result path: even an exact quotient is a
-/// Number operation whose interpreter representation is produced through the
-/// same Double path as `numericBinary`. Non-Number pairs are recorded before
-/// returning null so the generic coercion / BigInt path retains exact ordering.
-inline fn profiledNumberDiv(
+/// §6.1.6.1.4/.5 Number::multiply/divide plus raw-operand feedback in one tag
+/// walk. Multiplication preserves Lantern's canonical Int32 result when the
+/// product fits and is not -0; division always uses the Double representation.
+/// Non-Number pairs are recorded before returning null so generic coercion and
+/// BigInt handling retain their exact ordering.
+inline fn profiledNumberArithmetic(
+    comptime op: enum { mul, div },
     profile: *chunk_mod.BinaryTypeProfile,
     lhs: Value,
     rhs: Value,
@@ -1294,9 +1295,9 @@ inline fn profiledNumberDiv(
     const rhs_int32 = rhs.isInt32();
     if (lhs_int32 and rhs_int32) {
         profile.recordInt32Pair();
-        return Value.fromDouble(
-            @as(f64, @floatFromInt(lhs.asInt32())) / @as(f64, @floatFromInt(rhs.asInt32())),
-        );
+        if (op == .mul) return intArith(.mul, lhs, rhs);
+        return Value.fromDouble(@as(f64, @floatFromInt(lhs.asInt32())) /
+            @as(f64, @floatFromInt(rhs.asInt32())));
     }
 
     const lhs_double = !lhs_int32 and lhs.isDouble();
@@ -1309,7 +1310,10 @@ inline fn profiledNumberDiv(
     profile.recordNumberPair();
     const x: f64 = if (lhs_int32) @floatFromInt(lhs.asInt32()) else lhs.asDouble();
     const y: f64 = if (rhs_int32) @floatFromInt(rhs.asInt32()) else rhs.asDouble();
-    return Value.fromDouble(x / y);
+    return Value.fromDouble(switch (op) {
+        .mul => x * y,
+        .div => x / y,
+    });
 }
 
 /// §6.1.6.1 / §13.15 — `+` `-` `*` `/` `%` on two numeric operands where
@@ -1717,12 +1721,15 @@ pub fn runFrames(
         },
         .mul => {
             const r = code[ip];
-            ip += 1;
-            if (intArith(.mul, registers[r], acc)) |res| {
-                acc = res;
-                continue :dispatch try decodeNext(code, &ip, &committed);
-            }
-            if (numArith(.mul, registers[r], acc)) |res| {
+            const profile_index = readU16(code, ip + 1);
+            ip += 3;
+            if (profile_index >= local_chunk.inline_binary_profiles.len) return error.InvalidOpcode;
+            if (profiledNumberArithmetic(
+                .mul,
+                &local_chunk.inline_binary_profiles[profile_index],
+                registers[r],
+                acc,
+            )) |res| {
                 acc = res;
                 continue :dispatch try decodeNext(code, &ip, &committed);
             }
@@ -1742,7 +1749,12 @@ pub fn runFrames(
             const profile_index = readU16(code, ip + 1);
             ip += 3;
             if (profile_index >= local_chunk.inline_binary_profiles.len) return error.InvalidOpcode;
-            if (profiledNumberDiv(&local_chunk.inline_binary_profiles[profile_index], registers[r], acc)) |res| {
+            if (profiledNumberArithmetic(
+                .div,
+                &local_chunk.inline_binary_profiles[profile_index],
+                registers[r],
+                acc,
+            )) |res| {
                 acc = res;
                 continue :dispatch try decodeNext(code, &ip, &committed);
             }

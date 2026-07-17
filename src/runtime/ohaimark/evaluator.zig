@@ -338,19 +338,32 @@ const Runner = struct {
                 self.outputKind(node_id),
             ) };
         }
-        if (op == .div and info.lowering == .number_div) {
-            const lhs_value = try self.taggedNodeInput(node_id, 0);
-            const rhs_value = try self.taggedNodeInput(node_id, 1);
-            if ((!lhs_value.isInt32() and !lhs_value.isDouble()) or
-                (!rhs_value.isInt32() and !rhs_value.isDouble()))
-            {
-                return .guard_failed;
+        const number_lowering: ?specialize.Lowering = switch (op) {
+            .mul => .number_mul,
+            .div => .number_div,
+            .add, .sub => null,
+        };
+        if (number_lowering) |lowering| {
+            if (info.lowering == lowering) {
+                const lhs_value = try self.taggedNodeInput(node_id, 0);
+                const rhs_value = try self.taggedNodeInput(node_id, 1);
+                if ((!lhs_value.isInt32() and !lhs_value.isDouble()) or
+                    (!rhs_value.isInt32() and !rhs_value.isDouble()))
+                {
+                    return .guard_failed;
+                }
+                const lhs = try numberValue(lhs_value);
+                const rhs = try numberValue(rhs_value);
+                const result = switch (op) {
+                    .mul => lhs * rhs,
+                    .div => lhs / rhs,
+                    .add, .sub => return error.MalformedGraph,
+                };
+                // Value.fromDouble canonicalizes NaN. Leave that uncommon case to
+                // Lantern so native and evaluator paths preserve identical bits.
+                if (std.math.isNan(result)) return .guard_failed;
+                return .{ .value = .{ .tagged = Value.fromDouble(result) } };
             }
-            const result = (try numberValue(lhs_value)) / (try numberValue(rhs_value));
-            // Value.fromDouble canonicalizes NaN. Leave that uncommon case to
-            // Lantern so native and evaluator paths preserve identical bits.
-            if (std.math.isNan(result)) return .guard_failed;
-            return .{ .value = .{ .tagged = Value.fromDouble(result) } };
         }
         const expected = switch (op) {
             .add => specialize.Lowering.checked_int32_add,

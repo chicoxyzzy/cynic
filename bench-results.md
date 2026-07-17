@@ -17,6 +17,24 @@ new run against the previous section with the *same host*.
 
 ## History
 
+### 2026-07-17 — multiplication operand profile + tagged Number T2 path, host `Darwin 25.6.0 arm64`
+
+Focused interleaved A/B against `0ca910a9` (pre-profile), Lantern-only
+(`--no-jit`), 200 pairs. `mul` now carries a one-byte raw-operand profile;
+Lantern records it in the fused Number multiplication path, and Ohaimark can
+consume the trained site through its new tagged-Number `fmul` lowering.
+
+| bench | base_ms | head_ms | ratio | spread% |
+|---|---:|---:|---:|---:|
+| mul_loop | 44.38 | 44.92 | 1.012x | 81.8 |
+
+The median moved about 1.2%, but the max/min ratio spread is too noisy for a
+precise regression claim. It rules out a large Lantern tax; the semantic and
+T2 payoff is established separately by native execution, natural-threshold,
+GC-pressure, and exact full-corpus differential gates. The bench runner also
+gained `--filter=<name>` so future targeted A/B runs do not pay for the whole
+suite.
+
 ### 2026-07-17 — division operand profile + fused Number path, host `Darwin 25.6.0 arm64`
 
 Interleaved A/B against `bb7aa7dd` (pre-profile), Lantern-only (`--no-jit`),

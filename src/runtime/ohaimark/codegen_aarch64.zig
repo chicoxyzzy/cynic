@@ -260,8 +260,11 @@ const Compiler = struct {
         kind: ir.NodeKind,
         lowering_kind: specialize.Lowering,
     ) !void {
-        if (kind == .div and lowering_kind == .number_div) {
-            try self.emitNumberDivide(node_id);
+        const number_arithmetic =
+            (kind == .mul and lowering_kind == .number_mul) or
+            (kind == .div and lowering_kind == .number_div);
+        if (number_arithmetic) {
+            try self.emitNumberArithmetic(node_id, kind);
             return;
         }
         const expected: specialize.Lowering = switch (kind) {
@@ -387,10 +390,15 @@ const Compiler = struct {
         try self.jumpToGuardIf(.ne, guard);
     }
 
-    /// §6.1.6.1.5 Number::divide. Tagged Int32 and Double operands bridge
-    /// through caller-saved v16/v17, and the result is immediately re-boxed.
-    /// Coercion, BigInt, and NaN canonicalization stay on Lantern's slow path.
-    fn emitNumberDivide(self: *Compiler, node_id: ir.ValueId) !void {
+    /// §6.1.6.1.4/.5 Number::multiply/divide. Tagged Int32 and Double
+    /// operands bridge through caller-saved v16/v17, and the result is
+    /// immediately re-boxed. Coercion, BigInt, and NaN canonicalization stay
+    /// on Lantern's slow path.
+    fn emitNumberArithmetic(
+        self: *Compiler,
+        node_id: ir.ValueId,
+        kind: ir.NodeKind,
+    ) !void {
         if (self.representations.outputs[node_id] != .tagged) {
             return error.InvalidRepresentation;
         }
@@ -399,7 +407,11 @@ const Compiler = struct {
         try self.emitTaggedInput(node_id, 1, rhs_scratch);
         try self.emitTaggedNumberAsDouble(lhs_scratch, .x16, guard);
         try self.emitTaggedNumberAsDouble(rhs_scratch, .x17, guard);
-        try self.machine.emit(a64.fdivD(.x16, .x16, .x17));
+        try self.machine.emit(switch (kind) {
+            .mul => a64.fmulD(.x16, .x16, .x17),
+            .div => a64.fdivD(.x16, .x16, .x17),
+            else => return error.MalformedGraph,
+        });
         try self.machine.emit(a64.fcmpD(.x16, .x16));
         try self.jumpToGuardIf(.vs, guard);
         try self.machine.emit(a64.fmovDtoX(result_scratch, .x16));

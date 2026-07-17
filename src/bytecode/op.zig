@@ -1510,7 +1510,7 @@ pub const Op = enum(u8) {
             .mov => baselineInstruction("Mov", .reg_reg),
             .add => baselineInstruction("Add", .reg),
             .sub => baselineInstruction("Sub", .reg),
-            .mul => baselineInstruction("Mul", .reg),
+            .mul => baselineInstruction("Mul", .reg_u16),
             .div => instruction("Div", .reg_u16),
             .mod => instruction("Mod", .reg),
             .pow => instruction("Pow", .reg),
@@ -1704,6 +1704,12 @@ pub const Op = enum(u8) {
     /// Total operand bytes, derived from the authoritative layout.
     pub fn operandSize(op: Op) u8 {
         return op.spec().layout.operandSize();
+    }
+
+    /// Arithmetic bytecodes whose trailing u16 indexes the chunk-owned raw
+    /// operand profile consumed by optimizing tiers.
+    pub fn hasBinaryTypeProfile(op: Op) bool {
+        return op == .mul or op == .div;
     }
 
     /// Stable disassembly mnemonic, derived from the authoritative spec.

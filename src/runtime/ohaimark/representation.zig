@@ -266,8 +266,8 @@ fn initialOutput(node: ir.Node, info: specialize.NodeInfo) !Kind {
         },
         .add => arithmeticOutput(info, .checked_int32_add),
         .sub => arithmeticOutput(info, .checked_int32_sub),
-        .mul => arithmeticOutput(info, .checked_int32_mul),
-        .div => divisionOutput(info),
+        .mul => profiledArithmeticOutput(info, .checked_int32_mul, .number_mul),
+        .div => profiledArithmeticOutput(info, .checked_int32_div, .number_div),
         .strict_eq => switch (info.lowering) {
             .constant, .strict_eq => .tagged,
             else => error.MalformedGraph,
@@ -320,12 +320,16 @@ fn arithmeticOutput(info: specialize.NodeInfo, checked: specialize.Lowering) !Ki
     };
 }
 
-fn divisionOutput(info: specialize.NodeInfo) !Kind {
-    if (info.lowering == .number_div) {
+fn profiledArithmeticOutput(
+    info: specialize.NodeInfo,
+    checked: specialize.Lowering,
+    number: specialize.Lowering,
+) !Kind {
+    if (info.lowering == number) {
         if (info.folded != null) return error.MalformedGraph;
         return .tagged;
     }
-    return arithmeticOutput(info, .checked_int32_div);
+    return arithmeticOutput(info, checked);
 }
 
 fn nodeInputKind(node: ir.Node, info: specialize.NodeInfo) !Kind {
@@ -340,8 +344,8 @@ fn nodeInputKind(node: ir.Node, info: specialize.NodeInfo) !Kind {
         => .none,
         .add => arithmeticInput(info, .checked_int32_add),
         .sub => arithmeticInput(info, .checked_int32_sub),
-        .mul => arithmeticInput(info, .checked_int32_mul),
-        .div => divisionInput(info),
+        .mul => profiledArithmeticInput(info, .checked_int32_mul, .number_mul),
+        .div => profiledArithmeticInput(info, .checked_int32_div, .number_div),
         .strict_eq => switch (info.lowering) {
             .constant => .none,
             .strict_eq => .int32,
@@ -378,12 +382,16 @@ fn arithmeticInput(info: specialize.NodeInfo, checked: specialize.Lowering) !Kin
     };
 }
 
-fn divisionInput(info: specialize.NodeInfo) !Kind {
-    if (info.lowering == .number_div) {
+fn profiledArithmeticInput(
+    info: specialize.NodeInfo,
+    checked: specialize.Lowering,
+    number: specialize.Lowering,
+) !Kind {
+    if (info.lowering == number) {
         if (info.folded != null) return error.MalformedGraph;
         return .tagged;
     }
-    return arithmeticInput(info, .checked_int32_div);
+    return arithmeticInput(info, checked);
 }
 
 fn nodeInputCount(kind: ir.NodeKind) u16 {
@@ -470,10 +478,10 @@ fn validateNodeContract(node: ir.Node, info: specialize.NodeInfo) !void {
                 return error.MalformedGraph;
             }
         },
-        .add, .sub, .mul, .strict_eq, .logical_not, .less_than => {
+        .add, .sub, .strict_eq, .logical_not, .less_than => {
             if (!hasPayload(node.payload, .none)) return error.MalformedGraph;
         },
-        .div => if (!hasPayload(node.payload, .binary_profile)) return error.MalformedGraph,
+        .mul, .div => if (!hasPayload(node.payload, .binary_profile)) return error.MalformedGraph,
         .load_named => {
             if (!hasPayload(node.payload, .named_load)) return error.MalformedGraph;
         },

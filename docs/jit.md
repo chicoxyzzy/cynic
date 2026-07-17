@@ -7,7 +7,8 @@ plus stable physical deopt homes, graph/Lantern differential evaluation, and
 abstract register/spill allocation plus AArch64 frame/edge lowering have
 landed. Transactional prologue/epilogue emission now has native AArch64 proof,
 and typed moves, folded-value returns, checked int32 arithmetic/control,
-profile-gated tagged Number division, and frame-reconstructing guard exits
+profile-gated tagged Number multiplication/division, and frame-reconstructing
+guard exits
 execute natively in tests. Guarded
 own/prototype/synthetic named loads now execute through live typed IC cells.
 Taken backedges now poll fuel, interrupts, hooks, and pending GC work, with a

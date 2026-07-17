@@ -208,24 +208,67 @@ test "Ohaimark function-entry guard exit resumes the same Lantern frame" {
     try testing.expectEqual(@as(f64, 2_147_483_648), resumed.asDouble());
 }
 
-test "Lantern records raw operand types at division sites" {
+test "Ohaimark natural threshold consumes trained multiplication feedback" {
+    if (comptime !driver.supported) return error.SkipZigTest;
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+    realm.jit_threshold_override = std.math.maxInt(u32);
+    realm.ohaimark_enabled = true;
+    // Three interpreted entries (3 * 16 warmth) train the site before the
+    // fourth entry crosses the threshold and snapshots its Number profile.
+    realm.ohaimark_threshold_override = 64;
+    realm.heap.ohaimark_stats.enabled = true;
+
+    const source =
+        \\function multiply(a, b) { return a * b; }
+        \\multiply(1.5, 2);
+        \\multiply(2.5, 3);
+        \\multiply(3.5, 4);
+        \\multiply(4.5, 5);
+        \\multiply(6.5, 2);
+    ;
+    var chunk = try compileScript(&realm, source);
+    defer chunk.deinit(testing.allocator);
+    const value = try runValue(&realm, &chunk);
+    try testing.expectEqual(Value.fromDouble(13).bits, value.bits);
+
+    const body = templateNamed(&chunk, "multiply");
+    try testing.expectEqual(chunk_mod.BinaryTypeMode.number, body.inline_binary_profiles[0].mode());
+    const state = body.jit_state.?;
+    try testing.expectEqual(chunk_mod.Chunk.JitState.Tier.compiled, state.ohaimark.tier);
+    try testing.expectEqual(chunk_mod.Chunk.JitState.Tier.cold, state.bistromath.code.tier);
+    try testing.expectEqual(@as(u64, 1), realm.heap.ohaimark_stats.compile_attempts);
+    try testing.expectEqual(@as(u64, 1), realm.heap.ohaimark_stats.compile_successes);
+    try testing.expectEqual(@as(u64, 2), realm.heap.ohaimark_stats.executed_entries);
+    try testing.expectEqual(@as(u64, 2), realm.heap.ohaimark_stats.completed_entries);
+    try testing.expectEqual(@as(u64, 0), realm.heap.ohaimark_stats.guard_exits);
+}
+
+test "Lantern records raw operand types at profiled arithmetic sites" {
     var realm = Realm.init(testing.allocator);
     defer realm.deinit();
     realm.jit_enabled = false;
 
     const source =
         \\function divide(a, b) { return a / b; }
+        \\function multiply(a, b) { return a * b; }
         \\divide(6, 2);
         \\divide(1.5, 2);
         \\divide("6", 2);
+        \\multiply(6, 2);
+        \\multiply(1.5, 2);
+        \\multiply("6", 2);
     ;
     var chunk = try compileScript(&realm, source);
     defer chunk.deinit(testing.allocator);
     _ = try runValue(&realm, &chunk);
 
-    const body = templateNamed(&chunk, "divide");
-    try testing.expectEqual(@as(usize, 1), body.inline_binary_profiles.len);
-    try testing.expectEqual(chunk_mod.BinaryTypeMode.mixed, body.inline_binary_profiles[0].mode());
+    for ([_][]const u8{ "divide", "multiply" }) |name| {
+        const body = templateNamed(&chunk, name);
+        try testing.expectEqual(@as(usize, 1), body.inline_binary_profiles.len);
+        try testing.expectEqual(chunk_mod.BinaryTypeMode.mixed, body.inline_binary_profiles[0].mode());
+    }
 }
 
 test "Ohaimark stops re-entering a function after its guard-exit budget" {

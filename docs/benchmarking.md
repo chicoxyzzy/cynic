@@ -88,9 +88,13 @@ spawn overhead and timer granularity in the cross-engine harness,
 flagging cells as noisy at `*` >10% spread). Bump the count if
 the fixture drops below ~50 ms on the lead engine.
 
+Run one fixture with `zig build bench -- --filter=<name>`; combine it with
+`--runs=<N>`, `--no-jit`, or `--ab-baseline=<binary>` for a focused gate.
+
 | Fixture | Iters | Stresses |
 |---|---:|---|
 | `arith_loop` | 5,000,000 | Bytecode dispatch density on `Op.add` / `Op.lt` / `Op.jmp` — int32 fast-path + the threaded-dispatch loop with no property access. Smi-overflow paths are NOT exercised (every step stays int32-clean via `\| 0`). |
+| `mul_loop` | 3,000,000 | Numeric `Op.mul` dispatch with an Int32/Double raw-operand pair and a Double result. Pins Lantern's one-byte per-site operand profile plus the fused Number multiplication path; the changing multiplicand prevents constant folding. |
 | `div_loop` | 3,000,000 | Numeric `Op.div` dispatch with Int32 raw operands and a Double result. Pins Lantern's one-byte per-site operand profile plus the fused Number division path; the changing numerator prevents constant folding. |
 | `prop_access` | 500,000 | Hot named-property reads on a same-shape object — `lda_property` IC hit-rate. Pre-IC: ~3× behind QuickJS-NG. Post-IC (e03f5cd): −66 % on Cynic. The headline cache-effectiveness bench. |
 | `prop_write` | 500,000 | Hot named-property writes on a same-shape object — `sta_property` IC + shape-shadow update + property-bag put. The mirror of `prop_access`. Post-IC (7bad504): −63 % on Cynic. |

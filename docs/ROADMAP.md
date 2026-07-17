@@ -1286,6 +1286,23 @@ sampling by `/profile`.
   while `arith_loop` stayed `1.003x`. The natural heat threshold remains
   unchanged pending steady-state rollout benchmarks. See
   [ohaimark.md](ohaimark.md) §3.19.
+- **Ohaimark profiled numeric multiplication (2026-07-17).** `mul` now owns
+  the same compact raw-operand profile as `div`. Lantern classifies and
+  multiplies in one tag walk while preserving Int32 products, overflow
+  promotion, and signed zero; coercion and BigInt remain on the generic path.
+  Ohaimark selects a distinct tagged-Number lowering only from Number-only
+  feedback, emits helper-free AArch64 `fmul`, and deopts non-Numbers or NaN
+  from exact pre-operation state. Native tests cover finite/widened products,
+  infinities, signed zero, NaN, and coercion. A natural-threshold driver test
+  trains three calls, then completes two through T2 with no T1 publication or
+  exit. The hostile threshold-1 full sweep intentionally retained the prior
+  6,896 publications / 670 KiB / 106 exits because sites are cold at first
+  entry; its lower-tier and forced-T2 pass caches remain byte-identical at
+  48,653 paths (SHA-256 `10f024349d3467c72112da03dd57e0d7e543cdb819a00b3082dfecedaec614ca`).
+  ReleaseSafe GC pressure retained 39 multiplication passes plus one known
+  strict-only failure. A 200-pair no-JIT `mul_loop` A/B observed `1.012x`, but
+  its noisy spread supports only a no-large-regression conclusion. See
+  [ohaimark.md](ohaimark.md) §3.20.
 - **Generational GC.** A JSC-Riptide-style non-moving
   generational collector — store-site routing, generation header
   bits, a write barrier + remembered set, `collectYoung` with

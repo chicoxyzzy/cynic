@@ -1253,18 +1253,19 @@ pub const Builder = struct {
         try self.emitU8(r);
     }
 
-    /// Emit a binary accumulator operation. Division carries a profile index:
-    /// `[op] [lhs:u8] [profile:u16]`. Other binary operators retain their
-    /// historical `[op] [lhs:u8]` encoding until they gain a specialization
-    /// that consumes operand feedback.
+    /// Emit a binary accumulator operation. Profiled arithmetic carries
+    /// `[op] [lhs:u8] [profile:u16]`; other binary operators retain their
+    /// historical `[op] [lhs:u8]` encoding.
     pub fn emitBinary(self: *Builder, op: Op, span: Span, lhs: u8) !void {
-        std.debug.assert(op == .div or op.spec().layout == .reg);
-        if (op == .div and self.inline_binary_profile_count == std.math.maxInt(u16)) {
+        std.debug.assert(op.hasBinaryTypeProfile() or op.spec().layout == .reg);
+        if (op.hasBinaryTypeProfile() and
+            self.inline_binary_profile_count == std.math.maxInt(u16))
+        {
             return error.TooManyInlineCaches;
         }
         try self.emitOp(op, span);
         try self.emitU8(lhs);
-        if (op == .div) {
+        if (op.hasBinaryTypeProfile()) {
             const profile = self.inline_binary_profile_count;
             self.inline_binary_profile_count += 1;
             try self.emitU16(profile);
@@ -1977,23 +1978,29 @@ test "Builder: integer immediates choose the narrowest lossless encoding" {
     try testing.expectEqual(chunk.code.len, pc);
 }
 
-test "Builder: division owns a compact binary type profile" {
+test "Builder: profiled arithmetic owns compact binary type profiles" {
     var b = Builder.init(testing.allocator);
     errdefer b.deinit();
     const span: Span = .{ .start = 0, .end = 1 };
     const lhs = try b.reserveRegister();
 
+    try b.emitBinary(.mul, span, lhs);
     try b.emitBinary(.div, span, lhs);
     var chunk = try b.finish();
     defer chunk.deinit(testing.allocator);
 
-    try testing.expectEqual(@as(usize, 4), chunk.code.len);
-    try testing.expectEqual(Op.div, @as(Op, @enumFromInt(chunk.code[0])));
+    try testing.expectEqual(@as(usize, 8), chunk.code.len);
+    try testing.expectEqual(Op.mul, @as(Op, @enumFromInt(chunk.code[0])));
     try testing.expectEqual(lhs, chunk.code[1]);
     try testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, chunk.code[2..4], .little));
+    try testing.expectEqual(Op.div, @as(Op, @enumFromInt(chunk.code[4])));
+    try testing.expectEqual(lhs, chunk.code[5]);
+    try testing.expectEqual(@as(u16, 1), std.mem.readInt(u16, chunk.code[6..8], .little));
+    try testing.expectEqual(@as(u8, 3), Op.operandSize(.mul));
     try testing.expectEqual(@as(u8, 3), Op.operandSize(.div));
-    try testing.expectEqual(@as(usize, 1), chunk.inline_binary_profiles.len);
+    try testing.expectEqual(@as(usize, 2), chunk.inline_binary_profiles.len);
     try testing.expectEqual(BinaryTypeMode.cold, chunk.inline_binary_profiles[0].mode());
+    try testing.expectEqual(BinaryTypeMode.cold, chunk.inline_binary_profiles[1].mode());
     try testing.expectEqual(@as(usize, 1), @sizeOf(BinaryTypeProfile));
 
     chunk.inline_binary_profiles[0].observe(Value.fromInt32(6), Value.fromInt32(2));

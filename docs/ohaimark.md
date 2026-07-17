@@ -5,7 +5,8 @@ representation selection, and logical plus stable-spill physical deopt
 metadata, graph/Lantern differential evaluation, and abstract register/spill
 allocation plus AArch64 physical frame/edge lowering landed** (2026-07-17).
 Verified native frame entry/exit, typed physical moves, folded-value returns,
-checked int32 arithmetic/control, guarded tagged-Number division, strict
+checked int32 arithmetic/control, guarded tagged-Number multiplication and
+division, strict
 equality, every fused strict equality/inequality branch width, standalone
 strict inequality, Boolean logical
 not, frame/realm loads, and direct Lantern-frame guard exits have also landed.
@@ -640,13 +641,14 @@ megamorphic/generic instead of retrying one shape forever
 Cynic now applies the same bounded principle without exposing engine state on
 a JS object.
 
-Each `div` bytecode is `[op][lhs:u8][profile:u16]`. Its indexed
+Each profiled `mul` or `div` bytecode is `[op][lhs:u8][profile:u16]`. Its indexed
 `BinaryTypeProfile` is one byte in the chunk: monotonic bits record an
 Int32/Int32 pair, another Number pair, and a pair containing a non-Number. The
 derived modes distinguish cold, numeric-only, coercive-only, and mixed sites.
-Lantern records the raw operands before §6.1.6.1.5 coercion, so `"6" / 2`
+Lantern records the raw operands before §6.1.6.1.4/.5 coercion, so `"6" * 2`
+or `"6" / 2`
 cannot train a Number guard merely because its result is numeric. A fused
-Number fast path performs that classification and the division in one tag
+Number fast path performs that classification and the operation in one tag
 walk; only coercion and BigInt fall through to `numericBinary`.
 
 The deliberately hostile threshold-1 test262 posture compiles at function
@@ -670,6 +672,51 @@ the new `div_loop` at 46.13 ms versus 63.09 ms (`0.727x`, 12.3% ratio spread);
 the fused Number path more than repays profile recording, while `arith_loop`
 stayed flat at `1.003x`.
 
+### 3.20 Profile-gated tagged-Number multiplication
+
+Multiplication follows
+[§6.1.6.1.4 Number::multiply](https://tc39.es/ecma262/#sec-numeric-types-number-multiply),
+including overflow promotion, infinities, signed zero, and NaN. Its lowering
+reuses the engine shape surveyed for division: V8 Maglev separates checked
+int32 multiplication from Float64 multiplication in its
+[Maglev IR](https://chromium.googlesource.com/v8/v8/+/refs/heads/main/src/maglev/maglev-ir.h),
+JSC DFG selects integer or `DoubleRep` multiplication in the
+[speculative JIT](https://github.com/WebKit/WebKit/blob/main/Source/JavaScriptCore/dfg/DFGSpeculativeJIT.cpp),
+and SpiderMonkey's
+[MIR](https://searchfox.org/mozilla-central/source/js/src/jit/MIR.h) gives
+`MMul` fallible int32 and Double specializations.
+
+`mul` now uses the same one-byte raw-operand profile and three-byte operand
+layout as `div`. Lantern classifies and executes the Number case in one tag
+walk while preserving its established representation contract: an exact,
+non-negative-zero int32 product remains Int32; overflow, `-0`, and mixed
+Int32/Double products become Double. Coercion and BigInt still run through
+`numericBinary` after their raw pair is recorded.
+
+Ohaimark's distinct `number_mul` lowering is selected only for Number-only
+feedback. It consumes tagged Int32/Double inputs, converts through the same
+caller-saved FP scratch registers as division, emits AArch64 `fmul`, and
+immediately reboxes the result. NaN and non-Number operands deopt from the
+pre-operation frame state so Lantern remains the canonical-NaN and coercion
+authority. Representation, logical/physical deopt, evaluator, and native tests
+cover finite products, widened int32 products, infinities, negative zero, NaN,
+and string coercion.
+
+The hostile threshold-1 full corpus cannot consume body feedback before its
+first compile attempt, so its telemetry intentionally stayed at 6,896
+publications, 670 KiB installed, and 106/141,632 guard exits (0.07%). A
+natural-threshold integration test instead trains three Number pairs before
+publication, then completes two calls in generated code with no T1 compile or
+guard exit. Lower-tier and forced-T2 sweeps retained the same 48,653 sorted
+paths and SHA-256
+`10f024349d3467c72112da03dd57e0d7e543cdb819a00b3082dfecedaec614ca`.
+ReleaseSafe `--gc-threshold=1` over `language/expressions/multiplication`
+retained 39 passes plus the one known strict-only failure; forced T2 completed
+six native entries with no exits. A focused 200-pair Darwin arm64 no-JIT A/B
+measured `mul_loop` at 44.92 ms versus 44.38 ms (`1.012x` median), but the
+81.8% max/min ratio spread permits only the conclusion that no large Lantern
+regression was observed.
+
 ## 4. Deoptimization contract
 
 Every speculative node will carry an explicit assumption and deopt point.
@@ -689,7 +736,8 @@ once. A single reverse-liveness scan per block selects those registers; dead
 defined registers do not inflate every guard state.
 
 After specialization, `runtime/ohaimark/deopt.zig` emits points only for
-checked-int32 arithmetic, tagged-Number division, feedback-specialized
+checked-int32 arithmetic, tagged-Number multiplication/division,
+feedback-specialized
 property/global loads, and guarded frame/environment loads. Its byte stream
 embeds constants directly and uses `ValueId` recoveries for non-constant SSA
 values. The verifier checks point order and bounds, lowering/assumption
@@ -718,7 +766,8 @@ panicking.
 `runtime/ohaimark/evaluator.zig` now provides that pre-codegen proof for the
 pure supported subset. It executes constants, block arguments, branches,
 loops, folded nodes, checked int32 arithmetic, strict equality/inequality,
-guarded tagged-Number division, Boolean logical not, numeric less-than, and
+guarded tagged-Number multiplication/division, Boolean logical not, numeric
+less-than, and
 returns while applying the selected per-use conversions. Every definition
 writes its required physical home. A failed type/overflow/NaN guard
 decodes the physical stream, materializes the accumulator and live registers,
@@ -771,7 +820,8 @@ traffic remains on T1/T0 until the rollout gates pass.
    moves, raw int32 spill stores, boxing, checked offsets, non-heap constant
    rematerialization, and an end-to-end folded graph native return.
 8. **AArch64 optimized execution, initial slice shipped:** checked int32
-   add/sub/mul/div plus guarded tagged-Number division, strict equality and all
+   add/sub/mul/div plus guarded tagged-Number multiplication/division, strict
+   equality and all
    fused strict equality/inequality branch
    widths, standalone strict inequality, guarded Boolean logical not, int32
    control flow, stable-home writes, returns, and direct Lantern-frame guard

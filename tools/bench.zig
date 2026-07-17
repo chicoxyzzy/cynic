@@ -35,6 +35,7 @@
 //!   zig build bench -- --no-jit     # Lantern-only baseline column
 //!   zig build bench -- --runs=40    # wider budget; lights up p95
 //!   zig build bench -- --runs=200   # lights up p95 + p99
+//!   zig build bench -- --filter=mul_loop
 //!   zig build bench -- --macros     # Octane macro set (bench/macros/),
 //!                                   # run --unhardened; Splay is heavy,
 //!                                   # so --runs=3 for a quick pass
@@ -80,6 +81,7 @@ const Bench = struct {
 
 const BENCHES = [_]Bench{
     .{ .name = "arith_loop", .path = "bench/micros/arith_loop.js" },
+    .{ .name = "mul_loop", .path = "bench/micros/mul_loop.js" },
     .{ .name = "div_loop", .path = "bench/micros/div_loop.js" },
     .{ .name = "prop_access", .path = "bench/micros/prop_access.js" },
     .{ .name = "prop_write", .path = "bench/micros/prop_write.js" },
@@ -357,12 +359,13 @@ fn runInterleavedAb(
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
 
-    // Parse `--runs=<N>` (default DEFAULT_RUNS, clamped to MAX_RUNS).
-    // Anything else on the line is ignored — this driver has one knob.
+    // Parse the sample budget, posture, fixture selection, and optional A/B
+    // baseline. Unknown flags remain ignored for compatibility with wrappers.
     var runs: usize = DEFAULT_RUNS;
     var jit = false;
     var no_jit = false;
     var macros = false;
+    var filter: ?[]const u8 = null;
     var ab_baseline: ?[]const u8 = null;
     {
         var args_iter = init.minimal.args.iterate();
@@ -384,6 +387,8 @@ pub fn main(init: std.process.Init) !void {
                 // Run the Octane macro set (bench/macros/) instead of
                 // the default micros, under `--unhardened`.
                 macros = true;
+            } else if (std.mem.startsWith(u8, a, "--filter=")) {
+                filter = a["--filter=".len..];
             } else if (std.mem.startsWith(u8, a, "--ab-baseline=")) {
                 // Interleaved A/B vs this baseline cynic binary — see
                 // runInterleavedAb. The argv memory is process-lifetime.
@@ -395,7 +400,21 @@ pub fn main(init: std.process.Init) !void {
     // need it (they monkey-patch primordials and use the Function
     // constructor), and it keeps the comparison fair against the unhardened
     // peer engines — no SES tax on Cynic alone.
-    const fixtures: []const Bench = if (macros) &MACROS else &BENCHES;
+    const all_fixtures: []const Bench = if (macros) &MACROS else &BENCHES;
+    var fixtures = all_fixtures;
+    if (filter) |name| {
+        for (all_fixtures, 0..) |fixture, index| {
+            if (std.mem.eql(u8, fixture.name, name)) {
+                fixtures = all_fixtures[index .. index + 1];
+                break;
+            }
+        } else {
+            var buf: [256]u8 = undefined;
+            const msg = try std.fmt.bufPrint(&buf, "bench: unknown fixture '{s}'\n", .{name});
+            try std.Io.File.stderr().writeStreamingAll(io, msg);
+            std.process.exit(2);
+        }
+    }
     const unhardened = true;
     const show_p95 = runs >= P95_MIN_SAMPLES;
     const show_p99 = runs >= P99_MIN_SAMPLES;

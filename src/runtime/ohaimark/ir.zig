@@ -546,7 +546,7 @@ const Builder = struct {
                 },
                 .add, .sub, .mul, .div => |binary| {
                     const lhs = try readRegister(registers, self.chunk.code[pc + 1]);
-                    const payload: Payload = if (binary == .div) blk: {
+                    const payload: Payload = if (binary.hasBinaryTypeProfile()) blk: {
                         const profile_index = readU16(self.chunk.code, pc + 2);
                         if (profile_index >= self.chunk.inline_binary_profiles.len) {
                             return error.MalformedBytecode;
