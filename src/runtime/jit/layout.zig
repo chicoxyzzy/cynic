@@ -97,6 +97,10 @@ pub const realm = struct {
         globals_decl_slots_ptr + @sizeOf(*Value);
     pub const globals_decl_const_flags_ptr: usize =
         @offsetOf(Realm, "globals") + @offsetOf(GlobalBindings, "decl_const_flags");
+    /// Ohaimark loop-header OSR policy (docs/ohaimark.md §3.17). Bistromath
+    /// backedges load this first so the default-off path stays a single
+    /// compare against zero with no helper call.
+    pub const ohaimark_osr_enabled: usize = @offsetOf(Realm, "ohaimark_osr_enabled");
 };
 
 /// `Heap` fields used only to detect pending collector work at a compiled

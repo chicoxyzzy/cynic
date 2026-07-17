@@ -473,6 +473,42 @@ const bool_tag_bits: u64 = Value.false_.bits;
 /// (no allocation), so the compiled site needs no rooting. Returns 1
 /// and writes the element to `out` on a hit; 0 on any miss (the
 /// caller tiers down to re-run the full `lda_computed`).
+/// Bistromath backedge probe for Ohaimark OSR (docs/ohaimark.md §3.17).
+/// Returns 1 when the frame should tier down to the loop header so Lantern
+/// can enter T2; 0 to stay in Bistromath. Never mutates the frame or
+/// compiles — compilation stays on the Lantern OSR path so refusal cannot
+/// leave a half-updated activation.
+///
+/// Constants mirror `ohaimark/driver.zig` rather than importing it: the
+/// lantern ↔ bistromath ↔ ohaimark import cycle would otherwise form at
+/// module load.
+fn ohaimarkOsrYieldProbe(
+    r: *Realm,
+    frame: *CallFrame,
+    target_bc: u64,
+) callconv(.c) u32 {
+    if (!r.ohaimark_osr_enabled or !r.ohaimark_enabled or !r.jit_enabled) return 0;
+    if (comptime !supported) return 0;
+    // Keep in lockstep with ohaimark/driver.zig.
+    const ohaimark_osr_strike_limit: u8 = 8;
+    const ohaimark_tier_up_base: u32 = 8 * 1024;
+    const state = frame.chunk.jit_state orelse return 0;
+    if (state.ohaimark_osr_strikes >= ohaimark_osr_strike_limit) return 0;
+    if (target_bc > std.math.maxInt(u32)) return 0;
+    const bc: u32 = @intCast(target_bc);
+    return switch (state.ohaimark.tier) {
+        .dont_compile => 0,
+        .cold => blk: {
+            const threshold = r.ohaimark_threshold_override orelse blk2: {
+                const len: u32 = @intCast(@min(frame.chunk.code.len, 1 << 20));
+                break :blk2 ohaimark_tier_up_base +| (32 *| len);
+            };
+            break :blk if (state.warmth >= threshold) 1 else 0;
+        },
+        .compiled => if (state.ohaimarkOsrCodeOffset(bc) != null) 1 else 0,
+    };
+}
+
 fn denseGetShim(recv_bits: u64, key_bits: u64, out: *Value) callconv(.c) u32 {
     if (heap_mod.Heap.denseElementFastGet(.{ .bits = recv_bits }, .{ .bits = key_bits })) |v| {
         out.* = v;
@@ -1775,6 +1811,11 @@ const Compiler = struct {
     /// then surfaces the RangeError through its own safe point.
     /// Compiled code allocates nothing, so the GC counters can't
     /// move mid-run and aren't checked here.
+    ///
+    /// When `Realm.ohaimark_osr_enabled` is set, a warm Ohaimark OSR
+    /// candidate also tiers down at the header so Lantern's backedge
+    /// driver can enter T2 (docs/ohaimark.md §3.17). The policy load
+    /// is a single byte check so the default-off path stays free.
     fn backEdgeSafePoint(self: *Compiler, target: u32) CompileError!void {
         const m = &self.m;
         const td = try self.tdFor(target);
@@ -1784,6 +1825,22 @@ const Compiler = struct {
         try self.storeRealmU64(.x9, step_budget_off);
         try self.loadRealmU8(.x10, interrupt_off);
         try m.jumpCbnz(.x10, td);
+
+        var osr_skip: Masm.Label = .{};
+        defer osr_skip.deinit(m.gpa);
+        try self.loadRealmU8(.x9, layout.realm.ohaimark_osr_enabled);
+        try m.jumpCbz(.x9, &osr_skip);
+        // Flush the pinned accumulator before the helper; tier-down
+        // reloads from the frame, and a concurrent GC sees it rooted.
+        try m.emit(a64.strImm(acc_reg, frame_reg, acc_off));
+        try m.emit(a64.movReg(.x0, realm_reg));
+        try m.emit(a64.movReg(.x1, frame_reg));
+        try m.movImm64(.x2, target);
+        try m.callAbs(.x16, @intFromPtr(&ohaimarkOsrYieldProbe));
+        try m.jumpCbnz(.x0, td);
+        // Helper returns 0: keep the flushed acc in the register.
+        try m.emit(a64.ldrImm(acc_reg, frame_reg, acc_off));
+        m.bind(&osr_skip);
     }
 
     /// `eor` against the pinned tag, shift the payload away, and

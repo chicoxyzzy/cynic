@@ -1242,6 +1242,39 @@ inline fn bistromathOsrWorth(realm: *const Realm, chunk: *const Chunk) bool {
     };
 }
 
+/// Ohaimark OSR first (higher tier), then Bistromath. Both paths require the
+/// frame to already be synced at the loop header (`loopSafePoint`).
+const BackedgeOsr = union(enum) {
+    none,
+    resumed,
+    completed: Value,
+    threw: Value,
+};
+
+inline fn tryBackedgeOsr(
+    allocator: std.mem.Allocator,
+    realm: *Realm,
+    frames: *std.ArrayListUnmanaged(CallFrame),
+    chunk: *const Chunk,
+) RunError!BackedgeOsr {
+    if (ohaimark_driver.osrWorth(realm, chunk)) {
+        switch (try ohaimark_driver.tryOsrEnterTop(allocator, realm, frames)) {
+            .not_entered => {},
+            .resumed => return .resumed,
+            .completed => |v| return .{ .completed = v },
+        }
+    }
+    if (bistromathOsrWorth(realm, chunk)) {
+        switch (try bistromath.tryOsrEnterTop(allocator, realm, frames)) {
+            .not_entered => {},
+            .resumed => return .resumed,
+            .completed => |v| return .{ .completed = v },
+            .threw => |ex| return .{ .threw = ex },
+        }
+    }
+    return .none;
+}
+
 // ── Int32 fast paths ───────────────────────────────────────────────
 // The arithmetic / comparison / bitwise opcodes route the general
 // case through `addValues` / `numericBinary` / `relational` /
@@ -2272,20 +2305,46 @@ pub fn runFrames(
             ip = applyOffset(ip, off);
             if (off < 0) {
                 if (try loopSafePoint(realm, f, ip, acc)) |r| return r;
-                // docs/jit.md §12 3f — OSR: a loop hot enough to
-                // tier up enters compiled code at this back-edge's
-                // header; loopSafePoint synced the frame, so the
-                // switch is a jump. Inline-guarded — back-edges are
-                // the hottest dispatch path.
-                // Cheap precheck — a 5M-iteration interpreted loop
-                // cannot afford a function call per back-edge: call
-                // only when tier-up is plausibly due (cold and past
-                // the threshold floor) or an OSR table exists and is
-                // not striking out.
-                const osr_worth = bistromathOsrWorth(realm, f.chunk);
-                if (osr_worth) {
-                    switch (try bistromath.tryOsrEnterTop(allocator, realm, frames)) {
-                        .not_entered => {},
+                // docs/jit.md §12 3f + ohaimark.md §3.17 — OSR: Ohaimark
+                // first when gated, else Bistromath. loopSafePoint synced
+                // the frame; only call when a precheck says tier-up is due.
+                switch (try tryBackedgeOsr(allocator, realm, frames, f.chunk)) {
+                    .none => {},
+                    .resumed => {
+                        committed = true;
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                    },
+                    .completed => |ret| {
+                        if (frames.items.len == 0) return .{ .value = ret };
+                        frames.items[frames.items.len - 1].accumulator = ret;
+                        committed = true;
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                    },
+                    .threw => |ex| {
+                        if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
+                        committed = true;
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                    },
+                }
+            }
+            continue :dispatch try decodeNext(code, &ip, &committed);
+        },
+        .jmp_if_false, .jmp_if_false8, .jmp_if_false32 => |op_tag| {
+            const off = op_tag.branchInfo().?.displacement(code, ip - 1);
+            ip += op_tag.operandSize();
+            // Inline ToBoolean fast path (§7.1.2): a comparison result
+            // (bool) or an int condition skips the call; strings / objects
+            // / doubles / BigInt fall through to `toBoolean`.
+            const truthy = if (acc.isBool()) acc.asBool() else if (acc.isInt32()) (acc.asInt32() != 0) else toBoolean(acc);
+            if (!truthy) {
+                ip = applyOffset(ip, off);
+                if (off < 0) {
+                    if (try loopSafePoint(realm, f, ip, acc)) |r| return r;
+                    // docs/jit.md §12 3f + ohaimark.md §3.17 — OSR: Ohaimark
+                    // first when gated, else Bistromath. loopSafePoint synced
+                    // the frame; only call when a precheck says tier-up is due.
+                    switch (try tryBackedgeOsr(allocator, realm, frames, f.chunk)) {
+                        .none => {},
                         .resumed => {
                             committed = true;
                             continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
@@ -2306,52 +2365,6 @@ pub fn runFrames(
             }
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
-        .jmp_if_false, .jmp_if_false8, .jmp_if_false32 => |op_tag| {
-            const off = op_tag.branchInfo().?.displacement(code, ip - 1);
-            ip += op_tag.operandSize();
-            // Inline ToBoolean fast path (§7.1.2): a comparison result
-            // (bool) or an int condition skips the call; strings / objects
-            // / doubles / BigInt fall through to `toBoolean`.
-            const truthy = if (acc.isBool()) acc.asBool() else if (acc.isInt32()) (acc.asInt32() != 0) else toBoolean(acc);
-            if (!truthy) {
-                ip = applyOffset(ip, off);
-                if (off < 0) {
-                    if (try loopSafePoint(realm, f, ip, acc)) |r| return r;
-                    // docs/jit.md §12 3f — OSR: a loop hot enough to
-                    // tier up enters compiled code at this back-edge's
-                    // header; loopSafePoint synced the frame, so the
-                    // switch is a jump. Inline-guarded — back-edges are
-                    // the hottest dispatch path.
-                    // Cheap precheck — a 5M-iteration interpreted loop
-                    // cannot afford a function call per back-edge: call
-                    // only when tier-up is plausibly due (cold and past
-                    // the threshold floor) or an OSR table exists and is
-                    // not striking out.
-                    const osr_worth = bistromathOsrWorth(realm, f.chunk);
-                    if (osr_worth) {
-                        switch (try bistromath.tryOsrEnterTop(allocator, realm, frames)) {
-                            .not_entered => {},
-                            .resumed => {
-                                committed = true;
-                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
-                            },
-                            .completed => |ret| {
-                                if (frames.items.len == 0) return .{ .value = ret };
-                                frames.items[frames.items.len - 1].accumulator = ret;
-                                committed = true;
-                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
-                            },
-                            .threw => |ex| {
-                                if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
-                                committed = true;
-                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
-                            },
-                        }
-                    }
-                }
-            }
-            continue :dispatch try decodeNext(code, &ip, &committed);
-        },
         .jmp_if_true, .jmp_if_true8, .jmp_if_true32 => |op_tag| {
             const off = op_tag.branchInfo().?.displacement(code, ip - 1);
             ip += op_tag.operandSize();
@@ -2360,36 +2373,26 @@ pub fn runFrames(
                 ip = applyOffset(ip, off);
                 if (off < 0) {
                     if (try loopSafePoint(realm, f, ip, acc)) |r| return r;
-                    // docs/jit.md §12 3f — OSR: a loop hot enough to
-                    // tier up enters compiled code at this back-edge's
-                    // header; loopSafePoint synced the frame, so the
-                    // switch is a jump. Inline-guarded — back-edges are
-                    // the hottest dispatch path.
-                    // Cheap precheck — a 5M-iteration interpreted loop
-                    // cannot afford a function call per back-edge: call
-                    // only when tier-up is plausibly due (cold and past
-                    // the threshold floor) or an OSR table exists and is
-                    // not striking out.
-                    const osr_worth = bistromathOsrWorth(realm, f.chunk);
-                    if (osr_worth) {
-                        switch (try bistromath.tryOsrEnterTop(allocator, realm, frames)) {
-                            .not_entered => {},
-                            .resumed => {
-                                committed = true;
-                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
-                            },
-                            .completed => |ret| {
-                                if (frames.items.len == 0) return .{ .value = ret };
-                                frames.items[frames.items.len - 1].accumulator = ret;
-                                committed = true;
-                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
-                            },
-                            .threw => |ex| {
-                                if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
-                                committed = true;
-                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
-                            },
-                        }
+                    // docs/jit.md §12 3f + ohaimark.md §3.17 — OSR: Ohaimark
+                    // first when gated, else Bistromath. loopSafePoint synced
+                    // the frame; only call when a precheck says tier-up is due.
+                    switch (try tryBackedgeOsr(allocator, realm, frames, f.chunk)) {
+                        .none => {},
+                        .resumed => {
+                            committed = true;
+                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                        },
+                        .completed => |ret| {
+                            if (frames.items.len == 0) return .{ .value = ret };
+                            frames.items[frames.items.len - 1].accumulator = ret;
+                            committed = true;
+                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                        },
+                        .threw => |ex| {
+                            if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
+                            committed = true;
+                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                        },
                     }
                 }
             }
@@ -2505,36 +2508,26 @@ pub fn runFrames(
                 ip = applyOffset(ip, off);
                 if (off < 0) {
                     if (try loopSafePoint(realm, f, ip, acc)) |r| return r;
-                    // docs/jit.md §12 3f — OSR: a loop hot enough to
-                    // tier up enters compiled code at this back-edge's
-                    // header; loopSafePoint synced the frame, so the
-                    // switch is a jump. Inline-guarded — back-edges are
-                    // the hottest dispatch path.
-                    // Cheap precheck — a 5M-iteration interpreted loop
-                    // cannot afford a function call per back-edge: call
-                    // only when tier-up is plausibly due (cold and past
-                    // the threshold floor) or an OSR table exists and is
-                    // not striking out.
-                    const osr_worth = bistromathOsrWorth(realm, f.chunk);
-                    if (osr_worth) {
-                        switch (try bistromath.tryOsrEnterTop(allocator, realm, frames)) {
-                            .not_entered => {},
-                            .resumed => {
-                                committed = true;
-                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
-                            },
-                            .completed => |ret| {
-                                if (frames.items.len == 0) return .{ .value = ret };
-                                frames.items[frames.items.len - 1].accumulator = ret;
-                                committed = true;
-                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
-                            },
-                            .threw => |ex| {
-                                if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
-                                committed = true;
-                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
-                            },
-                        }
+                    // docs/jit.md §12 3f + ohaimark.md §3.17 — OSR: Ohaimark
+                    // first when gated, else Bistromath. loopSafePoint synced
+                    // the frame; only call when a precheck says tier-up is due.
+                    switch (try tryBackedgeOsr(allocator, realm, frames, f.chunk)) {
+                        .none => {},
+                        .resumed => {
+                            committed = true;
+                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                        },
+                        .completed => |ret| {
+                            if (frames.items.len == 0) return .{ .value = ret };
+                            frames.items[frames.items.len - 1].accumulator = ret;
+                            committed = true;
+                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                        },
+                        .threw => |ex| {
+                            if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
+                            committed = true;
+                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                        },
                     }
                 }
             }
@@ -2560,36 +2553,26 @@ pub fn runFrames(
                         ip = applyOffset(ip, off);
                         if (off < 0) {
                             if (try loopSafePoint(realm, f, ip, acc)) |r| return r;
-                            // docs/jit.md §12 3f — OSR: a loop hot enough to
-                            // tier up enters compiled code at this back-edge's
-                            // header; loopSafePoint synced the frame, so the
-                            // switch is a jump. Inline-guarded — back-edges are
-                            // the hottest dispatch path.
-                            // Cheap precheck — a 5M-iteration interpreted loop
-                            // cannot afford a function call per back-edge: call
-                            // only when tier-up is plausibly due (cold and past
-                            // the threshold floor) or an OSR table exists and is
-                            // not striking out.
-                            const osr_worth = bistromathOsrWorth(realm, f.chunk);
-                            if (osr_worth) {
-                                switch (try bistromath.tryOsrEnterTop(allocator, realm, frames)) {
-                                    .not_entered => {},
-                                    .resumed => {
-                                        committed = true;
-                                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
-                                    },
-                                    .completed => |ret| {
-                                        if (frames.items.len == 0) return .{ .value = ret };
-                                        frames.items[frames.items.len - 1].accumulator = ret;
-                                        committed = true;
-                                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
-                                    },
-                                    .threw => |ex| {
-                                        if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
-                                        committed = true;
-                                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
-                                    },
-                                }
+                            // docs/jit.md §12 3f + ohaimark.md §3.17 — OSR: Ohaimark
+                            // first when gated, else Bistromath. loopSafePoint synced
+                            // the frame; only call when a precheck says tier-up is due.
+                            switch (try tryBackedgeOsr(allocator, realm, frames, f.chunk)) {
+                                .none => {},
+                                .resumed => {
+                                    committed = true;
+                                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                                },
+                                .completed => |ret| {
+                                    if (frames.items.len == 0) return .{ .value = ret };
+                                    frames.items[frames.items.len - 1].accumulator = ret;
+                                    committed = true;
+                                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                                },
+                                .threw => |ex| {
+                                    if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
+                                    committed = true;
+                                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                                },
                             }
                         }
                     }
@@ -2640,36 +2623,26 @@ pub fn runFrames(
                 ip = applyOffset(ip, off);
                 if (off < 0) {
                     if (try loopSafePoint(realm, f, ip, acc)) |r| return r;
-                    // docs/jit.md §12 3f — OSR: a loop hot enough to
-                    // tier up enters compiled code at this back-edge's
-                    // header; loopSafePoint synced the frame, so the
-                    // switch is a jump. Inline-guarded — back-edges are
-                    // the hottest dispatch path.
-                    // Cheap precheck — a 5M-iteration interpreted loop
-                    // cannot afford a function call per back-edge: call
-                    // only when tier-up is plausibly due (cold and past
-                    // the threshold floor) or an OSR table exists and is
-                    // not striking out.
-                    const osr_worth = bistromathOsrWorth(realm, f.chunk);
-                    if (osr_worth) {
-                        switch (try bistromath.tryOsrEnterTop(allocator, realm, frames)) {
-                            .not_entered => {},
-                            .resumed => {
-                                committed = true;
-                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
-                            },
-                            .completed => |ret| {
-                                if (frames.items.len == 0) return .{ .value = ret };
-                                frames.items[frames.items.len - 1].accumulator = ret;
-                                committed = true;
-                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
-                            },
-                            .threw => |ex| {
-                                if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
-                                committed = true;
-                                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
-                            },
-                        }
+                    // docs/jit.md §12 3f + ohaimark.md §3.17 — OSR: Ohaimark
+                    // first when gated, else Bistromath. loopSafePoint synced
+                    // the frame; only call when a precheck says tier-up is due.
+                    switch (try tryBackedgeOsr(allocator, realm, frames, f.chunk)) {
+                        .none => {},
+                        .resumed => {
+                            committed = true;
+                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                        },
+                        .completed => |ret| {
+                            if (frames.items.len == 0) return .{ .value = ret };
+                            frames.items[frames.items.len - 1].accumulator = ret;
+                            committed = true;
+                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                        },
+                        .threw => |ex| {
+                            if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
+                            committed = true;
+                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                        },
                     }
                 }
             }
