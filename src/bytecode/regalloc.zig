@@ -189,6 +189,33 @@ const Replacement = struct {
 // dense copy runs are the dispatch-bound hot-loop shape this pass targets.
 const hot_copy_min_replacements: usize = 8;
 
+// Cheap syntactic gate used before liveness allocation. It may over-count
+// pairs that enter through another CFG edge; that only admits analysis, while
+// the real rewrite still applies its leader proof below.
+fn potentialAccumulatorCopyCount(code: []const u8) usize {
+    var count: usize = 0;
+    var i: u32 = 0;
+    while (i < code.len) {
+        const op: Op = @enumFromInt(code[i]);
+        const load_end = i + 1 + Op.operandSize(op);
+        if (loadTarget(op, code, i) != null and load_end < code.len) {
+            const store_op: Op = @enumFromInt(code[load_end]);
+            if (isPureStore(store_op)) {
+                const pair_end = load_end + 1 + Op.operandSize(store_op);
+                if (pair_end < code.len and pair_end - i >= 3 and
+                    definitelyOverwritesAccumulator(@enumFromInt(code[pair_end])))
+                {
+                    count += 1;
+                    i = pair_end;
+                    continue;
+                }
+            }
+        }
+        i = load_end;
+    }
+    return count;
+}
+
 /// Replace `Ldar src; Star dst` with `Mov src dst` when the immediately
 /// following instruction definitely overwrites the accumulator before it can
 /// be observed. `Mov` intentionally preserves the incoming accumulator, so
@@ -220,6 +247,7 @@ fn eliminateDeadAccumulatorCopiesOne(allocator: std.mem.Allocator, chunk: *Chunk
 fn eliminateDeadAccumulatorCopiesOneMin(allocator: std.mem.Allocator, chunk: *Chunk, min_replacements: usize) !usize {
     const code = chunk.code;
     if (code.len == 0 or chunk.handlers.len > 0) return 0;
+    if (min_replacements > 0 and potentialAccumulatorCopyCount(code) < min_replacements) return 0;
 
     var a = try liveness.analyze(allocator, code, chunk.register_count, chunk.handlers, chunk.switch_tables);
     defer a.deinit();
@@ -861,6 +889,23 @@ test "regalloc(copy): compact pair does not grow" {
     defer testing.allocator.free(chunk.code);
 
     try testing.expectEqual(@as(usize, 0), try eliminateDeadAccumulatorCopiesOne(testing.allocator, &chunk));
+    try testing.expectEqualSlices(u8, &code, chunk.code);
+}
+
+test "regalloc(copy): production gate skips sparse chunks" {
+    var code = [_]u8{
+        @intFromEnum(Op.ldar_1),
+        @intFromEnum(Op.star),
+        2,
+        @intFromEnum(Op.ldar_3),
+        @intFromEnum(Op.add),
+        2,
+        @intFromEnum(Op.return_),
+    };
+    var chunk = try mkChunk(&code);
+    defer testing.allocator.free(chunk.code);
+
+    try testing.expectEqual(@as(usize, 0), try eliminateDeadAccumulatorCopies(testing.allocator, &chunk));
     try testing.expectEqualSlices(u8, &code, chunk.code);
 }
 
