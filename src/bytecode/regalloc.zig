@@ -171,8 +171,9 @@ fn definitelyOverwritesAccumulator(op: Op) bool {
         .ldar_1,
         .ldar_2,
         .ldar_3,
-        .lda_this,
         .lda_new_target,
+        .inc_reg,
+        .dec_reg,
         => true,
         else => false,
     };
@@ -846,6 +847,51 @@ test "regalloc(copy): compact pair does not grow" {
         @intFromEnum(Op.ldar_3),
         @intFromEnum(Op.add),
         2,
+        @intFromEnum(Op.return_),
+    };
+    var chunk = try mkChunk(&code);
+    defer testing.allocator.free(chunk.code);
+
+    try testing.expectEqual(@as(usize, 0), try eliminateDeadAccumulatorCopiesOne(testing.allocator, &chunk));
+    try testing.expectEqualSlices(u8, &code, chunk.code);
+}
+
+test "regalloc(copy): register-update overwrites permit Mov" {
+    // IncReg / DecReg read and update their encoded register, then leave the
+    // bumped value in the accumulator; neither consumes the incoming value.
+    inline for (.{ Op.inc_reg, Op.dec_reg }) |update| {
+        var code = [_]u8{
+            @intFromEnum(Op.ldar_1),
+            @intFromEnum(Op.star),
+            2,
+            @intFromEnum(update),
+            3,
+            @intFromEnum(Op.add),
+            2,
+            @intFromEnum(Op.return_),
+        };
+        var chunk = try mkChunk(&code);
+        defer testing.allocator.free(chunk.code);
+
+        try testing.expectEqual(@as(usize, 1), try eliminateDeadAccumulatorCopiesOne(testing.allocator, &chunk));
+        try testing.expectEqualSlices(u8, &.{
+            @intFromEnum(Op.mov), 1,                        2,
+            @intFromEnum(update), 3,                        @intFromEnum(Op.add),
+            2,                    @intFromEnum(Op.return_),
+        }, chunk.code);
+    }
+}
+
+test "regalloc(copy): abrupt LdaThis path keeps Ldar-Star" {
+    // Before super() in a derived constructor, LdaThis throws after syncing
+    // the frame's existing accumulator. It therefore is not an unconditional
+    // accumulator overwrite for this deliberately local proof.
+    var code = [_]u8{
+        @intFromEnum(Op.ldar),
+        1,
+        @intFromEnum(Op.star),
+        2,
+        @intFromEnum(Op.lda_this),
         @intFromEnum(Op.return_),
     };
     var chunk = try mkChunk(&code);
