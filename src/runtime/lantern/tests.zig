@@ -1133,11 +1133,11 @@ test "later: function expression assigned to a let" {
 }
 
 test "regalloc: compiler-emitted Mov preserves register copy" {
-    // Five parameters force the generic Ldar r4; Star r5 encodings. The
-    // finalized-bytecode pass can replace that pair with one accumulator-
-    // preserving Mov because Ldar0 immediately overwrites the accumulator.
+    // Eight independent parameter-to-local copies make this a hot-shaped
+    // chunk: the production pass admits dense runs, while sparse cold chunks
+    // retain their original layout.
     const source =
-        "(function(a,b,c,d,e){ let x = e; return x + a; })(2,0,0,0,40);";
+        "(function(a,b,c,d,e,f,g,h){ let x=e,y=f,z=g,w=h,q=a,r=b,s=c,t=d; return x+y+z+w+q+r+s+t; })(1,2,3,4,5,6,7,8);";
 
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
@@ -1157,20 +1157,19 @@ test "regalloc: compiler-emitted Mov preserves register copy" {
 
     const out = try disasm.dump(testing.allocator, &chunk);
     defer testing.allocator.free(out);
-    try testing.expect(std.mem.indexOf(u8, out, "Mov r4 r5") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "Ldar r4") == null);
+    try testing.expect(std.mem.count(u8, out, "Mov") >= 8);
 
     const value = switch (try run(testing.allocator, &realm, &chunk)) {
         .value, .yielded => |v| v,
         .thrown => return error.UncaughtException,
     };
     try testing.expect(value.isInt32());
-    try testing.expectEqual(@as(i32, 42), value.asInt32());
+    try testing.expectEqual(@as(i32, 36), value.asInt32());
 }
 
 test "regalloc: Mov pass reaches class-owned method chunks" {
     const source =
-        "class C { m(a,b,c,d,e) { let x = e; return x + a; } } new C().m(2,0,0,0,40);";
+        "class C { m(a,b,c,d,e,f,g,h) { let x=e,y=f,z=g,w=h,q=a,r=b,s=c,t=d; return x+y+z+w+q+r+s+t; } } new C().m(1,2,3,4,5,6,7,8);";
 
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
@@ -1193,14 +1192,14 @@ test "regalloc: Mov pass reaches class-owned method chunks" {
     const method = &chunk.class_templates[0].instance_methods[0].chunk;
     const out = try disasm.dump(testing.allocator, method);
     defer testing.allocator.free(out);
-    try testing.expect(std.mem.indexOf(u8, out, "Mov r4 r5") != null);
+    try testing.expect(std.mem.count(u8, out, "Mov") >= 8);
 
     const value = switch (try run(testing.allocator, &realm, &chunk)) {
         .value, .yielded => |v| v,
         .thrown => return error.UncaughtException,
     };
     try testing.expect(value.isInt32());
-    try testing.expectEqual(@as(i32, 42), value.asInt32());
+    try testing.expectEqual(@as(i32, 36), value.asInt32());
 }
 
 test "later: arrow function — concise body" {

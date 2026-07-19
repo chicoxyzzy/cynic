@@ -185,6 +185,10 @@ const Replacement = struct {
     bytes: [3]u8,
 };
 
+// A handful of copies in a cold function is not worth changing its layout;
+// dense copy runs are the dispatch-bound hot-loop shape this pass targets.
+const hot_copy_min_replacements: usize = 8;
+
 /// Replace `Ldar src; Star dst` with `Mov src dst` when the immediately
 /// following instruction definitely overwrites the accumulator before it can
 /// be observed. `Mov` intentionally preserves the incoming accumulator, so
@@ -192,7 +196,7 @@ const Replacement = struct {
 /// than Mov's three-byte encoding are retained. Recurses through every nested
 /// function and class-owned chunk.
 pub fn eliminateDeadAccumulatorCopies(allocator: std.mem.Allocator, chunk: *Chunk) !usize {
-    var replaced = try eliminateDeadAccumulatorCopiesOne(allocator, chunk);
+    var replaced = try eliminateDeadAccumulatorCopiesOneMin(allocator, chunk, hot_copy_min_replacements);
     for (chunk.function_templates) |*t| replaced += try eliminateDeadAccumulatorCopies(allocator, &t.chunk);
     for (chunk.class_templates) |*class| {
         replaced += try eliminateDeadAccumulatorCopies(allocator, &class.constructor_chunk);
@@ -210,6 +214,10 @@ pub fn eliminateDeadAccumulatorCopies(allocator: std.mem.Allocator, chunk: *Chun
 }
 
 fn eliminateDeadAccumulatorCopiesOne(allocator: std.mem.Allocator, chunk: *Chunk) !usize {
+    return eliminateDeadAccumulatorCopiesOneMin(allocator, chunk, 0);
+}
+
+fn eliminateDeadAccumulatorCopiesOneMin(allocator: std.mem.Allocator, chunk: *Chunk, min_replacements: usize) !usize {
     const code = chunk.code;
     if (code.len == 0 or chunk.handlers.len > 0) return 0;
 
@@ -256,7 +264,7 @@ fn eliminateDeadAccumulatorCopiesOne(allocator: std.mem.Allocator, chunk: *Chunk
         i = pair_end;
     }
 
-    if (replacements.items.len == 0) return 0;
+    if (replacements.items.len < min_replacements) return 0;
     try reEmit(allocator, chunk, &.{}, replacements.items);
     return replacements.items.len;
 }
