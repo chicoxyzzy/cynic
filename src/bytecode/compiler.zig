@@ -15117,6 +15117,7 @@ fn compileScriptLikeChunk(
 
     c.builder.code.items[slot_count_patch] = c.env_slot_count;
     var chunk = try c.finish();
+    errdefer chunk.deinit(allocator);
     // Pin every JSString in the chunk's constant pool (incl.
     // nested function / class templates). Chunks are realm-
     // lifetime; pinning lets the GC skip walking the chunk
@@ -15124,6 +15125,7 @@ fn compileScriptLikeChunk(
     _ = try regalloc.eliminateRedundantTdzChecks(allocator, &chunk);
     _ = try regalloc.eliminateRedundantStoreLoads(allocator, &chunk);
     _ = try regalloc.eliminateDeadStores(allocator, &chunk);
+    _ = try regalloc.eliminateDeadAccumulatorCopies(allocator, &chunk);
     try realm.heap.pinChunk(&chunk);
     return chunk;
 }
@@ -15322,10 +15324,12 @@ pub fn compileModuleAsChunk(
     // this module's evaluation as an async function call.
     c.builder.is_async_module = c.module_has_top_level_await;
     var chunk = try c.finish();
+    errdefer chunk.deinit(allocator);
     chunk.base_url = base_url;
     _ = try regalloc.eliminateRedundantTdzChecks(allocator, &chunk);
     _ = try regalloc.eliminateRedundantStoreLoads(allocator, &chunk);
     _ = try regalloc.eliminateDeadStores(allocator, &chunk);
+    _ = try regalloc.eliminateDeadAccumulatorCopies(allocator, &chunk);
     try realm.heap.pinChunk(&chunk);
     return chunk;
 }
@@ -15356,9 +15360,11 @@ pub fn compileExpressionAsChunk(
     try c.compileExpression(expr);
     try c.builder.emitOp(.return_, expr.span());
     var chunk = try c.finish();
+    errdefer chunk.deinit(allocator);
     _ = try regalloc.eliminateRedundantTdzChecks(allocator, &chunk);
     _ = try regalloc.eliminateRedundantStoreLoads(allocator, &chunk);
     _ = try regalloc.eliminateDeadStores(allocator, &chunk);
+    _ = try regalloc.eliminateDeadAccumulatorCopies(allocator, &chunk);
     try realm.heap.pinChunk(&chunk);
     return chunk;
 }

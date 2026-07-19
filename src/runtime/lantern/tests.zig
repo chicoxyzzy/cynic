@@ -1132,6 +1132,77 @@ test "later: function expression assigned to a let" {
     try expectScriptInt("let f = function(x) { return x * 2; }; f(7);", 14);
 }
 
+test "regalloc: compiler-emitted Mov preserves register copy" {
+    // Five parameters force the generic Ldar r4; Star r5 encodings. The
+    // finalized-bytecode pass can replace that pair with one accumulator-
+    // preserving Mov because Ldar0 immediately overwrites the accumulator.
+    const source =
+        "(function(a,b,c,d,e){ let x = e; return x + a; })(2,0,0,0,40);";
+
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const program = try parser_mod.parseScript(arena.allocator(), source, null);
+
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+
+    var chunk = try compileScriptAsChunk(
+        testing.allocator,
+        &realm,
+        &program,
+        source,
+        null,
+    );
+    defer chunk.deinit(testing.allocator);
+
+    const out = try disasm.dump(testing.allocator, &chunk);
+    defer testing.allocator.free(out);
+    try testing.expect(std.mem.indexOf(u8, out, "Mov r4 r5") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "Ldar r4") == null);
+
+    const value = switch (try run(testing.allocator, &realm, &chunk)) {
+        .value, .yielded => |v| v,
+        .thrown => return error.UncaughtException,
+    };
+    try testing.expect(value.isInt32());
+    try testing.expectEqual(@as(i32, 42), value.asInt32());
+}
+
+test "regalloc: Mov pass reaches class-owned method chunks" {
+    const source =
+        "class C { m(a,b,c,d,e) { let x = e; return x + a; } } new C().m(2,0,0,0,40);";
+
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const program = try parser_mod.parseScript(arena.allocator(), source, null);
+
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+
+    var chunk = try compileScriptAsChunk(
+        testing.allocator,
+        &realm,
+        &program,
+        source,
+        null,
+    );
+    defer chunk.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 1), chunk.class_templates.len);
+    try testing.expectEqual(@as(usize, 1), chunk.class_templates[0].instance_methods.len);
+    const method = &chunk.class_templates[0].instance_methods[0].chunk;
+    const out = try disasm.dump(testing.allocator, method);
+    defer testing.allocator.free(out);
+    try testing.expect(std.mem.indexOf(u8, out, "Mov r4 r5") != null);
+
+    const value = switch (try run(testing.allocator, &realm, &chunk)) {
+        .value, .yielded => |v| v,
+        .thrown => return error.UncaughtException,
+    };
+    try testing.expect(value.isInt32());
+    try testing.expectEqual(@as(i32, 42), value.asInt32());
+}
+
 test "later: arrow function — concise body" {
     try expectScriptInt("let f = (x) => x + 10; f(5);", 15);
 }

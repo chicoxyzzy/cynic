@@ -4,8 +4,10 @@
 //! A `Star rX` whose target register is not live afterward has no observable
 //! effect, so it is dropped. An adjacent `Star rX; Ldar rX` can drop the load
 //! when the finalized CFG proves the `Ldar` has no other predecessor: `Star`
-//! leaves its value in the accumulator already. Both remove interpreter
-//! dispatches from hot loops.
+//! leaves its value in the accumulator already. A complementary local proof
+//! turns `Ldar src; Star dst` into accumulator-preserving `Mov src dst` when
+//! the following instruction definitely overwrites the accumulator. These
+//! remove interpreter dispatches from hot loops.
 //!
 //! Re-emitting (vs in-place patching) is what lets an instruction be
 //! removed: the new code buffer is rebuilt and every code-offset
@@ -151,6 +153,113 @@ fn eliminateDeadStoresOne(allocator: std.mem.Allocator, chunk: *Chunk) !usize {
     return dead.items.len;
 }
 
+fn definitelyOverwritesAccumulator(op: Op) bool {
+    return switch (op) {
+        .lda_undefined,
+        .lda_null,
+        .lda_true,
+        .lda_false,
+        .lda_hole,
+        .lda_zero,
+        .lda_one,
+        .lda_smi,
+        .lda_smi8,
+        .lda_smi16,
+        .lda_constant,
+        .ldar,
+        .ldar_0,
+        .ldar_1,
+        .ldar_2,
+        .ldar_3,
+        .lda_this,
+        .lda_new_target,
+        => true,
+        else => false,
+    };
+}
+
+const Replacement = struct {
+    start: u32,
+    end: u32,
+    bytes: [3]u8,
+};
+
+/// Replace `Ldar src; Star dst` with `Mov src dst` when the immediately
+/// following instruction definitely overwrites the accumulator before it can
+/// be observed. `Mov` intentionally preserves the incoming accumulator, so
+/// this local proof is the semantic boundary of the rewrite. Pairs shorter
+/// than Mov's three-byte encoding are retained. Recurses through every nested
+/// function and class-owned chunk.
+pub fn eliminateDeadAccumulatorCopies(allocator: std.mem.Allocator, chunk: *Chunk) !usize {
+    var replaced = try eliminateDeadAccumulatorCopiesOne(allocator, chunk);
+    for (chunk.function_templates) |*t| replaced += try eliminateDeadAccumulatorCopies(allocator, &t.chunk);
+    for (chunk.class_templates) |*class| {
+        replaced += try eliminateDeadAccumulatorCopies(allocator, &class.constructor_chunk);
+        for (class.instance_methods) |*method| replaced += try eliminateDeadAccumulatorCopies(allocator, &method.chunk);
+        for (class.static_methods) |*method| replaced += try eliminateDeadAccumulatorCopies(allocator, &method.chunk);
+        for (class.instance_fields) |*field| if (field.init_chunk) |*init| {
+            replaced += try eliminateDeadAccumulatorCopies(allocator, init);
+        };
+        for (class.static_fields) |*field| if (field.init_chunk) |*init| {
+            replaced += try eliminateDeadAccumulatorCopies(allocator, init);
+        };
+        for (class.static_blocks) |*block| replaced += try eliminateDeadAccumulatorCopies(allocator, block);
+    }
+    return replaced;
+}
+
+fn eliminateDeadAccumulatorCopiesOne(allocator: std.mem.Allocator, chunk: *Chunk) !usize {
+    const code = chunk.code;
+    if (code.len == 0 or chunk.handlers.len > 0) return 0;
+
+    var a = try liveness.analyze(allocator, code, chunk.register_count, chunk.handlers, chunk.switch_tables);
+    defer a.deinit();
+
+    var replacements: std.ArrayListUnmanaged(Replacement) = .empty;
+    defer replacements.deinit(allocator);
+
+    var i: u32 = 0;
+    while (i < code.len) {
+        const op: Op = @enumFromInt(code[i]);
+        const load_end = i + 1 + Op.operandSize(op);
+        const src = loadTarget(op, code, i) orelse {
+            i = load_end;
+            continue;
+        };
+        if (load_end >= code.len or isLeaderOff(a.leaders, load_end)) {
+            i = load_end;
+            continue;
+        }
+
+        const store_op: Op = @enumFromInt(code[load_end]);
+        if (!isPureStore(store_op)) {
+            i = load_end;
+            continue;
+        }
+        const pair_end = load_end + 1 + Op.operandSize(store_op);
+        if (pair_end >= code.len or pair_end - i < 3) {
+            i = pair_end;
+            continue;
+        }
+        const after_op: Op = @enumFromInt(code[pair_end]);
+        if (!definitelyOverwritesAccumulator(after_op)) {
+            i = pair_end;
+            continue;
+        }
+
+        try replacements.append(allocator, .{
+            .start = i,
+            .end = pair_end,
+            .bytes = .{ @intFromEnum(Op.mov), src, storeTarget(store_op, code, load_end) },
+        });
+        i = pair_end;
+    }
+
+    if (replacements.items.len == 0) return 0;
+    try reEmit(allocator, chunk, &.{}, replacements.items);
+    return replacements.items.len;
+}
+
 /// Rebuild `chunk.code` / `source_positions` / `handlers` with the
 /// instructions at the given `dead` offsets removed (sorted ascending, each
 /// an instruction start), re-patching width-relaxed relative jumps,
@@ -160,6 +269,19 @@ fn eliminateDeadStoresOne(allocator: std.mem.Allocator, chunk: *Chunk) !usize {
 /// TDZ checks — a removed instruction's offset maps to the next surviving
 /// instruction, so a jump that targeted it still resolves.
 fn reEmitDropping(allocator: std.mem.Allocator, chunk: *Chunk, dead: []const u32) !void {
+    try reEmit(allocator, chunk, dead, &.{});
+}
+
+/// Shared length-changing re-emitter. Replacements are sorted, non-overlapping
+/// instruction ranges; every covered old instruction maps to the replacement's
+/// start. Replacement bytes never exceed the old range, so already-relaxed
+/// branch widths remain lossless.
+fn reEmit(
+    allocator: std.mem.Allocator,
+    chunk: *Chunk,
+    dead: []const u32,
+    replacements: []const Replacement,
+) !void {
     const code = chunk.code;
 
     // ── old offset → new offset map (every instruction start + a code.len
@@ -168,10 +290,25 @@ fn reEmitDropping(allocator: std.mem.Allocator, chunk: *Chunk, dead: []const u32
     defer allocator.free(new_off);
     {
         var di: usize = 0;
+        var ri: usize = 0;
         var old: u32 = 0;
         var new: u32 = 0;
         while (old < code.len) {
             new_off[old] = new;
+            if (ri < replacements.len and replacements[ri].start == old) {
+                const replacement = replacements[ri];
+                var covered = old;
+                while (covered < replacement.end) {
+                    new_off[covered] = new;
+                    const covered_op: Op = @enumFromInt(code[covered]);
+                    covered += 1 + Op.operandSize(covered_op);
+                }
+                std.debug.assert(covered == replacement.end);
+                new += replacement.bytes.len;
+                old = replacement.end;
+                ri += 1;
+                continue;
+            }
             const op: Op = @enumFromInt(code[old]);
             const sz: u32 = 1 + Op.operandSize(op);
             if (di < dead.len and dead[di] == old) {
@@ -191,9 +328,24 @@ fn reEmitDropping(allocator: std.mem.Allocator, chunk: *Chunk, dead: []const u32
     errdefer new_sp.deinit(allocator);
     {
         var di: usize = 0;
+        var ri: usize = 0;
         var sp_i: usize = 0;
         var old: u32 = 0;
         while (old < code.len) {
+            if (ri < replacements.len and replacements[ri].start == old) {
+                const replacement = replacements[ri];
+                const new_self = new_off[old];
+                // Keep the load's source mapping on Mov; discard mappings for
+                // the absorbed store so none points into Mov's operands.
+                while (sp_i < chunk.source_positions.len and chunk.source_positions[sp_i].offset == old) : (sp_i += 1) {
+                    try new_sp.append(allocator, .{ .offset = new_self, .span = chunk.source_positions[sp_i].span });
+                }
+                while (sp_i < chunk.source_positions.len and chunk.source_positions[sp_i].offset < replacement.end) sp_i += 1;
+                try out.appendSlice(allocator, &replacement.bytes);
+                old = replacement.end;
+                ri += 1;
+                continue;
+            }
             const op: Op = @enumFromInt(code[old]);
             const sz: u32 = 1 + Op.operandSize(op);
             const is_dead = di < dead.len and dead[di] == old;
@@ -251,14 +403,18 @@ fn reEmitDropping(allocator: std.mem.Allocator, chunk: *Chunk, dead: []const u32
             .is_finally = h.is_finally,
         };
     }
+    // Own every rebuilt buffer before mutating chunk-owned state. This keeps
+    // the pass error-atomic under allocation failure.
+    const owned_code = try out.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_code);
+    const owned_sp = try new_sp.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_sp);
+
+    // ── Commit: remap in-place tables, swap rebuilt buffers, free originals ──
     for (chunk.switch_tables) |*table| {
         table.default_target = new_off[table.default_target];
         for (table.targets) |*target| target.* = new_off[target.*];
     }
-
-    // ── Commit: swap in the rebuilt buffers, free the originals ──
-    const owned_code = try out.toOwnedSlice(allocator);
-    const owned_sp = try new_sp.toOwnedSlice(allocator);
     allocator.free(chunk.code);
     allocator.free(chunk.source_positions);
     allocator.free(chunk.handlers);
@@ -585,6 +741,192 @@ test "regalloc(store-load): load at a branch target is kept" {
 
     try testing.expectEqual(@as(usize, 0), try eliminateRedundantStoreLoadsOne(testing.allocator, &chunk));
     try testing.expectEqualSlices(u8, &code, chunk.code);
+}
+
+test "regalloc(copy): dead accumulator Ldar-Star becomes Mov" {
+    // Ldar1; Star r2 copies r1 to r2. The following Ldar3 overwrites the
+    // accumulator before Add observes it, so the pair can become one Mov.
+    var code = [_]u8{
+        @intFromEnum(Op.ldar_1),
+        @intFromEnum(Op.star),
+        2,
+        @intFromEnum(Op.ldar_3),
+        @intFromEnum(Op.add),
+        2,
+        @intFromEnum(Op.return_),
+    };
+    var chunk = try mkChunk(&code);
+    defer testing.allocator.free(chunk.code);
+
+    try testing.expectEqual(@as(usize, 1), try eliminateDeadAccumulatorCopiesOne(testing.allocator, &chunk));
+    try testing.expectEqualSlices(u8, &.{
+        @intFromEnum(Op.mov),     1,                    2,
+        @intFromEnum(Op.ldar_3),  @intFromEnum(Op.add), 2,
+        @intFromEnum(Op.return_),
+    }, chunk.code);
+}
+
+test "regalloc(copy): live accumulator keeps Ldar-Star" {
+    // Return observes the accumulator loaded from r1. Mov deliberately leaves
+    // the accumulator untouched, so this pair is not interchangeable.
+    var code = [_]u8{
+        @intFromEnum(Op.lda_one),
+        @intFromEnum(Op.ldar),
+        1,
+        @intFromEnum(Op.star),
+        2,
+        @intFromEnum(Op.return_),
+    };
+    var chunk = try mkChunk(&code);
+    defer testing.allocator.free(chunk.code);
+
+    try testing.expectEqual(@as(usize, 0), try eliminateDeadAccumulatorCopiesOne(testing.allocator, &chunk));
+    try testing.expectEqualSlices(u8, &code, chunk.code);
+}
+
+test "regalloc(copy): branch into Star keeps Ldar-Star" {
+    // The taken edge reaches Star without executing Ldar. Replacing the pair
+    // would make that edge store r1 instead of its incoming accumulator.
+    var code = [_]u8{
+        @intFromEnum(Op.lda_zero), // 0
+        @intFromEnum(Op.jmp_if_false), 2, 0, // 1: after=4, +2 -> Star@6
+        @intFromEnum(Op.ldar), 1, // 4
+        @intFromEnum(Op.star), 2, // 6: branch target
+        @intFromEnum(Op.lda_zero), // 8: definite accumulator overwrite
+        @intFromEnum(Op.ldar),
+        2,
+        @intFromEnum(Op.return_),
+    };
+    var chunk = try mkChunk(&code);
+    defer testing.allocator.free(chunk.code);
+
+    try testing.expectEqual(@as(usize, 0), try eliminateDeadAccumulatorCopiesOne(testing.allocator, &chunk));
+    try testing.expectEqualSlices(u8, &code, chunk.code);
+}
+
+test "regalloc(copy): shrinking replacement repatches a crossing branch" {
+    // Generic Ldar + Star is four bytes; Mov is three. The branch target after
+    // the pair must keep pointing at Return when the replacement shrinks it.
+    var code = [_]u8{
+        @intFromEnum(Op.lda_true), // 0
+        @intFromEnum(Op.jmp_if_false), 8, 0, // 1: after=4, +8 -> Return@12
+        @intFromEnum(Op.ldar), 1, // 4
+        @intFromEnum(Op.star), 2, // 6
+        @intFromEnum(Op.ldar), 3, // 8: accumulator overwrite
+        @intFromEnum(Op.add), 2, // 10: keeps r2 live
+        @intFromEnum(Op.return_), // 12
+    };
+    var chunk = try mkChunk(&code);
+    defer testing.allocator.free(chunk.code);
+
+    try testing.expectEqual(@as(usize, 1), try eliminateDeadAccumulatorCopiesOne(testing.allocator, &chunk));
+    try testing.expectEqualSlices(u8, &.{
+        @intFromEnum(Op.lda_true),
+        @intFromEnum(Op.jmp_if_false),
+        7,
+        0,
+        @intFromEnum(Op.mov),
+        1,
+        2,
+        @intFromEnum(Op.ldar),
+        3,
+        @intFromEnum(Op.add),
+        2,
+        @intFromEnum(Op.return_),
+    }, chunk.code);
+    try testing.expectEqual(@as(u32, 11), liveness.branchTarget(.jmp_if_false, chunk.code, 1).?);
+}
+
+test "regalloc(copy): compact pair does not grow" {
+    // Two operand-free compact instructions are smaller than Mov's three-byte
+    // encoding, so the initial pass intentionally leaves them alone.
+    var code = [_]u8{
+        @intFromEnum(Op.ldar_1),
+        @intFromEnum(Op.star_2),
+        @intFromEnum(Op.ldar_3),
+        @intFromEnum(Op.add),
+        2,
+        @intFromEnum(Op.return_),
+    };
+    var chunk = try mkChunk(&code);
+    defer testing.allocator.free(chunk.code);
+
+    try testing.expectEqual(@as(usize, 0), try eliminateDeadAccumulatorCopiesOne(testing.allocator, &chunk));
+    try testing.expectEqualSlices(u8, &code, chunk.code);
+}
+
+const copy_oom_code = [_]u8{
+    @intFromEnum(Op.ldar),     1,
+    @intFromEnum(Op.star),     2,
+    @intFromEnum(Op.lda_zero), @intFromEnum(Op.return_),
+};
+
+const copy_oom_source_positions = [_]SourcePos{
+    .{ .offset = 0, .span = .{ .start = 0, .end = 1 } },
+    .{ .offset = 2, .span = .{ .start = 2, .end = 3 } },
+    .{ .offset = 4, .span = .{ .start = 4, .end = 5 } },
+    .{ .offset = 5, .span = .{ .start = 5, .end = 6 } },
+};
+
+fn makeCopyOomChunk(allocator: std.mem.Allocator) !Chunk {
+    const code = try allocator.dupe(u8, &copy_oom_code);
+    errdefer allocator.free(code);
+    const source_positions = try allocator.dupe(SourcePos, &copy_oom_source_positions);
+    errdefer allocator.free(source_positions);
+    const targets = try allocator.dupe(u32, &.{5});
+    errdefer allocator.free(targets);
+    const tables = try allocator.alloc(SwitchTable, 1);
+    errdefer allocator.free(tables);
+    tables[0] = .{ .min = 0, .targets = targets, .default_target = 4 };
+
+    return .{
+        .code = code,
+        .constants = &.{},
+        .source_positions = source_positions,
+        .handlers = &.{},
+        .switch_tables = tables,
+        .function_templates = &.{},
+        .class_templates = &.{},
+        .register_count = 4,
+    };
+}
+
+fn exerciseCopyPassAllocationFailure(allocator: std.mem.Allocator) !void {
+    var chunk = try makeCopyOomChunk(allocator);
+    defer chunk.deinit(allocator);
+
+    const replaced = eliminateDeadAccumulatorCopiesOne(allocator, &chunk) catch |err| {
+        // Every fallible allocation must precede the commit: an OOM leaves
+        // bytecode, source positions, and in-place switch targets untouched.
+        try testing.expectEqualSlices(u8, &copy_oom_code, chunk.code);
+        try testing.expectEqualSlices(SourcePos, &copy_oom_source_positions, chunk.source_positions);
+        try testing.expectEqual(@as(u32, 4), chunk.switch_tables[0].default_target);
+        try testing.expectEqual(@as(u32, 5), chunk.switch_tables[0].targets[0]);
+        return err;
+    };
+
+    try testing.expectEqual(@as(usize, 1), replaced);
+    try testing.expectEqualSlices(u8, &.{
+        @intFromEnum(Op.mov),      1,                        2,
+        @intFromEnum(Op.lda_zero), @intFromEnum(Op.return_),
+    }, chunk.code);
+    try testing.expectEqual(@as(u32, 3), chunk.switch_tables[0].default_target);
+    try testing.expectEqual(@as(u32, 4), chunk.switch_tables[0].targets[0]);
+}
+
+fn exerciseCopyPassAllocationFailureWithoutRemap(backing_allocator: std.mem.Allocator) !void {
+    // Force ArrayList.toOwnedSlice to use its fallible allocate+copy fallback
+    // so the exhaustive outer allocator reaches both ownership transfers.
+    var no_remap = testing.FailingAllocator.init(backing_allocator, .{ .resize_fail_index = 0 });
+    try exerciseCopyPassAllocationFailure(no_remap.allocator());
+}
+
+test "regalloc(copy): re-emission is atomic and leak-free on allocation failure" {
+    try testing.checkAllAllocationFailures(
+        testing.allocator,
+        exerciseCopyPassAllocationFailureWithoutRemap,
+        .{},
+    );
 }
 
 test "regalloc: a jump offset is recomputed when a store between it and its target is removed" {
