@@ -377,6 +377,7 @@ pub const Analysis = struct {
     pub fn liveAfter(self: *const Analysis, code: []const u8, off: u32) !std.DynamicBitSet {
         const blk = self.blockOf(off);
         var live = try std.DynamicBitSet.initEmpty(self.allocator, self.register_count);
+        errdefer live.deinit();
         live.setUnion(self.live_out[blk]);
         const end: u32 = if (blk + 1 < self.leaders.len) self.leaders[blk + 1] else @intCast(code.len);
         // Collect instruction offsets strictly after `off`, then apply the
@@ -491,10 +492,15 @@ pub fn analyze(
         allocator.free(succs);
     }
     var use = try allocator.alloc(std.DynamicBitSet, nblocks);
-    var def = try allocator.alloc(std.DynamicBitSet, nblocks);
+    var def = allocator.alloc(std.DynamicBitSet, nblocks) catch |err| {
+        allocator.free(use);
+        return err;
+    };
+    var use_initialized: usize = 0;
+    var def_initialized: usize = 0;
     defer {
-        for (use) |*s| s.deinit();
-        for (def) |*s| s.deinit();
+        for (use[0..use_initialized]) |*s| s.deinit();
+        for (def[0..def_initialized]) |*s| s.deinit();
         allocator.free(use);
         allocator.free(def);
     }
@@ -504,7 +510,9 @@ pub fn analyze(
         succs[b] = .empty;
         succs_initialized += 1;
         use[b] = try std.DynamicBitSet.initEmpty(allocator, register_count);
+        use_initialized += 1;
         def[b] = try std.DynamicBitSet.initEmpty(allocator, register_count);
+        def_initialized += 1;
 
         const start = leaders[b];
         const end = blockEnd(leaders, code.len, b);
@@ -611,18 +619,22 @@ pub fn analyze(
 
     // ── Liveness fixpoint (backward dataflow) ──
     var live_in = try allocator.alloc(std.DynamicBitSet, nblocks);
+    var live_in_initialized: usize = 0;
     errdefer {
-        for (live_in) |*s| s.deinit();
+        for (live_in[0..live_in_initialized]) |*s| s.deinit();
         allocator.free(live_in);
     }
     var live_out = try allocator.alloc(std.DynamicBitSet, nblocks);
+    var live_out_initialized: usize = 0;
     errdefer {
-        for (live_out) |*s| s.deinit();
+        for (live_out[0..live_out_initialized]) |*s| s.deinit();
         allocator.free(live_out);
     }
     for (0..nblocks) |b| {
         live_in[b] = try std.DynamicBitSet.initEmpty(allocator, register_count);
+        live_in_initialized += 1;
         live_out[b] = try std.DynamicBitSet.initEmpty(allocator, register_count);
+        live_out_initialized += 1;
     }
     var changed = true;
     while (changed) {
@@ -764,6 +776,26 @@ test "liveness: straight-line block, def-then-use register is not live-in" {
     try testing.expect(a.fully_understood);
     try testing.expect(!a.live_in[0].isSet(0)); // r0 defined before use
     try testing.expect(!a.live_in[0].isSet(1));
+}
+
+fn exerciseAnalyzeAllocationFailure(allocator: std.mem.Allocator) !void {
+    // Three blocks make allocation failures land after partially initializing
+    // the use/def and live-in/live-out bitset arrays.
+    const code = [_]u8{
+        byteOf(.lda_zero),
+        byteOf(.jmp_if_false), 1,                0, // after=4, +1 -> Return@5
+        byteOf(.lda_one),      byteOf(.return_),
+    };
+    var a = try analyze(allocator, &code, 4, &.{}, &.{});
+    defer a.deinit();
+}
+
+test "liveness: analysis is leak-free on allocation failure" {
+    try testing.checkAllAllocationFailures(
+        testing.allocator,
+        exerciseAnalyzeAllocationFailure,
+        .{},
+    );
 }
 
 test "liveness: a register defined before a branch is live across both arms" {
