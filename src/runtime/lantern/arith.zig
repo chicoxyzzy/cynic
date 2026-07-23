@@ -1024,23 +1024,34 @@ fn applyRelOpDouble(allocator: std.mem.Allocator, comptime op: RelOp, bi: *const
     return applyRelOpOrder(op, ord);
 }
 
+const TypeOfName = enum {
+    undefined_,
+    object,
+    boolean,
+    number,
+    string,
+    function,
+    symbol,
+    bigint,
+};
+
 pub fn typeOf(realm: *Realm, v: Value) RunError!Value {
-    const name: []const u8 = if (v.isUndefined())
-        "undefined"
+    const type_name: TypeOfName = if (v.isUndefined())
+        .undefined_
     else if (v.isNull())
-        "object" // §13.5.3 — historical quirk.
+        .object // §13.5.3 — historical quirk.
     else if (v.isBool())
-        "boolean"
+        .boolean
     else if (v.isInt32() or v.isDouble())
-        "number"
+        .number
     else if (v.isString())
-        "string"
+        .string
     else if (heap_mod.isFunction(v))
-        "function"
+        .function
     else if (heap_mod.isSymbol(v))
-        "symbol"
+        .symbol
     else if (heap_mod.isBigInt(v))
-        "bigint"
+        .bigint
     else if (heap_mod.valueAsPlainObject(v)) |po|
         // §13.5.3 — typeof on a plain JSObject is "object"
         // unless the object carries callable-exotic semantics:
@@ -1049,9 +1060,22 @@ pub fn typeOf(realm: *Realm, v: Value) RunError!Value {
         // §20.2.3 — %Function.prototype% is itself a built-in
         //   function. Both cases ride the same `proxy_callable`
         //   flag.
-        if (po.brand.proxy_callable) "function" else "object"
+        if (po.brand.proxy_callable) .function else .object
     else
-        "undefined";
+        .undefined_;
+
+    const cached, const name = switch (type_name) {
+        .undefined_ => .{ &realm.intrinsics.typeof_undefined_string, "undefined" },
+        .object => .{ &realm.intrinsics.typeof_object_string, "object" },
+        .boolean => .{ &realm.intrinsics.typeof_boolean_string, "boolean" },
+        .number => .{ &realm.intrinsics.typeof_number_string, "number" },
+        .string => .{ &realm.intrinsics.typeof_string_string, "string" },
+        .function => .{ &realm.intrinsics.typeof_function_string, "function" },
+        .symbol => .{ &realm.intrinsics.typeof_symbol_string, "symbol" },
+        .bigint => .{ &realm.intrinsics.typeof_bigint_string, "bigint" },
+    };
+    if (!cached.*.isUndefined()) return cached.*;
     const s = realm.heap.allocateString(name) catch return error.OutOfMemory;
-    return Value.fromString(s);
+    cached.* = Value.fromString(s);
+    return cached.*;
 }

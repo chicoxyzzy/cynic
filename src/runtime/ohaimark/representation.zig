@@ -301,6 +301,26 @@ fn initialOutput(node: ir.Node, info: specialize.NodeInfo) !Kind {
             .tagged
         else
             error.MalformedGraph,
+        .allocate_environment => if (info.lowering == .allocate_environment)
+            .none
+        else
+            error.MalformedGraph,
+        .store_environment => if (info.lowering == .store_environment)
+            .none
+        else
+            error.MalformedGraph,
+        .throw_if_hole => if (info.lowering == .throw_if_hole)
+            .tagged
+        else
+            error.MalformedGraph,
+        .typeof_ => if (info.lowering == .typeof_)
+            .tagged
+        else
+            error.MalformedGraph,
+        .direct_call => if (info.lowering == .direct_call)
+            .tagged
+        else
+            error.MalformedGraph,
         .jump, .branch, .return_ => .none,
     };
 }
@@ -340,6 +360,8 @@ fn nodeInputKind(node: ir.Node, info: specialize.NodeInfo) !Kind {
         .load_global,
         .load_global_slot,
         .load_environment,
+        .allocate_environment,
+        .direct_call,
         .jump,
         => .none,
         .add => arithmeticInput(info, .checked_int32_add),
@@ -369,6 +391,18 @@ fn nodeInputKind(node: ir.Node, info: specialize.NodeInfo) !Kind {
             => .tagged,
             else => error.MalformedGraph,
         },
+        .store_environment => if (info.lowering == .store_environment)
+            .tagged
+        else
+            error.MalformedGraph,
+        .throw_if_hole => if (info.lowering == .throw_if_hole)
+            .tagged
+        else
+            error.MalformedGraph,
+        .typeof_ => if (info.lowering == .typeof_)
+            .tagged
+        else
+            error.MalformedGraph,
         .branch, .return_ => .tagged,
     };
 }
@@ -402,9 +436,11 @@ fn nodeInputCount(kind: ir.NodeKind) u16 {
         .load_global,
         .load_global_slot,
         .load_environment,
+        .allocate_environment,
+        .direct_call,
         .jump,
         => 0,
-        .logical_not, .load_named, .branch, .return_ => 1,
+        .logical_not, .load_named, .store_environment, .throw_if_hole, .typeof_, .branch, .return_ => 1,
         .add, .sub, .mul, .div, .strict_eq, .less_than => 2,
     };
 }
@@ -510,6 +546,41 @@ fn validateNodeContract(node: ir.Node, info: specialize.NodeInfo) !void {
         .load_environment => {
             if (!hasPayload(node.payload, .environment_load) or
                 info.lowering != .load_environment or info.folded != null)
+            {
+                return error.MalformedGraph;
+            }
+        },
+        .allocate_environment => {
+            if (!hasPayload(node.payload, .environment_allocation) or
+                info.lowering != .allocate_environment or info.folded != null)
+            {
+                return error.MalformedGraph;
+            }
+        },
+        .store_environment => {
+            if (!hasPayload(node.payload, .environment_store) or
+                info.lowering != .store_environment or info.folded != null)
+            {
+                return error.MalformedGraph;
+            }
+        },
+        .throw_if_hole => {
+            if (!hasPayload(node.payload, .none) or info.lowering != .throw_if_hole or
+                info.folded != null)
+            {
+                return error.MalformedGraph;
+            }
+        },
+        .typeof_ => {
+            if (!hasPayload(node.payload, .none) or info.lowering != .typeof_ or
+                info.folded != null)
+            {
+                return error.MalformedGraph;
+            }
+        },
+        .direct_call => {
+            if (!hasPayload(node.payload, .direct_call) or info.lowering != .direct_call or
+                info.folded != null or info.assumption != null)
             {
                 return error.MalformedGraph;
             }

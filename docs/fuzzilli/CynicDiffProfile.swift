@@ -29,8 +29,8 @@
 // the same posture (strict-only, no Annex B, --unhardened, --allow=eval
 // — all fixed inside fuzz_main.zig), so every Cynic-intentional
 // divergence is identical on both sides and cancels. The only residual
-// noise source is run-to-run non-determinism, handled by the codePrefix
-// shim below.
+// noise source is run-to-run non-determinism, handled by cynic-fuzz's
+// shared `--diff` prelude.
 //
 // To validate the oracle end-to-end without a real miscompile, pass
 //   --additionalArguments=--diff-self-test
@@ -65,24 +65,11 @@ let cynicDiffProfile = Profile(
     // cold start can't false-timeout the crash-detection startup test.
     timeout: Timeout.value(1500),
 
-    // Determinism shim: a differential pair is two sequential REPRL
-    // runs in two child processes, so any `Date.now()` / `Math.random()`
-    // that leaks into a completion value would diverge spuriously. Pin
-    // both to fixed, deterministic implementations. cynic-fuzz runs
-    // `--unhardened`, so reassigning these primordials is allowed.
-    // Kept minimal (no Proxy / Temporal) to avoid the shim itself
-    // throwing on any sample.
-    codePrefix: """
-        (function () {
-            var FIXED = 1767225600000;
-            Date.now = function () { return FIXED; };
-            var s = 305419896;
-            Math.random = function () {
-                s ^= s << 13; s ^= s >> 17; s ^= s << 5;
-                return (s >>> 0) / 4294967296;
-            };
-        })();
-        """,
+    // `cynic-fuzz --diff` installs its deterministic Date / Math
+    // prelude in each fresh realm. Keeping it in the host makes all
+    // differential launchers use the same setup instead of depending
+    // on a particular Fuzzilli profile to concatenate source text.
+    codePrefix: "",
 
     codeSuffix: "",
 

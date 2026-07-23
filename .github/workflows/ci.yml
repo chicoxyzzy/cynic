@@ -518,19 +518,20 @@ jobs:
           diff -u /tmp/pass-interp.txt /tmp/pass-jit.txt
           echo "pass-sets identical: $(wc -l < /tmp/pass-interp.txt) fixtures (Atomics wait/notify + copyWithin coerced-detached excluded from the differential)"
 
-      - name: Ohaimark differential + telemetry (gating)
+      - name: Ohaimark + OSR differential + telemetry (gating)
         timeout-minutes: 20
         run: |
           set -euo pipefail
           # Reuse the completed interpreter pass set, then force default-on T2
-          # before T1. Ohaimark has graduated, so any pass-set divergence now
-          # fails the same job as the established Bistromath differential.
+          # plus loop-header OSR before T1. Both are production defaults, so
+          # any pass-set divergence fails the same job as the established
+          # Bistromath differential.
           test -s /tmp/pass-interp.txt
           EXCLUDES=(--exclude=built-ins/Atomics/wait/ --exclude=built-ins/Atomics/notify/ --exclude=built-ins/TypedArray/prototype/copyWithin/coerced)
           zig build test262 -- --quiet --threads=0 --ohaimark --ohaimark-stats "${EXCLUDES[@]}" --pass-list-out=/tmp/pass-ohaimark.txt
           test -s /tmp/pass-ohaimark.txt
           diff -u /tmp/pass-interp.txt /tmp/pass-ohaimark.txt
-          echo "Ohaimark pass-set identical: $(wc -l < /tmp/pass-ohaimark.txt) fixtures"
+          echo "Ohaimark+OSR pass-set identical: $(wc -l < /tmp/pass-ohaimark.txt) fixtures"
 
   test262-gc-stress-jit:
     name: test262 GC stress + ${{ matrix.tier.label }} / ${{ matrix.bucket }} (advisory)

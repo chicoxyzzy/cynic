@@ -91,8 +91,9 @@
 //!   --jit                   Force Bistromath T1 at threshold 1.
 //!   --ohaimark              Force Ohaimark T2 before T1, both at threshold 1.
 //!                           Production CLI T2 remains at its natural threshold.
-//!   --ohaimark-osr          Also enable default-off loop-header OSR (requires
-//!                           `--ohaimark`). Differential gate for OSR graduation.
+//!   --ohaimark-osr          Explicitly retain default-on loop-header OSR.
+//!   --no-ohaimark-osr       Disable loop-header OSR while forcing Ohaimark;
+//!                           isolates function-entry T2 for diagnosis.
 //!   --ohaimark-stats        Print aggregate T2 compile/entry/exit telemetry,
 //!                           refusal stages, and top unsupported opcodes.
 //!                           Requires `--ohaimark`; works with the worker pool.
@@ -1171,10 +1172,9 @@ var g_jit_force: bool = false;
 /// Bistromath differential pass set remains a stable gate of its own.
 var g_ohaimark_force: bool = false;
 
-/// `--ohaimark-osr` — enable default-off loop-header OSR on every realm.
-/// Requires `--ohaimark` (OSR publishes from T2 compile). Used only for the
-/// OSR graduation differential; does not change production defaults.
-var g_ohaimark_osr_force: bool = false;
+/// `--no-ohaimark-osr` — isolate function-entry Ohaimark by disabling the
+/// default-on loop-header OSR policy on every forced-T2 realm.
+var g_ohaimark_osr_disabled: bool = false;
 
 fn configureForcedJit(realm: *cynic.runtime.Realm) void {
     if (!g_jit_force and !g_ohaimark_force) return;
@@ -1183,25 +1183,23 @@ fn configureForcedJit(realm: *cynic.runtime.Realm) void {
     if (g_ohaimark_force) {
         realm.ohaimark_enabled = true;
         realm.ohaimark_threshold_override = 1;
-        if (g_ohaimark_osr_force) {
-            realm.ohaimark_osr_enabled = true;
-        }
+        realm.ohaimark_osr_enabled = !g_ohaimark_osr_disabled;
     }
 }
 
 test "test262 tier force keeps Bistromath and Ohaimark postures distinct" {
     const saved_jit = g_jit_force;
     const saved_ohaimark = g_ohaimark_force;
-    const saved_osr = g_ohaimark_osr_force;
+    const saved_osr_disabled = g_ohaimark_osr_disabled;
     defer {
         g_jit_force = saved_jit;
         g_ohaimark_force = saved_ohaimark;
-        g_ohaimark_osr_force = saved_osr;
+        g_ohaimark_osr_disabled = saved_osr_disabled;
     }
 
     g_jit_force = true;
     g_ohaimark_force = false;
-    g_ohaimark_osr_force = false;
+    g_ohaimark_osr_disabled = false;
     var baseline = cynic.runtime.Realm.init(std.testing.allocator);
     defer baseline.deinit();
     configureForcedJit(&baseline);
@@ -1209,11 +1207,11 @@ test "test262 tier force keeps Bistromath and Ohaimark postures distinct" {
     try std.testing.expectEqual(@as(?u32, 1), baseline.jit_threshold_override);
     try std.testing.expect(!baseline.ohaimark_enabled);
     try std.testing.expectEqual(@as(?u32, null), baseline.ohaimark_threshold_override);
-    try std.testing.expect(!baseline.ohaimark_osr_enabled);
+    try std.testing.expect(baseline.ohaimark_osr_enabled);
 
     g_jit_force = false;
     g_ohaimark_force = true;
-    g_ohaimark_osr_force = false;
+    g_ohaimark_osr_disabled = false;
     var optimized = cynic.runtime.Realm.init(std.testing.allocator);
     defer optimized.deinit();
     configureForcedJit(&optimized);
@@ -1221,14 +1219,14 @@ test "test262 tier force keeps Bistromath and Ohaimark postures distinct" {
     try std.testing.expectEqual(@as(?u32, 1), optimized.jit_threshold_override);
     try std.testing.expect(optimized.ohaimark_enabled);
     try std.testing.expectEqual(@as(?u32, 1), optimized.ohaimark_threshold_override);
-    try std.testing.expect(!optimized.ohaimark_osr_enabled);
+    try std.testing.expect(optimized.ohaimark_osr_enabled);
 
-    g_ohaimark_osr_force = true;
-    var with_osr = cynic.runtime.Realm.init(std.testing.allocator);
-    defer with_osr.deinit();
-    configureForcedJit(&with_osr);
-    try std.testing.expect(with_osr.ohaimark_enabled);
-    try std.testing.expect(with_osr.ohaimark_osr_enabled);
+    g_ohaimark_osr_disabled = true;
+    var without_osr = cynic.runtime.Realm.init(std.testing.allocator);
+    defer without_osr.deinit();
+    configureForcedJit(&without_osr);
+    try std.testing.expect(without_osr.ohaimark_enabled);
+    try std.testing.expect(!without_osr.ohaimark_osr_enabled);
 }
 
 const Options = struct {
@@ -4875,7 +4873,9 @@ fn parseArgs(gpa: std.mem.Allocator, args: std.process.Args) !Options {
         } else if (std.mem.eql(u8, arg, "--ohaimark")) {
             g_ohaimark_force = true;
         } else if (std.mem.eql(u8, arg, "--ohaimark-osr")) {
-            g_ohaimark_osr_force = true;
+            g_ohaimark_osr_disabled = false;
+        } else if (std.mem.eql(u8, arg, "--no-ohaimark-osr")) {
+            g_ohaimark_osr_disabled = true;
         } else if (std.mem.eql(u8, arg, "--ohaimark-stats")) {
             opts.ohaimark_stats = true;
         } else if (std.mem.startsWith(u8, arg, "--gc-threshold=")) {
@@ -4926,8 +4926,8 @@ fn parseArgs(gpa: std.mem.Allocator, args: std.process.Args) !Options {
         std.debug.print("error: --ohaimark-stats requires --ohaimark\n", .{});
         std.process.exit(1);
     }
-    if (g_ohaimark_osr_force and !g_ohaimark_force) {
-        std.debug.print("error: --ohaimark-osr requires --ohaimark\n", .{});
+    if (g_ohaimark_osr_disabled and !g_ohaimark_force) {
+        std.debug.print("error: --no-ohaimark-osr requires --ohaimark\n", .{});
         std.process.exit(1);
     }
 

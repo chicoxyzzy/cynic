@@ -1981,6 +1981,10 @@ fn buildZipWrapper(
         for (ks, 0..) |k, i| {
             const k_owned = realm.heap.allocateString(k) catch return error.OutOfMemory;
             state.zip_inputs.items[i].key = Value.fromString(k_owned);
+            // `wrap` can have tenured while an earlier input was opened;
+            // the copied key is freshly allocated and remains young until
+            // the next minor cycle.
+            wrap.noteInternalSlotWrite();
         }
     }
 
@@ -2017,6 +2021,9 @@ fn buildZipWrapper(
                     return error.NativeThrew;
                 };
                 zin.pad = value;
+                // A user getter may return a freshly allocated object or
+                // function. Keep a mature wrapper on the dirty list.
+                wrap.noteInternalSlotWrite();
             }
         } else {
             // §27.5.4 step 14.b — `Let paddingIter be ?
@@ -2078,6 +2085,9 @@ fn buildZipWrapper(
                         return err;
                     };
                     state.zip_inputs.items[i].pad = value;
+                    // `IteratorStepValue` can likewise be a young heap
+                    // value when this native resumes after the re-entry.
+                    wrap.noteInternalSlotWrite();
                 } else {
                     state.zip_inputs.items[i].pad = Value.undefined_;
                 }

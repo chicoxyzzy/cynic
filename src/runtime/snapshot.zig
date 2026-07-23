@@ -1748,6 +1748,7 @@ const Restore = struct {
 // ────────────────────────────────────────────────────────────────────
 
 const testing = std.testing;
+const arith = @import("lantern/arith.zig");
 const lantern = @import("lantern/interpreter.zig");
 
 fn makeInstalledRealm(allocator: std.mem.Allocator, hardened: bool) !*Realm {
@@ -1934,6 +1935,26 @@ test "snapshot: restored realm survives GC and allocation pressure" {
     , "numberobject");
     restored.collectGarbage();
     try expectEvalString(restored, "[4,5,6].map(x=>x+1).join(\"\")", "567");
+}
+
+test "snapshot: warmed typeof cache round-trips and remains rooted" {
+    const source = try makeInstalledRealm(testing.allocator, true);
+    defer destroyRealm(testing.allocator, source);
+    const source_cached = try arith.typeOf(source, Value.fromInt32(0));
+    try testing.expect(source.intrinsics.typeof_number_string.isString());
+    try testing.expectEqual(source_cached.bits, source.intrinsics.typeof_number_string.bits);
+
+    const image = try Snapshot.capture(source, testing.allocator);
+    defer testing.allocator.free(image);
+
+    const restored = try Snapshot.restore(testing.allocator, image);
+    defer destroyRealm(testing.allocator, restored);
+    const cached = restored.intrinsics.typeof_number_string;
+    try testing.expect(cached.isString());
+    restored.collectGarbage();
+    try testing.expectEqual(cached.bits, restored.intrinsics.typeof_number_string.bits);
+    try expectEvalString(restored, "typeof 0", "number");
+    try testing.expectEqual(cached.bits, restored.intrinsics.typeof_number_string.bits);
 }
 
 test "snapshot: unhardened realm round-trips with its posture" {

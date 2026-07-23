@@ -148,10 +148,10 @@ pub fn run(
     // instrumentation keeps native execution disabled so counters stay exact.
     if (jit and !collect_bytecode_stats) realm.jit_enabled = true;
     if (jit and ohaimark and !collect_bytecode_stats) realm.ohaimark_enabled = true;
-    // Loop-header OSR stays default-off (docs/ohaimark.md §3.17).
-    if (jit and ohaimark and ohaimark_osr and !collect_bytecode_stats) {
-        realm.ohaimark_osr_enabled = true;
-    }
+    // OSR is part of the production T2 posture; `--no-ohaimark-osr` keeps
+    // function-entry-only diagnosis available. Instrumented bytecode runs
+    // keep every native tier disabled so their counters stay exact.
+    realm.ohaimark_osr_enabled = jit and ohaimark and ohaimark_osr and !collect_bytecode_stats;
     realm.heap.ohaimark_stats.enabled = ohaimark_stats;
     // Apply the `--gc-threshold` knob before `installBuiltins`
     // so the builtin-install allocations themselves run at the

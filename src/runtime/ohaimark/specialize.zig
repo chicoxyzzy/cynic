@@ -83,6 +83,11 @@ pub const Lowering = enum {
     load_global,
     load_global_slot,
     load_environment,
+    allocate_environment,
+    store_environment,
+    throw_if_hole,
+    typeof_,
+    direct_call,
 };
 
 pub const AssumptionKind = enum {
@@ -320,6 +325,28 @@ fn inferNode(graph: *const ir.Graph, facts: []const NodeInfo, id: ir.ValueId) !N
             .{},
         .load_environment => if (inputs.len == 0)
             .{ .result_type = Type.any, .lowering = .load_environment }
+        else
+            .{},
+        .allocate_environment => if (inputs.len == 0)
+            .{ .lowering = .allocate_environment }
+        else
+            .{},
+        .store_environment => if (inputs.len == 1 and !facts[inputs[0]].result_type.isBottom())
+            .{ .lowering = .store_environment }
+        else
+            .{},
+        .throw_if_hole => if (inputs.len == 1 and !facts[inputs[0]].result_type.isBottom())
+            // The successor cannot observe Hole, but retaining `any` keeps
+            // the graph total for an always-throwing constant-Hole input.
+            .{ .result_type = Type.any, .lowering = .throw_if_hole }
+        else
+            .{},
+        .typeof_ => if (inputs.len == 1 and !facts[inputs[0]].result_type.isBottom())
+            .{ .result_type = Type.string, .lowering = .typeof_ }
+        else
+            .{},
+        .direct_call => if (inputs.len == 0)
+            .{ .result_type = Type.any, .lowering = .direct_call }
         else
             .{},
         .jump, .return_ => .{},

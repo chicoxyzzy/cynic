@@ -245,14 +245,19 @@ opcode hands a raw heap pointer back across a `runFrames` boundary.
 Native calls do — see "natives and `HandleScope`" below.
 
 Bistromath keeps the same Lantern `CallFrame` authoritative. Ohaimark can keep
-tagged values in machine registers, so its first executable subset uses a
-stricter boundary: generated code never calls a helper or collector. Every
-taken backedge polls pending GC/host work; a slow poll boxes the target block's
-accumulator and liveness-derived register parameters into the Lantern frame,
-sets the loop-header bytecode offset, and returns before `runSafePoint` can
-collect. Thus the collector still sees only the root set below. A future
-helper-backed Ohaimark node must add rooted call-safepoint metadata; it may not
-reuse the backedge policy while retaining an optimized-only pointer.
+tagged values in machine registers, so ordinary generated code still uses a
+stricter boundary: every taken backedge polls pending GC/host work; a slow poll
+boxes the target block's accumulator and liveness-derived register parameters
+into the Lantern frame, sets the loop-header bytecode offset, and returns before
+`runSafePoint` can collect. The one shipped helper exception is the non-
+reentrant lexical-environment subset: before a mid-body `make_environment` or
+`sta_env` call, codegen reconstructs the exact physical pre-op state in the
+registered Lantern frame and saves every caller-saved location that can hold
+optimized state. The C helper then either returns without JS re-entry or falls
+back to Lantern at the original opcode. This frame-staged safepoint is not a
+general native stack-map protocol: a helper that can re-enter JS, throw through
+compiled control flow, or retain a heap pointer across that boundary still needs
+explicit rooted continuation metadata (and `HandleScope` where applicable).
 
 ## What gets marked
 

@@ -24,6 +24,9 @@ pub const Entry = struct {
     accumulator: Value,
     registers: []const Value,
     this_value: Value = Value.undefined_,
+    /// Optional because the evaluator still covers realm-independent graph
+    /// shapes. `typeof_` supplies it to share Lantern's cached-string logic.
+    realm: ?*Realm = null,
     step_limit: usize,
 };
 
@@ -146,6 +149,7 @@ const Runner = struct {
     int32_spills: []i32,
     steps_left: usize,
     this_value: Value,
+    realm: ?*Realm,
     entry_accumulator: Value,
     entry_registers: []const Value,
 
@@ -185,6 +189,7 @@ const Runner = struct {
             .int32_spills = int32_spills,
             .steps_left = entry.step_limit,
             .this_value = entry.this_value,
+            .realm = entry.realm,
             .entry_accumulator = entry.accumulator,
             .entry_registers = entry.registers,
         };
@@ -227,12 +232,15 @@ const Runner = struct {
                     .load_global,
                     .load_global_slot,
                     .load_environment,
+                    .throw_if_hole,
+                    .typeof_,
                     => {
                         switch (try self.evaluateValueNode(node_id)) {
                             .value => |value| try self.define(node_id, value),
                             .guard_failed => return self.deoptAt(node_id),
                         }
                     },
+                    .allocate_environment, .store_environment, .direct_call => return self.deoptAt(node_id),
                     .jump => {
                         const edge = try self.singleOutgoingEdge(block_index);
                         block_index = try self.transfer(edge);
@@ -317,6 +325,18 @@ const Runner = struct {
                 .guard_failed
             else
                 error.MalformedGraph,
+            .throw_if_hole => if (info.lowering == .throw_if_hole) blk: {
+                const value = try self.taggedNodeInput(node_id, 0);
+                if (value.isHole()) break :blk .guard_failed;
+                break :blk .{ .value = .{ .tagged = value } };
+            } else error.MalformedGraph,
+            .typeof_ => if (info.lowering == .typeof_) blk: {
+                const realm = self.realm orelse return error.UnsupportedNode;
+                break :blk .{ .value = .{ .tagged = try arith.typeOf(
+                    realm,
+                    try self.taggedNodeInput(node_id, 0),
+                ) } };
+            } else error.MalformedGraph,
             else => error.MalformedGraph,
         };
     }

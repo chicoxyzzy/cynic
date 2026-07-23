@@ -487,6 +487,7 @@ pub fn tryEnterFreshJitFrame(
     switch (try tryEnterOhaimarkTop(allocator, realm, frames)) {
         .not_entered => return bistromath.tryEnterTop(allocator, realm, frames),
         .resumed => return .not_entered,
+        .handed_off => return .not_entered,
         .completed => |value| return .{ .completed = value },
     }
 }
@@ -1261,6 +1262,7 @@ inline fn tryBackedgeOsr(
         switch (try ohaimark_driver.tryOsrEnterTop(allocator, realm, frames)) {
             .not_entered => {},
             .resumed => return .resumed,
+            .handed_off => return .resumed,
             .completed => |v| return .{ .completed = v },
         }
     }

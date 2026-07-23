@@ -142,19 +142,19 @@ are the shape the **OSR rollout** suite targets.
 
 `zig build bench -- --ohaimark-osr-rollout` selects `bench/ohaimark_osr/*.js`:
 single-call hot loops that only OSR can promote to T2. It compares explicit T1
-(`--jit --no-ohaimark`) against T1+T2 with OSR (`--jit --ohaimark --ohaimark-osr`)
-in the same ReleaseFast binary with interleaved process pairs. The
-`--ohaimark-osr` CLI flag exists solely so this harness (and focused validation)
-can flip `Realm.ohaimark_osr_enabled` without a separate binary; OSR remains
-default-off in production until the §3.17 graduation criteria pass
-([ohaimark.md](ohaimark.md)). Report columns match the function-entry rollout:
+(`--jit --no-ohaimark`) against the default T2+OSR posture (`--jit --ohaimark`)
+in the same ReleaseFast binary with interleaved process pairs. The rollout
+driver still passes `--ohaimark-osr` explicitly as a compatibility assertion;
+`--no-ohaimark-osr` is the entry-only diagnostic posture. Report columns match
+the function-entry rollout:
 compile attempts/publications, compile time, code size, entries, exits,
 geometric mean, and worst fixture.
 
     zig build bench -- --ohaimark-osr-rollout --runs=30
 
-Do **not** default OSR on unless geometric mean T2/T1 is `≤ 1.000×` and no
-stable fixture exceeds `1.050×`, with clean differential/GC/fuzz gates.
+The 2026-07-19 graduation repeat measured `0.122x` geometric mean and `0.140x`
+worst fixture, with exact differential, GC-pressure, and fuzz gates clean.
+The suite remains the regression guard for the default posture.
 
 The ordinary function-entry rollout fixtures repeatedly call small leaf
 functions instead, covering tagged Number multiplication/division, monomorphic

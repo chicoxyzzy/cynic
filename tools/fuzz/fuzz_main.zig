@@ -78,17 +78,7 @@ pub fn main(init: std.process.Init) !void {
     var arg_it = std.process.Args.Iterator.init(init.minimal.args);
     _ = arg_it.skip(); // argv[0]
     while (arg_it.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--jit")) {
-            options.jit = true;
-        } else if (std.mem.eql(u8, arg, "--ohaimark")) {
-            options.ohaimark = true;
-        } else if (std.mem.eql(u8, arg, "--diff")) {
-            options.emit_digest = true;
-        } else if (std.mem.eql(u8, arg, "--diff-self-test")) {
-            // A digest to perturb is a prerequisite for the self-test.
-            options.emit_digest = true;
-            options.self_test = true;
-        }
+        options.applyArgument(arg);
     }
 
     // Engine allocator selection. Default ⇒ the host GPA the runtime

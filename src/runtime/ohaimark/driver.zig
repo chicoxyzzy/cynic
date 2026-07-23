@@ -4,11 +4,14 @@
 //! A cold or refused chunk falls through untouched so Bistromath can enter it;
 //! a guard exit reports `resumed` separately because Ohaimark has already
 //! reconstructed the live Lantern frame and T1 must not restart it at ip 0.
-//! Loop-header OSR is a separate default-off policy (`Realm.ohaimark_osr_enabled`).
+//! Loop-header OSR is a separate host policy (`Realm.ohaimark_osr_enabled`),
+//! default-on with production Ohaimark and independently disableable for
+//! function-entry diagnosis.
 
 const std = @import("std");
 
 const Chunk = @import("../../bytecode/chunk.zig").Chunk;
+const call_mod = @import("../lantern/call.zig");
 const lantern = @import("../lantern/interpreter.zig");
 const Realm = @import("../realm.zig").Realm;
 const Value = @import("../value.zig").Value;
@@ -29,6 +32,10 @@ pub const EnterOutcome = union(enum) {
     /// Generated code reconstructed the frame at a bytecode offset. Resume
     /// Lantern exactly there; restarting in another tier would be incorrect.
     resumed,
+    /// Generated code staged its caller, appended an ordinary bytecode callee
+    /// to this same frame list, and yielded to Lantern to drive that callee.
+    /// The caller stays parked at the bytecode after the call.
+    handed_off,
     /// The ordinary function frame completed and was popped.
     completed: Value,
 };
@@ -76,6 +83,8 @@ pub fn tryEnterTop(
     if (!frameKindCompilable(frame)) return .not_entered;
     const state = frame.chunk.jit_state orelse return .not_entered;
     if (state.ohaimark_guard_exits >= guard_exit_limit) return .not_entered;
+    var frame_scope = call_mod.JitFrameScope.init(realm, frames) catch return .not_entered;
+    defer frame_scope.deinit();
     if (state.ohaimark.entry() == null) {
         if (state.ohaimark.tier != .cold) return .not_entered;
         const threshold = realm.ohaimark_threshold_override orelse
@@ -89,6 +98,8 @@ pub fn tryEnterTop(
     const telemetry = &realm.heap.ohaimark_stats;
     telemetry.recordEntry();
     const result_bits = entry(realm, frame, frame.registers.ptr);
+    if (result_bits == codegen.call_pushed_sentinel_bits) return .handed_off;
+    if (result_bits == codegen.host_oom_sentinel_bits) return error.OutOfMemory;
     if (result_bits == codegen.resume_sentinel_bits) {
         state.ohaimark_guard_exits +|= 1;
         telemetry.recordGuardExit();
@@ -137,6 +148,8 @@ pub fn tryOsrEnterTop(
     if (!frameKindOrdinary(frame)) return .not_entered;
     const state = frame.chunk.jit_state orelse return .not_entered;
     if (state.ohaimark_osr_strikes >= osr_strike_limit) return .not_entered;
+    var frame_scope = call_mod.JitFrameScope.init(realm, frames) catch return .not_entered;
+    defer frame_scope.deinit();
 
     if (state.ohaimark.entry() == null) {
         if (state.ohaimark.tier != .cold) return .not_entered;
@@ -157,6 +170,8 @@ pub fn tryOsrEnterTop(
     const telemetry = &realm.heap.ohaimark_stats;
     telemetry.recordEntry();
     const result_bits = stub(realm, frame, frame.registers.ptr);
+    if (result_bits == codegen.call_pushed_sentinel_bits) return .handed_off;
+    if (result_bits == codegen.host_oom_sentinel_bits) return error.OutOfMemory;
     if (result_bits == codegen.osr_bail_sentinel_bits) {
         // True enter-and-bail (failed header materialization). Do not charge
         // function-entry guard_exits — OSR is independent of that budget.

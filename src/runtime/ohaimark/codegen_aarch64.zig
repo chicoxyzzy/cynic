@@ -3,18 +3,26 @@
 //! The compiler consumes only finished specialization, representation,
 //! deoptimization, allocation, and physical-lowering plans. Guard exits write
 //! the pre-operation state back into the existing Lantern `CallFrame`, then
-//! return `resume_interp`; no helper call, allocation, or second frame format
-//! exists on the bailout path. Taken backedges poll host/GC state and use the
+//! return `resume_interp`. Narrow non-reentrant environment helpers use the
+//! same frame reconstruction as a rooted call safepoint; JS-reentrant helpers
+//! remain outside this subset. Taken backedges poll host/GC state and use the
 //! same frame-compatible exit before Lantern performs any slow work.
 
 const std = @import("std");
 
 const BinaryNumberShape = @import("../../bytecode/chunk.zig").BinaryNumberShape;
+const CallICCell = @import("../../bytecode/chunk.zig").CallICCell;
 const Chunk = @import("../../bytecode/chunk.zig").Chunk;
+const Op = @import("../../bytecode/op.zig").Op;
 const a64 = @import("../jit/asm_aarch64.zig");
 const layout = @import("../jit/layout.zig");
 const Masm = @import("../jit/masm.zig").Masm;
 const arith = @import("../lantern/arith.zig");
+const call_mod = @import("../lantern/call.zig");
+const lantern = @import("../lantern/interpreter.zig");
+const JSFunction = @import("../function.zig").JSFunction;
+const heap_mod = @import("../heap.zig");
+const Realm = @import("../realm.zig").Realm;
 const Value = @import("../value.zig").Value;
 const allocation = @import("allocation.zig");
 const control_fusion = @import("control_fusion.zig");
@@ -49,6 +57,16 @@ pub const resume_sentinel_bits: u64 = 0x7FFA_0000_0000_0001;
 /// strike enter-and-bail thrash without charging cooperative safepoint exits.
 pub const osr_bail_sentinel_bits: u64 = 0x7FFA_0000_0000_0002;
 
+/// A direct compact call staged its parent and appended the bytecode callee to
+/// the same frame list. Lantern must drive the new top frame; the parent is
+/// parked at the instruction after the call.
+pub const call_pushed_sentinel_bits: u64 = 0x7FFA_0000_0000_0003;
+
+/// The direct-call frame push exhausted host memory after the parent was
+/// staged. This is not a JavaScript completion and must reach the host as
+/// `error.OutOfMemory`, never be replayed in Lantern.
+pub const host_oom_sentinel_bits: u64 = 0x7FFA_0000_0000_0004;
+
 comptime {
     const decoded: f64 = @bitCast(resume_sentinel_bits -% Value.double_encode_offset);
     std.debug.assert(std.math.isNan(decoded));
@@ -57,6 +75,17 @@ comptime {
     std.debug.assert(std.math.isNan(bail_decoded));
     std.debug.assert(osr_bail_sentinel_bits != resume_sentinel_bits);
     std.debug.assert(osr_bail_sentinel_bits != Value.fromDouble(std.math.nan(f64)).bits);
+    const call_pushed_decoded: f64 = @bitCast(call_pushed_sentinel_bits -% Value.double_encode_offset);
+    std.debug.assert(std.math.isNan(call_pushed_decoded));
+    std.debug.assert(call_pushed_sentinel_bits != resume_sentinel_bits);
+    std.debug.assert(call_pushed_sentinel_bits != osr_bail_sentinel_bits);
+    std.debug.assert(call_pushed_sentinel_bits != Value.fromDouble(std.math.nan(f64)).bits);
+    const host_oom_decoded: f64 = @bitCast(host_oom_sentinel_bits -% Value.double_encode_offset);
+    std.debug.assert(std.math.isNan(host_oom_decoded));
+    std.debug.assert(host_oom_sentinel_bits != resume_sentinel_bits);
+    std.debug.assert(host_oom_sentinel_bits != osr_bail_sentinel_bits);
+    std.debug.assert(host_oom_sentinel_bits != call_pushed_sentinel_bits);
+    std.debug.assert(host_oom_sentinel_bits != Value.fromDouble(std.math.nan(f64)).bits);
 }
 
 const max_graph_items = 16 * 1024;
@@ -66,6 +95,311 @@ const lhs_scratch: a64.Reg = .x12;
 const rhs_scratch: a64.Reg = .x13;
 const result_scratch: a64.Reg = .x14;
 const guard_scratch: a64.Reg = .x15;
+
+const environment_helper_ok: u64 = 0;
+const environment_helper_failed: u64 = 1;
+const no_this_register: u64 = std.math.maxInt(u64);
+
+inline fn directCallTierDown() u32 {
+    return @intFromEnum(call_mod.JitPushStatus.tier_down);
+}
+
+const MonomorphicCall = struct {
+    callee: *JSFunction,
+    cell: *const CallICCell,
+    args_start: usize,
+    argc: u8,
+};
+
+const MonomorphicPropertyCall = struct {
+    callee: *JSFunction,
+    this_bits: u64,
+    args_start: usize,
+    argc: u8,
+};
+
+/// Decode and validate the shared CallIC facts that both direct call and
+/// direct construction require. The IC's heap pointers are weak, so the
+/// helper rechecks every boundary value after the caller has rooted its frame.
+fn monomorphicCall(
+    frame: *lantern.CallFrame,
+    callee_raw: u64,
+    argc_raw: u64,
+    feedback_raw: u64,
+) ?MonomorphicCall {
+    const callee = std.math.cast(u8, callee_raw) orelse return null;
+    const argc = std.math.cast(u8, argc_raw) orelse return null;
+    const feedback_index = std.math.cast(u16, feedback_raw) orelse return null;
+    const callee_index: usize = callee;
+    const args_start = callee_index + 1;
+    const args_end = args_start + @as(usize, argc);
+    if (callee_index >= frame.registers.len or
+        args_end > frame.registers.len or
+        feedback_index >= frame.chunk.inline_call_caches.len)
+    {
+        return null;
+    }
+    const callee_fn = heap_mod.valueAsFunction(frame.registers[callee]) orelse return null;
+    const cell = &frame.chunk.inline_call_caches[feedback_index];
+    const cached = cell.callee orelse return null;
+    if (cached != callee_fn) return null;
+    return .{
+        .callee = callee_fn,
+        .cell = cell,
+        .args_start = args_start,
+        .argc = argc,
+    };
+}
+
+/// Validate the fused `call_property8` IC pair before crossing an allocation
+/// boundary. This intentionally admits only ordinary data slots: accessors,
+/// cold cells, proxies, polymorphism, and every other observable lookup shape
+/// must replay §13.3.6 EvaluateCall in Lantern.
+fn monomorphicPropertyCall(
+    realm: *Realm,
+    frame: *lantern.CallFrame,
+    receiver_raw: u64,
+    argc_raw: u64,
+    load_feedback_raw: u64,
+    call_feedback_raw: u64,
+) ?MonomorphicPropertyCall {
+    const receiver_register = std.math.cast(u8, receiver_raw) orelse return null;
+    const argc = std.math.cast(u8, argc_raw) orelse return null;
+    const load_feedback = std.math.cast(u16, load_feedback_raw) orelse return null;
+    const call_feedback = std.math.cast(u16, call_feedback_raw) orelse return null;
+    const receiver_index: usize = receiver_register;
+    const args_start = std.math.add(usize, receiver_index, 1) catch return null;
+    const args_end = std.math.add(usize, args_start, @as(usize, argc)) catch return null;
+    const load_index = std.math.cast(usize, load_feedback) orelse return null;
+    const call_index = std.math.cast(usize, call_feedback) orelse return null;
+    if (receiver_index >= frame.registers.len or
+        args_end > frame.registers.len or
+        load_index >= frame.chunk.inline_load_caches.len or
+        call_index >= frame.chunk.inline_call_caches.len)
+    {
+        return null;
+    }
+
+    const this_value = frame.registers[receiver_index];
+    const receiver = heap_mod.valueAsPlainObject(this_value) orelse return null;
+    const load_cell = &frame.chunk.inline_load_caches[load_index];
+    const receiver_shape = load_cell.shape orelse return null;
+    if (load_cell.kind != .data or receiver_shape != receiver.shape) return null;
+    const slot = std.math.cast(usize, load_cell.slot) orelse return null;
+    const callee_value = if (load_cell.proto) |proto| blk: {
+        if (receiver.prototype != proto or
+            proto.shape != load_cell.proto_shape or
+            load_cell.proto_rev != realm.proto_revision_counter or
+            slot >= proto.slotCount())
+        {
+            return null;
+        }
+        break :blk proto.slotAt(slot);
+    } else blk: {
+        if (slot >= receiver.slotCount()) return null;
+        break :blk receiver.slotAt(slot);
+    };
+    const callee = heap_mod.valueAsFunction(callee_value) orelse return null;
+    const call_cell = &frame.chunk.inline_call_caches[call_index];
+    const cached = call_cell.callee orelse return null;
+    if (cached != callee) return null;
+    return .{
+        .callee = callee,
+        .this_bits = this_value.bits,
+        .args_start = args_start,
+        .argc = argc,
+    };
+}
+
+/// The IR reaches this helper only after its frame state made every call
+/// operand visible to the collector. Keep the eligibility check here too:
+/// feedback cells are weak, and a direct caller must never bypass Lantern's
+/// proxy, bound-function, async/generator, wrapper, class, or SES-accessor
+/// dispatch.
+fn pushMonomorphicDirectCall(
+    realm: *Realm,
+    frame: *lantern.CallFrame,
+    this_register_raw: u64,
+    callee_raw: u64,
+    argc_raw: u64,
+    feedback_raw: u64,
+) callconv(.c) u32 {
+    const this_register: ?u8 = if (this_register_raw == no_this_register)
+        null
+    else
+        std.math.cast(u8, this_register_raw) orelse return directCallTierDown();
+    if (this_register) |receiver| {
+        if (@as(usize, receiver) >= frame.registers.len) return directCallTierDown();
+    }
+    const site = monomorphicCall(frame, callee_raw, argc_raw, feedback_raw) orelse
+        return directCallTierDown();
+    if (!directCallEligible(site.callee)) {
+        return directCallTierDown();
+    }
+    const this_bits = if (this_register) |receiver|
+        frame.registers[receiver].bits
+    else
+        Value.undefined_.bits;
+    return call_mod.pushJitDirectCallFrame(
+        realm,
+        site.callee,
+        this_bits,
+        frame.registers.ptr + site.args_start,
+        site.argc,
+    );
+}
+
+/// Compact `call_property8` combines the ordinary data LoadIC and CallIC
+/// checks before using the same staged Lantern frame push as a direct call.
+/// The helper neither fills an IC nor invokes user code; every non-hit resumes
+/// the original fused opcode in Lantern.
+fn pushMonomorphicPropertyCall(
+    realm: *Realm,
+    frame: *lantern.CallFrame,
+    receiver_raw: u64,
+    argc_raw: u64,
+    load_feedback_raw: u64,
+    call_feedback_raw: u64,
+) callconv(.c) u32 {
+    const site = monomorphicPropertyCall(
+        realm,
+        frame,
+        receiver_raw,
+        argc_raw,
+        load_feedback_raw,
+        call_feedback_raw,
+    ) orelse return directCallTierDown();
+    if (!directCallEligible(site.callee)) return directCallTierDown();
+    return call_mod.pushJitDirectCallFrame(
+        realm,
+        site.callee,
+        site.this_bits,
+        frame.registers.ptr + site.args_start,
+        site.argc,
+    );
+}
+
+/// Compact `new_call8` uses the same weak CallIC validity check as a direct
+/// call, then adds the constructor-only cached-prototype guard. The shared
+/// Lantern helper owns allocation and ConstructResult frame state.
+fn pushMonomorphicConstruct(
+    realm: *Realm,
+    frame: *lantern.CallFrame,
+    ignored_this_register_raw: u64,
+    callee_raw: u64,
+    argc_raw: u64,
+    feedback_raw: u64,
+) callconv(.c) u32 {
+    _ = ignored_this_register_raw;
+    const site = monomorphicCall(frame, callee_raw, argc_raw, feedback_raw) orelse
+        return directCallTierDown();
+    if (!directConstructEligible(site.callee) or site.cell.proto != site.callee.prototype) {
+        return directCallTierDown();
+    }
+    return call_mod.pushJitConstructFrame(
+        realm,
+        site.cell,
+        site.callee,
+        frame.registers.ptr + site.args_start,
+        site.argc,
+    );
+}
+
+fn directCallEligible(callee: *const JSFunction) bool {
+    return callee.chunk != null and
+        callee.native_callback == null and
+        !callee.is_generator and
+        !callee.is_async and
+        callee.bound_target == null and
+        callee.wrapped_target.isUndefined() and
+        !callee.is_class_constructor and
+        callee.revocable_proxy == null and
+        callee.synth_accessor == null;
+}
+
+fn directConstructEligible(callee: *const JSFunction) bool {
+    return callee.chunk != null and
+        callee.native_callback == null and
+        !callee.is_arrow and
+        callee.has_construct and
+        !callee.is_generator and
+        !callee.is_async and
+        callee.bound_target == null and
+        callee.wrapped_target.isUndefined() and
+        callee.revocable_proxy == null and
+        callee.synth_accessor == null;
+}
+
+fn directCallAfterBytecode(
+    chunk: *const Chunk,
+    bytecode_offset: u32,
+    site: ir.DirectCallSite,
+) !u32 {
+    const pc = std.math.cast(usize, bytecode_offset) orelse return error.InvalidMetadata;
+    if (pc >= chunk.code.len) return error.InvalidMetadata;
+    const op: Op = @enumFromInt(chunk.code[pc]);
+    const after = std.math.add(usize, pc, 1 + Op.operandSize(op)) catch return error.InvalidMetadata;
+    if (after > chunk.code.len) return error.InvalidMetadata;
+    switch (site) {
+        .direct => |direct| {
+            const kind: ir.DirectCall.Kind = switch (op) {
+                .call_method8, .call8, .call0_8, .call1_8, .call2_8, .call3_8 => .call,
+                .new_call8 => .construct,
+                else => return error.InvalidMetadata,
+            };
+            const expects_receiver = op == .call_method8;
+            if (direct.kind != kind) return error.InvalidMetadata;
+            if ((direct.this_register != null) != expects_receiver) return error.InvalidMetadata;
+        },
+        .property => |property| {
+            const load_feedback = std.math.cast(u8, property.load_feedback_index) orelse return error.InvalidMetadata;
+            const call_feedback = std.math.cast(u8, property.call_feedback_index) orelse return error.InvalidMetadata;
+            if (op != .call_property8 or
+                chunk.code[pc + 2] != property.receiver or
+                chunk.code[pc + 3] != property.argc or
+                chunk.code[pc + 4] != load_feedback or
+                chunk.code[pc + 5] != call_feedback)
+            {
+                return error.InvalidMetadata;
+            }
+        },
+    }
+    return std.math.cast(u32, after) orelse error.InvalidMetadata;
+}
+
+/// `make_environment`'s allocation half. The caller has already staged all
+/// live JS values in the Lantern frame, and this helper cannot re-enter JS.
+fn allocateEnvironment(
+    realm: *Realm,
+    frame: *lantern.CallFrame,
+    slot_count: u64,
+) callconv(.c) u64 {
+    const slots = std.math.cast(u8, slot_count) orelse return environment_helper_failed;
+    const env = realm.heap.allocateEnvironment(frame.env, slots) catch
+        return environment_helper_failed;
+    frame.env = env;
+    return environment_helper_ok;
+}
+
+/// `sta_env` delegates the write to the heap's typed setter so the native
+/// path keeps Lantern's generational and incremental-marking barrier.
+fn storeEnvironment(
+    realm: *Realm,
+    frame: *lantern.CallFrame,
+    depth_raw: u64,
+    slot_raw: u64,
+) callconv(.c) u64 {
+    const depth = std.math.cast(u8, depth_raw) orelse return environment_helper_failed;
+    const slot = std.math.cast(u8, slot_raw) orelse return environment_helper_failed;
+    var environment = frame.env orelse return environment_helper_failed;
+    var remaining = depth;
+    while (remaining > 0) : (remaining -= 1) {
+        environment = environment.parent orelse return environment_helper_failed;
+    }
+    if (@as(usize, slot) >= environment.slots.len) return environment_helper_failed;
+    realm.heap.storeEnvSlot(environment, slot, frame.accumulator);
+    return environment_helper_ok;
+}
 
 const NumberInputKind = enum {
     generic,
@@ -97,6 +431,11 @@ const FrameMoveSource = union(enum) {
 const FrameMove = struct {
     source: FrameMoveSource,
     destination: FrameLocation,
+};
+
+const EnvironmentHelper = union(enum) {
+    allocate: ir.EnvironmentAllocation,
+    store: ir.EnvironmentStore,
 };
 
 pub fn emitGraph(
@@ -242,6 +581,9 @@ const Compiler = struct {
 
     fn emit(self: *Compiler) !void {
         try emitter.emitPrologue(self.machine, self.lowered.frame);
+        if (self.graph.entry_environment_slots) |slot_count| {
+            try self.emitEntryEnvironment(slot_count);
+        }
         try self.emitEntryParameters();
         for (self.graph.blocks, 0..) |block, block_index| {
             if (!block.reachable) continue;
@@ -261,6 +603,72 @@ const Compiler = struct {
         const entry = self.graph.blocks[0];
         if (!entry.reachable) return error.MalformedGraph;
         try self.materializeBlockParametersFromFrame(0, null);
+    }
+
+    /// The AAPCS64 call boundary is deliberately local to the entry helper:
+    /// until entry parameters are materialized, all JS Values remain in the
+    /// registered Lantern frame, so no optimized-only root needs a stack map.
+    /// Preserve volatile ABI state the ordinary entry body still needs, plus
+    /// LR, without imposing callee-save traffic on helper-free code.
+    fn emitEntryEnvironment(self: *Compiler, slot_count: u8) !void {
+        var failed: Masm.Label = .{};
+        defer failed.deinit(self.allocator);
+        var done: Masm.Label = .{};
+        defer done.deinit(self.allocator);
+
+        try self.machine.emit(a64.stpPreIdxSp(
+            lowering.realm_register,
+            lowering.lantern_frame_register,
+            -16,
+        ));
+        try self.machine.emit(a64.stpPreIdxSp(
+            lowering.lantern_registers_register,
+            lowering.spill_base_register,
+            -16,
+        ));
+        try self.machine.emit(a64.strPreIdxSp(.lr, -16));
+
+        try self.machine.movImm64(
+            lowering.lantern_registers_register,
+            slot_count,
+        );
+        try self.machine.callAbs(
+            lowering.spill_base_register,
+            @intFromPtr(&allocateEnvironment),
+        );
+        try self.machine.jumpCbnz(lowering.realm_register, &failed);
+
+        try self.emitEntryEnvironmentRestore();
+        try self.machine.jump(&done);
+
+        self.machine.bind(&failed);
+        try self.emitEntryEnvironmentRestore();
+        // Leave the original frame state intact. Lantern retries the exact
+        // MakeEnvironment opcode and surfaces OutOfMemory normally if needed.
+        try self.machine.movImm64(lhs_scratch, 0);
+        try self.machine.emit(a64.strImm(
+            lhs_scratch,
+            lowering.lantern_frame_register,
+            layout.frame.ip,
+        ));
+        try self.machine.movImm64(.x0, resume_sentinel_bits);
+        try emitter.emitEpilogue(self.machine, self.lowered.frame);
+
+        self.machine.bind(&done);
+    }
+
+    fn emitEntryEnvironmentRestore(self: *Compiler) !void {
+        try self.machine.emit(a64.ldrPostIdxSp(.lr, 16));
+        try self.machine.emit(a64.ldpPostIdxSp(
+            lowering.lantern_registers_register,
+            lowering.spill_base_register,
+            16,
+        ));
+        try self.machine.emit(a64.ldpPostIdxSp(
+            lowering.realm_register,
+            lowering.lantern_frame_register,
+            16,
+        ));
     }
 
     /// Map the live Lantern frame into the SSA parameters of `block_index`.
@@ -284,7 +692,10 @@ const Compiler = struct {
             }
             const destination = self.lowered.locations[param.value];
             if (destination == .none) continue;
-            if (destination == .immediate) return error.UnsupportedNode;
+            // A folded loop phi is rematerialized at each use. Its value is
+            // identical on every incoming edge, so OSR does not need to load
+            // or validate the corresponding Lantern-frame slot.
+            if (destination == .immediate) continue;
             const kind = self.representations.outputs[param.value];
             switch (param.role) {
                 .accumulator => try self.machine.emit(a64.ldrImm(
@@ -453,6 +864,30 @@ const Compiler = struct {
             },
             .load_environment => {
                 try self.emitEnvironmentLoad(node_id, info.lowering);
+                return false;
+            },
+            .allocate_environment => {
+                try self.emitEnvironmentAllocate(node_id, info.lowering);
+                return false;
+            },
+            .store_environment => {
+                try self.emitEnvironmentStore(node_id, info.lowering);
+                return false;
+            },
+            .direct_call => {
+                // A direct handoff returns to the driver on every outcome.
+                // Keep emitting the bytecode continuation structurally: it is
+                // reached by Lantern after the callee returns, never by native
+                // fallthrough from this call site.
+                try self.emitDirectCall(node_id, info.lowering);
+                return false;
+            },
+            .throw_if_hole => {
+                try self.emitThrowIfHole(node_id, info.lowering);
+                return false;
+            },
+            .typeof_ => {
+                try self.emitTypeOf(node_id, info.lowering);
                 return false;
             },
             .return_ => {
@@ -954,6 +1389,357 @@ const Compiler = struct {
         try self.emitTaggedResult(node_id, lhs_scratch);
     }
 
+    fn emitEnvironmentAllocate(
+        self: *Compiler,
+        node_id: ir.ValueId,
+        lowering_kind: specialize.Lowering,
+    ) !void {
+        if (lowering_kind != .allocate_environment) return error.UnsupportedNode;
+        const allocation_site = switch (self.graph.nodes[node_id].payload) {
+            .environment_allocation => |site| site,
+            else => return error.MalformedGraph,
+        };
+        try self.emitFrameSafepoint(node_id, .{ .allocate = allocation_site });
+    }
+
+    fn emitEnvironmentStore(
+        self: *Compiler,
+        node_id: ir.ValueId,
+        lowering_kind: specialize.Lowering,
+    ) !void {
+        if (lowering_kind != .store_environment) return error.UnsupportedNode;
+        const store_site = switch (self.graph.nodes[node_id].payload) {
+            .environment_store => |site| site,
+            else => return error.MalformedGraph,
+        };
+        try self.emitFrameSafepoint(node_id, .{ .store = store_site });
+    }
+
+    fn emitDirectCall(
+        self: *Compiler,
+        node_id: ir.ValueId,
+        lowering_kind: specialize.Lowering,
+    ) !void {
+        if (lowering_kind != .direct_call or
+            self.representations.outputs[node_id] != .tagged)
+        {
+            return error.UnsupportedNode;
+        }
+        const node = self.graph.nodes[node_id];
+        if (node.input_count != 0) return error.MalformedGraph;
+        const site: ir.DirectCallSite = switch (node.payload) {
+            .direct_call => |direct_call| direct_call,
+            else => return error.MalformedGraph,
+        };
+        const point_index = try self.pointIndexForNode(node_id);
+        var point = try self.physical_deopt.decode(self.allocator, point_index);
+        defer point.deinit();
+        if (point.bytecode_offset != node.bytecode_offset) return error.InvalidMetadata;
+        try validateDirectCallRoots(point, site);
+        const after_bytecode = try directCallAfterBytecode(self.chunk, node.bytecode_offset, site);
+
+        // Commit the exact pre-call state before an allocation boundary. The
+        // helper reads the operands from this rooted frame, then may append a
+        // callee and relocate the `frames` backing array.
+        try self.emitFrameState(point);
+        try self.machine.movImm64(lhs_scratch, after_bytecode);
+        try self.machine.emit(a64.strImm(
+            lhs_scratch,
+            lowering.lantern_frame_register,
+            layout.frame.ip,
+        ));
+
+        var pushed: Masm.Label = .{};
+        defer pushed.deinit(self.allocator);
+        var tier_down: Masm.Label = .{};
+        defer tier_down.deinit(self.allocator);
+
+        // `blr` may clobber every caller-saved register. The direct helper
+        // returns to Lantern on success, but its tier-down path must still
+        // restore the JIT frame/register bases before reconstructing the
+        // original bytecode operation. Leave x0 unsaved so it keeps the
+        // helper's status code.
+        try self.emitDirectCallSave();
+        try self.machine.emit(a64.movReg(.x0, lowering.realm_register));
+        try self.machine.emit(a64.movReg(.x1, lowering.lantern_frame_register));
+        switch (site) {
+            .direct => |direct| {
+                const this_register: u64 = if (direct.this_register) |receiver| receiver else no_this_register;
+                try self.machine.movImm64(.x2, this_register);
+                try self.machine.movImm64(.x3, direct.callee);
+                try self.machine.movImm64(.x4, direct.argc);
+                try self.machine.movImm64(.x5, direct.feedback_index);
+                switch (direct.kind) {
+                    .call => try self.machine.callAbs(
+                        lowering.spill_base_register,
+                        @intFromPtr(&pushMonomorphicDirectCall),
+                    ),
+                    .construct => try self.machine.callAbs(
+                        lowering.spill_base_register,
+                        @intFromPtr(&pushMonomorphicConstruct),
+                    ),
+                }
+            },
+            .property => |property| {
+                try self.machine.movImm64(.x2, property.receiver);
+                try self.machine.movImm64(.x3, property.argc);
+                try self.machine.movImm64(.x4, property.load_feedback_index);
+                try self.machine.movImm64(.x5, property.call_feedback_index);
+                try self.machine.callAbs(
+                    lowering.spill_base_register,
+                    @intFromPtr(&pushMonomorphicPropertyCall),
+                );
+            },
+        }
+        try self.machine.emit(a64.movRegW(.x0, .x0));
+        try self.machine.jumpCbz(.x0, &pushed);
+        try self.machine.emit(a64.cmpImm(
+            .x0,
+            @intFromEnum(call_mod.JitPushStatus.tier_down),
+            false,
+        ));
+        try self.machine.jumpCond(.eq, &tier_down);
+
+        // Any status other than pushed/tier-down is host OOM. The frame was
+        // already staged, but must not be replayed because allocation may have
+        // occurred before the failure.
+        try self.emitDirectCallRestore();
+        try self.machine.movImm64(.x0, host_oom_sentinel_bits);
+        try emitter.emitEpilogue(self.machine, self.lowered.frame);
+
+        self.machine.bind(&pushed);
+        // Do not touch the Lantern frame after this point: append may have
+        // invalidated its address. Lantern derives the new top frame.
+        try self.emitDirectCallRestore();
+        try self.machine.movImm64(.x0, call_pushed_sentinel_bits);
+        try emitter.emitEpilogue(self.machine, self.lowered.frame);
+
+        self.machine.bind(&tier_down);
+        // The helper left the frame unmodified except for our staged state;
+        // replay the original opcode through Lantern's complete call path.
+        try self.emitDirectCallRestore();
+        try self.emitResumeAt(point.bytecode_offset);
+    }
+
+    /// Preserve all caller-saved registers that remain part of Ohaimark's
+    /// register convention across a direct-call helper. x0 deliberately stays
+    /// live for the helper status; no native continuation uses its prior value.
+    fn emitDirectCallSave(self: *Compiler) !void {
+        try self.machine.emit(a64.stpPreIdxSp(.x1, .x2, -16));
+        try self.machine.emit(a64.stpPreIdxSp(.x3, .x4, -16));
+        try self.machine.emit(a64.stpPreIdxSp(.x5, .x6, -16));
+        try self.machine.emit(a64.stpPreIdxSp(.x7, .x8, -16));
+        try self.machine.emit(a64.stpPreIdxSp(.x16, .lr, -16));
+    }
+
+    fn emitDirectCallRestore(self: *Compiler) !void {
+        try self.machine.emit(a64.ldpPostIdxSp(.x16, .lr, 16));
+        try self.machine.emit(a64.ldpPostIdxSp(.x7, .x8, 16));
+        try self.machine.emit(a64.ldpPostIdxSp(.x5, .x6, 16));
+        try self.machine.emit(a64.ldpPostIdxSp(.x3, .x4, 16));
+        try self.machine.emit(a64.ldpPostIdxSp(.x1, .x2, 16));
+    }
+
+    fn validateDirectCallRoots(
+        point: deopt_physical.DecodedPoint,
+        site: ir.DirectCallSite,
+    ) !void {
+        var rooted: [256]bool = @splat(false);
+        for (point.slots) |slot| rooted[slot.register] = true;
+        switch (site) {
+            .direct => |direct| {
+                if (direct.this_register) |receiver| {
+                    if (!rooted[receiver]) return error.InvalidMetadata;
+                }
+                try validateDirectCallWindow(&rooted, direct.callee, direct.argc);
+            },
+            .property => |property| try validateDirectCallWindow(&rooted, property.receiver, property.argc),
+        }
+    }
+
+    fn validateDirectCallWindow(rooted: *const [256]bool, base: u8, argc: u8) !void {
+        if (!rooted[base]) return error.InvalidMetadata;
+        const args_start = @as(usize, base) + 1;
+        const args_end = args_start + @as(usize, argc);
+        if (args_end > rooted.len) return error.InvalidMetadata;
+        for (args_start..args_end) |register| {
+            if (!rooted[register]) return error.InvalidMetadata;
+        }
+    }
+
+    fn emitThrowIfHole(
+        self: *Compiler,
+        node_id: ir.ValueId,
+        lowering_kind: specialize.Lowering,
+    ) !void {
+        if (lowering_kind != .throw_if_hole) return error.UnsupportedNode;
+        const guard = try self.guardFor(node_id);
+        try self.emitTaggedInput(node_id, 0, lhs_scratch);
+        try self.machine.movImm64(guard_scratch, Value.hole_.bits);
+        try self.machine.emit(a64.cmpReg(lhs_scratch, guard_scratch));
+        try self.jumpToGuardIf(.eq, guard);
+        try self.emitTaggedResult(node_id, lhs_scratch);
+    }
+
+    /// §13.5.3. This remains allocation-free on the native path: classify the
+    /// NaN-boxed input, then load the active Realm's immutable cached result
+    /// string. A cold cache is a normal guard exit, letting Lantern allocate
+    /// and cache it before this entry is used again.
+    fn emitTypeOf(
+        self: *Compiler,
+        node_id: ir.ValueId,
+        lowering_kind: specialize.Lowering,
+    ) !void {
+        if (lowering_kind != .typeof_ or self.representations.outputs[node_id] != .tagged) {
+            return error.UnsupportedNode;
+        }
+        const guard = try self.guardFor(node_id);
+        var number: Masm.Label = .{};
+        defer number.deinit(self.allocator);
+        var undefined_: Masm.Label = .{};
+        defer undefined_.deinit(self.allocator);
+        var object: Masm.Label = .{};
+        defer object.deinit(self.allocator);
+        var boolean: Masm.Label = .{};
+        defer boolean.deinit(self.allocator);
+        var string: Masm.Label = .{};
+        defer string.deinit(self.allocator);
+        var function: Masm.Label = .{};
+        defer function.deinit(self.allocator);
+        var symbol: Masm.Label = .{};
+        defer symbol.deinit(self.allocator);
+        var bigint: Masm.Label = .{};
+        defer bigint.deinit(self.allocator);
+        var object_tag: Masm.Label = .{};
+        defer object_tag.deinit(self.allocator);
+        var done: Masm.Label = .{};
+        defer done.deinit(self.allocator);
+
+        try self.emitTaggedInput(node_id, 0, lhs_scratch);
+        try self.machine.emit(a64.lsrImm(guard_scratch, lhs_scratch, 48));
+        try self.machine.movImm64(rhs_scratch, layout.value_bits.tag_object);
+        try self.machine.emit(a64.cmpReg(guard_scratch, rhs_scratch));
+        // Doubles occupy every top-tag value below Object. Int32 uses its
+        // own tag, but has the same `typeof` result and joins below.
+        try self.machine.jumpCond(.cc, &number);
+        try self.machine.jumpCond(.eq, &object_tag);
+
+        try self.machine.movImm64(rhs_scratch, layout.value_bits.tag_string);
+        try self.machine.emit(a64.cmpReg(guard_scratch, rhs_scratch));
+        try self.machine.jumpCond(.eq, &string);
+        try self.machine.movImm64(rhs_scratch, layout.value_bits.tag_int32);
+        try self.machine.emit(a64.cmpReg(guard_scratch, rhs_scratch));
+        try self.machine.jumpCond(.eq, &number);
+        try self.machine.movImm64(rhs_scratch, layout.value_bits.tag_bool);
+        try self.machine.emit(a64.cmpReg(guard_scratch, rhs_scratch));
+        try self.machine.jumpCond(.eq, &boolean);
+        try self.machine.movImm64(rhs_scratch, layout.value_bits.tag_null);
+        try self.machine.emit(a64.cmpReg(guard_scratch, rhs_scratch));
+        try self.machine.jumpCond(.eq, &object);
+        try self.machine.movImm64(rhs_scratch, layout.value_bits.tag_undefined);
+        try self.machine.emit(a64.cmpReg(guard_scratch, rhs_scratch));
+        try self.machine.jumpCond(.eq, &undefined_);
+        // Hole cannot reach a valid `typeof` bytecode site, but Lantern's
+        // fallback classifies it as `undefined`; retain that total behavior.
+        try self.machine.jump(&undefined_);
+
+        self.machine.bind(&object_tag);
+        try self.machine.movImm64(rhs_scratch, layout.value_bits.tag_object_shifted);
+        try self.machine.emit(a64.eorReg(guard_scratch, lhs_scratch, rhs_scratch));
+        try self.machine.emit(a64.lslImm(rhs_scratch, guard_scratch, 62));
+        try self.machine.emit(a64.lsrImm(rhs_scratch, rhs_scratch, 62));
+        try self.machine.emit(a64.cmpImm(
+            rhs_scratch,
+            @intCast(layout.value_bits.kind_function),
+            false,
+        ));
+        try self.machine.jumpCond(.eq, &function);
+        try self.machine.emit(a64.cmpImm(
+            rhs_scratch,
+            @intCast(layout.value_bits.kind_symbol),
+            false,
+        ));
+        try self.machine.jumpCond(.eq, &symbol);
+        try self.machine.emit(a64.cmpImm(
+            rhs_scratch,
+            @intCast(layout.value_bits.kind_bigint),
+            false,
+        ));
+        try self.machine.jumpCond(.eq, &bigint);
+        try self.machine.emit(a64.cmpImm(
+            rhs_scratch,
+            @intCast(layout.value_bits.kind_object),
+            false,
+        ));
+        try self.machine.jumpCond(.ne, &undefined_);
+        try self.machine.emit(a64.lsrImm(result_scratch, guard_scratch, 2));
+        try self.machine.emit(a64.lslImm(result_scratch, result_scratch, 2));
+        try self.machine.emit(a64.ldrImmW(
+            rhs_scratch,
+            result_scratch,
+            layout.object.brand,
+        ));
+        try self.machine.jumpTbnz(
+            rhs_scratch,
+            layout.object.brand_proxy_callable_bit,
+            &function,
+        );
+        try self.machine.jump(&object);
+
+        self.machine.bind(&number);
+        try self.emitTypeOfCachedString(node_id, guard, layout.realm.typeof_number_string);
+        try self.machine.jump(&done);
+
+        self.machine.bind(&undefined_);
+        try self.emitTypeOfCachedString(node_id, guard, layout.realm.typeof_undefined_string);
+        try self.machine.jump(&done);
+
+        self.machine.bind(&object);
+        try self.emitTypeOfCachedString(node_id, guard, layout.realm.typeof_object_string);
+        try self.machine.jump(&done);
+
+        self.machine.bind(&boolean);
+        try self.emitTypeOfCachedString(node_id, guard, layout.realm.typeof_boolean_string);
+        try self.machine.jump(&done);
+
+        self.machine.bind(&string);
+        try self.emitTypeOfCachedString(node_id, guard, layout.realm.typeof_string_string);
+        try self.machine.jump(&done);
+
+        self.machine.bind(&function);
+        try self.emitTypeOfCachedString(node_id, guard, layout.realm.typeof_function_string);
+        try self.machine.jump(&done);
+
+        self.machine.bind(&symbol);
+        try self.emitTypeOfCachedString(node_id, guard, layout.realm.typeof_symbol_string);
+        try self.machine.jump(&done);
+
+        self.machine.bind(&bigint);
+        try self.emitTypeOfCachedString(node_id, guard, layout.realm.typeof_bigint_string);
+        try self.machine.jump(&done);
+
+        self.machine.bind(&done);
+    }
+
+    fn emitTypeOfCachedString(
+        self: *Compiler,
+        node_id: ir.ValueId,
+        guard: *Masm.Label,
+        cache_offset: usize,
+    ) !void {
+        try property_codegen.emitRealmU64(
+            self.machine,
+            lowering.realm_register,
+            result_scratch,
+            cache_offset,
+        );
+        try self.machine.emit(a64.lsrImm(guard_scratch, result_scratch, 48));
+        try self.machine.movImm64(rhs_scratch, layout.value_bits.tag_string);
+        try self.machine.emit(a64.cmpReg(guard_scratch, rhs_scratch));
+        try self.jumpToGuardIf(.ne, guard);
+        try self.emitTaggedResult(node_id, result_scratch);
+    }
+
     fn emitTaggedInput(
         self: *Compiler,
         node_id: ir.ValueId,
@@ -1448,6 +2234,78 @@ const Compiler = struct {
     fn emitGuardExit(self: *Compiler, point_index: usize) !void {
         var point = try self.physical_deopt.decode(self.allocator, point_index);
         defer point.deinit();
+        try self.emitFrameState(point);
+        try self.emitResumeAt(point.bytecode_offset);
+    }
+
+    fn emitFrameSafepoint(
+        self: *Compiler,
+        node_id: ir.ValueId,
+        helper: EnvironmentHelper,
+    ) !void {
+        const point_index = try self.pointIndexForNode(node_id);
+        var point = try self.physical_deopt.decode(self.allocator, point_index);
+        defer point.deinit();
+        var failed: Masm.Label = .{};
+        defer failed.deinit(self.allocator);
+        var done: Masm.Label = .{};
+        defer done.deinit(self.allocator);
+
+        // The physical deopt point is the exact pre-op Lantern state. Commit
+        // it before the ABI boundary so every JS root is visible through the
+        // registered frame while the helper allocates or writes a typed slot.
+        try self.emitFrameState(point);
+        try self.emitFrameSafepointSave();
+        const target: usize = switch (helper) {
+            .allocate => |site| blk: {
+                try self.machine.movImm64(.x2, site.slot_count);
+                break :blk @intFromPtr(&allocateEnvironment);
+            },
+            .store => |site| blk: {
+                try self.machine.movImm64(.x2, site.depth);
+                try self.machine.movImm64(.x3, site.slot);
+                break :blk @intFromPtr(&storeEnvironment);
+            },
+        };
+        try self.machine.callAbs(lowering.spill_base_register, target);
+        try self.machine.jumpCbnz(lowering.realm_register, &failed);
+
+        try self.emitFrameSafepointRestore();
+        try self.machine.jump(&done);
+
+        self.machine.bind(&failed);
+        try self.emitFrameSafepointRestore();
+        try self.emitResumeAt(point.bytecode_offset);
+
+        self.machine.bind(&done);
+    }
+
+    /// Save every caller-saved location that can hold Ohaimark state. The
+    /// helper ABI uses x0-x3/x16, x3-x8 carry tagged SSA values, and x16
+    /// anchors the spill area. Five pairs plus the padded LR save are 96 bytes,
+    /// preserving AAPCS64's 16-byte stack alignment at `blr`.
+    fn emitFrameSafepointSave(self: *Compiler) !void {
+        try self.machine.emit(a64.stpPreIdxSp(.x0, .x1, -16));
+        try self.machine.emit(a64.stpPreIdxSp(.x2, .x3, -16));
+        try self.machine.emit(a64.stpPreIdxSp(.x4, .x5, -16));
+        try self.machine.emit(a64.stpPreIdxSp(.x6, .x7, -16));
+        try self.machine.emit(a64.stpPreIdxSp(.x8, .x16, -16));
+        try self.machine.emit(a64.strPreIdxSp(.lr, -16));
+    }
+
+    fn emitFrameSafepointRestore(self: *Compiler) !void {
+        try self.machine.emit(a64.ldrPostIdxSp(.lr, 16));
+        try self.machine.emit(a64.ldpPostIdxSp(.x8, .x16, 16));
+        try self.machine.emit(a64.ldpPostIdxSp(.x6, .x7, 16));
+        try self.machine.emit(a64.ldpPostIdxSp(.x4, .x5, 16));
+        try self.machine.emit(a64.ldpPostIdxSp(.x2, .x3, 16));
+        try self.machine.emit(a64.ldpPostIdxSp(.x0, .x1, 16));
+    }
+
+    fn emitFrameState(
+        self: *Compiler,
+        point: deopt_physical.DecodedPoint,
+    ) !void {
         try self.emitDirectFrameRecoveries(point);
         try self.emitExternalRecovery(point.accumulator, .accumulator);
         for (point.slots) |slot| {
@@ -1456,7 +2314,10 @@ const Compiler = struct {
                 .{ .register = slot.register },
             );
         }
-        try self.machine.movImm64(lhs_scratch, point.bytecode_offset);
+    }
+
+    fn emitResumeAt(self: *Compiler, bytecode_offset: u32) !void {
+        try self.machine.movImm64(lhs_scratch, bytecode_offset);
         try self.machine.emit(a64.strImm(
             lhs_scratch,
             lowering.lantern_frame_register,
@@ -1608,10 +2469,16 @@ const Compiler = struct {
     }
 
     fn guardFor(self: *Compiler, node_id: ir.ValueId) !*Masm.Label {
-        if (node_id >= self.point_for_node.len) return error.InvalidMetadata;
-        const point_index = self.point_for_node[node_id] orelse return error.InvalidMetadata;
+        const point_index = try self.pointIndexForNode(node_id);
         if (point_index >= self.guard_labels.len) return error.InvalidMetadata;
         return &self.guard_labels[point_index];
+    }
+
+    fn pointIndexForNode(self: *const Compiler, node_id: ir.ValueId) !usize {
+        if (node_id >= self.point_for_node.len) return error.InvalidMetadata;
+        const point_index = self.point_for_node[node_id] orelse return error.InvalidMetadata;
+        if (point_index >= self.physical_deopt.points.len) return error.InvalidMetadata;
+        return point_index;
     }
 
     fn valueLocation(self: *const Compiler, value: ir.ValueId) !parallel_moves.Location {

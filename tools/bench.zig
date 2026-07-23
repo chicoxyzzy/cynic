@@ -39,7 +39,7 @@
 //!   zig build bench -- --filter=mul_loop
 //!   zig build bench -- --ohaimark             # natural-threshold T2
 //!   zig build bench -- --ohaimark-rollout     # interleaved T1 vs T2 gate
-//!   zig build bench -- --ohaimark-osr-rollout # T1 vs T1+T2 OSR (default-off gate)
+//!   zig build bench -- --ohaimark-osr-rollout # T1 vs default T2+OSR regression gate
 //!   zig build bench -- --macros     # Octane macro set (bench/macros/),
 //!                                   # run --unhardened; Splay is heavy,
 //!                                   # so --runs=3 for a quick pass

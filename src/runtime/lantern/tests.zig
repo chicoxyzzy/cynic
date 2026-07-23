@@ -8,6 +8,7 @@ const std = @import("std");
 const testing = std.testing;
 
 const lantern = @import("interpreter.zig");
+const arith = @import("arith.zig");
 const RunResult = lantern.RunResult;
 const run = lantern.run;
 const evaluateScript = lantern.evaluateScript;
@@ -1701,6 +1702,21 @@ test "later: assigning new property" {
 
 test "later: typeof null is object (historical)" {
     try expectScriptString("typeof null;", "object");
+}
+
+test "later: typeof result strings are cached and rooted" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+
+    const first = try arith.typeOf(&realm, Value.undefined_);
+    const second = try arith.typeOf(&realm, Value.undefined_);
+    try testing.expectEqual(first.bits, second.bits);
+
+    realm.collectGarbage();
+    const third = try arith.typeOf(&realm, Value.undefined_);
+    try testing.expectEqual(first.bits, third.bits);
+    const string: *JSString = @ptrCast(@alignCast(third.asString()));
+    try testing.expectEqualStrings("undefined", string.flatBytes());
 }
 
 test "later: object stored in let, methods of access" {
@@ -8171,6 +8187,30 @@ test "GC: Iterator.zipKeyed result keys survive gc_threshold=1" {
         \\const r = Array.from(Iterator.zipKeyed({ a: [1, 2], b: [10, 20] }));
         \\r[0].a + r[0].b + r[1].a + r[1].b;
     , 33);
+}
+
+test "GC: Iterator.zipKeyed longest state survives alternating GC pressure" {
+    // `buildZipWrapper` allocates the copied keys after `wrap` may have
+    // tenured, then stores each longest-mode padding value after a
+    // user-observable Get. Both writes land in the typed
+    // `iter_helper.zip_inputs` slot and therefore must card-mark a mature
+    // wrapper. The getters deliberately allocate fresh padding objects so
+    // the stored values are young when the following minor cycle audits the
+    // remembered set.
+    try expectScriptIntUnderAlternatingGcPressure(
+        \\const it = Iterator.zipKeyed(
+        \\  { alpha: [1], beta: [10, 20] },
+        \\  { mode: "longest", padding: {
+        \\    get alpha() { __collectGarbage(); return { n: 3 }; },
+        \\    get beta() {
+        \\      for (let i = 0; i < 8; i++) ({ i });
+        \\      return { n: 4 };
+        \\    },
+        \\  } },
+        \\);
+        \\const rows = Array.from(it);
+        \\rows[0].alpha + rows[0].beta + rows[1].alpha.n + rows[1].beta;
+    , 34);
 }
 
 test "GC: Map iterator survives gc_threshold=1" {

@@ -30,6 +30,7 @@ const heap_mod = @import("../heap.zig");
 const intrinsics_mod = @import("../intrinsics.zig");
 const Realm = @import("../realm.zig").Realm;
 const Chunk = @import("../../bytecode/chunk.zig").Chunk;
+const CallICCell = @import("../../bytecode/chunk.zig").CallICCell;
 
 // Circular back to interpreter.zig for shared types + the dispatch
 // loop entry + a handful of helpers that bracket call/construct.
@@ -51,6 +52,222 @@ const wrapGenerator = generator.wrapGenerator;
 const wrapAsyncGenerator = generator.wrapAsyncGenerator;
 const promise_mod = @import("promise.zig");
 const resumeAsyncFunction = promise_mod.resumeAsyncFunction;
+
+/// Result of a JIT in-line direct-call frame push. The caller has already
+/// checked its monomorphic call IC and staged the caller frame as a GC root.
+/// A mismatch belongs to the generated tier-down path, where Lantern retries
+/// the original bytecode operation before any user-visible call happens.
+pub const JitPushStatus = enum(u32) {
+    pushed = 0,
+    tier_down = 1,
+    host_oom = 2,
+};
+
+/// Dynamic extent for generated code that may allocate or append an in-line
+/// callee. `callJSFunction` probes JIT tiers before it enters `runFrames`, so
+/// this list is not necessarily already in `Realm.frame_stacks`. Register it
+/// here before any generated helper can allocate; otherwise a GC would miss
+/// the caller's register file. Nested JIT entries keep their outer active list
+/// and only add a root when this exact list is not registered already.
+pub const JitFrameScope = struct {
+    realm: *Realm,
+    prior_active: ?*std.ArrayListUnmanaged(CallFrame),
+    frames: *std.ArrayListUnmanaged(CallFrame),
+    added_root: bool,
+
+    pub fn init(
+        realm: *Realm,
+        frames: *std.ArrayListUnmanaged(CallFrame),
+    ) !JitFrameScope {
+        var added_root = false;
+        var already_rooted = false;
+        for (realm.frame_stacks.items) |existing| {
+            if (existing == frames) {
+                already_rooted = true;
+                break;
+            }
+        }
+        if (!already_rooted) {
+            try realm.frame_stacks.append(realm.allocator, frames);
+            added_root = true;
+        }
+        const prior_active = realm.jit_active_frames;
+        realm.jit_active_frames = frames;
+        return .{
+            .realm = realm,
+            .prior_active = prior_active,
+            .frames = frames,
+            .added_root = added_root,
+        };
+    }
+
+    pub fn deinit(self: *JitFrameScope) void {
+        self.realm.jit_active_frames = self.prior_active;
+        if (!self.added_root) return;
+        const stacks = &self.realm.frame_stacks;
+        if (stacks.items.len > 0 and stacks.items[stacks.items.len - 1] == self.frames) {
+            _ = stacks.pop();
+            return;
+        }
+        var index = stacks.items.len;
+        while (index > 0) {
+            index -= 1;
+            if (stacks.items[index] == self.frames) {
+                _ = stacks.swapRemove(index);
+                return;
+            }
+        }
+    }
+};
+
+/// Push a vetted ordinary bytecode callee onto the active JIT-owned frame
+/// stack without running it. Bistromath and Ohaimark share this because frame
+/// allocation, arrow `this`/`new.target`, and the frame-stack ownership rule
+/// are tier-independent. The caller must not touch its `*CallFrame` after a
+/// `.pushed` result: `frames.append` may relocate the backing array.
+pub fn pushJitDirectCallFrame(
+    realm: *Realm,
+    callee_fn: *JSFunction,
+    this_bits: u64,
+    args_ptr: [*]const Value,
+    argc: u64,
+) callconv(.c) u32 {
+    const frames = realm.jit_active_frames orelse
+        return @intFromEnum(JitPushStatus.tier_down);
+    if (frames.items.len >= lantern.max_call_frames) {
+        return @intFromEnum(JitPushStatus.tier_down);
+    }
+    const callee_chunk = callee_fn.chunk orelse
+        return @intFromEnum(JitPushStatus.tier_down);
+    const allocator = realm.heap.allocator;
+    const ac = std.math.cast(usize, argc) orelse
+        return @intFromEnum(JitPushStatus.tier_down);
+    const reg_count = @max(@as(usize, callee_chunk.register_count), ac);
+    var is_stack_alloc = true;
+    const callee_regs = realm.allocStackRegisters(reg_count) orelse blk: {
+        is_stack_alloc = false;
+        break :blk realm.frame_pool.acquire(allocator, reg_count) catch
+            return @intFromEnum(JitPushStatus.host_oom);
+    };
+    @memset(callee_regs, Value.undefined_);
+    var ai: usize = 0;
+    while (ai < ac and ai < callee_regs.len) : (ai += 1) {
+        callee_regs[ai] = args_ptr[ai];
+    }
+    const callee_this: Value = if (callee_fn.is_arrow)
+        callee_fn.captured_this
+    else
+        .{ .bits = this_bits };
+    const callee_new_target: Value = if (callee_fn.is_arrow)
+        callee_fn.captured_new_target
+    else
+        Value.undefined_;
+    frames.append(allocator, .{
+        .chunk = callee_chunk,
+        .ip = 0,
+        .accumulator = Value.undefined_,
+        .registers = callee_regs,
+        .env = callee_fn.captured_env,
+        .this_value = callee_this,
+        .new_target = callee_new_target,
+        .home_object = callee_fn.home_object,
+        .home_function = callee_fn.home_function,
+        .super_called_cell = callee_fn.super_called_cell,
+        .argc = @intCast(@min(ac, std.math.maxInt(u32))),
+        .wrap_return_in_promise = false,
+        .owning_module = callee_fn.owning_module,
+        .running_realm = callee_fn.realm,
+        .is_stack_alloc = is_stack_alloc,
+    }) catch {
+        if (is_stack_alloc) {
+            realm.freeStackRegisters(callee_regs);
+        } else {
+            realm.frame_pool.release(allocator, callee_regs);
+        }
+        return @intFromEnum(JitPushStatus.host_oom);
+    };
+    return @intFromEnum(JitPushStatus.pushed);
+}
+
+/// Push a vetted ordinary bytecode constructor onto the active JIT-owned frame
+/// stack without running it. This is the shared `new_call` IC-hit path for
+/// Bistromath and Ohaimark: the caller has already checked the cached callee
+/// and prototype, so this helper only performs the allocation/frame work that
+/// Lantern's interpreter fast path would perform. The driver applies
+/// §10.2.2 ConstructResult when this child returns.
+pub fn pushJitConstructFrame(
+    realm: *Realm,
+    cell: *const CallICCell,
+    callee_fn: *JSFunction,
+    args_ptr: [*]const Value,
+    argc: u64,
+) callconv(.c) u32 {
+    const frames = realm.jit_active_frames orelse
+        return @intFromEnum(JitPushStatus.tier_down);
+    if (frames.items.len >= lantern.max_call_frames) {
+        return @intFromEnum(JitPushStatus.tier_down);
+    }
+    const callee_chunk = callee_fn.chunk orelse
+        return @intFromEnum(JitPushStatus.tier_down);
+    const ac = std.math.cast(usize, argc) orelse
+        return @intFromEnum(JitPushStatus.tier_down);
+    const allocator = realm.heap.allocator;
+    const reg_count = @max(@as(usize, callee_chunk.register_count), ac);
+    var is_stack_alloc = true;
+    const callee_regs = realm.allocStackRegisters(reg_count) orelse blk: {
+        is_stack_alloc = false;
+        break :blk realm.frame_pool.acquire(allocator, reg_count) catch
+            return @intFromEnum(JitPushStatus.host_oom);
+    };
+    @memset(callee_regs, Value.undefined_);
+    var ai: usize = 0;
+    while (ai < ac and ai < callee_regs.len) : (ai += 1) {
+        callee_regs[ai] = args_ptr[ai];
+    }
+    const instance = realm.heap.allocateObject() catch {
+        if (is_stack_alloc) {
+            realm.freeStackRegisters(callee_regs);
+        } else {
+            realm.frame_pool.release(allocator, callee_regs);
+        }
+        return @intFromEnum(JitPushStatus.host_oom);
+    };
+    realm.heap.setObjectPrototype(instance, cell.proto);
+    // §10.1.13's initial-map hint provisions slot capacity only. It must not
+    // change the observable shape, and failure is a harmless optimization miss.
+    if (cell.initial_shape) |ishape| presize: {
+        const n = ishape.property_count;
+        if (n == 0 or instance.slotCount() >= n) break :presize;
+        instance.resizeSlots(allocator, n) catch break :presize;
+        var si: usize = 0;
+        while (si < n) : (si += 1) instance.slotPtr(si).* = Value.undefined_;
+    }
+    frames.append(allocator, .{
+        .chunk = callee_chunk,
+        .ip = 0,
+        .accumulator = Value.undefined_,
+        .registers = callee_regs,
+        .env = callee_fn.captured_env,
+        .this_value = heap_mod.taggedObject(instance),
+        .is_construct = true,
+        .is_derived_ctor = callee_fn.constructor_kind == .derived,
+        .new_target = heap_mod.taggedFunction(callee_fn),
+        .home_object = callee_fn.home_object,
+        .home_function = callee_fn.home_function,
+        .owning_module = callee_fn.owning_module,
+        .running_realm = callee_fn.realm,
+        .argc = @intCast(@min(ac, std.math.maxInt(u32))),
+        .is_stack_alloc = is_stack_alloc,
+    }) catch {
+        if (is_stack_alloc) {
+            realm.freeStackRegisters(callee_regs);
+        } else {
+            realm.frame_pool.release(allocator, callee_regs);
+        }
+        return @intFromEnum(JitPushStatus.host_oom);
+    };
+    return @intFromEnum(JitPushStatus.pushed);
+}
 
 /// Phase 3 SES override-mistake fix — perform the synthetic
 /// setter's DefineOwnProperty step on `receiver`.

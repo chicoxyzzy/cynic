@@ -273,14 +273,10 @@ fn driveTop(
     entry: EntryFn,
 ) RunError!EnterOutcome {
     const base = frames.items.len - 1;
-    // The in-line push shims append to `realm.jit_active_frames` — set
-    // it to THIS activation's list (not `frame_stacks`'s top, which may
-    // be stale: `callJSFunction` enters here before its `runFrames`
-    // registers the list). Restore on exit; the save handles nesting
-    // (a compiled callee's exotic call re-enters JS on a fresh list).
-    const prev_active = realm.jit_active_frames;
-    realm.jit_active_frames = frames;
-    defer realm.jit_active_frames = prev_active;
+    // Root this list before generated code can push an allocating callee.
+    // `callJSFunction` probes JIT tiers before `runFrames` registers it.
+    var frame_scope = call_mod.JitFrameScope.init(realm, frames) catch return .not_entered;
+    defer frame_scope.deinit();
     var stub = entry;
     while (true) {
         const fr = &frames.items[frames.items.len - 1];
@@ -336,6 +332,7 @@ fn driveTop(
                         stub = entryForFresh(realm, callee) orelse return .not_entered;
                     },
                     .resumed => return .not_entered,
+                    .handed_off => return .not_entered,
                     .completed => |ret| {
                         const caller = &frames.items[frames.items.len - 1];
                         caller.accumulator = ret;
@@ -544,160 +541,7 @@ const HelperCallStatus = enum(u32) { value = 0, threw = 1, host_oom = 2 };
 /// precondition didn't hold (stack-depth ceiling — Lantern re-runs the
 /// op and raises the RangeError, or other rare guard) and the site
 /// tiers down to re-run the whole op in Lantern; `host_oom` propagates.
-const PushStatus = enum(u32) { pushed = 0, tier_down = 1, host_oom = 2 };
-
-/// The `frames` list the active `driveTop` is driving (docs/jit.md
-/// §4.5) — set by `driveTop`, NOT `frame_stacks`'s top: a compiled
-/// callee can be entered (via `tryEnterTop` in `callJSFunction`)
-/// before that list is registered on `frame_stacks`, so the top would
-/// be the stale OUTER list and the shim would push the callee onto the
-/// wrong stack. A compiled in-line push appends the callee here (frame
-/// identity, docs/jit.md §4.2): the same list, the same pooled
-/// register files. The append may realloc the backing array and so
-/// invalidate any held `*CallFrame` — the compiled site must have
-/// already flushed `ip` / `accumulator` to its frame and must not
-/// touch its frame pointer again before returning `frame_pushed`
-/// (the driver re-derives the caller by index on resume).
-inline fn activeFrames(realm: *Realm) *std.ArrayListUnmanaged(CallFrame) {
-    return realm.jit_active_frames.?;
-}
-
-/// docs/jit.md §4.5 in-line plain call: push a vetted plain JSFunction
-/// callee's frame onto the caller's `frames` list, exactly as the
-/// interpreter's `.call` / `.call_method` fast path does — reg-file
-/// acquire, arg copy, frame append at ip 0 — without running it. The
-/// driver drives it next. `callee_fn` is the cell-vetted function (the
-/// site checked the function kind + `CallICCell.callee` match); `this`
-/// is the receiver (method form) or undefined (plain). Arrows take
-/// their captured `this` / `new.target` (§13.3.12). Mirrors
-/// interpreter.zig's `.call_method` JS-callee push.
-fn pushCallFrameShim(
-    realm: *Realm,
-    callee_fn: *JSFunction,
-    this_bits: u64,
-    args_ptr: [*]const Value,
-    argc: u64,
-) callconv(.c) u32 {
-    const allocator = realm.heap.allocator;
-    const frames = activeFrames(realm);
-    if (frames.items.len >= interpreter.max_call_frames) {
-        return @intFromEnum(PushStatus.tier_down);
-    }
-    const callee_chunk = callee_fn.chunk orelse return @intFromEnum(PushStatus.tier_down);
-    const ac: usize = @intCast(argc);
-    const reg_count = @max(@as(usize, callee_chunk.register_count), ac);
-    var is_stack_alloc = true;
-    const callee_regs = realm.allocStackRegisters(reg_count) orelse blk: {
-        is_stack_alloc = false;
-        break :blk realm.frame_pool.acquire(allocator, reg_count) catch
-            return @intFromEnum(PushStatus.host_oom);
-    };
-    @memset(callee_regs, Value.undefined_);
-    var ai: usize = 0;
-    while (ai < ac and ai < callee_regs.len) : (ai += 1) {
-        callee_regs[ai] = args_ptr[ai];
-    }
-    const callee_this: Value = if (callee_fn.is_arrow) callee_fn.captured_this else .{ .bits = this_bits };
-    const callee_new_target: Value = if (callee_fn.is_arrow) callee_fn.captured_new_target else Value.undefined_;
-    frames.append(allocator, .{
-        .chunk = callee_chunk,
-        .ip = 0,
-        .accumulator = Value.undefined_,
-        .registers = callee_regs,
-        .env = callee_fn.captured_env,
-        .this_value = callee_this,
-        .new_target = callee_new_target,
-        .home_object = callee_fn.home_object,
-        .home_function = callee_fn.home_function,
-        .super_called_cell = callee_fn.super_called_cell,
-        .argc = @intCast(@min(ac, std.math.maxInt(u32))),
-        .wrap_return_in_promise = false,
-        .owning_module = callee_fn.owning_module,
-        .running_realm = callee_fn.realm,
-        .is_stack_alloc = is_stack_alloc,
-    }) catch {
-        if (is_stack_alloc) realm.freeStackRegisters(callee_regs) else realm.frame_pool.release(allocator, callee_regs);
-        return @intFromEnum(PushStatus.host_oom);
-    };
-    return @intFromEnum(PushStatus.pushed);
-}
-
-/// docs/jit.md §4.5 in-line construct: push a vetted plain JSFunction
-/// constructor's frame, exactly as the interpreter's `new_call` IC-hit
-/// fast path does (interpreter.zig `.new_call`) — allocate the
-/// instance with the cell's cached prototype, pre-size its slot vector
-/// from the cell's `initial_shape` (§10.1.13 "initial map"), acquire
-/// the reg file, copy args, append the construct frame at ip 0. The
-/// site has already checked the function kind, `cell.callee` ==
-/// callee_fn, and `callee_fn.prototype` == `cell.proto`; the shim
-/// reads `cell.proto` / `cell.initial_shape` for the instance shape.
-/// The driver applies §10.2.2 ConstructResult on the callee's return.
-fn pushConstructFrameShim(
-    realm: *Realm,
-    cell: *const chunk_mod.CallICCell,
-    callee_fn: *JSFunction,
-    args_ptr: [*]const Value,
-    argc: u64,
-) callconv(.c) u32 {
-    const allocator = realm.heap.allocator;
-    const frames = activeFrames(realm);
-    if (frames.items.len >= interpreter.max_call_frames) {
-        return @intFromEnum(PushStatus.tier_down);
-    }
-    const callee_chunk = callee_fn.chunk orelse return @intFromEnum(PushStatus.tier_down);
-    const ac: usize = @intCast(argc);
-    const reg_count = @max(@as(usize, callee_chunk.register_count), ac);
-    var is_stack_alloc = true;
-    const callee_regs = realm.allocStackRegisters(reg_count) orelse blk: {
-        is_stack_alloc = false;
-        break :blk realm.frame_pool.acquire(allocator, reg_count) catch
-            return @intFromEnum(PushStatus.host_oom);
-    };
-    @memset(callee_regs, Value.undefined_);
-    var ai: usize = 0;
-    while (ai < ac and ai < callee_regs.len) : (ai += 1) {
-        callee_regs[ai] = args_ptr[ai];
-    }
-    const instance = realm.heap.allocateObject() catch {
-        if (is_stack_alloc) realm.freeStackRegisters(callee_regs) else realm.frame_pool.release(allocator, callee_regs);
-        return @intFromEnum(PushStatus.host_oom);
-    };
-    realm.heap.setObjectPrototype(instance, cell.proto);
-    // §10.1.13 instance "initial map" — pre-size the slot vector to the
-    // ctor's inferred field count so the body's `this.<field> =` writes
-    // land in provisioned slots. Pure optimization: on OOM skip it and
-    // let the per-field `sta_property` path size/throw. The SHAPE stays
-    // at root (§10.1.11 own-key order grows field-by-field).
-    if (cell.initial_shape) |ishape| presize: {
-        const n = ishape.property_count;
-        if (n == 0 or instance.slotCount() >= n) break :presize;
-        instance.resizeSlots(allocator, n) catch break :presize;
-        var si: usize = 0;
-        while (si < n) : (si += 1) instance.slotPtr(si).* = Value.undefined_;
-    }
-    const this_value = heap_mod.taggedObject(instance);
-    frames.append(allocator, .{
-        .chunk = callee_chunk,
-        .ip = 0,
-        .accumulator = Value.undefined_,
-        .registers = callee_regs,
-        .env = callee_fn.captured_env,
-        .this_value = this_value,
-        .is_construct = true,
-        .is_derived_ctor = callee_fn.constructor_kind == .derived,
-        .new_target = heap_mod.taggedFunction(callee_fn),
-        .home_object = callee_fn.home_object,
-        .home_function = callee_fn.home_function,
-        .owning_module = callee_fn.owning_module,
-        .running_realm = callee_fn.realm,
-        .argc = @intCast(@min(ac, std.math.maxInt(u32))),
-        .is_stack_alloc = is_stack_alloc,
-    }) catch {
-        if (is_stack_alloc) realm.freeStackRegisters(callee_regs) else realm.frame_pool.release(allocator, callee_regs);
-        return @intFromEnum(PushStatus.host_oom);
-    };
-    return @intFromEnum(PushStatus.pushed);
-}
+const PushStatus = call_mod.JitPushStatus;
 
 /// The docs/jit.md §4.5 helper-mediated call: compiled code syncs
 /// its accumulator (the callee may allocate and GC; the frame is
@@ -1807,10 +1651,10 @@ const Compiler = struct {
     /// Compiled code allocates nothing, so the GC counters can't
     /// move mid-run and aren't checked here.
     ///
-    /// When `Realm.ohaimark_osr_enabled` is set, a warm Ohaimark OSR
-    /// candidate also tiers down at the header so Lantern's backedge
-    /// driver can enter T2 (docs/ohaimark.md §3.17). The policy load
-    /// is a single byte check so the default-off path stays free.
+    /// A warm Ohaimark OSR candidate tiers down at the header while the
+    /// realm policy is enabled so Lantern's backedge driver can enter T2
+    /// (docs/ohaimark.md §3.17). The policy load is a single byte check
+    /// so the explicit host opt-out stays cheap.
     fn backEdgeSafePoint(self: *Compiler, target: u32) CompileError!void {
         const m = &self.m;
         const td = try self.tdFor(target);
@@ -2078,7 +1922,7 @@ const Compiler = struct {
     /// window at `args_base..+argc`. A cell hit (vetted plain
     /// JSFunction, pointer match) takes **in-line frame-reentry**: it
     /// stamps the resume ip (`after_bc`) on the frame, pushes the
-    /// callee frame onto the caller's list (`pushCallFrameShim`), and
+    /// callee frame onto the caller's list (`pushJitDirectCallFrame`), and
     /// returns `EntryResult.frame_pushed` so the driver runs the
     /// callee in place — no nested `runFrames` (the fix for
     /// docs/ctor-array-build-gap.md L5). Any miss — cold cell,
@@ -2134,7 +1978,7 @@ const Compiler = struct {
         }
         try m.emit(a64.addImm(.x3, regs_reg, @intCast(@as(u32, regSlot(args_base))), false));
         try m.movImm64(.x4, argc);
-        try m.callAbs(.x16, @intFromPtr(&pushCallFrameShim));
+        try m.callAbs(.x16, @intFromPtr(&call_mod.pushJitDirectCallFrame));
         // PushStatus: 0 pushed → frame_pushed; 1 tier_down → re-run the
         // op in Lantern; 2 host_oom.
         try m.emit(a64.movRegW(.x0, .x0));
@@ -2167,7 +2011,7 @@ const Compiler = struct {
     /// JSFunction whose `CallICCell.callee` matches AND whose live
     /// `.prototype` still equals the cell's cached `proto` (catches a
     /// `C.prototype = …` reassignment). On a hit, push the construct
-    /// frame (`pushConstructFrameShim`, which allocates the instance
+    /// frame (`pushJitConstructFrame`, which allocates the instance
     /// with the cached proto + pre-sizes from `initial_shape`) and
     /// return `frame_pushed` — the driver applies §10.2.2 ConstructResult
     /// on the callee's return. Any miss tiers down to re-run the whole
@@ -2216,7 +2060,7 @@ const Compiler = struct {
         try m.emit(a64.movReg(.x2, .x10)); // callee fn ptr
         try m.emit(a64.addImm(.x3, regs_reg, @intCast(@as(u32, regSlot(r_callee + 1))), false));
         try m.movImm64(.x4, argc);
-        try m.callAbs(.x16, @intFromPtr(&pushConstructFrameShim));
+        try m.callAbs(.x16, @intFromPtr(&call_mod.pushJitConstructFrame));
         try m.emit(a64.movRegW(.x0, .x0));
         try m.jumpCbz(.x0, &self.frame_pushed_label);
         try m.emit(a64.cmpImm(.x0, @intFromEnum(PushStatus.tier_down), false));

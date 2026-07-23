@@ -72,14 +72,13 @@ fallthrough, and a one-word completion ABI. Its one-byte arithmetic profile
 distinguishes Int32/Double operand order so generated Number operations emit
 only the guards and conversions they need. Ohaimark now runs by default at its
 natural production threshold: `--no-ohaimark` isolates Bistromath, while
-`--no-jit` disables both tiers. Loop-header OSR is implemented but **default-off**
-(`Realm.ohaimark_osr_enabled` / `--ohaimark-osr` for validation and the OSR
-rollout bench) until its own differential and performance gates pass. The final
-30-pair T2/T1 function-entry rollout measured `0.997x` geometric mean, a worst
-fixture of `1.041x`, and 0.8 KiB installed code, passing both rollout ceilings.
-Baseline and forced-T2 test262 sweeps produced the exact same 48,517-pass set;
-focused ReleaseSafe GC-pressure runs and bounded crash/value-differential fuzz
-campaigns found no verifier failure, host crash, or differential. See
+`--no-jit` disables both tiers. Loop-header OSR is also on by default with T2;
+`--no-ohaimark-osr` retains function-entry-only diagnosis. Its final 30-pair
+T2/T1 rollout measured `0.122x` geometric mean, a worst fixture of `0.140x`,
+and 2.1 KiB installed code. Baseline and forced-T2+OSR test262 sweeps produced
+the exact same 48,517-pass set; focused ReleaseSafe GC-pressure runs and
+bounded crash/value-differential fuzz campaigns found no verifier failure, host
+crash, or differential. See
 [`docs/ROADMAP.md`](docs/ROADMAP.md) for the thematic breakdown.
 
 ### Conformance
@@ -209,9 +208,10 @@ your local `zig version` reports an older dev tag, bump it.
 - `--jit` / `--ohaimark` — force Bistromath alone, or default-on Ohaimark before Bistromath, at threshold 1 for independent pass-set differential runs.
 - `--ohaimark-stats` — with `--ohaimark`, print aggregate T2 compile attempts, publications/refusals, compile time, installed bytes, generated entries, completions, guard exits, refusal-stage counts, and the top unsupported bytecodes. Remains parallel-safe.
 
-Top-level CLI (not a test262 harness flag): `--ohaimark-osr` enables
-loop-header OSR into Ohaimark (default off; validation and
-`zig build bench -- --ohaimark-osr-rollout` only until graduation).
+Top-level CLI: loop-header OSR is part of the default Ohaimark posture;
+`--no-ohaimark-osr` isolates function-entry T2. The
+`zig build bench -- --ohaimark-osr-rollout` suite remains the dedicated
+natural-threshold OSR regression check.
 - `--gc-threshold=<n>` — per-fixture allocation-pressure GC threshold (default 32,768; engine default 16,384). `0` falls through to the engine default. The engine also has a 16 MiB byte trigger so allocate-and-discard patterns GC promptly regardless of count.
 - `--write-results` — update `test262-results.md` with today's row. Re-running on the same date replaces that day's row rather than appending. The default run never touches that file.
 - **Memory / leak instrumentation:** `--gc-stats` (per-cycle pool counts + bytes), `--mem-summary` (end-of-sweep totals: cumulative bytes, max charged peak, GC cycles), `--top-rss=<n>` (top-N fixtures by process RSS delta ≥ 8 MiB), `--top-alloc=<n>` (top-N by cumulative bytes allocated ≥ 64 KiB — catches GC-cleaned thrash that RSS hides), `--leak-check` (route per-fixture bytes allocator through `std.heap.DebugAllocator`; stack trace per unfreed allocation), `--max-rss=<mb>` (abort with the offending path when RSS crosses budget).

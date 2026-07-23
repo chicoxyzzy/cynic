@@ -285,6 +285,19 @@ pub const Intrinsics = struct {
     /// before stepping the backing storage directly.
     array_iterator_next: Value = Value.undefined_,
 
+    /// §13.5.3 result strings. `typeof` is a pure classification
+    /// operation; caching these immutable primitive strings avoids a fresh
+    /// heap allocation for every execution and gives Ohaimark a stable,
+    /// realm-relative result to load directly.
+    typeof_undefined_string: Value = Value.undefined_,
+    typeof_object_string: Value = Value.undefined_,
+    typeof_boolean_string: Value = Value.undefined_,
+    typeof_number_string: Value = Value.undefined_,
+    typeof_string_string: Value = Value.undefined_,
+    typeof_function_string: Value = Value.undefined_,
+    typeof_symbol_string: Value = Value.undefined_,
+    typeof_bigint_string: Value = Value.undefined_,
+
     /// `%StringIteratorPrototype%` (§22.1.5.2). Same shape — chains
     /// to `%IteratorPrototype%`. Lazily allocated alongside
     /// `array_iterator_prototype`.

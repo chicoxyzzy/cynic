@@ -4,18 +4,23 @@ Status: **Bistromath and Ohaimark ship on by default** (`--no-ohaimark`
 isolates T1; `--no-jit` selects Lantern). Ohaimark's feedback/SSA,
 specialization, representation/deopt plans, allocation, AArch64 codegen,
 live-cell property guards, exact Lantern recovery, backedge safepoints, and
-transactional executable ownership have landed. Its helper-free ABI now adds
-single-predecessor edge coalescing, physical next-block fallthrough, a one-word
-completion result, and exact Int32/Double operand-shape specialization. The
+transactional executable ownership have landed. Its ordinary helper-free ABI
+now adds single-predecessor edge coalescing, physical next-block fallthrough, a
+one-word completion result, and exact Int32/Double operand-shape specialization. The
 graduation 30-pair T2/T1 run measured `0.997x` geometric mean, `1.041x` worst,
 and 0.8 KiB installed code. Baseline and forced-T2 test262 pass lists match at
 48,517 paths; focused ReleaseSafe GC-pressure runs and bounded crash/value
 differential fuzz campaigns found no verifier failure, host crash, or
 differential. CI now gates both T1 and T2 pass-set equality. Loop-header OSR
-into Ohaimark is implemented behind a realm-local **default-off** gate
-(`Realm.ohaimark_osr_enabled` / CLI `--ohaimark-osr`); it does not graduate to
-default-on until its own differential and natural-threshold gates pass (see
-[ohaimark.md](ohaimark.md) §3.17). Rooted helper calls, broader opcode
+into Ohaimark also ships by default after its independent exact differential,
+ReleaseSafe GC-pressure, fuzz, and natural-threshold performance gates passed;
+`--no-ohaimark-osr` isolates function-entry T2 (see
+[ohaimark.md](ohaimark.md) §3.17). A rooted lexical-environment subset now
+ships: entry/mid-body `make_environment` and barrier-backed `sta_env`;
+a direct monomorphic compact call/construct/property frame handoff
+(`call_method8`, `call0_8` through `call3_8`, `call8`, `call_property8`, and
+`new_call8`) now also ships.
+Generalized rooted helper calls, native post-call continuations, broader opcode
 coverage, and additional codegen targets remain future work. Spasm's
 delivery state is tracked below. The document
 doubles as the design record that pinned the architecture before the first
@@ -481,8 +486,37 @@ accumulator and liveness-derived register parameters into the existing Lantern
 frame and returns `resume_interp`; Lantern performs the slow work with those
 tagged values in its normal precise root set. Native tests include a real young
 collection that preserves a loop-carried object and reclaims an unrooted peer.
-The supported native subset still makes no helper call or allocation; such
-nodes continue to reject until rooted call safepoints land. Completed code now
+The supported native subset remains helper-free except for a narrow
+non-reentrant lexical-environment boundary and a direct compact
+call/construct/property handoff. A single entry
+`make_environment` still runs before SSA materialization; any later or multiple
+allocation, plus `sta_env`, first stages the physical pre-operation state in
+the Lantern frame, preserves `x0`-`x8`, `x16`, and LR across the C helper, then
+continues on success or resumes Lantern at the original opcode on failure.
+`sta_env` routes through `Heap.storeEnvSlot`, preserving the GC write barrier.
+The deliberate JS-reentrant exceptions are monomorphic compact direct calls,
+construction, and data-only property calls: `call_method8`, `call0_8` through
+`call3_8`, `call8`, `call_property8`, and `new_call8`. After staging its
+pre-operation physical state, generated code validates the live `CallICCell`;
+calls use their method receiver or strict `undefined`, while construction
+additionally guards the cached prototype against the live constructor. A
+`call_property8` additionally proves a plain-object receiver, matching
+data-only `LoadICCell`, and same-target `CallICCell`; prototype loads verify
+identity, shape, and the Realm prototype revision. Its receiver is `this` and
+its arguments immediately follow it in the staged window. Synthetic accessors,
+accessors/exotics, cold or mismatching ICs, and every excluded callable replay
+the original bytecode in Lantern. Shared Lantern helpers push only eligible
+ordinary bytecode child frames. The construct helper allocates from the cached
+prototype, preserves the initial-shape capacity hint, marks the child as a
+constructor, and leaves §10.2.2 ConstructResult to Lantern's normal return
+path. Both helpers advance the caller IP and return a handoff control word.
+They preserve the volatile JIT convention except status `x0`, so a cold or
+mismatching IC can reconstruct and replay the exact opcode in Lantern. Lantern
+then drives the child and the parent's ordinary bytecode continuation. This is
+not a generic helper ABI: native post-call continuations, other JS-reentrant
+calls, and exception/continuation operations still refuse until they have full
+stack-map and continuation support.
+Completed code now
 publishes transactionally into a chunk-owned T2 record, independently of
 Bistromath's owned main/continuation records. The production CLI's default-on
 driver enters fresh ordinary functions after sustained heat (or threshold 1
@@ -490,9 +524,10 @@ under the test262 `--ohaimark` differential), then returns a tagged completion
 in AAPCS64 `x0` or resumes Lantern's reconstructed frame after receiving the
 reserved one-word sentinel. `--no-ohaimark` retains Bistromath; `--no-jit`
 retains Lantern alone. Constructors, generators, async frames, and Ohaimark OSR
-remain lower-tier paths unless `Realm.ohaimark_osr_enabled` is set (default
-off). With OSR on, Lantern and Bistromath backedges may enter published T2
-stubs at loop headers using the existing frame-identity ABI.
+remain lower-tier paths unless all master JIT/T2 gates are enabled. With the
+default OSR policy on, Lantern and Bistromath backedges may enter published T2
+stubs at loop headers using the existing frame-identity ABI; hosts can isolate
+function-entry T2 through `Realm.ohaimark_osr_enabled = false`.
 The production-threshold rollout harness in [benchmarking.md](benchmarking.md)
 now compares T1 and T1+T2 with interleaved process pairs and machine-readable
 publication telemetry. Its first 30-pair arm64 sample published five supported
@@ -1257,10 +1292,10 @@ useful:
    Single-predecessor edge coalescing, physical fallthrough, one-word
    completion, and exact Number operand-shape specialization passed the
    performance gate; full differential, focused GC-pressure, and bounded fuzz
-   evidence passed the rollout audit. Ordinary-function entry now reaches T2
-   by default at natural thresholds. OSR ships default-off (ohaimark.md §3.17).
-   Next: OSR graduation, rooted helper calls, broader
-   opcode coverage, and additional architectures; see
+   evidence passed the rollout audit. Ordinary-function entry and loop-header
+   OSR now reach T2 by default at natural thresholds; `--no-ohaimark-osr`
+   retains an entry-only diagnostic posture. Next: generalized rooted helper
+   calls, broader opcode coverage, and additional architectures; see
    [ohaimark.md](ohaimark.md).
 
 ## 13. Considered and declined

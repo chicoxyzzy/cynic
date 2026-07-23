@@ -435,9 +435,10 @@ runs the comparison as the gating `test262-jit-differential`
 job. The harness flag is independent of the `cynic` CLI, where
 the tier is on by default at natural thresholds and `--no-jit`
 opts out),
-`--ohaimark` (force the default-on Ohaimark tier before Bistromath and
-set both thresholds to 1. This is the T2 differential posture; it
-remains separate from the established T1-only `--jit` pass set),
+`--ohaimark` (force the default-on Ohaimark tier, including loop-header
+OSR, before Bistromath and set both thresholds to 1. This is the T2
+differential posture; `--no-ohaimark-osr` isolates function-entry T2,
+and it remains separate from the established T1-only `--jit` pass set),
 `--ohaimark-stats` (requires `--ohaimark`; print heap-scoped T2 compile,
 code-size, entry, completion, guard-exit, refusal-stage, and top unsupported-
 opcode counters aggregated across fixtures and harness workers),

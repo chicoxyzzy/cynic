@@ -6,8 +6,11 @@ const Op = @import("../../bytecode/op.zig").Op;
 const Span = @import("../../source.zig").Span;
 const a64 = @import("../jit/asm_aarch64.zig");
 const code_alloc = @import("../jit/code_alloc.zig");
+const NativeError = @import("../function.zig").NativeError;
 const heap_mod = @import("../heap.zig");
+const JSString = @import("../string.zig").JSString;
 const lantern = @import("../lantern/interpreter.zig");
+const arith = @import("../lantern/arith.zig");
 const masm = @import("../jit/masm.zig");
 const object_mod = @import("../object.zig");
 const Realm = @import("../realm.zig").Realm;
@@ -443,6 +446,22 @@ fn globalSlotLoadChunk(slot: u32) !chunk_mod.Chunk {
     return builder.finish();
 }
 
+fn throwIfHoleChunk() !chunk_mod.Chunk {
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    try builder.emitOp(.throw_if_hole, span);
+    try builder.emitOp(.return_, span);
+    return builder.finish();
+}
+
+fn typeOfChunk() !chunk_mod.Chunk {
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    try builder.emitOp(.typeof_, span);
+    try builder.emitOp(.return_, span);
+    return builder.finish();
+}
+
 const SafepointLoop = struct {
     chunk: chunk_mod.Chunk,
     header: u32,
@@ -611,11 +630,15 @@ fn codeContainsMaskedTriple(
     return false;
 }
 
-fn resumeLantern(realm: *Realm, frame: lantern.CallFrame) !Value {
+fn resumeLanternResult(realm: *Realm, frame: lantern.CallFrame) !lantern.RunResult {
     var frames: std.ArrayListUnmanaged(lantern.CallFrame) = .empty;
     defer frames.deinit(testing.allocator);
     try frames.append(testing.allocator, frame);
-    return switch (try lantern.runFrames(testing.allocator, realm, &frames)) {
+    return lantern.runFrames(testing.allocator, realm, &frames);
+}
+
+fn resumeLantern(realm: *Realm, frame: lantern.CallFrame) !Value {
+    return switch (try resumeLanternResult(realm, frame)) {
         .value => |value| value,
         else => error.TestUnexpectedResult,
     };
@@ -1714,12 +1737,10 @@ test "Ohaimark IR elides only unobservable empty environments" {
     try mixed_builder.emitOp(.return_, span);
     var mixed = try mixed_builder.finish();
     defer mixed.deinit(testing.allocator);
-    var diagnostics: ir.BuildDiagnostics = .{};
-    try testing.expectError(
-        error.UnsupportedOp,
-        ir.Graph.buildWithDiagnostics(testing.allocator, &mixed, &diagnostics),
-    );
-    try testing.expectEqual(Op.make_environment, diagnostics.unsupported_opcode.?);
+    var mixed_graph = try ir.Graph.build(testing.allocator, &mixed);
+    defer mixed_graph.deinit();
+    try testing.expectEqual(@as(?u8, 0), mixed_graph.entry_environment_slots);
+    try testing.expect(findNodeInGraph(&mixed_graph, .load_environment) != null);
 
     var real_builder = Builder.init(testing.allocator);
     defer real_builder.deinit();
@@ -1728,12 +1749,319 @@ test "Ohaimark IR elides only unobservable empty environments" {
     try real_builder.emitOp(.return_, span);
     var real = try real_builder.finish();
     defer real.deinit(testing.allocator);
-    diagnostics = .{};
-    try testing.expectError(
-        error.UnsupportedOp,
-        ir.Graph.buildWithDiagnostics(testing.allocator, &real, &diagnostics),
+    var real_graph = try ir.Graph.build(testing.allocator, &real);
+    defer real_graph.deinit();
+    try testing.expectEqual(@as(?u8, 1), real_graph.entry_environment_slots);
+
+    var late_builder = Builder.init(testing.allocator);
+    defer late_builder.deinit();
+    try late_builder.emitOp(.lda_undefined, span);
+    try late_builder.emitOp(.make_environment, span);
+    try late_builder.emitU8(1);
+    try late_builder.emitOp(.return_, span);
+    var late = try late_builder.finish();
+    defer late.deinit(testing.allocator);
+    var late_graph = try ir.Graph.build(testing.allocator, &late);
+    defer late_graph.deinit();
+    try testing.expectEqual(@as(?u8, null), late_graph.entry_environment_slots);
+    const allocation_node = findNodeInGraph(&late_graph, .allocate_environment) orelse
+        return error.TestUnexpectedResult;
+    try testing.expect(late_graph.nodes[allocation_node].frame_state != null);
+    var late_native = try NativeGraph.build(&late);
+    defer late_native.deinit();
+}
+
+test "Ohaimark AArch64 rooted entry environment allocation preserves frame roots" {
+    if (comptime !masm.native_aarch64) return error.SkipZigTest;
+
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    const root_register = try builder.reserveRegister();
+    try builder.emitOp(.make_environment, span);
+    try builder.emitU8(1);
+    try builder.emitLoadReg(span, root_register);
+    try builder.emitOp(.return_, span);
+    var chunk = try builder.finish();
+    defer chunk.deinit(testing.allocator);
+
+    var native = try NativeGraph.build(&chunk);
+    defer native.deinit();
+    try testing.expectEqual(@as(?u8, 1), native.graph.entry_environment_slots);
+
+    var emitted = masm.Masm.init(testing.allocator);
+    defer emitted.deinit();
+    try native.emit(&emitted, &chunk);
+    try testing.expect(codeContainsWord(
+        emitted.code.items,
+        a64.stpPreIdxSp(.x0, .x1, -16),
+    ));
+    try testing.expect(codeContainsWord(
+        emitted.code.items,
+        a64.stpPreIdxSp(.x2, .x16, -16),
+    ));
+    try testing.expect(codeContainsWord(emitted.code.items, a64.strPreIdxSp(.lr, -16)));
+    try testing.expect(codeContainsWord(emitted.code.items, a64.ldrPostIdxSp(.lr, 16)));
+    try testing.expect(codeContainsWord(
+        emitted.code.items,
+        a64.ldpPostIdxSp(.x2, .x16, 16),
+    ));
+    try testing.expect(codeContainsWord(
+        emitted.code.items,
+        a64.ldpPostIdxSp(.x0, .x1, 16),
+    ));
+
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = false;
+    realm.heap.setGcThreshold(1);
+    const root = try realm.heap.allocateObject();
+    _ = try realm.heap.allocateObject();
+    try testing.expectEqual(@as(usize, 2), realm.heap.objectCount());
+    const parent = try realm.heap.allocateEnvironment(null, 1);
+
+    const registers = try testing.allocator.alloc(Value, chunk.register_count);
+    defer testing.allocator.free(registers);
+    var frames: std.ArrayListUnmanaged(lantern.CallFrame) = .empty;
+    defer frames.deinit(testing.allocator);
+    try frames.append(testing.allocator, testFrame(&chunk, registers));
+    try realm.frame_stacks.append(realm.allocator, &frames);
+    defer _ = realm.frame_stacks.pop();
+    const frame = &frames.items[0];
+    frame.env = parent;
+    frame.registers[root_register] = heap_mod.taggedObject(root);
+
+    try testing.expectEqual(
+        @intFromEnum(codegen.EntryResult.done),
+        try executeNative(&native, &realm, frame),
     );
-    try testing.expectEqual(Op.make_environment, diagnostics.unsupported_opcode.?);
+    try testing.expectEqual(heap_mod.taggedObject(root).bits, frame.accumulator.bits);
+    const env = frame.env orelse return error.TestUnexpectedResult;
+    try testing.expect(env.parent == parent);
+    try testing.expectEqual(@as(usize, 1), env.slots.len);
+    try testing.expectEqual(Value.hole_.bits, env.slots[0].bits);
+
+    realm.collectGarbage();
+    try testing.expectEqual(@as(usize, 1), realm.heap.objectCount());
+    try testing.expectEqual(@as(usize, 2), realm.heap.environmentCount());
+    try testing.expectEqual(heap_mod.taggedObject(root).bits, frame.registers[root_register].bits);
+    const live_env = frame.env orelse return error.TestUnexpectedResult;
+    try testing.expect(live_env.parent == parent);
+    try testing.expectEqual(@as(usize, 1), live_env.slots.len);
+}
+
+test "Ohaimark AArch64 rooted mid-body environment allocation preserves live values" {
+    if (comptime !masm.native_aarch64) return error.SkipZigTest;
+
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    const root_register = try builder.reserveRegister();
+    try builder.emitLoadReg(span, root_register);
+    try builder.emitOp(.make_environment, span);
+    try builder.emitU8(1);
+    try builder.emitLoadReg(span, root_register);
+    try builder.emitOp(.return_, span);
+    var chunk = try builder.finish();
+    defer chunk.deinit(testing.allocator);
+
+    var native = try NativeGraph.build(&chunk);
+    defer native.deinit();
+    try testing.expectEqual(@as(?u8, null), native.graph.entry_environment_slots);
+
+    var emitted = masm.Masm.init(testing.allocator);
+    defer emitted.deinit();
+    try native.emit(&emitted, &chunk);
+    try testing.expect(codeContainsWord(
+        emitted.code.items,
+        a64.stpPreIdxSp(.x0, .x1, -16),
+    ));
+    try testing.expect(codeContainsWord(
+        emitted.code.items,
+        a64.stpPreIdxSp(.x2, .x3, -16),
+    ));
+    try testing.expect(codeContainsWord(
+        emitted.code.items,
+        a64.stpPreIdxSp(.x4, .x5, -16),
+    ));
+    try testing.expect(codeContainsWord(
+        emitted.code.items,
+        a64.stpPreIdxSp(.x6, .x7, -16),
+    ));
+    try testing.expect(codeContainsWord(
+        emitted.code.items,
+        a64.stpPreIdxSp(.x8, .x16, -16),
+    ));
+    try testing.expect(codeContainsWord(emitted.code.items, a64.strPreIdxSp(.lr, -16)));
+    try testing.expect(codeContainsWord(emitted.code.items, a64.ldrPostIdxSp(.lr, 16)));
+    try testing.expect(codeContainsWord(
+        emitted.code.items,
+        a64.ldpPostIdxSp(.x8, .x16, 16),
+    ));
+    try testing.expect(codeContainsWord(
+        emitted.code.items,
+        a64.ldpPostIdxSp(.x6, .x7, 16),
+    ));
+    try testing.expect(codeContainsWord(
+        emitted.code.items,
+        a64.ldpPostIdxSp(.x4, .x5, 16),
+    ));
+    try testing.expect(codeContainsWord(
+        emitted.code.items,
+        a64.ldpPostIdxSp(.x2, .x3, 16),
+    ));
+    try testing.expect(codeContainsWord(
+        emitted.code.items,
+        a64.ldpPostIdxSp(.x0, .x1, 16),
+    ));
+
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = false;
+    realm.heap.setGcThreshold(1);
+    const root = try realm.heap.allocateObject();
+    _ = try realm.heap.allocateObject();
+    const parent = try realm.heap.allocateEnvironment(null, 1);
+
+    const registers = try testing.allocator.alloc(Value, chunk.register_count);
+    defer testing.allocator.free(registers);
+    var frames: std.ArrayListUnmanaged(lantern.CallFrame) = .empty;
+    defer frames.deinit(testing.allocator);
+    try frames.append(testing.allocator, testFrame(&chunk, registers));
+    try realm.frame_stacks.append(realm.allocator, &frames);
+    defer _ = realm.frame_stacks.pop();
+    const frame = &frames.items[0];
+    frame.env = parent;
+    frame.registers[root_register] = heap_mod.taggedObject(root);
+
+    try testing.expectEqual(
+        @intFromEnum(codegen.EntryResult.done),
+        try executeNative(&native, &realm, frame),
+    );
+    try testing.expectEqual(heap_mod.taggedObject(root).bits, frame.accumulator.bits);
+    const env = frame.env orelse return error.TestUnexpectedResult;
+    try testing.expect(env.parent == parent);
+    try testing.expectEqual(@as(usize, 1), env.slots.len);
+
+    realm.collectGarbage();
+    try testing.expectEqual(@as(usize, 1), realm.heap.objectCount());
+    try testing.expectEqual(heap_mod.taggedObject(root).bits, frame.registers[root_register].bits);
+}
+
+test "Ohaimark AArch64 environment store preserves the accumulator and writes through the barrier" {
+    if (comptime !masm.native_aarch64) return error.SkipZigTest;
+
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    const root_register = try builder.reserveRegister();
+    try builder.emitLoadReg(span, root_register);
+    try builder.emitOp(.sta_env, span);
+    try builder.emitU8(0);
+    try builder.emitU8(0);
+    try builder.emitOp(.lda_env, span);
+    try builder.emitU8(0);
+    try builder.emitU8(0);
+    try builder.emitOp(.return_, span);
+    var chunk = try builder.finish();
+    defer chunk.deinit(testing.allocator);
+
+    var native = try NativeGraph.build(&chunk);
+    defer native.deinit();
+
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = false;
+    const root = try realm.heap.allocateObject();
+    const environment = try realm.heap.allocateEnvironment(null, 1);
+    const registers = try testing.allocator.alloc(Value, chunk.register_count);
+    defer testing.allocator.free(registers);
+    var frame = testFrame(&chunk, registers);
+    frame.env = environment;
+    frame.registers[root_register] = heap_mod.taggedObject(root);
+
+    try testing.expectEqual(
+        @intFromEnum(codegen.EntryResult.done),
+        try executeNative(&native, &realm, &frame),
+    );
+    try testing.expectEqual(heap_mod.taggedObject(root).bits, frame.accumulator.bits);
+    try testing.expectEqual(heap_mod.taggedObject(root).bits, environment.slots[0].bits);
+}
+
+test "Ohaimark AArch64 environment helper failure restores the pre-operation frame" {
+    if (comptime !masm.native_aarch64) return error.SkipZigTest;
+
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    const root_register = try builder.reserveRegister();
+    try builder.emitLoadReg(span, root_register);
+    try builder.emitOp(.sta_env, span);
+    try builder.emitU8(0);
+    try builder.emitU8(1);
+    try builder.emitLoadReg(span, root_register);
+    try builder.emitOp(.return_, span);
+    var chunk = try builder.finish();
+    defer chunk.deinit(testing.allocator);
+
+    var native = try NativeGraph.build(&chunk);
+    defer native.deinit();
+    const store_node = try findNode(&native, .store_environment);
+
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = false;
+    const root = try realm.heap.allocateObject();
+    const environment = try realm.heap.allocateEnvironment(null, 1);
+    const registers = try testing.allocator.alloc(Value, chunk.register_count);
+    defer testing.allocator.free(registers);
+    var frame = testFrame(&chunk, registers);
+    frame.env = environment;
+    frame.registers[root_register] = heap_mod.taggedObject(root);
+
+    try testing.expectEqual(
+        @intFromEnum(codegen.EntryResult.resume_interp),
+        try executeNative(&native, &realm, &frame),
+    );
+    try testing.expectEqual(native.graph.nodes[store_node].bytecode_offset, frame.ip);
+    try testing.expectEqual(heap_mod.taggedObject(root).bits, frame.accumulator.bits);
+    try testing.expectEqual(heap_mod.taggedObject(root).bits, frame.registers[root_register].bits);
+    try testing.expect(frame.env == environment);
+    try testing.expectEqual(Value.hole_.bits, environment.slots[0].bits);
+}
+
+test "Ohaimark AArch64 entry zero environment preserves lexical depth" {
+    if (comptime !masm.native_aarch64) return error.SkipZigTest;
+
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    try builder.emitOp(.make_environment, span);
+    try builder.emitU8(0);
+    try builder.emitOp(.lda_env, span);
+    try builder.emitU8(1);
+    try builder.emitU8(0);
+    try builder.emitOp(.return_, span);
+    var chunk = try builder.finish();
+    defer chunk.deinit(testing.allocator);
+
+    var native = try NativeGraph.build(&chunk);
+    defer native.deinit();
+    try testing.expectEqual(@as(?u8, 0), native.graph.entry_environment_slots);
+
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = false;
+    const parent = try realm.heap.allocateEnvironment(null, 1);
+    parent.slots[0] = Value.fromInt32(73);
+    const registers = try testing.allocator.alloc(Value, chunk.register_count);
+    defer testing.allocator.free(registers);
+    var frame = testFrame(&chunk, registers);
+    frame.env = parent;
+
+    try testing.expectEqual(
+        @intFromEnum(codegen.EntryResult.done),
+        try executeNative(&native, &realm, &frame),
+    );
+    try testing.expectEqual(Value.fromInt32(73).bits, frame.accumulator.bits);
+    const child = frame.env orelse return error.TestUnexpectedResult;
+    try testing.expect(child.parent == parent);
+    try testing.expectEqual(@as(usize, 0), child.slots.len);
 }
 
 test "Ohaimark AArch64 frame this load guards derived-constructor state" {
@@ -2074,6 +2402,123 @@ test "Ohaimark AArch64 prototype named load guards holder and revision" {
         executeEntry(entry, &realm, &frame),
     );
     try testing.expectEqual(Value.fromInt32(77).bits, (try resumeLantern(&realm, frame)).bits);
+}
+
+test "Ohaimark AArch64 throw_if_hole preserves values and resumes TDZ throws" {
+    if (comptime !masm.native_aarch64) return error.SkipZigTest;
+    var chunk = try throwIfHoleChunk();
+    defer chunk.deinit(testing.allocator);
+    var native = try NativeGraph.build(&chunk);
+    defer native.deinit();
+    const node_id = try findNode(&native, .throw_if_hole);
+    try testing.expectEqual(
+        specialize.Lowering.throw_if_hole,
+        native.specialization.node_info[node_id].lowering,
+    );
+
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = false;
+    const registers = try testing.allocator.alloc(Value, chunk.register_count);
+    defer testing.allocator.free(registers);
+
+    var frame = testFrame(&chunk, registers);
+    frame.accumulator = Value.fromInt32(42);
+    try testing.expectEqual(
+        @intFromEnum(codegen.EntryResult.done),
+        try executeNative(&native, &realm, &frame),
+    );
+    try testing.expectEqual(Value.fromInt32(42).bits, frame.accumulator.bits);
+
+    frame = testFrame(&chunk, registers);
+    frame.accumulator = Value.hole_;
+    try testing.expectEqual(
+        @intFromEnum(codegen.EntryResult.resume_interp),
+        try executeNative(&native, &realm, &frame),
+    );
+    try testing.expectEqual(native.graph.nodes[node_id].bytecode_offset, frame.ip);
+    try testing.expectEqual(Value.hole_.bits, frame.accumulator.bits);
+    switch (try resumeLanternResult(&realm, frame)) {
+        .thrown => {},
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "Ohaimark AArch64 typeof uses realm-cached strings across value kinds" {
+    if (comptime !masm.native_aarch64) return error.SkipZigTest;
+    const Noop = struct {
+        fn body(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+            _ = realm;
+            _ = this_value;
+            _ = args;
+            return Value.undefined_;
+        }
+    };
+
+    var chunk = try typeOfChunk();
+    defer chunk.deinit(testing.allocator);
+    var native = try NativeGraph.build(&chunk);
+    defer native.deinit();
+    const node_id = try findNode(&native, .typeof_);
+    try testing.expectEqual(
+        specialize.Lowering.typeof_,
+        native.specialization.node_info[node_id].lowering,
+    );
+
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = false;
+    const plain_object = try realm.heap.allocateObject();
+    const callable_object = try realm.heap.allocateObject();
+    callable_object.brand.proxy_callable = true;
+    const string = try realm.heap.allocateString("string");
+    const function = try realm.heap.allocateFunctionNative(&realm, Noop.body, 0, "f");
+    const symbol = try realm.heap.allocateSymbol(null);
+    const bigint = try realm.heap.allocateBigInt(1);
+    const cases = [_]Value{
+        Value.undefined_,
+        Value.null_,
+        Value.true_,
+        Value.fromInt32(1),
+        Value.fromDouble(1.5),
+        Value.fromString(string),
+        heap_mod.taggedFunction(function),
+        heap_mod.taggedObject(plain_object),
+        heap_mod.taggedObject(callable_object),
+        heap_mod.taggedSymbol(symbol),
+        heap_mod.taggedBigInt(bigint),
+    };
+
+    var registers: [0]Value = .{};
+    var frame = testFrame(&chunk, &registers);
+    frame.accumulator = Value.undefined_;
+    var machine = masm.Masm.init(testing.allocator);
+    defer machine.deinit();
+    var executable = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
+    defer executable.deinit();
+    const entry = try installNative(&native, &frame, &machine, &executable);
+
+    // The lazy cache begins empty. Generated code must reconstruct the
+    // original operation so Lantern fills it, then execute directly later.
+    try testing.expectEqual(
+        @intFromEnum(codegen.EntryResult.resume_interp),
+        executeEntry(entry, &realm, &frame),
+    );
+    try testing.expectEqual(native.graph.nodes[node_id].bytecode_offset, frame.ip);
+    const cache_miss = try resumeLantern(&realm, frame);
+    const cache_miss_string: *JSString = @ptrCast(@alignCast(cache_miss.asString()));
+    try testing.expectEqualStrings("undefined", cache_miss_string.flatBytes());
+
+    for (cases) |input| {
+        const expected = try arith.typeOf(&realm, input);
+        frame = testFrame(&chunk, &registers);
+        frame.accumulator = input;
+        try testing.expectEqual(
+            @intFromEnum(codegen.EntryResult.done),
+            executeEntry(entry, &realm, &frame),
+        );
+        try testing.expectEqual(expected.bits, frame.accumulator.bits);
+    }
 }
 
 test "Ohaimark AArch64 synthetic named load reads live value and guards mode" {

@@ -40,6 +40,22 @@ pub const NodeKind = enum {
     load_global,
     load_global_slot,
     load_environment,
+    allocate_environment,
+    store_environment,
+    /// §9.1.1.1.6 GetBindingValue TDZ probe. The non-Hole path is an
+    /// accumulator identity; a Hole guard exit resumes Lantern so it creates
+    /// and unwinds the required ReferenceError through the canonical path.
+    throw_if_hole,
+    /// §13.5.3 pure value classification. The generated path dispatches on
+    /// the NaN-boxed tag and loads the realm's cached immutable result string;
+    /// a cold uninitialized cache exits to Lantern to allocate it.
+    typeof_,
+    /// §13.3.6 EvaluateCall, direct IC-hit ordinary-call subset. The generated
+    /// path stages the caller frame then yields to Lantern to drive the
+    /// callee; this includes fused property calls after their data LoadIC and
+    /// CallIC validate. Cold, mismatched, and exotic cases resume this opcode
+    /// in Lantern before user code runs.
+    direct_call,
     jump,
     branch,
     return_,
@@ -77,6 +93,49 @@ pub const EnvironmentLoad = struct {
     slot: u8,
 };
 
+pub const EnvironmentAllocation = struct {
+    slot_count: u8,
+};
+
+pub const EnvironmentStore = struct {
+    depth: u8,
+    slot: u8,
+};
+
+/// A compact call/construct handoff site. `this_register == null` represents
+/// the strict free-call `this` value, `undefined`; a present register
+/// represents the receiver supplied by `call_method8`. Constructors never use
+/// a receiver register: Lantern allocates and binds `this` from the CallIC's
+/// cached prototype.
+pub const DirectCall = struct {
+    pub const Kind = enum { call, construct };
+
+    kind: Kind,
+    this_register: ?u8,
+    callee: u8,
+    argc: u8,
+    feedback_index: u16,
+};
+
+/// A compact fused `obj.method(args)` handoff. `receiver` is both the
+/// `this` value and the register immediately preceding its contiguous
+/// argument window. The LoadIC and CallIC remain distinct because the same
+/// receiver shape can expose a different callee through a slot rewrite.
+pub const DirectPropertyCall = struct {
+    receiver: u8,
+    argc: u8,
+    load_feedback_index: u16,
+    call_feedback_index: u16,
+};
+
+/// Direct ordinary calls/constructs and fused property calls share the same
+/// staged-frame result, but their operands are intentionally distinct: a
+/// property call has no callee register until its LoadIC hit resolves one.
+pub const DirectCallSite = union(enum) {
+    direct: DirectCall,
+    property: DirectPropertyCall,
+};
+
 pub const Payload = union(enum) {
     none,
     immediate: Immediate,
@@ -86,6 +145,9 @@ pub const Payload = union(enum) {
     global_load: GlobalLoad,
     global_slot: u32,
     environment_load: EnvironmentLoad,
+    environment_allocation: EnvironmentAllocation,
+    environment_store: EnvironmentStore,
+    direct_call: DirectCallSite,
     binary_profile: u16,
 };
 
@@ -155,6 +217,10 @@ pub const Block = struct {
 pub const Graph = struct {
     allocator: std.mem.Allocator,
     register_count: u8,
+    /// A non-elidable `make_environment` at bytecode offset zero. The native
+    /// entry helper performs it before materializing any SSA values, keeping
+    /// every JS root in the authoritative Lantern frame.
+    entry_environment_slots: ?u8 = null,
     blocks: []Block,
     nodes: []Node,
     inputs: []ValueId,
@@ -188,10 +254,11 @@ pub const Graph = struct {
 
         const environment_summary = environment_elision.analyze(chunk.code) catch
             return error.MalformedBytecode;
-        if (!environment_summary.canElideMakeEnvironments()) {
-            if (diagnostics) |out| out.unsupported_opcode = .make_environment;
-            return error.UnsupportedOp;
-        }
+        const elide_make_environments = environment_summary.canElideMakeEnvironments();
+        const entry_environment_slots = if (elide_make_environments)
+            null
+        else
+            environment_summary.entryAllocationSlots();
 
         var analysis = try liveness.analyze(
             allocator,
@@ -210,6 +277,8 @@ pub const Graph = struct {
             .chunk = chunk,
             .analysis = &analysis,
             .diagnostics = diagnostics,
+            .entry_environment_slots = entry_environment_slots,
+            .elide_make_environments = elide_make_environments,
         };
         defer builder.deinit();
         try builder.createBlocks();
@@ -234,6 +303,7 @@ pub const Graph = struct {
         return .{
             .allocator = allocator,
             .register_count = chunk.register_count,
+            .entry_environment_slots = entry_environment_slots,
             .blocks = blocks,
             .nodes = nodes,
             .inputs = inputs,
@@ -321,6 +391,8 @@ const Builder = struct {
     chunk: *const Chunk,
     analysis: *const liveness.Analysis,
     diagnostics: ?*BuildDiagnostics,
+    entry_environment_slots: ?u8,
+    elide_make_environments: bool,
     blocks: std.ArrayListUnmanaged(Block) = .empty,
     nodes: std.ArrayListUnmanaged(Node) = .empty,
     inputs: std.ArrayListUnmanaged(ValueId) = .empty,
@@ -775,7 +847,126 @@ const Builder = struct {
                         live_registers,
                     );
                 },
-                .make_environment => {},
+                .make_environment => {
+                    if (!self.elide_make_environments and
+                        !(pc == 0 and self.entry_environment_slots != null))
+                    {
+                        const live_registers = try deopt_liveness.take(
+                            &deopt_live_cursor,
+                            @intCast(pc),
+                        );
+                        _ = try self.addDeoptNode(
+                            .allocate_environment,
+                            @intCast(pc),
+                            &.{},
+                            .{ .environment_allocation = .{
+                                .slot_count = self.chunk.code[pc + 1],
+                            } },
+                            block_index,
+                            accumulator,
+                            registers,
+                            live_registers,
+                        );
+                    }
+                },
+                .sta_env => {
+                    const depth = self.chunk.code[pc + 1];
+                    if (depth > 8) {
+                        if (self.diagnostics) |out| out.unsupported_opcode = .sta_env;
+                        return error.UnsupportedOp;
+                    }
+                    const live_registers = try deopt_liveness.take(&deopt_live_cursor, @intCast(pc));
+                    _ = try self.addDeoptNode(
+                        .store_environment,
+                        @intCast(pc),
+                        &.{accumulator},
+                        .{ .environment_store = .{
+                            .depth = depth,
+                            .slot = self.chunk.code[pc + 2],
+                        } },
+                        block_index,
+                        accumulator,
+                        registers,
+                        live_registers,
+                    );
+                },
+                .throw_if_hole => {
+                    const live_registers = try deopt_liveness.take(&deopt_live_cursor, @intCast(pc));
+                    accumulator = try self.addDeoptNode(
+                        .throw_if_hole,
+                        @intCast(pc),
+                        &.{accumulator},
+                        .none,
+                        block_index,
+                        accumulator,
+                        registers,
+                        live_registers,
+                    );
+                },
+                .typeof_ => {
+                    const live_registers = try deopt_liveness.take(&deopt_live_cursor, @intCast(pc));
+                    accumulator = try self.addDeoptNode(
+                        .typeof_,
+                        @intCast(pc),
+                        &.{accumulator},
+                        .none,
+                        block_index,
+                        accumulator,
+                        registers,
+                        live_registers,
+                    );
+                },
+                .call_method8,
+                .call8,
+                .call0_8,
+                .call1_8,
+                .call2_8,
+                .call3_8,
+                .new_call8,
+                => {
+                    const site = try compactDirectCall(self.chunk, op, pc);
+                    if (site.this_register) |receiver| {
+                        _ = try readRegister(registers, receiver);
+                    }
+                    _ = try readRegister(registers, site.callee);
+                    const args_end = @as(usize, site.callee) + 1 + @as(usize, site.argc);
+                    if (args_end > registers.len or site.feedback_index >= self.chunk.inline_call_caches.len) {
+                        return error.MalformedBytecode;
+                    }
+                    const live_registers = try deopt_liveness.take(&deopt_live_cursor, @intCast(pc));
+                    accumulator = try self.addDeoptNode(
+                        .direct_call,
+                        @intCast(pc),
+                        &.{},
+                        .{ .direct_call = .{ .direct = site } },
+                        block_index,
+                        accumulator,
+                        registers,
+                        live_registers,
+                    );
+                },
+                .call_property8 => {
+                    const site = try compactDirectPropertyCall(self.chunk, pc);
+                    _ = try readRegister(registers, site.receiver);
+                    const args_end = @as(usize, site.receiver) + 1 + @as(usize, site.argc);
+                    if (args_end > registers.len or
+                        site.load_feedback_index >= self.chunk.inline_load_caches.len or
+                        site.call_feedback_index >= self.chunk.inline_call_caches.len)
+                    {
+                        return error.MalformedBytecode;
+                    }
+                    const live_registers = try deopt_liveness.take(&deopt_live_cursor, @intCast(pc));
+                    accumulator = try self.addDeoptNode(
+                        .direct_call,
+                        @intCast(pc),
+                        &.{},
+                        .{ .direct_call = .{ .property = site } },
+                        block_index,
+                        accumulator,
+                        registers,
+                        live_registers,
+                    );
+                },
                 .return_ => {
                     _ = try self.addNode(.return_, @intCast(pc), &.{accumulator}, .none);
                     terminated = true;
@@ -917,7 +1108,7 @@ const Builder = struct {
                 liveness.effectOf(op, self.chunk.code, offset),
                 self.chunk.register_count,
             );
-            if (!isDeoptCandidate(op)) continue;
+            if (!self.isDeoptCandidate(op, offset)) continue;
 
             const register_start = try indexU32(result.registers.items.len);
             var iterator = live.iterator(.{});
@@ -966,50 +1157,63 @@ const Builder = struct {
             .argument_count = target.param_count,
         });
     }
-};
 
-fn isDeoptCandidate(op: Op) bool {
-    return switch (op) {
-        .add,
-        .sub,
-        .mul,
-        .div,
-        .strict_eq,
-        .strict_neq,
-        .logical_not,
-        .add_smi,
-        .add_smi8,
-        .add_smi16,
-        .jmp_if_false,
-        .jmp_if_false8,
-        .jmp_if_false32,
-        .jmp_if_true,
-        .jmp_if_true8,
-        .jmp_if_true32,
-        .jmp_if_nullish,
-        .jmp_if_nullish8,
-        .jmp_if_nullish32,
-        .jmp_if_strict_eq,
-        .jmp_if_strict_eq8,
-        .jmp_if_strict_eq32,
-        .jmp_if_strict_neq,
-        .jmp_if_strict_neq8,
-        .jmp_if_strict_neq32,
-        .lda_property,
-        .lda_property8,
-        .lda_property_reg,
-        .lda_property_reg8,
-        .lda_this,
-        .lda_global,
-        .lda_global_or_undef,
-        .lda_global8,
-        .lda_global_or_undef8,
-        .lda_global_slot,
-        .lda_env,
-        => true,
-        else => false,
-    };
-}
+    fn isDeoptCandidate(self: *const Builder, op: Op, offset: u32) bool {
+        return switch (op) {
+            .make_environment => !self.elide_make_environments and
+                !(offset == 0 and self.entry_environment_slots != null),
+            .sta_env,
+            .add,
+            .sub,
+            .mul,
+            .div,
+            .strict_eq,
+            .strict_neq,
+            .logical_not,
+            .add_smi,
+            .add_smi8,
+            .add_smi16,
+            .jmp_if_false,
+            .jmp_if_false8,
+            .jmp_if_false32,
+            .jmp_if_true,
+            .jmp_if_true8,
+            .jmp_if_true32,
+            .jmp_if_nullish,
+            .jmp_if_nullish8,
+            .jmp_if_nullish32,
+            .jmp_if_strict_eq,
+            .jmp_if_strict_eq8,
+            .jmp_if_strict_eq32,
+            .jmp_if_strict_neq,
+            .jmp_if_strict_neq8,
+            .jmp_if_strict_neq32,
+            .lda_property,
+            .lda_property8,
+            .lda_property_reg,
+            .lda_property_reg8,
+            .lda_this,
+            .lda_global,
+            .lda_global_or_undef,
+            .lda_global8,
+            .lda_global_or_undef8,
+            .lda_global_slot,
+            .lda_env,
+            .throw_if_hole,
+            .typeof_,
+            .call_method8,
+            .call8,
+            .call0_8,
+            .call1_8,
+            .call2_8,
+            .call3_8,
+            .new_call8,
+            .call_property8,
+            => true,
+            else => false,
+        };
+    }
+};
 
 fn indexU32(index: usize) !u32 {
     if (index > std.math.maxInt(u32)) return error.GraphTooLarge;
@@ -1021,6 +1225,66 @@ fn readRegister(registers: []const ValueId, register: u8) !ValueId {
     const value = registers[register];
     if (value == invalid_value) return error.MalformedBytecode;
     return value;
+}
+
+/// Decode compact call and construct forms into their one shared handoff shape.
+/// Wide forms remain intentionally unsupported until their larger operand
+/// indexes get dedicated coverage.
+fn compactDirectCall(chunk: *const Chunk, op: Op, pc: usize) !DirectCall {
+    const code = chunk.code;
+    return switch (op) {
+        .call_method8 => .{
+            .kind = .call,
+            .this_register = code[pc + 1],
+            .callee = code[pc + 2],
+            .argc = code[pc + 3],
+            .feedback_index = code[pc + 4],
+        },
+        .call8 => .{
+            .kind = .call,
+            .this_register = null,
+            .callee = code[pc + 1],
+            .argc = code[pc + 2],
+            .feedback_index = code[pc + 3],
+        },
+        .call0_8, .call1_8, .call2_8, .call3_8 => blk: {
+            const argc: u8 = switch (op) {
+                .call0_8 => 0,
+                .call1_8 => 1,
+                .call2_8 => 2,
+                .call3_8 => 3,
+                else => return error.MalformedBytecode,
+            };
+            break :blk .{
+                .kind = .call,
+                .this_register = null,
+                .callee = code[pc + 1],
+                .argc = argc,
+                .feedback_index = code[pc + 2],
+            };
+        },
+        .new_call8 => .{
+            .kind = .construct,
+            .this_register = null,
+            .callee = code[pc + 1],
+            .argc = code[pc + 2],
+            .feedback_index = code[pc + 3],
+        },
+        else => error.MalformedBytecode,
+    };
+}
+
+/// Decode the narrow fused property-call form. Wide `call_property` stays
+/// outside this first slice so every operand used by native code is compactly
+/// covered by the regression matrix.
+fn compactDirectPropertyCall(chunk: *const Chunk, pc: usize) !DirectPropertyCall {
+    const code = chunk.code;
+    return .{
+        .receiver = code[pc + 2],
+        .argc = code[pc + 3],
+        .load_feedback_index = code[pc + 4],
+        .call_feedback_index = code[pc + 5],
+    };
 }
 
 fn writeRegister(registers: []ValueId, register: u8, value: ValueId) !void {

@@ -412,11 +412,14 @@ profile changes in `CynicProfile.swift`.
 
 The base `cynic` profile finds crashes. To find **silent
 miscompiles** — a wrong value with no crash — `cynic-fuzz` also
-supports interpreter-vs-JIT differentials via four argv flags:
+supports interpreter-vs-JIT differentials via five argv flags:
 
 - `--jit` — run with Bistromath on, tier-up threshold forced to 1.
 - `--ohaimark` — force both native tiers to threshold 1 and try Ohaimark
-  before Bistromath; usable for crash campaigns or a T2 differential target.
+  before Bistromath, including default-on loop-header OSR; usable for crash
+  campaigns or a T2 differential target.
+- `--no-ohaimark-osr` — isolate function-entry T2 in a forced-Ohaimark
+  campaign. `--ohaimark-osr` remains an explicit compatibility no-op.
 - `--diff` — after each sample, write a canonical completion-value
   digest to fd 103 so Fuzzilli's fuzzout oracle can compare two runs.
 - `--diff-self-test` — perturb that digest (harness validation only).
@@ -438,10 +441,12 @@ graduation audit ran each posture for five bounded minutes: the crash campaign
 retained 216 programs and the value differential retained 49, with no crash or
 differential artifact.
 
-Loop-header OSR (`--ohaimark-osr`, docs/ohaimark.md §3.17) is **default-off**
-and is not part of the production or base fuzz posture. A focused OSR
-crash/value-differential campaign should pass both `--ohaimark` and
-`--ohaimark-osr` and must stay clean before OSR graduates to default-on.
+Loop-header OSR is part of the default Ohaimark fuzz posture
+(`--ohaimark`, docs/ohaimark.md §3.17). Its graduation campaign replayed the
+sole timing-noise candidate cleanly after the shared `--diff` Date prelude was
+fixed, then completed 250 samples / 11,388 executions in 6m30s with zero crash
+or differential artifacts. Use `--no-ohaimark-osr` only to isolate entry-only
+T2 during a diagnosis.
 
 ## The coverage protocol
 

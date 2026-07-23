@@ -1154,10 +1154,10 @@ pub const Realm = struct {
     /// size-scaled policy in runtime/ohaimark/driver.zig.
     ohaimark_threshold_override: ?u32 = null,
     /// Loop-header on-stack replacement into Ohaimark (docs/ohaimark.md §3.17).
-    /// Independently default-off until OSR's own differential and natural-
-    /// threshold performance gates pass. Function-entry T2 does not require
-    /// this flag. Inherited by child realms.
-    ohaimark_osr_enabled: bool = false,
+    /// Default-on after its differential, GC-pressure, fuzz, and natural-
+    /// threshold performance gates passed. Subordinate to the master JIT/T2
+    /// gates and inherited by child realms.
+    ohaimark_osr_enabled: bool = true,
     /// Lazily-created arena owning every realm-resident WebAssembly
     /// artifact (decoded modules, instances, their store state). Freed
     /// wholesale at realm teardown, so wasm objects need no per-object
@@ -2053,7 +2053,8 @@ pub const Realm = struct {
         while (dit.next()) |e| self.heap.markValue(e.value_ptr.*);
 
         // Intrinsics — the struct is a flat list of optional
-        // `*JSObject` / `*JSFunction` pointers; iterate fields
+        // `*JSObject` / `*JSFunction` pointers and a small number of
+        // cached `Value`s; iterate fields
         // with comptime reflection so adding a new intrinsic
         // doesn't silently break GC roots.
         inline for (@typeInfo(Intrinsics).@"struct".field_names) |field_name| {
@@ -2063,6 +2064,8 @@ pub const Realm = struct {
                 if (v) |o| self.heap.markValue(heap_mod.taggedObject(o));
             } else if (T == ?*JSFunction) {
                 if (v) |fp| self.heap.markValue(heap_mod.taggedFunction(fp));
+            } else if (T == Value) {
+                self.heap.markValue(v);
             }
         }
 

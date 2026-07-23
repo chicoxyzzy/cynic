@@ -2,10 +2,10 @@
 //!
 //! Graph nodes that may speculate carry the pre-operation Lantern state as
 //! SSA ValueIds. This module serializes only guarded nodes selected by the
-//! specialization plan. Constants are embedded directly; non-constant values
-//! remain SSA references until register allocation assigns physical recovery
-//! locations. Runtime reconstruction is deliberately deferred until that
-//! location map exists.
+//! specialization plan. Constants and specialization-folded values are
+//! embedded directly; remaining values stay as SSA references until register
+//! allocation assigns physical recovery locations. Runtime reconstruction is
+//! deliberately deferred until that location map exists.
 
 const std = @import("std");
 
@@ -71,7 +71,7 @@ pub const Metadata = struct {
             try appendRecovery(
                 &stream,
                 allocator,
-                try recoveryFor(graph, state.accumulator),
+                try recoveryFor(graph, plan, state.accumulator),
             );
             try codec.appendU16(&stream, allocator, state.slot_count);
             for (slots) |slot| {
@@ -79,7 +79,7 @@ pub const Metadata = struct {
                 try appendRecovery(
                     &stream,
                     allocator,
-                    try recoveryFor(graph, slot.value),
+                    try recoveryFor(graph, plan, slot.value),
                 );
             }
             const stream_len = try codec.indexU32(stream.items.len - stream_offset);
@@ -133,7 +133,7 @@ pub const Metadata = struct {
                 return error.InvalidMetadata;
             }
             const bytes = try pointBytes(self, point);
-            try verifyPoint(bytes, graph, node_id);
+            try verifyPoint(bytes, graph, plan, node_id);
             expected_stream_offset += bytes.len;
             point_index += 1;
         }
@@ -194,6 +194,11 @@ pub fn requiresDeopt(lowering: specialize.Lowering) bool {
         .load_global,
         .load_global_slot,
         .load_environment,
+        .allocate_environment,
+        .store_environment,
+        .throw_if_hole,
+        .typeof_,
+        .direct_call,
         => true,
         else => false,
     };
@@ -226,6 +231,11 @@ fn validateGuardedNode(
         .load_global => try hasAssumption(plan, info, .load_global) and node.kind == .load_global,
         .load_global_slot => node.kind == .load_global_slot and info.assumption == null,
         .load_environment => node.kind == .load_environment and info.assumption == null,
+        .allocate_environment => node.kind == .allocate_environment and info.assumption == null,
+        .store_environment => node.kind == .store_environment and info.assumption == null,
+        .throw_if_hole => node.kind == .throw_if_hole and info.assumption == null,
+        .typeof_ => node.kind == .typeof_ and info.assumption == null,
+        .direct_call => node.kind == .direct_call and info.assumption == null,
         else => false,
     };
     if (!valid or node.frame_state == null) return error.MalformedGraph;
@@ -326,8 +336,17 @@ fn valueAvailable(
     return false;
 }
 
-fn recoveryFor(graph: *const ir.Graph, value: ir.ValueId) !Recovery {
-    if (value >= graph.nodes.len) return error.MalformedGraph;
+fn recoveryFor(
+    graph: *const ir.Graph,
+    plan: *const specialize.Plan,
+    value: ir.ValueId,
+) !Recovery {
+    if (value >= graph.nodes.len or value >= plan.node_info.len) {
+        return error.MalformedGraph;
+    }
+    if (plan.node_info[value].folded) |immediate| {
+        return .{ .immediate = immediate };
+    }
     const node = graph.nodes[value];
     if (node.kind != .constant) return .{ .value = value };
     return switch (node.payload) {
@@ -336,18 +355,29 @@ fn recoveryFor(graph: *const ir.Graph, value: ir.ValueId) !Recovery {
     };
 }
 
-fn verifyPoint(bytes: []const u8, graph: *const ir.Graph, node_id: ir.ValueId) !void {
+fn verifyPoint(
+    bytes: []const u8,
+    graph: *const ir.Graph,
+    plan: *const specialize.Plan,
+    node_id: ir.ValueId,
+) !void {
     const state = try checkedState(graph, node_id);
     const slots = try checkedSlots(graph, node_id, state);
     var cursor: codec.Cursor = .{ .bytes = bytes };
     if (try cursor.readU32() != state.bytecode_offset) return error.InvalidMetadata;
-    if (!recoveryEql(try readRecovery(&cursor), try recoveryFor(graph, state.accumulator))) {
+    if (!recoveryEql(
+        try readRecovery(&cursor),
+        try recoveryFor(graph, plan, state.accumulator),
+    )) {
         return error.InvalidMetadata;
     }
     if (try cursor.readU16() != slots.len) return error.InvalidMetadata;
     for (slots) |slot| {
         if (try cursor.readByte() != slot.register) return error.InvalidMetadata;
-        if (!recoveryEql(try readRecovery(&cursor), try recoveryFor(graph, slot.value))) {
+        if (!recoveryEql(
+            try readRecovery(&cursor),
+            try recoveryFor(graph, plan, slot.value),
+        )) {
             return error.InvalidMetadata;
         }
     }

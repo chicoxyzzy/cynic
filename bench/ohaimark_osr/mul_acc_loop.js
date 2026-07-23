@@ -8,6 +8,6 @@ function mulAcc(n) {
     }
     return acc + n;
 }
-const result = mulAcc(3_000_000);
-if (result !== 3_000_001) throw new Error('mul_acc_loop produced ' + result);
+const result = mulAcc(2_000_000);
+if (result !== 2_000_001) throw new Error('mul_acc_loop produced ' + result);
 print(result);

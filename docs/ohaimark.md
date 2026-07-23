@@ -1,24 +1,28 @@
 # Ohaimark optimizing JIT
 
-Status: **default-on for production CLI ordinary-function entry** (2026-07-17).
+Status: **default-on for production CLI ordinary-function entry and loop-header
+OSR** (2026-07-19).
 The accepted bytecode/feedback/SSA pipeline, pure specialization and
 representation plans, verified logical/physical deopt metadata, allocator,
 AArch64 lowering, live-cell property guards, backedge safepoints, and
 transactional executable ownership now ship. Single-predecessor edge
 coalescing, physical next-block fallthrough, a one-word completion ABI, and
 exact Int32/Double operand-shape specialization closed the remaining rollout
-cost. The graduation 30-pair T2/T1 run measured `0.997x` geometric mean, a
-worst fixture of `1.041x`, and 0.8 KiB installed code. Baseline and forced-T2
-test262 sweeps produced the same 48,517-pass set and SHA-256; focused
-ReleaseSafe GC-pressure runs and bounded crash/value-differential fuzz
-campaigns found no verifier failure, host crash, or differential. The
-production CLI enables Ohaimark at its natural threshold; `--no-ohaimark`
-isolates Bistromath, while `--no-jit` disables both tiers. Loop-header OSR is
-implemented behind a realm-local **default-off** gate
-(`Realm.ohaimark_osr_enabled`); it does not graduate to default-on until its
-own differential, GC/fuzz, and natural-threshold performance gates pass.
-Rooted helper calls, broader opcode coverage, and additional architectures
-remain future work.
+cost. The loop-header OSR graduation 30-pair T2/T1 run measured `0.122x`
+geometric mean, a worst fixture of `0.140x`, and 2.1 KiB installed code.
+Baseline and forced-T2+OSR test262 sweeps produced the same 48,517-pass set
+and SHA-256; focused ReleaseSafe GC-pressure runs and bounded
+crash/value-differential fuzz campaigns found no verifier failure, host crash,
+or differential. The production CLI enables Ohaimark and OSR at natural
+thresholds; `--no-ohaimark` isolates Bistromath, `--no-ohaimark-osr` isolates
+function-entry T2, and `--no-jit` disables both tiers. A rooted lexical-
+environment helper subset now ships: entry and mid-body `make_environment`,
+plus barrier-backed `sta_env`. A monomorphic compact call/construct/property
+handoff family (`call_method8`, `call0_8` through `call3_8`, `call8`,
+`call_property8`, and `new_call8`) can also stage its caller and hand an
+ordinary bytecode callee or constructor back to Lantern. Generalized
+JS-reentrant helper calls, native post-call continuations, broader opcode
+coverage, and additional architectures remain future work.
 
 Ohaimark is Cynic's T2 method JIT. It consumes finalized Lantern bytecode
 and runtime feedback, builds a compact control-flow SSA graph, specializes
@@ -233,7 +237,7 @@ malformed graphs or homes remain normal compilation errors.
 ### 3.6 AArch64 physical lowering
 
 `runtime/ohaimark/lowering_aarch64.zig` maps the abstract plan onto one fixed
-AAPCS64 convention without emitting code. The current executable subset is
+AAPCS64 convention without emitting code. Ordinary generated code is
 helper-free, so it preserves its three incoming arguments in volatile
 `x0`-`x2` (realm, Lantern frame, register-file base), maps six optimizer values
 to `x3`-`x8`, reserves `x9`-`x15` for move/boxing/graph scratch, and uses `x16`
@@ -258,10 +262,15 @@ attached. Duplicate destinations, scratch aliasing, and edge-level
 
 The lowering verifier rebuilds the frame, physical value locations, per-edge
 stream ranges, and resolved move sequence. Code generation must initialize
-every tagged slot to a non-pointer value before the first safepoint. A future
-rooted helper-call lowering must introduce explicit live-register preservation
-and stack maps before changing the helper-free ABI; GC polls currently transfer
-exact state to Lantern instead of calling.
+every tagged slot to a non-pointer value before the first safepoint. The narrow
+environment-helper boundary reconstructs the physical pre-operation state into
+the Lantern frame, then saves `x0`-`x8`, `x16`, and LR in a 96-byte aligned
+area before calling a non-reentrant C helper. The helper either succeeds and
+the generated state is restored, or resumes Lantern at the original opcode
+with that already-staged frame. This mirrors the rooted-call discipline behind
+V8 Maglev's [SaveRegisterStateForCall](https://chromium.googlesource.com/v8/v8/%2B/d8fd81812d5a4c5c3449673b6a803279c4bdb2f2/src/maglev/maglev-assembler.h),
+without claiming a general native stack-map protocol: JS-reentrant calls and
+exception-producing helpers still reject transactionally.
 
 ### 3.7 Native frame entry and exit
 
@@ -450,8 +459,8 @@ publishes. Backedges continue to add warmth in Lantern/T1 independently; when
 
 Only fresh ordinary-function frames use function-entry T2. Constructors,
 generators, and async Promise-wrapping frames stay in the lower tiers. Loop-
-header OSR is a separate default-off gate. A cold/refused T2 attempt leaves the
-frame untouched and permits T1;
+header OSR is a separately disableable default policy. A cold/refused T2
+attempt leaves the frame untouched and permits T1;
 an optimized guard exit reports `resumed` separately because it already wrote
 the exact bytecode offset, accumulator, and live registers into the Lantern
 frame. The shared dispatcher resumes Lantern directly in that case and never
@@ -552,19 +561,41 @@ frontier; `lda_global8` at 44,462, `make_environment` at 38,799, and `div` at
 36,894 are now the top three. The forced-T2 and fresh lower-tier pass lists
 remain byte-identical at 48,653 paths with the same SHA-256 above.
 
-### 3.17 Frame, environment, and global loads
+### 3.17 Frame, environment, global loads, and compact call/construct/property handoff
 
-The optimizer now distinguishes environment allocation from environment access
-with a shared post-bytecode analysis in `bytecode/environment_elision.zig`.
-Both JIT tiers may erase `make_environment` only when every allocation in the
-chunk has zero slots and the same chunk performs no environment read or write.
+The optimizer distinguishes environment allocation from environment access with
+a shared post-bytecode analysis in `bytecode/environment_elision.zig`. Both JIT
+tiers erase `make_environment` only when every allocation in the chunk has zero
+slots and the same chunk performs no environment read or write. Ohaimark also
+lowers exactly one `make_environment` at bytecode offset zero, including a
+zero-slot allocation whose pushed depth is observed by `lda_env`. Before it
+materializes any SSA parameter, the generated entry saves `x0`-`x2`, `x16`, and
+LR in a 48-byte AAPCS64-aligned temporary area, calls the environment allocator,
+then restores that ABI state. Thus every pre-call JS reference remains in the
+registered Lantern frame; the helper writes the fresh child into `frame.env`
+before native code walks it. Allocation failure restores the untouched entry
+state, sets `frame.ip = 0`, and returns the normal resume sentinel so Lantern
+retries the original opcode and reports `OutOfMemory` normally.
+
 An `lda_env` without a local allocation is still valid: it reads an inherited
 environment from the existing `CallFrame`, so Ohaimark walks and null-checks the
 live parent chain rather than manufacturing optimizer state. This preserves the
 environment-record and `GetThisBinding` boundaries in
 [§9.1.1](https://tc39.es/ecma262/#sec-environment-records) and
-[§9.1.1.3.4](https://tc39.es/ecma262/#sec-getthisbinding). Malformed bytecode,
-nonzero allocations, and mixed allocation/access chunks reject normally.
+[§9.1.1.3.4](https://tc39.es/ecma262/#sec-getthisbinding).
+
+Later or multiple allocations now become void `allocate_environment` nodes;
+`sta_env` becomes a void `store_environment` node with the accumulator as its
+one tagged input. Both carry a physical pre-operation deopt point. Codegen
+first reconstructs that exact accumulator/live-register state in the existing
+Lantern frame, then saves `x0`-`x8`, `x16`, and LR before calling the allocator
+or a `Heap.storeEnvSlot` shim. The latter preserves the normal generational and
+incremental-marking write barrier. A helper failure restores the native ABI,
+stamps the original bytecode offset, and resumes Lantern; a successful helper
+restores the live optimizer state and continues. This is a deliberately narrow
+frame-staged safepoint, not a general stack-map/continuation protocol: neither
+helper can re-enter JS, and calls, exception-producing operations, and
+continuation-bearing opcodes still reject transactionally.
 
 `lda_this` reads the executing Lantern frame after validating constructor state.
 Named global loads follow the same live-cell discipline as property loads: the
@@ -594,6 +625,135 @@ cost was 2.043 s. `lda_global8` disappeared from the leading unsupported list an
 global sites now reach the transactional generic-load boundary. Forced T2 and a
 fresh lower-tier run retained byte-identical 48,653-path pass lists (SHA-256
 `10f024349d3467c72112da03dd57e0d7e543cdb819a00b3082dfecedaec614ca`).
+
+The mid-body follow-up again kept the forced-T2 pass list equal to the lower-tier
+baseline: 48,653 paths, SHA-256
+`10f024349d3467c72112da03dd57e0d7e543cdb819a00b3082dfecedaec614ca`.
+Its four-worker sweep attempted 222,334 compilations, published 7,036, refused
+215,298, installed 181 KiB, and completed 143,447 of 143,565 generated entries
+with 118 guard exits. `make_environment` no longer appears as an unsupported
+opcode; `call_method8` (23,611), `throw_if_hole` (21,131), and `typeof_`
+(9,117) are the leading remaining frontiers. Native tests pin the 96-byte
+save/restore sequence, retain a frame root and its environment chain through a
+full collection, test the barrier-backed store, and compile a real `var` write
+at `gc_threshold=1`. The ReleaseSafe `language/statements/let` T2 bucket also
+passed with `gc_threshold=1`.
+
+`throw_if_hole` now lowers as a tagged identity guard. Per
+[§9.1.1.1.6 GetBindingValue](https://tc39.es/ecma262/#sec-declarative-environment-records-getbindingvalue),
+the Hole path must produce the normal TDZ `ReferenceError`; it therefore exits
+through the existing pre-operation deopt path and lets Lantern create and unwind
+that completion. The non-Hole path preserves the tagged accumulator in place,
+without a helper call, allocation, or synthetic exception state. Graph-evaluator
+and native AArch64 tests cover both paths.
+
+The four-worker ReleaseSafe `--timeout=0` differential retained byte-identical
+48,653-path T1 and forced-T2 pass lists (SHA-256
+`10f024349d3467c72112da03dd57e0d7e543cdb819a00b3082dfecedaec614ca`). T2
+attempted 222,336 compilations, published 7,297, installed 241 KiB, and entered
+generated code 260,248 times (260,112 completions and 136 guard exits).
+The same safe sweep exposed a separate `Iterator.zipKeyed` card-marking gap:
+copied keys and longest-mode padding values now remember a mature wrapper after
+each heap-value write, with an alternating-minor/major regression test.
+
+`typeof_` now lowers directly under
+[§13.5.3](https://tc39.es/ecma262/#sec-typeof-operator). AArch64 classifies the
+NaN-boxed tag without coercion or property access: Double and Int32 join the
+Number result; String, Boolean, Null, and Undefined take their fixed paths;
+the heap-pointer kind distinguishes Function, Symbol, BigInt, and plain
+objects; and the packed callable-exotic bit preserves Proxy and
+`%Function.prototype%`'s `"function"` result. This follows the same basic
+tagged-value discipline exposed by
+[JavaScriptCore's `JSValue`](https://github.com/WebKit/WebKit/blob/main/Source/JavaScriptCore/runtime/JSCJSValue.h),
+while retaining Ohaimark's existing pre-operation deopt contract rather than
+adding a helper call. Each Realm owns eight lazy immutable result strings in
+`Intrinsics`; a cold cache takes that deopt, Lantern allocates the string once,
+and later native entries load it directly. The cache is GC-rooted and snapshot
+encoded as an intrinsic `Value`, so it is neither JS-visible state nor an SES
+surface change. Graph-evaluator, layout, snapshot, and native tests cover the
+cache miss plus every ECMAScript value category, including callable plain
+objects. The forced-T2 ReleaseSafe sweep published 7,354 functions (up from
+7,297), installed 270 KiB, and completed 260,118 of 260,306 generated entries;
+`typeof_` dropped out of the leading refusal report. Its 48,653 pass paths were
+byte-identical to forced T1 (SHA-256
+`10f024349d3467c72112da03dd57e0d7e543cdb819a00b3082dfecedaec614ca`).
+
+#### Direct monomorphic compact call/construct/property handoff
+
+Ohaimark now accepts a narrow JS-reentrant boundary for
+[`EvaluateCall`](https://tc39.es/ecma262/#sec-evaluatecall) and
+[`EvaluateNew`](https://tc39.es/ecma262/#sec-evaluate-new)'s compact bytecode
+forms: `call_method8`, fixed-arity free calls `call0_8` through `call3_8`, the
+generic-arity `call8`, `call_property8`, and `new_call8`. A shared handoff
+record distinguishes ordinary calls, property calls, and construction. Method
+and property calls preserve their receiver, while free calls explicitly pass
+`undefined` as strict `this`. A call needs an exact ordinary bytecode
+`JSFunction`, excluding native, bound, wrapped, class, generator, async,
+revocable, and synthetic-accessor behavior. Construction additionally verifies
+the mature CallIC's cached prototype against the live constructor; it excludes
+native, bound, wrapped, arrow, generator, async, revocable, and
+synthetic-accessor behavior, while ordinary class constructors remain eligible.
+Before any allocation, codegen decodes the pre-operation physical deopt point
+and materializes the caller's accumulator, receiver when present, callee, and
+argument window in its Lantern `CallFrame`. A compile-time root check rejects a
+malformed liveness/deopt snapshot rather than publishing code that could lose a
+call operand during collection. This is the same materialize-before-call
+discipline as V8 Maglev's
+[`SaveRegisterStateForCall`](https://chromium.googlesource.com/v8/v8/%2B/d8fd81812d5a4c5c3449673b6a803279c4bdb2f2/src/maglev/maglev-assembler.h),
+but Cynic returns to Lantern instead of maintaining a native post-call state.
+
+For `call_property8`, the receiver is `this` and its arguments occupy the
+following contiguous register window. The T2 helper first requires a plain
+object receiver and a mature data-only `LoadICCell` with the exact receiver
+shape. An own-slot load checks that slot directly; an immediate-prototype load
+also checks prototype identity, prototype shape, and the Realm prototype
+revision before reading the slot. It then requires the `CallICCell` to name the
+same ordinary bytecode function found in that slot. A cold cell, non-data cell,
+receiver or prototype mismatch, accessor, Proxy/exotic, or target mismatch is
+not partially executed: it reconstructs the pre-operation state and lets
+Lantern perform the whole operation. This is the fused-property-call shape used
+by V8 Ignition's
+[`CallProperty0/1/2`](https://chromium.googlesource.com/v8/v8/%2B/447bf33d786e39067e76cfa7604bacdcf2287c25/src/interpreter/bytecodes.h),
+while its all-or-nothing fallback follows SpiderMonkey's
+[atomic bytecode/IC contract](https://searchfox.org/mozilla-central/source/js/src/doc/bytecode_checklist.md).
+In particular, rejecting synthetic accessor cells keeps hardened-realm
+override-mistake accessors in Lantern and adds no JIT-only user-visible state.
+
+The generated stub then advances `frame.ip` past the operation and invokes a
+shared `lantern/call.zig` frame push. The call helper applies ordinary-call
+setup, including arrow lexical `this` and `new.target`. The construct helper
+allocates an instance from the IC's cached prototype, applies its initial-shape
+capacity hint, sets `is_construct` plus `new_target`, and lets Lantern apply
+§10.2.2 ConstructResult when the child returns. Both append the bytecode child
+to the same `CallFrame` list and immediately return a reserved control word, so
+generated code does not touch a possibly relocated caller frame. The helper
+boundary preserves `x1` through `x8`, `x16`, and LR while leaving its status in
+`x0`, so a cold or mismatching IC can safely reconstruct the pre-operation
+Lantern state. The Ohaimark driver then yields to Lantern, which drives the
+child and uses its normal return path to restore the parked caller at the
+following bytecode. `JitFrameScope` conditionally registers a top-level
+`callJSFunction` frame list before either JIT can allocate, closing the root gap
+that existed before a direct frame push.
+
+A cold or mismatching call, construct, or property IC, a changed constructor
+prototype, or any excluded callable form reconstructs the same pre-operation
+state and replays the original opcode in Lantern. This is a frame handoff, not
+a native post-call continuation: after a successful child call, the remainder
+of the parent runs in Lantern until a later tier entry. Generic JS-reentrant
+helpers and exception-bearing native continuations remain unsupported. Focused
+source-level coverage forces collection at `gc_threshold=1`, exercises every
+compact free-call layout, validates strict `this` plus argument placement, and
+checks constructor `new.target`, object-return ConstructResult, cold, and
+polymorphic fallback. Property coverage adds a mature own-data hit plus cold
+LoadIC/CallIC replay and a same-own-shape, different-immediate-prototype miss.
+The forced-T2 `language/expressions/call` sweep remains 82 pass / 10 fail,
+publishes nine functions, completes 100,008 generated entries, and exits zero
+times; the `language/expressions/new` sweep remains 73 pass / 0 fail. The full
+forced sweep remains `48,653` pass / `1,324` fail, publishes 8,370 functions,
+generates 263,938 entries, completes 260,124, and records 2,364 guard exits.
+`call_property8` no longer appears in its leading unsupported-opcode report.
+The CI-shaped excluded interpreter/T2 pass-set differential remains the
+independent release gate.
 
 ### 3.18 Exact-int32 and tagged-Number division
 
@@ -767,26 +927,28 @@ keeps Ohaimark default-off. This made the unconditional x19-x28 save/restore
 sequence the first measured tuning target before broader opcode coverage or
 threshold changes.
 
-### 3.22 Helper-free volatile-register ABI
+### 3.22 Volatile-register ABI and rooted entry allocation
 
 The follow-up applies the platform convention rather than inventing a private
 one. AAPCS64 classifies `x0`-`x17` as caller-saved (`x16`/`x17` are IP0/IP1),
 `x18` as platform-specific, and `x19`-`x29` as callee-saved
 ([Arm AAPCS64](https://github.com/ARM-software/abi-aa/blob/main/aapcs64/aapcs64.rst)).
-Ohaimark makes no helper call, so preserving ten callee-saved registers and
-FP/LR on every entry paid for a capability it could not use. V8 Maglev likewise
-saves a snapshot's live registers around an actual call/safepoint rather than
-unconditionally for helper-free code
+Most Ohaimark entries make no helper call, so preserving ten callee-saved
+registers and FP/LR on every entry paid for a capability they could not use.
+V8 Maglev likewise saves a snapshot's live registers around an actual
+call/safepoint rather than unconditionally for helper-free code
 ([Maglev assembler](https://chromium.googlesource.com/v8/v8/+/d8fd81812d5a4c5c3449673b6a803279c4bdb2f2/src/maglev/maglev-assembler.h)).
 
-The lowering contract now marks helper calls unsupported, keeps the realm,
-Lantern frame, and Lantern register-file pointers in incoming `x0`-`x2`, maps
-the allocator to `x3`-`x8`, keeps existing scratch in `x9`-`x15`, and anchors
-spills in `x16`. The prologue contains only optional aligned spill reservation,
-spill-base setup, and tagged-home initialization; a zero-spill graph starts at
-its first body instruction. The epilogue releases optional spills and returns.
-Adding a generated helper call now explicitly requires a call-aware ABI plus
-rooted live-register preservation; it cannot quietly invalidate this layout.
+The lowering contract keeps the realm, Lantern frame, and Lantern register-file
+pointers in incoming `x0`-`x2`, maps the allocator to `x3`-`x8`, keeps existing
+scratch in `x9`-`x15`, and anchors spills in `x16`. The prologue contains only
+optional aligned spill reservation, spill-base setup, and tagged-home
+initialization; a zero-spill graph starts at its first body instruction. The
+epilogue releases optional spills and returns. The one rooted entry allocator
+temporarily saves/restores the volatile state it needs. All generic and
+mid-body helper calls remain unsupported until they can flush/reload optimized
+state and publish precise root metadata; they cannot quietly invalidate this
+layout.
 
 Golden tests cover the zero-spill and chunked-spill instruction streams.
 Native tests execute typed moves and every graph path under the new mapping,
@@ -1155,12 +1317,12 @@ continue through Bistromath/Lantern without changing JavaScript behavior.
    Default-on ordinary-function tier-up now ships with exact
    bailout-vs-fallback routing, one-word completion, and child-realm policy
    inheritance.
-8b. **Loop-header OSR, shipping default-off:** verified OSR-entry metadata for
+8b. **Loop-header OSR, shipping default-on:** verified OSR-entry metadata for
    every eligible loop header, AArch64 entry stubs in the same transactional
    code allocation as function entry, Lantern and Bistromath backedge drivers,
-   reuse of guard-exit / safepoint recovery, and anti-thrash strikes. Kept
-   independently off until its own differential and rollout benchmarks pass
-   (see §3.17).
+   reuse of guard-exit / safepoint recovery, and anti-thrash strikes. Its
+   independent exact differential, ReleaseSafe GC-pressure, fuzz, and
+   natural-threshold rollout gates passed (see §3.17).
 9. **Gates and tuning, shipped:** full test262 pass-set differential, SES suite,
    GC-pressure runs, fuzzing, and compile-time/code-size/performance budgets.
    CFG edge coalescing/fallthrough and exact Number operand shapes brought the
@@ -1176,7 +1338,7 @@ continue through Bistromath/Lantern without changing JavaScript behavior.
 
 ### 3.17 Loop-header on-stack replacement (OSR)
 
-Status: **implemented, default-off.** Function-entry T2 alone cannot win
+Status: **implemented, default-on.** Function-entry T2 alone cannot win
 single-entry hot loops (`function f() { for (…) … } ; f()`): the body never
 re-enters at ip 0 after the first call, so the natural heat threshold is only
 reachable through backedges. OSR closes that gap without inventing a second
@@ -1258,15 +1420,13 @@ frame format.
    opcodes or OSR materialization errors refuse the whole T2 compile for that
    chunk without mutating the live frame.
 
-6. **Default-off gate.** `Realm.ohaimark_osr_enabled` defaults false and is
-   inherited by `initChild`. The CLI flag `--ohaimark-osr` (requires
-   `--jit`/`--ohaimark`) exists only so validation and
-   `zig build bench -- --ohaimark-osr-rollout` can flip the Realm policy
-   without a separate binary — not a production default. The test262
-   harness mirrors that opt-in as `--ohaimark --ohaimark-osr` (OSR requires
-   `--ohaimark`; same exclude set as the T2 differential) so the
-   baseline-vs-OSR pass-set gate can run before graduation. Enabling OSR by
-   default waits on the graduation criteria below.
+6. **Default-on policy.** `Realm.ohaimark_osr_enabled` defaults true and is
+   inherited by `initChild`, subordinate to the master JIT/T2 gates. The
+   production CLI's natural Ohaimark posture therefore includes loop-header
+   OSR; `--no-ohaimark-osr` isolates function-entry compilation for diagnosis.
+   `--ohaimark-osr` remains an explicit compatibility no-op. The test262
+   `--ohaimark` and forced fuzz postures follow the same default; their
+   `--no-ohaimark-osr` switches retain an entry-only comparison when needed.
 
 #### Rejected alternatives
 
@@ -1278,17 +1438,24 @@ frame format.
 - **Enter at arbitrary bytecode offsets:** forbids standard loop opts; every
   production engine restricts optimizing OSR to headers (or rarer special
   points).
-- **Default-on CLI for end users before gates pass:** the validation-only
-  `--ohaimark-osr` flag is the compromise — opt-in for benches/tests, never
-  the production default until graduation.
+- **Premature default-on before gates passed:** the validation-only
+  `--ohaimark-osr` posture was retained until the recorded graduation evidence
+  below completed.
 
-#### Graduation criteria (unchanged from the function-entry bar)
+#### Graduation record (2026-07-19)
 
-Do **not** default `ohaimark_osr_enabled` on unless: forced baseline-vs-T2
-test262 pass sets are byte-identical, ReleaseSafe `--gc-threshold=1` over
-loop/Array/Object buckets is clean, bounded Fuzzilli crash + Lantern-vs-T2
-value differentials are clean, natural-threshold OSR geometric mean T2/T1 is
-`≤ 1.000×`, and no stable fixture exceeds `1.050×`.
+The forced baseline-vs-T2+OSR test262 pass sets are byte-identical at 48,517
+paths (SHA-256 `52146dd368643d2eedd21f60c731589f7fd6a0245dadeb26f8cdd70a95ec2ae3`).
+ReleaseSafe `--gc-threshold=1` Object, Array, and object-expression buckets
+completed with no GC verifier failure or host crash. The initial Fuzzilli
+value-differential candidate reduced to `new Date(); v++` and exposed a
+determinism-shim gap, not a JIT divergence; the shared `--diff` prelude now
+pins zero-argument Date construction as well as `Date.now`. The minimized
+artifact replayed cleanly, and a fresh 6m30s forced Ohaimark+OSR campaign ran
+250 samples / 11,388 executions with zero crash and differential artifacts.
+The natural-threshold 30-pair rollout measured `0.122x` geometric mean and
+`0.140x` worst fixture, both inside the `≤1.000x` / `≤1.050x` limits. OSR
+therefore graduated to the default production T2 posture.
 
 ## 6. Declined for v1
 
@@ -1300,4 +1467,4 @@ value differentials are clean, natural-threshold OSR geometric mean T2/T1 is
 - Background compilation before synchronous compile cost is measured.
 - Deoptless continuation specialization: interesting later, but conventional
   deopt is the smaller correctness surface for the first tier.
-- Default-on OSR before the §3.17 graduation criteria pass.
+- Default-on OSR without retaining the §3.17 validation record and opt-out.

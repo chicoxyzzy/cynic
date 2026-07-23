@@ -21,6 +21,7 @@ const heap_mod = @import("../heap.zig");
 const Heap = heap_mod.Heap;
 const Realm = @import("../realm.zig").Realm;
 const GlobalBindings = @import("../realm.zig").GlobalBindings;
+const Intrinsics = @import("../intrinsics.zig").Intrinsics;
 const object_mod = @import("../object.zig");
 const JSObject = object_mod.JSObject;
 const chunk_mod = @import("../../bytecode/chunk.zig");
@@ -97,9 +98,28 @@ pub const realm = struct {
         globals_decl_slots_ptr + @sizeOf(*Value);
     pub const globals_decl_const_flags_ptr: usize =
         @offsetOf(Realm, "globals") + @offsetOf(GlobalBindings, "decl_const_flags");
+    /// §13.5.3's per-realm immutable string cache. Ohaimark's direct
+    /// `typeof` dispatch reads these Values from the active Realm, so one
+    /// compiled chunk remains correct across child realms.
+    pub const typeof_undefined_string: usize =
+        @offsetOf(Realm, "intrinsics") + @offsetOf(Intrinsics, "typeof_undefined_string");
+    pub const typeof_object_string: usize =
+        @offsetOf(Realm, "intrinsics") + @offsetOf(Intrinsics, "typeof_object_string");
+    pub const typeof_boolean_string: usize =
+        @offsetOf(Realm, "intrinsics") + @offsetOf(Intrinsics, "typeof_boolean_string");
+    pub const typeof_number_string: usize =
+        @offsetOf(Realm, "intrinsics") + @offsetOf(Intrinsics, "typeof_number_string");
+    pub const typeof_string_string: usize =
+        @offsetOf(Realm, "intrinsics") + @offsetOf(Intrinsics, "typeof_string_string");
+    pub const typeof_function_string: usize =
+        @offsetOf(Realm, "intrinsics") + @offsetOf(Intrinsics, "typeof_function_string");
+    pub const typeof_symbol_string: usize =
+        @offsetOf(Realm, "intrinsics") + @offsetOf(Intrinsics, "typeof_symbol_string");
+    pub const typeof_bigint_string: usize =
+        @offsetOf(Realm, "intrinsics") + @offsetOf(Intrinsics, "typeof_bigint_string");
     /// Ohaimark loop-header OSR policy (docs/ohaimark.md §3.17). Bistromath
-    /// backedges load this first so the default-off path stays a single
-    /// compare against zero with no helper call.
+    /// backedges load this before T2 state so the explicit host opt-out stays
+    /// a single compare against zero with no helper call.
     pub const ohaimark_osr_enabled: usize = @offsetOf(Realm, "ohaimark_osr_enabled");
 };
 
@@ -122,6 +142,10 @@ pub const heap = struct {
 pub const object = struct {
     pub const shape: u15 = @offsetOf(JSObject, "shape");
     pub const prototype: u15 = @offsetOf(JSObject, "prototype");
+    /// Packed `BrandFlags` word. `typeof` only reads the callable-exotic bit;
+    /// the comptime witness below pins its bit position to the Zig layout.
+    pub const brand: u14 = @offsetOf(JSObject, "brand");
+    pub const brand_proxy_callable_bit: u6 = 4;
     pub const inline_slots: u15 = @offsetOf(JSObject, "inline_slots");
     /// Byte offset of `overflow_slots.items.ptr` — the
     /// slice-pointer-at-offset-0 assumption the proof test
@@ -167,9 +191,18 @@ pub const call_ic_cell = struct {
 /// re-exported from value.zig / heap.zig so they cannot drift.
 pub const value_bits = struct {
     pub const tag_object_shifted: u64 = @as(u64, Value.tag_object) << 48;
+    pub const tag_object: u64 = Value.tag_object;
+    pub const tag_string: u64 = Value.tag_string;
+    pub const tag_int32: u64 = Value.tag_int32;
+    pub const tag_bool: u64 = Value.tag_bool;
+    pub const tag_null: u64 = Value.tag_null;
+    pub const tag_undefined: u64 = Value.tag_undefined;
     pub const pointer_mask: u64 = Value.pointer_mask;
     pub const kind_mask: u64 = heap_mod.kind_mask;
+    pub const kind_function: u64 = heap_mod.kind_function;
     pub const kind_object: u64 = heap_mod.kind_object;
+    pub const kind_symbol: u64 = heap_mod.kind_symbol;
+    pub const kind_bigint: u64 = heap_mod.kind_bigint;
 };
 
 comptime {
@@ -189,6 +222,10 @@ comptime {
         realm.globals_target,               realm.globals_decl_revision,
         realm.globals_decl_slots_ptr,       realm.globals_decl_slots_len,
         realm.globals_decl_const_flags_ptr, heap.bytes_since_gc,
+        realm.typeof_undefined_string,      realm.typeof_object_string,
+        realm.typeof_boolean_string,        realm.typeof_number_string,
+        realm.typeof_string_string,         realm.typeof_function_string,
+        realm.typeof_symbol_string,         realm.typeof_bigint_string,
         heap.gc_byte_threshold,
     }) |off| std.debug.assert(off % 8 == 0);
     // `slot` is a u32 field — 4-aligned is enough (loaded via ldr-w
@@ -197,6 +234,7 @@ comptime {
     // only if the emitters say so. Today they load it 32-bit.)
     std.debug.assert(load_ic_cell.slot % 4 == 0);
     std.debug.assert(store_ic_cell.slot % 4 == 0);
+    std.debug.assert(object.brand % 4 == 0);
     std.debug.assert(heap.allocs_since_gc % 4 == 0);
     std.debug.assert(heap.gc_young_threshold % 4 == 0);
     // The kind bits live inside the 8-byte alignment slack.
@@ -204,6 +242,14 @@ comptime {
     // `is_arrow` is a byte load (ldrb imm12).
     std.debug.assert(function.is_arrow < 4096);
     std.debug.assert(load_ic_cell.kind < 4096);
+    const callable_brand: object_mod.BrandFlags = .{
+        .extensible = false,
+        .array_length_writable = false,
+        .proxy_callable = true,
+    };
+    std.debug.assert(
+        @as(u32, @bitCast(callable_brand)) == (@as(u32, 1) << object.brand_proxy_callable_bit),
+    );
 }
 
 // ── Executable proof ────────────────────────────────────────────────
@@ -321,6 +367,32 @@ test "jit layout: machine loads match Zig reads on live values" {
         @as(u64, realm_v.globals.decl_slots.len),
         try loadVia(&ca, realm.globals_decl_slots_len, &realm_v),
     );
+    const typeof_string = try realm_v.heap.allocateString("undefined");
+    const cached_typeof = Value.fromString(typeof_string);
+    inline for ([_][]const u8{
+        "typeof_undefined_string",
+        "typeof_object_string",
+        "typeof_boolean_string",
+        "typeof_number_string",
+        "typeof_string_string",
+        "typeof_function_string",
+        "typeof_symbol_string",
+        "typeof_bigint_string",
+    }) |field_name| {
+        @field(realm_v.intrinsics, field_name) = cached_typeof;
+    }
+    inline for ([_]usize{
+        realm.typeof_undefined_string,
+        realm.typeof_object_string,
+        realm.typeof_boolean_string,
+        realm.typeof_number_string,
+        realm.typeof_string_string,
+        realm.typeof_function_string,
+        realm.typeof_symbol_string,
+        realm.typeof_bigint_string,
+    }) |offset| {
+        try testing.expectEqual(cached_typeof.bits, try loadVia(&ca, offset, &realm_v));
+    }
 
     // Heap safepoint fields: count/byte pressure and incremental phases.
     realm_v.heap.allocs_since_gc = 17;
@@ -359,6 +431,12 @@ test "jit layout: machine loads match Zig reads on live values" {
     try testing.expectEqual(
         @as(u64, @intFromPtr(obj.prototype orelse @as(?*JSObject, null))),
         try loadVia(&ca, object.prototype, obj),
+    );
+    obj.brand.proxy_callable = true;
+    try testing.expectEqual(
+        @as(u32, 1) << object.brand_proxy_callable_bit,
+        (try loadViaW(&ca, object.brand, obj)) &
+            (@as(u32, 1) << object.brand_proxy_callable_bit),
     );
     const inline1 = try loadVia(&ca, object.inline_slots + 8, obj);
     try testing.expectEqual(obj.slotAt(1).bits, inline1);

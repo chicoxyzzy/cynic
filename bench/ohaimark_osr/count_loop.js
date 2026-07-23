@@ -11,6 +11,6 @@ function count(n) {
     }
     return acc;
 }
-const result = count(5_000_000);
-if (result !== 5_000_000) throw new Error('count_loop produced ' + result);
+const result = count(2_000_000);
+if (result !== 2_000_000) throw new Error('count_loop produced ' + result);
 print(result);

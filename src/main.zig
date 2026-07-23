@@ -289,9 +289,9 @@ fn printUsage(io: std.Io) !void {
         \\                                   default at its natural production threshold;
         \\                                   --ohaimark is an explicit no-op and --no-jit
         \\                                   remains the master opt-out for both tiers.
-        \\  --ohaimark-osr                   Enable loop-header OSR into Ohaimark
-        \\                                   (default off; validation/bench gate only
-        \\                                   until docs/ohaimark.md §3.17 graduation).
+        \\  --no-ohaimark-osr                Disable loop-header OSR while retaining
+        \\                                   Ohaimark function-entry compilation. OSR is
+        \\                                   otherwise on by default with Ohaimark.
         \\
     );
 }
@@ -466,12 +466,10 @@ pub const ParsedFlags = struct {
     /// differential, GC-pressure, and fuzz gates passed. `--no-ohaimark`
     /// isolates Bistromath; `--no-jit` remains the master opt-out.
     ohaimark: bool = true,
-    /// Loop-header OSR into Ohaimark (docs/ohaimark.md §3.17). Default-off
-    /// until its own differential and natural-threshold gates pass. Exposed
-    /// as a CLI flag so the OSR rollout benchmark and focused validation can
-    /// flip `Realm.ohaimark_osr_enabled` without a separate test binary; it
-    /// is not a general user-facing production surface while the gate is off.
-    ohaimark_osr: bool = false,
+    /// Loop-header OSR into Ohaimark (docs/ohaimark.md §3.17). It defaults on
+    /// with production T2 after passing its independent validation gates;
+    /// `--no-ohaimark-osr` isolates function-entry compilation when needed.
+    ohaimark_osr: bool = true,
     /// The unconsumed tail of the argv slice (subcommand + its
     /// arguments). Empty when no subcommand was supplied — the
     /// caller prints usage in that case.
@@ -531,6 +529,9 @@ pub fn parseTopLevelFlags(args: []const []const u8) ParsedFlags {
             rest = rest[1..];
         } else if (std.mem.eql(u8, a, "--ohaimark-osr")) {
             out.ohaimark_osr = true;
+            rest = rest[1..];
+        } else if (std.mem.eql(u8, a, "--no-ohaimark-osr")) {
+            out.ohaimark_osr = false;
             rest = rest[1..];
         } else if (std.mem.startsWith(u8, a, "--allow=")) {
             // `--allow=<name>` relaxes a default-on restriction
@@ -651,10 +652,11 @@ test "parseTopLevelFlags: jit — explicit --jit is still accepted" {
     try testing.expect(parsed.jit);
 }
 
-test "parseTopLevelFlags: Ohaimark defaults on with an independent opt-out" {
+test "parseTopLevelFlags: Ohaimark and OSR default on with independent opt-outs" {
     const baseline_args = [_][]const u8{ "run", "foo.js" };
     const baseline = parseTopLevelFlags(&baseline_args);
     try testing.expect(baseline.ohaimark);
+    try testing.expect(baseline.ohaimark_osr);
 
     const disabled_args = [_][]const u8{ "--no-ohaimark", "run", "foo.js" };
     const disabled = parseTopLevelFlags(&disabled_args);
@@ -668,6 +670,13 @@ test "parseTopLevelFlags: Ohaimark defaults on with an independent opt-out" {
     try testing.expect(optimized.jit);
     try testing.expect(optimized.ohaimark);
     try testing.expectEqualStrings("run", optimized.remaining[0]);
+
+    const osr_disabled_args = [_][]const u8{ "--no-ohaimark-osr", "run", "foo.js" };
+    const osr_disabled = parseTopLevelFlags(&osr_disabled_args);
+    try testing.expectEqual(@as(?FlagError, null), osr_disabled.err);
+    try testing.expect(osr_disabled.ohaimark);
+    try testing.expect(!osr_disabled.ohaimark_osr);
+    try testing.expectEqualStrings("run", osr_disabled.remaining[0]);
 }
 
 test "parseTopLevelFlags: --gc-threshold=0 is rejected" {

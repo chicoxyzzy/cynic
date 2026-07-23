@@ -1193,14 +1193,27 @@ sampling by `/profile`.
   one pre-existing conformance failure). Broader GC-pressure buckets, fuzzing,
   and compile-time/code-size/performance gates followed; loop-header OSR is
   tracked separately below. See [ohaimark.md](ohaimark.md).
-- **Ohaimark loop-header OSR, default-off (2026-07-17).** Verified OSR-entry
-  metadata, AArch64 entry stubs in the same transactional code allocation,
-  Lantern + Bistromath backedge drivers, `Realm.ohaimark_osr_enabled` (default
-  off, child-inherited), CLI `--ohaimark-osr` for validation/bench only, and
-  anti-thrash strikes. Reuses guard-exit, safepoint, and fuel/interrupt
-  machinery. Graduation requires exact differential, clean GC/fuzz, and
-  natural-threshold geometric mean `≤ 1.000×` with no fixture above `1.050×`
-  ([ohaimark.md](ohaimark.md) §3.17).
+- **Ohaimark loop-header OSR initial validation gate (2026-07-17).** Verified
+  OSR-entry metadata, AArch64 entry stubs in the same transactional code
+  allocation, Lantern + Bistromath backedge drivers, the initially default-off,
+  child-inherited `Realm.ohaimark_osr_enabled` policy, validation-only
+  `--ohaimark-osr`, and anti-thrash strikes. Reuses guard-exit, safepoint, and
+  fuel/interrupt machinery. The following 2026-07-19 graduation record shows
+  the required exact differential, clean GC/fuzz, and natural-threshold
+  performance gates were met ([ohaimark.md](ohaimark.md) §3.17).
+- **Ohaimark loop-header OSR default-on graduation (2026-07-19).** The final
+  30-pair natural-threshold rollout measured `0.122x` geometric mean and
+  `0.140x` worst fixture (three publications, 2.1 KiB, zero exits). Baseline
+  and forced-T2+OSR test262 pass sets matched exactly at 48,517 paths with
+  SHA-256 `52146dd368643d2eedd21f60c731589f7fd6a0245dadeb26f8cdd70a95ec2ae3`.
+  ReleaseSafe threshold-1 Object, Array, and object-expression buckets found
+  no verifier failure or host crash. A Fuzzilli candidate reduced to host-time
+  noise from zero-argument `new Date()`, so the shared `--diff` prelude now
+  pins Date construction as well as `Date.now`; the minimized artifact replay
+  and a fresh 6m30s 250-sample / 11,388-execution campaign found zero crash or
+  differential artifacts. OSR now defaults on with Ohaimark; `--no-ohaimark-osr`
+  isolates function-entry T2, and the CI Ohaimark pass-set gate covers the
+  default T2+OSR posture. See [ohaimark.md](ohaimark.md) §3.17.
 - **Ohaimark rollout telemetry + automated gates (2026-07-16).** Opt-in,
   heap-scoped counters now measure compile attempts, publications/refusals,
   total/max compile time, installed code bytes, generated entries, normal
@@ -1400,6 +1413,83 @@ sampling by `/profile`.
   at natural thresholds; `--no-ohaimark` isolates T1 and `--no-jit` disables
   both tiers. The CI T2 pass-set comparison is gating. See
   [ohaimark.md](ohaimark.md) §3.26.
+- **Ohaimark rooted lexical-environment helpers (2026-07-20).** T2 now lowers
+  entry/mid-body/multiple `make_environment` and `sta_env`. The entry fast path
+  still allocates before any SSA value materializes; every other environment
+  operation carries a physical pre-op frame state, which AArch64 commits into
+  the registered Lantern frame before preserving `x0`-`x8`, `x16`, and LR across
+  a non-reentrant C helper. Allocation failure or an invalid environment chain
+  restores that ABI, stamps the original bytecode offset, and resumes Lantern;
+  stores route through `Heap.storeEnvSlot` for the normal GC barrier. This is a
+  deliberately limited frame-staged safepoint, not a generic JS-reentrant
+  helper/continuation protocol. Native and source-level GC-pressure tests cover
+  live roots, the write barrier, and a real `var` write; the ReleaseSafe
+  `language/statements/let` T2 bucket passes at `gc_threshold=1`. The four-worker
+  forced-T2 sweep retained the exact 48,653-path pass list (SHA-256
+  `10f024349d3467c72112da03dd57e0d7e543cdb819a00b3082dfecedaec614ca`), with
+  7,036 publications, 143,447 completed entries, and 118 guard exits.
+  `make_environment` no longer appears among refusals; `call_method8`,
+  `throw_if_hole`, and `typeof_` are now the leading frontiers. See
+  [ohaimark.md](ohaimark.md) §3.17.
+- **Ohaimark TDZ guard lowering and zip-state card marking (2026-07-21).**
+  `throw_if_hole` now compiles as a tagged identity guard. A Hole takes the
+  existing pre-operation deopt route, so Lantern creates the canonical
+  §9.1.1.1.6 TDZ `ReferenceError`; a non-Hole value continues with no helper
+  call or allocation. Evaluator and native AArch64 coverage pin both paths.
+  The accompanying ReleaseSafe sweep found and fixed an independent
+  `Iterator.zipKeyed` generational-GC gap: copied keys and longest-mode padding
+  values now card-mark the mature wrapper, covered by an alternating
+  minor/major regression. Four-worker `--timeout=0` T1 and forced-T2 pass lists
+  were byte-identical at 48,653 paths (SHA-256
+  `10f024349d3467c72112da03dd57e0d7e543cdb819a00b3082dfecedaec614ca`); the
+  forced run published 7,297 functions and completed 260,112 generated entries
+  with 136 guard exits. See [ohaimark.md](ohaimark.md) §3.17.
+- **Ohaimark `typeof` tag dispatch (2026-07-22).** `typeof_` now lowers from
+  the §13.5.3 NaN-boxed value tag directly, including callable plain objects
+  used by callable Proxies and `%Function.prototype%`. Eight lazy, per-realm
+  immutable result strings live in `Intrinsics`; a cold cache deopts to Lantern
+  for one allocation, while later native entries load the cached primitive with
+  no helper call, user-code reentry, or exposed state. The cache is rooted and
+  snapshot-encoded with intrinsic `Value`s. Graph, layout, native AArch64, GC,
+  and snapshot coverage passed. The full ReleaseSafe forced-T2 sweep published
+  7,354 functions, completed 260,118 generated entries, and removed `typeof_`
+  from the leading refusal report. Its 48,653 pass paths exactly matched forced
+  T1 (SHA-256 `10f024349d3467c72112da03dd57e0d7e543cdb819a00b3082dfecedaec614ca`).
+  See [ohaimark.md](ohaimark.md) §3.17.
+- **Ohaimark direct monomorphic compact call/construct/property handoff (2026-07-23).** A mature
+  `CallICCell` for an ordinary bytecode function stages the caller's physical
+  pre-operation state, advances its IP, and uses the shared Lantern frame-push
+  helper to append the child frame. The shared IR/codegen path covers
+  `call_method8`, free `call0_8` through `call3_8`, generic `call8`,
+  `call_property8`, and `new_call8`; free calls pass strict `undefined` as
+  `this`. Property calls preserve their receiver as `this`, require an exact
+  plain-object own or immediate-prototype data `LoadICCell`, then require its
+  loaded function to exactly match the `CallICCell`; prototype loads also guard
+  identity, shape, and the Realm prototype revision. Synthetic accessor cells,
+  accessors/exotics, cold or mismatching feedback, and excluded callable forms
+  all replay in Lantern, preserving hardened-realm override-mistake behavior.
+  Construction additionally guards the cached prototype against the live
+  constructor, then uses the shared Lantern construct-frame helper to allocate
+  the instance, apply the initial-shape capacity hint, and defer §10.2.2
+  ConstructResult to Lantern's normal return path. The generated stub
+  immediately returns a reserved handoff word, so Lantern drives the child and
+  the parent's ordinary bytecode continuation; it never follows a potentially
+  relocated caller pointer. The helper preserves the volatile frame/register
+  bases across a cold or polymorphic IC tier-down before replaying the original
+  opcode in Lantern. `JitFrameScope` also roots a `callJSFunction` frame list
+  before either JIT can allocate. Source-level `gc_threshold=1` coverage
+  validates every compact free-call shape, receiver and argument placement,
+  constructor `new.target`, object-return ConstructResult, plus cold and
+  polymorphic fallback. It now also covers an own-data property hit, cold
+  LoadIC/CallIC replay, and equal-own-shape receivers with different immediate
+  prototypes. The forced-T2 `language/expressions/call` sweep remains 82 pass /
+  10 fail, publishes nine functions, completes 100,008 entries, and has zero
+  guard exits; `language/expressions/new` remains 73 pass / 0 fail. The full
+  forced sweep remains 48,653 pass / 1,324 fail, publishes 8,370 functions,
+  generates 263,938 entries, completes 260,124, and records 2,364 guard exits.
+  `call_property8` no longer appears in the leading unsupported-opcode report.
+  This is intentionally a Lantern handoff, not generic native post-call
+  continuation support. See [ohaimark.md](ohaimark.md) §3.17.
 - **Generational GC.** A JSC-Riptide-style non-moving
   generational collector — store-site routing, generation header
   bits, a write barrier + remembered set, `collectYoung` with
@@ -1796,9 +1886,12 @@ and the per-builtin checklist; this section tracks status.
   full-pipeline compilation, chunk-owned executable lifetime, verified CFG
   transfer coalescing/fallthrough, one-word completion, and exact Number
   operand-shape specialization now ship. Ohaimark is on by default at natural
-  thresholds; `--no-ohaimark` isolates T1. Loop-header OSR ships default-off
-  (`Realm.ohaimark_osr_enabled` / `--ohaimark-osr`). Rooted helper calls,
-  broader opcode coverage, and additional architectures remain planned. See
+  thresholds; `--no-ohaimark` isolates T1, while `--no-ohaimark-osr` isolates
+  function-entry T2 from default loop-header OSR. A rooted lexical-environment
+  helper subset (`make_environment` plus `sta_env`) and direct monomorphic
+  compact call/construct/property frame handoff now ship; generalized
+  JS-reentrant helper calls, broader opcode coverage, and additional
+  architectures remain planned. See
   [ohaimark.md](ohaimark.md).
 - **Spasm** — wasm baseline JIT (T1), Sarcasm's compiled tier.
   Single-pass over the validated module + branch side-table,

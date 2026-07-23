@@ -10,6 +10,7 @@ const JSObject = @import("../object.zig").JSObject;
 const Realm = @import("../realm.zig").Realm;
 const Shape = @import("../shape.zig").Shape;
 const Value = @import("../value.zig").Value;
+const arith = @import("../lantern/arith.zig");
 const deopt = @import("deopt.zig");
 const deopt_physical = @import("deopt_physical.zig");
 const evaluator = @import("evaluator.zig");
@@ -859,7 +860,7 @@ test "Ohaimark physical deopt metadata mixes entry stable and immediate recovery
     defer homes.deinit();
     try homes.verify(&graph, &specialization, &representations, &logical);
     try testing.expectEqual(@as(u32, 0), homes.tagged_slot_count);
-    try testing.expectEqual(@as(u32, 1), homes.int32_slot_count);
+    try testing.expectEqual(@as(u32, 0), homes.int32_slot_count);
 
     var first_logical = try logical.decode(testing.allocator, 0);
     defer first_logical.deinit();
@@ -872,13 +873,9 @@ test "Ohaimark physical deopt metadata mixes entry stable and immediate recovery
     var second_logical = try logical.decode(testing.allocator, 1);
     defer second_logical.deinit();
     try testing.expectEqual(@as(usize, 1), second_logical.slots.len);
-    const folded_value = switch (second_logical.slots[0].recovery) {
-        .value => |value| value,
-        .immediate => return error.TestUnexpectedResult,
-    };
     try testing.expectEqual(
-        deopt_physical.Home{ .int32_stack = 0 },
-        try homes.homeFor(folded_value),
+        deopt.Recovery{ .immediate = .{ .int32 = 42 } },
+        second_logical.slots[0].recovery,
     );
 
     var physical = try deopt_physical.Metadata.build(
@@ -909,7 +906,7 @@ test "Ohaimark physical deopt metadata mixes entry stable and immediate recovery
     var second_physical = try physical.decode(testing.allocator, 1);
     defer second_physical.deinit();
     try testing.expectEqual(
-        deopt_physical.Recovery{ .int32_stack = 0 },
+        deopt_physical.Recovery{ .immediate = .{ .int32 = 42 } },
         second_physical.slots[0].recovery,
     );
     try testing.expectEqual(
@@ -1328,6 +1325,179 @@ test "Ohaimark graph evaluator deopt resumes Lantern before overflow" {
     try testing.expectEqual(interpreted.bits, resumed.bits);
     try testing.expect(resumed.isDouble());
     try testing.expectEqual(@as(f64, 2_147_483_648), resumed.asDouble());
+}
+
+test "Ohaimark graph evaluator handles throw_if_hole TDZ guards" {
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    try builder.emitOp(.throw_if_hole, span);
+    var chunk = try finish(&builder);
+    defer chunk.deinit(testing.allocator);
+
+    var graph = try ir.Graph.build(testing.allocator, &chunk);
+    defer graph.deinit();
+    const node_id = findNode(&graph, .throw_if_hole) orelse return error.TestUnexpectedResult;
+    try testing.expect(graph.nodes[node_id].frame_state != null);
+
+    var specialization = try specialize.Plan.build(testing.allocator, &graph);
+    defer specialization.deinit();
+    try testing.expectEqual(
+        specialize.Lowering.throw_if_hole,
+        specialization.node_info[node_id].lowering,
+    );
+    var representations = try representation.Plan.build(
+        testing.allocator,
+        &graph,
+        &specialization,
+    );
+    defer representations.deinit();
+    try testing.expectEqual(representation.Kind.tagged, representations.outputs[node_id]);
+    var logical = try deopt.Metadata.build(testing.allocator, &graph, &specialization);
+    defer logical.deinit();
+    var homes = try deopt_physical.Homes.build(
+        testing.allocator,
+        &graph,
+        &specialization,
+        &representations,
+        &logical,
+    );
+    defer homes.deinit();
+    var physical = try deopt_physical.Metadata.build(
+        testing.allocator,
+        &graph,
+        &specialization,
+        &representations,
+        &logical,
+        &homes,
+    );
+    defer physical.deinit();
+
+    const registers = [_]Value{};
+    var passed = try evaluator.evaluate(
+        testing.allocator,
+        &chunk,
+        &graph,
+        &specialization,
+        &representations,
+        &logical,
+        &homes,
+        &physical,
+        .{
+            .accumulator = Value.fromInt32(42),
+            .registers = &registers,
+            .step_limit = 1_000,
+        },
+    );
+    defer passed.deinit();
+    switch (passed) {
+        .returned => |value| try testing.expectEqual(Value.fromInt32(42).bits, value.bits),
+        .deopt => return error.TestUnexpectedResult,
+    }
+
+    var failed = try evaluator.evaluate(
+        testing.allocator,
+        &chunk,
+        &graph,
+        &specialization,
+        &representations,
+        &logical,
+        &homes,
+        &physical,
+        .{
+            .accumulator = Value.hole_,
+            .registers = &registers,
+            .step_limit = 1_000,
+        },
+    );
+    defer failed.deinit();
+    const recovered = switch (failed) {
+        .returned => return error.TestUnexpectedResult,
+        .deopt => |*state| state,
+    };
+    try testing.expectEqual(node_id, recovered.node);
+    try testing.expectEqual(graph.nodes[node_id].bytecode_offset, recovered.bytecode_offset);
+    try testing.expectEqual(Value.hole_.bits, recovered.accumulator.bits);
+
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = false;
+    switch (try recovered.resumeLantern(testing.allocator, &realm, &chunk)) {
+        .thrown => {},
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "Ohaimark graph evaluator handles typeof with realm-cached strings" {
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    try builder.emitOp(.typeof_, span);
+    var chunk = try finish(&builder);
+    defer chunk.deinit(testing.allocator);
+
+    var graph = try ir.Graph.build(testing.allocator, &chunk);
+    defer graph.deinit();
+    const node_id = findNode(&graph, .typeof_) orelse return error.TestUnexpectedResult;
+    try testing.expect(graph.nodes[node_id].frame_state != null);
+
+    var specialization = try specialize.Plan.build(testing.allocator, &graph);
+    defer specialization.deinit();
+    try testing.expectEqual(
+        specialize.Lowering.typeof_,
+        specialization.node_info[node_id].lowering,
+    );
+    try testing.expect(specialization.node_info[node_id].result_type.eql(specialize.Type.string));
+    var representations = try representation.Plan.build(
+        testing.allocator,
+        &graph,
+        &specialization,
+    );
+    defer representations.deinit();
+    try testing.expectEqual(representation.Kind.tagged, representations.outputs[node_id]);
+    var logical = try deopt.Metadata.build(testing.allocator, &graph, &specialization);
+    defer logical.deinit();
+    var homes = try deopt_physical.Homes.build(
+        testing.allocator,
+        &graph,
+        &specialization,
+        &representations,
+        &logical,
+    );
+    defer homes.deinit();
+    var physical = try deopt_physical.Metadata.build(
+        testing.allocator,
+        &graph,
+        &specialization,
+        &representations,
+        &logical,
+        &homes,
+    );
+    defer physical.deinit();
+
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    const expected = try arith.typeOf(&realm, Value.fromInt32(7));
+    const registers = [_]Value{};
+    var outcome = try evaluator.evaluate(
+        testing.allocator,
+        &chunk,
+        &graph,
+        &specialization,
+        &representations,
+        &logical,
+        &homes,
+        &physical,
+        .{
+            .realm = &realm,
+            .accumulator = Value.fromInt32(7),
+            .registers = &registers,
+            .step_limit = 1_000,
+        },
+    );
+    defer outcome.deinit();
+    switch (outcome) {
+        .returned => |value| try testing.expectEqual(expected.bits, value.bits),
+        .deopt => return error.TestUnexpectedResult,
+    }
 }
 
 test "Ohaimark graph evaluator bounds non-terminating control flow" {
