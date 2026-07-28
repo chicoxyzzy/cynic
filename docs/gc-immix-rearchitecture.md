@@ -142,7 +142,8 @@ Stage A moved the *cold* clusters (fields null on a plain object). The rest
 of the header is the *storage* fields — empty on a shape-mode object but
 still resident: `properties`/`property_flags` (40 B each), `own_key_order`
 (24 B), `elements` (24 B), `sparse_elements`+`is_sparse`+`sparse_length`
-(~28 B), `inline_slots[4]` (32 B), `overflow_slots` (24 B), `shape` (8 B).
+(~28 B), `inline_slots[4]` (32 B), the then-separate `overflow_slots`
+(24 B; now the overflow role of `secondary_values`), and `shape` (8 B).
 A survey of the property/element substrate splits these into two moves along
 one hard constraint: **Bistromath (the JIT) bakes header offsets into
 emitted machine code.**
@@ -153,7 +154,8 @@ representation. They are empty on every shape-mode object (splay's `Node`s,
 all plain literals — a shaped object stores values in `inline_slots`, never
 the bag), and the JIT deopts to the interpreter for dict-mode objects and
 **never reads these fields**. So they moved into a lazily-allocated
-`DictStore` reached by one pointer (`dict_store`), allocated only on
+`DictStore` reached by one pointer (originally `dict_store`, now the tagged
+`aux_store`), allocated only on
 `demoteFromShape` / first bag write, read through `propsConst`/`propsMut`
 (and the flags/order pair). Shape-mode objects never allocate it, so the
 `is_pristine` fast-death and the shape/IC hot path are undisturbed — the
@@ -183,13 +185,50 @@ byte-identical, `--gc-threshold=1` verifiers green. **The dense `elements`
 vector is deliberately NOT moved** — it is the array hot path (every dense
 index read/write) and belongs to a perf-sensitive "packed JSArray"
 redesign, not a cold move. So header now stands at 176 B (408 → 176 overall,
-−57 %); the remaining big fields — `inline_slots[4]`, `overflow_slots`,
-`shape` — are all JIT-baked and only move under B2.
+−57 %); the remaining big fields — `inline_slots[4]`, the then-separate
+`overflow_slots` (now `secondary_values`), and `shape` — are all JIT-baked
+and only move under B2.
+
+**B1c — overlay the two secondary value-vector headers (IN PROGRESS).**
+Shape-mode named properties need an overflow vector only after the four
+inline slots fill; dense indexed objects need an elements vector. The
+common objects measured in `splay` use one role or the other, yet every
+object currently pays for both 24-byte `ArrayListUnmanaged(Value)` headers.
+`secondary_values` overlays those headers without moving either vector's
+payload. It starts as the dense-elements header. On the first named-slot
+spill, the elements header moves to an exact-sized cold auxiliary record
+only if that same object actually has indexed storage, and
+`secondary_values` becomes the overflow-slot header. The
+`secondary_is_overflow` transition is monotonic, so
+`layout.object.overflow_items_ptr` remains one direct JIT load even after a
+later shape demotion. A tagged auxiliary store composes the rare mixed
+elements-plus-dictionary case from stable child pointers; ordinary shaped
+objects and ordinary dense arrays allocate no new sidecar.
+
+This is a deliberately smaller step than JavaScriptCore's
+[Butterfly](https://github.com/WebKit/WebKit/blob/main/Source/JavaScriptCore/runtime/Butterfly.h),
+which lays property and indexed storage around one out-of-line allocation.
+SpiderMonkey's
+[NativeObject](https://searchfox.org/mozilla-central/source/js/src/vm/NativeObject.h)
+and Hermes'
+[JSObject](https://github.com/facebook/hermes/blob/main/include/hermes/VM/JSObject.h)
+instead keep direct slots plus separate out-of-line storage. The overlay
+keeps Cynic's existing element and compiled-slot access shapes, trading a
+cold allocation only for the uncommon object that uses both roles.
+
+The representation is not ECMAScript-observable: §10.1 ordinary-object
+property operations and §10.4.2 array-exotic indexed semantics must remain
+identical. The implementation gate therefore includes both construction
+orders for mixed named/indexed objects, deletion and shape demotion,
+snapshot round trips, GC marking/deinit under allocation pressure, and the
+JIT layout proof. test262's property/array buckets and the SES hardened-
+primordial suite must remain unchanged. Header-size and peak-RSS results
+will be recorded after those gates and the remote macro run complete.
 
 **B2 — the hot-field / uniform-header move (JIT lane, the actual ~75 MB
-target).** `shape` + `inline_slots` + `overflow_slots` (and `elements`) are
-the shape-mode value storage — the hot path. Moving them out-of-line to
-reach ~90 B is where the 4× RSS outlier actually closes, but it is
+target).** `shape` + `inline_slots` + the overlaid `secondary_values`
+header are still resident hot-path storage. Moving them fully out-of-line
+to reach ~90 B is where the 4× RSS outlier actually closes, but it is
 **machine-code-coupled**: `src/runtime/jit/layout.zig` is the single source
 of truth for `object.shape` / `object.inline_slots` /
 `object.overflow_items_ptr` / `inline_slot_cap`, and `emitLoadSlot` /

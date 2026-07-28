@@ -261,9 +261,10 @@ pub fn ownPropertyKeysOrdered(
                 integer_keys.append(realm.allocator, .{ .idx = idx, .key = owned.flatBytes() }) catch return error.OutOfMemory;
             }
         } else {
+            const elements = obj.elementItems();
             var ei: u32 = 0;
-            while (ei < obj.elements.items.len) : (ei += 1) {
-                if (JSObject.isElementHole(obj.elements.items[ei])) continue;
+            while (ei < elements.len) : (ei += 1) {
+                if (JSObject.isElementHole(elements[ei])) continue;
                 var ibuf: [16]u8 = undefined;
                 const ks = std.fmt.bufPrint(&ibuf, "{d}", .{ei}) catch continue;
                 const owned = realm.heap.allocateString(ks) catch return error.OutOfMemory;
@@ -3161,7 +3162,7 @@ fn objectFreeze(realm: *Realm, this_value: Value, args: []const Value) NativeErr
     }
     obj.brand.extensible = false;
     // §10.4.2 — for Array exotic objects, indexed elements live
-    // in `obj.elements` (or `sparse_elements`) and default to
+    // in dense (or sparse) element storage and default to
     // `{w:true, e:true, c:true}`. SetIntegrityLevel(O, frozen)
     // must lower them to `{w:false, e:true, c:false}`; promote
     // each present indexed slot into `property_flags` keyed by
@@ -3238,9 +3239,10 @@ fn lowerArrayIndexedFlags(realm: *Realm, obj: *JSObject, sealed_only: bool) Nati
             try indices.append(realm.allocator, entry.key_ptr.*);
         }
     } else {
+        const elements = obj.elementItems();
         var i: u32 = 0;
-        while (i < obj.elements.items.len) : (i += 1) {
-            if (JSObject.isElementHole(obj.elements.items[i])) continue;
+        while (i < elements.len) : (i += 1) {
+            if (JSObject.isElementHole(elements[i])) continue;
             try indices.append(realm.allocator, i);
         }
     }
@@ -3433,7 +3435,7 @@ fn objectIsSealed(realm: *Realm, this_value: Value, args: []const Value) NativeE
 
 /// `true` iff `obj` is an Array exotic with at least one
 /// present indexed slot whose descriptor hasn't been lowered
-/// into the property bag. Indexed slots in `obj.elements` /
+/// into the property bag. Indexed slots in dense element storage /
 /// `obj.sparseConst()` default to `{w,e,c} = true` (per
 /// §10.4.2) — `isSealed` / `isFrozen` must observe that as
 /// "not sealed" until SetIntegrityLevel promotes the slots.
@@ -3450,9 +3452,10 @@ fn hasUnlockedIndexedElements(obj: *JSObject) bool {
         }
         return false;
     }
+    const elements = obj.elementItems();
     var i: u32 = 0;
-    while (i < obj.elements.items.len) : (i += 1) {
-        if (JSObject.isElementHole(obj.elements.items[i])) continue;
+    while (i < elements.len) : (i += 1) {
+        if (JSObject.isElementHole(elements[i])) continue;
         var ibuf: [16]u8 = undefined;
         const ks = std.fmt.bufPrint(&ibuf, "{d}", .{i}) catch return true;
         if (!obj.ownDataContains(ks)) return true;

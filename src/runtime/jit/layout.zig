@@ -90,7 +90,7 @@ pub const realm = struct {
         @offsetOf(Realm, "globals") + @offsetOf(GlobalBindings, "decl_revision");
     /// The §9.1.1.4 declarative-record slot caches (slice pointers
     /// at offset 0 — the same layout assumption the proof test
-    /// witnesses for `overflow_slots`).
+    /// witnesses for `secondary_values`).
     pub const globals_decl_slots_ptr: usize =
         @offsetOf(Realm, "globals") + @offsetOf(GlobalBindings, "decl_slots");
     pub const globals_decl_slots_len: usize =
@@ -123,11 +123,14 @@ pub const object = struct {
     pub const shape: u15 = @offsetOf(JSObject, "shape");
     pub const prototype: u15 = @offsetOf(JSObject, "prototype");
     pub const inline_slots: u15 = @offsetOf(JSObject, "inline_slots");
-    /// Byte offset of `overflow_slots.items.ptr` — the
-    /// slice-pointer-at-offset-0 assumption the proof test
-    /// witnesses.
+    /// Byte offset of `secondary_values.items.ptr`. Once an object
+    /// needs a named slot past `inline_slot_cap`,
+    /// `secondary_is_overflow` is monotonic: this header remains the
+    /// JIT-visible overflow-slot vector even if the object later
+    /// demotes from shape mode. The slice-pointer-at-offset-0
+    /// assumption is witnessed by the proof test below.
     pub const overflow_items_ptr: u15 =
-        @offsetOf(JSObject, "overflow_slots") +
+        @offsetOf(JSObject, "secondary_values") +
         @offsetOf(std.ArrayListUnmanaged(Value), "items");
     pub const inline_slot_cap: u32 = object_mod.inline_slot_cap;
 };

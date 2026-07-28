@@ -1924,7 +1924,7 @@ test "later: harden on Array reaches nested values but not indexed slots (known 
     //                   object). ✓
     //   `a.push(3)`     throws (root is non-extensible). ✓
     //   `a[0] = 9`      **does NOT throw** — the indexed slot
-    //                   itself lives in `obj.elements`, not
+    //                   itself lives in dense element storage, not
     //                   `obj.propsConst()`, so harden's bag-only
     //                   walk doesn't reach it. Object.freeze
     //                   handles this via `lowerArrayIndexedFlags`

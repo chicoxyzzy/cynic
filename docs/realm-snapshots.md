@@ -320,10 +320,12 @@ hooks above.
   back-pointer disappears. `pinned`, `length_cu`, `byte_len` copied.
 - `JSObject` (`object.zig:821`): `properties` /
   `property_flags` (StringArrayHashMaps — key slices + Values),
-  `shape: ?*Shape`, `inline_slots[4]` + `overflow_slots` +
+  `shape: ?*Shape`, `inline_slots[4]` + the overflow view of
+  `secondary_values` +
   `slot_count` (`object.zig:819` `inline_slot_cap = 4`;
   `object.zig:862-864`), `heap` back-pointer (restamp), `prototype` /
-  `prototype_fn`, `elements` / `sparse_elements` (+
+  `prototype_fn`, dense elements (the alternate `secondary_values`
+  role, with an aux header on mixed objects) / `sparse_elements` (+
   `elements_pooled`, `object.zig:1230` — pooled buffers must be
   re-drawn from the pool or unpooled at restore), `key_anchors`
   (`object.zig:1241`), `own_key_order` (`object.zig:1262` — borrowed
@@ -591,7 +593,8 @@ needs a `snapshot_arena` field or ownership hook on `Realm`
   post-restore transitions dedupe against the snapshot's tree
   exactly as against the original.
 - Shape-mode objects: `slot_count` + the first 4 values from
-  `inline_slots` + `overflow_slots` serialize as one logical slot
+  `inline_slots` + the overflow view of `secondary_values` serialize
+  as one logical slot
   vector (encoder reads through `slotAt`, decoder writes through
   `setSlot`/`resizeSlots` equivalents, keeping the inline/overflow
   split an implementation detail per `object.zig:857-859`).

@@ -269,13 +269,14 @@ fn featureSetFromBits(bits: u64) features.FeatureSet {
 /// the remaining bits (the proxy / promise / weakref / sparse / buffer
 /// brands) are at their default — a non-default one is outside the
 /// phase-1 envelope (`error.SnapshotUnsupported`), same as before the
-/// fields were folded into one word.
+/// fields were folded into one word. The compact-storage representation
+/// bits (`secondary_is_overflow` / `aux_kind`) are reconstructed from
+/// the logical property/slot/element tags rather than persisted.
 const object_serialized_fields = [_][]const u8{
-    "kind",         "dict_store",   "shape",
-    "inline_slots", "slot_count",   "overflow_slots",
-    "prototype",    "prototype_fn", "brand",
-    "elements",     "extension",    "needs_internal_scan",
-    "is_pristine",
+    "kind",         "aux_store",           "shape",
+    "inline_slots", "slot_count",          "secondary_values",
+    "prototype",    "prototype_fn",        "brand",
+    "extension",    "needs_internal_scan", "is_pristine",
 };
 /// Fields recomputed / re-defaulted at restore (GC header, heap
 /// back-pointer). Borrowed-key anchors are dropped-by-design too, but
@@ -860,10 +861,11 @@ const Capture = struct {
             try w.w8(obj_tag_prototype_fn);
             try w.w32(@intCast(try self.functionRef(p)));
         }
-        if (o.elements.items.len != 0) {
+        const elements = o.elementItems();
+        if (elements.len != 0) {
             try w.w8(obj_tag_elements);
-            try w.w32(@intCast(o.elements.items.len));
-            for (o.elements.items) |v| try w.w64(try self.encodeValue(v));
+            try w.w32(@intCast(elements.len));
+            for (elements) |v| try w.w64(try self.encodeValue(v));
         }
         if (o.orderConst().items.len != 0) {
             try w.w8(obj_tag_own_key_order);
@@ -1596,8 +1598,9 @@ const Restore = struct {
                 obj_tag_elements => {
                     const n = try r.r32();
                     if (n > r.data.len) return error.SnapshotCorrupt;
-                    try o.elements.ensureTotalCapacity(allocator, n);
-                    for (0..n) |_| o.elements.appendAssumeCapacity(try self.readValue(r));
+                    const elements = try o.elementsMut(allocator);
+                    try elements.ensureTotalCapacity(allocator, n);
+                    for (0..n) |_| elements.appendAssumeCapacity(try self.readValue(r));
                 },
                 obj_tag_own_key_order => try self.readKeyList(r, try o.orderMut(allocator)),
                 obj_tag_accessors => {
@@ -1858,6 +1861,64 @@ test "snapshot: hardened realm round-trip preserves per-kind heap counts" {
     try testing.expectEqual(want_symbols, restored.heap.symbolCount());
     try testing.expectEqual(want_cells, restored.synth_accessor_cells.items.len);
     try testing.expect(restored.hardened);
+}
+
+test "snapshot: mixed named-overflow and dense elements round-trip logically" {
+    const source = try makeInstalledRealm(testing.allocator, false);
+    const owner = try source.heap.allocateObject();
+    const names = [_][]const u8{ "a", "b", "c", "d", "e", "f" };
+    for (names, 0..) |name, i| {
+        try source.heap.storeProperty(owner, source.allocator, name, Value.fromInt32(@intCast(i + 1)));
+    }
+    try owner.markAsArrayExotic(source.allocator);
+    try owner.setIndexed(source.allocator, 0, Value.fromInt32(101));
+    try owner.setIndexed(source.allocator, 1, Value.fromInt32(202));
+    try testing.expect(owner.brand.secondary_is_overflow);
+    try source.globals.put(source.allocator, "snapshotMixed", heap_mod.taggedObject(owner));
+
+    // Exercise the other aux composition as well: deleting a named key
+    // demotes the shaped mixed object to a DictStore while its dense
+    // element header remains spilled. The snapshot format must encode
+    // the logical dict + elements, not the `.combined` representation.
+    const combined = try source.heap.allocateObject();
+    for (names, 0..) |name, i| {
+        try source.heap.storeProperty(combined, source.allocator, name, Value.fromInt32(@intCast(10 + i)));
+    }
+    try combined.markAsArrayExotic(source.allocator);
+    try combined.setIndexed(source.allocator, 0, Value.fromInt32(303));
+    try testing.expect(try combined.deleteOwn(source.allocator, "a"));
+    try testing.expect(combined.shape == null);
+    try testing.expect(combined.dictStore() != null);
+    try testing.expect(combined.brand.secondary_is_overflow);
+    try source.globals.put(source.allocator, "snapshotCombined", heap_mod.taggedObject(combined));
+
+    const image = try Snapshot.capture(source, testing.allocator);
+    defer testing.allocator.free(image);
+    destroyRealm(testing.allocator, source);
+
+    const restored = try Snapshot.restore(testing.allocator, image);
+    defer destroyRealm(testing.allocator, restored);
+    const restored_value = restored.globals.get("snapshotMixed") orelse return error.TestUnexpectedResult;
+    const mixed = heap_mod.valueAsPlainObject(restored_value) orelse return error.TestUnexpectedResult;
+
+    try testing.expect(mixed.brand.secondary_is_overflow);
+    try testing.expectEqual(@as(usize, names.len), mixed.slotCount());
+    try testing.expectEqual(@as(usize, 2), mixed.elementCount());
+    for (names, 0..) |name, i| {
+        try testing.expectEqual(@as(i32, @intCast(i + 1)), mixed.get(name).asInt32());
+    }
+    try testing.expectEqual(@as(i32, 101), mixed.getIndexed(0).asInt32());
+    try testing.expectEqual(@as(i32, 202), mixed.getIndexed(1).asInt32());
+
+    const combined_value = restored.globals.get("snapshotCombined") orelse return error.TestUnexpectedResult;
+    const restored_combined = heap_mod.valueAsPlainObject(combined_value) orelse return error.TestUnexpectedResult;
+    try testing.expect(restored_combined.shape == null);
+    try testing.expect(restored_combined.dictStore() != null);
+    try testing.expect(restored_combined.get("a").isUndefined());
+    for (names[1..], 1..) |name, i| {
+        try testing.expectEqual(@as(i32, @intCast(10 + i)), restored_combined.get(name).asInt32());
+    }
+    try testing.expectEqual(@as(i32, 303), restored_combined.getIndexed(0).asInt32());
 }
 
 test "snapshot: restored hardened realm behaves like a fresh one" {
