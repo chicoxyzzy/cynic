@@ -189,7 +189,7 @@ redesign, not a cold move. So header now stands at 176 B (408 → 176 overall,
 `overflow_slots` (now `secondary_values`), and `shape` — are all JIT-baked
 and only move under B2.
 
-**B1c — overlay the two secondary value-vector headers (IN PROGRESS).**
+**B1c — overlay the two secondary value-vector headers (SHIPPED).**
 Shape-mode named properties need an overflow vector only after the four
 inline slots fill; dense indexed objects need an elements vector. The
 common objects measured in `splay` use one role or the other, yet every
@@ -222,8 +222,20 @@ identical. The implementation gate therefore includes both construction
 orders for mixed named/indexed objects, deletion and shape demotion,
 snapshot round trips, GC marking/deinit under allocation pressure, and the
 JIT layout proof. test262's property/array buckets and the SES hardened-
-primordial suite must remain unchanged. Header-size and peak-RSS results
-will be recorded after those gates and the remote macro run complete.
+primordial suite remain unchanged.
+
+**Result: the later packed-brand baseline falls from 168 → 144 B per
+`JSObject` (−24 B, −14.3%).** On the pinned remote box, interpreter Splay
+falls from **201,856 → 183,664 KiB peak RSS** (−18,192 KiB / −17.77 MiB,
+−9.01%), matching the 768,000-live-object prediction (18,000 KiB) within
+allocator/page noise. It also gets slightly faster: absolute p50
+**688.05 → 660.14 ms** (−4.1%), while the interleaved five-pair comparison
+reports **0.968×** with 4.9% ratio spread. The adjacent interpreter micro
+smokes (`array_iter`, property read/write, object allocation, constructor
+array build) show no stable regression; their small ±3–8% movements carry
+11.7–26.0% spread except Splay's low-noise result. ReleaseSafe unit tests,
+the SES suite, allocation-pressure Array/Object/object-expression buckets,
+and the JIT layout/Bistromath/Ohaimark proofs stay green.
 
 **B2 — the hot-field / uniform-header move (JIT lane, the actual ~75 MB
 target).** `shape` + `inline_slots` + the overlaid `secondary_values`
