@@ -461,9 +461,10 @@ pub fn buildForInSnapshot(
                         int_keys.append(realm.allocator, .{ .idx = idx, .key = key_owned_str.flatBytes() }) catch return error.OutOfMemory;
                     }
                 } else {
+                    const elements = cur.elementItems();
                     var ei: u32 = 0;
-                    while (ei < cur.elements.items.len) : (ei += 1) {
-                        if (@import("../object.zig").JSObject.isElementHole(cur.elements.items[ei])) continue;
+                    while (ei < elements.len) : (ei += 1) {
+                        if (@import("../object.zig").JSObject.isElementHole(elements[ei])) continue;
                         var ibuf: [16]u8 = undefined;
                         const ks = std.fmt.bufPrint(&ibuf, "{d}", .{ei}) catch continue;
                         const key_owned_str = realm.heap.allocateString(ks) catch return error.OutOfMemory;

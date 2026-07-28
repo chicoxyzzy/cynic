@@ -2209,7 +2209,7 @@ pub fn regexReplace(
         const match_arr = heap_mod.valueAsPlainObject(exec_result) orelse break;
         // The match array and the whole-match string survive the
         // functional-replacer GC only if rooted: the captures live
-        // in `match_arr.elements`, so rooting `match_arr` keeps the
+        // in `match_arr`'s dense elements, so rooting it keeps the
         // whole capture set reachable through `appendRegexReplacement`.
         const iter_scope = realm.heap.openScope() catch return error.OutOfMemory;
         defer iter_scope.close();

@@ -347,8 +347,8 @@ pub const GlobalBindings = struct {
     decl_revision: u64 = 0,
 
     fn map(self: *GlobalBindings) *std.StringArrayHashMapUnmanaged(Value) {
-        // `bindToObject` guarantees the target has a `dict_store`.
-        if (self.target) |t| return &t.dict_store.?.properties;
+        // `bindToObject` guarantees the target has a DictStore.
+        if (self.target) |t| return &t.dictStore().?.properties;
         return &self.fallback;
     }
     fn mapConst(self: *const GlobalBindings) *const std.StringArrayHashMapUnmanaged(Value) {
@@ -693,7 +693,7 @@ pub const GlobalBindings = struct {
         self.fallback = .empty;
         // The object env-record writes/reads the global's property bag
         // through `map()` (a raw `*Map`, no allocator). The bag lives in
-        // the JSObject's lazily-allocated `dict_store` now, so ensure it
+        // the JSObject's lazily-allocated dictionary aux store now, so ensure it
         // exists here — the global is definitionally dict-backed.
         _ = try gt.ensureDictStore(allocator);
         self.target = gt;

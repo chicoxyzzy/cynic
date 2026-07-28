@@ -544,8 +544,8 @@ fn arrayLikeIterStep(realm: *Realm, this_value: Value) StepOutcome {
         } else if (obj.brand.is_array_exotic and !obj.brand.is_sparse) {
             // §23.1.5.2.1 step 6 — fast path for a dense Array
             // exotic. `length` is a data property kept synced with
-            // `elements.items.len`, and in-range data slots live
-            // directly in `elements`, so `Get(O, "length")` and
+            // `elementCount()`, and in-range data slots live in dense
+            // element storage, so `Get(O, "length")` and
             // `Get(O, Pk)` are observably equivalent to a direct
             // vector read. Holes and descriptor-flag-promoted slots
             // read back as the hole sentinel — fall through to the

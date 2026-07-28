@@ -1205,10 +1205,11 @@ pub const Heap = struct {
         const obj = self.allocateObject() catch return error.OutOfMemory;
         self.setObjectPrototype(obj, array_prototype);
         obj.markAsArrayExotic(self.allocator) catch return error.OutOfMemory;
+        const elements = obj.elementsMut(self.allocator) catch return error.OutOfMemory;
         const buf = self.element_buf_pool.create(self.allocator) catch return error.OutOfMemory;
-        obj.elements = .{ .items = buf[0..0], .capacity = element_buf_cap };
+        elements.* = .{ .items = buf[0..0], .capacity = element_buf_cap };
         obj.brand.elements_pooled = true;
-        obj.elements.appendSliceAssumeCapacity(elems);
+        elements.appendSliceAssumeCapacity(elems);
         obj.markNonPristine();
         return obj;
     }
@@ -1234,7 +1235,7 @@ pub const Heap = struct {
         if (!aobj.brand.is_array_exotic or aobj.brand.is_sparse or
             aobj.getProxyTarget() != null or aobj.brand.proxy_revoked) return null;
         const idx: usize = @intCast(ik);
-        const els = aobj.elements.items;
+        const els = aobj.elementItems();
         if (idx >= els.len or JSObject.isElementHole(els[idx])) return null;
         return els[idx];
     }
@@ -1260,18 +1261,18 @@ pub const Heap = struct {
         if (!aobj.brand.is_array_exotic or aobj.brand.is_sparse or aobj.brand.is_proxy) return false;
 
         const idx: usize = @intCast(ik);
-        const els = aobj.elements.items;
+        const els = aobj.elementItems();
         if (idx >= els.len or JSObject.isElementHole(els[idx])) return false;
 
         // Array exotics normally keep indexed values exclusively in
-        // `elements`. Be conservative around any named representation:
+        // dense element storage. Be conservative around any named representation:
         // `markAsArrayExotic` can brand a pre-shaped object, and an
         // indexed descriptor demotion can leave bag/flag metadata that
         // must win over a blind packed-vector store. Accessors live in
         // the extension independently of the dictionary pointer.
         if (aobj.shape != null or aobj.dictStore() != null or aobj.accessorCount() != 0) return false;
 
-        aobj.elements.items[idx] = v;
+        aobj.elementItemsMut()[idx] = v;
         // The direct store bypasses `JSObject.setIndexed`, so preserve
         // both its mature→young remembered-set edge and its Dijkstra
         // incremental-marking shade explicitly.
@@ -1969,7 +1970,7 @@ pub const Heap = struct {
                         var sit = o.sparseConst().iterator();
                         while (sit.next()) |entry| self.enqueue(entry.value_ptr.*);
                     } else {
-                        for (o.elements.items) |elem| self.enqueue(elem);
+                        for (o.elementItems()) |elem| self.enqueue(elem);
                     }
                 }
                 // §26.1 WeakRef — the `[[WeakRefTarget]]` is a weak
@@ -4260,7 +4261,7 @@ pub const Heap = struct {
                         }
                     }
                 } else {
-                    for (o.elements.items, 0..) |elem, idx| {
+                    for (o.elementItems(), 0..) |elem, idx| {
                         if (isYoungHeapValue(elem) and !o.dirty) {
                             std.debug.print(
                                 "verifyRememberedSet: un-barriered mature\u{2192}young edge: " ++
@@ -5123,8 +5124,8 @@ test "Heap: denseElementFastSet overwrites only clean existing packed elements" 
     const arr = try heap.makeDenseArray(null, &.{ Value.fromInt32(10), Value.fromInt32(20) });
     const arr_v = taggedObject(arr);
     try testing.expect(heap.denseElementFastSet(arr_v, Value.fromInt32(1), Value.fromInt32(99)));
-    try testing.expectEqual(@as(i32, 10), arr.elements.items[0].asInt32());
-    try testing.expectEqual(@as(i32, 99), arr.elements.items[1].asInt32());
+    try testing.expectEqual(@as(i32, 10), arr.elementItems()[0].asInt32());
+    try testing.expectEqual(@as(i32, 99), arr.elementItems()[1].asInt32());
     try testing.expectEqual(@as(u32, 2), arr.arrayLength());
 
     // P0 deliberately accepts only non-negative int32 keys. Numeric
@@ -5134,17 +5135,17 @@ test "Heap: denseElementFastSet overwrites only clean existing packed elements" 
     try testing.expect(!heap.denseElementFastSet(arr_v, Value.fromDouble(-0.0), Value.fromInt32(1)));
     try testing.expect(!heap.denseElementFastSet(arr_v, Value.fromDouble(1.0), Value.fromInt32(1)));
     try testing.expect(!heap.denseElementFastSet(arr_v, Value.fromInt32(2), Value.fromInt32(1)));
-    try testing.expectEqual(@as(i32, 10), arr.elements.items[0].asInt32());
-    try testing.expectEqual(@as(i32, 99), arr.elements.items[1].asInt32());
+    try testing.expectEqual(@as(i32, 10), arr.elementItems()[0].asInt32());
+    try testing.expectEqual(@as(i32, 99), arr.elementItems()[1].asInt32());
 
     const holed = try heap.makeDenseArray(null, &.{Value.hole_});
     try testing.expect(!heap.denseElementFastSet(taggedObject(holed), Value.fromInt32(0), Value.fromInt32(1)));
-    try testing.expect(JSObject.isElementHole(holed.elements.items[0]));
+    try testing.expect(JSObject.isElementHole(holed.elementItems()[0]));
 
     const ordinary = try heap.allocateObject();
     try ordinary.setIndexed(heap.allocator, 0, Value.fromInt32(3));
     try testing.expect(!heap.denseElementFastSet(taggedObject(ordinary), Value.fromInt32(0), Value.fromInt32(4)));
-    try testing.expectEqual(@as(i32, 3), ordinary.elements.items[0].asInt32());
+    try testing.expectEqual(@as(i32, 3), ordinary.elementItems()[0].asInt32());
 
     const sparse = try heap.allocateObject();
     try sparse.markAsArrayExotic(heap.allocator);
@@ -5156,7 +5157,7 @@ test "Heap: denseElementFastSet overwrites only clean existing packed elements" 
     const proxy_branded = try heap.makeDenseArray(null, &.{Value.fromInt32(7)});
     proxy_branded.brand.is_proxy = true;
     try testing.expect(!heap.denseElementFastSet(taggedObject(proxy_branded), Value.fromInt32(0), Value.fromInt32(8)));
-    try testing.expectEqual(@as(i32, 7), proxy_branded.elements.items[0].asInt32());
+    try testing.expectEqual(@as(i32, 7), proxy_branded.elementItems()[0].asInt32());
 
     // Array exotics can be branded after acquiring a shape. A numeric
     // shape descriptor could then coexist with indexed storage, so the
@@ -5167,7 +5168,7 @@ test "Heap: denseElementFastSet overwrites only clean existing packed elements" 
     try shaped.markAsArrayExotic(heap.allocator);
     try shaped.setIndexed(heap.allocator, 0, Value.fromInt32(9));
     try testing.expect(!heap.denseElementFastSet(taggedObject(shaped), Value.fromInt32(0), Value.fromInt32(10)));
-    try testing.expectEqual(@as(i32, 9), shaped.elements.items[0].asInt32());
+    try testing.expectEqual(@as(i32, 9), shaped.elementItems()[0].asInt32());
 
     // Descriptor-demoted indexed entries and accessors live outside
     // the packed vector. Conservatively reject any dictionary or
@@ -5177,14 +5178,14 @@ test "Heap: denseElementFastSet overwrites only clean existing packed elements" 
     try dictionary.set(heap.allocator, "meta", Value.fromInt32(1));
     try testing.expect(dictionary.dictStore() != null);
     try testing.expect(!heap.denseElementFastSet(taggedObject(dictionary), Value.fromInt32(0), Value.fromInt32(12)));
-    try testing.expectEqual(@as(i32, 11), dictionary.elements.items[0].asInt32());
+    try testing.expectEqual(@as(i32, 11), dictionary.elementItems()[0].asInt32());
 
     const accessor_bearing = try heap.makeDenseArray(null, &.{Value.fromInt32(13)});
     const accessor = try accessor_bearing.getOrPutAccessor(heap.allocator, "meta");
     if (!accessor.found_existing) accessor.value_ptr.* = .{};
     try testing.expectEqual(@as(usize, 1), accessor_bearing.accessorCount());
     try testing.expect(!heap.denseElementFastSet(taggedObject(accessor_bearing), Value.fromInt32(0), Value.fromInt32(14)));
-    try testing.expectEqual(@as(i32, 13), accessor_bearing.elements.items[0].asInt32());
+    try testing.expectEqual(@as(i32, 13), accessor_bearing.elementItems()[0].asInt32());
 }
 
 test "Heap: denseElementFastSet remembers a young child stored into a mature array" {
@@ -5205,7 +5206,7 @@ test "Heap: denseElementFastSet remembers a young child stored into a mature arr
     // store's write barrier can make the mature array a minor-GC root.
     heap.collectYoung(&.{});
     try testing.expectEqual(Generation.mature, child.generation);
-    try testing.expectEqual(taggedObject(child).bits, arr.elements.items[0].bits);
+    try testing.expectEqual(taggedObject(child).bits, arr.elementItems()[0].bits);
     try testing.expectEqual(@as(i32, 42), child.get("tag").asInt32());
     try testing.expect(!arr.dirty);
     try testing.expectEqual(@as(usize, 0), heap.dirty_list.items.len);
@@ -5894,6 +5895,45 @@ test "Heap: major mark scans each shape-mode named value once" {
     while (i < n) : (i += 1) {
         try testing.expectEqual(@as(i32, @intCast(i)), children[i].get("tag").asInt32());
     }
+}
+
+test "Heap: major mark scans named overflow and spilled dense elements" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    const object_mod = @import("object.zig");
+    const owner = try heap.allocateObject();
+    const named_count: usize = object_mod.inline_slot_cap + 2;
+    var named_children: [object_mod.inline_slot_cap + 2]*object_mod.JSObject = undefined;
+    var keys: [object_mod.inline_slot_cap + 2][1]u8 = undefined;
+
+    for (0..named_count) |i| {
+        const child = try heap.allocateObject();
+        try child.set(heap.allocator, "tag", Value.fromInt32(@intCast(i)));
+        named_children[i] = child;
+        keys[i] = .{@as(u8, 'a') + @as(u8, @intCast(i))};
+        try heap.storeProperty(owner, heap.allocator, &keys[i], taggedObject(child));
+    }
+    try owner.markAsArrayExotic(heap.allocator);
+
+    const element_a = try heap.allocateObject();
+    const element_b = try heap.allocateObject();
+    try element_a.set(heap.allocator, "tag", Value.fromInt32(101));
+    try element_b.set(heap.allocator, "tag", Value.fromInt32(202));
+    try owner.setIndexed(heap.allocator, 0, taggedObject(element_a));
+    try owner.setIndexed(heap.allocator, 1, taggedObject(element_b));
+
+    try testing.expect(owner.brand.secondary_is_overflow);
+    try testing.expectEqual(named_count, owner.slotCount());
+    try testing.expectEqual(@as(usize, 2), owner.elementCount());
+
+    heap.collectFull(&.{taggedObject(owner)});
+
+    for (0..named_count) |i| {
+        try testing.expectEqual(@as(i32, @intCast(i)), named_children[i].get("tag").asInt32());
+    }
+    try testing.expectEqual(@as(i32, 101), element_a.get("tag").asInt32());
+    try testing.expectEqual(@as(i32, 202), element_b.get("tag").asInt32());
 }
 
 test "Heap: major mark preserves dictionary named values and Symbol keys" {

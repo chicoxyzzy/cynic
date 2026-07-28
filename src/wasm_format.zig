@@ -80,7 +80,7 @@ fn appendValueAt(
     } else if (v.isHole()) {
         // Array exotics store dense holes as a distinct `Value.hole_`
         // sentinel — never reachable from user JS, but the array
-        // printer below feeds them in when iterating `obj.elements`.
+        // printer below feeds them in when iterating dense element storage.
         try buf.appendSlice(allocator, "<empty>");
     } else if (v.isString()) {
         const s: *JSString = @ptrCast(@alignCast(v.asString()));
@@ -123,7 +123,7 @@ fn appendValueAt(
 /// `max_array_show` and `max_depth`. Sparse holes (the
 /// `is_sparse = true` storage where indices are absent from the
 /// `sparse_elements` map) render as `<empty>`. Dense holes (the
-/// `Value.hole_` sentinel in `elements`) route through
+/// `Value.hole_` sentinel in dense element storage) route through
 /// `appendValueAt`'s `isHole` branch, which prints the same string.
 fn appendArray(
     allocator: std.mem.Allocator,
@@ -134,7 +134,7 @@ fn appendArray(
     const len: usize = if (obj.brand.is_sparse)
         @intCast(obj.sparse_length)
     else
-        obj.elements.items.len;
+        obj.elementCount();
 
     if (depth >= max_depth) {
         var scratch: [32]u8 = undefined;
@@ -156,7 +156,7 @@ fn appendArray(
             }
         }
     } else {
-        for (obj.elements.items[0..show_n], 0..) |elem, idx| {
+        for (obj.elementItems()[0..show_n], 0..) |elem, idx| {
             if (idx > 0) try buf.appendSlice(allocator, ", ");
             try appendValueAt(allocator, buf, elem, depth + 1);
         }

@@ -1522,14 +1522,15 @@ pub fn tryCreateListFromArrayLikeFast(
         // Any own accessor could shadow an index (or `length` cannot
         // — it is virtual on an array exotic — but index accessors
         // installed via defineProperty live in the accessor map and
-        // fire before `elements`).
+        // fire before dense element storage).
         if (o.accessorCount() != 0) return false;
-        const len = o.elements.items.len; // dense: mirrors the §23.1.4 virtual length
+        const elements = o.elementItems();
+        const len = elements.len; // dense: mirrors the §23.1.4 virtual length
         // Over the harness iteration cap the generic path raises the
         // error; let it.
         if (len > @as(usize, @intCast(max_iter_length))) return false;
         try out.ensureUnusedCapacity(realm.allocator, len);
-        for (o.elements.items) |v| {
+        for (elements) |v| {
             if (v.isHole()) {
                 // §10.4.2.1 step 2 — a hole delegates the read up the
                 // prototype chain; that walk is observable.

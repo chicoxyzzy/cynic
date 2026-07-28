@@ -3342,10 +3342,10 @@ test "jit bistromath: dense array literals compile via make_array_n" {
     };
     const arr = heap_mod.valueAsPlainObject(v) orelse return error.NotAnArray;
     try testing.expect(arr.brand.is_array_exotic);
-    try testing.expectEqual(@as(usize, 3), arr.elements.items.len);
-    try testing.expectEqual(@as(i32, 10), arr.elements.items[0].asInt32());
-    try testing.expectEqual(@as(i32, 20), arr.elements.items[1].asInt32());
-    try testing.expectEqual(@as(i32, 30), arr.elements.items[2].asInt32());
+    try testing.expectEqual(@as(usize, 3), arr.elementCount());
+    try testing.expectEqual(@as(i32, 10), arr.elementItems()[0].asInt32());
+    try testing.expectEqual(@as(i32, 20), arr.elementItems()[1].asInt32());
+    try testing.expectEqual(@as(i32, 30), arr.elementItems()[2].asInt32());
     try testing.expectEqual(
         Chunk.JitState.Tier.compiled,
         templateNamed(&chunk, "build").jit_state.?.bistromath.code.tier,

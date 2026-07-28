@@ -509,12 +509,12 @@ pub const FinalizationCell = struct {
 /// §10.1 dictionary-mode representation, moved out-of-line. A
 /// *shape-mode* object (`shape != null` — every plain `{a, b}`
 /// literal, `new Point(x, y)`, splay's `Node`) stores its values in
-/// `inline_slots` / `overflow_slots` and leaves all three of these
+/// `inline_slots` / `secondary_values` and leaves all three of these
 /// EMPTY, so they cost 104 B on the header for nothing. This side
 /// allocation carries them only for the objects that actually go
 /// dictionary mode (`demoteFromShape`, or a runtime that writes the
-/// bag directly). Reached by `JSObject.dict_store`; allocated lazily
-/// by `ensureDictStore`. The JIT never reads these fields (it deopts
+/// bag directly). Reached through `JSObject.aux_store`; allocated
+/// lazily by `ensureDictStore`. The JIT never reads these fields (it deopts
 /// to the interpreter for dict-mode receivers), so this move is
 /// invisible to emitted code — unlike `shape`/`inline_slots`, which
 /// must stay on the header (see the JIT layout SSoT).
@@ -536,6 +536,30 @@ pub const DictStore = struct {
     }
 };
 
+/// Discriminator for the lazily allocated `JSObject.aux_store`.
+///
+/// The common object carries no aux allocation. Dictionary-mode named
+/// properties and the rare dense-element metadata spill each allocate
+/// only their exact payload; an object that needs both upgrades to the
+/// combined payload. Keeping the discriminator in `BrandFlags` lets the
+/// header retain one pointer instead of paying for independent
+/// dictionary and element-spill pointers.
+const ObjectAuxKind = enum(u2) {
+    none,
+    dict,
+    elements,
+    combined,
+};
+
+const ObjectAuxCombined = struct {
+    /// Keep each exact-sized child at its original address when the
+    /// second aux kind appears. Callers may hold a map/list pointer for
+    /// the duration of an operation; upgrading the discriminator must
+    /// not invalidate it.
+    dict: *DictStore,
+    elements: *std.ArrayListUnmanaged(Value),
+};
+
 /// Shared, never-mutated empty maps returned by the `*Const` dict
 /// accessors when an object has no `DictStore` (the common shape-mode
 /// case). Reads (`get` / `contains` / `count` / `iterator` / `values`)
@@ -545,6 +569,7 @@ pub const DictStore = struct {
 const empty_props: std.StringArrayHashMapUnmanaged(Value) = .empty;
 const empty_flags: std.StringArrayHashMapUnmanaged(PropertyFlags) = .empty;
 const empty_order: std.ArrayListUnmanaged([]const u8) = .empty;
+const empty_elements: std.ArrayListUnmanaged(Value) = .empty;
 /// Shared empty sparse map for the `sparseConst` read path on a
 /// non-sparse object (no extension). Never mutated — writes go through
 /// `sparseMut`, which allocates the extension.
@@ -556,7 +581,7 @@ const empty_sparse: std.AutoHashMapUnmanaged(u32, Value) = .empty;
 /// or writes." Subsequent commits migrate the cold fields here
 /// one at a time. Anything the JIT will speculate on stays in the
 /// hot JSObject prefix and MUST NOT move here — keep `shape`,
-/// `slots`, `elements`, `prototype` out of this struct forever.
+/// property/index storage, and `prototype` out of this struct forever.
 /// (`properties` / `property_flags` / `own_key_order` are the
 /// dictionary representation — they live in `DictStore`, reached by
 /// a separate pointer, not here.)
@@ -1036,6 +1061,16 @@ pub const BrandFlags = packed struct(u32) {
     /// (`elementsUnpool`); frees/teardown return the buffer to the
     /// pool — a pooled pointer must NEVER reach `allocator.free`.
     elements_pooled: bool = false,
+    /// The base object's single `secondary_values` vector is normally
+    /// dense indexed storage. Once named-property slots overflow the
+    /// four inline values, their JIT-visible vector permanently takes
+    /// over that header and dense-element metadata (if any) moves to
+    /// `aux_store`. Monotonic so emitted slot loads never need a mode
+    /// guard.
+    secondary_is_overflow: bool = false,
+    /// Type of allocation reached by `JSObject.aux_store`: dictionary
+    /// state, spilled dense-element metadata, or their combined form.
+    aux_kind: ObjectAuxKind = .none,
     /// `[[ArrayBufferData]]` brand presence (§25.1.5.x
     /// RequireInternalSlot) — true iff produced by the ArrayBuffer
     /// constructor (or `.transfer` / `.slice`).
@@ -1059,7 +1094,7 @@ pub const BrandFlags = packed struct(u32) {
     /// no footprint benefit to a narrower tag).
     promise_state: PromiseState = .none,
     /// Reserved padding to fill the 32-bit word.
-    _padding: u7 = 0,
+    _padding: u4 = 0,
 };
 
 pub const JSObject = struct {
@@ -1071,17 +1106,24 @@ pub const JSObject = struct {
     /// §10.1 dictionary-mode representation — `properties` (name →
     /// value), `property_flags` (non-default §6.2.5 descriptor bits),
     /// and `own_key_order` (§10.1.11 insertion order) — moved into a
-    /// lazily-allocated `DictStore` reached by this single pointer.
-    /// `null` on every shape-mode object (the hot case: plain
-    /// literals, `new Point(x,y)`, splay's `Node`), which stores its
-    /// values in `inline_slots` and never touches the bag. Allocated
-    /// only on `demoteFromShape` / a direct bag write. Access through
+    /// lazily-allocated `DictStore` reached through this single aux
+    /// pointer.
+    /// `null` on the hot shape-only case (plain literals,
+    /// `new Point(x,y)`, splay's `Node`), which stores its values in
+    /// `inline_slots` and never touches the bag. Dictionary state is
+    /// allocated only on `demoteFromShape` / a direct bag write.
+    /// A still-shaped object may instead use this pointer for the rare
+    /// dense-element metadata spill after named slots overflow. Access through
     /// `propsConst`/`propsMut` / `flagsConst`/`flagsMut` /
     /// `orderConst`/`orderMut` and the `dictStore`/`ensureDictStore`
-    /// helpers — never a raw field. The JIT never reads these (it
+    /// helpers — never a raw field. The same pointer may instead hold
+    /// the rare dense-element metadata spill, discriminated by
+    /// `brand.aux_kind`; exact-sized variants avoid charging every
+    /// object for independent dictionary and spill pointers. The JIT
+    /// never reads these (it
     /// deopts for dict-mode receivers), so the move is invisible to
     /// emitted code (unlike `shape`/`inline_slots`).
-    dict_store: ?*DictStore = null,
+    aux_store: ?*anyopaque = null,
     /// §10.1 shape-based named-property storage — not yet the
     /// source of truth. `shape` describes this object's named-
     /// property layout (see `shape.zig`); `slots[shape.lookup(key)
@@ -1098,17 +1140,20 @@ pub const JSObject = struct {
     /// RGBA) stores every value here and pays NO separate
     /// allocation, since the header itself comes from the slab
     /// pool. Only objects that grow past the inline capacity spill
-    /// the remainder into `overflow_slots` (a heap buffer holding
-    /// logical slots `[inline_slot_cap ..]`). `slot_count` is the
-    /// total live count across both. Access ONLY through
+    /// the remainder into `secondary_values` (a heap buffer holding
+    /// logical slots `[inline_slot_cap ..]`). Before that first spill,
+    /// the same 24-byte vector header carries dense indexed elements;
+    /// if an object needs both, the element header moves into the
+    /// exact-sized aux variant. `slot_count` is the total live named-
+    /// property count. Access ONLY through
     /// `slotAt` / `slotPtr` / `setSlot` / `slotCount` /
-    /// `resizeSlots` / `clearSlots` — never the raw fields — so the
-    /// inline/overflow split stays an implementation detail.
+    /// `resizeSlots` / `clearSlots` and the element helpers — never the
+    /// raw field — so the overlay stays an implementation detail.
     /// Non-moving: inline slots live in the (pinned-address) header,
     /// so the engine's pointer-stability invariant is preserved.
     inline_slots: [inline_slot_cap]Value = undefined,
     slot_count: u32 = 0,
-    overflow_slots: std.ArrayListUnmanaged(Value) = .empty,
+    secondary_values: std.ArrayListUnmanaged(Value) = .empty,
     /// Back-pointer to the owning heap, stamped at allocation by
     /// `Heap.allocateObject`. Lets the realm-agnostic `get` / `set`
     /// API reach the agent-wide property-shape tree (`heap.shapes`)
@@ -1187,8 +1232,8 @@ pub const JSObject = struct {
     needs_internal_scan: bool = false,
     /// True while this object has not accumulated any heap-attached
     /// state — every potentially-allocated field (`properties`,
-    /// `property_flags`, `own_key_order`, `key_anchors`, `elements`,
-    /// `sparse_elements`, `overflow_slots`, `extension`, plus the
+    /// `property_flags`, `own_key_order`, `key_anchors`, dense elements,
+    /// `sparse_elements`, named overflow slots, `extension`, plus the
     /// optional state pointers `array_like_iter` / `map_set_iter` /
     /// `regexp_string_iter` / `iter_record` / `iter_helper` /
     /// `regex_perlex` / `promise_store`, and the capability /
@@ -1299,7 +1344,6 @@ pub const JSObject = struct {
     // `JSObjectExtension` — only Module Namespace exotics populate
     // them. Access via the `namespaceRedirect*` /
     // `ambiguousNamespaceKey*` helpers below.)
-    elements: std.ArrayListUnmanaged(Value) = .empty,
     // §10.4.2 sparse indexed store (`sparse_elements`) moved to
     // `JSObjectExtension` — populated only on the rare sparse array
     // exotic. The `is_sparse` brand + `sparse_length` stay inline (the
@@ -1510,33 +1554,149 @@ pub const JSObject = struct {
     // `shadowSet`), not the typed-slot scan — so, unlike the extension,
     // `ensureDictStore` sets `markNonPristine` but NOT
     // `needs_internal_scan`.
+    fn auxAs(self: *const JSObject, comptime T: type) *T {
+        return @ptrCast(@alignCast(self.aux_store.?));
+    }
+
     pub fn dictStore(self: *const JSObject) ?*DictStore {
-        return self.dict_store;
+        return switch (self.brand.aux_kind) {
+            .none, .elements => null,
+            .dict => self.auxAs(DictStore),
+            .combined => self.auxAs(ObjectAuxCombined).dict,
+        };
     }
+
     pub fn ensureDictStore(self: *JSObject, allocator: std.mem.Allocator) !*DictStore {
-        if (self.dict_store) |d| return d;
-        const d = try allocator.create(DictStore);
-        d.* = .{};
-        self.dict_store = d;
-        self.markNonPristine();
-        return d;
+        switch (self.brand.aux_kind) {
+            .dict => return self.auxAs(DictStore),
+            .combined => return self.auxAs(ObjectAuxCombined).dict,
+            .none => {
+                std.debug.assert(self.aux_store == null);
+                const d = try allocator.create(DictStore);
+                d.* = .{};
+                self.aux_store = d;
+                self.brand.aux_kind = .dict;
+                self.markNonPristine();
+                return d;
+            },
+            .elements => {
+                // Upgrade atomically: allocation happens before the old
+                // exact-sized element header is detached.
+                const elems = self.auxAs(std.ArrayListUnmanaged(Value));
+                const dict = try allocator.create(DictStore);
+                errdefer allocator.destroy(dict);
+                dict.* = .{};
+                const both = try allocator.create(ObjectAuxCombined);
+                both.* = .{ .dict = dict, .elements = elems };
+                self.aux_store = both;
+                self.brand.aux_kind = .combined;
+                self.markNonPristine();
+                return dict;
+            },
+        }
     }
+
+    /// Dense-element vector metadata when named slots already occupy
+    /// `secondary_values`. This is the rare coexistence path; allocate
+    /// exactly one ArrayList header, upgrading to `ObjectAuxCombined`
+    /// only if dictionary state also exists.
+    fn ensureSpilledElements(
+        self: *JSObject,
+        allocator: std.mem.Allocator,
+    ) !*std.ArrayListUnmanaged(Value) {
+        switch (self.brand.aux_kind) {
+            .elements => return self.auxAs(std.ArrayListUnmanaged(Value)),
+            .combined => return self.auxAs(ObjectAuxCombined).elements,
+            .none => {
+                std.debug.assert(self.aux_store == null);
+                const elems = try allocator.create(std.ArrayListUnmanaged(Value));
+                elems.* = .empty;
+                self.aux_store = elems;
+                self.brand.aux_kind = .elements;
+                self.markNonPristine();
+                return elems;
+            },
+            .dict => {
+                const dict = self.auxAs(DictStore);
+                const elems = try allocator.create(std.ArrayListUnmanaged(Value));
+                errdefer allocator.destroy(elems);
+                elems.* = .empty;
+                const both = try allocator.create(ObjectAuxCombined);
+                both.* = .{ .dict = dict, .elements = elems };
+                self.aux_store = both;
+                self.brand.aux_kind = .combined;
+                self.markNonPristine();
+                return elems;
+            },
+        }
+    }
+
+    /// Read view of dense indexed storage. The shared empty header
+    /// avoids allocating an aux payload for an overflow-slot object
+    /// that has no indexed properties.
+    pub inline fn elementsConst(self: *const JSObject) *const std.ArrayListUnmanaged(Value) {
+        if (!self.brand.secondary_is_overflow) return &self.secondary_values;
+        return switch (self.brand.aux_kind) {
+            .elements => self.auxAs(std.ArrayListUnmanaged(Value)),
+            .combined => self.auxAs(ObjectAuxCombined).elements,
+            .none, .dict => &empty_elements,
+        };
+    }
+
+    /// Mutable dense indexed storage, allocating the exact-sized aux
+    /// header only when named overflow already owns `secondary_values`.
+    pub inline fn elementsMut(
+        self: *JSObject,
+        allocator: std.mem.Allocator,
+    ) !*std.ArrayListUnmanaged(Value) {
+        if (!self.brand.secondary_is_overflow) return &self.secondary_values;
+        return self.ensureSpilledElements(allocator);
+    }
+
+    pub inline fn elementItems(self: *const JSObject) []const Value {
+        return self.elementsConst().items;
+    }
+
+    /// Mutable element-list header when one already exists. Unlike
+    /// `elementsMut`, this never allocates: overflow-slot objects with
+    /// no indexed storage return null.
+    inline fn elementsExistingMut(self: *JSObject) ?*std.ArrayListUnmanaged(Value) {
+        if (!self.brand.secondary_is_overflow) return &self.secondary_values;
+        return switch (self.brand.aux_kind) {
+            .elements => self.auxAs(std.ArrayListUnmanaged(Value)),
+            .combined => self.auxAs(ObjectAuxCombined).elements,
+            .none, .dict => null,
+        };
+    }
+
+    /// Existing mutable element slice. The empty fallback is borrowed
+    /// from this object itself and is never written: callers validate an
+    /// index against `elementItems().len` before taking this path.
+    pub inline fn elementItemsMut(self: *JSObject) []Value {
+        if (self.elementsExistingMut()) |elements| return elements.items;
+        return self.inline_slots[0..0];
+    }
+
+    pub inline fn elementCount(self: *const JSObject) usize {
+        return self.elementsConst().items.len;
+    }
+
     /// Read view of the dict property bag (shared empty when no store).
     pub fn propsConst(self: *const JSObject) *const std.StringArrayHashMapUnmanaged(Value) {
-        return if (self.dict_store) |d| &d.properties else &empty_props;
+        return if (self.dictStore()) |d| &d.properties else &empty_props;
     }
     /// Mutable view; allocates the store on first use.
     pub fn propsMut(self: *JSObject, allocator: std.mem.Allocator) !*std.StringArrayHashMapUnmanaged(Value) {
         return &(try self.ensureDictStore(allocator)).properties;
     }
     pub fn flagsConst(self: *const JSObject) *const std.StringArrayHashMapUnmanaged(PropertyFlags) {
-        return if (self.dict_store) |d| &d.property_flags else &empty_flags;
+        return if (self.dictStore()) |d| &d.property_flags else &empty_flags;
     }
     pub fn flagsMut(self: *JSObject, allocator: std.mem.Allocator) !*std.StringArrayHashMapUnmanaged(PropertyFlags) {
         return &(try self.ensureDictStore(allocator)).property_flags;
     }
     pub fn orderConst(self: *const JSObject) *const std.ArrayListUnmanaged([]const u8) {
-        return if (self.dict_store) |d| &d.own_key_order else &empty_order;
+        return if (self.dictStore()) |d| &d.own_key_order else &empty_order;
     }
     pub fn orderMut(self: *JSObject, allocator: std.mem.Allocator) !*std.ArrayListUnmanaged([]const u8) {
         return &(try self.ensureDictStore(allocator)).own_key_order;
@@ -2369,7 +2529,7 @@ pub const JSObject = struct {
     // ── Shape-mode slot storage (inline + overflow) ─────────────────
     //
     // The first `inline_slot_cap` logical slots live in `inline_slots`
-    // (in the header); the rest in `overflow_slots`. These accessors
+    // (in the header); the rest in `secondary_values`. These accessors
     // hide the split — callers index a single logical [0 .. slot_count)
     // space. Bounds are the caller's responsibility (same contract the
     // old `slots.items[i]` had).
@@ -2381,18 +2541,16 @@ pub const JSObject = struct {
 
     /// Read logical slot `i`.
     pub inline fn slotAt(self: *const JSObject, i: usize) Value {
-        return if (i < inline_slot_cap)
-            self.inline_slots[i]
-        else
-            self.overflow_slots.items[i - inline_slot_cap];
+        if (i < inline_slot_cap) return self.inline_slots[i];
+        std.debug.assert(self.brand.secondary_is_overflow);
+        return self.secondary_values.items[i - inline_slot_cap];
     }
 
     /// Pointer to logical slot `i` (for in-place update).
     pub inline fn slotPtr(self: *JSObject, i: usize) *Value {
-        return if (i < inline_slot_cap)
-            &self.inline_slots[i]
-        else
-            &self.overflow_slots.items[i - inline_slot_cap];
+        if (i < inline_slot_cap) return &self.inline_slots[i];
+        std.debug.assert(self.brand.secondary_is_overflow);
+        return &self.secondary_values.items[i - inline_slot_cap];
     }
 
     /// Write logical slot `i`.
@@ -2400,7 +2558,8 @@ pub const JSObject = struct {
         if (i < inline_slot_cap) {
             self.inline_slots[i] = v;
         } else {
-            self.overflow_slots.items[i - inline_slot_cap] = v;
+            std.debug.assert(self.brand.secondary_is_overflow);
+            self.secondary_values.items[i - inline_slot_cap] = v;
         }
     }
 
@@ -2410,12 +2569,32 @@ pub const JSObject = struct {
     /// (the caller writes them); shrinking just lowers the count.
     pub fn resizeSlots(self: *JSObject, allocator: std.mem.Allocator, n: usize) !void {
         if (n > inline_slot_cap) {
-            try self.overflow_slots.resize(allocator, n - inline_slot_cap);
+            if (!self.brand.secondary_is_overflow) {
+                // Named overflow permanently claims the inline vector
+                // header. Preserve any dense-element header in the
+                // exact-sized aux store before reusing the field. All
+                // allocation happens before the representation flip, so
+                // OOM leaves the original element vector intact.
+                const old_elements = self.secondary_values;
+                if (old_elements.capacity != 0 or
+                    old_elements.items.len != 0 or
+                    self.brand.elements_pooled)
+                {
+                    const spilled = try self.ensureSpilledElements(allocator);
+                    std.debug.assert(spilled.capacity == 0);
+                    spilled.* = old_elements;
+                }
+                self.secondary_values = .empty;
+                self.brand.secondary_is_overflow = true;
+            }
+            try self.secondary_values.resize(allocator, n - inline_slot_cap);
             self.markNonPristine();
-        } else if (self.overflow_slots.items.len != 0) {
+        } else if (self.brand.secondary_is_overflow and
+            self.secondary_values.items.len != 0)
+        {
             // Shrinking back into the inline range — drop the
             // overflow buffer's live entries (keep capacity).
-            self.overflow_slots.clearRetainingCapacity();
+            self.secondary_values.clearRetainingCapacity();
         }
         self.slot_count = @intCast(n);
     }
@@ -2424,7 +2603,9 @@ pub const JSObject = struct {
     /// demote path's `slots.clearRetainingCapacity()` analogue).
     pub fn clearSlots(self: *JSObject) void {
         self.slot_count = 0;
-        self.overflow_slots.clearRetainingCapacity();
+        if (self.brand.secondary_is_overflow) {
+            self.secondary_values.clearRetainingCapacity();
+        }
     }
 
     /// Drop every sub-allocation owned by this object — does NOT
@@ -2466,17 +2647,49 @@ pub const JSObject = struct {
     ///
     /// Compiled out of ReleaseFast — only the runtime-safety builds
     /// (Debug, ReleaseSafe, test) run it.
+    fn assertAuxInvariant(self: *const JSObject) void {
+        switch (self.brand.aux_kind) {
+            .none => std.debug.assert(self.aux_store == null),
+            .dict => std.debug.assert(self.aux_store != null),
+            .elements => {
+                std.debug.assert(self.aux_store != null);
+                std.debug.assert(self.brand.secondary_is_overflow);
+            },
+            .combined => {
+                std.debug.assert(self.aux_store != null);
+                std.debug.assert(self.brand.secondary_is_overflow);
+            },
+        }
+        if (self.slot_count > inline_slot_cap) {
+            std.debug.assert(self.brand.secondary_is_overflow);
+        }
+        if (self.brand.secondary_is_overflow) {
+            const expected_overflow_len: usize = if (self.slot_count > inline_slot_cap)
+                @intCast(self.slot_count - inline_slot_cap)
+            else
+                0;
+            std.debug.assert(self.secondary_values.items.len == expected_overflow_len);
+        }
+        if (!self.brand.secondary_is_overflow) {
+            std.debug.assert(self.brand.aux_kind != .elements);
+            std.debug.assert(self.brand.aux_kind != .combined);
+        }
+    }
+
     fn assertPristineFieldsClean(self: *const JSObject) void {
+        self.assertAuxInvariant();
         // The dictionary representation (`properties` / `property_flags`
-        // / `own_key_order`) lives in `dict_store`; a pristine object
+        // / `own_key_order`) lives in `aux_store`; a pristine object
         // never allocated one.
-        if (self.dict_store != null) std.debug.panic("pristine violated: dict_store is non-null", .{});
+        if (self.aux_store != null) std.debug.panic("pristine violated: aux_store is non-null", .{});
         // `key_anchors` lives in the extension; the `extension != null`
         // check below covers it.
-        if (self.elements.items.len != 0) std.debug.panic("pristine violated: elements.len={d}", .{self.elements.items.len});
+        if (self.elementCount() != 0) std.debug.panic("pristine violated: elements.len={d}", .{self.elementCount()});
         // `sparse_elements` lives in the extension; the `extension != null`
         // check below covers it.
-        if (self.overflow_slots.items.len != 0) std.debug.panic("pristine violated: overflow_slots.len={d}", .{self.overflow_slots.items.len});
+        if (self.brand.secondary_is_overflow and self.secondary_values.items.len != 0) {
+            std.debug.panic("pristine violated: overflow slots len={d}", .{self.secondary_values.items.len});
+        }
         // A pristine object has no `extension`, which transitively
         // guarantees its iterator-state slots (`array_like_iter` /
         // `map_set_iter` / `regexp_string_iter` / `iter_record` /
@@ -2496,12 +2709,7 @@ pub const JSObject = struct {
             return;
         }
         if (self.heap) |h| h.deinit_slowpath_count +%= 1;
-        // §10.1 dictionary representation (`properties` / `property_flags`
-        // / `own_key_order`) lives in `dict_store` — free it as a unit.
-        if (self.dict_store) |d| {
-            d.deinit(allocator);
-            allocator.destroy(d);
-        }
+        if (std.debug.runtime_safety) self.assertAuxInvariant();
         // `private_properties`, `private_methods`, `private_accessors`,
         // `accessors`, `namespace_redirects`, `ambiguous_namespace_keys`,
         // `map_data`, `set_data`, and the iterator-state structs
@@ -2519,20 +2727,39 @@ pub const JSObject = struct {
             if (self.heap) |h| h.promise_store_pool.destroy(s) else allocator.destroy(s);
         }
         // `key_anchors` lives in the extension — freed when it is.
-        // `own_key_order` lives in `dict_store` (freed above).
+        // `own_key_order` lives in the aux DictStore (freed below).
+        const elements = self.elementsExistingMut();
         if (self.brand.elements_pooled) {
             // Pool-owned buffer — must not reach `allocator.free`.
             const heap_ty = @import("heap.zig");
-            const buf: *[heap_ty.Heap.element_buf_cap]Value = @ptrCast(self.elements.items.ptr);
+            const buf: *[heap_ty.Heap.element_buf_cap]Value = @ptrCast(elements.?.items.ptr);
             if (self.heap) |h| h.element_buf_pool.destroy(buf);
-        } else {
-            self.elements.deinit(allocator);
+        } else if (elements) |dense| {
+            dense.deinit(allocator);
         }
         // `sparse_elements` lives in the extension — freed when it is.
         // `shape` itself is realm-lifetime arena memory (ShapeTree),
         // not freed per-object; only the overflow slot vector is
         // owned here (inline slots live in the header).
-        self.overflow_slots.deinit(allocator);
+        if (self.brand.secondary_is_overflow) {
+            self.secondary_values.deinit(allocator);
+        }
+        switch (self.brand.aux_kind) {
+            .none => {},
+            .dict => {
+                const d = self.auxAs(DictStore);
+                d.deinit(allocator);
+                allocator.destroy(d);
+            },
+            .elements => allocator.destroy(self.auxAs(std.ArrayListUnmanaged(Value))),
+            .combined => {
+                const both = self.auxAs(ObjectAuxCombined);
+                both.dict.deinit(allocator);
+                allocator.destroy(both.dict);
+                allocator.destroy(both.elements);
+                allocator.destroy(both);
+            },
+        }
         if (self.extension) |ext| {
             ext.deinit(allocator);
             allocator.destroy(ext);
@@ -2678,7 +2905,7 @@ pub const JSObject = struct {
     pub fn forgetKey(self: *JSObject, key: []const u8) void {
         // No store ⇒ no ordering list ⇒ nothing to forget. `orderedRemove`
         // does not allocate, so mutate the store's list in place.
-        const d = self.dict_store orelse return;
+        const d = self.dictStore() orelse return;
         var i: usize = 0;
         while (i < d.own_key_order.items.len) : (i += 1) {
             if (std.mem.eql(u8, d.own_key_order.items[i], key)) {
@@ -2980,13 +3207,13 @@ pub const JSObject = struct {
             // Shape encodes the attrs on the transition node —
             // no `property_flags` entry needed. Clear any stale
             // entry left behind by a prior dict-mode redefine.
-            if (self.dict_store) |d| _ = d.property_flags.swapRemove(key);
+            if (self.dictStore()) |d| _ = d.property_flags.swapRemove(key);
             return;
         }
         // Dictionary-mode: bag is the source of truth.
         try self.bagPut(allocator, key, v);
         if (is_default) {
-            if (self.dict_store) |d| _ = d.property_flags.swapRemove(key);
+            if (self.dictStore()) |d| _ = d.property_flags.swapRemove(key);
         } else {
             try (try self.flagsMut(allocator)).put(allocator, key, flags);
             self.markNonPristine();
@@ -3295,7 +3522,7 @@ pub const JSObject = struct {
         // stays — the shape chain is the ordering authority now, but
         // keeping the list matches the pre-shape behaviour). The store
         // exists (promote runs on a dict-mode object).
-        if (self.dict_store) |d| {
+        if (self.dictStore()) |d| {
             d.properties.clearRetainingCapacity();
             d.property_flags.clearRetainingCapacity();
         }
@@ -3772,12 +3999,12 @@ pub const JSObject = struct {
         if (self.heap) |h| h.writeBarrier(.{ .object = self }, value);
     }
 
-    /// Logical array length. Dense → `elements.items.len`;
+    /// Logical array length. Dense → `elementCount()`;
     /// sparse → `sparse_length`. Callers should prefer this
     /// helper over poking the underlying storage directly.
     pub fn arrayLength(self: *const JSObject) u32 {
         if (self.brand.is_sparse) return self.sparse_length;
-        return @intCast(self.elements.items.len);
+        return @intCast(self.elementCount());
     }
 
     /// Own indexed slot read that distinguishes hole from
@@ -3794,8 +4021,9 @@ pub const JSObject = struct {
             }
             return null;
         }
-        if (idx >= self.elements.items.len) return null;
-        const v = self.elements.items[idx];
+        const elements = self.elementItems();
+        if (idx >= elements.len) return null;
+        const v = elements[idx];
         if (isElementHole(v)) return null;
         return v;
     }
@@ -3843,7 +4071,7 @@ pub const JSObject = struct {
         if (self.brand.is_sparse) {
             try (try self.sparseMut(allocator)).put(allocator, idx, v);
         } else {
-            self.elements.items[idx] = v;
+            self.elementItemsMut()[idx] = v;
         }
         self.markNonPristine();
         // Generational write barrier — a mature array gaining a young
@@ -3867,8 +4095,8 @@ pub const JSObject = struct {
     pub fn holeIndexed(self: *JSObject, idx: u32) void {
         if (self.brand.is_sparse) {
             if (self.extension) |ext| _ = ext.sparse_elements.remove(idx);
-        } else if (idx < self.elements.items.len) {
-            self.elements.items[idx] = Value.hole_;
+        } else if (idx < self.elementCount()) {
+            self.elementItemsMut()[idx] = Value.hole_;
         }
     }
 
@@ -3888,12 +4116,13 @@ pub const JSObject = struct {
     fn elementsUnpool(self: *JSObject, allocator: std.mem.Allocator, min_cap: usize) !void {
         if (!self.brand.elements_pooled) return;
         const heap_ty = @import("heap.zig");
+        const elements = self.elementsExistingMut().?;
         var fresh: std.ArrayListUnmanaged(Value) = .empty;
-        try fresh.ensureTotalCapacity(allocator, @max(min_cap, self.elements.items.len));
-        fresh.appendSliceAssumeCapacity(self.elements.items);
-        const buf: *[heap_ty.Heap.element_buf_cap]Value = @ptrCast(self.elements.items.ptr);
+        try fresh.ensureTotalCapacity(allocator, @max(min_cap, elements.items.len));
+        fresh.appendSliceAssumeCapacity(elements.items);
+        const buf: *[heap_ty.Heap.element_buf_cap]Value = @ptrCast(elements.items.ptr);
         if (self.heap) |h| h.element_buf_pool.destroy(buf);
-        self.elements = fresh;
+        elements.* = fresh;
         self.brand.elements_pooled = false;
     }
 
@@ -3901,9 +4130,10 @@ pub const JSObject = struct {
     /// Mirrors `clearAndFree` for the pooled representation.
     fn elementsFreePooled(self: *JSObject) void {
         const heap_ty = @import("heap.zig");
-        const buf: *[heap_ty.Heap.element_buf_cap]Value = @ptrCast(self.elements.items.ptr);
+        const elements = self.elementsExistingMut().?;
+        const buf: *[heap_ty.Heap.element_buf_cap]Value = @ptrCast(elements.items.ptr);
         if (self.heap) |h| h.element_buf_pool.destroy(buf);
-        self.elements = .empty;
+        elements.* = .empty;
         self.brand.elements_pooled = false;
     }
 
@@ -3914,11 +4144,13 @@ pub const JSObject = struct {
         v: Value,
     ) !bool {
         if (self.brand.is_sparse) return false;
-        if (idx != self.elements.items.len) return false;
-        if (self.brand.elements_pooled and self.elements.items.len == self.elements.capacity) {
-            try self.elementsUnpool(allocator, self.elements.items.len + 1);
+        if (idx != self.elementCount()) return false;
+        var elements = try self.elementsMut(allocator);
+        if (self.brand.elements_pooled and elements.items.len == elements.capacity) {
+            try self.elementsUnpool(allocator, elements.items.len + 1);
+            elements = self.elementsExistingMut().?;
         }
-        try self.elements.append(allocator, v);
+        try elements.append(allocator, v);
         self.markNonPristine();
         if (self.heap) |h| h.writeBarrier(.{ .object = self }, v);
         return true;
@@ -3938,19 +4170,21 @@ pub const JSObject = struct {
             }
             return;
         }
-        const old_len = self.elements.items.len;
+        const old_len = self.elementCount();
         if (new_len <= old_len) return;
         if (new_len - old_len > sparse_gap_threshold) {
             try self.promoteToSparse(allocator, new_len);
             return;
         }
-        if (self.brand.elements_pooled and new_len > self.elements.capacity) {
+        var elements = try self.elementsMut(allocator);
+        if (self.brand.elements_pooled and new_len > elements.capacity) {
             try self.elementsUnpool(allocator, new_len);
+            elements = self.elementsExistingMut().?;
         }
-        try self.elements.resize(allocator, new_len);
+        try elements.resize(allocator, new_len);
         var i = old_len;
         while (i < new_len) : (i += 1) {
-            self.elements.items[i] = Value.hole_;
+            elements.items[i] = Value.hole_;
         }
         self.markNonPristine();
     }
@@ -3962,16 +4196,17 @@ pub const JSObject = struct {
     fn promoteToSparse(self: *JSObject, allocator: std.mem.Allocator, new_len: usize) !void {
         std.debug.assert(!self.brand.is_sparse);
         std.debug.assert(new_len <= std.math.maxInt(u32));
+        const elements = self.elementItems();
         var i: u32 = 0;
-        while (i < self.elements.items.len) : (i += 1) {
-            const v = self.elements.items[i];
+        while (i < elements.len) : (i += 1) {
+            const v = elements[i];
             if (isElementHole(v)) continue;
             try (try self.sparseMut(allocator)).put(allocator, i, v);
         }
         if (self.brand.elements_pooled) {
             self.elementsFreePooled();
-        } else {
-            self.elements.clearAndFree(allocator);
+        } else if (self.elementsExistingMut()) |dense| {
+            dense.clearAndFree(allocator);
         }
         self.sparse_length = @intCast(new_len);
         self.brand.is_sparse = true;
@@ -4009,10 +4244,10 @@ pub const JSObject = struct {
             if (new_len < self.sparse_length) self.sparse_length = new_len;
             return true;
         }
-        const cur: usize = self.elements.items.len;
+        const cur: usize = self.elementCount();
         const want: usize = new_len;
         if (want >= cur) return true;
-        try self.elements.resize(allocator, want);
+        try (try self.elementsMut(allocator)).resize(allocator, want);
         return true;
     }
 
@@ -4075,8 +4310,8 @@ pub const JSObject = struct {
             if (self.extension) |ext| _ = ext.sparse_elements.remove(idx);
             return true;
         }
-        if (idx >= self.elements.items.len) return true; // already absent
-        self.elements.items[idx] = Value.hole_;
+        if (idx >= self.elementCount()) return true; // already absent
+        self.elementItemsMut()[idx] = Value.hole_;
         return true;
     }
 
@@ -4113,8 +4348,8 @@ pub const JSObject = struct {
                     // reverse / copyWithin / unshift) reach here
                     // for array-like generic-object receivers.
                     try self.demoteFromShape(allocator);
-                    if (self.dict_store) |d| _ = d.properties.swapRemove(key);
-                    if (self.dict_store) |d| _ = d.property_flags.swapRemove(key);
+                    if (self.dictStore()) |d| _ = d.properties.swapRemove(key);
+                    if (self.dictStore()) |d| _ = d.property_flags.swapRemove(key);
                 }
                 return true;
             }
@@ -4122,14 +4357,14 @@ pub const JSObject = struct {
         if (self.hasAccessor(key)) {
             try self.demoteFromShape(allocator);
             _ = self.removeAccessor(key);
-            if (self.dict_store) |d| _ = d.property_flags.swapRemove(key);
+            if (self.dictStore()) |d| _ = d.property_flags.swapRemove(key);
             if (!self.propsConst().contains(key)) self.forgetKey(key);
             return true;
         }
         if (!self.ownDataContains(key)) return true;
         try self.demoteFromShape(allocator);
-        if (self.dict_store) |d| _ = d.properties.swapRemove(key);
-        if (self.dict_store) |d| _ = d.property_flags.swapRemove(key);
+        if (self.dictStore()) |d| _ = d.properties.swapRemove(key);
+        if (self.dictStore()) |d| _ = d.property_flags.swapRemove(key);
         if (!self.hasAccessor(key)) self.forgetKey(key);
         return true;
     }
@@ -4264,7 +4499,7 @@ test "JSObject: set/get round-trip" {
 test "JSObject: inline/overflow slot boundary round-trips" {
     // The first `inline_slot_cap` property values live in the
     // header's `inline_slots`; the rest spill to the heap-backed
-    // `overflow_slots`. Set enough properties to straddle the
+    // overflow view of `secondary_values`. Set enough properties to straddle the
     // boundary and confirm every value reads back through both
     // `slotAt` and the spec-facing `get`, including the slots on
     // either side of the inline/overflow seam.
@@ -4299,6 +4534,151 @@ test "JSObject: inline/overflow slot boundary round-trips" {
     // inline array.
     o.setSlot(inline_slot_cap + 1, Value.fromInt32(777));
     try testing.expectEqual(@as(i32, 777), o.slotAt(inline_slot_cap + 1).asInt32());
+}
+
+test "JSObject: named overflow and dense elements coexist through the cold spill" {
+    // Compact storage overlays the common mutually-exclusive cases:
+    // the secondary vector is either named-property overflow OR dense
+    // indexed elements. An object that genuinely needs both spills the
+    // element-vector metadata into its exact-sized aux store. Exercise both
+    // transition orders, then demote one receiver from shape mode; no
+    // named or indexed value may be lost at either representation seam.
+    const heap_mod = @import("heap.zig");
+    var heap = heap_mod.Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    const elements_first = try heap.allocateObject();
+    try elements_first.setIndexed(testing.allocator, 0, Value.fromInt32(101));
+    try elements_first.setIndexed(testing.allocator, 1, Value.fromInt32(202));
+
+    const n: usize = inline_slot_cap + 2;
+    var keys: [inline_slot_cap + 2][1]u8 = undefined;
+    for (0..n) |i| {
+        keys[i] = .{@as(u8, 'a') + @as(u8, @intCast(i))};
+        try elements_first.set(testing.allocator, &keys[i], Value.fromInt32(@intCast(i + 1)));
+    }
+    try testing.expect(elements_first.brand.secondary_is_overflow);
+    try testing.expectEqual(ObjectAuxKind.elements, elements_first.brand.aux_kind);
+    try testing.expect(elements_first.extension == null);
+    try testing.expectEqual(@as(i32, 101), elements_first.getIndexed(0).asInt32());
+    try testing.expectEqual(@as(i32, 202), elements_first.getIndexed(1).asInt32());
+    for (0..n) |i| {
+        try testing.expectEqual(@as(i32, @intCast(i + 1)), elements_first.get(&keys[i]).asInt32());
+    }
+    try elements_first.setIndexed(testing.allocator, 4_294_967_294, Value.fromInt32(606));
+    try testing.expect(elements_first.brand.is_sparse);
+    try testing.expectEqual(@as(usize, 0), elements_first.elementCount());
+    try testing.expectEqual(@as(i32, 606), elements_first.getIndexed(4_294_967_294).asInt32());
+    for (0..n) |i| {
+        try testing.expectEqual(@as(i32, @intCast(i + 1)), elements_first.get(&keys[i]).asInt32());
+    }
+
+    const overflow_first = try heap.allocateObject();
+    for (0..n) |i| {
+        try overflow_first.set(testing.allocator, &keys[i], Value.fromInt32(@intCast(20 + i)));
+    }
+    try overflow_first.setIndexed(testing.allocator, 0, Value.fromInt32(303));
+    try testing.expect(overflow_first.brand.secondary_is_overflow);
+    try testing.expectEqual(ObjectAuxKind.elements, overflow_first.brand.aux_kind);
+    try testing.expect(overflow_first.extension == null);
+    try testing.expectEqual(@as(i32, 303), overflow_first.getIndexed(0).asInt32());
+    for (0..n) |i| {
+        try testing.expectEqual(@as(i32, @intCast(20 + i)), overflow_first.get(&keys[i]).asInt32());
+    }
+
+    try testing.expect(try overflow_first.deleteOwn(testing.allocator, &keys[0]));
+    try testing.expectEqual(ObjectAuxKind.combined, overflow_first.brand.aux_kind);
+    try testing.expect(overflow_first.extension == null);
+    try testing.expectEqual(@as(i32, 303), overflow_first.getIndexed(0).asInt32());
+
+    // The heap's fixed-capacity dense-element pool follows the same
+    // ownership transition. Its buffer must remain pool-owned after the
+    // list header spills, and teardown must return it to the pool rather
+    // than passing it to the general allocator.
+    const pooled = try heap.makeDenseArray(null, &.{ Value.fromInt32(404), Value.fromInt32(505) });
+    try testing.expect(pooled.brand.elements_pooled);
+    try pooled.resizeSlots(testing.allocator, n);
+    for (0..n) |i| {
+        pooled.setSlot(i, Value.fromInt32(@intCast(40 + i)));
+    }
+    try testing.expect(pooled.brand.secondary_is_overflow);
+    try testing.expectEqual(ObjectAuxKind.elements, pooled.brand.aux_kind);
+    try testing.expect(pooled.brand.elements_pooled);
+    try testing.expectEqual(@as(i32, 404), pooled.getIndexed(0).asInt32());
+    try testing.expectEqual(@as(i32, 505), pooled.getIndexed(1).asInt32());
+    try pooled.ensureElementsLen(testing.allocator, heap_mod.Heap.element_buf_cap + 1);
+    try testing.expect(!pooled.brand.elements_pooled);
+    try testing.expectEqual(@as(i32, 404), pooled.getIndexed(0).asInt32());
+    try testing.expectEqual(@as(i32, 505), pooled.getIndexed(1).asInt32());
+}
+
+test "JSObject: aux upgrades preserve dictionary and element header addresses" {
+    const heap_mod = @import("heap.zig");
+    var heap = heap_mod.Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    // Dictionary first, then overflow-mode indexed storage.
+    const dict_first = try heap.allocateObject();
+    const original_dict = try dict_first.ensureDictStore(testing.allocator);
+    try dict_first.resizeSlots(testing.allocator, inline_slot_cap + 1);
+    dict_first.setSlot(inline_slot_cap, Value.undefined_);
+    const added_elements = try dict_first.elementsMut(testing.allocator);
+    try added_elements.append(testing.allocator, Value.fromInt32(1));
+    try testing.expectEqual(ObjectAuxKind.combined, dict_first.brand.aux_kind);
+    try testing.expect(original_dict == dict_first.dictStore().?);
+
+    // Element header first, then dictionary state. The Combined node
+    // owns stable child pointers rather than moving either payload.
+    const elements_first = try heap.allocateObject();
+    try elements_first.resizeSlots(testing.allocator, inline_slot_cap + 1);
+    elements_first.setSlot(inline_slot_cap, Value.undefined_);
+    const original_elements = try elements_first.elementsMut(testing.allocator);
+    try original_elements.append(testing.allocator, Value.fromInt32(2));
+    _ = try elements_first.ensureDictStore(testing.allocator);
+    try testing.expectEqual(ObjectAuxKind.combined, elements_first.brand.aux_kind);
+    try testing.expect(original_elements == elements_first.elementsConst());
+}
+
+test "JSObject: aux publication remains valid at each allocation failure" {
+    const o = try JSObject.init(testing.allocator);
+    defer o.deinit(testing.allocator);
+    try o.setIndexed(testing.allocator, 0, Value.fromInt32(77));
+
+    // The first transition allocation is the exact-sized element
+    // header. If it fails, the original inline element header remains
+    // authoritative and no discriminator is published.
+    var fail_header = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    try testing.expectError(
+        error.OutOfMemory,
+        o.resizeSlots(fail_header.allocator(), inline_slot_cap + 1),
+    );
+    try testing.expect(!o.brand.secondary_is_overflow);
+    try testing.expectEqual(ObjectAuxKind.none, o.brand.aux_kind);
+    try testing.expectEqual(@as(i32, 77), o.getIndexed(0).asInt32());
+
+    // If the overflow-buffer allocation fails after the header moved,
+    // the monotonic overflow representation is still self-consistent:
+    // slot_count remains old, the overflow slice is empty, and indexed
+    // data remains reachable through the aux header.
+    var fail_overflow = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 1 });
+    try testing.expectError(
+        error.OutOfMemory,
+        o.resizeSlots(fail_overflow.allocator(), inline_slot_cap + 1),
+    );
+    try testing.expect(o.brand.secondary_is_overflow);
+    try testing.expectEqual(ObjectAuxKind.elements, o.brand.aux_kind);
+    try testing.expectEqual(@as(usize, 0), o.slotCount());
+    try testing.expectEqual(@as(usize, 0), o.secondary_values.items.len);
+    try testing.expectEqual(@as(i32, 77), o.getIndexed(0).asInt32());
+
+    // Upgrading elements → combined allocates a DictStore and then the
+    // two-pointer node. Failure of the second allocation must destroy
+    // the unpublished DictStore and leave the element payload in place.
+    var fail_combined = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 1 });
+    try testing.expectError(error.OutOfMemory, o.ensureDictStore(fail_combined.allocator()));
+    try testing.expectEqual(ObjectAuxKind.elements, o.brand.aux_kind);
+    try testing.expect(o.dictStore() == null);
+    try testing.expectEqual(@as(i32, 77), o.getIndexed(0).asInt32());
 }
 
 test "JSObject: get prefers the shape slot when present" {
@@ -4527,7 +4907,7 @@ test "JSObject: setIndexed past threshold promotes to sparse" {
 
     try o.setIndexed(testing.allocator, 4_294_967_294, Value.fromInt32(100));
     try testing.expect(o.brand.is_sparse);
-    try testing.expectEqual(@as(usize, 0), o.elements.items.len);
+    try testing.expectEqual(@as(usize, 0), o.elementCount());
     try testing.expectEqual(@as(u32, 4_294_967_295), o.arrayLength());
     try testing.expectEqual(@as(i32, 100), o.getIndexed(4_294_967_294).asInt32());
     try testing.expect(o.hasOwnIndexedSlot(4_294_967_294));
@@ -4600,7 +4980,7 @@ test "JSObject: defineProperty-style flagged write past threshold goes sparse" {
         .configurable = true,
     });
     try testing.expect(o.brand.is_sparse);
-    try testing.expectEqual(@as(usize, 0), o.elements.items.len);
+    try testing.expectEqual(@as(usize, 0), o.elementCount());
     try testing.expectEqual(@as(u32, 4_294_967_295), o.arrayLength());
     try testing.expectEqual(@as(i32, 100), o.get("4294967294").asInt32());
 }
@@ -4641,15 +5021,24 @@ test "JSObjectExtension: footprint probe (size measurement, not an invariant)" {
     // from 408 B down: the cold per-kind clusters (iterator / RegExp /
     // key anchors / Proxy) went behind `extension` (296 B), the
     // dictionary representation (`properties` / `property_flags` /
-    // `own_key_order`) went into `dict_store` (200 B), the sparse
+    // `own_key_order`) went into the aux DictStore (200 B), the sparse
     // indexed store (`sparse_elements`) went into `extension` (176 B),
     // and the 18 scattered brand bool/enum fields folded into the
     // single packed `BrandFlags` word (168 B — the V8 `Map`-flags /
-    // JSC `Structure`-flags model). See docs/gc-immix-rearchitecture.md
-    // "The memory axis". This catches an accidental re-inlining — the
-    // smallest moved field is 24 B, which would push the header past
-    // this bound.
-    try testing.expect(@sizeOf(JSObject) <= 172);
+    // JSC `Structure`-flags model). The next compact-storage step
+    // overlays the mutually-exclusive common cases for the two
+    // 24-byte value vectors: named-property overflow slots and indexed
+    // elements. That removes one vector header without adding an
+    // allocation to ordinary <=4-property objects or dense arrays,
+    // taking JSObject to 144 B. See
+    // docs/gc-immix-rearchitecture.md "The memory axis".
+    try testing.expect(@sizeOf(JSObject) <= 148);
+    if (@sizeOf(usize) == 8) {
+        try testing.expectEqual(@as(usize, 144), @sizeOf(JSObject));
+        try testing.expectEqual(@as(usize, 104), @sizeOf(DictStore));
+        try testing.expectEqual(@as(usize, 24), @sizeOf(std.ArrayListUnmanaged(Value)));
+        try testing.expectEqual(@as(usize, 16), @sizeOf(ObjectAuxCombined));
+    }
 }
 
 test "JSObjectExtension: extension is null on a fresh object" {

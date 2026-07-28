@@ -24,8 +24,8 @@
 //!     Proxy.harden would route through the trap; defer.
 //!   - Recursion uses the Zig stack; pathological depth would
 //!     overflow. Real-world capability graphs are shallow.
-//!   - Array-exotic indexed slots (§10.4.2) live in
-//!     `obj.elements`, not `obj.propsConst()`, so the bag-only
+//!   - Array-exotic indexed slots (§10.4.2) live in dense
+//!     element storage, not `obj.propsConst()`, so the bag-only
 //!     walk below misses them. The root array becomes non-
 //!     extensible and the *values* at each slot freeze
 //!     transitively (good), but `a[0] = …` doesn't throw on
@@ -188,7 +188,7 @@ pub fn hardenWalk(realm: *Realm, v: Value, visited: *std.AutoHashMap(usize, void
         var rit = obj.iterOwnNamedKeys();
         while (rit.next()) |e| try hardenWalk(realm, e.value_ptr.*, visited);
         // Recurse into array indexed slots. `iterOwnNamedKeys`
-        // skips these — they live in `obj.elements` /
+        // skips these — they live in dense element storage /
         // `obj.sparseConst()` per the array-exotic layout, not
         // in the named-property bag. The harden contract is
         // "deep-freeze every reachable value," and an array of
@@ -199,7 +199,7 @@ pub fn hardenWalk(realm: *Realm, v: Value, visited: *std.AutoHashMap(usize, void
         // this only recurses into the VALUES so transitive
         // freezing actually reaches them.
         if (obj.brand.is_array_exotic) {
-            for (obj.elements.items) |elem| try hardenWalk(realm, elem, visited);
+            for (obj.elementItems()) |elem| try hardenWalk(realm, elem, visited);
             var sit = obj.sparseConst().iterator();
             while (sit.next()) |e| try hardenWalk(realm, e.value_ptr.*, visited);
         }
