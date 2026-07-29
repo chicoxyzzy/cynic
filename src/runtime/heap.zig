@@ -1778,7 +1778,7 @@ pub const Heap = struct {
     /// exhausted. At that point the tiny cache has demonstrated no useful
     /// locality: release its roots and bypass a bounded eligibility window
     /// before sampling again.
-    fn recordShallowConsMiss(self: *Heap, result: *JSString) void {
+    noinline fn recordShallowConsMiss(self: *Heap, result: *JSString) void {
         self.shallow_cons_miss_streak += 1;
         if (self.shallow_cons_miss_streak == shallow_cons_miss_limit) {
             self.clearShallowConsCache();
