@@ -996,6 +996,14 @@ sampling by `/profile`.
   instructions **1,509 → 1,456** (-3.5%), encoded bytes **3,122 →
   3,067** (-1.8%), and dynamic dispatches **107,516,101 →
   104,678,462** (-2.64%).
+- **Schema-derived operand-size lookup (2026-07-29).** Merged Lantern
+  opcode-family handlers now advance `ip` through a 256-byte table generated
+  at comptime from the authoritative `Op.spec()` metadata, replacing repeated
+  runtime instruction-metadata and operand-layout classification. The wire
+  format and dispatch count are unchanged. A remote 12-pair A/B measured a
+  **0.720x** interpreter macro geometric mean and **0.706x** in the default
+  production-tier posture, with all six workloads improving and no gated
+  micro regression. See `bench-results.md`.
 - **Bistromath continuation + hardened-load closure (2026-07-16).**
   Catch/finally PCs now receive compiled reentry stubs in the shared
   bytecode-continuation table; the driver invokes Lantern's real unwinder
