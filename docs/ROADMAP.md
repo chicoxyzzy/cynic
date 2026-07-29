@@ -1620,13 +1620,23 @@ not measurements.
    it caches the key bytes inline ([inline-caches.md](inline-caches.md)
    "Computed-property read + write IC").
 
-10. **SMI fast paths in arithmetic / comparison opcodes.**
+10. **SMI fast paths in arithmetic / comparison opcodes — modulo
+    slice shipped (2026-07-29).**
     Cynic uses NaN-boxing so an int32 value is identifiable
     by tag. The `add` / `sub` / `mul` / `lt` / `eq` opcodes
     can check `(lhs.isInt32() and rhs.isInt32())` early and
     take a non-overflow integer path before falling back to
     the full numeric-tower coercion. Some opcodes already
-    have this; auditing for completeness is the work.
+    have this; auditing for completeness remains the work.
+    Int32/Int32 `%` now calls one total Number-remainder helper
+    directly from Lantern and the generic numeric path, preserving
+    NaN and signed zero while guarding the host-trapping
+    `minInt(i32) % -1` pair. On the remote 20-pair interpreter
+    A/B, `mod_loop` moved to **0.824×**; a 60-pair Crypto
+    confirmation measured **0.968×**. The six-macro interpreter
+    geometric mean stayed **1.000×** (worst **1.034×**), and the
+    only initially noisy >5% micro control resolved to **1.007×**
+    over 60 pairs.
 
 11. **Direct-threaded dispatch.** Pre-decode each chunk's
     bytecode into a list of `(handler_fn_ptr, operand_bytes)`
