@@ -328,14 +328,17 @@ pub const JSString = struct {
         self: *JSString,
         bytes_allocator: std.mem.Allocator,
     ) AllocError![]const u8 {
-        switch (self.payload) {
+        const heap = switch (self.payload) {
             .flat => |b| return b,
-            .cons => {},
-        }
+            .cons => |cons| cons.heap,
+        };
         // Materialise. One allocation of the already-known length.
         const out = try bytes_allocator.alloc(u8, self.byte_len);
         errdefer bytes_allocator.free(out);
         copyConsBytes(self, out);
+        // The memo key lives in `.cons.left` / `.cons.right`; stop
+        // strongly rooting this result before replacing that payload.
+        heap.invalidateShallowConsCache(self);
         // Degenerate in place: this node becomes flat, caching the
         // realised bytes. `length_cu` / `byte_len` are unchanged.
         self.payload = .{ .flat = out };

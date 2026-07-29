@@ -623,6 +623,10 @@ const Capture = struct {
         // Pre-capture full GC (doc §6.1): afterwards everything in
         // the pools is live and rooted, so capture serializes the
         // per-kind lists wholesale — no reachability trace needed.
+        // The shallow-concat cache is derived runtime state rather
+        // than realm state: clear it first so otherwise-unreachable
+        // rope graphs neither survive this GC nor enter the image.
+        self.realm.heap.clearShallowConsCache();
         self.realm.collectGarbage();
         try self.checkQuiescent();
         const heap = self.realm.heap;
@@ -1818,6 +1822,31 @@ test "snapshot: capture refuses a non-quiescent realm" {
     defer destroyRealm(testing.allocator, realm);
     try realm.enqueueMicrotask(Value.undefined_, Value.undefined_);
     try testing.expectError(error.RealmNotQuiescent, Snapshot.capture(realm, testing.allocator));
+}
+
+test "snapshot: capture drops derived shallow ConsString cache roots" {
+    const realm = try makeInstalledRealm(testing.allocator, true);
+    defer destroyRealm(testing.allocator, realm);
+
+    // Establish a cache-free installed-realm baseline, then add one
+    // otherwise-unreachable memoized rope graph.
+    realm.heap.clearShallowConsCache();
+    realm.collectGarbage();
+    const baseline_strings = realm.heap.stringCount();
+    const left = try realm.heap.allocateString("snapshot-left-");
+    const right = try realm.heap.allocateString("snapshot-right");
+    _ = try realm.heap.allocateConsString(left, right);
+    try testing.expectEqual(baseline_strings + 3, realm.heap.stringCount());
+
+    const image = try Snapshot.capture(realm, testing.allocator);
+    defer testing.allocator.free(image);
+    try testing.expectEqual(baseline_strings, realm.heap.stringCount());
+
+    const restored = try Snapshot.restore(testing.allocator, image);
+    defer destroyRealm(testing.allocator, restored);
+    for (restored.heap.shallow_cons_cache) |entry| {
+        try testing.expectEqual(@as(?*JSString, null), entry);
+    }
 }
 
 test "snapshot: corrupted payload byte fails the integrity check, flipped build-id byte fails the gate" {
