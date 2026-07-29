@@ -17,6 +17,45 @@ new run against the previous section with the *same host*.
 
 ## History
 
+### 2026-07-29 — compact/fused dense-element pools, host `Linux 6.8.0-117-generic x86_64` (remote bench box)
+
+Interpreter-only interleaved A/B against `fe0cf39d` (the compact-storage
+baseline), five pairs per fixture. Runtime head `c8aadcd5` splits fused
+array-literal buffers into capacity-10 and capacity-16 slab classes instead of
+giving every 1–16 element literal a 16-slot buffer.
+
+The headline is Splay's retained-memory result. Its 256,000 live ten-element
+leaf arrays predict a `256000 × (16 − 10) × 8 = 12,000 KiB` payload reduction;
+observed peak RSS fell **183,540 → 171,616 KiB** (**−11,924 KiB / −11.64 MiB /
+−6.50%**), within 76 KiB of that exact prediction. Standalone timing stayed
+flat inside run spread:
+
+| revision | p50_ms | min_ms | max_ms | spread% | rss_kb |
+|---|---:|---:|---:|---:|---:|
+| base `fe0cf39d` | 676.54 | 659.15 | 710.94 | 7.7 | 183540 |
+| head `c8aadcd5` | 679.69 | 643.53 | 713.01 | 10.2 | 171616 |
+
+The back-to-back ratios are the timing signal. No macro crossed the runner's
+regression gate (a move must exceed both 5% and one-third of ratio spread):
+
+| bench | base_ms | head_ms | ratio | spread% |
+|---|---:|---:|---:|---:|
+| richards | 1040.81 | 1066.90 | 1.024x | 6.6 |
+| deltablue | 660.17 | 663.45 | 1.018x | 16.1 |
+| crypto | 638.01 | 643.69 | 1.009x | 6.1 |
+| raytrace | 295.36 | 291.59 | 0.997x | 17.9 |
+| navier_stokes | 412.20 | 404.01 | 0.958x | 7.4 |
+| splay | 688.29 | 691.64 | 1.011x | 3.7 |
+
+The allocation-only `array_literal_loop` micro initially read 1.063x at five
+pairs, then **1.042x with 9.9% spread at 12 confirmation pairs**, below the
+gate. Its pool helpers are already inlined in the ReleaseFast binary, leaving
+only the required capacity-class branch. Controls were also unflagged:
+`ctor_array_build` 1.012x (5.5% spread) and `array_iter` 1.092x (38.5% spread).
+This run also registers the already-present `array_literal_loop.js` fixture in
+the standard benchmark table so the allocation path remains directly
+measurable.
+
 ### 2026-07-17 — multiplication operand profile + tagged Number T2 path, host `Darwin 25.6.0 arm64`
 
 Focused interleaved A/B against `0ca910a9` (pre-profile), Lantern-only
