@@ -115,8 +115,10 @@ without making Bistromath reconstruct a virtual stack.
 declares its mnemonic, operand layout, control-flow class, and
 Bistromath strategy in `Op.spec()`. The disassembler, liveness pass,
 statistics collector, branch decoder, Lantern, and Bistromath derive
-their stream walk from that schema. Do not add a parallel operand-size
-or opcode-classification table.
+their stream walk from that schema. `Op.operandSize()` uses a 256-byte
+table generated at comptime from `Op.spec()`; this is a cache of the
+authoritative schema, not an independent definition. Do not add a
+hand-maintained parallel operand-size or opcode-classification table.
 
 The wire format is compact but scalable:
 
