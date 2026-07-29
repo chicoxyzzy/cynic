@@ -1702,8 +1702,8 @@ pub const Op = enum(u8) {
     }
 
     /// Total operand bytes, derived from the authoritative layout.
-    pub fn operandSize(op: Op) u8 {
-        return op.spec().layout.operandSize();
+    pub inline fn operandSize(op: Op) u8 {
+        return operand_size_by_opcode[@intFromEnum(op)];
     }
 
     /// Arithmetic bytecodes whose trailing u16 indexes the chunk-owned raw
@@ -1820,6 +1820,20 @@ pub const Op = enum(u8) {
             else => unreachable,
         };
     }
+};
+
+/// Runtime operand decoding is part of every merged-family interpreter
+/// handler. Derive its compact lookup table from `Op.spec()` at comptime so
+/// the schema stays authoritative without re-running the full instruction
+/// metadata switch and operand-layout walk for every executed bytecode.
+const operand_size_by_opcode: [256]u8 = blk: {
+    @setEvalBranchQuota(10_000);
+    var sizes: [256]u8 = @splat(0);
+    for (@typeInfo(Op).@"enum".field_names) |field_name| {
+        const op: Op = @field(Op, field_name);
+        sizes[@intFromEnum(op)] = op.spec().layout.operandSize();
+    }
+    break :blk sizes;
 };
 
 // ---------------------------------------------------------------------------
