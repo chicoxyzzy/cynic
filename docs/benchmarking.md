@@ -98,6 +98,7 @@ Run one fixture with `zig build bench -- --filter=<name>`; combine it with
 | `arith_loop` | 5,000,000 | Bytecode dispatch density on `Op.add` / `Op.lt` / `Op.jmp` — int32 fast-path + the threaded-dispatch loop with no property access. Smi-overflow paths are NOT exercised (every step stays int32-clean via `\| 0`). |
 | `mul_loop` | 3,000,000 | Numeric `Op.mul` dispatch with an Int32/Double raw-operand pair and a Double result. Pins Lantern's one-byte per-site operand profile plus the fused Number multiplication path; the changing multiplicand prevents constant folding. |
 | `div_loop` | 3,000,000 | Numeric `Op.div` dispatch with Int32 raw operands and a Double result. Pins Lantern's one-byte per-site operand profile plus the fused Number division path; the changing numerator prevents constant folding. |
+| `mod_loop` | 3,000,000 | Numeric `Op.mod` dispatch with two Int32 operands. Pins Lantern's direct truncating Number-remainder path; the changing dividend prevents constant folding, while an accumulated checksum keeps every result observable. |
 | `prop_access` | 500,000 | Hot named-property reads on a same-shape object — `lda_property` IC hit-rate. Pre-IC: ~3× behind QuickJS-NG. Post-IC (e03f5cd): −66 % on Cynic. The headline cache-effectiveness bench. |
 | `prop_write` | 500,000 | Hot named-property writes on a same-shape object — `sta_property` IC + shape-shadow update + property-bag put. The mirror of `prop_access`. Post-IC (7bad504): −63 % on Cynic. |
 | `array_iter` | 10,000×100 passes | `for-of` over a packed Array — iterator protocol + indexed reads on §10.4.2 Array exotic. The env-hoist (`f719ae3`) was measured here at −69.6 %. |
@@ -135,10 +136,10 @@ out of the timed samples. Increase confidence with:
 
     zig build bench -- --ohaimark-rollout --runs=30
 
-The ordinary `bench/micros/mul_loop.js` and `div_loop.js` intentionally invoke
-their hot function once. Backedges heat those chunks, but an entry-only T2 has
-no later entry at which to compile them; they remain valid T1 benchmarks and
-are the shape the **OSR rollout** suite targets.
+The ordinary `bench/micros/mul_loop.js`, `div_loop.js`, and `mod_loop.js`
+intentionally invoke their hot function once. Backedges heat those chunks, but
+an entry-only T2 has no later entry at which to compile them; they remain valid
+T1 benchmarks and are the shape the **OSR rollout** suite targets.
 
 ### Ohaimark OSR natural-threshold gate
 
