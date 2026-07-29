@@ -347,11 +347,12 @@ pub const Heap = struct {
     pub const shallow_cons_cache_max_depth: u16 = 2;
     pub const shallow_cons_cache_max_byte_len: u32 = 64;
     /// A tiny memo should not tax a workload whose eligible operand
-    /// identities never repeat. Eight consecutive misses distinguish
-    /// that shape from Splay's two cold misses followed by 62 hits;
-    /// bypassing the next 64 eligible pairs amortises probe/root-turnover
-    /// cost while periodically giving locality another chance.
-    pub const shallow_cons_miss_limit: u8 = 8;
+    /// identities never repeat. With two FIFO slots, a third consecutive
+    /// miss proves both entries would be evicted before any reuse. Splay
+    /// instead has two cold misses followed by 62 hits; bypassing the next
+    /// 64 eligible pairs amortises miss/root-turnover cost while
+    /// periodically giving locality another chance.
+    pub const shallow_cons_miss_limit: u8 = 3;
     pub const shallow_cons_bypass_length: u8 = 64;
 
     /// Capacities (in Values) of the two pooled dense-element buffer
@@ -6540,11 +6541,6 @@ test "Heap: shallow ConsString cache backs off after a miss burst and recovers" 
         "right-0000",
         "right-0001",
         "right-0002",
-        "right-0003",
-        "right-0004",
-        "right-0005",
-        "right-0006",
-        "right-0007",
     };
     try testing.expectEqual(@as(usize, Heap.shallow_cons_miss_limit), rights.len);
     for (rights) |bytes| {
@@ -6603,6 +6599,9 @@ test "Heap: shallow ConsString cache deterministically evicts FIFO" {
 
     const ab = try heap.allocateConsString(a, b);
     _ = try heap.allocateConsString(c, d);
+    // Demonstrated reuse keeps the adaptive cache active before the
+    // third distinct pair exercises FIFO replacement.
+    try testing.expectEqual(ab, try heap.allocateConsString(a, b));
     const ef = try heap.allocateConsString(e, f);
 
     // The third insertion replaces the first slot. Re-inserting the
@@ -6667,11 +6666,13 @@ test "Heap: shallow ConsString cache is a bounded major-GC root" {
 
     const a = try heap.allocateString("aaaaaaaaaa");
     const b = try heap.allocateString("bbbbbbbbbb");
-    _ = try heap.allocateConsString(a, b);
+    const ab = try heap.allocateConsString(a, b);
+    try testing.expectEqual(ab, try heap.allocateConsString(a, b));
 
     const c = try heap.allocateString("cccccccccc");
     const d = try heap.allocateString("dddddddddd");
-    _ = try heap.allocateConsString(c, d);
+    const cd = try heap.allocateConsString(c, d);
+    try testing.expectEqual(cd, try heap.allocateConsString(c, d));
 
     const e = try heap.allocateString("eeeeeeeeee");
     const f = try heap.allocateString("ffffffffff");
@@ -6711,10 +6712,12 @@ test "Heap: shallow ConsString cache shades old operands published during increm
     // interleaved insertion below replaces it.
     const a = try heap.allocateString("aaaaaaaaaa");
     const b = try heap.allocateString("bbbbbbbbbb");
-    _ = try heap.allocateConsString(a, b);
+    const ab = try heap.allocateConsString(a, b);
+    try testing.expectEqual(ab, try heap.allocateConsString(a, b));
     const c = try heap.allocateString("cccccccccc");
     const d = try heap.allocateString("dddddddddd");
-    _ = try heap.allocateConsString(c, d);
+    const cd = try heap.allocateConsString(c, d);
+    try testing.expectEqual(cd, try heap.allocateConsString(c, d));
 
     heap.beginIncrementalMark(&.{});
     const published = try heap.allocateConsString(old_left, old_right);
