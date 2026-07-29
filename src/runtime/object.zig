@@ -1055,11 +1055,13 @@ pub const BrandFlags = packed struct(u32) {
     /// `sparse_elements` map (in the extension); `sparse_length` is
     /// the logical length. Once sparse, stays sparse.
     is_sparse: bool = false,
-    /// `elements.items.ptr` came from the heap's `element_buf_pool`
-    /// (capacity exactly `Heap.element_buf_cap`) rather than the GPA.
-    /// Growth past the class migrates to a GPA buffer
-    /// (`elementsUnpool`); frees/teardown return the buffer to the
-    /// pool — a pooled pointer must NEVER reach `allocator.free`.
+    /// `elements.items.ptr` came from one of the heap's fixed-capacity
+    /// dense-element pools rather than the GPA. Exact capacity identifies
+    /// the class: `Heap.compact_element_buf_cap` or
+    /// `Heap.element_buf_cap`. Growth can promote compact → fused →
+    /// GPA (`elementsGrowPooled`); frees/teardown return the buffer to
+    /// its matching pool — a pooled pointer must NEVER reach
+    /// `allocator.free`.
     elements_pooled: bool = false,
     /// The base object's single `secondary_values` vector is normally
     /// dense indexed storage. Once named-property slots overflow the
@@ -2731,9 +2733,8 @@ pub const JSObject = struct {
         const elements = self.elementsExistingMut();
         if (self.brand.elements_pooled) {
             // Pool-owned buffer — must not reach `allocator.free`.
-            const heap_ty = @import("heap.zig");
-            const buf: *[heap_ty.Heap.element_buf_cap]Value = @ptrCast(elements.?.items.ptr);
-            if (self.heap) |h| h.element_buf_pool.destroy(buf);
+            std.debug.assert(self.heap != null);
+            if (self.heap) |h| h.releasePooledElements(elements.?);
         } else if (elements) |dense| {
             dense.deinit(allocator);
         }
@@ -4100,6 +4101,51 @@ pub const JSObject = struct {
         }
     }
 
+    /// Grow pooled elements without exposing a half-published ownership
+    /// transition. A compact buffer first promotes to the fused class;
+    /// growth past that migrates to GPA storage. In both cases the
+    /// destination allocation and copy complete before the old buffer
+    /// returns to its pool, so OOM leaves pointer, capacity, contents,
+    /// and provenance unchanged.
+    fn elementsGrowPooled(self: *JSObject, allocator: std.mem.Allocator, min_cap: usize) !void {
+        if (!self.brand.elements_pooled) return;
+        const heap_ty = @import("heap.zig");
+        const elements = self.elementsExistingMut().?;
+        if (min_cap <= elements.capacity) return;
+        std.debug.assert(self.heap != null);
+
+        if (elements.capacity == heap_ty.Heap.compact_element_buf_cap and
+            min_cap <= heap_ty.Heap.element_buf_cap)
+        {
+            const h = self.heap.?;
+            var fresh = try h.allocatePooledElements(min_cap);
+            fresh.appendSliceAssumeCapacity(elements.items);
+            h.releasePooledElements(elements);
+            elements.* = fresh;
+            return;
+        }
+
+        std.debug.assert(
+            elements.capacity == heap_ty.Heap.compact_element_buf_cap or
+                elements.capacity == heap_ty.Heap.element_buf_cap,
+        );
+        var fresh: std.ArrayListUnmanaged(Value) = .empty;
+        try fresh.ensureTotalCapacity(allocator, @max(min_cap, elements.items.len));
+        fresh.appendSliceAssumeCapacity(elements.items);
+        self.heap.?.releasePooledElements(elements);
+        elements.* = fresh;
+        self.brand.elements_pooled = false;
+    }
+
+    /// Release pooled elements back to the pool and reset to empty.
+    /// Mirrors `clearAndFree` for the pooled representation.
+    fn elementsFreePooled(self: *JSObject) void {
+        const elements = self.elementsExistingMut().?;
+        std.debug.assert(self.heap != null);
+        if (self.heap) |h| h.releasePooledElements(elements);
+        self.brand.elements_pooled = false;
+    }
+
     /// Append `v` at the next dense index on a dense Array exotic — the
     /// sequential array-literal init case `[a, b, c]`, whose elements
     /// land at 0, 1, 2 in order. Pushes straight onto `elements` and
@@ -4109,34 +4155,6 @@ pub const JSObject = struct {
     /// back to the general indexed path when the array is sparse or
     /// `idx` is not the next slot (a hole-creating or overwriting
     /// write). Does NOT touch `length`; the caller syncs it. §10.4.2.1.
-    /// Migrate pooled elements to a general-purpose buffer sized for
-    /// at least `min_cap`, returning the pooled buffer. No-op when the
-    /// buffer is already GPA-owned. Must run before ANY operation that
-    /// could grow the buffer past `Heap.element_buf_cap`.
-    fn elementsUnpool(self: *JSObject, allocator: std.mem.Allocator, min_cap: usize) !void {
-        if (!self.brand.elements_pooled) return;
-        const heap_ty = @import("heap.zig");
-        const elements = self.elementsExistingMut().?;
-        var fresh: std.ArrayListUnmanaged(Value) = .empty;
-        try fresh.ensureTotalCapacity(allocator, @max(min_cap, elements.items.len));
-        fresh.appendSliceAssumeCapacity(elements.items);
-        const buf: *[heap_ty.Heap.element_buf_cap]Value = @ptrCast(elements.items.ptr);
-        if (self.heap) |h| h.element_buf_pool.destroy(buf);
-        elements.* = fresh;
-        self.brand.elements_pooled = false;
-    }
-
-    /// Release pooled elements back to the pool and reset to empty.
-    /// Mirrors `clearAndFree` for the pooled representation.
-    fn elementsFreePooled(self: *JSObject) void {
-        const heap_ty = @import("heap.zig");
-        const elements = self.elementsExistingMut().?;
-        const buf: *[heap_ty.Heap.element_buf_cap]Value = @ptrCast(elements.items.ptr);
-        if (self.heap) |h| h.element_buf_pool.destroy(buf);
-        elements.* = .empty;
-        self.brand.elements_pooled = false;
-    }
-
     pub fn appendDenseSequential(
         self: *JSObject,
         allocator: std.mem.Allocator,
@@ -4147,7 +4165,7 @@ pub const JSObject = struct {
         if (idx != self.elementCount()) return false;
         var elements = try self.elementsMut(allocator);
         if (self.brand.elements_pooled and elements.items.len == elements.capacity) {
-            try self.elementsUnpool(allocator, elements.items.len + 1);
+            try self.elementsGrowPooled(allocator, elements.items.len + 1);
             elements = self.elementsExistingMut().?;
         }
         try elements.append(allocator, v);
@@ -4178,7 +4196,7 @@ pub const JSObject = struct {
         }
         var elements = try self.elementsMut(allocator);
         if (self.brand.elements_pooled and new_len > elements.capacity) {
-            try self.elementsUnpool(allocator, new_len);
+            try self.elementsGrowPooled(allocator, new_len);
             elements = self.elementsExistingMut().?;
         }
         try elements.resize(allocator, new_len);
@@ -4595,8 +4613,13 @@ test "JSObject: named overflow and dense elements coexist through the cold spill
     // ownership transition. Its buffer must remain pool-owned after the
     // list header spills, and teardown must return it to the pool rather
     // than passing it to the general allocator.
-    const pooled = try heap.makeDenseArray(null, &.{ Value.fromInt32(404), Value.fromInt32(505) });
+    var pooled_values: [10]Value = undefined;
+    for (&pooled_values, 0..) |*value, i| {
+        value.* = Value.fromInt32(@intCast(404 + i));
+    }
+    const pooled = try heap.makeDenseArray(null, &pooled_values);
     try testing.expect(pooled.brand.elements_pooled);
+    try testing.expectEqual(@as(usize, 10), pooled.elementsConst().capacity);
     try pooled.resizeSlots(testing.allocator, n);
     for (0..n) |i| {
         pooled.setSlot(i, Value.fromInt32(@intCast(40 + i)));
@@ -4605,11 +4628,176 @@ test "JSObject: named overflow and dense elements coexist through the cold spill
     try testing.expectEqual(ObjectAuxKind.elements, pooled.brand.aux_kind);
     try testing.expect(pooled.brand.elements_pooled);
     try testing.expectEqual(@as(i32, 404), pooled.getIndexed(0).asInt32());
-    try testing.expectEqual(@as(i32, 505), pooled.getIndexed(1).asInt32());
+    try testing.expectEqual(@as(i32, 405), pooled.getIndexed(1).asInt32());
+
+    const compact_ptr = pooled.elementsConst().items.ptr;
+    try pooled.ensureElementsLen(testing.allocator, 11);
+    try testing.expect(pooled.brand.elements_pooled);
+    try testing.expectEqual(heap_mod.Heap.element_buf_cap, pooled.elementsConst().capacity);
+    try testing.expect(compact_ptr != pooled.elementsConst().items.ptr);
+    try testing.expectEqual(@as(i32, 404), pooled.getIndexed(0).asInt32());
+    try testing.expectEqual(@as(i32, 405), pooled.getIndexed(1).asInt32());
+
     try pooled.ensureElementsLen(testing.allocator, heap_mod.Heap.element_buf_cap + 1);
     try testing.expect(!pooled.brand.elements_pooled);
     try testing.expectEqual(@as(i32, 404), pooled.getIndexed(0).asInt32());
-    try testing.expectEqual(@as(i32, 505), pooled.getIndexed(1).asInt32());
+    try testing.expectEqual(@as(i32, 405), pooled.getIndexed(1).asInt32());
+}
+
+test "JSObject: compact pooled-element growth is OOM-atomic" {
+    const heap_mod = @import("heap.zig");
+    var failing = std.testing.FailingAllocator.init(testing.allocator, .{});
+    var heap = heap_mod.Heap.init(failing.allocator());
+    defer heap.deinit();
+
+    var values: [10]Value = undefined;
+    for (&values, 0..) |*value, i| {
+        value.* = Value.fromInt32(@intCast(700 + i));
+    }
+    const pooled = try heap.makeDenseArray(null, &values);
+    try testing.expect(pooled.brand.elements_pooled);
+    try testing.expectEqual(@as(usize, 10), pooled.elementsConst().capacity);
+
+    const old_ptr = pooled.elementsConst().items.ptr;
+    failing.fail_index = failing.alloc_index;
+    try testing.expectError(
+        error.OutOfMemory,
+        pooled.appendDenseSequential(
+            failing.allocator(),
+            @intCast(values.len),
+            Value.fromInt32(999),
+        ),
+    );
+    try testing.expect(pooled.brand.elements_pooled);
+    try testing.expectEqual(@as(usize, 10), pooled.elementsConst().capacity);
+    try testing.expectEqual(old_ptr, pooled.elementsConst().items.ptr);
+    try testing.expectEqualSlices(Value, &values, pooled.elementItems());
+
+    failing.fail_index = std.math.maxInt(usize);
+    var compact_probe = try heap.allocatePooledElements(values.len);
+    try testing.expect(compact_probe.items.ptr != old_ptr);
+    heap.releasePooledElements(&compact_probe);
+
+    try testing.expect(try pooled.appendDenseSequential(
+        failing.allocator(),
+        @intCast(values.len),
+        Value.fromInt32(999),
+    ));
+    try testing.expect(pooled.brand.elements_pooled);
+    try testing.expectEqual(heap_mod.Heap.element_buf_cap, pooled.elementsConst().capacity);
+    try testing.expect(old_ptr != pooled.elementsConst().items.ptr);
+    try testing.expectEqualSlices(Value, &values, pooled.elementItems()[0..values.len]);
+    try testing.expectEqual(@as(i32, 999), pooled.getIndexed(10).asInt32());
+
+    const fused_ptr = pooled.elementsConst().items.ptr;
+    failing.fail_index = failing.alloc_index;
+    try testing.expectError(
+        error.OutOfMemory,
+        pooled.ensureElementsLen(failing.allocator(), heap_mod.Heap.element_buf_cap + 1),
+    );
+    try testing.expect(pooled.brand.elements_pooled);
+    try testing.expectEqual(heap_mod.Heap.element_buf_cap, pooled.elementsConst().capacity);
+    try testing.expectEqual(fused_ptr, pooled.elementsConst().items.ptr);
+    try testing.expectEqual(@as(i32, 999), pooled.getIndexed(10).asInt32());
+
+    failing.fail_index = std.math.maxInt(usize);
+    var fused_probe = try heap.allocatePooledElements(heap_mod.Heap.element_buf_cap);
+    try testing.expect(fused_probe.items.ptr != fused_ptr);
+    heap.releasePooledElements(&fused_probe);
+
+    try pooled.ensureElementsLen(failing.allocator(), heap_mod.Heap.element_buf_cap + 1);
+    try testing.expect(!pooled.brand.elements_pooled);
+    try testing.expectEqualSlices(Value, &values, pooled.elementItems()[0..values.len]);
+    try testing.expectEqual(@as(i32, 999), pooled.getIndexed(10).asInt32());
+}
+
+test "JSObject: compact pooled elements can grow directly past fused capacity" {
+    const heap_mod = @import("heap.zig");
+    var heap = heap_mod.Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    var values: [10]Value = undefined;
+    for (&values, 0..) |*value, i| {
+        value.* = Value.fromInt32(@intCast(800 + i));
+    }
+    const pooled = try heap.makeDenseArray(null, &values);
+    try pooled.ensureElementsLen(testing.allocator, heap_mod.Heap.element_buf_cap + 1);
+    try testing.expect(!pooled.brand.elements_pooled);
+    try testing.expectEqualSlices(Value, &values, pooled.elementItems()[0..values.len]);
+    for (pooled.elementItems()[values.len..]) |value| {
+        try testing.expect(JSObject.isElementHole(value));
+    }
+}
+
+test "JSObject: sparse promotion returns each pooled element class" {
+    const heap_mod = @import("heap.zig");
+    var heap = heap_mod.Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    var compact_values: [10]Value = @splat(Value.undefined_);
+    const compact = try heap.makeDenseArray(null, &compact_values);
+    const compact_ptr = compact.elementsConst().items.ptr;
+    try compact.setIndexed(testing.allocator, 100_000, Value.fromInt32(1));
+    try testing.expect(compact.brand.is_sparse);
+    try testing.expect(!compact.brand.elements_pooled);
+
+    var fused_values: [11]Value = @splat(Value.undefined_);
+    var fused_probe = try heap.allocatePooledElements(fused_values.len);
+    try testing.expect(fused_probe.items.ptr != compact_ptr);
+    heap.releasePooledElements(&fused_probe);
+
+    const fused = try heap.makeDenseArray(null, &fused_values);
+    const fused_ptr = fused.elementsConst().items.ptr;
+    try fused.setIndexed(testing.allocator, 100_000, Value.fromInt32(2));
+    try testing.expect(fused.brand.is_sparse);
+    try testing.expect(!fused.brand.elements_pooled);
+
+    var compact_reused = try heap.allocatePooledElements(compact_values.len);
+    try testing.expectEqual(compact_ptr, compact_reused.items.ptr);
+    heap.releasePooledElements(&compact_reused);
+    var fused_reused = try heap.allocatePooledElements(fused_values.len);
+    try testing.expectEqual(fused_ptr, fused_reused.items.ptr);
+    heap.releasePooledElements(&fused_reused);
+}
+
+test "JSObject: sparse-promotion OOM retains exclusive pooled ownership" {
+    const heap_mod = @import("heap.zig");
+    var failing = std.testing.FailingAllocator.init(testing.allocator, .{});
+    var heap = heap_mod.Heap.init(failing.allocator());
+    defer heap.deinit();
+
+    var values: [10]Value = undefined;
+    for (&values, 0..) |*value, i| {
+        value.* = Value.fromInt32(@intCast(900 + i));
+    }
+    const pooled = try heap.makeDenseArray(null, &values);
+    const old_ptr = pooled.elementsConst().items.ptr;
+
+    failing.fail_index = failing.alloc_index;
+    try testing.expectError(
+        error.OutOfMemory,
+        pooled.setIndexed(failing.allocator(), 100_000, Value.fromInt32(1234)),
+    );
+    try testing.expect(!pooled.brand.is_sparse);
+    try testing.expect(pooled.brand.elements_pooled);
+    try testing.expectEqual(@as(usize, 10), pooled.elementsConst().capacity);
+    try testing.expectEqual(old_ptr, pooled.elementsConst().items.ptr);
+    try testing.expectEqualSlices(Value, &values, pooled.elementItems());
+
+    failing.fail_index = std.math.maxInt(usize);
+    var compact_probe = try heap.allocatePooledElements(values.len);
+    try testing.expect(compact_probe.items.ptr != old_ptr);
+    heap.releasePooledElements(&compact_probe);
+
+    try pooled.setIndexed(failing.allocator(), 100_000, Value.fromInt32(1234));
+    try testing.expect(pooled.brand.is_sparse);
+    try testing.expect(!pooled.brand.elements_pooled);
+    try testing.expectEqual(@as(i32, 900), pooled.getIndexed(0).asInt32());
+    try testing.expectEqual(@as(i32, 1234), pooled.getIndexed(100_000).asInt32());
+
+    var compact_reused = try heap.allocatePooledElements(values.len);
+    try testing.expectEqual(old_ptr, compact_reused.items.ptr);
+    heap.releasePooledElements(&compact_reused);
 }
 
 test "JSObject: aux upgrades preserve dictionary and element header addresses" {

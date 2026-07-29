@@ -337,9 +337,16 @@ pub const Heap = struct {
     /// the integers actually stringified allocate a backing string.
     pub const small_int_cache_max = 256;
 
-    /// Capacity (in Values) of one pooled dense-element buffer —
-    /// matches the compiler's fused-literal cap so every
-    /// `make_array_n` array fits one pool item exactly.
+    /// Capacities (in Values) of the two pooled dense-element buffer
+    /// classes. The compact class matches Splay's retained leaf arrays
+    /// and the fused class matches the compiler's `make_array_n` cap.
+    /// Array length and backing capacity are distinct and the latter is
+    /// unobservable (§13.2.4.1 / §10.4.2), so the exact capacity also
+    /// serves as the internal pool-class discriminator without spending
+    /// another JSObject brand bit. Keep this measured two-class policy
+    /// narrow; add another arena only when a retained-length histogram
+    /// demonstrates that its saved live bytes outweigh idle slabs.
+    pub const compact_element_buf_cap = 10;
     pub const element_buf_cap = 16;
 
     allocator: std.mem.Allocator,
@@ -874,13 +881,13 @@ pub const Heap = struct {
     /// via `destroy`, teardown frees the slabs wholesale.
     promise_store_pool: std.heap.MemoryPool(@import("object.zig").PromiseReactionStore) = .empty,
 
-    /// Slab pool of small dense-element buffers — one fixed class of
-    /// `element_buf_cap` Values (128 bytes). The fused array-literal
-    /// arm draws from it instead of a libc malloc per array, and the
-    /// sweep returns it on death; an array that outgrows the class
-    /// migrates to a general-purpose buffer once (see
-    /// `JSObject.brand.elements_pooled`). Most literal arrays live and die
-    /// entirely inside the pool.
+    /// Slab pools of small dense-element buffers. Literals through ten
+    /// Values use the exact 80-byte compact class; the remaining fused
+    /// literals use the 128-byte class. The sweep returns each buffer
+    /// by its exact capacity; a compact buffer can promote once to the
+    /// fused class, then growth past that migrates to general-purpose
+    /// storage (see `JSObject.brand.elements_pooled`).
+    compact_element_buf_pool: std.heap.MemoryPool([compact_element_buf_cap]Value) = .empty,
     element_buf_pool: std.heap.MemoryPool([element_buf_cap]Value) = .empty,
 
     /// Cache of pinned `JSString`s for the decimal forms of small
@@ -1033,6 +1040,7 @@ pub const Heap = struct {
         self.pending_realm_teardown.deinit(self.allocator);
         self.object_pool.deinit(self.allocator);
         self.promise_store_pool.deinit(self.allocator);
+        self.compact_element_buf_pool.deinit(self.allocator);
         self.element_buf_pool.deinit(self.allocator);
         // Free each environment's slot vector first (the only
         // sub-field the env owns separately). The Environment
@@ -1184,18 +1192,64 @@ pub const Heap = struct {
         return o;
     }
 
+    /// Allocate the smallest pooled dense-element class that can hold
+    /// `min_capacity`. The returned list is empty but owns its buffer.
+    /// Exact capacity is the pool provenance tag used by
+    /// `releasePooledElements`.
+    pub fn allocatePooledElements(
+        self: *Heap,
+        min_capacity: usize,
+    ) error{OutOfMemory}!std.ArrayListUnmanaged(Value) {
+        if (min_capacity > element_buf_cap) return error.OutOfMemory;
+        if (min_capacity <= compact_element_buf_cap) {
+            const buf = self.compact_element_buf_pool.create(self.allocator) catch
+                return error.OutOfMemory;
+            return .{ .items = buf[0..0], .capacity = compact_element_buf_cap };
+        }
+        const buf = self.element_buf_pool.create(self.allocator) catch
+            return error.OutOfMemory;
+        return .{ .items = buf[0..0], .capacity = element_buf_cap };
+    }
+
+    /// Return a pooled dense-element list to the matching size class.
+    /// Pooled capacity is immutable until an allocate-copy-release
+    /// transition publishes a different list, so it is safe to dispatch
+    /// independently of logical length (which may shrink).
+    pub fn releasePooledElements(
+        self: *Heap,
+        elements: *std.ArrayListUnmanaged(Value),
+    ) void {
+        switch (elements.capacity) {
+            compact_element_buf_cap => {
+                const buf: *[compact_element_buf_cap]Value = @ptrCast(elements.items.ptr);
+                self.compact_element_buf_pool.destroy(buf);
+            },
+            element_buf_cap => {
+                const buf: *[element_buf_cap]Value = @ptrCast(elements.items.ptr);
+                self.element_buf_pool.destroy(buf);
+            },
+            else => {
+                // Fail closed if internal provenance is ever corrupted:
+                // orphaning a pooled pointer until Heap teardown is safe;
+                // letting a caller clear `elements_pooled` while retaining
+                // this header could later send it to the GPA allocator.
+                elements.* = .empty;
+                return;
+            },
+        }
+        elements.* = .empty;
+    }
+
     /// §13.2.4.1 — build a dense Array exotic holding exactly `elems`,
-    /// drawing its element buffer from the fixed-class slab pool
-    /// (`element_buf_pool`). The single source of truth for the fused
-    /// dense-literal construction: Lantern's `make_array_n` arm and
-    /// Bistromath's codegen both call this, so the object they build is
-    /// byte-identical — same array-exotic shape, same pooled buffer
-    /// with `elements_pooled` set, same virtual length. `elems.len`
-    /// must be `<= element_buf_cap` (the compiler caps fused literals
-    /// there). The array is young and holds only `elems`' values, so
-    /// no write barrier is needed. The CALLER keeps `elems`' backing
-    /// store GC-rooted across this call — it allocates (the JIT's
-    /// frame-identity register file; the interpreter's frame
+    /// drawing its element buffer from the smallest fitting slab class.
+    /// This is the single source of truth for fused dense literals:
+    /// Lantern's `make_array_n` arm and Bistromath's codegen both call
+    /// it, so they share the same array-exotic shape, pooled provenance,
+    /// and virtual length. `elems.len` must be `<= element_buf_cap` (the
+    /// compiler caps fused literals there). The array is young and holds
+    /// only `elems`' values, so no write barrier is needed. The CALLER
+    /// keeps `elems`' backing store GC-rooted across this allocating call
+    /// (the JIT's frame-identity register file; the interpreter's frame
     /// registers).
     pub fn makeDenseArray(
         self: *Heap,
@@ -1206,8 +1260,7 @@ pub const Heap = struct {
         self.setObjectPrototype(obj, array_prototype);
         obj.markAsArrayExotic(self.allocator) catch return error.OutOfMemory;
         const elements = obj.elementsMut(self.allocator) catch return error.OutOfMemory;
-        const buf = self.element_buf_pool.create(self.allocator) catch return error.OutOfMemory;
-        elements.* = .{ .items = buf[0..0], .capacity = element_buf_cap };
+        elements.* = try self.allocatePooledElements(elems.len);
         obj.brand.elements_pooled = true;
         elements.appendSliceAssumeCapacity(elems);
         obj.markNonPristine();
@@ -5115,6 +5168,34 @@ test "Heap: collectFull keeps a rooted mature object" {
     heap.collectFull(&.{Value.fromString(s)});
     try testing.expectEqual(@as(usize, 1), heap.stringCount());
     try testing.expectEqual(@as(usize, 1), heap.strings_mature.items.len);
+}
+
+test "Heap: dense array literals select compact and fused element pools" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    var compact_values: [10]Value = undefined;
+    for (&compact_values, 0..) |*value, i| {
+        value.* = Value.fromInt32(@intCast(i));
+    }
+    const compact = try heap.makeDenseArray(null, &compact_values);
+    try testing.expect(compact.brand.elements_pooled);
+    try testing.expectEqual(@as(usize, 10), compact.elementsConst().capacity);
+    try testing.expectEqualSlices(Value, &compact_values, compact.elementItems());
+
+    var fused_values: [11]Value = undefined;
+    for (&fused_values, 0..) |*value, i| {
+        value.* = Value.fromInt32(@intCast(100 + i));
+    }
+    const fused = try heap.makeDenseArray(null, &fused_values);
+    try testing.expect(fused.brand.elements_pooled);
+    try testing.expectEqual(Heap.element_buf_cap, fused.elementsConst().capacity);
+    try testing.expectEqualSlices(Value, &fused_values, fused.elementItems());
+
+    try testing.expectError(
+        error.OutOfMemory,
+        heap.allocatePooledElements(Heap.element_buf_cap + 1),
+    );
 }
 
 test "Heap: denseElementFastSet overwrites only clean existing packed elements" {
