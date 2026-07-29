@@ -337,6 +337,16 @@ pub const Heap = struct {
     /// the integers actually stringified allocate a backing string.
     pub const small_int_cache_max = 256;
 
+    /// Two exact-operand shallow-rope memo entries cover the common
+    /// `(prefix + value) + suffix` expression shape without turning
+    /// concatenation into general string interning. The byte/depth
+    /// admission caps bound the graph retained by these strong roots:
+    /// two slots bound root count, but would not by themselves stop a
+    /// cache entry from pinning an arbitrarily large rope.
+    pub const shallow_cons_cache_size = 2;
+    pub const shallow_cons_cache_max_depth: u16 = 2;
+    pub const shallow_cons_cache_max_byte_len: u32 = 64;
+
     /// Capacities (in Values) of the two pooled dense-element buffer
     /// classes. The compact class matches Splay's retained leaf arrays
     /// and the fused class matches the compiler's `make_array_n` cap.
@@ -901,6 +911,15 @@ pub const Heap = struct {
     /// JS). See `smallIntString`.
     small_int_strings: [small_int_cache_max]?*JSString = @splat(null),
 
+    /// Tiny structural memo cache for `allocateConsString`. Each slot
+    /// stores only the result; its immutable `.cons.left` / `.right`
+    /// pointers are the exact-identity key. These are mutable strong GC
+    /// roots, not weak pointers: an unmarked weak entry could dangle
+    /// after sweep. `shallow_cons_next` is the oldest slot when both
+    /// are populated, giving deterministic FIFO replacement.
+    shallow_cons_cache: [shallow_cons_cache_size]?*JSString = @splat(null),
+    shallow_cons_next: u1 = 0,
+
     pub fn init(allocator: std.mem.Allocator) Heap {
         return .{
             .allocator = allocator,
@@ -1009,6 +1028,9 @@ pub const Heap = struct {
     const jit_code_region_bytes: usize = 64 << 20;
 
     pub fn deinit(self: *Heap) void {
+        // Derived memo entries are not part of heap ownership and must
+        // never outlive the strings they point at.
+        self.clearShallowConsCache();
         if (self.jit_code) |*ca| ca.deinit();
         self.shapes.deinit();
         // JSString headers live in the slab pool — free each
@@ -1597,6 +1619,17 @@ pub const Heap = struct {
             return self.concatStrings(left, right);
         }
 
+        // A hit proves these exact immutable operands previously passed
+        // every rope gate. Probe before the O(depth) seam walk and before
+        // any allocation/GC charge. Keep the miss path to two pointer
+        // comparisons, and skip even those for ineligible large/deep
+        // pairs (notably the `string_concat` control workload).
+        if (total <= shallow_cons_cache_max_byte_len and
+            1 + @max(left.depth, right.depth) <= shallow_cons_cache_max_depth)
+        {
+            if (self.lookupShallowCons(left, right)) |cached| return cached;
+        }
+
         // Gate B — WTF-8 dirty surrogate seam. Inspect the rightmost
         // flat leaf of `left` and the leftmost flat leaf of `right`;
         // every existing cons tree is already clean (this gate
@@ -1661,7 +1694,96 @@ pub const Heap = struct {
         };
         try self.strings_young.append(self.allocator, s);
         self.allocs_since_gc +|= 1;
+
+        // Allocate-black is necessary for mutator allocations during an
+        // incremental major, but marking the already-black parent would
+        // short-circuit without visiting old white children. Shade every
+        // new cons edge explicitly, including ropes too deep/large for
+        // the memo cache.
+        if (self.marking_phase == .marking) {
+            self.markString(left);
+            self.markString(right);
+        }
+
+        if (new_depth <= shallow_cons_cache_max_depth and
+            total <= shallow_cons_cache_max_byte_len)
+        {
+            self.publishShallowCons(s);
+        }
         return s;
+    }
+
+    /// Return the cached result whose immutable children are exactly
+    /// `(left, right)`. Equal string contents at different addresses are
+    /// intentionally a miss: content hashing would cost more and broaden
+    /// retention. A flat entry is defensive stale-state handling; normal
+    /// flattening invalidates it eagerly.
+    fn lookupShallowCons(
+        self: *Heap,
+        left: *JSString,
+        right: *JSString,
+    ) ?*JSString {
+        for (&self.shallow_cons_cache) |*slot| {
+            const candidate = slot.* orelse continue;
+            switch (candidate.payload) {
+                .flat => slot.* = null,
+                .cons => |cons| {
+                    if (cons.left == left and cons.right == right) {
+                        return candidate;
+                    }
+                },
+            }
+        }
+        return null;
+    }
+
+    /// Insert one admitted shallow result. `shallow_cons_next` points
+    /// to the oldest populated slot when full; a hole is filled without
+    /// evicting the other entry.
+    fn publishShallowCons(self: *Heap, result: *JSString) void {
+        const next: usize = self.shallow_cons_next;
+        if (self.shallow_cons_cache[next] == null) {
+            self.shallow_cons_cache[next] = result;
+            self.shallow_cons_next +%= 1;
+            return;
+        }
+
+        const other: usize = next ^ 1;
+        if (self.shallow_cons_cache[other] == null) {
+            self.shallow_cons_cache[other] = result;
+            return;
+        }
+
+        self.shallow_cons_cache[next] = result;
+        self.shallow_cons_next +%= 1;
+    }
+
+    /// Remove a result before its `.cons` key is destroyed in place by
+    /// `JSString.flatten`. Public only for that cross-module lifecycle
+    /// hook.
+    pub fn invalidateShallowConsCache(self: *Heap, result: *JSString) void {
+        for (&self.shallow_cons_cache) |*slot| {
+            if (slot.* == result) slot.* = null;
+        }
+    }
+
+    /// Drop all derived memo roots. Snapshot capture calls this before
+    /// its pre-capture full GC so cache-only graphs are not serialized.
+    pub fn clearShallowConsCache(self: *Heap) void {
+        self.shallow_cons_cache = @splat(null);
+        self.shallow_cons_next = 0;
+    }
+
+    /// Mark the two bounded cache entries as strong roots. A cache entry
+    /// recursively retains its exact operand graph.
+    fn markShallowConsCacheRoots(self: *Heap) void {
+        for (&self.shallow_cons_cache) |*slot| {
+            const result = slot.* orelse continue;
+            switch (result.payload) {
+                .flat => slot.* = null,
+                .cons => self.markString(result),
+            }
+        }
     }
 
     /// Allocate a heap-owned string that is the concatenation of two
@@ -2933,11 +3055,11 @@ pub const Heap = struct {
 
     /// Begin a major cycle's mark by snapshotting the roots — the
     /// start-of-cycle stop-the-world step: arm the cycle and mark every
-    /// root + handle-scope + const + native-ctor root, seeding the
-    /// worklist with the grey set. The worklist is then drained (to
-    /// completion STW today, or sliced at the safe-point in the
-    /// incremental path). Extracted from `collectFull` so an incremental
-    /// driver can call it standalone.
+    /// root + handle-scope + const + native-ctor + mutable shallow-cons
+    /// memo root, seeding the worklist with the grey set. The worklist is
+    /// then drained (to completion STW today, or sliced at the safe-point
+    /// in the incremental path). Extracted from `collectFull` so an
+    /// incremental driver can call it standalone.
     pub fn beginIncrementalMark(self: *Heap, roots: []const Value) void {
         // Stamp the pause-time origin (read by `collectFullTail`) so it
         // spans the mark whether the cycle completes STW or is sliced
@@ -2958,6 +3080,7 @@ pub const Heap = struct {
         // flight — permanently / transiently live roots.
         for (self.const_roots.items) |v| self.markValue(v);
         for (self.native_ctor_roots.items) |v| self.markValue(v);
+        self.markShallowConsCacheRoots();
     }
 
     /// Re-mark the TRANSIENT heap-side roots — handle-scope handles and
@@ -2969,13 +3092,15 @@ pub const Heap = struct {
     /// pinned only in a native local, so — exactly like the realm-root
     /// re-scan — the termination must re-scan these or the sweep frees a
     /// still-pinned object (a use-after-free the next minor's mark hits).
-    /// `const_roots` are permanent, so they need no re-scan. Idempotent:
-    /// re-marking an already-black root is a no-op.
+    /// `const_roots` are permanent, so they need no re-scan. The shallow
+    /// cons cache is mutable across slices, so it follows the transient
+    /// roots here. Idempotent: re-marking an already-black root is a no-op.
     pub fn markTransientRoots(self: *Heap) void {
         for (self.handle_scopes.items) |scope| {
             for (scope.handles.items) |r| self.markValue(r);
         }
         for (self.native_ctor_roots.items) |v| self.markValue(v);
+        self.markShallowConsCacheRoots();
     }
 
     /// Rebuild the conservative-scan young-pointer membership map
@@ -3437,6 +3562,7 @@ pub const Heap = struct {
         for (self.const_roots.items) |v| self.markValue(v);
         // Native-constructor instances currently in flight.
         for (self.native_ctor_roots.items) |v| self.markValue(v);
+        self.markShallowConsCacheRoots();
         // Registered symbols are pinned (§20.4.2.2); promoteYoungList
         // honours `entry.pinned` and tenures them straight into the
         // mature list without needing a per-cycle re-mark.
@@ -6310,6 +6436,262 @@ test "Heap: allocateConsString builds a lazy cons above the min-length gate" {
     try testing.expectEqualStrings("0123456789abcdefghij", try ab.flatten(heap.bytes_allocator));
 }
 
+test "Heap: shallow ConsString cache reuses an exact operand pair" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    const left = try heap.allocateString("prefix-prefix-");
+    const right = try heap.allocateString("suffix-suffix");
+    const first = try heap.allocateConsString(left, right);
+    const second = try heap.allocateConsString(left, right);
+
+    // String primitives expose code-unit value, never allocation
+    // identity. Reusing the exact immutable `(left, right)` rope is
+    // therefore unobservable and should avoid a second header.
+    try testing.expectEqual(first, second);
+    try testing.expectEqual(@as(usize, 3), heap.stringCount());
+}
+
+test "Heap: shallow ConsString cache retains two alternating pairs" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    const a = try heap.allocateString("aaaaaaaaaa");
+    const b = try heap.allocateString("bbbbbbbbbb");
+    const c = try heap.allocateString("cccccccccc");
+    const d = try heap.allocateString("dddddddddd");
+    const ab = try heap.allocateConsString(a, b);
+    const cd = try heap.allocateConsString(c, d);
+
+    // Two entries are the minimum useful window for the common
+    // `(prefix + value) + suffix` expression shape.
+    try testing.expectEqual(ab, try heap.allocateConsString(a, b));
+    try testing.expectEqual(cd, try heap.allocateConsString(c, d));
+    try testing.expectEqual(@as(usize, 6), heap.stringCount());
+}
+
+test "Heap: shallow ConsString cache covers the nested Splay payload shape" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    const prefix = try heap.allocateString("String for key ");
+    const tag = try heap.allocateString("0.123456789");
+    const suffix = try heap.allocateString(" in leaf node");
+    var first_inner: ?*JSString = null;
+    var first_outer: ?*JSString = null;
+
+    for (0..32) |_| {
+        const inner = try heap.allocateConsString(prefix, tag);
+        const outer = try heap.allocateConsString(inner, suffix);
+        if (first_inner) |expected| {
+            try testing.expectEqual(expected, inner);
+            try testing.expectEqual(first_outer.?, outer);
+        } else {
+            first_inner = inner;
+            first_outer = outer;
+        }
+    }
+
+    // Three flat operands plus exactly two memoized cons headers:
+    // 62 of the 64 concatenations above are exact-operand hits.
+    try testing.expectEqual(@as(usize, 5), heap.stringCount());
+}
+
+test "Heap: shallow ConsString cache uses pointer identity, not equal contents" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    const left_a = try heap.allocateString("same-left-");
+    const right_a = try heap.allocateString("same-right");
+    const first = try heap.allocateConsString(left_a, right_a);
+
+    const left_b = try heap.allocateString("same-left-");
+    const right_b = try heap.allocateString("same-right");
+    const second = try heap.allocateConsString(left_b, right_b);
+
+    try testing.expect(first != second);
+    try testing.expectEqualStrings(first.flatBytes(), second.flatBytes());
+}
+
+test "Heap: shallow ConsString cache deterministically evicts FIFO" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    const a = try heap.allocateString("aaaaaaaaaa");
+    const b = try heap.allocateString("bbbbbbbbbb");
+    const c = try heap.allocateString("cccccccccc");
+    const d = try heap.allocateString("dddddddddd");
+    const e = try heap.allocateString("eeeeeeeeee");
+    const f = try heap.allocateString("ffffffffff");
+
+    const ab = try heap.allocateConsString(a, b);
+    _ = try heap.allocateConsString(c, d);
+    const ef = try heap.allocateConsString(e, f);
+
+    // The third insertion replaces the first slot. Re-inserting the
+    // first pair replaces the second slot, leaving the third pair hot.
+    try testing.expect(ab != try heap.allocateConsString(a, b));
+    try testing.expectEqual(ef, try heap.allocateConsString(e, f));
+}
+
+test "Heap: shallow ConsString cache ignores deep entries" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    const a = try heap.allocateString("aaaaaaaaaa");
+    const b = try heap.allocateString("bbbbbbbbbb");
+    const c = try heap.allocateString("cccccccccc");
+    const d = try heap.allocateString("dddddddddd");
+
+    const depth_one = try heap.allocateConsString(a, b);
+    const depth_two = try heap.allocateConsString(depth_one, c);
+    const depth_three = try heap.allocateConsString(depth_two, d);
+    try testing.expectEqual(@as(u16, 3), depth_three.depth);
+    try testing.expect(depth_three != try heap.allocateConsString(depth_two, d));
+}
+
+test "Heap: shallow ConsString cache ignores entries above its byte cap" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    const left = try heap.allocateString("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    const right = try heap.allocateString("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    const first = try heap.allocateConsString(left, right);
+    const second = try heap.allocateConsString(left, right);
+
+    try testing.expect(first != second);
+    try testing.expect(first.byte_len > Heap.shallow_cons_cache_max_byte_len);
+}
+
+test "Heap: flatten invalidates a shallow ConsString cache root" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    const a = try heap.allocateString("aaaaaaaaaa");
+    const b = try heap.allocateString("bbbbbbbbbb");
+    const depth_one = try heap.allocateConsString(a, b);
+    // Flattening discards the child pointers that form the exact cache
+    // key. It must also stop strongly rooting the now-flat result.
+    _ = try depth_one.flatten(heap.bytes_allocator);
+    heap.collectFull(&.{ Value.fromString(a), Value.fromString(b) });
+    try testing.expectEqual(@as(usize, 2), heap.stringCount());
+
+    // A later concat of the old operands must build a new cons. The
+    // pool may reuse the reclaimed header's address, so allocation
+    // count—not stale pointer inequality—is the identity check here.
+    const rebuilt = try heap.allocateConsString(a, b);
+    try testing.expectEqual(@as(usize, 3), heap.stringCount());
+    try testing.expect(!rebuilt.isFlat());
+}
+
+test "Heap: shallow ConsString cache is a bounded major-GC root" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    const a = try heap.allocateString("aaaaaaaaaa");
+    const b = try heap.allocateString("bbbbbbbbbb");
+    _ = try heap.allocateConsString(a, b);
+
+    const c = try heap.allocateString("cccccccccc");
+    const d = try heap.allocateString("dddddddddd");
+    _ = try heap.allocateConsString(c, d);
+
+    const e = try heap.allocateString("eeeeeeeeee");
+    const f = try heap.allocateString("ffffffffff");
+    _ = try heap.allocateConsString(e, f);
+
+    // FIFO replacement evicts the first of three pairs. Only the two
+    // bounded cache roots and their four children survive.
+    heap.collectFull(&.{});
+    try testing.expectEqual(@as(usize, 6), heap.stringCount());
+}
+
+test "Heap: shallow ConsString cache roots a young rope through minor GC" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    const left = try heap.allocateString("left-left-");
+    const right = try heap.allocateString("right-right");
+    const result = try heap.allocateConsString(left, right);
+
+    heap.collectYoung(&.{});
+    try testing.expectEqual(@as(usize, 3), heap.stringCount());
+    try testing.expectEqual(Generation.mature, result.generation);
+    try testing.expectEqualStrings("left-left-right-right", result.flatBytes());
+}
+
+test "Heap: shallow ConsString cache shades old operands published during incremental marking" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    // These operands exist before the major starts and are deliberately
+    // absent from its initial roots.
+    const old_left = try heap.allocateString("old-left--");
+    const old_right = try heap.allocateString("old-right-");
+
+    // Fill both cache entries with unrelated roots before the root
+    // snapshot. The first entry becomes floating garbage when the
+    // interleaved insertion below replaces it.
+    const a = try heap.allocateString("aaaaaaaaaa");
+    const b = try heap.allocateString("bbbbbbbbbb");
+    _ = try heap.allocateConsString(a, b);
+    const c = try heap.allocateString("cccccccccc");
+    const d = try heap.allocateString("dddddddddd");
+    _ = try heap.allocateConsString(c, d);
+
+    heap.beginIncrementalMark(&.{});
+    const published = try heap.allocateConsString(old_left, old_right);
+    heap.markTransientRoots();
+    heap.collectFullTail(heap.cycle_t_start, false);
+
+    // The newly allocated parent is allocate-black, but its pre-existing
+    // operands were white. Publishing the cache root must shade them
+    // before the sweep or `published` would contain dangling children.
+    try testing.expectEqual(@as(usize, 9), heap.stringCount());
+    switch (published.payload) {
+        .flat => return error.TestUnexpectedResult,
+        .cons => |cons| {
+            try testing.expectEqual(old_left, cons.left);
+            try testing.expectEqual(old_right, cons.right);
+        },
+    }
+
+    // The next major drops the one-cycle floating, evicted entry and
+    // retains exactly the two current cache entries plus their children.
+    heap.collectFull(&.{});
+    try testing.expectEqual(@as(usize, 6), heap.stringCount());
+    try testing.expectEqualStrings("old-left--old-right-", published.flatBytes());
+}
+
+test "Heap: uncached ConsString allocation shades old operands during incremental marking" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    const old_left = try heap.allocateString("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    const old_right = try heap.allocateString("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+
+    heap.beginIncrementalMark(&.{});
+    const published = try heap.allocateConsString(old_left, old_right);
+    try testing.expect(published.byte_len > Heap.shallow_cons_cache_max_byte_len);
+    heap.markTransientRoots();
+    heap.collectFullTail(heap.cycle_t_start, false);
+
+    // The allocate-black parent is not a cache root, but it survives the
+    // in-flight cycle. Its white pre-cycle children must survive with it.
+    try testing.expectEqual(@as(usize, 3), heap.stringCount());
+    switch (published.payload) {
+        .flat => return error.TestUnexpectedResult,
+        .cons => |cons| {
+            try testing.expectEqual(old_left, cons.left);
+            try testing.expectEqual(old_right, cons.right);
+        },
+    }
+
+    // None of the three is rooted in the next cycle.
+    heap.collectFull(&.{});
+    try testing.expectEqual(@as(usize, 0), heap.stringCount());
+}
+
 test "Heap: allocateConsString eager-flattens a dirty WTF-8 seam" {
     var heap = Heap.init(testing.allocator);
     defer heap.deinit();
@@ -6364,7 +6746,9 @@ test "Heap: GC marks a real lazy cons tree built by allocateConsString" {
     heap.collect(&.{Value.fromString(ab)});
     try testing.expectEqual(@as(usize, 3), heap.stringCount());
 
-    // Drop the root — everything collected.
+    // Clearing the derived memo roots preserves the collector regression:
+    // once the explicit root is dropped, the whole graph is reclaimable.
+    heap.clearShallowConsCache();
     heap.collect(&.{});
     try testing.expectEqual(@as(usize, 0), heap.stringCount());
 }

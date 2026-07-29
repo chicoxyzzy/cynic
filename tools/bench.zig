@@ -95,6 +95,8 @@ const BENCHES = [_]Bench{
     .{ .name = "array_iter", .path = "bench/micros/array_iter.js" },
     .{ .name = "array_literal_loop", .path = "bench/micros/array_literal_loop.js" },
     .{ .name = "string_concat", .path = "bench/micros/string_concat.js" },
+    .{ .name = "shallow_cons_hit", .path = "bench/micros/shallow_cons_hit.js" },
+    .{ .name = "shallow_cons_miss", .path = "bench/micros/shallow_cons_miss.js" },
     .{ .name = "promise_chain", .path = "bench/micros/promise_chain.js" },
     .{ .name = "object_alloc", .path = "bench/micros/object_alloc.js" },
     .{ .name = "method_call", .path = "bench/micros/method_call.js" },
