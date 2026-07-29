@@ -1734,7 +1734,7 @@ pub const Heap = struct {
     /// intentionally a miss: content hashing would cost more and broaden
     /// retention. A flat entry is defensive stale-state handling; normal
     /// flattening invalidates it eagerly.
-    fn lookupShallowCons(
+    noinline fn lookupShallowCons(
         self: *Heap,
         left: *JSString,
         right: *JSString,
