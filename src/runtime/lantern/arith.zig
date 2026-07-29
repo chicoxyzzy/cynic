@@ -303,23 +303,7 @@ pub fn numericBinary(realm: *Realm, comptime op: NumericOp, lhs: Value, rhs: Val
                 if (numberMultiplyInt32(a, b)) |result| return result;
             },
             .mod => {
-                // §13.6.2 / §6.1.6.1.5 Number::remainder — JS
-                // modulus is truncated, not Euclidean: the
-                // result's sign follows the dividend (a). `@mod`
-                // is Euclidean (always non-negative when b > 0);
-                // `@rem` is the C-style truncated remainder that
-                // matches JS.
-                if (b != 0) {
-                    const rem = @rem(a, b);
-                    // §6.1.6.1.5 — when the result is zero, its
-                    // sign tracks the dividend: `(-1) % 1 === -0`,
-                    // `(-1) % (-1) === -0`. The int32 representation
-                    // collapses ±0 to +0, so a negative dividend
-                    // with zero remainder must escape to a Double
-                    // to preserve sign.
-                    if (rem == 0 and a < 0) return Value.fromDouble(-0.0);
-                    return Value.fromInt32(rem);
-                }
+                return numberRemainderInt32(a, b);
             },
             .div, .pow => unreachable,
         }
@@ -332,10 +316,9 @@ pub fn numericBinary(realm: *Realm, comptime op: NumericOp, lhs: Value, rhs: Val
         .sub => a - b,
         .mul => a * b,
         .div => a / b,
-        // §13.6.2 — truncated remainder (sign follows dividend),
-        // not Euclidean. `@rem` for f64 yields IEEE 754
-        // remainder by truncated division, matching `Math.fmod`
-        // / V8 / SM behaviour.
+        // §13.7.1 / §6.1.6.1.6 — truncating remainder (sign follows
+        // the dividend), not Euclidean or IEEE-754 remainder.
+        // `@rem` matches JavaScript `%` / fmod semantics.
         .mod => @rem(a, b),
         .pow => jsPow(a, b),
     });
@@ -352,6 +335,29 @@ pub inline fn numberMultiplyInt32(lhs: i32, rhs: i32) ?Value {
         return Value.fromDouble(-0.0);
     }
     return Value.fromInt32(product[0]);
+}
+
+/// §6.1.6.1.6 Number::remainder for two canonical int32 operands. This helper
+/// is total: exceptional integer-division cases escape to their Number result
+/// without evaluating a trapping host operation.
+pub inline fn numberRemainderInt32(dividend: i32, divisor: i32) Value {
+    if (divisor == 0) return Value.fromDouble(std.math.nan(f64));
+
+    // Zig's signed integer remainder shares division's minInt / -1 overflow
+    // trap. Mathematically every integer remainder by -1 is zero; JavaScript
+    // gives that zero the dividend's sign.
+    if (divisor == -1) {
+        return if (dividend < 0)
+            Value.fromDouble(-0.0)
+        else
+            Value.fromInt32(0);
+    }
+
+    // `@rem` is truncated rather than Euclidean, matching Number::remainder:
+    // a non-zero result has the dividend's sign.
+    const result = @rem(dividend, divisor);
+    if (result == 0 and dividend < 0) return Value.fromDouble(-0.0);
+    return Value.fromInt32(result);
 }
 
 /// §6.1.6.1.3 Number::exponentiate — adds the JS spec's special

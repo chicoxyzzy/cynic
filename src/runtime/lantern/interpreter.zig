@@ -1349,19 +1349,21 @@ inline fn profiledNumberArithmetic(
     });
 }
 
-/// §6.1.6.1 / §13.15 — `+` `-` `*` `/` `%` on two numeric operands where
-/// at least one is a Double (int32+int32 stays on the int path so an
-/// in-range integer result keeps its int32 tag). Returns
-/// `Value.fromDouble(x OP y)`, byte-identical to the general
-/// `addValues` / `numericBinary` double branch — same `fromDouble`, same
-/// f64 op — so the fast path is transparent. `null` when either operand
-/// isn't a Number (object / string / bool / BigInt → general path) or
-/// both are int32.
+/// §6.1.6.1 / §13.15 — `+` `-` `*` `/` `%` on two numeric operands.
+/// Double and mixed pairs return `Value.fromDouble(x OP y)`, byte-identical
+/// to the general `addValues` / `numericBinary` double branch. The `%`
+/// specialization also handles int32 pairs through Number::remainder's total,
+/// host-safe helper; other int32 pairs keep their existing dedicated paths.
+/// Returns `null` for non-Numbers (object / string / bool / BigInt → general
+/// coercion path).
 inline fn numArith(comptime op: enum { add, sub, mul, div, mod }, a: Value, b: Value) ?Value {
     const a_num = a.isInt32() or a.isDouble();
     const b_num = b.isInt32() or b.isDouble();
     if (!a_num or !b_num) return null;
-    if (!a.isDouble() and !b.isDouble()) return null; // both int32 → int path
+    if (!a.isDouble() and !b.isDouble()) {
+        if (op == .mod) return arith.numberRemainderInt32(a.asInt32(), b.asInt32());
+        return null; // other int32 pairs keep their dedicated paths
+    }
     const x: f64 = if (a.isInt32()) @floatFromInt(a.asInt32()) else a.asDouble();
     const y: f64 = if (b.isInt32()) @floatFromInt(b.asInt32()) else b.asDouble();
     return Value.fromDouble(switch (op) {

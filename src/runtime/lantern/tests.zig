@@ -8,6 +8,7 @@ const std = @import("std");
 const testing = std.testing;
 
 const lantern = @import("interpreter.zig");
+const lantern_arith = @import("arith.zig");
 const RunResult = lantern.RunResult;
 const run = lantern.run;
 const evaluateScript = lantern.evaluateScript;
@@ -305,7 +306,7 @@ test "const-fold: numeric tree folds to the exact spec value" {
     try expectInt("1 + 2*3;", 7);
     try expectInt("2 ** 10;", 1024);
     try expectInt("5 % 3;", 2);
-    try expectInt("-5 % 3;", -2); // §6.1.6.1.5 — sign follows the dividend
+    try expectInt("-5 % 3;", -2); // §6.1.6.1.6 — sign follows the dividend
     try expectInt("(7 & 3) | 8;", 11);
     try expectInt("1 << 31;", -2147483648); // wraps to i32 min
     try expectDouble("-1 >>> 0;", 4294967295.0); // §6.1.6.1.10 — uint32 result
@@ -332,6 +333,66 @@ test "multiplication: int32 fast path preserves negative zero" {
     // path independently from the compiler's constant folder.
     try expectDouble("(function () { let x = -1; let y = 0; return x * y; })();", -0.0);
     try expectDouble("(function () { let x = 0; let y = -1; return x * y; })();", -0.0);
+}
+
+test "remainder: dynamic int32 operands preserve Number semantics" {
+    // §6.1.6.1.6 Number::remainder. Keep both operands dynamic so these
+    // exercise Lantern's opcode path rather than the constant folder.
+    try expectInt("(function (x, y) { return x % y; })(5, 3);", 2);
+    try expectInt("(function (x, y) { return x % y; })(-5, 3);", -2);
+    try expectInt("(function (x, y) { return x % y; })(5, -3);", 2);
+    try expectInt("(function (x, y) { return x % y; })(-5, -3);", -2);
+
+    // A zero remainder takes the dividend's sign. The int32 Value encoding
+    // cannot represent -0, so negative dividends must escape to a Double.
+    try expectDouble("(function (x, y) { return x % y; })(-4, 2);", -0.0);
+    try expectDouble("(function (x, y) { return x % y; })(-4, -2);", -0.0);
+    try expectDouble("(function (x, y) { return x % y; })(4, -2);", 0.0);
+
+    // Division by zero produces NaN, never a host integer trap.
+    try expectBool(
+        "(function (x, y) { let r = x % y; return r !== r; })(5, 0);",
+        true,
+    );
+
+    // Zig's signed integer remainder traps for minInt / -1 even though the
+    // mathematical remainder is zero. Build minInt through a bitwise op so
+    // the `%` receives two canonical int32 Values at runtime.
+    try expectDouble(
+        "(function (x, y) { return x % y; })(1 << 31, -1);",
+        -0.0,
+    );
+
+    // The compiler's constant folder calls numericBinary directly; pin the
+    // same overflow edge there so the shared helper protects both paths.
+    try expectDouble("(1 << 31) % -1;", -0.0);
+}
+
+test "numberRemainderInt32: total helper covers signed zero and zero divisor" {
+    const ordinary = lantern_arith.numberRemainderInt32(5, 3);
+    try testing.expect(ordinary.isInt32());
+    try testing.expectEqual(@as(i32, 2), ordinary.asInt32());
+
+    const negative_zero = lantern_arith.numberRemainderInt32(-4, 2);
+    try testing.expect(negative_zero.isDouble());
+    try testing.expectEqual(
+        @as(u64, @bitCast(@as(f64, -0.0))),
+        @as(u64, @bitCast(negative_zero.asDouble())),
+    );
+
+    const zero_divisor = lantern_arith.numberRemainderInt32(5, 0);
+    try testing.expect(zero_divisor.isDouble());
+    try testing.expect(std.math.isNan(zero_divisor.asDouble()));
+
+    const overflow_edge = lantern_arith.numberRemainderInt32(
+        std.math.minInt(i32),
+        -1,
+    );
+    try testing.expect(overflow_edge.isDouble());
+    try testing.expectEqual(
+        @as(u64, @bitCast(@as(f64, -0.0))),
+        @as(u64, @bitCast(overflow_edge.asDouble())),
+    );
 }
 
 test "const-fold: string concat / comparisons / equality on literals" {
