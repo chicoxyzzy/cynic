@@ -75,6 +75,7 @@ widen.
 |---|---|
 | `src/bytecode/compiler.zig` (binding / scope) | `language/statements/{var,let,const,class}`, `language/expressions/{function,arrow-function,class}` |
 | `src/runtime/realm.zig` | `language/{module-code,global-code}`, `built-ins/Object/keys`, `built-ins/Object/getOwnPropertyNames` |
+| `src/runtime/{heap,string}.zig` (string allocation / ropes) | `language/expressions/addition`, `built-ins/{String,JSON,RegExp}`; repeat adjacent buckets with `test262-safe --gc-threshold=1` when roots or barriers change |
 | `src/runtime/interpreter.zig` (opcode) | the wider `language/` tree, plus the built-ins area whose semantics that opcode runs |
 | `src/runtime/builtins/X.zig` | `built-ins/X` + any `language/expressions` / `language/statements` that dispatch into it |
 | `src/runtime/module.zig` | `language/module-code`, `language/expressions/dynamic-import` |

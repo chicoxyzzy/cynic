@@ -34,6 +34,11 @@ a **GC/allocation macro** more than a splay-rotation micro. That's the
 most useful signal it gives a from-scratch engine, and the canonical
 `kSplayTreeSize` is left unchanged.
 
+Each node's depth-5 payload has 32 leaves that independently evaluate the
+same `(prefix + tag) + suffix` pair. Splay therefore also measures retained
+shallow-string allocation: `shallow_cons_hit` mirrors that exact reuse shape,
+while `shallow_cons_miss` guards the cost when operand identities do not recur.
+
 ## Provenance and licence
 
 Each `*.js` body is **byte-for-byte upstream**
