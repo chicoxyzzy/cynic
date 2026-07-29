@@ -350,10 +350,10 @@ pub const Heap = struct {
     /// identities never repeat. With two FIFO slots, a third consecutive
     /// miss proves both entries would be evicted before any reuse. Splay
     /// instead has two cold misses followed by 62 hits; bypassing the next
-    /// 64 eligible pairs amortises miss/root-turnover cost while
+    /// 255 eligible pairs amortises miss/root-turnover cost while
     /// periodically giving locality another chance.
     pub const shallow_cons_miss_limit: u8 = 3;
-    pub const shallow_cons_bypass_length: u8 = 64;
+    pub const shallow_cons_bypass_length: u8 = 255;
 
     /// Capacities (in Values) of the two pooled dense-element buffer
     /// classes. The compact class matches Splay's retained leaf arrays
@@ -1735,7 +1735,7 @@ pub const Heap = struct {
     /// intentionally a miss: content hashing would cost more and broaden
     /// retention. A flat entry is defensive stale-state handling; normal
     /// flattening invalidates it eagerly.
-    fn lookupShallowCons(
+    noinline fn lookupShallowCons(
         self: *Heap,
         left: *JSString,
         right: *JSString,
