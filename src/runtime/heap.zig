@@ -346,14 +346,19 @@ pub const Heap = struct {
     pub const shallow_cons_cache_size = 2;
     pub const shallow_cons_cache_max_depth: u16 = 2;
     pub const shallow_cons_cache_max_byte_len: u32 = 64;
+    const ShallowConsCacheEntry = struct {
+        left: *JSString,
+        right: *JSString,
+        result: *JSString,
+    };
     /// A tiny memo should not tax a workload whose eligible operand
     /// identities never repeat. With two FIFO slots, a third consecutive
     /// miss proves both entries would be evicted before any reuse. Splay
     /// instead has two cold misses followed by 62 hits; bypassing the next
-    /// 255 eligible pairs amortises miss/root-turnover cost while
+    /// 64 eligible pairs amortises miss/root-turnover cost while
     /// periodically giving locality another chance.
     pub const shallow_cons_miss_limit: u8 = 3;
-    pub const shallow_cons_bypass_length: u8 = 255;
+    pub const shallow_cons_bypass_length: u8 = 64;
 
     /// Capacities (in Values) of the two pooled dense-element buffer
     /// classes. The compact class matches Splay's retained leaf arrays
@@ -919,13 +924,14 @@ pub const Heap = struct {
     /// JS). See `smallIntString`.
     small_int_strings: [small_int_cache_max]?*JSString = @splat(null),
 
-    /// Tiny structural memo cache for `allocateConsString`. Each slot
-    /// stores only the result; its immutable `.cons.left` / `.right`
-    /// pointers are the exact-identity key. These are mutable strong GC
-    /// roots, not weak pointers: an unmarked weak entry could dangle
-    /// after sweep. `shallow_cons_next` is the oldest slot when both
-    /// are populated, giving deterministic FIFO replacement.
-    shallow_cons_cache: [shallow_cons_cache_size]?*JSString = @splat(null),
+    /// Tiny structural memo cache for `allocateConsString`. The redundant
+    /// operand pointers make a miss only two inline pointer-pair checks;
+    /// `result` is the sole marked strong root and keeps both keys live
+    /// through its immutable `.cons` payload. Flatten invalidates the whole
+    /// entry before destroying those edges. `shallow_cons_next` is the
+    /// oldest slot when both are populated, giving deterministic FIFO
+    /// replacement.
+    shallow_cons_cache: [shallow_cons_cache_size]?ShallowConsCacheEntry = @splat(null),
     shallow_cons_next: u1 = 0,
     shallow_cons_miss_streak: u8 = 0,
     shallow_cons_bypass_remaining: u8 = 0,
@@ -1733,22 +1739,18 @@ pub const Heap = struct {
     /// Return the cached result whose immutable children are exactly
     /// `(left, right)`. Equal string contents at different addresses are
     /// intentionally a miss: content hashing would cost more and broaden
-    /// retention. A flat entry is defensive stale-state handling; normal
-    /// flattening invalidates it eagerly.
-    noinline fn lookupShallowCons(
+    /// retention. Normal flattening invalidates the entry eagerly; the GC
+    /// root scan also clears any unexpectedly stale flat result.
+    fn lookupShallowCons(
         self: *Heap,
         left: *JSString,
         right: *JSString,
     ) ?*JSString {
-        for (&self.shallow_cons_cache) |*slot| {
-            const candidate = slot.* orelse continue;
-            switch (candidate.payload) {
-                .flat => slot.* = null,
-                .cons => |cons| {
-                    if (cons.left == left and cons.right == right) {
-                        return candidate;
-                    }
-                },
+        for (self.shallow_cons_cache) |entry| {
+            if (entry) |candidate| {
+                if (candidate.left == left and candidate.right == right) {
+                    return candidate.result;
+                }
             }
         }
         return null;
@@ -1758,20 +1760,26 @@ pub const Heap = struct {
     /// to the oldest populated slot when full; a hole is filled without
     /// evicting the other entry.
     fn publishShallowCons(self: *Heap, result: *JSString) void {
+        const cons = result.payload.cons;
+        const entry: ShallowConsCacheEntry = .{
+            .left = cons.left,
+            .right = cons.right,
+            .result = result,
+        };
         const next: usize = self.shallow_cons_next;
         if (self.shallow_cons_cache[next] == null) {
-            self.shallow_cons_cache[next] = result;
+            self.shallow_cons_cache[next] = entry;
             self.shallow_cons_next +%= 1;
             return;
         }
 
         const other: usize = next ^ 1;
         if (self.shallow_cons_cache[other] == null) {
-            self.shallow_cons_cache[other] = result;
+            self.shallow_cons_cache[other] = entry;
             return;
         }
 
-        self.shallow_cons_cache[next] = result;
+        self.shallow_cons_cache[next] = entry;
         self.shallow_cons_next +%= 1;
     }
 
@@ -1794,7 +1802,9 @@ pub const Heap = struct {
     /// hook.
     pub fn invalidateShallowConsCache(self: *Heap, result: *JSString) void {
         for (&self.shallow_cons_cache) |*slot| {
-            if (slot.* == result) slot.* = null;
+            if (slot.*) |entry| {
+                if (entry.result == result) slot.* = null;
+            }
         }
     }
 
@@ -1811,10 +1821,10 @@ pub const Heap = struct {
     /// recursively retains its exact operand graph.
     fn markShallowConsCacheRoots(self: *Heap) void {
         for (&self.shallow_cons_cache) |*slot| {
-            const result = slot.* orelse continue;
-            switch (result.payload) {
+            const entry = slot.* orelse continue;
+            switch (entry.result.payload) {
                 .flat => slot.* = null,
-                .cons => self.markString(result),
+                .cons => self.markString(entry.result),
             }
         }
     }

@@ -1845,7 +1845,7 @@ test "snapshot: capture drops derived shallow ConsString cache roots" {
     const restored = try Snapshot.restore(testing.allocator, image);
     defer destroyRealm(testing.allocator, restored);
     for (restored.heap.shallow_cons_cache) |entry| {
-        try testing.expectEqual(@as(?*JSString, null), entry);
+        try testing.expect(entry == null);
     }
     try testing.expectEqual(@as(u8, 0), restored.heap.shallow_cons_miss_streak);
     try testing.expectEqual(@as(u8, 0), restored.heap.shallow_cons_bypass_remaining);
