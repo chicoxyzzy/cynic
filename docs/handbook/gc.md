@@ -167,6 +167,14 @@ allocate-black (the existing default — a fresh object carries
 `live_color`), so they survive to the termination sweep, at the cost of
 bounded floating garbage (one major's worth), reclaimed next major.
 
+Allocate-black does not by itself protect a new object's pre-cycle white
+children: asking the marker to visit the already-black parent short-circuits
+before tracing its edges. `allocateConsString` therefore shades both immutable
+children whenever a cons header is created during incremental marking,
+including ropes that are too deep or large for the shallow-cons memo. The memo
+is separately a mutable heap-side root and is scanned at major start,
+incremental termination, and minor collection.
+
 **Barrier/root completeness is the use-after-free surface** — and exactly
 what STW marking hides, because no mutator runs *during* an STW mark. Two
 gaps the `--gc-threshold=1` verifier gate caught *after* the barrier
@@ -177,13 +185,13 @@ container, not the value, so its marking arm re-scans the container's
 typed slots (`markObjectInternalSlots` — the Steele-style re-grey); (2)
 `finishIncrementalMajor`'s termination re-scan covered only the realm
 (interpreter-stack) roots, not the **transient heap-side roots** — handle
-scopes and in-flight native-ctor instances the mutator changes between
-slices — so `markTransientRoots` re-scans them too (the Dijkstra barrier
-doesn't cover a pointer pinned only in a native local). Both are invisible
-to a normal run; both surface only under allocation-pressure GC with the
-mutator interleaved. The verifiers (full-scan + 0xaa free-poison in
-Debug / ReleaseSafe) are the net — the same verifier-first discipline that
-shipped card marking.
+scopes, in-flight native-ctor instances, and the mutable shallow-cons memo
+the mutator changes between slices — so `markTransientRoots` re-scans them
+too (the Dijkstra barrier doesn't cover a pointer pinned only in a native
+local). Both are invisible to a normal run; both surface only under
+allocation-pressure GC with the mutator interleaved. The verifiers
+(full-scan + 0xaa free-poison in Debug / ReleaseSafe) are the net — the same
+verifier-first discipline that shipped card marking.
 
 **Throughput trade-off.** The latency win is bought with the write barrier
 active across the whole (now long) marking window — the STW major paused the
@@ -280,6 +288,11 @@ reuse the backedge policy while retaining an optimized-only pointer.
   frame stacks" below.
 - **Open handle scopes** — `heap.collect` walks `heap.handle_scopes`
   itself (see below).
+- **Shallow ConsString memo** — at most two cached `result` strings are
+  mutable strong roots; each recursively marks the immutable `left` /
+  `right` operand graph. Major-start, incremental-termination, and
+  minor-GC scans all include them. Flattening invalidates an entry before
+  replacing the result's cons edges.
 
 Marking on an object cascades through its property bag, accessors,
 private properties, prototype chain, captured environments, bound-

@@ -17,6 +17,51 @@ new run against the previous section with the *same host*.
 
 ## History
 
+### 2026-07-29 — bounded shallow-ConsString memo, host `Linux 6.8.0-117-generic x86_64` (remote bench box)
+
+Lantern-only (`--no-jit`) interleaved A/B: runtime head `654fc093` against
+exact pre-change `2710e8ea`, 20 pairs for the six-macro sweep and wider
+confirmation on Splay (30 pairs) and Crypto (60 pairs). The heap retains two
+exact `(left, right, result)` entries only for ropes at most two deep and 64
+bytes. A third consecutive eligible miss clears both entries and bypasses the
+next 64 eligible candidates. This is bounded structural memoization, not
+content interning.
+
+Splay's depth-5 payload has 32 leaves that repeat the same two concatenations.
+After two cold misses, 62 of 64 concatenations hit; across the canonical
+8,000-node retained tree that avoids 496,000 redundant rope headers. The
+30-pair confirmation moved **678.86 → 581.12 ms (`0.859x`, 19.7% spread)**.
+In standalone 20-run samples, p50 moved **700.32 → 576.00 ms** and peak RSS
+fell **171,616 → 144,000 KiB** (**−27,616 KiB / −26.97 MiB / −16.09%**).
+
+No non-target macro crossed the 5% regression ceiling in the 20-pair sweep:
+
+| bench | base_ms | head_ms | ratio | spread% |
+|---|---:|---:|---:|---:|
+| richards | 1047.06 | 1041.50 | 0.997x | 18.8 |
+| deltablue | 664.24 | 670.66 | 1.024x | 23.1 |
+| crypto | 635.09 | 664.73 | 1.045x | 18.0 |
+| raytrace | 294.84 | 302.73 | 1.015x | 24.3 |
+| navier_stokes | 401.05 | 411.34 | 1.032x | 16.6 |
+| splay | 684.61 | 589.07 | 0.850x | 23.1 |
+
+Crypto's wider 60-pair confirmation was `1.035x` (637.93 → 659.24 ms,
+16.0% spread). Targeted controls were likewise below the ceiling:
+
+| bench | pairs | base_ms | head_ms | ratio | spread% |
+|---|---:|---:|---:|---:|---:|
+| shallow_cons_hit | 40 | 93.87 | 92.28 | 0.995x | 68.6 |
+| shallow_cons_miss | 100 | 172.70 | 178.81 | 1.026x | 46.8 |
+| string_concat | 40 | 81.75 | 82.26 | 1.008x | 57.2 |
+| json_stringify | 40 | 44.93 | 43.27 | 0.998x | 69.3 |
+
+The miss control's wide process-level spread makes it a regression guard, not
+a precision claim. Validation covered the full ReleaseSafe unit suite,
+non-`--only-failing` test262 addition/String buckets, and those buckets again
+under ReleaseSafe `--gc-threshold=1`; the historical JSON/RegExp rope-stress
+buckets also passed at that GC pressure, and the final full sweep held the
+exact 48,653-pass / 1,324-fail score.
+
 ### 2026-07-29 — compact/fused dense-element pools, host `Linux 6.8.0-117-generic x86_64` (remote bench box)
 
 Interpreter-only interleaved A/B against `fe0cf39d` (the compact-storage

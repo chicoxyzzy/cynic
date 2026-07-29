@@ -276,6 +276,10 @@ Fields that carry heap references or must survive the round trip:
 - `small_int_strings: [256]?*JSString` (`heap.zig:890`) — lazily
   populated pinned strings; expected all-null at init
   **[unverified]** — serialize as refs regardless.
+- `shallow_cons_cache` and its replacement/backoff counters — derived
+  runtime state, not image state. Capture clears the two strong roots
+  before its pre-capture full GC so cache-only rope graphs are reclaimed;
+  restore starts with an empty cache and zeroed counters.
 - `const_roots`, `native_ctor_roots`, `handle_scopes`, `dirty_list`,
   `young_ptr_set`, weak worklists, `jit_code` — all empty/null at
   capture (assert), default at restore.
@@ -634,8 +638,10 @@ envelope and errors otherwise (`error.RealmNotQuiescent` /
   `accessors`) at its default, enforced by a comptime-exhaustive
   field switch so a new extension field breaks compilation here, not
   silently at runtime (mitigation for risk R2).
-- Then run `realm.collectGarbage()` (`realm.zig:1692`) so the pools
-  contain only live objects, then serialize the lists wholesale.
+- Clear the derived `shallow_cons_cache`, then run
+  `realm.collectGarbage()` (`realm.zig:1692`) so cache-only ropes are
+  reclaimed and the pools contain only live image objects; serialize the
+  lists wholesale. Restore deliberately leaves the cache cold.
 
 V8 has the same rule ("interaction with the outside is off-limits
 during snapshot creation"); we make it a checked error instead of a

@@ -1407,7 +1407,28 @@ sampling by `/profile`.
   trigger. See [docs/handbook/gc.md](handbook/gc.md).
 - **ConsString ropes.** `JSString` carries a flat/cons
   discriminator; `concat` is O(1) and flattens lazily on first
-  observable use — removes the O(N²) `buildString +=` blow-up.
+  observable use — removes the O(N²) `buildString +=` blow-up. A
+  two-entry exact-operand memo now reuses only ropes at most two
+  deep and 64 bytes; a third consecutive eligible miss drops the
+  roots and bypasses the next 64 candidates. Splay's repeated
+  `(prefix + tag) + suffix` payload shape therefore creates two
+  rope headers per node instead of 64, measuring **0.859x** in the
+  30-pair interpreter confirmation while peak RSS fell **171,616 →
+  144,000 KiB (−16.09%)**.
+
+  This is deliberately bounded structural memoization, not string
+  interning. ECMA-262 §6.1.4 exposes a String primitive only as its
+  UTF-16 code-unit sequence, so reusing the allocation for an exact
+  immutable operand pair has no observable identity; it adds no
+  state to a user-visible object and changes neither test262 nor SES
+  semantics. The prior-art source survey found ropes plus separate
+  content-interning/atom mechanisms in V8 (`ConsString`), JSC
+  (`JSRopeString`, plus a one-entry string-wrapper cache),
+  SpiderMonkey (rope strings/atoms), Hermes (concat strings), and
+  QuickJS (flat strings/atoms), but no arbitrary dynamic
+  concat-operand memo. The small measured cache is therefore an
+  intentional Cynic-specific choice, with the miss micro guarding
+  its non-reuse cost.
 - **Cross-engine micro-bench harness** (`tools/bench-cross.sh`) —
   interpreter-tier comparison against QuickJS-NG / V8 /
   SpiderMonkey / Hermes with their JITs disabled. Phase 2 of
