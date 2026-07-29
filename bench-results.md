@@ -17,6 +17,46 @@ new run against the previous section with the *same host*.
 
 ## History
 
+### 2026-07-29 — schema-derived operand-size lookup, host `Linux 6.8.0-117-generic x86_64` (remote bench box)
+
+Interleaved A/B: runtime head `0760c74a` against exact pre-change
+`5023ad4a`, 12 pairs in both Lantern-only (`--no-jit`) and the default
+production-tier posture. Merged opcode-family handlers previously resolved
+each runtime opcode's width through `Op.spec()` and
+`OperandLayout.operandSize()`. Head instead indexes a 256-byte table generated
+from `Op.spec()` at comptime. The schema remains authoritative; bytecode
+encoding and dynamic dispatch counts are unchanged.
+
+Exact-main ReleaseFast profiles attributed the metadata path to 30.7% of
+Richards samples, 19.3% of DeltaBlue, and 21.9% of RayTrace. Removing it
+improved every macro. The interpreter-only geometric mean was **0.720x**:
+
+| bench | base_ms | head_ms | ratio | spread% |
+|---|---:|---:|---:|---:|
+| richards | 1031.86 | 598.67 | 0.582x | 12 |
+| deltablue | 640.75 | 469.46 | 0.725x | 11 |
+| crypto | 618.37 | 414.89 | 0.681x | 17 |
+| raytrace | 290.82 | 217.14 | 0.748x | 21 |
+| navier_stokes | 396.61 | 291.48 | 0.765x | 17 |
+| splay | 566.50 | 480.54 | 0.849x | 20 |
+
+The default-tier confirmation likewise improved all six macros, for a
+**0.706x** geometric mean:
+
+| bench | base_ms | head_ms | ratio | spread% |
+|---|---:|---:|---:|---:|
+| richards | 1020.94 | 599.34 | 0.587x | 16 |
+| deltablue | 638.60 | 462.47 | 0.725x | 19 |
+| crypto | 636.59 | 416.02 | 0.656x | 18 |
+| raytrace | 296.55 | 216.51 | 0.734x | 25 |
+| navier_stokes | 389.86 | 284.10 | 0.733x | 12 |
+| splay | 573.65 | 476.07 | 0.827x | 15 |
+
+The full micro suite reported no regression past the paired-run threshold.
+Interpreter highlights were `arith_loop` **0.648x**, `prop_access` **0.576x**,
+`prop_write` **0.426x**, and `method_call` **0.634x**; the low-dispatch
+`promise_chain` control stayed flat at **0.999x**.
+
 ### 2026-07-29 — bounded shallow-ConsString memo, host `Linux 6.8.0-117-generic x86_64` (remote bench box)
 
 Lantern-only (`--no-jit`) interleaved A/B: runtime head `654fc093` against
