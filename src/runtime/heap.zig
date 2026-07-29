@@ -346,6 +346,13 @@ pub const Heap = struct {
     pub const shallow_cons_cache_size = 2;
     pub const shallow_cons_cache_max_depth: u16 = 2;
     pub const shallow_cons_cache_max_byte_len: u32 = 64;
+    /// A tiny memo should not tax a workload whose eligible operand
+    /// identities never repeat. Eight consecutive misses distinguish
+    /// that shape from Splay's two cold misses followed by 62 hits;
+    /// bypassing the next 64 eligible pairs amortises probe/root-turnover
+    /// cost while periodically giving locality another chance.
+    pub const shallow_cons_miss_limit: u8 = 8;
+    pub const shallow_cons_bypass_length: u8 = 64;
 
     /// Capacities (in Values) of the two pooled dense-element buffer
     /// classes. The compact class matches Splay's retained leaf arrays
@@ -919,6 +926,8 @@ pub const Heap = struct {
     /// are populated, giving deterministic FIFO replacement.
     shallow_cons_cache: [shallow_cons_cache_size]?*JSString = @splat(null),
     shallow_cons_next: u1 = 0,
+    shallow_cons_miss_streak: u8 = 0,
+    shallow_cons_bypass_remaining: u8 = 0,
 
     pub fn init(allocator: std.mem.Allocator) Heap {
         return .{
@@ -1624,10 +1633,21 @@ pub const Heap = struct {
         // any allocation/GC charge. Keep the miss path to two pointer
         // comparisons, and skip even those for ineligible large/deep
         // pairs (notably the `string_concat` control workload).
-        if (total <= shallow_cons_cache_max_byte_len and
-            1 + @max(left.depth, right.depth) <= shallow_cons_cache_max_depth)
-        {
-            if (self.lookupShallowCons(left, right)) |cached| return cached;
+        const shallow_cache_eligible =
+            total <= shallow_cons_cache_max_byte_len and
+            1 + @max(left.depth, right.depth) <= shallow_cons_cache_max_depth;
+        var shallow_cache_miss = false;
+        if (shallow_cache_eligible) {
+            if (self.shallow_cons_bypass_remaining != 0) {
+                self.shallow_cons_bypass_remaining -= 1;
+            } else if (self.lookupShallowCons(left, right)) |cached| {
+                if (self.shallow_cons_miss_streak != 0) {
+                    self.shallow_cons_miss_streak = 0;
+                }
+                return cached;
+            } else {
+                shallow_cache_miss = true;
+            }
         }
 
         // Gate B — WTF-8 dirty surrogate seam. Inspect the rightmost
@@ -1705,11 +1725,7 @@ pub const Heap = struct {
             self.markString(right);
         }
 
-        if (new_depth <= shallow_cons_cache_max_depth and
-            total <= shallow_cons_cache_max_byte_len)
-        {
-            self.publishShallowCons(s);
-        }
+        if (shallow_cache_miss) self.recordShallowConsMiss(s);
         return s;
     }
 
@@ -1758,6 +1774,20 @@ pub const Heap = struct {
         self.shallow_cons_next +%= 1;
     }
 
+    /// Publish a normal miss until the consecutive-miss budget is
+    /// exhausted. At that point the tiny cache has demonstrated no useful
+    /// locality: release its roots and bypass a bounded eligibility window
+    /// before sampling again.
+    fn recordShallowConsMiss(self: *Heap, result: *JSString) void {
+        self.shallow_cons_miss_streak += 1;
+        if (self.shallow_cons_miss_streak == shallow_cons_miss_limit) {
+            self.clearShallowConsCache();
+            self.shallow_cons_bypass_remaining = shallow_cons_bypass_length;
+            return;
+        }
+        self.publishShallowCons(result);
+    }
+
     /// Remove a result before its `.cons` key is destroyed in place by
     /// `JSString.flatten`. Public only for that cross-module lifecycle
     /// hook.
@@ -1772,6 +1802,8 @@ pub const Heap = struct {
     pub fn clearShallowConsCache(self: *Heap) void {
         self.shallow_cons_cache = @splat(null);
         self.shallow_cons_next = 0;
+        self.shallow_cons_miss_streak = 0;
+        self.shallow_cons_bypass_remaining = 0;
     }
 
     /// Mark the two bounded cache entries as strong roots. A cache entry
@@ -6495,6 +6527,51 @@ test "Heap: shallow ConsString cache covers the nested Splay payload shape" {
     // Three flat operands plus exactly two memoized cons headers:
     // 62 of the 64 concatenations above are exact-operand hits.
     try testing.expectEqual(@as(usize, 5), heap.stringCount());
+    try testing.expectEqual(@as(u8, 0), heap.shallow_cons_bypass_remaining);
+    try testing.expectEqual(@as(u8, 0), heap.shallow_cons_miss_streak);
+}
+
+test "Heap: shallow ConsString cache backs off after a miss burst and recovers" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    const left = try heap.allocateString("left-left-");
+    const rights = [_][]const u8{
+        "right-0000",
+        "right-0001",
+        "right-0002",
+        "right-0003",
+        "right-0004",
+        "right-0005",
+        "right-0006",
+        "right-0007",
+    };
+    try testing.expectEqual(@as(usize, Heap.shallow_cons_miss_limit), rights.len);
+    for (rights) |bytes| {
+        const right = try heap.allocateString(bytes);
+        _ = try heap.allocateConsString(left, right);
+    }
+
+    // A sustained exact-identity miss stream is hostile to a tiny memo:
+    // drop its strong roots and skip the next bounded eligibility window.
+    for (heap.shallow_cons_cache) |entry| try testing.expect(entry == null);
+    try testing.expectEqual(
+        Heap.shallow_cons_bypass_length,
+        heap.shallow_cons_bypass_remaining,
+    );
+    try testing.expectEqual(@as(u8, 0), heap.shallow_cons_miss_streak);
+
+    const stable_right = try heap.allocateString("right-stable");
+    for (0..Heap.shallow_cons_bypass_length) |_| {
+        _ = try heap.allocateConsString(left, stable_right);
+    }
+    try testing.expectEqual(@as(u8, 0), heap.shallow_cons_bypass_remaining);
+    for (heap.shallow_cons_cache) |entry| try testing.expect(entry == null);
+
+    const first = try heap.allocateConsString(left, stable_right);
+    const second = try heap.allocateConsString(left, stable_right);
+    try testing.expectEqual(first, second);
+    try testing.expectEqual(@as(u8, 0), heap.shallow_cons_miss_streak);
 }
 
 test "Heap: shallow ConsString cache uses pointer identity, not equal contents" {
