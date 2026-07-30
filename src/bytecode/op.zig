@@ -1488,6 +1488,12 @@ pub const Op = enum(u8) {
     post_inc_reg,
     /// `[op] [r:u8]` — decrement counterpart of `post_inc_reg`.
     post_dec_reg,
+    /// `[op] [dst:u8] [src:u8]` — store the accumulator in `dst`,
+    /// then load `src` into the accumulator. The order is observable when
+    /// `dst == src`: the load sees the value just stored. Finalized-bytecode
+    /// fusion emits this for adjacent `Star dst; Ldar src` pairs whose load
+    /// is not a control-flow entry.
+    star_ldar,
 
     /// Authoritative instruction metadata. Adding an opcode requires one
     /// exhaustive entry here; consumers derive names, sizes and tier/control
@@ -1541,6 +1547,7 @@ pub const Op = enum(u8) {
             .dec_reg => baselineInstruction("DecReg", .reg),
             .post_inc_reg => instruction("PostIncReg", .reg),
             .post_dec_reg => instruction("PostDecReg", .reg),
+            .star_ldar => baselineInstruction("StarLdar", .reg_reg),
             .lda_smi8 => baselineInstruction("LdaSmi8", .i8),
             .lda_smi16 => baselineInstruction("LdaSmi16", .i16),
             .add_smi8 => baselineInstruction("AddSmi8", .reg_i8),
@@ -1925,6 +1932,7 @@ test "Op: every variant has one authoritative instruction spec" {
 test "Op: instruction specs classify representative execution contracts" {
     try testing.expectEqual(OperandLayout.none, Op.lda_undefined.spec().layout);
     try testing.expectEqual(OperandLayout.reg, Op.ldar.spec().layout);
+    try testing.expectEqual(OperandLayout.reg_reg, Op.star_ldar.spec().layout);
     try testing.expectEqual(OperandLayout.reg_i32, Op.add_smi.spec().layout);
     try testing.expectEqual(OperandLayout.reg_i16, Op.jmp_if_strict_eq.spec().layout);
     try testing.expectEqual(OperandLayout.u16_reg_u8_u16_u16, Op.call_property.spec().layout);
@@ -1936,6 +1944,7 @@ test "Op: instruction specs classify representative execution contracts" {
 
     try testing.expectEqual(BaselineStrategy.inline_, Op.add.spec().baseline);
     try testing.expectEqual(BaselineStrategy.inline_, Op.inc_reg.spec().baseline);
+    try testing.expectEqual(BaselineStrategy.inline_, Op.star_ldar.spec().baseline);
     try testing.expectEqual(BaselineStrategy.unsupported, Op.post_inc_reg.spec().baseline);
     try testing.expectEqual(BaselineStrategy.unsupported, Op.await_.spec().baseline);
 }
@@ -2002,6 +2011,7 @@ test "Op: operandSize agrees with the documented encoding" {
     // register: `[op] [r:u8] [profile:u16]`.
     try testing.expectEqual(@as(u8, 3), Op.operandSize(.div));
     try testing.expectEqual(@as(u8, 2), Op.operandSize(.mov));
+    try testing.expectEqual(@as(u8, 2), Op.operandSize(.star_ldar));
     try testing.expectEqual(@as(u8, 2), Op.operandSize(.lda_constant));
     try testing.expectEqual(@as(u8, 2), Op.operandSize(.jmp));
     try testing.expectEqual(@as(u8, 4), Op.operandSize(.lda_smi));

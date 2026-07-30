@@ -35,6 +35,7 @@ const SourcePos = chunk_mod.SourcePos;
 const Handler = chunk_mod.Handler;
 const SwitchTable = chunk_mod.SwitchTable;
 const liveness = @import("liveness.zig");
+const disasm = @import("disasm.zig");
 
 fn isPureStore(op: Op) bool {
     return switch (op) {
@@ -98,6 +99,104 @@ fn eliminateRedundantStoreLoadsOne(allocator: std.mem.Allocator, chunk: *Chunk) 
     if (dead.items.len == 0) return 0;
     try reEmitDropping(allocator, chunk, dead.items);
     return dead.items.len;
+}
+
+/// Fuse adjacent `Star dst; Ldar src` into `StarLdar dst src` after the
+/// finalized CFG proves the load has no other predecessor. Pairs whose two
+/// compact encodings occupy only two bytes are retained: the replacement is
+/// three bytes, and the shared post-relaxation re-emitter deliberately never
+/// grows code (an already-selected i8 branch might otherwise overflow).
+///
+/// Run this after dead-store elimination so a dead `Star` can still disappear
+/// instead of being hidden inside the fused instruction. Recurses through all
+/// function- and class-owned chunks.
+pub fn fuseStoreLoads(allocator: std.mem.Allocator, chunk: *Chunk) !usize {
+    var replaced = try fuseStoreLoadsOne(allocator, chunk);
+    for (chunk.function_templates) |*t| replaced += try fuseStoreLoads(allocator, &t.chunk);
+    for (chunk.class_templates) |*class| {
+        replaced += try fuseStoreLoads(allocator, &class.constructor_chunk);
+        for (class.instance_methods) |*method| replaced += try fuseStoreLoads(allocator, &method.chunk);
+        for (class.static_methods) |*method| replaced += try fuseStoreLoads(allocator, &method.chunk);
+        for (class.instance_fields) |*field| if (field.init_chunk) |*init| {
+            replaced += try fuseStoreLoads(allocator, init);
+        };
+        for (class.static_fields) |*field| if (field.init_chunk) |*init| {
+            replaced += try fuseStoreLoads(allocator, init);
+        };
+        for (class.static_blocks) |*block| replaced += try fuseStoreLoads(allocator, block);
+    }
+    return replaced;
+}
+
+/// Cheap syntactic gate before allocating CFG/liveness state. It deliberately
+/// ignores leader status; false positives merely pay for analysis, while a
+/// false negative would miss a legal fusion.
+fn hasPotentialStoreLoadFusion(code: []const u8) bool {
+    var i: u32 = 0;
+    while (i < code.len) {
+        const store_op: Op = @enumFromInt(code[i]);
+        const load_start = i + 1 + Op.operandSize(store_op);
+        if (isPureStore(store_op) and load_start < code.len) {
+            const load_op: Op = @enumFromInt(code[load_start]);
+            if (loadTarget(load_op, code, load_start)) |src| {
+                const pair_end = load_start + 1 + Op.operandSize(load_op);
+                if (pair_end - i >= 3 and storeTarget(store_op, code, i) != src) return true;
+            }
+        }
+        i = load_start;
+    }
+    return false;
+}
+
+fn fuseStoreLoadsOne(allocator: std.mem.Allocator, chunk: *Chunk) !usize {
+    const code = chunk.code;
+    if (code.len == 0 or !hasPotentialStoreLoadFusion(code)) return 0;
+
+    var a = try liveness.analyze(allocator, code, chunk.register_count, chunk.handlers, chunk.switch_tables);
+    defer a.deinit();
+
+    var replacements: std.ArrayListUnmanaged(Replacement) = .empty;
+    defer replacements.deinit(allocator);
+
+    var i: u32 = 0;
+    while (i < code.len) {
+        const store_op: Op = @enumFromInt(code[i]);
+        const load_start = i + 1 + Op.operandSize(store_op);
+        if (!isPureStore(store_op) or load_start >= code.len or isLeaderOff(a.leaders, load_start)) {
+            i = load_start;
+            continue;
+        }
+
+        const load_op: Op = @enumFromInt(code[load_start]);
+        const src = loadTarget(load_op, code, load_start) orelse {
+            i = load_start;
+            continue;
+        };
+        const pair_end = load_start + 1 + Op.operandSize(load_op);
+        if (pair_end - i < 3) {
+            i = pair_end;
+            continue;
+        }
+        const dst = storeTarget(store_op, code, i);
+        // Same-register pairs have the stronger `Ldar`-deletion rewrite.
+        // The normal pipeline runs it first. Skipping aliases here also avoids
+        // weakening class-owned pairs not reached by that older pass.
+        if (dst == src) {
+            i = pair_end;
+            continue;
+        }
+
+        try replacements.append(allocator, .{
+            .start = i,
+            .end = pair_end,
+            .bytes = .{ @intFromEnum(Op.star_ldar), dst, src },
+        });
+        i = pair_end;
+    }
+
+    if (replacements.items.len == 0) return 0;
+    try reEmit(allocator, chunk, &.{}, replacements.items);
+    return replacements.items.len;
 }
 
 /// Drop dead `Star` instructions in `chunk` (and recurse into nested
@@ -374,8 +473,9 @@ fn reEmit(
             if (ri < replacements.len and replacements[ri].start == old) {
                 const replacement = replacements[ri];
                 const new_self = new_off[old];
-                // Keep the load's source mapping on Mov; discard mappings for
-                // the absorbed store so none points into Mov's operands.
+                // Keep the first instruction's source mapping on the fused
+                // replacement; discard mappings for absorbed instructions so
+                // none points into the replacement's operands.
                 while (sp_i < chunk.source_positions.len and chunk.source_positions[sp_i].offset == old) : (sp_i += 1) {
                     try new_sp.append(allocator, .{ .offset = new_self, .span = chunk.source_positions[sp_i].span });
                 }
@@ -780,6 +880,231 @@ test "regalloc(store-load): load at a branch target is kept" {
 
     try testing.expectEqual(@as(usize, 0), try eliminateRedundantStoreLoadsOne(testing.allocator, &chunk));
     try testing.expectEqualSlices(u8, &code, chunk.code);
+}
+
+test "regalloc(store-load fusion): adjacent distinct registers emit and disassemble StarLdar" {
+    var code = [_]u8{
+        @intFromEnum(Op.lda_one),
+        @intFromEnum(Op.star),
+        3,
+        @intFromEnum(Op.ldar_2),
+        @intFromEnum(Op.return_),
+    };
+    var chunk = try mkChunk(&code);
+    defer testing.allocator.free(chunk.code);
+
+    try testing.expectEqual(@as(usize, 1), try fuseStoreLoadsOne(testing.allocator, &chunk));
+    try testing.expectEqualSlices(u8, &.{
+        @intFromEnum(Op.lda_one),
+        @intFromEnum(Op.star_ldar),
+        3,
+        2,
+        @intFromEnum(Op.return_),
+    }, chunk.code);
+
+    const got = try disasm.dump(testing.allocator, &chunk);
+    defer testing.allocator.free(got);
+    try testing.expect(std.mem.indexOf(u8, got, "StarLdar r3 r2") != null);
+}
+
+test "regalloc(store-load fusion): both mixed encodings fuse without growing code" {
+    {
+        var code = [_]u8{
+            @intFromEnum(Op.star_2),
+            @intFromEnum(Op.ldar),
+            3,
+            @intFromEnum(Op.return_),
+        };
+        var chunk = try mkChunk(&code);
+        defer testing.allocator.free(chunk.code);
+        try testing.expectEqual(@as(usize, 1), try fuseStoreLoadsOne(testing.allocator, &chunk));
+        try testing.expectEqualSlices(u8, &.{
+            @intFromEnum(Op.star_ldar), 2, 3,
+            @intFromEnum(Op.return_),
+        }, chunk.code);
+    }
+    {
+        var code = [_]u8{
+            @intFromEnum(Op.star),
+            3,
+            @intFromEnum(Op.ldar_2),
+            @intFromEnum(Op.return_),
+        };
+        var chunk = try mkChunk(&code);
+        defer testing.allocator.free(chunk.code);
+        try testing.expectEqual(@as(usize, 1), try fuseStoreLoadsOne(testing.allocator, &chunk));
+        try testing.expectEqualSlices(u8, &.{
+            @intFromEnum(Op.star_ldar), 3, 2,
+            @intFromEnum(Op.return_),
+        }, chunk.code);
+    }
+}
+
+test "regalloc(store-load fusion): compact pair is not grown" {
+    var code = [_]u8{
+        @intFromEnum(Op.star_2),
+        @intFromEnum(Op.ldar_3),
+        @intFromEnum(Op.return_),
+    };
+    var chunk = try mkChunk(&code);
+    defer testing.allocator.free(chunk.code);
+
+    try testing.expectEqual(@as(usize, 0), try fuseStoreLoadsOne(testing.allocator, &chunk));
+    try testing.expectEqualSlices(u8, &code, chunk.code);
+}
+
+test "regalloc(store-load fusion): load at a branch target is not fused" {
+    // The jump reaches Ldar without executing the preceding Star. Folding
+    // both into the fallthrough instruction would lose that entry point.
+    var code = [_]u8{
+        @intFromEnum(Op.jmp),     1,                     0, // after=3, +1 -> Ldar at 4
+        @intFromEnum(Op.star_2),  @intFromEnum(Op.ldar), 3,
+        @intFromEnum(Op.return_),
+    };
+    var chunk = try mkChunk(&code);
+    defer testing.allocator.free(chunk.code);
+
+    try testing.expectEqual(@as(usize, 0), try fuseStoreLoadsOne(testing.allocator, &chunk));
+    try testing.expectEqualSlices(u8, &code, chunk.code);
+}
+
+test "regalloc(store-load fusion): handler and switch targets are not fused" {
+    {
+        var code = [_]u8{
+            @intFromEnum(Op.star_2),
+            @intFromEnum(Op.ldar),
+            4,
+            @intFromEnum(Op.return_),
+        };
+        var handlers = [_]Handler{.{
+            .start_pc = 0,
+            .end_pc = 1,
+            .handler_pc = 1,
+            .catch_register = 5,
+        }};
+        var chunk: Chunk = .{
+            .code = try testing.allocator.dupe(u8, &code),
+            .constants = &.{},
+            .source_positions = &.{},
+            .handlers = &handlers,
+            .function_templates = &.{},
+            .class_templates = &.{},
+            .register_count = 6,
+        };
+        defer testing.allocator.free(chunk.code);
+        try testing.expectEqual(@as(usize, 0), try fuseStoreLoadsOne(testing.allocator, &chunk));
+        try testing.expectEqualSlices(u8, &code, chunk.code);
+    }
+    {
+        var code = [_]u8{
+            @intFromEnum(Op.switch_smi), 0,                     0, 0,
+            @intFromEnum(Op.star_2),     @intFromEnum(Op.ldar), 4, @intFromEnum(Op.return_),
+            @intFromEnum(Op.return_),
+        };
+        var targets = [_]u32{5};
+        var tables = [_]SwitchTable{.{ .min = 0, .targets = &targets, .default_target = 8 }};
+        var chunk: Chunk = .{
+            .code = try testing.allocator.dupe(u8, &code),
+            .constants = &.{},
+            .source_positions = &.{},
+            .handlers = &.{},
+            .switch_tables = &tables,
+            .function_templates = &.{},
+            .class_templates = &.{},
+            .register_count = 5,
+        };
+        defer testing.allocator.free(chunk.code);
+        try testing.expectEqual(@as(usize, 0), try fuseStoreLoadsOne(testing.allocator, &chunk));
+        try testing.expectEqualSlices(u8, &code, chunk.code);
+    }
+}
+
+test "regalloc(store-load fusion): a target at Star keeps the legal fusion" {
+    var code = [_]u8{
+        @intFromEnum(Op.jmp),     1,                        0, // after=3, +1 -> Star at 4
+        @intFromEnum(Op.lda_one), @intFromEnum(Op.star_2),  @intFromEnum(Op.ldar),
+        3,                        @intFromEnum(Op.return_),
+    };
+    var chunk = try mkChunk(&code);
+    defer testing.allocator.free(chunk.code);
+
+    try testing.expectEqual(@as(usize, 1), try fuseStoreLoadsOne(testing.allocator, &chunk));
+    try testing.expectEqual(Op.star_ldar, @as(Op, @enumFromInt(chunk.code[4])));
+    try testing.expectEqual(@as(u32, 4), liveness.branchTarget(.jmp, chunk.code, 0).?);
+}
+
+test "regalloc(store-load fusion): shrinking pair repatches a crossing branch" {
+    var code = [_]u8{
+        @intFromEnum(Op.lda_true),
+        @intFromEnum(Op.jmp_if_false), 4,                        0, // after=4, +4 -> Return at 8
+        @intFromEnum(Op.star),         2,                        @intFromEnum(Op.ldar),
+        3,                             @intFromEnum(Op.return_),
+    };
+    var chunk = try mkChunk(&code);
+    defer testing.allocator.free(chunk.code);
+
+    try testing.expectEqual(@as(usize, 1), try fuseStoreLoadsOne(testing.allocator, &chunk));
+    try testing.expectEqual(@as(usize, code.len - 1), chunk.code.len);
+    try testing.expectEqual(@as(u32, 7), liveness.branchTarget(.jmp_if_false, chunk.code, 1).?);
+    try testing.expectEqual(Op.return_, @as(Op, @enumFromInt(chunk.code[7])));
+}
+
+test "regalloc(store-load fusion): the public pipeline leaves same-register cleanup stronger" {
+    var code = [_]u8{
+        @intFromEnum(Op.star),    3,
+        @intFromEnum(Op.ldar),    3,
+        @intFromEnum(Op.return_),
+    };
+    var chunk = try mkChunk(&code);
+    defer testing.allocator.free(chunk.code);
+
+    try testing.expectEqual(@as(usize, 1), try eliminateRedundantStoreLoadsOne(testing.allocator, &chunk));
+    try testing.expectEqual(@as(usize, 0), try fuseStoreLoadsOne(testing.allocator, &chunk));
+    try testing.expectEqualSlices(u8, &.{
+        @intFromEnum(Op.star),    3,
+        @intFromEnum(Op.return_),
+    }, chunk.code);
+}
+
+test "regalloc(store-load fusion): recurses into a class-owned constructor chunk" {
+    var outer_code = [_]u8{@intFromEnum(Op.return_)};
+    var constructor_code = [_]u8{
+        @intFromEnum(Op.star),    3,
+        @intFromEnum(Op.ldar),    2,
+        @intFromEnum(Op.return_),
+    };
+    const constructor = try mkChunk(&constructor_code);
+    var classes = [_]chunk_mod.ClassTemplate{.{
+        .name = null,
+        .span = .{ .start = 0, .end = 0 },
+        .has_heritage = false,
+        .private_prefix = "",
+        .constructor_chunk = constructor,
+        .constructor_param_count = 0,
+        .instance_methods = &.{},
+        .static_methods = &.{},
+        .instance_fields = &.{},
+        .static_fields = &.{},
+        .static_blocks = &.{},
+        .static_element_order = &.{},
+    }};
+    defer testing.allocator.free(classes[0].constructor_chunk.code);
+    var outer: Chunk = .{
+        .code = try testing.allocator.dupe(u8, &outer_code),
+        .constants = &.{},
+        .source_positions = &.{},
+        .handlers = &.{},
+        .function_templates = &.{},
+        .class_templates = &classes,
+        .register_count = 1,
+    };
+    defer testing.allocator.free(outer.code);
+
+    try testing.expectEqual(@as(usize, 1), try fuseStoreLoads(testing.allocator, &outer));
+    try testing.expectEqualSlices(u8, &.{
+        @intFromEnum(Op.star_ldar), 3, 2,
+        @intFromEnum(Op.return_),
+    }, classes[0].constructor_chunk.code);
 }
 
 test "regalloc(copy): dead accumulator Ldar-Star becomes Mov" {

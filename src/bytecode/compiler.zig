@@ -15131,6 +15131,7 @@ fn compileScriptLikeChunk(
     _ = try regalloc.eliminateRedundantStoreLoads(allocator, &chunk);
     _ = try regalloc.eliminateDeadStores(allocator, &chunk);
     _ = try regalloc.eliminateDeadAccumulatorCopies(allocator, &chunk);
+    _ = try regalloc.fuseStoreLoads(allocator, &chunk);
     try realm.heap.pinChunk(&chunk);
     return chunk;
 }
@@ -15335,6 +15336,7 @@ pub fn compileModuleAsChunk(
     _ = try regalloc.eliminateRedundantStoreLoads(allocator, &chunk);
     _ = try regalloc.eliminateDeadStores(allocator, &chunk);
     _ = try regalloc.eliminateDeadAccumulatorCopies(allocator, &chunk);
+    _ = try regalloc.fuseStoreLoads(allocator, &chunk);
     try realm.heap.pinChunk(&chunk);
     return chunk;
 }
@@ -15370,6 +15372,7 @@ pub fn compileExpressionAsChunk(
     _ = try regalloc.eliminateRedundantStoreLoads(allocator, &chunk);
     _ = try regalloc.eliminateDeadStores(allocator, &chunk);
     _ = try regalloc.eliminateDeadAccumulatorCopies(allocator, &chunk);
+    _ = try regalloc.fuseStoreLoads(allocator, &chunk);
     try realm.heap.pinChunk(&chunk);
     return chunk;
 }
@@ -15500,6 +15503,16 @@ test "compiler: member store o.x=v with register-bound receiver stores to the so
     const t0 = t0Of(got);
     try testing.expect(std.mem.indexOf(u8, t0, "StaProperty8 k0 r0") != null);
     try testing.expect(std.mem.indexOf(u8, t0, "Star ") == null);
+}
+
+test "compiler: finalized call-argument shuffles fuse Star then Ldar" {
+    const got = try dumpExpr("(function(o,a,b,c){ return o.m(a,b,c); })");
+    defer testing.allocator.free(got);
+    const body = t0Of(got);
+    // Saving one argument and immediately loading the next is the hot
+    // multi-argument-call shape. The finalized CFG proves each load is
+    // fallthrough-only before the post-regalloc fusion runs.
+    try testing.expect(std.mem.indexOf(u8, body, "StarLdar") != null);
 }
 
 test "compiler: a trailing statement's completion register traffic is eliminated" {

@@ -989,6 +989,10 @@ const Compiler = struct {
                     try m.emit(a64.ldrImm(.x9, regs_reg, regSlot(code[i + 1])));
                     try m.emit(a64.strImm(.x9, regs_reg, regSlot(code[i + 2])));
                 },
+                .star_ldar => {
+                    try m.emit(a64.strImm(acc_reg, regs_reg, regSlot(code[i + 1])));
+                    try m.emit(a64.ldrImm(acc_reg, regs_reg, regSlot(code[i + 2])));
+                },
                 .inc_reg, .dec_reg => {
                     // §13.4 fast path. The bytecode's general semantics are
                     // ToNumeric + a Number/BigInt unit; Bistromath handles the
@@ -2487,6 +2491,43 @@ test "jit bistromath: fused register updates compile without blocking tier-up" {
     const js = g_chunk.jit_state.?;
     try testing.expectEqual(Chunk.JitState.Tier.compiled, js.bistromath.code.tier);
     try testing.expect(js.bistromath.entry() != null);
+}
+
+test "jit bistromath: StarLdar compiles and preserves argument arithmetic" {
+    if (comptime !supported) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+    realm.jit_threshold_override = 1;
+
+    const src =
+        \\function mix(a, b, c, d) { return (a + b) + (c + d); }
+        \\mix(1, 2, 3, 4);
+        \\mix(10, 20, 30, 40);
+    ;
+    const program = try parser_mod.parseScript(arena.allocator(), src, null);
+    var chunk = try bc_compiler.compileScriptAsChunk(testing.allocator, &realm, &program, src, null);
+    defer chunk.deinit(testing.allocator);
+    const body = templateNamed(&chunk, "mix");
+    var saw_star_ldar = false;
+    var pc: usize = 0;
+    while (pc < body.code.len) {
+        const op: Op = @enumFromInt(body.code[pc]);
+        saw_star_ldar = saw_star_ldar or op == .star_ldar;
+        pc += 1 + Op.operandSize(op);
+    }
+    try testing.expect(saw_star_ldar);
+
+    const value = switch (try interpreter.run(testing.allocator, &realm, &chunk)) {
+        .value, .yielded => |result| result,
+        .thrown => return error.UncaughtException,
+    };
+    try testing.expectEqual(Value.fromInt32(100).bits, value.bits);
+    const state = body.jit_state.?;
+    try testing.expectEqual(Chunk.JitState.Tier.compiled, state.bistromath.code.tier);
+    try testing.expect(state.bistromath.entry() != null);
 }
 
 test "jit bistromath: make_environment(0) with env reads dont_compiles" {

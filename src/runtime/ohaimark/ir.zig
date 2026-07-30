@@ -554,6 +554,10 @@ const Builder = struct {
                     const value = try readRegister(registers, self.chunk.code[pc + 1]);
                     try writeRegister(registers, self.chunk.code[pc + 2], value);
                 },
+                .star_ldar => {
+                    try writeRegister(registers, self.chunk.code[pc + 1], accumulator);
+                    accumulator = try readRegister(registers, self.chunk.code[pc + 2]);
+                },
                 .add, .sub, .mul, .div => |binary| {
                     const lhs = try readRegister(registers, self.chunk.code[pc + 1]);
                     const payload: Payload = if (binary.hasBinaryTypeProfile()) blk: {
