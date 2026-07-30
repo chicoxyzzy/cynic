@@ -1607,6 +1607,85 @@ test "lda_property_reg: string-primitive receiver via register form" {
     try expectScriptInt("(function(s){ return s.length; })('hello');", 5);
 }
 
+// §9.1.1.3.4 GetThisBinding followed by §13.3.4.1 property access.
+// The interpreter direct-threads this common pair into the existing
+// lda_property8 handler; these tests pin the observable boundary.
+test "lda_this property direct threading: own data property" {
+    try expectScriptIntWithBuiltins(
+        "function read(){ return this.x; } let o = { x: 20 }; let first = read.call(o); o.x = 22; first + read.call(o);",
+        42,
+    );
+}
+
+test "lda_this property direct threading: getter keeps receiver rooted across reentry" {
+    try expectScriptStringWithBuiltins(
+        \\let calls = 0;
+        \\function read(){ return this.x; }
+        \\class Box {
+        \\  constructor(){ this.y = 41; }
+        \\  get x(){
+        \\    calls = calls + 1;
+        \\    __collectGarbage();
+        \\    return this.y + 1;
+        \\  }
+        \\}
+        \\let o = new Box();
+        \\"" + read.call(o) + "/" + calls;
+    , "42/1");
+}
+
+test "lda_this property direct threading: Proxy get receives the original receiver" {
+    try expectScriptStringWithBuiltins(
+        \\let calls = 0;
+        \\function read(){ return this.x; }
+        \\let target = { x: 7 };
+        \\let proxy = new Proxy(target, {
+        \\  get(t, key, receiver) {
+        \\    if (key === "x") calls = calls + 1;
+        \\    return receiver === proxy ? t[key] : -1;
+        \\  }
+        \\});
+        \\"" + read.call(proxy) + "/" + calls;
+    , "7/1");
+}
+
+test "lda_this property direct threading: derived-constructor TDZ stays catchable" {
+    try expectScriptStringWithBuiltins(
+        \\let caught = "none";
+        \\class Base {}
+        \\class Derived extends Base {
+        \\  constructor() {
+        \\    try { this.x; }
+        \\    catch (error) { caught = error.constructor.name; }
+        \\    super();
+        \\  }
+        \\}
+        \\new Derived();
+        \\caught;
+    , "ReferenceError");
+}
+
+test "lda_this property direct threading: lexical this follows super-called cell" {
+    try expectScriptStringWithBuiltins(
+        \\let before = "none";
+        \\let after = -1;
+        \\class Base {
+        \\  constructor(){ this.x = 42; }
+        \\}
+        \\class Derived extends Base {
+        \\  constructor() {
+        \\    const read = () => this.x;
+        \\    try { read(); }
+        \\    catch (error) { before = error.constructor.name; }
+        \\    super();
+        \\    after = read();
+        \\  }
+        \\}
+        \\new Derived();
+        \\before + ":" + after;
+    , "ReferenceError:42");
+}
+
 // Redundant-register-move elimination: the access/store reads the
 // receiver straight from its register (no Ldar;Star copy) and the
 // script completion drops the redundant reload. Values must be

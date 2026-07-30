@@ -93,6 +93,7 @@ pub const DynamicStats = struct {
     pairs: [pair_capacity]SequenceCell = @splat(.{}),
     trigrams: [trigram_capacity]SequenceCell = @splat(.{}),
     instructions: u64 = 0,
+    direct_transfers: u64 = 0,
     dropped_pairs: u64 = 0,
     dropped_trigrams: u64 = 0,
     previous: [2]Op = undefined,
@@ -117,6 +118,11 @@ pub const DynamicStats = struct {
             self.previous[1] = op;
             self.previous_len = 2;
         }
+    }
+
+    pub fn observeDirect(self: *DynamicStats, op: Op) void {
+        self.observe(op);
+        self.direct_transfers +|= 1;
     }
 
     pub fn resetSequence(self: *DynamicStats) void {
@@ -159,6 +165,12 @@ pub fn activate(stats: *DynamicStats) Activation {
 pub noinline fn observeActive(op: Op) void {
     if (comptime enabled) {
         if (active_dynamic) |stats| stats.observe(op);
+    }
+}
+
+pub noinline fn observeDirectActive(op: Op) void {
+    if (comptime enabled) {
+        if (active_dynamic) |stats| stats.observeDirect(op);
     }
 }
 
@@ -282,8 +294,9 @@ pub fn formatReport(
         if (count != 0) try op_rows.append(allocator, .{ .op = op, .count = count });
     }
     std.mem.sort(OpcodeRow, op_rows.items, {}, rowLessThan(OpcodeRow));
-    try out.print(allocator, "dynamic: instructions={d} dropped-pairs={d} dropped-trigrams={d}\n", .{
+    try out.print(allocator, "dynamic: instructions={d} direct-transfers={d} dropped-pairs={d} dropped-trigrams={d}\n", .{
         dynamic.instructions,
+        dynamic.direct_transfers,
         dynamic.dropped_pairs,
         dynamic.dropped_trigrams,
     });
@@ -369,6 +382,18 @@ test "bytecode stats: dynamic scan records opcode pairs and trigrams" {
     try testing.expectEqual(@as(u64, 1), stats.trigramCount(.add, .star, .add));
 }
 
+test "bytecode stats: direct-threaded transfer preserves logical sequence telemetry" {
+    var stats: DynamicStats = .{};
+    stats.observe(.lda_this);
+    stats.observeDirect(.lda_property8);
+
+    try testing.expectEqual(@as(u64, 2), stats.instructions);
+    try testing.expectEqual(@as(u64, 1), stats.direct_transfers);
+    try testing.expectEqual(@as(u64, 1), stats.opcodeCount(.lda_this));
+    try testing.expectEqual(@as(u64, 1), stats.opcodeCount(.lda_property8));
+    try testing.expectEqual(@as(u64, 1), stats.pairCount(.lda_this, .lda_property8));
+}
+
 test "bytecode stats: report exposes encoding and dispatch hot spots" {
     var static: StaticStats = .{};
     static.instructions = 3;
@@ -378,10 +403,12 @@ test "bytecode stats: report exposes encoding and dispatch hot spots" {
     dynamic.observe(.add);
     dynamic.observe(.star);
     dynamic.observe(.add);
+    dynamic.direct_transfers = 1;
 
     const report = try formatReport(testing.allocator, &static, &dynamic, 8);
     defer testing.allocator.free(report);
     try testing.expect(std.mem.indexOf(u8, report, "static: chunks=0 instructions=3 bytes=7") != null);
+    try testing.expect(std.mem.indexOf(u8, report, "direct-transfers=1") != null);
     try testing.expect(std.mem.indexOf(u8, report, "Add 2") != null);
     try testing.expect(std.mem.indexOf(u8, report, "Add -> Star 1") != null);
     try testing.expect(std.mem.indexOf(u8, report, "Add -> Star -> Add 1") != null);
