@@ -140,7 +140,7 @@ fn hasPotentialStoreLoadFusion(code: []const u8) bool {
             const load_op: Op = @enumFromInt(code[load_start]);
             if (loadTarget(load_op, code, load_start)) |src| {
                 const pair_end = load_start + 1 + Op.operandSize(load_op);
-                if (pair_end - i >= 3 and storeTarget(store_op, code, i) != src) return true;
+                if (pair_end < code.len and pair_end - i >= 3 and storeTarget(store_op, code, i) != src) return true;
             }
         }
         i = load_start;
@@ -173,7 +173,10 @@ fn fuseStoreLoadsOne(allocator: std.mem.Allocator, chunk: *Chunk) !usize {
             continue;
         };
         const pair_end = load_start + 1 + Op.operandSize(load_op);
-        if (pair_end - i < 3) {
+        // StarLdar uses the smaller known-present decode tail. Finalized
+        // compiler chunks normally end in an explicit transfer, but retain a
+        // terminal pair defensively so the fused opcode always has a successor.
+        if (pair_end >= code.len or pair_end - i < 3) {
             i = pair_end;
             continue;
         }
@@ -945,6 +948,20 @@ test "regalloc(store-load fusion): compact pair is not grown" {
         @intFromEnum(Op.star_2),
         @intFromEnum(Op.ldar_3),
         @intFromEnum(Op.return_),
+    };
+    var chunk = try mkChunk(&code);
+    defer testing.allocator.free(chunk.code);
+
+    try testing.expectEqual(@as(usize, 0), try fuseStoreLoadsOne(testing.allocator, &chunk));
+    try testing.expectEqualSlices(u8, &code, chunk.code);
+}
+
+test "regalloc(store-load fusion): terminal pair keeps checked end-of-chunk decode" {
+    var code = [_]u8{
+        @intFromEnum(Op.star),
+        3,
+        @intFromEnum(Op.ldar),
+        2,
     };
     var chunk = try mkChunk(&code);
     defer testing.allocator.free(chunk.code);
