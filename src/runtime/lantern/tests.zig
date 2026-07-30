@@ -12322,6 +12322,23 @@ test "proto-load IC: built-in Array.prototype.push hot loop" {
     , 100);
 }
 
+test "synthetic proto-load IC gate: unhardened ordinary data and method loads" {
+    try expectScriptIntUnhardened(
+        \\const proto = {
+        \\  value: 3,
+        \\  method: function () { return this.own; },
+        \\};
+        \\const obj = Object.create(proto);
+        \\obj.own = 4;
+        \\let total = 0;
+        \\for (let i = 0; i < 50; i++) {
+        \\  total += obj.value;
+        \\  total += obj.method();
+        \\}
+        \\total;
+    , 350);
+}
+
 test "proto-load IC: class instance method on hot loop" {
     // Class methods land on `C.prototype.m`, so every `c.m()` is a
     // prototype-load. Without the proto IC, the slow path walks

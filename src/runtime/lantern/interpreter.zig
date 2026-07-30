@@ -12825,6 +12825,10 @@ fn tryFillSyntheticPrototypeLoadIC(
     key: []const u8,
     cell: *LoadICCell,
 ) ?Value {
+    // `--unhardened` skips override-mistake installation, while snapshot
+    // restore repopulates this table before execution. Its emptiness is
+    // therefore the exact proof that no SyntheticAccessor can exist.
+    if (realm.synth_accessor_cells.items.len == 0) return null;
     const recv_shape = recv.shape orelse return null;
     if (recv_shape.lookup(key) != null or recv.ownDataContains(key) or recv.hasAccessor(key)) return null;
     if (chainHasProxy(recv)) return null;
