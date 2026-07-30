@@ -258,14 +258,37 @@ pub fn toNumericPrimitive(realm: *Realm, value: Value) RunError!?Value {
     return value;
 }
 
+/// Root both bytecode-produced operands before a binary abstract operation
+/// starts coercing either one. The first coercion can return a fresh heap
+/// primitive, and the second can re-enter JavaScript and trigger GC. Primitive
+/// pairs cannot re-enter, so keep those hot paths allocation-free.
+pub fn openBinaryCoercionScope(realm: *Realm, lhs: Value, rhs: Value) error{OutOfMemory}!?*heap_mod.HandleScope {
+    if (!heap_mod.isJSObject(lhs) and !heap_mod.isJSObject(rhs)) return null;
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    errdefer scope.close();
+    scope.push(lhs) catch return error.OutOfMemory;
+    scope.push(rhs) catch return error.OutOfMemory;
+    return scope;
+}
+
 pub fn numericBinary(realm: *Realm, comptime op: NumericOp, lhs: Value, rhs: Value) RunError!?Value {
+    // Either coercion may re-enter JavaScript and trigger GC. Keep both raw
+    // operands rooted for the whole abstract operation, then pin each fresh
+    // primitive result before starting the next coercion. In particular, a
+    // lhs `valueOf` can return a newly allocated BigInt that otherwise has no
+    // root while rhs `valueOf` runs.
+    const scope = try openBinaryCoercionScope(realm, lhs, rhs);
+    defer if (scope) |s| s.close();
+
     // §13.15.4 ApplyStringOrNumericBinaryOperator step 1 — call
     // ToPrimitive on each operand (hint "number") before any
     // numeric coercion. Spec sequencing matters: lhs first, then
     // rhs. A throw inside `valueOf` / `toString` / Symbol.toPrim
     // bubbles via `pending_exception`.
     const l = (try toNumericPrimitive(realm, lhs)) orelse return null;
+    if (scope) |s| s.push(l) catch return error.OutOfMemory;
     const r = (try toNumericPrimitive(realm, rhs)) orelse return null;
+    if (scope) |s| s.push(r) catch return error.OutOfMemory;
 
     // §6.1.6.2 — once both sides are primitives, BigInt + Number
     // is an unconditional TypeError. Pure-BigInt math went through
@@ -383,11 +406,16 @@ fn bigintShiftTooLarge(shift: BigIntValue) bool {
 }
 
 pub fn bitwiseBinary(realm: *Realm, comptime op: BitwiseOp, lhs: Value, rhs: Value) RunError!?Value {
+    const scope = try openBinaryCoercionScope(realm, lhs, rhs);
+    defer if (scope) |s| s.close();
+
     // §13.12 BitwiseOp — spec evaluates lhs then rhs, then
     // ToNumeric on each. We already have the bytecode-evaluated
     // values in registers, so we only owe the ToNumeric step.
     const l = (try toNumericPrimitive(realm, lhs)) orelse return null;
+    if (scope) |s| s.push(l) catch return error.OutOfMemory;
     const r = (try toNumericPrimitive(realm, rhs)) orelse return null;
+    if (scope) |s| s.push(r) catch return error.OutOfMemory;
 
     // BigInt mixing — bitwise ops on BigInt are not yet supported
     // by the interpreter, but mixed Number+BigInt must still throw
@@ -586,19 +614,24 @@ pub fn addValues(realm: *Realm, lhs: Value, rhs: Value) RunError!?Value {
     // code surface via `pending_exception`.
     var l = lhs;
     var r = rhs;
+    const scope = try openBinaryCoercionScope(realm, lhs, rhs);
+    defer if (scope) |s| s.close();
+
     // §13.15.4 step 1: `lprim = ? ToPrimitive(lval)`. Only fires when
     // a side is a JS Object — Symbol / BigInt primitives short-
     // circuit the no-op call (and a recursive `toPrimitive` on them
     // would still return the value as-is per §7.1.1 step 2).
-    if (heap_mod.isJSObject(l) or heap_mod.isJSObject(r)) {
+    if (scope) |s| {
         l = intrinsics_mod.toPrimitive(realm, l, .default) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.NativeThrew => return null,
         };
+        s.push(l) catch return error.OutOfMemory;
         r = intrinsics_mod.toPrimitive(realm, r, .default) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.NativeThrew => return null,
         };
+        s.push(r) catch return error.OutOfMemory;
     }
     // §13.15.4 — Symbol primitives never participate in `+`. Even
     // when one side is already string-typed, a Symbol on the other

@@ -2189,18 +2189,22 @@ pub fn runFrames(
                 acc = res;
                 continue :dispatch try decodeNext(code, &ip, &committed);
             }
+            const scope = try arith.openBinaryCoercionScope(realm, registers[r], acc);
+            defer if (scope) |s| s.close();
             const lhs = try coerceForCompare(allocator, realm, frames, f, ip, registers[r], .number);
             if (lhs == .uncaught) return .{ .thrown = lhs.uncaught };
             if (lhs == .handled) {
                 committed = true;
                 continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
             }
+            if (scope) |s| s.push(lhs.ok) catch return error.OutOfMemory;
             const rhs = try coerceForCompare(allocator, realm, frames, f, ip, acc, .number);
             if (rhs == .uncaught) return .{ .thrown = rhs.uncaught };
             if (rhs == .handled) {
                 committed = true;
                 continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
             }
+            if (scope) |s| s.push(rhs.ok) catch return error.OutOfMemory;
             acc = relational(.lt, realm, lhs.ok, rhs.ok) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.NativeThrew => {
@@ -2222,18 +2226,22 @@ pub fn runFrames(
                 acc = res;
                 continue :dispatch try decodeNext(code, &ip, &committed);
             }
+            const scope = try arith.openBinaryCoercionScope(realm, registers[r], acc);
+            defer if (scope) |s| s.close();
             const lhs = try coerceForCompare(allocator, realm, frames, f, ip, registers[r], .number);
             if (lhs == .uncaught) return .{ .thrown = lhs.uncaught };
             if (lhs == .handled) {
                 committed = true;
                 continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
             }
+            if (scope) |s| s.push(lhs.ok) catch return error.OutOfMemory;
             const rhs = try coerceForCompare(allocator, realm, frames, f, ip, acc, .number);
             if (rhs == .uncaught) return .{ .thrown = rhs.uncaught };
             if (rhs == .handled) {
                 committed = true;
                 continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
             }
+            if (scope) |s| s.push(rhs.ok) catch return error.OutOfMemory;
             acc = relational(.gt, realm, lhs.ok, rhs.ok) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.NativeThrew => {
@@ -2255,18 +2263,22 @@ pub fn runFrames(
                 acc = res;
                 continue :dispatch try decodeNext(code, &ip, &committed);
             }
+            const scope = try arith.openBinaryCoercionScope(realm, registers[r], acc);
+            defer if (scope) |s| s.close();
             const lhs = try coerceForCompare(allocator, realm, frames, f, ip, registers[r], .number);
             if (lhs == .uncaught) return .{ .thrown = lhs.uncaught };
             if (lhs == .handled) {
                 committed = true;
                 continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
             }
+            if (scope) |s| s.push(lhs.ok) catch return error.OutOfMemory;
             const rhs = try coerceForCompare(allocator, realm, frames, f, ip, acc, .number);
             if (rhs == .uncaught) return .{ .thrown = rhs.uncaught };
             if (rhs == .handled) {
                 committed = true;
                 continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
             }
+            if (scope) |s| s.push(rhs.ok) catch return error.OutOfMemory;
             acc = relational(.le, realm, lhs.ok, rhs.ok) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.NativeThrew => {
@@ -2288,18 +2300,22 @@ pub fn runFrames(
                 acc = res;
                 continue :dispatch try decodeNext(code, &ip, &committed);
             }
+            const scope = try arith.openBinaryCoercionScope(realm, registers[r], acc);
+            defer if (scope) |s| s.close();
             const lhs = try coerceForCompare(allocator, realm, frames, f, ip, registers[r], .number);
             if (lhs == .uncaught) return .{ .thrown = lhs.uncaught };
             if (lhs == .handled) {
                 committed = true;
                 continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
             }
+            if (scope) |s| s.push(lhs.ok) catch return error.OutOfMemory;
             const rhs = try coerceForCompare(allocator, realm, frames, f, ip, acc, .number);
             if (rhs == .uncaught) return .{ .thrown = rhs.uncaught };
             if (rhs == .handled) {
                 committed = true;
                 continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
             }
+            if (scope) |s| s.push(rhs.ok) catch return error.OutOfMemory;
             acc = relational(.ge, realm, lhs.ok, rhs.ok) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.NativeThrew => {
@@ -2499,18 +2515,22 @@ pub fn runFrames(
             if (fast) |res| {
                 take = !res.asBool();
             } else {
+                const scope = try arith.openBinaryCoercionScope(realm, registers[r], acc);
+                defer if (scope) |s| s.close();
                 const lhs = try coerceForCompare(allocator, realm, frames, f, ip, registers[r], .number);
                 if (lhs == .uncaught) return .{ .thrown = lhs.uncaught };
                 if (lhs == .handled) {
                     committed = true;
                     continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
+                if (scope) |s| s.push(lhs.ok) catch return error.OutOfMemory;
                 const rhs = try coerceForCompare(allocator, realm, frames, f, ip, acc, .number);
                 if (rhs == .uncaught) return .{ .thrown = rhs.uncaught };
                 if (rhs == .handled) {
                     committed = true;
                     continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
+                if (scope) |s| s.push(rhs.ok) catch return error.OutOfMemory;
                 const res = (switch (canonical) {
                     .jmp_if_not_lt => relational(.lt, realm, lhs.ok, rhs.ok),
                     .jmp_if_not_le => relational(.le, realm, lhs.ok, rhs.ok),
