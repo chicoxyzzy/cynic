@@ -3155,7 +3155,7 @@ pub const Compiler = struct {
                 // circuit, so it keeps the copy path.)
                 if (!m.optional) {
                     if (self.tryRegisterBoundIdent(m.object.*)) |r_src| {
-                        if (!self.exprMayWriteRegister(key_expr)) {
+                        if (!self.exprMayWriteTargetRegister(key_expr, r_src)) {
                             try self.compileExpression(key_expr);
                             try self.builder.emitLdaComputed(m.span, r_src);
                             return;
@@ -5558,6 +5558,22 @@ pub const Compiler = struct {
             .await_ => |aw| self.exprMayWriteRegister(aw.argument),
             .import_call => |ic| self.exprMayWriteRegister(ic.source),
         };
+    }
+
+    /// Narrow target-specific proof for the hot §13.3.2.1
+    /// `receiver[++index]` shape. A direct update of a different resolved
+    /// register cannot clobber `target`; every other assignment/update shape
+    /// stays on the conservative receiver-snapshot path.
+    fn exprMayWriteTargetRegister(
+        self: *Compiler,
+        e: *const ast.expression.Expression,
+        target: u8,
+    ) bool {
+        var unwrapped = e;
+        while (unwrapped.* == .parenthesized) unwrapped = unwrapped.parenthesized.expression;
+        if (unwrapped.* != .update) return self.exprMayWriteRegister(e);
+        const written = self.tryRegisterBoundIdent(unwrapped.update.operand.*) orelse return true;
+        return written == target;
     }
 
     /// Returns the int32 value when `expr` is a Smi-representable
@@ -15492,6 +15508,54 @@ test "compiler: computed access a[i] with register-bound receiver reads the sour
     try testing.expect(std.mem.indexOf(u8, t0, "LdaComputed8 r0") != null);
     // …and the receiver-copy Star is gone (the body has no other Star).
     try testing.expect(std.mem.indexOf(u8, t0, "Star ") == null);
+}
+
+test "compiler: computed access a[++i] keeps a distinct register receiver in place" {
+    // §13.3.2.1 evaluates the receiver before the key, but `++i` cannot
+    // clobber the distinct register-bound receiver `a`. Read `a` in place
+    // instead of snapshotting it through `Ldar; Star`.
+    const got = try dumpExpr("(function(a,i){ return a[++i]; })");
+    defer testing.allocator.free(got);
+    const t0 = t0Of(got);
+    try testing.expect(std.mem.indexOf(u8, t0, "IncReg r1") != null);
+    try testing.expect(std.mem.indexOf(u8, t0, "LdaComputed8 r0") != null);
+    try testing.expect(std.mem.indexOf(u8, t0, "Star ") == null);
+}
+
+test "compiler: computed access keeps receiver across distinct postfix and decrement updates" {
+    const cases = [_]struct { source: []const u8, update: []const u8 }{
+        .{ .source = "(function(a,i){ return a[i++]; })", .update = "PostIncReg r1" },
+        .{ .source = "(function(a,i){ return a[--i]; })", .update = "DecReg r1" },
+    };
+    for (cases) |case| {
+        const got = try dumpExpr(case.source);
+        defer testing.allocator.free(got);
+        const t0 = t0Of(got);
+        try testing.expect(std.mem.indexOf(u8, t0, case.update) != null);
+        try testing.expect(std.mem.indexOf(u8, t0, "LdaComputed8 r0") != null);
+        try testing.expect(std.mem.indexOf(u8, t0, "Star ") == null);
+    }
+}
+
+test "compiler: computed access a[++a] snapshots its same-register receiver" {
+    // The direct-update proof compares resolved register identity. Updating
+    // the receiver binding itself must keep the pre-key receiver in a temp.
+    const got = try dumpExpr("(function(a){ return a[++a]; })");
+    defer testing.allocator.free(got);
+    const t0 = t0Of(got);
+    try testing.expect(std.mem.indexOf(u8, t0, "IncReg r0") != null);
+    try testing.expect(std.mem.indexOf(u8, t0, "LdaComputed8 r0") == null);
+    try testing.expect(std.mem.indexOf(u8, t0, "LdaComputed8 r1") != null);
+}
+
+test "compiler: computed access a[a=other] snapshots a before its key clobbers the receiver" {
+    // The target-specific proof must retain §13.3.2.1 evaluation order when
+    // the computed key writes the receiver register itself.
+    const got = try dumpExpr("(function(a,other){ return a[a=other]; })");
+    defer testing.allocator.free(got);
+    const t0 = t0Of(got);
+    try testing.expect(std.mem.indexOf(u8, t0, "LdaComputed8 r0") == null);
+    try testing.expect(std.mem.indexOf(u8, t0, "LdaComputed8 r2") != null);
 }
 
 test "compiler: member store o.x=v with register-bound receiver stores to the source register (no Ldar;Star copy)" {
