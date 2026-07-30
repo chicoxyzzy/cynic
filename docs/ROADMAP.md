@@ -996,6 +996,21 @@ sampling by `/profile`.
   instructions **1,509 → 1,456** (-3.5%), encoded bytes **3,122 →
   3,067** (-1.8%), and dynamic dispatches **107,516,101 →
   104,678,462** (-2.64%).
+- **Finalized `StarLdar` store/load fusion (2026-07-30).** After finalized
+  CFG/liveness analysis, adjacent distinct-register `Star dst; Ldar src`
+  pairs whose load is not a branch, switch, or handler entry collapse into
+  one store-before-load `StarLdar dst src` dispatch. Compact/compact pairs
+  remain unchanged so post-relaxation re-emission never grows bytecode, and
+  Lantern, Bistromath, and Ohaimark share the operation. Six-macro telemetry
+  recorded **17,500,773** executions at **704 static fused sites**, reducing
+  logical instructions **348,164,417 → 330,663,644** (-5.03%). Forty paired
+  runs in each arm64 launch order measured an order-neutral **0.986x**
+  interpreter macro geometric mean; a production-default-tier control
+  measured **0.988x**. The fusion also proves a successor opcode exists, so
+  Lantern's compact decode keeps `runFrames` within 8 bytes of the prior
+  arm64 binary instead of duplicating the generic error tail. A pinned-CPU
+  x86_64 confirmation measured **0.993x**, with every workload regression
+  below 2%. See `bench-results.md`.
 - **Schema-derived operand-size lookup (2026-07-29).** Merged Lantern
   opcode-family handlers now advance `ip` through a 256-byte table generated
   at comptime from the authoritative `Op.spec()` metadata, replacing repeated
@@ -1603,9 +1618,9 @@ not measurements.
 5. **Profile-gated super-instructions — infrastructure shipped.**
    Static and dynamic opcode pair/trigram telemetry now identifies
    candidates; existing retained fusions include compare+branch,
-   property-call, counter-loop, `add_smi`, and `add_to_int32`
-   shapes. New opcodes must clear a paired wall-time gate, not just
-   reduce dispatch. A loose-equality+branch family cut Richards
+   property-call, counter-loop, `add_smi`, `add_to_int32`, and finalized
+   `star_ldar` store/load shapes. New opcodes must clear a paired wall-time
+   gate, not just reduce dispatch. A loose-equality+branch family cut Richards
    dispatch by 4.34% but regressed paired non-JIT wall time by 3.8%,
    so it was reverted. Continue only where profiles show a candidate
    and the end-to-end benchmark improves.
@@ -1630,10 +1645,10 @@ not measurements.
    Emit-time specializations cover common constants, low registers,
    arithmetic idioms, calls, and comparisons; jump threading runs
    over logical branch patches. Finalized chunks get CFG/liveness-
-   guarded dead-store re-emission and accumulator-aware adjacent
-   store/reload forwarding; a load that is a branch, switch, or
-   handler entry is retained. Re-emission repairs relaxed branches,
-   source positions, exception handlers, and switch targets. More
+   guarded dead-store re-emission, redundant same-register store/reload
+   deletion, and distinct-register `star_ldar` fusion; a load that is a
+   branch, switch, or handler entry is retained. Re-emission repairs relaxed
+   branches, source positions, exception handlers, and switch targets. More
    rewrites remain profile-driven; unknown register effects fail
    closed and merely skip liveness-dependent passes.
 

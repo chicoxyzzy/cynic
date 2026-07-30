@@ -17,6 +17,108 @@ new run against the previous section with the *same host*.
 
 ## History
 
+### 2026-07-30 — finalized `StarLdar` store/load fusion, host `Darwin 25.6.0 arm64`
+
+Exact merged-main and final-candidate bytecode telemetry over the six macro
+workloads recorded **17,500,773** executions of the new
+`StarLdar dst, src` opcode at **704 static fused sites**. Baseline logical
+instructions fell **348,164,417 → 330,663,644**: one dispatch removed per
+execution, or **5.03%** of the old total. Aggregate encoded bytecode shrank
+**45,664 → 45,392 bytes** (-272):
+
+| bench | baseline instructions | candidate instructions | `StarLdar` executions |
+|---|---:|---:|---:|
+| richards | 104,678,462 | 104,321,361 | 357,101 |
+| deltablue | 40,203,516 | 39,702,815 | 500,701 |
+| crypto | 103,974,302 | 91,262,914 | 12,711,388 |
+| raytrace | 16,246,778 | 15,928,519 | 318,259 |
+| navier_stokes | 61,219,557 | 58,160,156 | 3,059,401 |
+| splay | 21,841,802 | 21,287,879 | 553,923 |
+
+The post-regalloc pass works on finalized bytecode, after redundant reload,
+dead-store, and dead-accumulator-copy elimination. It fuses only
+distinct-register `Star dst; Ldar src` pairs whose load is not a branch,
+switch, or exception-handler entry. Generic/generic pairs shrink from four
+bytes to three and mixed compact/generic pairs stay at three; compact/compact
+pairs remain two bytes so re-emission never grows code after branch
+relaxation. `StarLdar` stores before loading, which defines the alias case
+even though the normal compiler gives same-register pairs the stronger
+reload-deletion rewrite. The shared re-emitter repatches branches, source
+positions, handlers, and switch tables. Lantern, Bistromath, and Ohaimark all
+execute the operation. Fusion also proves that a successor opcode exists:
+the resulting Lantern handler can decode that known-present byte directly
+instead of cloning the generic checked end-of-chunk error tail. On arm64 this
+keeps the handler to 44 bytes and `runFrames` just 8 bytes larger than main.
+
+Forty paired Lantern-only runs in each launch order used exact
+baseline/candidate binary SHA-256 prefixes `2da04af` / `c8b4764`. The forward
+runner reports candidate/base, the swapped runner reports base/candidate, and
+the order-neutral candidate/base ratio is
+`sqrt((forward C/B) / (reverse B/C))`:
+
+| bench | forward C/B | reverse B/C | neutral C/B |
+|---|---:|---:|---:|
+| richards | 1.010x | 0.995x | 1.008x |
+| deltablue | 1.001x | 1.006x | 0.998x |
+| crypto | 0.961x | 1.043x | 0.960x |
+| raytrace | 0.985x | 1.013x | 0.986x |
+| navier_stokes | 0.980x | 1.027x | 0.977x |
+| splay | 0.996x | 1.015x | 0.991x |
+| **geomean** |  |  | **0.986x** |
+
+The order-neutral macro result is therefore **0.986x**, or **1.4% faster**.
+Only Richards regresses, by 0.8%. A separate 20-pair
+production-default-tier control measured a **0.988x** neutral geometric mean
+(about **1.2% faster**). Its per-workload neutral ratios were **0.997x,
+0.997x, 0.963x, 1.002x, 0.977x, and 0.992x**, respectively; natural tier-up
+and host noise make the aggregate the useful signal.
+
+The pinned-CPU x86_64 confirmation used exact base `7949d5f8` and candidate
+`62c6335f`, pinned the driver and inherited children to CPU 3, and verified
+baseline/candidate SHA-256 prefixes `f2e0b6e2` / `c4d7f531`. Forty pairs in
+each role produced:
+
+| bench | forward C/B | reverse B/C | neutral C/B |
+|---|---:|---:|---:|
+| richards | 1.005x | 0.997x | 1.004x |
+| deltablue | 1.010x | 0.979x | 1.016x |
+| crypto | 0.973x | 1.024x | 0.975x |
+| raytrace | 0.997x | 1.003x | 0.997x |
+| navier_stokes | 0.963x | 1.026x | 0.969x |
+| splay | 0.999x | 1.005x | 0.997x |
+| **geomean** |  |  | **0.993x** |
+
+Thus the final x86_64 candidate improves the macro geomean by **0.7%**, with
+all workload regressions below the 2% gate. The VM remained noisy
+(21–47% per-run spreads in the decisive sample), so both launch roles matter.
+Its zero-hit `arith_loop` control measured **1.012x / 0.983x / 1.015x**
+forward, reverse, and neutral with 38–59% spreads; the raw macro gate above is
+the primary result.
+
+The compact decode is material rather than cosmetic. The first implementation
+used the generic checked decode tail, grew `runFrames` by 136 bytes, and
+failed the same x86_64 gate at **1.012x** neutral, including Richards
+**1.040x**, DeltaBlue **1.028x**, and RayTrace **1.025x**. Proving a successor
+and shrinking the handler to 44 bytes turned that cross-architecture
+regression into the retained result above.
+
+`array_iter` provides a dynamic-count check: two static sites execute
+**1,010,100** times, moving **14,091,633 → 13,081,533** logical instructions
+exactly as predicted. `arith_loop` and `prop_access` contain no eligible
+sites. `arith_loop` executes a compact/compact `Star3; Ldar1` pair five
+million times, but deliberately keeps its two-byte encoding; its 40-pair
+forward, reverse, and neutral timings were **0.988x / 1.012x / 0.988x**, so
+it serves as a dispatch-layout control rather than evidence from fused
+execution.
+
+Validation covered focused fusion, CFG/leader, re-emission, liveness,
+disassembly, Lantern alias-ordering, compiler-pipeline, forced Bistromath,
+and forced Ohaimark tests plus the complete ReleaseSafe unit suite. The
+language test262 pass list was byte-identical across interpreter, forced T1,
+and forced T2 at **22,122 pass / 1,070 known fail**. The non-cached full
+sweep retained **48,653 pass / 1,324 known fail**, plus ShadowRealm
+**63 / 1**.
+
 ### 2026-07-30 — consumed postfix register updates, host `Darwin 25.6.0 arm64`
 
 Bytecode telemetry isolated Crypto's consumed postfix register update as the

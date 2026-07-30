@@ -148,7 +148,12 @@ The finalized-bytecode liveness pass builds a CFG, including every
 `switch_smi` successor, and fails closed on unknown register effects.
 It supports dead-store re-emission and accumulator forwarding for an
 adjacent `Star r; Ldar r` only when the load is not a branch, switch,
-or handler entry. This rewrite must run after branch finalization:
+or handler entry. A later pass applies the same entry proof to fuse an
+adjacent distinct-register `Star dst; Ldar src` into the store-before-load
+`StarLdar dst, src`; compact/compact pairs remain unfused so the finalized
+encoding never grows, and terminal pairs remain unfused so the handler can
+decode a proven-present successor without the generic end-of-chunk error
+tail. These rewrites must run after branch finalization:
 emission-time patch state does not yet know every incoming edge.
 Explicit register reads come from the opcode schema; instructions with
 implicit argument windows still require an explicit effect declaration.
