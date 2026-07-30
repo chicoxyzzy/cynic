@@ -996,6 +996,18 @@ sampling by `/profile`.
   instructions **1,509 → 1,456** (-3.5%), encoded bytes **3,122 →
   3,067** (-1.8%), and dynamic dispatches **107,516,101 →
   104,678,462** (-2.64%).
+- **Target-specific computed-receiver register reuse (2026-07-30).** For a
+  non-optional computed read whose receiver is an initialized, uncaptured
+  register binding and whose direct `++` / `--` key updates a distinct
+  resolved register, the compiler reads the receiver in place instead of
+  snapshotting it through a temporary. Same-register, assignment, member,
+  env/global/TDZ, captured, and optional-chain shapes fail closed. This
+  preserves §13.3.2.1 ordering and keeps the receiver rooted across
+  `ToNumeric` re-entry without adding an opcode. Navier-Stokes logical
+  instructions fell **58,160,156 → 53,605,322 (-7.83%)**. Paired arm64 and
+  pinned x86_64 interpreter macro geometric means were **0.996x** and
+  **0.993x** as directional retention signals, with no resolved workload
+  regression over 2%. See `bench-results.md`.
 - **Finalized `StarLdar` store/load fusion (2026-07-30).** After finalized
   CFG/liveness analysis, adjacent distinct-register `Star dst; Ldar src`
   pairs whose load is not a branch, switch, or handler entry collapse into
@@ -1643,14 +1655,15 @@ not measurements.
 
 7. **Peephole + CFG/liveness re-emission — shipped foundation.**
    Emit-time specializations cover common constants, low registers,
-   arithmetic idioms, calls, and comparisons; jump threading runs
-   over logical branch patches. Finalized chunks get CFG/liveness-
-   guarded dead-store re-emission, redundant same-register store/reload
-   deletion, and distinct-register `star_ldar` fusion; a load that is a
-   branch, switch, or handler entry is retained. Re-emission repairs relaxed
-   branches, source positions, exception handlers, and switch targets. More
-   rewrites remain profile-driven; unknown register effects fail
-   closed and merely skip liveness-dependent passes.
+   arithmetic idioms, calls, comparisons, and target-specific reuse of a
+   register-bound computed receiver across a distinct-binding update key;
+   jump threading runs over logical branch patches. Finalized chunks get
+   CFG/liveness-guarded dead-store re-emission, redundant same-register
+   store/reload deletion, and distinct-register `star_ldar` fusion; a load
+   that is a branch, switch, or handler entry is retained. Re-emission
+   repairs relaxed branches, source positions, exception handlers, and
+   switch targets. More rewrites remain profile-driven; unknown register
+   effects fail closed and merely skip liveness-dependent passes.
 
 8. **Frame register pool — shipped** (`b38f125`). Every
    JS-function call site (`call`, `call_method`, `new_call`,
