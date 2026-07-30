@@ -136,12 +136,13 @@ The wire format is compact but scalable:
 
 `-Dbytecode-stats=true` compiles instrumentation; `cynic run
 --bytecode-stats file.js` then reports nested-chunk instruction/byte
-counts, operand-width fit, and dynamic opcode/pair/trigram frequencies.
-The flag is compile-time so normal binaries contain no counter access.
-Use those traces plus paired wall-time measurements before retaining a
-new super-instruction. A 2026-07 loose-equality branch fusion removed
-4.34% of Richards dispatches but made paired non-JIT wall time 3.8%
-slower, so it was reverted.
+counts, operand-width fit, dynamic logical opcode/pair/trigram
+frequencies, and direct-threaded transfer counts. The flag is
+compile-time so normal binaries contain no counter access. Use those
+traces plus paired wall-time measurements before retaining a new
+super-instruction. A 2026-07 loose-equality branch fusion removed 4.34%
+of Richards dispatches but made paired non-JIT wall time 3.8% slower,
+so it was reverted.
 
 The finalized-bytecode liveness pass builds a CFG, including every
 `switch_smi` successor, and fails closed on unknown register effects.

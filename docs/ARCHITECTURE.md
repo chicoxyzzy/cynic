@@ -254,11 +254,12 @@ feedback boundary are in [ohaimark.md](ohaimark.md).
 
 An opt-in instrumentation build (`-Dbytecode-stats=true`, then
 `cynic run --bytecode-stats`) reports static encoding widths and
-dynamic opcode/pair/trigram frequencies. Normal builds compile the
-dispatch counters out. The CFG/liveness pass uses the same schema,
-models dense-switch N-way edges, and fails closed when an implicit
-register effect is not understood. Accumulator forwarding is a
-post-finalization rewrite: `Star r; Ldar r` loses the load only when
+dynamic logical opcode/pair/trigram frequencies plus the number of
+logical opcodes entered by a direct-threaded transfer. Normal builds
+compile the dispatch counters out. The CFG/liveness pass uses the same
+schema, models dense-switch N-way edges, and fails closed when an
+implicit register effect is not understood. Accumulator forwarding is
+a post-finalization rewrite: `Star r; Ldar r` loses the load only when
 the finalized leader set proves no branch, switch, or handler can enter
 between the pair.
 
