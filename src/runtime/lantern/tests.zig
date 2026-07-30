@@ -1607,9 +1607,10 @@ test "lda_property_reg: string-primitive receiver via register form" {
     try expectScriptInt("(function(s){ return s.length; })('hello');", 5);
 }
 
-// §9.1.1.3.4 GetThisBinding followed by §13.3.4.1 property access.
-// The interpreter direct-threads this common pair into the existing
-// lda_property8 handler; these tests pin the observable boundary.
+// §9.1.1.3.4 GetThisBinding followed by §13.3.4
+// EvaluatePropertyAccessWithIdentifierKey. The interpreter
+// direct-threads this common pair into the existing lda_property8
+// handler; these tests pin the observable boundary.
 test "lda_this property direct threading: own data property" {
     try expectScriptIntWithBuiltins(
         "function read(){ return this.x; } let o = { x: 20 }; let first = read.call(o); o.x = 22; first + read.call(o);",
