@@ -13,6 +13,7 @@ const RunResult = lantern.RunResult;
 const run = lantern.run;
 const evaluateScript = lantern.evaluateScript;
 const op_mod = @import("../../bytecode/op.zig");
+const bytecode_stats = @import("../../bytecode/stats.zig");
 const chunk_mod = @import("../../bytecode/chunk.zig");
 const disasm = @import("../../bytecode/disasm.zig");
 const Span = @import("../../source.zig").Span;
@@ -1611,6 +1612,24 @@ test "lda_property_reg: string-primitive receiver via register form" {
 // EvaluatePropertyAccessWithIdentifierKey. The interpreter
 // direct-threads this common pair into the existing lda_property8
 // handler; these tests pin the observable boundary.
+test "lda_this property direct threading: instrumented run records transfer" {
+    if (comptime !bytecode_stats.enabled) return error.SkipZigTest;
+
+    var stats: bytecode_stats.DynamicStats = .{};
+    const activation = bytecode_stats.activate(&stats);
+    defer activation.deinit();
+
+    try expectScriptInt(
+        "let o = { x: 42, read: function(){ return this.x; } }; o.read();",
+        42,
+    );
+    try testing.expect(stats.direct_transfers > 0);
+    try testing.expectEqual(
+        stats.direct_transfers,
+        stats.pairCount(.lda_this, .lda_property8),
+    );
+}
+
 test "lda_this property direct threading: own data property" {
     try expectScriptIntWithBuiltins(
         "function read(){ return this.x; } let o = { x: 20 }; let first = read.call(o); o.x = 22; first + read.call(o);",
