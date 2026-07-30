@@ -54,7 +54,7 @@ pub fn dump(allocator: std.mem.Allocator, chunk: *const Chunk) ![]u8 {
 
         // Format the operand, if any.
         switch (op) {
-            .ldar, .star, .inc_reg, .dec_reg => {
+            .ldar, .star, .inc_reg, .dec_reg, .post_inc_reg, .post_dec_reg => {
                 const r = chunk.code[i + 1];
                 try buf.print(allocator, " r{d}", .{r});
             },
@@ -472,6 +472,8 @@ test "disasm: register updates print their operand and preserve alignment" {
     const r1 = try b.reserveRegister();
     try b.emitUpdateReg(.inc_reg, span, r1);
     try b.emitUpdateReg(.dec_reg, span, r1);
+    try b.emitUpdateReg(.post_inc_reg, span, r1);
+    try b.emitUpdateReg(.post_dec_reg, span, r1);
     try b.emitOp(.return_, span);
     var chunk = try b.finish();
     defer chunk.deinit(testing.allocator);
@@ -482,7 +484,9 @@ test "disasm: register updates print their operand and preserve alignment" {
         \\(chunk regs=2 consts=0
         \\  0000 IncReg r1 [3..8]
         \\  0002 DecReg r1 [3..8]
-        \\  0004 Return [3..8]
+        \\  0004 PostIncReg r1 [3..8]
+        \\  0006 PostDecReg r1 [3..8]
+        \\  0008 Return [3..8]
         \\)
     , out);
 }

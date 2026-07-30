@@ -2073,23 +2073,27 @@ pub fn runFrames(
             }
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
-        .inc_reg, .dec_reg => |op_tag| {
+        .inc_reg, .dec_reg, .post_inc_reg, .post_dec_reg => |op_tag| {
             const r = code[ip];
             ip += 1;
+            const is_postfix = op_tag == .post_inc_reg or op_tag == .post_dec_reg;
+            const is_increment = op_tag == .inc_reg or op_tag == .post_inc_reg;
 
             // §13.4 GetValue → ToNumeric → type-matched unit →
             // PutValue. The source register remains the authoritative root
             // while object coercion re-enters JS; commit it only after both
             // conversion and bump succeed, so a throw leaves the binding
-            // unchanged. `acc = old` mirrors the explicit leading Ldar.
+            // unchanged. Postfix forms leave the coerced OLD numeric value
+            // in acc; prefix/discarded forms leave the bumped value.
             acc = registers[r];
             if (acc.isInt32()) {
-                const bumped = if (op_tag == .inc_reg)
+                const old = acc;
+                const bumped = if (is_increment)
                     intArith(.add, acc, Value.fromInt32(1)).?
                 else
                     intArith(.sub, acc, Value.fromInt32(1)).?;
-                acc = bumped;
                 registers[r] = bumped;
+                acc = if (is_postfix) old else bumped;
                 continue :dispatch try decodeNext(code, &ip, &committed);
             }
 
@@ -2105,10 +2109,18 @@ pub fn runFrames(
                 continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
             }
 
-            const delta: i32 = if (op_tag == .inc_reg) 1 else -1;
+            // A consumed postfix must keep a freshly coerced heap BigInt alive
+            // while incOrDec allocates the bumped BigInt. The raw source
+            // register may hold only the coercion object, so publish the old
+            // numeric value through the frame accumulator before that
+            // allocation. The binding register itself remains unchanged until
+            // the bump succeeds.
+            const old = acc;
+            if (is_postfix) f.accumulator = old;
+            const delta: i32 = if (is_increment) 1 else -1;
             if (try arith.incOrDec(realm, acc, delta)) |bumped| {
-                acc = bumped;
                 registers[r] = bumped;
+                acc = if (is_postfix) old else bumped;
             } else {
                 const ex = realm.pending_exception orelse try makeTypeError(realm, "Update failed");
                 realm.pending_exception = null;

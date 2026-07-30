@@ -1482,6 +1482,12 @@ pub const Op = enum(u8) {
     /// Targets live in `Chunk.switch_tables[table]`; every execution jumps to
     /// either one case body or the default target (no fallthrough edge).
     switch_smi,
+    /// `[op] [r:u8]` — consumed postfix register increment. Stores the
+    /// ToNumeric-bumped value in `registers[r]` while leaving the coerced OLD
+    /// numeric value in the accumulator. §13.4.
+    post_inc_reg,
+    /// `[op] [r:u8]` — decrement counterpart of `post_inc_reg`.
+    post_dec_reg,
 
     /// Authoritative instruction metadata. Adding an opcode requires one
     /// exhaustive entry here; consumers derive names, sizes and tier/control
@@ -1533,6 +1539,8 @@ pub const Op = enum(u8) {
             .dec => instruction("Dec", .none),
             .inc_reg => baselineInstruction("IncReg", .reg),
             .dec_reg => baselineInstruction("DecReg", .reg),
+            .post_inc_reg => instruction("PostIncReg", .reg),
+            .post_dec_reg => instruction("PostDecReg", .reg),
             .lda_smi8 => baselineInstruction("LdaSmi8", .i8),
             .lda_smi16 => baselineInstruction("LdaSmi16", .i16),
             .add_smi8 => baselineInstruction("AddSmi8", .reg_i8),
@@ -1928,6 +1936,7 @@ test "Op: instruction specs classify representative execution contracts" {
 
     try testing.expectEqual(BaselineStrategy.inline_, Op.add.spec().baseline);
     try testing.expectEqual(BaselineStrategy.inline_, Op.inc_reg.spec().baseline);
+    try testing.expectEqual(BaselineStrategy.unsupported, Op.post_inc_reg.spec().baseline);
     try testing.expectEqual(BaselineStrategy.unsupported, Op.await_.spec().baseline);
 }
 
@@ -2056,4 +2065,6 @@ test "Op: operandSize agrees with the documented encoding" {
     // Bistromath's unsupported-op scan to stay aligned on the next opcode.
     try testing.expectEqual(@as(u8, 1), Op.operandSize(.inc_reg));
     try testing.expectEqual(@as(u8, 1), Op.operandSize(.dec_reg));
+    try testing.expectEqual(@as(u8, 1), Op.operandSize(.post_inc_reg));
+    try testing.expectEqual(@as(u8, 1), Op.operandSize(.post_dec_reg));
 }

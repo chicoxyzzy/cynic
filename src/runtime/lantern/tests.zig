@@ -3215,6 +3215,98 @@ test "register update: object ToNumeric runs once and a throw does not store" {
     , "41:2:true:true");
 }
 
+test "consumed postfix register update returns coerced old and stores bumped new" {
+    // Function parameters are non-TDZ register bindings, so every update
+    // below executes PostIncReg/PostDecReg. §13.4 returns the
+    // ToNumeric-coerced OLD value—not the raw string/Boolean/null/undefined—
+    // while storing the type-matched bumped value back into the parameter.
+    try expectScriptStringWithBuiltins(
+        \\function inspect(x) {
+        \\  const old = x++;
+        \\  return typeof old + "," + String(old) + "," +
+        \\         typeof x + "," + String(x);
+        \\}
+        \\function inspectDown(x) {
+        \\  const old = x--;
+        \\  return typeof old + "," + String(old) + "," +
+        \\         typeof x + "," + String(x);
+        \\}
+        \\[
+        \\  inspect(41),
+        \\  inspect(1.5),
+        \\  inspect("41"),
+        \\  inspect(true),
+        \\  inspect(null),
+        \\  inspect(undefined),
+        \\  inspectDown(41)
+        \\].join("|");
+    , "number,41,number,42|number,1.5,number,2.5|number,41,number,42|number,1,number,2|number,0,number,1|number,NaN,number,NaN|number,41,number,40");
+}
+
+test "consumed postfix register update preserves Number edge values" {
+    // The old result must retain -0/NaN/Infinity identity while the binding
+    // receives the Number increment. Int32 overflow widens instead of
+    // trapping or wrapping.
+    try expectScriptStringWithBuiltins(
+        \\function edge(x) {
+        \\  const old = x++;
+        \\  return [old, x];
+        \\}
+        \\const z = edge(-0);
+        \\const n = edge(NaN);
+        \\const i = edge(Infinity);
+        \\const o = edge(2147483647);
+        \\[
+        \\  Object.is(z[0], -0), Object.is(z[1], 1),
+        \\  Number.isNaN(n[0]), Number.isNaN(n[1]),
+        \\  i[0] === Infinity, i[1] === Infinity,
+        \\  o[0] === 2147483647, o[1] === 2147483648
+        \\].join(":");
+    , "true:true:true:true:true:true:true:true");
+}
+
+test "consumed postfix register update preserves BigInt type and coerces once" {
+    // §13.4 selects a BigInt 1n unit after ToNumeric. Both increment and
+    // decrement return the old BigInt, and object coercion must happen once.
+    try expectScriptStringWithBuiltins(
+        \\let calls = 0;
+        \\function inc(x) {
+        \\  const old = x++;
+        \\  return typeof old + ":" + old + ":" + typeof x + ":" + x;
+        \\}
+        \\function dec(x) {
+        \\  const old = x--;
+        \\  return typeof old + ":" + old + ":" + typeof x + ":" + x;
+        \\}
+        \\const a = inc(5n);
+        \\const b = dec(-5n);
+        \\const c = inc({ valueOf() { calls++; return 9n; } });
+        \\a + "|" + b + "|" + c + ":" + calls;
+    , "bigint:5:bigint:6|bigint:-5:bigint:-6|bigint:9:bigint:10:1");
+}
+
+test "consumed postfix register update leaves binding unchanged on coercion throw" {
+    // A failed ToNumeric must not commit either the coerced or bumped value.
+    // Symbol failure exercises the engine-generated TypeError path as well as
+    // propagation of an exception thrown from user coercion.
+    try expectScriptStringWithBuiltins(
+        \\const marker = {};
+        \\let calls = 0;
+        \\function fail(x) {
+        \\  const original = x;
+        \\  try { return x++; }
+        \\  catch (e) { return (e === marker) + ":" + (x === original); }
+        \\}
+        \\function failSymbol(x) {
+        \\  const original = x;
+        \\  try { return x++; }
+        \\  catch (e) { return (e instanceof TypeError) + ":" + (x === original); }
+        \\}
+        \\const value = { valueOf() { calls++; throw marker; } };
+        \\fail(value) + ":" + calls + ":" + failSymbol(Symbol());
+    , "true:true:1:true:true");
+}
+
 test "register update: self-update in a let initializer preserves TDZ ReferenceError" {
     // `x` is register-promoted but still contains Hole while its own
     // initializer runs. This site must stay on the explicit load/check path;
@@ -7840,6 +7932,28 @@ test "GC: register update ToNumeric survives allocating JS re-entry" {
         \\});
         \\value + ":" + calls;
     , "41:1");
+}
+
+test "GC: consumed postfix register update roots coerced old BigInt across bump" {
+    // The source register roots the coercion object, not the fresh BigInt
+    // returned by valueOf. PostIncReg must publish that OLD BigInt as a frame
+    // root while allocating the bumped BigInt, then return old and store new.
+    try expectScriptStringUnderAlternatingGcPressure(
+        \\let calls = 0;
+        \\function post(x) {
+        \\  const old = x++;
+        \\  return typeof old + ":" + old + ":" + typeof x + ":" + x;
+        \\}
+        \\const result = post({
+        \\  valueOf() {
+        \\    const junk = [];
+        \\    for (let i = 0; i < 20; i++) junk.push({ i });
+        \\    calls++;
+        \\    return BigInt("123456789012345678901234567890");
+        \\  }
+        \\});
+        \\result + ":" + calls;
+    , "bigint:123456789012345678901234567890:bigint:123456789012345678901234567891:1");
 }
 
 test "GC: generator wrapper iteration survives gc_threshold=1" {
