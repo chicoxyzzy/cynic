@@ -484,6 +484,20 @@ pub fn tryEnterFreshJitFrame(
     realm: *Realm,
     frames: *std.ArrayListUnmanaged(CallFrame),
 ) RunError!bistromath.EnterOutcome {
+    // Lantern-only realms still heat chunks so an embedder can enable the
+    // tiers later, but they need not enter both tier drivers merely to
+    // rediscover the master switch is off. Keep this increment identical to
+    // Ohaimark's entry observation; when JIT is enabled that driver
+    // remains the single owner so compiled T1 callers continue heating T2.
+    if (!realm.jit_enabled) {
+        const frame = &frames.items[frames.items.len - 1];
+        if (frame.ip == 0) {
+            if (frame.chunk.jit_state) |state| {
+                state.warmth +|= Chunk.JitState.entry_weight;
+            }
+        }
+        return .not_entered;
+    }
     switch (try tryEnterOhaimarkTop(allocator, realm, frames)) {
         .not_entered => return bistromath.tryEnterTop(allocator, realm, frames),
         .resumed => return .not_entered,
@@ -1257,6 +1271,10 @@ inline fn tryBackedgeOsr(
     frames: *std.ArrayListUnmanaged(CallFrame),
     chunk: *const Chunk,
 ) RunError!BackedgeOsr {
+    // `loopSafePoint` already recorded the back-edge warmth above. When the
+    // master tier switch is off, avoid entering both tier-specific policy
+    // probes merely to rediscover it.
+    if (!realm.jit_enabled) return .none;
     if (ohaimark_driver.osrWorth(realm, chunk)) {
         switch (try ohaimark_driver.tryOsrEnterTop(allocator, realm, frames)) {
             .not_entered => {},
