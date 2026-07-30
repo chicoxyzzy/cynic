@@ -1053,6 +1053,19 @@ inline fn decodeNext(code: []const u8, ip: *usize, committed: *bool) RunError!Op
     return op;
 }
 
+/// StarLdar is produced only when finalized-bytecode fusion proves a
+/// successor instruction exists. Keeping that invariant out of the generic
+/// error-union decoder avoids cloning its checked failure tail into the new
+/// threaded handler.
+inline fn decodeNextKnownPresent(code: []const u8, ip: *usize, committed: *bool) Op {
+    committed.* = false;
+    const b = code[ip.*];
+    ip.* += 1;
+    const op: Op = @enumFromInt(b);
+    if (comptime bytecode_stats.enabled) bytecode_stats.observeActive(op);
+    return op;
+}
+
 /// Re-derive the loop-persistent dispatch state from the top frame,
 /// then decode the next opcode. Used after any step that swaps the
 /// active frame (call push / return pop) or repositions it (an
@@ -1576,7 +1589,7 @@ pub fn runFrames(
             ip += 2;
             registers[dst] = acc;
             acc = registers[src];
-            continue :dispatch try decodeNext(code, &ip, &committed);
+            continue :dispatch decodeNextKnownPresent(code, &ip, &committed);
         },
         .lda_hole => {
             acc = Value.hole_;

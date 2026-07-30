@@ -1492,7 +1492,7 @@ pub const Op = enum(u8) {
     /// then load `src` into the accumulator. The order is observable when
     /// `dst == src`: the load sees the value just stored. Finalized-bytecode
     /// fusion emits this for adjacent `Star dst; Ldar src` pairs whose load
-    /// is not a control-flow entry.
+    /// is not a control-flow entry and whose pair has a successor opcode.
     star_ldar,
 
     /// Authoritative instruction metadata. Adding an opcode requires one
