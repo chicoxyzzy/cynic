@@ -17,6 +17,63 @@ new run against the previous section with the *same host*.
 
 ## History
 
+### 2026-07-30 — packed branch-metadata lookup, host `Linux 6.8.0-117-generic x86_64` (remote bench box)
+
+Interleaved A/B on one pinned CPU: runtime head `83f2ac76` against exact
+merged main `92ed61ef`, 20 pairs in Lantern-only (`--no-jit`) and 12 pairs
+in the default production-tier posture. Merged width-family handlers
+previously called the out-of-line `Op.branchInfo()` classifier for every
+relative branch (twice in the fused equality and relational handlers), then
+loaded `operand_size_by_opcode` separately to advance `ip`.
+
+Head generates a 512-byte packed `u16` table from the authoritative
+branch-family definition at comptime. Large handler tails cross a scalar
+call barrier that returns the packed bits in a register; the compact
+`jmp_if_false` and `loop_inc_lt` tails probe it directly. Every handler
+decodes the metadata once and advances through
+`operand_offset + width.byteSize()`. An exhaustive opcode test pins the
+packed round trip, control-flow classification, signed operand kind and
+offset, canonical width variants, and the invariant that a relative
+displacement is the final operand.
+
+ReleaseFast profiles at `0d4da627` (with the same branch classifier)
+attributed `Op.branchInfo` self time to 2.72% of Richards samples, 1.86% of
+DeltaBlue, and 4.57% of Navier-Stokes. The `ratio` column is the median of
+the 20 per-pair `head / base` ratios, so it can differ from the quotient of
+the two aggregate p50 columns. The interpreter-only geometric mean improved
+to **0.979x**:
+
+| bench | base_ms | head_ms | ratio | spread% |
+|---|---:|---:|---:|---:|
+| richards | 599.20 | 578.22 | 0.966x | 10.9 |
+| deltablue | 471.13 | 464.31 | 0.977x | 19.7 |
+| crypto | 397.10 | 389.56 | 0.978x | 10.7 |
+| raytrace | 202.73 | 204.56 | 1.013x | 19.4 |
+| navier_stokes | 275.65 | 267.61 | 0.965x | 22.1 |
+| splay | 467.97 | 459.72 | 0.975x | 10.4 |
+
+RayTrace's +0.9% aggregate result sits inside 19.4% run spread; the paired
+median was +1.3%, so the remote box cannot resolve that workload's small
+effect. The noisier 12-pair default-tier confirmation improved to a
+**0.972x** geometric mean:
+
+| bench | base_ms | head_ms | ratio | spread% |
+|---|---:|---:|---:|---:|
+| richards | 607.84 | 561.91 | 0.928x | 12.6 |
+| deltablue | 485.76 | 470.32 | 0.959x | 16.5 |
+| crypto | 398.79 | 395.71 | 1.005x | 14.2 |
+| raytrace | 209.59 | 202.45 | 0.978x | 20.2 |
+| navier_stokes | 280.67 | 273.45 | 0.986x | 16.5 |
+| splay | 471.39 | 450.83 | 0.976x | 12.0 |
+
+A quieter `Darwin 25.6.0 arm64` cross-check measured a **0.981x**
+interpreter geometric mean over 60 pairs and **0.984x** with production
+tiers over 40 pairs; `arith_loop` improved to **0.894x** over 60 pairs.
+The selected inline/call-barrier frontier adds 2,956 bytes to total arm64
+text (0.071%) and 352 bytes to constants. Full ReleaseSafe units pass, and
+the non-`--only-failing` test262 sweep retains the exact merged-main pass
+set: **48,653 pass / 1,324 fail (97.35%)**.
+
 ### 2026-07-29 — disabled-tier probe gate, host `Darwin 25.6.0 arm64`
 
 Interleaved A/B: runtime head `85616796` against exact merged main
