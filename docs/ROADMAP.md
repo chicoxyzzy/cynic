@@ -933,9 +933,9 @@ built-ins, accessor / legacy-global aliases), and the
   peephole / IC work.
 - Opt-in bytecode telemetry: build with `-Dbytecode-stats=true`,
   then run `cynic run --bytecode-stats <file>`. Reports static
-  nested-chunk bytes / operand-width fit plus dynamic opcode,
-  pair, and trigram frequencies; normal builds compile the
-  counters out.
+  nested-chunk bytes / operand-width fit plus dynamic logical
+  opcode, pair, and trigram frequencies and direct-transfer
+  counts; normal builds compile the counters out.
 - `zig build test262 -- ...` parser and runtime modes; harness
   loads `harness/sta.js` + `assert.js` automatically; per-file
   outcome on `--verbose`; failure list on `--list-failures=N`;
@@ -1024,6 +1024,17 @@ sampling by `/profile`.
   **0.979x** interpreter macro geometric mean; 60-pair arm64 confirmation
   measured **0.981x**, with `arith_loop` at **0.894x**. See
   `bench-results.md`.
+- **Direct-threaded `this` property loads (2026-07-30).** Instrumented
+  compute-six traces found **18,364,389** `LdaThis -> LdaProperty8`
+  transitions, **5.058%** of all logical instructions and **71.214%** of
+  `LdaThis` executions. After the existing derived-constructor TDZ gate,
+  Lantern now recognizes the compact successor and continues directly into
+  the unchanged property-load handler, bypassing one indirect dispatch.
+  Bytecode, logical telemetry, and both JIT tiers remain unchanged; opt-in
+  stats expose the bypass count separately. Thirty-pair forward/reverse A/Bs
+  measured **0.981x / 0.979x** interpreter macro geometric means on pinned
+  x86_64 and **0.9952x / 0.9957x** on arm64. The arm64 production-tier
+  control measured **0.9937x**. See `bench-results.md`.
 - **Bistromath continuation + hardened-load closure (2026-07-16).**
   Catch/finally PCs now receive compiled reentry stubs in the shared
   bytecode-continuation table; the driver invokes Lantern's real unwinder

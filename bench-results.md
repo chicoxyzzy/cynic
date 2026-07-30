@@ -17,6 +17,62 @@ new run against the previous section with the *same host*.
 
 ## History
 
+### 2026-07-30 — direct-threaded `this` property loads, host `Linux 6.8.0-117-generic x86_64` (remote bench box)
+
+Interleaved A/B on one pinned CPU: runtime head `7e93321a` against exact
+merged main `808ff428`, 30 pairs in Lantern-only (`--no-jit`). Instrumented
+traces identified `LdaThis -> LdaProperty8` as the largest remaining adjacent
+opcode opportunity: **18,364,389** transitions across the six macros, or
+**5.058%** of 363,054,517 logical instructions. The pair covers **71.214%**
+of all `LdaThis` executions. All 502 static sites use the compact property
+encoding, and their matching source spans identify direct
+`this.IdentifierName` expressions.
+
+Head leaves the bytecode and both JIT tiers unchanged. After the existing
+§9.1.1.3.4 GetThisBinding / derived-constructor TDZ gate succeeds,
+`LdaThis` recognizes a following compact property load, advances past that
+opcode byte, records it as a logical instruction, and directly continues into
+the existing property handler. This removes one indirect dispatch while
+retaining the single OrdinaryGet implementation for own/prototype ICs,
+getters, Proxy traps, primitives, and module namespaces. Opt-in telemetry now
+reports the bypass separately as `direct-transfers`; all opcode, pair, and
+trigram counts remain logical and therefore compare exactly with the
+pre-change traces.
+
+The forward-order interpreter geometric mean improved to **0.981x**:
+
+| bench | base_ms | head_ms | ratio | spread% |
+|---|---:|---:|---:|---:|
+| richards | 590.51 | 578.88 | 0.979x | 16.5 |
+| deltablue | 468.26 | 449.37 | 0.968x | 23.5 |
+| crypto | 385.64 | 379.05 | 0.979x | 19.5 |
+| raytrace | 198.29 | 195.71 | 0.993x | 15.8 |
+| navier_stokes | 267.30 | 258.13 | 0.967x | 21.0 |
+| splay | 447.29 | 455.15 | 1.002x | 28.2 |
+
+Because the runner always launches runtime head before baseline within a pair,
+the binaries were then swapped while retaining the same harness and pinned
+CPU. Inverting those median ratios produced a **0.979x** candidate/main
+geometric mean; the per-fixture candidate ratios were **0.998x, 0.967x,
+0.958x, 0.989x, 0.968x, and 0.997x**, respectively. Thus the x86 signal
+survives launch order despite the shared host's 15–30% process-level spread.
+
+A quieter `Darwin 25.6.0 arm64` confirmation measured **0.9952x** forward
+and **0.9957x** with the binaries swapped, also over 30 pairs. The matching
+production-tier macro control was **0.9937x**. Targeted 50-pair controls
+priced the new branch directly: `method_call`, whose `LdaThis` sites match
+about half the time, improved to **0.982x**; zero-match
+`class_instantiate` moved to **1.021x**, below the 5% stable-regression gate.
+`prop_access` (no `LdaThis`) stayed at **1.000x**.
+
+Validation covered the full ReleaseSafe unit suite; focused test262 buckets
+held their exact pass sets (`property-accessors` 21/0,
+`statements/class` 4347/6, `expressions/class` 4043/6, and optional chaining
+40/0). The property-accessor bucket also remained 21/0 under forced
+Bistromath and forced Ohaimark. Inline tests pin IC fill/hit, a prototype
+getter re-entering through forced GC, Proxy receiver identity, the direct
+derived-constructor TDZ, and a lexical arrow's shared `super_called_cell`.
+
 ### 2026-07-30 — packed branch-metadata lookup, host `Linux 6.8.0-117-generic x86_64` (remote bench box)
 
 Interleaved A/B on one pinned CPU: runtime head `83f2ac76` against exact
