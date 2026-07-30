@@ -5314,6 +5314,20 @@ pub fn runFrames(
                 continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
             }
             acc = f.this_value;
+
+            // `this.name` is the hottest adjacent opcode pair in the
+            // macro corpus. Thread its compact form directly into the
+            // existing §13.3.4.1 property-load arm: the bytecode and
+            // both JIT tiers still see the ordinary two-op sequence,
+            // while T0 avoids one indirect dispatch. Keep the
+            // GetThisBinding gate above this transfer so a derived
+            // constructor's uninitialised `this` still throws before
+            // any property lookup.
+            if (ip < code.len and code[ip] == @intFromEnum(Op.lda_property8)) {
+                ip += 1;
+                if (comptime bytecode_stats.enabled) bytecode_stats.observeDirectActive(.lda_property8);
+                continue :dispatch .lda_property8;
+            }
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
 
