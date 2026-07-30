@@ -2320,8 +2320,9 @@ pub fn runFrames(
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
         .jmp, .jmp8, .jmp32 => |op_tag| {
-            const off = op_tag.branchInfo().?.displacement(code, ip - 1);
-            ip += op_tag.operandSize();
+            const branch = op_tag.branchInfoForDispatch();
+            const off = branch.displacement(code, ip - 1);
+            ip += branch.operand_offset + branch.width.byteSize();
             ip = applyOffset(ip, off);
             if (off < 0) {
                 if (try loopSafePoint(realm, f, ip, acc)) |r| return r;
@@ -2350,8 +2351,9 @@ pub fn runFrames(
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
         .jmp_if_false, .jmp_if_false8, .jmp_if_false32 => |op_tag| {
-            const off = op_tag.branchInfo().?.displacement(code, ip - 1);
-            ip += op_tag.operandSize();
+            const branch = op_tag.branchInfoInlineForDispatch();
+            const off = branch.displacement(code, ip - 1);
+            ip += branch.operand_offset + branch.width.byteSize();
             // Inline ToBoolean fast path (§7.1.2): a comparison result
             // (bool) or an int condition skips the call; strings / objects
             // / doubles / BigInt fall through to `toBoolean`.
@@ -2386,8 +2388,9 @@ pub fn runFrames(
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
         .jmp_if_true, .jmp_if_true8, .jmp_if_true32 => |op_tag| {
-            const off = op_tag.branchInfo().?.displacement(code, ip - 1);
-            ip += op_tag.operandSize();
+            const branch = op_tag.branchInfoForDispatch();
+            const off = branch.displacement(code, ip - 1);
+            ip += branch.operand_offset + branch.width.byteSize();
             const truthy = if (acc.isBool()) acc.asBool() else if (acc.isInt32()) (acc.asInt32() != 0) else toBoolean(acc);
             if (truthy) {
                 ip = applyOffset(ip, off);
@@ -2431,10 +2434,11 @@ pub fn runFrames(
             // OSR back-edge machinery is unneeded; a backward offset
             // (defensive) still takes a GC safepoint.
             const r = code[ip];
-            const off = t.branchInfo().?.displacement(code, ip - 1);
-            ip += t.operandSize();
+            const branch = t.branchInfoForDispatch();
+            const off = branch.displacement(code, ip - 1);
+            ip += branch.operand_offset + branch.width.byteSize();
             const equal = strictEq(registers[r], acc);
-            const take = if (t.branchInfo().?.canonical == .jmp_if_strict_eq) equal else !equal;
+            const take = if (branch.canonical == .jmp_if_strict_eq) equal else !equal;
             if (take) {
                 ip = applyOffset(ip, off);
                 if (off < 0) {
@@ -2469,9 +2473,10 @@ pub fn runFrames(
             // without duplicating the body. Forward-only by emit; a
             // defensive backward offset still takes a GC safepoint.
             const r = code[ip];
-            const off = t.branchInfo().?.displacement(code, ip - 1);
-            ip += t.operandSize();
-            const canonical = t.branchInfo().?.canonical;
+            const branch = t.branchInfoForDispatch();
+            const off = branch.displacement(code, ip - 1);
+            ip += branch.operand_offset + branch.width.byteSize();
+            const canonical = branch.canonical;
             var take: bool = undefined;
             const fast: ?Value = switch (canonical) {
                 .jmp_if_not_lt => intCompare(.lt, registers[r], acc),
@@ -2522,8 +2527,9 @@ pub fn runFrames(
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
         .jmp_if_nullish, .jmp_if_nullish8, .jmp_if_nullish32 => |op_tag| {
-            const off = op_tag.branchInfo().?.displacement(code, ip - 1);
-            ip += op_tag.operandSize();
+            const branch = op_tag.branchInfoForDispatch();
+            const off = branch.displacement(code, ip - 1);
+            ip += branch.operand_offset + branch.width.byteSize();
             if (acc.isNull() or acc.isUndefined()) {
                 ip = applyOffset(ip, off);
                 if (off < 0) {
@@ -2556,8 +2562,9 @@ pub fn runFrames(
         .loop_inc_lt, .loop_inc_lt8, .loop_inc_lt32 => |op_tag| {
             const r_counter = code[ip];
             const r_bound = code[ip + 1];
-            const off = op_tag.branchInfo().?.displacement(code, ip - 1);
-            ip += op_tag.operandSize();
+            const branch = op_tag.branchInfoInlineForDispatch();
+            const off = branch.displacement(code, ip - 1);
+            ip += branch.operand_offset + branch.width.byteSize();
             // Hot path: both operands int32, counter+1 doesn't
             // overflow. The branch back to the body is the
             // overwhelmingly common case (5M iterations of an

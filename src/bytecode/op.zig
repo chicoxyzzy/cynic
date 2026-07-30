@@ -1720,7 +1720,30 @@ pub const Op = enum(u8) {
     /// Branch encoding metadata shared by relaxation, decoding, CFG analysis,
     /// disassembly, and Bistromath. `null` means ordinary fallthrough or a
     /// non-relative control transfer.
-    pub fn branchInfo(op: Op) ?BranchInfo {
+    pub noinline fn branchInfo(op: Op) ?BranchInfo {
+        return unpackBranchInfo(branch_info_bits_by_opcode[@intFromEnum(op)]);
+    }
+
+    /// Lantern's merged branch-family handlers call this for every executed
+    /// relative branch. Keep the table load out of line so the backend does
+    /// not duplicate the large dispatch tails, but return the packed metadata
+    /// in a scalar register instead of using the optional-struct ABI.
+    pub inline fn branchInfoForDispatch(op: Op) BranchInfo {
+        return unpackBranchInfo(branchInfoBits(op)).?;
+    }
+
+    /// The compact truthiness and fused counter-loop handlers are hot enough
+    /// to justify a direct table probe. Larger branch tails retain the scalar
+    /// call barrier to avoid backend tail duplication.
+    pub inline fn branchInfoInlineForDispatch(op: Op) BranchInfo {
+        return unpackBranchInfo(branch_info_bits_by_opcode[@intFromEnum(op)]).?;
+    }
+
+    noinline fn branchInfoBits(op: Op) u16 {
+        return branch_info_bits_by_opcode[@intFromEnum(op)];
+    }
+
+    fn branchInfoUncached(op: Op) ?BranchInfo {
         return switch (op) {
             .jmp8 => .{ .canonical = .jmp, .width = .i8, .operand_offset = 0 },
             .jmp => .{ .canonical = .jmp, .width = .i16, .operand_offset = 0 },
@@ -1836,6 +1859,38 @@ const operand_size_by_opcode: [256]u8 = blk: {
     break :blk sizes;
 };
 
+/// Branch decoding is hot in Lantern's merged width-family handlers. Keep the
+/// explicit family definition above as the one source for canonical opcode,
+/// width, and displacement position, then cache its result by wire opcode.
+const branch_info_bits_by_opcode: [256]u16 = blk: {
+    @setEvalBranchQuota(10_000);
+    var infos: [256]u16 = @splat(0);
+    for (@typeInfo(Op).@"enum".field_names) |field_name| {
+        const op: Op = @field(Op, field_name);
+        if (op.branchInfoUncached()) |info| {
+            infos[@intFromEnum(op)] = packBranchInfo(info);
+        }
+    }
+    break :blk infos;
+};
+
+fn packBranchInfo(info: BranchInfo) u16 {
+    const width: u3 = @intCast(@intFromEnum(info.width));
+    const operand_offset: u5 = @intCast(info.operand_offset);
+    return @as(u16, @intFromEnum(info.canonical)) |
+        (@as(u16, width) << 8) |
+        (@as(u16, operand_offset) << 11);
+}
+
+fn unpackBranchInfo(bits: u16) ?BranchInfo {
+    if (bits == 0) return null;
+    return .{
+        .canonical = @enumFromInt(@as(u8, @truncate(bits))),
+        .width = @enumFromInt(@as(u8, @truncate((bits >> 8) & 0b111))),
+        .operand_offset = @as(u8, @truncate(bits >> 11)),
+    };
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1874,6 +1929,56 @@ test "Op: instruction specs classify representative execution contracts" {
     try testing.expectEqual(BaselineStrategy.inline_, Op.add.spec().baseline);
     try testing.expectEqual(BaselineStrategy.inline_, Op.inc_reg.spec().baseline);
     try testing.expectEqual(BaselineStrategy.unsupported, Op.await_.spec().baseline);
+}
+
+test "Op: branch metadata agrees with the instruction schema" {
+    @setEvalBranchQuota(10_000);
+    inline for (@typeInfo(Op).@"enum".field_names) |field_name| {
+        const op: Op = @field(Op, field_name);
+        const info = op.branchInfo();
+        try testing.expectEqual(op.branchInfoUncached(), info);
+        const is_relative_branch = switch (op.spec().control_flow) {
+            .jump, .conditional_jump => true,
+            else => false,
+        };
+        try testing.expectEqual(is_relative_branch, info != null);
+
+        if (info) |branch| {
+            try testing.expectEqual(branch, op.branchInfoForDispatch());
+            try testing.expectEqual(branch, op.branchInfoInlineForDispatch());
+            const expected_kind: OperandKind = switch (branch.width) {
+                .i8 => .i8,
+                .i16 => .i16,
+                .i32 => .i32,
+            };
+            var offset: u8 = 0;
+            var found_displacement = false;
+            for (op.spec().layout.operands()) |kind| {
+                if (offset == branch.operand_offset) {
+                    try testing.expectEqual(expected_kind, kind);
+                    found_displacement = true;
+                }
+                offset += kind.byteSize();
+            }
+            try testing.expect(found_displacement);
+            try testing.expectEqual(
+                op.operandSize(),
+                branch.operand_offset + branch.width.byteSize(),
+            );
+
+            const canonical_info = branch.canonical.branchInfo().?;
+            try testing.expectEqual(branch.canonical, canonical_info.canonical);
+            try testing.expectEqual(BranchWidth.i16, canonical_info.width);
+            try testing.expectEqual(op, branch.canonical.branchVariant(branch.width));
+
+            inline for ([_]BranchWidth{ .i8, .i16, .i32 }) |width| {
+                const variant = branch.canonical.branchVariant(width);
+                const variant_info = variant.branchInfo().?;
+                try testing.expectEqual(branch.canonical, variant_info.canonical);
+                try testing.expectEqual(width, variant_info.width);
+            }
+        }
+    }
 }
 
 test "Op: operandSize agrees with the documented encoding" {
