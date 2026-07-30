@@ -174,6 +174,8 @@ fn definitelyOverwritesAccumulator(op: Op) bool {
         .lda_new_target,
         .inc_reg,
         .dec_reg,
+        .post_inc_reg,
+        .post_dec_reg,
         => true,
         else => false,
     };
@@ -910,9 +912,10 @@ test "regalloc(copy): production gate skips sparse chunks" {
 }
 
 test "regalloc(copy): register-update overwrites permit Mov" {
-    // IncReg / DecReg read and update their encoded register, then leave the
-    // bumped value in the accumulator; neither consumes the incoming value.
-    inline for (.{ Op.inc_reg, Op.dec_reg }) |update| {
+    // Register-update forms read and update their encoded register, then
+    // overwrite the accumulator with either the bumped or old numeric value;
+    // none consumes the incoming accumulator value.
+    inline for (.{ Op.inc_reg, Op.dec_reg, Op.post_inc_reg, Op.post_dec_reg }) |update| {
         var code = [_]u8{
             @intFromEnum(Op.ldar_1),
             @intFromEnum(Op.star),

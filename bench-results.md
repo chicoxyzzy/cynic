@@ -17,6 +17,100 @@ new run against the previous section with the *same host*.
 
 ## History
 
+### 2026-07-30 — consumed postfix register updates, host `Darwin 25.6.0 arm64`
+
+Bytecode telemetry isolated Crypto's consumed postfix register update as the
+largest remaining exact sequence. An instrumentation-only build from
+`b40518d8` (the compiler and macro sources are identical to merged baseline
+`da6e1ce7`; the intervening changes are property-handler-only) recorded
+118,864,402 logical instructions. It executed
+`ToNumeric → Star old → Inc` 2,983,837 times; the following `Star0` and
+`Star3` register writebacks identified the two dominant register sites.
+Re-running the same telemetry on the final bytecode measured
+**2,977,794 `PostIncReg`** and **226 `PostDecReg`** executions.
+Collapsing each six-op
+`Ldar; ToNumeric; Star old; Inc; Star binding; Ldar old` sequence to one
+dispatch removes **14,890,100 instructions**, or **12.53%** of Crypto's old
+dynamic total (118,864,402 → 103,974,302). Static Crypto bytecode also shrinks
+by 130 instructions and 187 bytes.
+
+The compiler now emits `PostIncReg` / `PostDecReg` for a consumed postfix
+update of a non-TDZ register binding. The opcode performs GetValue,
+ToNumeric, and the type-matched Number/BigInt bump; it commits only the
+bumped value to the binding while leaving the coerced **old** numeric value
+in the accumulator. Throwing coercion therefore leaves the binding
+unchanged. For object-to-BigInt coercion, the old BigInt is published through
+the frame accumulator before allocating the bumped BigInt, so it remains a
+GC root without temporarily mutating the binding.
+
+This follows existing interpreter prior art rather than inventing a novel
+result convention: V8's bytecode generator has an explicit TODO for proper
+`PostInc` / `PostDec` bytecodes after its current ToNumeric-and-save lowering
+([source](https://github.com/v8/v8/blob/0616192af6309f2121f27ad735485db602c11fa6/src/interpreter/bytecode-generator.cc#L7514-L7735)),
+while QuickJS already carries dedicated `post_inc` / `post_dec` opcodes
+([source](https://github.com/bellard/quickjs/blob/04be246001599f5995fa2f2d8c91a0f198d3f34c/quickjs-opcode.h#L218-L227)).
+The new forms remain an intentional JIT tier boundary: the old sequence was
+already refused by Bistromath and Ohaimark at `ToNumeric` / `Inc`, so
+coverage is unchanged.
+
+On 40 interleaved Lantern-only pairs, exact candidate/base SHA-256 binaries
+improved the six-macro geometric mean to **0.9960x**:
+
+| bench | base_ms | head_ms | ratio | spread% |
+|---|---:|---:|---:|---:|
+| richards | 242.07 | 241.74 | 1.005x | 44.0 |
+| deltablue | 175.39 | 173.52 | 0.993x | 15.2 |
+| crypto | 134.15 | 128.92 | 0.962x | 41.9 |
+| raytrace | 78.31 | 78.41 | 1.003x | 24.9 |
+| navier_stokes | 98.17 | 99.66 | 1.013x | 92.7 |
+| splay | 167.90 | 168.52 | 1.001x | 42.6 |
+
+Swapping the binaries confirmed a **0.9951x** candidate/main geometric mean.
+The inverted candidate ratios were **1.004x, 0.993x, 0.958x, 0.997x,
+1.025x, and 0.995x**, respectively. Thus the targeted Crypto gain is
+3.8–4.2%; the dispatch-table layout costs Navier 1.3–2.5%, but the suite
+geomean remains positive in both launch orders.
+
+The clean x86_64 gate used new `/tmp` checkouts at exact base `da6e1ce7`,
+verified the local source patch before building distinct ReleaseFast binaries,
+and pinned the driver plus inherited children to CPU 3. Thirty forward pairs
+improved the geometric mean to **0.9770x**:
+
+| bench | base_ms | head_ms | ratio | spread% |
+|---|---:|---:|---:|---:|
+| richards | 583.14 | 577.30 | 0.980x | 20.1 |
+| deltablue | 426.45 | 423.68 | 0.989x | 13.6 |
+| crypto | 392.69 | 363.39 | 0.920x | 25.2 |
+| raytrace | 211.40 | 202.76 | 0.957x | 23.6 |
+| navier_stokes | 249.72 | 253.70 | 1.020x | 24.5 |
+| splay | 481.84 | 484.07 | 0.999x | 16.7 |
+
+The swapped 30-pair run produced a **0.9802x** candidate/main geometric mean;
+its inverted candidate ratios were **0.984x, 0.981x, 0.918x, 0.964x,
+1.034x, and 1.003x**. Combining both launch orders gives **0.9786x**
+order-neutral: Crypto improves 8.1%, Navier gives back 2.7%, and the whole
+macro set improves 2.1%. Base/candidate binary SHA-256 prefixes were
+`416a20e3` / `59a1f528`; all 360 timed invocations succeeded.
+
+Two smaller encodings were measured and rejected. A single
+`PostUpdateReg r, delta` opcode made Crypto **1.021x** slower than the
+two-opcode form (the swapped comparison was **1.027x** slower after
+inversion) and regressed the six-macro baseline geomean to **1.0041x**.
+A `PostIncReg`-only hybrid avoided the nearly cold decrement opcode but
+landed at **0.9990x / 0.9955x** in 40-pair forward/swapped runs, for a
+combined **0.9972x** versus the symmetric pair's **0.9955x**. The extra
+opcode therefore earns its dispatch-table slot empirically, not merely for
+symmetry.
+
+Validation covered the complete ReleaseSafe unit suite (**3,332 pass / 261
+expected skip**), dedicated Int32/double/`-0`/NaN/infinity/overflow,
+string/Boolean/null/undefined, BigInt, object-coercion, Symbol, thrown
+coercion, failure-atomicity, and alternating-GC tests, plus the focused
+postfix increment/decrement test262 buckets in interpreter, forced-T1, and
+ReleaseSafe `gc_threshold=1` postures. The non-cached full sweep retained the
+merged pass set (**48,653 pass / 1,324 fail**, plus ShadowRealm **63 / 1**).
+Independent correctness and performance reviews found no actionable issue.
+
 ### 2026-07-30 — impossible property-probe gates, host `Linux 6.8.0-117-generic x86_64` (remote bench box)
 
 Pinned-CPU `perf` profiles of exact merged main `b40518d8` found two pure

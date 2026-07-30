@@ -1742,8 +1742,13 @@ pub const Compiler = struct {
         // the one-dispatch update while every old-value / TDZ-sensitive path
         // retains the existing explicit sequence.
         const need_old = !u.prefix and result_used;
-        if (binding.is_register and !binding.register_tdz and !need_old) {
-            const op: Op = if (u.op == .increment) .inc_reg else .dec_reg;
+        if (binding.is_register and !binding.register_tdz) {
+            const op: Op = if (need_old)
+                if (u.op == .increment) .post_inc_reg else .post_dec_reg
+            else if (u.op == .increment)
+                .inc_reg
+            else
+                .dec_reg;
             try self.builder.emitUpdateReg(op, u.span, binding.register);
             return;
         }
@@ -15770,18 +15775,32 @@ test "compiler: discarded non-TDZ register updates fuse into IncReg and DecReg" 
     try testing.expect(std.mem.indexOf(u8, dec_body, "ToNumeric") == null);
 }
 
-test "compiler: consumed postfix and TDZ register updates stay unfused" {
-    // A consumed postfix must reload the OLD numeric value, which IncReg does
-    // not preserve. A body-local `let` still carries register_tdz while its
-    // own initializer is running, so that site must retain the existing
-    // load/check/store sequence rather than hiding the ReferenceError
-    // ordering in the fused opcode.
-    const postfix_dump = try dumpExpr("(function(x){ return x++; })");
-    defer testing.allocator.free(postfix_dump);
-    const postfix_body = t0Of(postfix_dump);
-    try testing.expect(std.mem.indexOf(u8, postfix_body, "IncReg") == null);
-    try testing.expect(std.mem.indexOf(u8, postfix_body, "ToNumeric") != null);
+test "compiler: consumed postfix register updates fuse without an old-value temp" {
+    // §13.4 consumed postfix updates return the ToNumeric-coerced OLD value
+    // while committing the bumped value to the binding. A dedicated register
+    // form can perform both results without the six-dispatch
+    // Ldar/ToNumeric/Star/Inc-or-Dec/Star/Ldar sequence.
+    const inc_dump = try dumpExpr("(function(x){ return x++; })");
+    defer testing.allocator.free(inc_dump);
+    const inc_body = t0Of(inc_dump);
+    try testing.expect(std.mem.indexOf(u8, inc_body, "PostIncReg r0") != null);
+    try testing.expect(std.mem.indexOf(u8, inc_body, "ToNumeric") == null);
+    try testing.expect(std.mem.indexOf(u8, inc_body, "Star1") == null);
+    try testing.expect(std.mem.indexOf(u8, inc_body, "Ldar1") == null);
 
+    const dec_dump = try dumpExpr("(function(x){ return x--; })");
+    defer testing.allocator.free(dec_dump);
+    const dec_body = t0Of(dec_dump);
+    try testing.expect(std.mem.indexOf(u8, dec_body, "PostDecReg r0") != null);
+    try testing.expect(std.mem.indexOf(u8, dec_body, "ToNumeric") == null);
+    try testing.expect(std.mem.indexOf(u8, dec_body, "Star1") == null);
+    try testing.expect(std.mem.indexOf(u8, dec_body, "Ldar1") == null);
+}
+
+test "compiler: TDZ register updates stay unfused" {
+    // A body-local `let` still carries register_tdz while its own initializer
+    // is running, so that site must retain the existing load/check/store
+    // sequence rather than hiding the ReferenceError ordering in a fused op.
     const tdz_dump = try dumpExpr("(function(){ let x=++x; return x; })");
     defer testing.allocator.free(tdz_dump);
     const tdz_body = t0Of(tdz_dump);

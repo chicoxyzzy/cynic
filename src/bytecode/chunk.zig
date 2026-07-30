@@ -1324,11 +1324,12 @@ pub const Builder = struct {
         }
     }
 
-    /// Emit a §13.4 register-binding update. Both variants share the
-    /// `[op][r:u8]` encoding; keeping the pair in one emitter prevents the
+    /// Emit a §13.4 register-binding update. All variants share the
+    /// `[op][r:u8]` encoding; keeping them in one emitter prevents the
     /// compiler and disassembler operand layouts from drifting apart.
     pub fn emitUpdateReg(self: *Builder, op: Op, span: Span, r: u8) !void {
-        std.debug.assert(op == .inc_reg or op == .dec_reg);
+        std.debug.assert(op == .inc_reg or op == .dec_reg or
+            op == .post_inc_reg or op == .post_dec_reg);
         try self.emitOp(op, span);
         try self.emitU8(r);
     }

@@ -209,7 +209,11 @@ pub fn effectOf(op: Op, code: []const u8, i: usize) Effect {
         // ── Read + write the same register ──
         // `[op][r:u8]` — read the old binding value and replace it with the
         // ToNumeric-bumped result.
-        .inc_reg, .dec_reg => .{ .reads = .{ code[i + 1], 0, 0 }, .n_reads = 1, .write = code[i + 1] },
+        .inc_reg, .dec_reg, .post_inc_reg, .post_dec_reg => .{
+            .reads = .{ code[i + 1], 0, 0 },
+            .n_reads = 1,
+            .write = code[i + 1],
+        },
         // `[op][r_counter:u8][r_bound:u8][off:i8|i16|i32]` — counter is read
         // (test + increment) and written (the bumped value).
         .loop_inc_lt, .loop_inc_lt8, .loop_inc_lt32 => .{ .reads = .{ code[i + 1], code[i + 2], 0 }, .n_reads = 2, .write = code[i + 1] },
@@ -754,6 +758,18 @@ test "liveness: effectOf classifies register operands" {
     try testing.expectEqual(@as(u8, 1), e_dec_reg.n_reads);
     try testing.expectEqual(@as(u8, 7), e_dec_reg.reads[0]);
     try testing.expectEqual(@as(?u8, 7), e_dec_reg.write);
+
+    var post_inc_reg = [_]u8{ byteOf(.post_inc_reg), 8 };
+    const e_post_inc_reg = effectOf(.post_inc_reg, &post_inc_reg, 0);
+    try testing.expectEqual(@as(u8, 1), e_post_inc_reg.n_reads);
+    try testing.expectEqual(@as(u8, 8), e_post_inc_reg.reads[0]);
+    try testing.expectEqual(@as(?u8, 8), e_post_inc_reg.write);
+
+    var post_dec_reg = [_]u8{ byteOf(.post_dec_reg), 9 };
+    const e_post_dec_reg = effectOf(.post_dec_reg, &post_dec_reg, 0);
+    try testing.expectEqual(@as(u8, 1), e_post_dec_reg.n_reads);
+    try testing.expectEqual(@as(u8, 9), e_post_dec_reg.reads[0]);
+    try testing.expectEqual(@as(?u8, 9), e_post_dec_reg.write);
 
     // call reads the [callee .. callee+argc] window.
     var call = [_]u8{ byteOf(.call), 4, 2, 0, 0 }; // r_callee=4, argc=2
