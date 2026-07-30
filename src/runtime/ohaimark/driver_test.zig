@@ -3,6 +3,7 @@ const std = @import("std");
 const chunk_mod = @import("../../bytecode/chunk.zig");
 const Builder = chunk_mod.Builder;
 const compiler_mod = @import("../../bytecode/compiler.zig");
+const Op = @import("../../bytecode/op.zig").Op;
 const parser_mod = @import("../../parser/parser.zig");
 const Span = @import("../../source.zig").Span;
 const lantern = @import("../lantern/interpreter.zig");
@@ -141,6 +142,42 @@ test "Ohaimark forced function entry compiles and completes through normal dispa
     try testing.expectEqual(@as(u64, 2), realm.heap.ohaimark_stats.executed_entries);
     try testing.expectEqual(@as(u64, 2), realm.heap.ohaimark_stats.completed_entries);
     try testing.expectEqual(@as(u64, 0), realm.heap.ohaimark_stats.guard_exits);
+}
+
+test "Ohaimark forced function entry compiles StarLdar" {
+    if (comptime !driver.supported) return error.SkipZigTest;
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+    realm.jit_threshold_override = 1;
+    realm.ohaimark_enabled = true;
+    realm.ohaimark_threshold_override = 1;
+
+    const source =
+        \\function mix() {
+        \\  let a = 1; let b = 2; let c = 3; let d = 4;
+        \\  return (a + b) + (c + d);
+        \\}
+        \\mix();
+        \\mix();
+    ;
+    var chunk = try compileScript(&realm, source);
+    defer chunk.deinit(testing.allocator);
+    const body = templateNamed(&chunk, "mix");
+    var saw_star_ldar = false;
+    var pc: usize = 0;
+    while (pc < body.code.len) {
+        const op: Op = @enumFromInt(body.code[pc]);
+        saw_star_ldar = saw_star_ldar or op == .star_ldar;
+        pc += 1 + Op.operandSize(op);
+    }
+    try testing.expect(saw_star_ldar);
+
+    const value = try runValue(&realm, &chunk);
+    try testing.expectEqual(Value.fromInt32(10).bits, value.bits);
+    const state = body.jit_state.?;
+    try testing.expectEqual(chunk_mod.Chunk.JitState.Tier.compiled, state.ohaimark.tier);
+    try testing.expect(state.ohaimark.entry() != null);
 }
 
 test "Ohaimark warmth continues through a compiled Bistromath caller" {

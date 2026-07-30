@@ -205,6 +205,13 @@ pub fn effectOf(op: Op, code: []const u8, i: usize) Effect {
         .star => Effect.writeReg(code[i + 1]),
         .star_0, .star_1, .star_2, .star_3 => Effect.writeReg(@intFromEnum(op) - @intFromEnum(Op.star_0)),
         .mov => .{ .reads = .{ code[i + 1], 0, 0 }, .n_reads = 1, .write = code[i + 2] },
+        // Store happens before load. For an aliasing pair, the load reads the
+        // just-written value rather than the old register contents, so there
+        // is no old-value read to keep live.
+        .star_ldar => if (code[i + 1] == code[i + 2])
+            Effect.writeReg(code[i + 1])
+        else
+            .{ .reads = .{ code[i + 2], 0, 0 }, .n_reads = 1, .write = code[i + 1] },
 
         // ── Read + write the same register ──
         // `[op][r:u8]` — read the old binding value and replace it with the
@@ -737,6 +744,19 @@ test "liveness: effectOf classifies register operands" {
     const e_mov = effectOf(.mov, &mov, 0);
     try testing.expectEqual(@as(u8, 1), e_mov.reads[0]);
     try testing.expectEqual(@as(?u8, 2), e_mov.write);
+
+    // StarLdar stores dst before loading src. Distinct registers read the
+    // source's old value; an alias reads the just-written value and therefore
+    // has no old-value read in the liveness model.
+    var star_ldar = [_]u8{ byteOf(.star_ldar), 2, 4 };
+    const e_star_ldar = effectOf(.star_ldar, &star_ldar, 0);
+    try testing.expectEqual(@as(u8, 1), e_star_ldar.n_reads);
+    try testing.expectEqual(@as(u8, 4), e_star_ldar.reads[0]);
+    try testing.expectEqual(@as(?u8, 2), e_star_ldar.write);
+    var star_ldar_alias = [_]u8{ byteOf(.star_ldar), 3, 3 };
+    const e_star_ldar_alias = effectOf(.star_ldar, &star_ldar_alias, 0);
+    try testing.expectEqual(@as(u8, 0), e_star_ldar_alias.n_reads);
+    try testing.expectEqual(@as(?u8, 3), e_star_ldar_alias.write);
 
     // loop_inc_lt reads counter+bound, writes counter.
     var lil = [_]u8{ byteOf(.loop_inc_lt), 1, 2, 0, 0 };

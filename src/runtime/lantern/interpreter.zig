@@ -1570,6 +1570,14 @@ pub fn runFrames(
             registers[dst] = registers[src];
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
+        .star_ldar => {
+            const dst = code[ip];
+            const src = code[ip + 1];
+            ip += 2;
+            registers[dst] = acc;
+            acc = registers[src];
+            continue :dispatch try decodeNext(code, &ip, &committed);
+        },
         .lda_hole => {
             acc = Value.hole_;
             continue :dispatch try decodeNext(code, &ip, &committed);

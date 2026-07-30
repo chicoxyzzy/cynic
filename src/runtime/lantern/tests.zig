@@ -112,6 +112,39 @@ fn expectScriptStringWithBuiltins(source: []const u8, expected: []const u8) !voi
     try testing.expectEqualStrings(expected, s.flatBytes());
 }
 
+test "lantern: StarLdar stores before loading when registers alias" {
+    const Op = op_mod.Op;
+    const code = [_]u8{
+        @intFromEnum(Op.lda_zero),
+        @intFromEnum(Op.star),
+        1,
+        @intFromEnum(Op.lda_one),
+        @intFromEnum(Op.star_ldar),
+        1,
+        1,
+        @intFromEnum(Op.return_),
+    };
+    const chunk: chunk_mod.Chunk = .{
+        .code = &code,
+        .constants = &.{},
+        .source_positions = &.{},
+        .handlers = &.{},
+        .function_templates = &.{},
+        .class_templates = &.{},
+        .register_count = 2,
+    };
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+
+    const result = try run(testing.allocator, &realm, &chunk);
+    const value = switch (result) {
+        .value, .yielded => |v| v,
+        .thrown => return error.UncaughtException,
+    };
+    try testing.expect(value.isInt32());
+    try testing.expectEqual(@as(i32, 1), value.asInt32());
+}
+
 /// Unhardened-realm variant of `expectScriptIntWithBuiltins`. Use
 /// when the test monkey-patches a primordial (e.g. installs an
 /// indexed accessor on `Object.prototype`) or probes a descriptor
