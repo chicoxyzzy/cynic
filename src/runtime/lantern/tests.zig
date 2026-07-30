@@ -1777,6 +1777,41 @@ test "reg-move: computed read of a register-bound receiver" {
     try expectScriptInt("(function(a,i){ return a[i]; })([10,20,30], 1);", 20);
 }
 
+test "reg-move: computed read keeps receiver across a distinct register update" {
+    try expectScriptInt("(function(a,i){ return a[++i]; })([10,20,30], 0);", 20);
+}
+
+test "reg-move: same-register key update reads the pre-update receiver" {
+    // §13.3.2.1 fixes the base before evaluating `++a`. The update replaces
+    // the binding with Number 1, but the property read still targets the
+    // original object.
+    try expectScriptIntWithBuiltins(
+        "(function(a){ return a[++a]; })({ 1: 42, valueOf(){ return 0; } });",
+        42,
+    );
+}
+
+test "reg-move: distinct key coercion keeps the source-register receiver rooted" {
+    // Removing the snapshot leaves `a` rooted in its parameter register while
+    // ToNumeric(i) re-enters JS and forces a collection.
+    try expectScriptIntWithBuiltins(
+        \\let index = { valueOf(){ __collectGarbage(); return 0; } };
+        \\(function(a,i){ return a[++i]; })([10,20,30], index);
+    , 20);
+}
+
+test "reg-move: captured receiver keeps its pre-key snapshot" {
+    // A receiver captured by the key's coercion callback is not register-bound.
+    // §13.3.2.1 therefore keeps the conservative snapshot before `++i` can
+    // re-enter JS and replace `a`.
+    try expectScriptInt(
+        \\(function(a,i){
+        \\  i.valueOf = function(){ a = { 1: 99 }; return 0; };
+        \\  return a[++i];
+        \\})({ 1: 42 }, {});
+    , 42);
+}
+
 test "reg-move: member store to a register-bound receiver" {
     try expectScriptInt("(function(o,v){ o.x = v; return o.x; })({}, 7);", 7);
 }
