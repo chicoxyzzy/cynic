@@ -17,6 +17,77 @@ new run against the previous section with the *same host*.
 
 ## History
 
+### 2026-07-30 — impossible property-probe gates, host `Linux 6.8.0-117-generic x86_64` (remote bench box)
+
+Pinned-CPU `perf` profiles of exact merged main `b40518d8` found two pure
+classification paths doing work before the runtime knew that their result
+could matter:
+
+- `typedArrayChainSetDecision` accounted for **4.26%** of Navier-Stokes and
+  **2.46%** of Crypto callgraph cycles. It ran
+  §7.1.21 CanonicalNumericIndexString parsing and NumberToString round-tripping
+  before discovering that the receiver's prototype chain contained no
+  TypedArray.
+- `tryFillSyntheticPrototypeLoadIC` accounted for about **2.5%** of Richards
+  and **9.8%** of DeltaBlue inclusive cycles. The macro posture is
+  `--unhardened`, so the override-mistake installation pass creates zero
+  `SyntheticAccessor` cells, but every eligible named-load miss still probed
+  shapes, property tables, accessors, and the prototype chain.
+
+Head first rejects property keys whose leading byte cannot begin any canonical
+numeric spelling (decimal digit, `-`, `I`, or `N`), then walks to the first
+TypedArray ancestor, and only then performs the full canonical parse. The
+prototype walk and parser are both pure, so their order is unobservable and the
+first TypedArray still owns the §10.4.5.6 decision. Separately, the synthetic
+load-IC fill helper returns immediately when the realm's authoritative
+`synth_accessor_cells` table is empty. Snapshot restore repopulates that table
+before execution, making its emptiness a stronger capability test than the
+mutable hardened-posture flag. The gate deliberately remains inside the
+outlined helper: call-site forms removed its prologue too, but destabilized the
+giant dispatch handlers enough to regress unrelated macros.
+
+On `Darwin 25.6.0 arm64`, 40 interleaved Lantern-only pairs improved the macro
+geometric mean to **0.9702x**:
+
+| bench | base_ms | head_ms | ratio | spread% |
+|---|---:|---:|---:|---:|
+| richards | 237.36 | 231.16 | 0.976x | 6.3 |
+| deltablue | 183.06 | 166.94 | 0.911x | 3.9 |
+| crypto | 131.68 | 128.86 | 0.983x | 6.1 |
+| raytrace | 76.14 | 75.87 | 1.000x | 4.5 |
+| navier_stokes | 99.49 | 95.13 | 0.957x | 14.9 |
+| splay | 160.44 | 159.88 | 0.997x | 4.5 |
+
+Swapping the binaries produced a **0.9666x** candidate/main geometric mean;
+the inverted per-fixture ratios were **0.974x, 0.910x, 0.981x, 0.994x,
+0.955x, and 0.988x**.
+
+The clean x86_64 rebuild used a distinct install prefix and SHA-256, then ran
+30 pairs with the driver and both children pinned to CPU 3. Forward order
+improved the geometric mean to **0.9688x**:
+
+| bench | base_ms | head_ms | ratio | spread% |
+|---|---:|---:|---:|---:|
+| richards | 579.16 | 572.64 | 0.981x | 22.8 |
+| deltablue | 448.12 | 419.89 | 0.940x | 24.4 |
+| crypto | 382.54 | 367.47 | 0.959x | 41.1 |
+| raytrace | 204.15 | 200.15 | 0.981x | 25.6 |
+| navier_stokes | 261.76 | 247.02 | 0.954x | 24.5 |
+| splay | 469.12 | 462.61 | 0.999x | 18.9 |
+
+The swapped run confirmed a **0.9760x** candidate/main geometric mean; its
+inverted ratios were **0.984x, 0.946x, 0.961x, 0.992x, 0.970x, and 1.004x**.
+Thus Splay is order-sensitive but statistically flat, while the five resolved
+signals all improve.
+
+Validation covered the complete ReleaseSafe unit suite (**3,350 pass / 261
+expected skip**), the focused TypedArray Integer-Indexed `[[Set]]` test262
+bucket (**53 / 53**), and the hardened-JavaScript suite (**36 / 36**).
+Regression tests pin canonical sentinels (`-0`, `NaN`, and both infinities),
+same- versus different-receiver coercion, valid and noncanonical inherited
+writes, plus ordinary data and fused-method prototype loads in a realm with no
+synthetic cells.
+
 ### 2026-07-30 — direct-threaded `this` property loads, host `Linux 6.8.0-117-generic x86_64` (remote bench box)
 
 Interleaved A/B on one pinned CPU: runtime head `7e93321a` against exact
