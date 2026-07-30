@@ -17,6 +17,116 @@ new run against the previous section with the *same host*.
 
 ## History
 
+### 2026-07-30 — target-specific computed-receiver register reuse, host `Darwin 25.6.0 arm64`
+
+Exact stats-enabled ReleaseFast binaries from merged main `339818b0` and the
+candidate implementation (SHA-256 prefixes `7d06db73` / `58d647d3`) isolate
+the deterministic effect on Navier-Stokes. Logical instructions fell
+**58,160,156 → 53,605,322**, removing **4,554,834 dispatches (-7.83%)**.
+Static bytecode moved **1,934 → 1,916 instructions** and **4,546 → 4,499
+bytes**; the script-wide maximum register count remained 28. Fifteen source
+reads became eligible. Baseline `Mov → IncReg` pairs executed **4,587,520**
+times, including **4,456,448** `Mov → IncReg → LdaComputed8` triples.
+Removing the sites' 14 `Mov` snapshots and one `Star` snapshot also exposed
+the existing finalizer's reload/fusion rewrites.
+
+§13.3.2.1 property-access evaluation, via §13.3.3
+EvaluatePropertyAccessWithExpressionKey, fixes the receiver value before
+evaluating the computed key. Cynic therefore normally snapshots a
+register-bound receiver before a key that may write a register. For the
+specific `receiver[++index]` / `receiver[index++]` / decrement shapes, the
+compiler can resolve both bindings before emission: when the receiver and
+updated binding are distinct initialized register slots, the update cannot
+clobber the receiver. Final bytecode consequently changes from
+
+    Mov r_receiver, r_tmp
+    IncReg r_index
+    LdaComputed8 r_tmp
+
+to
+
+    IncReg r_index
+    LdaComputed8 r_receiver
+
+with no new opcode or dispatch-table entry. Same-register updates such as
+`a[++a]`, assignments, member/destructuring targets, env/global/TDZ
+bindings, captured receivers, and optional chains retain the snapshot or
+nullish-short-circuit path. The receiver remains a frame-register GC root
+while `ToNumeric` re-enters JavaScript.
+
+Representative interpreter prior art keeps the evaluated receiver separate
+while the key is evaluated: V8 Ignition visits the base into a register,
+evaluates a keyed property expression into the accumulator, then issues
+`LoadKeyedProperty(obj)` ([source](https://github.com/v8/v8/blob/f4a59ca0ef1286ac4eccda99a90fccf1aea1ac93/src/interpreter/bytecode-generator.cc#L6503-L6547),
+[call site](https://github.com/v8/v8/blob/f4a59ca0ef1286ac4eccda99a90fccf1aea1ac93/src/interpreter/bytecode-generator.cc#L6835-L6842));
+Hermes HBC lowers a computed read to `GetByVal(result, obj, prop)`
+([source](https://github.com/facebook/hermes/blob/ccc2a2f35267d5009d3fb24b61120357cdba0acb/lib/BCGen/HBC/ISel.cpp#L750-L774));
+and QuickJS's `get_array_el` consumes distinct object and property stack
+operands ([source](https://github.com/bellard/quickjs/blob/04be246001599f5995fa2f2d8c91a0f198d3f34c/quickjs-opcode.h#L140-L142)).
+Cynic's narrower contribution is reusing an already-bound receiver register
+when a target-specific write proof makes the extra snapshot unnecessary.
+
+Forty paired Lantern-only runs in each launch order used exact non-stats
+baseline/candidate SHA-256 binaries `8c49a670` / `64fe2890`. The forward
+runner reports candidate/base, the swapped runner reports base/candidate, and
+the order-neutral candidate/base ratio is
+`sqrt((forward C/B) / (reverse B/C))`. A first run immediately after
+compilation showed process-wide spreads as high as 892% and was discarded in
+full. A fresh 40+40 run after the other local jobs settled was materially
+less distorted, though its per-workload spreads still ranged from 7.1% to
+91.2%:
+
+| bench | forward C/B | reverse B/C | neutral C/B |
+|---|---:|---:|---:|
+| richards | 0.998x | 0.998x | 1.000x |
+| deltablue | 1.001x | 0.997x | 1.002x |
+| crypto | 1.000x | 1.008x | 0.996x |
+| raytrace | 1.005x | 1.005x | 1.000x |
+| navier_stokes | 0.977x | 1.033x | 0.973x |
+| splay | 1.018x | 1.001x | 1.008x |
+| **geomean** |  |  | **0.996x** |
+
+The order-neutral arm64 macro estimate is **0.9964x**. Given the retained
+spread, the sub-percent geomean is a no-regression signal rather than a
+precise speedup magnitude. Navier-Stokes measures **0.9725x** across the two
+roles, while the worst resolved workload estimate is Splay at **1.0085x**.
+
+The pinned-CPU x86_64 confirmation used exact base `339818b0` and
+candidate `70368694`, normal ReleaseFast CLI SHA-256 prefixes `08d68fa5` /
+`3700c82d`, and an exact-main benchmark driver (`0e7c03a3`). The driver and
+all child processes inherited `taskset -c 3`. Forty pairs in each physical
+launch role produced:
+
+| bench | forward C/B | reverse B/C | neutral C/B |
+|---|---:|---:|---:|
+| richards | 0.999x | 1.024x | 0.988x |
+| deltablue | 0.979x | 1.009x | 0.985x |
+| crypto | 1.002x | 1.009x | 0.997x |
+| raytrace | 1.019x | 1.016x | 1.001x |
+| navier_stokes | 0.966x | 1.025x | 0.971x |
+| splay | 1.005x | 0.977x | 1.014x |
+| **geomean** |  |  | **0.993x** |
+
+The neutral x86_64 geometric-mean estimate is **0.9925x**. Navier-Stokes
+measures **0.9708x**, and the worst workload is Splay at **1.0142x**, below
+the 2% retention gate. A separate 20-pair run in each
+production-default-tier role measured a **0.9955x** neutral geometric mean;
+its per-workload neutral ratios were **0.995x, 1.000x, 0.993x, 1.003x,
+0.970x, and 1.012x**, respectively. Interpreter spreads remained
+19.4–45.2%, and default-tier spreads 13.6–38.8%, so these sub-percent
+geomeans are directional retention evidence, not precise effect sizes.
+Crucially, both launch roles independently show the targeted Navier-Stokes
+improvement and every order-neutral workload stays inside the 2% gate.
+
+Validation covered prefix/postfix increment and decrement code generation,
+same-register and assignment fallback, capture during key coercion, and
+forced-GC re-entry. All eight relevant non-cached test262 buckets had
+identical tallies and displayed runtime-failure sets across Lantern, forced
+Bistromath, and forced Ohaimark. The complete ReleaseSafe unit suite retained
+**3,341 pass / 261 intentional skips / 0 fail**. The non-cached full test262
+sweep retained **48,653 pass / 1,324 known fail**, plus ShadowRealm
+**63 / 1**.
+
 ### 2026-07-30 — finalized `StarLdar` store/load fusion, host `Darwin 25.6.0 arm64`
 
 Exact merged-main and final-candidate bytecode telemetry over the six macro
