@@ -7956,6 +7956,155 @@ test "GC: consumed postfix register update roots coerced old BigInt across bump"
     , "bigint:123456789012345678901234567890:bigint:123456789012345678901234567891:1");
 }
 
+test "GC: numeric binary coercion roots fresh lhs primitive across rhs re-entry" {
+    // Coercing the lhs returns a fresh BigInt that lives only in the native
+    // arithmetic helper while rhs coercion allocates and collects. The
+    // abstract operation must root that intermediate primitive.
+    try expectScriptStringUnderAlternatingGcPressure(
+        \\function multiply(a, b) { return a * b; }
+        \\let order = "";
+        \\const lhs = {
+        \\  valueOf() {
+        \\    const junk = [];
+        \\    for (let i = 0; i < 20; i++) junk.push({ i });
+        \\    order += "L";
+        \\    return BigInt("12345678901234567890");
+        \\  }
+        \\};
+        \\const rhs = {
+        \\  valueOf() {
+        \\    const junk = [];
+        \\    for (let i = 0; i < 20; i++) junk.push({ i });
+        \\    order += "R";
+        \\    return 2n;
+        \\  }
+        \\};
+        \\const product = multiply(lhs, rhs);
+        \\typeof product + ":" + product + ":" + order;
+    , "bigint:24691357802469135780:LR");
+}
+
+test "GC: addition coercion roots fresh lhs primitive across rhs re-entry" {
+    // Addition has its own ToPrimitive path because of string concatenation,
+    // but it owes the same lifetime guarantee between left and right
+    // coercion as the other binary operators.
+    try expectScriptStringUnderAlternatingGcPressure(
+        \\function add(a, b) { return a + b; }
+        \\let order = "";
+        \\const lhs = {
+        \\  valueOf() {
+        \\    const junk = [];
+        \\    for (let i = 0; i < 20; i++) junk.push({ i });
+        \\    order += "L";
+        \\    return BigInt("12345678901234567890");
+        \\  }
+        \\};
+        \\const rhs = {
+        \\  valueOf() {
+        \\    const junk = [];
+        \\    for (let i = 0; i < 20; i++) junk.push({ i });
+        \\    order += "R";
+        \\    return 2n;
+        \\  }
+        \\};
+        \\const result = add(lhs, rhs);
+        \\typeof result + ":" + result + ":" + order;
+    , "bigint:12345678901234567892:LR");
+}
+
+test "GC: bitwise binary coercion roots fresh lhs primitive across rhs re-entry" {
+    // Like arithmetic, bitwise ToNumeric holds the freshly coerced lhs only
+    // in a native local while coercing the rhs. That primitive must survive
+    // allocation-pressure collection during the second user-code re-entry.
+    try expectScriptStringUnderAlternatingGcPressure(
+        \\function bitAnd(a, b) { return a & b; }
+        \\let order = "";
+        \\const lhs = {
+        \\  valueOf() {
+        \\    const junk = [];
+        \\    for (let i = 0; i < 20; i++) junk.push({ i });
+        \\    order += "L";
+        \\    return BigInt("12345678901234567890");
+        \\  }
+        \\};
+        \\const rhs = {
+        \\  valueOf() {
+        \\    const junk = [];
+        \\    for (let i = 0; i < 20; i++) junk.push({ i });
+        \\    order += "R";
+        \\    return 255n;
+        \\  }
+        \\};
+        \\const result = bitAnd(lhs, rhs);
+        \\typeof result + ":" + result + ":" + order;
+    , "bigint:210:LR");
+}
+
+test "GC: relational coercion roots fresh lhs primitive across rhs re-entry" {
+    // IsLessThan also keeps the freshly coerced lhs in a native local while
+    // rhs coercion can re-enter JavaScript and collect.
+    try expectScriptStringUnderAlternatingGcPressure(
+        \\function greaterThan(a, b) { return a > b; }
+        \\let order = "";
+        \\const lhs = {
+        \\  valueOf() {
+        \\    const junk = [];
+        \\    for (let i = 0; i < 20; i++) junk.push({ i });
+        \\    order += "L";
+        \\    return BigInt("12345678901234567890");
+        \\  }
+        \\};
+        \\const rhs = {
+        \\  valueOf() {
+        \\    const junk = [];
+        \\    for (let i = 0; i < 20; i++) junk.push({ i });
+        \\    order += "R";
+        \\    return 2n;
+        \\  }
+        \\};
+        \\const result = greaterThan(lhs, rhs);
+        \\result + ":" + order;
+    , "true:LR");
+}
+
+test "GC: fused relational branch roots fresh lhs primitive across rhs re-entry" {
+    const source =
+        \\function greaterThan(a, b) {
+        \\  if (a > b) return "yes";
+        \\  return "no";
+        \\}
+        \\let order = "";
+        \\const lhs = {
+        \\  valueOf() {
+        \\    const junk = [];
+        \\    for (let i = 0; i < 20; i++) junk.push({ i });
+        \\    order += "L";
+        \\    return BigInt("12345678901234567890");
+        \\  }
+        \\};
+        \\const rhs = {
+        \\  valueOf() {
+        \\    const junk = [];
+        \\    for (let i = 0; i < 20; i++) junk.push({ i });
+        \\    order += "R";
+        \\    return 2n;
+        \\  }
+        \\};
+        \\greaterThan(lhs, rhs) + ":" + order;
+    ;
+
+    // Keep this regression tied to the separately implemented fused
+    // compare-and-branch handler rather than silently falling back to `Gt`.
+    var shape_realm = Realm.init(testing.allocator);
+    defer shape_realm.deinit();
+    try installBuiltinsAllFeatures(&shape_realm);
+    const out = try compileAndDisassemble(&shape_realm, source);
+    defer testing.allocator.free(out);
+    try testing.expect(std.mem.indexOf(u8, out, "JmpIfNotGt") != null);
+
+    try expectScriptStringUnderAlternatingGcPressure(source, "yes:LR");
+}
+
 test "GC: generator wrapper iteration survives gc_threshold=1" {
     // `for (v of g())` opens an iterator on the wrapper JSObject
     // returned by the generator call. The wrapper sits in the
