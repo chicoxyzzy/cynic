@@ -1012,6 +1012,18 @@ sampling by `/profile`.
   60-pair local A/B measured a **0.969x** interpreter macro geometric mean and
   **0.911x** on the loop-only `arith_loop` control; the default production-tier
   macro control stayed flat at **1.003x**. See `bench-results.md`.
+- **Packed branch-metadata lookup (2026-07-30).** Relative-branch canonical
+  opcode, displacement width, and operand offset now live in a 512-byte
+  `u16` table generated at comptime from the existing branch-family
+  definition. Lantern decodes that record once per branch and derives the
+  post-instruction `ip` from the exhaustively tested final-displacement
+  invariant, removing both repeated `branchInfo()` classification and the
+  second operand-size-table load. Larger handler tails retain a scalar call
+  barrier to limit backend tail duplication; only compact `jmp_if_false` and
+  `loop_inc_lt` tails probe directly. A pinned-CPU Linux A/B measured a
+  **0.979x** interpreter macro geometric mean; 60-pair arm64 confirmation
+  measured **0.981x**, with `arith_loop` at **0.894x**. See
+  `bench-results.md`.
 - **Bistromath continuation + hardened-load closure (2026-07-16).**
   Catch/finally PCs now receive compiled reentry stubs in the shared
   bytecode-continuation table; the driver invokes Lantern's real unwinder
