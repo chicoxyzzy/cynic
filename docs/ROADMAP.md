@@ -1035,6 +1035,16 @@ sampling by `/profile`.
   measured **0.981x / 0.979x** interpreter macro geometric means on pinned
   x86_64 and **0.9952x / 0.9957x** on arm64. The arm64 production-tier
   control measured **0.9937x**. See `bench-results.md`.
+- **Impossible property-probe gates (2026-07-30).** Strict property writes now
+  reject keys that cannot begin a §7.1.21 canonical numeric spelling, walk to
+  the first TypedArray ancestor, and only then pay for numeric parsing and
+  NumberToString round-tripping. The synthetic prototype-load IC fill helper
+  likewise returns immediately when the realm owns zero
+  `SyntheticAccessor` cells — the exact state of `--unhardened` realms and a
+  snapshot-stable capability test. Pinned forward/reverse interpreter A/Bs
+  measured **0.9702x / 0.9666x** macro geometric means on arm64 and
+  **0.9688x / 0.9760x** on x86_64, with no resolved workload regression. See
+  `bench-results.md`.
 - **Bistromath continuation + hardened-load closure (2026-07-16).**
   Catch/finally PCs now receive compiled reentry stubs in the shared
   bytecode-continuation table; the driver invokes Lantern's real unwinder

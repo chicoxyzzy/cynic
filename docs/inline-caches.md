@@ -245,8 +245,13 @@ All on `origin/main`:
 - **`LoadICCell` has data and synthetic-accessor modes.** Own data uses
   `(shape, slot)`. Prototype data adds prototype identity/shape/revision and
   loads `proto.slots[slot]`. Frozen synthetic accessors use the same guards
-  but load `synthetic_value`. Global loads reuse the data layout and store
-  `GlobalBindings.decl_revision` in the revision field.
+  but load `synthetic_value`. The outlined synthetic-fill helper first checks
+  the realm's authoritative `synth_accessor_cells` table: an unhardened realm
+  installs no cells, while snapshot restore repopulates the table before
+  execution, so an empty table proves that the shape/accessor/prototype probe
+  cannot succeed. Keeping this gate inside the outlined helper preserves the
+  layout of Lantern's large named-load handlers. Global loads reuse the data
+  layout and store `GlobalBindings.decl_revision` in the revision field.
 - **`StoreICCell` owns write-only state.** Same-shape writes cache the slot.
   Transition writes additionally cache
   `pre_shape`/`post_shape`, prototype guards, and `proto_struct_epoch` before
