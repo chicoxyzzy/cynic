@@ -1493,3 +1493,48 @@ the corpus under the relevant section's directory before adding.
   distinguish `0 * -0` and related Double cases, but none covers a negative
   nonzero integer multiplied by int32 `+0`, the representation boundary that
   exposed this bug.
+
+### Binary coercion intermediates were unrooted across right-operand re-entry
+
+- **Fixed in:** `9d5964a9` (2026-07-30)
+- **Spec:** §13.15.4 ApplyStringOrNumericBinaryOperator; §13.12
+  bitwise operators; §7.2.13 IsLessThan. Each evaluates/coerces the
+  left operand before the right, and the resulting primitive must
+  remain live until the abstract operation completes.
+- **Reproducer:**
+
+  ```js
+  var lhs = { valueOf() {
+    return BigInt("12345678901234567890"); // fresh heap primitive
+  } };
+  var rhs = { valueOf() {
+    var junk = [];
+    for (var i = 0; i < 300; i++) junk.push({ i: i });
+    return 2n; // allocation + user-code re-entry can trigger GC
+  } };
+  lhs * rhs;  // must be 24691357802469135780n
+  lhs + rhs;  // must be 12345678901234567892n
+  lhs & rhs;  // must be 2n
+  lhs > rhs;  // must be true
+  ```
+
+- **Before fix:** the freshly coerced left BigInt lived only in a
+  Zig local while the right operand's `valueOf` re-entered JavaScript.
+  Under allocation-pressure GC it was swept before the operator used
+  it: arithmetic, addition, and bitwise paths dereferenced poisoned
+  BigInt limbs and aborted the host; relational comparison silently
+  returned `false`.
+- **After fix:** binary coercion paths open a `HandleScope` only when
+  an operand is a JavaScript object that can re-enter, root both raw
+  operands, and pin each primitive result before the next coercion.
+  Primitive Number / BigInt / String hot paths remain allocation-free.
+  Standalone and fused relational handlers share the same rooting
+  contract.
+- **Suggested fixture shape:** positive · runtime fixtures under
+  `language/expressions/{multiplication,addition,bitwise-and,
+  greater-than}/` asserting left-to-right `valueOf` order and the
+  values above. A normal test262 run cannot require a collection, so
+  the host-abort portion needs an engine GC-stress mode (or repeated
+  allocation large enough to cross a collector threshold); the
+  portable fixtures still protect the observable coercion order and
+  result types.
