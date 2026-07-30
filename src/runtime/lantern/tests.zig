@@ -597,6 +597,35 @@ test "double-key: typed array double index" {
     try expectScriptIntWithBuiltins("var ta = new Float64Array(3); ta[1.0] = 7; ta[2.0] = 9; ta[1] + ta[2];", 16);
 }
 
+test "TypedArray chain Set preserves canonical sentinel and receiver semantics" {
+    try expectScriptIntWithBuiltins(
+        \\var ta = new Float64Array(1);
+        \\var child = Object.create(ta);
+        \\var coerces = 0;
+        \\var value = { valueOf: function () { coerces++; return 7; } };
+        \\ta.NaN = value;
+        \\ta.Infinity = value;
+        \\ta["-Infinity"] = value;
+        \\ta["-0"] = value;
+        \\var sameReceiverCoerces = coerces === 4;
+        \\child.NaN = value;
+        \\child.Infinity = value;
+        \\child["-Infinity"] = value;
+        \\child["-0"] = value;
+        \\var inheritedInvalidSkips = coerces === 4 &&
+        \\    !Object.hasOwn(child, "NaN") &&
+        \\    !Object.hasOwn(child, "Infinity") &&
+        \\    !Object.hasOwn(child, "-Infinity") &&
+        \\    !Object.hasOwn(child, "-0");
+        \\child["0"] = 11;
+        \\child["1.0"] = 12;
+        \\var ordinaryWrites = Object.hasOwn(child, "0") &&
+        \\    child["0"] === 11 && ta[0] === 0 &&
+        \\    Object.hasOwn(child, "1.0") && child["1.0"] === 12;
+        \\sameReceiverCoerces && inheritedInvalidSkips && ordinaryWrites ? 1 : 0;
+    , 1);
+}
+
 test "interpreter: relational operators" {
     try expectBool("1 < 2;", true);
     try expectBool("2 < 1;", false);

@@ -12875,11 +12875,26 @@ const TAChainSetResult = struct {
 };
 
 fn typedArrayChainSetDecision(obj: *JSObject, key: []const u8, recv: Value) TAChainSetResult {
-    const ta_mod = @import("../builtins/typed_array.zig");
-    const num = ta_mod.canonicalNumericIndex(key) orelse return .{ .decision = .not_applicable };
+    // §7.1.21 CanonicalNumericIndexString — every accepted spelling
+    // starts with a decimal digit, "-", "I" (Infinity), or "N" (NaN).
+    // Reject ordinary named properties before either walking the
+    // prototype chain or entering the full parse/NumberToString
+    // round trip.
+    if (key.len == 0) return .{ .decision = .not_applicable };
+    switch (key[0]) {
+        '0'...'9', '-', 'I', 'N' => {},
+        else => return .{ .decision = .not_applicable },
+    }
+
     var cursor: ?*JSObject = obj;
     while (cursor) |c| : (cursor = c.prototype) {
         if (c.getTypedView()) |tv| {
+            // The prototype walk is side-effect-free. Defer the
+            // comparatively expensive canonical-number parse until a
+            // TypedArray is actually present; ordinary object/Array
+            // chains cannot observe or use its result.
+            const ta_mod = @import("../builtins/typed_array.zig");
+            const num = ta_mod.canonicalNumericIndex(key) orelse return .{ .decision = .not_applicable };
             const recv_obj = heap_mod.valueAsPlainObject(recv);
             const same_receiver = (recv_obj == c);
             if (same_receiver) {
