@@ -1004,6 +1004,14 @@ sampling by `/profile`.
   **0.720x** interpreter macro geometric mean and **0.706x** in the default
   production-tier posture, with all six workloads improving and no gated
   micro regression. See `bench-results.md`.
+- **Disabled-tier probe gate (2026-07-29).** Lantern-only realms still
+  accumulate the tiering contract's `+16` fresh-entry and `+1` loop-backedge
+  warmth, but now check `Realm.jit_enabled` once before entering the separate
+  Ohaimark and Bistromath policy probes. Merged-main profiles put the redundant
+  fresh-entry path at 7.36% of Richards and 7.50% of DeltaBlue samples. A
+  60-pair local A/B measured a **0.969x** interpreter macro geometric mean and
+  **0.911x** on the loop-only `arith_loop` control; the default production-tier
+  macro control stayed flat at **1.003x**. See `bench-results.md`.
 - **Bistromath continuation + hardened-load closure (2026-07-16).**
   Catch/finally PCs now receive compiled reentry stubs in the shared
   bytecode-continuation table; the driver invokes Lantern's real unwinder

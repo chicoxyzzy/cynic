@@ -17,6 +17,50 @@ new run against the previous section with the *same host*.
 
 ## History
 
+### 2026-07-29 — disabled-tier probe gate, host `Darwin 25.6.0 arm64`
+
+Interleaved A/B: runtime head `85616796` against exact merged main
+`0d4da627`, 60 pairs in both Lantern-only (`--no-jit`) and the default
+production-tier posture. A disabled-JIT realm previously entered the
+Ohaimark and Bistromath policy paths after every fresh frame and loop
+backedge merely to rediscover the shared master switch. Head checks that
+switch once, after preserving the existing `+16` entry and `+1` backedge
+warmth updates, and skips both tier-specific probes.
+
+Merged-main ReleaseFast profiles attributed the fresh-entry probes to 7.36%
+of Richards samples and 7.50% of DeltaBlue; Navier-Stokes attributed another
+1.49% to the backedge Ohaimark policy probe. The interpreter-only geometric
+mean improved to **0.969x**:
+
+| bench | base_ms | head_ms | ratio | spread% |
+|---|---:|---:|---:|---:|
+| richards | 258.12 | 244.84 | 0.949x | 16.6 |
+| deltablue | 199.67 | 188.04 | 0.942x | 6.4 |
+| crypto | 136.45 | 132.88 | 0.974x | 19.2 |
+| raytrace | 79.94 | 77.53 | 0.972x | 4.7 |
+| navier_stokes | 102.99 | 102.38 | 0.994x | 5.1 |
+| splay | 164.27 | 161.15 | 0.982x | 18.1 |
+
+The loop-only `arith_loop` control improved to **0.911x** over 50 pairs.
+The matching 60-pair default-tier control stayed flat at a **1.003x**
+geometric mean:
+
+| bench | base_ms | head_ms | ratio | spread% |
+|---|---:|---:|---:|---:|
+| richards | 234.44 | 237.46 | 1.013x | 5.9 |
+| deltablue | 178.58 | 177.58 | 0.996x | 10.3 |
+| crypto | 137.00 | 137.48 | 1.004x | 6.3 |
+| raytrace | 80.45 | 80.47 | 1.000x | 5.5 |
+| navier_stokes | 103.04 | 103.45 | 1.002x | 7.9 |
+| splay | 168.90 | 169.23 | 1.002x | 14.5 |
+
+The shared remote box's 20-pair cross-check had 15–29% ratio spread, too
+noisy to resolve this small change; it reported no regression past the
+harness threshold. ReleaseFast disassembly confirms every disabled path
+branches before the Ohaimark/Bistromath calls. Full ReleaseSafe units pass,
+and the non-`--only-failing` test262 sweep retains the exact merged-main pass
+set: **48,653 pass / 1,324 fail (97.35%)**.
+
 ### 2026-07-29 — schema-derived operand-size lookup, host `Linux 6.8.0-117-generic x86_64` (remote bench box)
 
 Interleaved A/B: runtime head `0760c74a` against exact pre-change
