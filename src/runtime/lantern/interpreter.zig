@@ -1898,17 +1898,21 @@ pub fn runFrames(
         },
 
         // ── Bitwise — both operands are ToInt32-coerced ─────────────
-        .bit_and_smi, .bit_and_smi16 => |op_tag| {
-            acc = Value.fromInt32(if (op_tag == .bit_and_smi16)
-                readI16(code, ip)
+        .bit_and, .bit_and_smi, .bit_and_smi16 => |op_tag| {
+            const r_offset: usize = if (op_tag == .bit_and)
+                0
+            else if (op_tag == .bit_and_smi16)
+                2
             else
-                readI32(code, ip));
-            ip += if (op_tag == .bit_and_smi16) 2 else 4;
-            continue :dispatch .bit_and;
-        },
-        .bit_and => {
-            const r = code[ip];
-            ip += 1;
+                4;
+            const r = code[ip + r_offset];
+            if (op_tag != .bit_and) {
+                acc = Value.fromInt32(if (op_tag == .bit_and_smi16)
+                    readI16(code, ip)
+                else
+                    readI32(code, ip));
+            }
+            ip += op_tag.operandSize();
             if (intBitwise(.band, registers[r], acc)) |res| {
                 acc = res;
                 continue :dispatch try decodeNext(code, &ip, &committed);
