@@ -1394,22 +1394,6 @@ pub const Builder = struct {
         }
     }
 
-    /// Emit `acc = registers[r] & imm` for the width classes retained by the
-    /// BitAnd superinstruction gate. Callers keep i8 immediates on the
-    /// ordinary `LdaSmi8; BitAnd` sequence.
-    pub fn emitBitAndSmi(self: *Builder, span: Span, r: u8, imm: i32) !void {
-        std.debug.assert(imm < std.math.minInt(i8) or imm > std.math.maxInt(i8));
-        if (imm >= std.math.minInt(i16) and imm <= std.math.maxInt(i16)) {
-            try self.emitOp(.bit_and_smi16, span);
-            try self.emitI16(@intCast(imm));
-            try self.emitU8(r);
-        } else {
-            try self.emitOp(.bit_and_smi, span);
-            try self.emitI32(imm);
-            try self.emitU8(r);
-        }
-    }
-
     /// Resolve a previously-emitted i16 branch placeholder. The logical
     /// relocation is authoritative; the in-place i16 is only populated when
     /// it fits so pre-finalization peepholes can inspect ordinary branches.
@@ -2063,22 +2047,11 @@ test "Builder: integer immediates choose the narrowest lossless encoding" {
     try b.emitAddSmi(span, r, -3);
     try b.emitAddSmi(span, r, 1_000);
     try b.emitAddSmi(span, r, 100_000);
-    try b.emitBitAndSmi(span, r, 1_000);
-    try b.emitBitAndSmi(span, r, 100_000);
     var chunk = try b.finish();
     defer chunk.deinit(testing.allocator);
 
     var pc: usize = 0;
-    const expected = [_]Op{
-        .lda_smi8,
-        .lda_smi16,
-        .lda_smi,
-        .add_smi8,
-        .add_smi16,
-        .add_smi,
-        .bit_and_smi16,
-        .bit_and_smi,
-    };
+    const expected = [_]Op{ .lda_smi8, .lda_smi16, .lda_smi, .add_smi8, .add_smi16, .add_smi };
     for (expected) |op| {
         try testing.expectEqual(op, @as(Op, @enumFromInt(chunk.code[pc])));
         pc += 1 + op.operandSize();

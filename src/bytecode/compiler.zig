@@ -5387,30 +5387,6 @@ pub const Compiler = struct {
                 }
             }
         }
-        // `<lhs> & <wide Smi literal>` — carry the literal in one
-        // BitAndSmi instruction instead of materialising it in acc and then
-        // dispatching BitAnd. Literal evaluation has no side effects, so a
-        // register-bound LHS can feed the fused op directly; every other LHS
-        // is evaluated and snapshotted through the same temp as the ordinary
-        // path. Keep i8 masks unfused: corpus telemetry found no profitable
-        // hot successor in that width class, while adding a new opcode there
-        // would increase the bytecode surface for no measured gain.
-        if (op == .bit_and) {
-            if (self.tryGetSmiLiteralValue(b.rhs.*)) |imm| {
-                if (imm < std.math.minInt(i8) or imm > std.math.maxInt(i8)) {
-                    if (self.tryRegisterBoundIdent(b.lhs.*)) |r_lhs| {
-                        try self.builder.emitBitAndSmi(b.span, r_lhs, imm);
-                        return;
-                    }
-                    try self.compileExpression(b.lhs);
-                    const r = try self.reserveTemp();
-                    defer self.releaseTemp();
-                    try self.builder.emitStoreReg(b.lhs.span(), r);
-                    try self.builder.emitBitAndSmi(b.span, r, imm);
-                    return;
-                }
-            }
-        }
         // Register-binding peephole — when LHS is a register-bound
         // identifier (a loop counter promoted by
         // `compileForStatement`, or a register-only function param

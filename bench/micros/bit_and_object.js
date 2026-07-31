@@ -1,6 +1,6 @@
 // Object-coercion binary bitwise AND loop. The RHS emits
-// LdaSmi16 -> BitAnd, but the object LHS must decline primitive-Number
-// successor threading and run the ordinary ToNumeric/valueOf path.
+// LdaSmi16 -> BitAnd; successor threading must enter the shared
+// ToNumeric/valueOf path exactly once on every iteration.
 'use strict';
 const operand = {
     valueOf() {

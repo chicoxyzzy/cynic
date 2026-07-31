@@ -130,7 +130,7 @@ jobs:
         # The optimization witnesses inspect compile-time-gated dynamic
         # opcode telemetry, so the normal instrumentation-off unit build
         # skips them. Keep one focused stats-enabled build in CI.
-        run: zig build test-fast --summary all -Dbytecode-stats=true -Dtest-filter='bit-and-smi'
+        run: zig build test-fast --summary all -Dbytecode-stats=true -Dtest-filter='smi bit-and direct threading'
 
       - name: SES positive-coverage tests
         # Runs the hand-written tests under `tests/ses/` against the

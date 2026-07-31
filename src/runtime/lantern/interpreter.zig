@@ -1419,7 +1419,7 @@ inline fn intCompare(comptime op: enum { lt, gt, le, ge }, a: Value, b: Value) ?
     });
 }
 
-/// §13.15 bitwise / shift on two int32 operands. `&` `|` `^` `<<`
+/// §13.12 / §13.9 bitwise / shift on two int32 operands. `&` `|` `^` `<<`
 /// `>>` stay in int32; `>>>` yields a uint32 that promotes to a
 /// double when it exceeds the int32 range.
 inline fn intBitwise(comptime op: enum { band, bor, bxor, shl, shr, shr_u }, a: Value, b: Value) ?Value {
@@ -1447,27 +1447,6 @@ inline fn intBitwise(comptime op: enum { band, bor, bxor, shl, shr, shr_u }, a: 
                 Value.fromDouble(@floatFromInt(ru));
         },
     }
-}
-
-const SlowBinaryUnwind = union(enum) {
-    resumed,
-    uncaught: Value,
-};
-
-noinline fn unwindSlowBinaryFailure(
-    allocator: std.mem.Allocator,
-    realm: *Realm,
-    frames: *std.ArrayListUnmanaged(CallFrame),
-    f: *CallFrame,
-    ip: usize,
-    acc: Value,
-) RunError!SlowBinaryUnwind {
-    const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
-    realm.pending_exception = null;
-    f.ip = ip;
-    f.accumulator = acc;
-    if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
-    return .resumed;
 }
 
 pub fn runFrames(
@@ -1577,6 +1556,47 @@ pub fn runFrames(
             };
             ip += op_tag.operandSize();
             acc = Value.fromInt32(imm);
+
+            // Dense integer masks followed by BitAnd dominate the full-width
+            // and 16-bit Smi loads in the macro corpus. Thread their pure
+            // int32 fast path here while preserving the ordinary bytecode for
+            // both JIT tiers. Deliberately exclude LdaSmi8: Splay executes it
+            // over two million times without a useful BitAnd successor.
+            //
+            // If the LHS is not an Int32 (a Double, coercible object, or
+            // BigInt), enter the same `bitwiseBinary` slow operation directly.
+            // Re-dispatching BitAnd would repeat the Int32 probe we just
+            // declined on every fallback-heavy site.
+            if (op_tag != .lda_smi8 and
+                ip + 1 < code.len and
+                code[ip] == @intFromEnum(Op.bit_and))
+            {
+                // The grouped load arm is dominated overall by LdaSmi8 and
+                // non-BitAnd successors. Bias their ordinary decode path
+                // toward the laid-out fallthrough; matching masks take this
+                // side edge and remain highly predictable inside Crypto.
+                @branchHint(.unlikely);
+                const r = code[ip + 1];
+                if (intBitwise(.band, registers[r], acc)) |res| {
+                    ip += 2;
+                    if (comptime bytecode_stats.enabled) bytecode_stats.observeDirectActive(.bit_and);
+                    acc = res;
+                } else {
+                    ip += 2;
+                    if (comptime bytecode_stats.enabled) bytecode_stats.observeActive(.bit_and);
+                    if (try bitwiseBinary(realm, .bit_and, registers[r], acc)) |res| {
+                        acc = res;
+                    } else {
+                        const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
+                        realm.pending_exception = null;
+                        f.ip = ip;
+                        f.accumulator = acc;
+                        committed = true;
+                        if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                    }
+                }
+            }
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
         .lda_constant => {
@@ -1906,11 +1926,13 @@ pub fn runFrames(
                 continue :dispatch try decodeNext(code, &ip, &committed);
             }
             if (try bitwiseBinary(realm, .bit_and, registers[r], acc)) |res| acc = res else {
+                const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
+                realm.pending_exception = null;
+                f.ip = ip;
+                f.accumulator = acc;
                 committed = true;
-                switch (try unwindSlowBinaryFailure(allocator, realm, frames, f, ip, acc)) {
-                    .uncaught => |ex| return .{ .thrown = ex },
-                    .resumed => continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed),
-                }
+                if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
+                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
             }
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
@@ -2003,14 +2025,6 @@ pub fn runFrames(
                 continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
             }
             continue :dispatch try decodeNext(code, &ip, &committed);
-        },
-        .bit_and_smi, .bit_and_smi16 => |op_tag| {
-            acc = Value.fromInt32(if (op_tag == .bit_and_smi16)
-                readI16(code, ip)
-            else
-                readI32(code, ip));
-            ip += if (op_tag == .bit_and_smi16) 2 else 4;
-            continue :dispatch .bit_and;
         },
 
         // ── Unary on accumulator ────────────────────────────────────
