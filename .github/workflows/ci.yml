@@ -125,6 +125,13 @@ jobs:
             zig build test-fast --summary all
           fi
 
+      - name: Bytecode direct-threading tests
+        if: runner.os == 'Linux'
+        # The optimization witnesses inspect compile-time-gated dynamic
+        # opcode telemetry, so the normal instrumentation-off unit build
+        # skips them. Keep one focused stats-enabled build in CI.
+        run: zig build test-fast --summary all -Dbytecode-stats=true -Dtest-filter='smi bit-and direct threading'
+
       - name: SES positive-coverage tests
         # Runs the hand-written tests under `tests/ses/` against the
         # installed cynic CLI (hardened by default). Each fixture

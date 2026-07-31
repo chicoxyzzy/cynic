@@ -88,6 +88,7 @@ const Bench = struct {
 
 const BENCHES = [_]Bench{
     .{ .name = "arith_loop", .path = "bench/micros/arith_loop.js" },
+    .{ .name = "bit_and_double", .path = "bench/micros/bit_and_double.js" },
     .{ .name = "mul_loop", .path = "bench/micros/mul_loop.js" },
     .{ .name = "div_loop", .path = "bench/micros/div_loop.js" },
     .{ .name = "mod_loop", .path = "bench/micros/mod_loop.js" },
@@ -377,6 +378,30 @@ fn medianOfSortedF64(sorted: []const f64) f64 {
     return (sorted[sorted.len / 2 - 1] + sorted[sorted.len / 2]) / 2.0;
 }
 
+const RatioSummary = struct {
+    median: f64,
+    spread_pct: f64,
+};
+
+fn summarizeSortedRatios(sorted: []const f64) RatioSummary {
+    const median = medianOfSortedF64(sorted);
+    return .{
+        .median = median,
+        .spread_pct = if (median > 0)
+            (sorted[sorted.len - 1] - sorted[0]) / median * 100.0
+        else
+            0.0,
+    };
+}
+
+test "A/B ratio summary averages the middle pair for an even sample count" {
+    const ratios = [_]f64{ 0.80, 0.90, 1.10, 1.20 };
+    const summary = summarizeSortedRatios(&ratios);
+
+    try std.testing.expectApproxEqAbs(@as(f64, 1.00), summary.median, 0.000_001);
+    try std.testing.expectApproxEqAbs(@as(f64, 40.00), summary.spread_pct, 0.000_001);
+}
+
 fn nearestRankF64(sorted: []const f64, percentile: u8) f64 {
     var rank = (@as(usize, percentile) * sorted.len + 99) / 100;
     rank = std.math.clamp(rank, 1, sorted.len);
@@ -441,9 +466,8 @@ fn runInterleavedAb(
         const base_ms = usToMs(medianUsOf(base));
         const head_ms = usToMs(medianUsOf(head));
         std.mem.sort(f64, ratios, {}, std.sort.asc(f64));
-        const ratio_med = ratios[ratios.len / 2];
-        const r_spread = if (ratio_med > 0) (ratios[ratios.len - 1] - ratios[0]) / ratio_med * 100.0 else 0.0;
-        const row = try std.fmt.bufPrint(&buf, "{s:<16} {d:>10.2} {d:>10.2} {d:>8.3}x {d:>8.1}\n", .{ b.name, base_ms, head_ms, ratio_med, r_spread });
+        const ratio_summary = summarizeSortedRatios(ratios);
+        const row = try std.fmt.bufPrint(&buf, "{s:<16} {d:>10.2} {d:>10.2} {d:>8.3}x {d:>8.1}\n", .{ b.name, base_ms, head_ms, ratio_summary.median, ratio_summary.spread_pct });
         try std.Io.File.stdout().writeStreamingAll(io, row);
     }
 }

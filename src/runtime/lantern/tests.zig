@@ -1692,7 +1692,8 @@ test "lda_this property direct threading: instrumented run records transfer" {
     );
 }
 
-// §13.15 ApplyStringOrNumericBinaryOperator / §13.10 shift operators.
+// §13.15.3 ApplyStringOrNumericBinaryOperator / §13.9 shift operators /
+// §13.12 binary bitwise operators.
 // Exact integer RHS literals use width-specific loads. Lantern threads the
 // `LdaSmi16; BitAnd` and full-width `LdaSmi; BitAnd` int32 fast paths while
 // preserving the ordinary bytecode stream for both JIT tiers.
@@ -1752,6 +1753,23 @@ test "smi8 bit-and direct threading: compact masks stay on ordinary dispatch" {
     , 1);
 
     try testing.expectEqual(@as(u64, 1), stats.pairCount(.lda_smi8, .bit_and));
+    try testing.expectEqual(@as(u64, 0), stats.direct_transfers);
+}
+
+test "smi bit-and direct threading: Double operand declines the direct transfer" {
+    if (comptime !bytecode_stats.enabled) return error.SkipZigTest;
+
+    var stats: bytecode_stats.DynamicStats = .{};
+    const activation = bytecode_stats.activate(&stats);
+    defer activation.deinit();
+
+    try expectScriptInt(
+        \\function f(x) { return x & 32767; }
+        \\f(32769.9);
+    , 1);
+
+    try testing.expectEqual(@as(u64, 1), stats.pairCount(.lda_smi16, .bit_and));
+    try testing.expectEqual(@as(u64, 1), stats.opcodeCount(.bit_and));
     try testing.expectEqual(@as(u64, 0), stats.direct_transfers);
 }
 

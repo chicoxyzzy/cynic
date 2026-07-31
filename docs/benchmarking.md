@@ -96,6 +96,7 @@ Run one fixture with `zig build bench -- --filter=<name>`; combine it with
 | Fixture | Iters | Stresses |
 |---|---:|---|
 | `arith_loop` | 5,000,000 | Bytecode dispatch density on `Op.add` / `Op.lt` / `Op.jmp` — int32 fast-path + the threaded-dispatch loop with no property access. Smi-overflow paths are NOT exercised (every step stays int32-clean via `\| 0`). |
+| `bit_and_double` | 5,000,000 | Double-heavy `LdaSmi16 -> BitAnd` execution. Adding `0.5` after every result keeps the next left operand outside Int32, pinning a declined successor-threading probe followed by the ordinary §13.15.3 ToNumeric / ToInt32 path on every iteration. |
 | `mul_loop` | 3,000,000 | Numeric `Op.mul` dispatch with an Int32/Double raw-operand pair and a Double result. Pins Lantern's one-byte per-site operand profile plus the fused Number multiplication path; the changing multiplicand prevents constant folding. |
 | `div_loop` | 3,000,000 | Numeric `Op.div` dispatch with Int32 raw operands and a Double result. Pins Lantern's one-byte per-site operand profile plus the fused Number division path; the changing numerator prevents constant folding. |
 | `mod_loop` | 3,000,000 | Numeric `Op.mod` dispatch with two Int32 operands. Pins Lantern's direct truncating Number-remainder path; the changing dividend prevents constant folding, while an accumulated checksum keeps every result observable. |
