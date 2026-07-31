@@ -1519,6 +1519,7 @@ pub fn runFrames(
     var ip: usize = f.ip;
     var acc: Value = f.accumulator;
     var committed: bool = false;
+    var declined_smi_bit_and_ip: usize = std.math.maxInt(usize);
 
     // First opcode of this `runFrames` invocation. A fresh entry is
     // also how a suspended generator resumes, so cross the safe
@@ -1566,8 +1567,10 @@ pub fn runFrames(
             // Primitive Doubles can complete through ToInt32 without JS
             // re-entry. Objects and BigInts leave `ip` on BitAnd so its
             // established coercion / exception path remains the sole slow
-            // implementation.
+            // implementation. Remember one declined bytecode offset for this
+            // dispatch so an object-heavy site pays the probe only once.
             if (op_tag != .lda_smi8 and
+                declined_smi_bit_and_ip != ip and
                 ip + 1 < code.len and
                 code[ip] == @intFromEnum(Op.bit_and))
             {
@@ -1583,6 +1586,8 @@ pub fn runFrames(
                     if (comptime bytecode_stats.enabled) bytecode_stats.observeDirectActive(.bit_and);
                     const left = if (lhs.isInt32()) lhs.asInt32() else toInt32(lhs);
                     acc = Value.fromInt32(left & imm);
+                } else {
+                    declined_smi_bit_and_ip = ip;
                 }
             }
             continue :dispatch try decodeNext(code, &ip, &committed);
