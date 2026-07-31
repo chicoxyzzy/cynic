@@ -1773,7 +1773,7 @@ test "smi bit-and direct threading: Double operand uses the Number direct transf
     try testing.expectEqual(@as(u64, 1), stats.direct_transfers);
 }
 
-test "smi bit-and direct threading: object operand declines the direct transfer" {
+test "smi bit-and direct threading: object operand transfers to the coercion path" {
     if (comptime !bytecode_stats.enabled) return error.SkipZigTest;
 
     var stats: bytecode_stats.DynamicStats = .{};
@@ -1787,7 +1787,7 @@ test "smi bit-and direct threading: object operand declines the direct transfer"
 
     try testing.expectEqual(@as(u64, 1), stats.pairCount(.lda_smi16, .bit_and));
     try testing.expectEqual(@as(u64, 1), stats.opcodeCount(.bit_and));
-    try testing.expectEqual(@as(u64, 0), stats.direct_transfers);
+    try testing.expectEqual(@as(u64, 1), stats.direct_transfers);
 }
 
 test "smi bit-and direct threading: slow coercion and caught throw stay exact" {

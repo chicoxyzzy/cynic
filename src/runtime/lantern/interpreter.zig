@@ -1519,7 +1519,6 @@ pub fn runFrames(
     var ip: usize = f.ip;
     var acc: Value = f.accumulator;
     var committed: bool = false;
-    var declined_smi_bit_and_ip: usize = std.math.maxInt(usize);
 
     // First opcode of this `runFrames` invocation. A fresh entry is
     // also how a suspended generator resumes, so cross the safe
@@ -1565,12 +1564,11 @@ pub fn runFrames(
             // two million times without a useful BitAnd successor.
             //
             // Primitive Doubles can complete through ToInt32 without JS
-            // re-entry. Objects and BigInts leave `ip` on BitAnd so its
-            // established coercion / exception path remains the sole slow
-            // implementation. Remember one declined bytecode offset for this
-            // dispatch so an object-heavy site pays the probe only once.
+            // re-entry. Objects and BigInts consume the successor too, then
+            // enter the established coercion / exception path exactly once.
+            // This keeps object-heavy sites from paying a failed fast-path
+            // probe before ordinary BitAnd dispatch on every iteration.
             if (op_tag != .lda_smi8 and
-                declined_smi_bit_and_ip != ip and
                 ip + 1 < code.len and
                 code[ip] == @intFromEnum(Op.bit_and))
             {
@@ -1581,13 +1579,21 @@ pub fn runFrames(
                 @branchHint(.unlikely);
                 const r = code[ip + 1];
                 const lhs = registers[r];
+                ip += 2;
+                if (comptime bytecode_stats.enabled) bytecode_stats.observeDirectActive(.bit_and);
                 if (lhs.isNumber()) {
-                    ip += 2;
-                    if (comptime bytecode_stats.enabled) bytecode_stats.observeDirectActive(.bit_and);
                     const left = if (lhs.isInt32()) lhs.asInt32() else toInt32(lhs);
                     acc = Value.fromInt32(left & imm);
+                } else if (try bitwiseBinary(realm, .bit_and, lhs, acc)) |res| {
+                    acc = res;
                 } else {
-                    declined_smi_bit_and_ip = ip;
+                    const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
+                    realm.pending_exception = null;
+                    f.ip = ip;
+                    f.accumulator = acc;
+                    committed = true;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
+                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
                 }
             }
             continue :dispatch try decodeNext(code, &ip, &committed);
