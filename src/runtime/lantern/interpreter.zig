@@ -1578,14 +1578,11 @@ pub fn runFrames(
                 @branchHint(.unlikely);
                 const r = code[ip + 1];
                 const lhs = registers[r];
-                if (intBitwise(.band, lhs, acc)) |res| {
+                if (lhs.isNumber()) {
                     ip += 2;
                     if (comptime bytecode_stats.enabled) bytecode_stats.observeDirectActive(.bit_and);
-                    acc = res;
-                } else if (lhs.isDouble()) {
-                    ip += 2;
-                    if (comptime bytecode_stats.enabled) bytecode_stats.observeDirectActive(.bit_and);
-                    acc = Value.fromInt32(toInt32(lhs) & imm);
+                    const left = if (lhs.isInt32()) lhs.asInt32() else toInt32(lhs);
+                    acc = Value.fromInt32(left & imm);
                 }
             }
             continue :dispatch try decodeNext(code, &ip, &committed);
