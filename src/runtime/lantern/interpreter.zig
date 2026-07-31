@@ -1449,19 +1449,15 @@ inline fn intBitwise(comptime op: enum { band, bor, bxor, shl, shr, shr_u }, a: 
     }
 }
 
-noinline fn applyBitAndSmiSlow(realm: *Realm, lhs: Value, imm: i32) RunError!?Value {
-    return bitwiseBinary(realm, .bit_and, lhs, Value.fromInt32(imm));
-}
-
 /// §13.12 ApplyStringOrNumericBinaryOperator for a BitAndSmi opcode. The RHS
-/// is known int32, so classify only the LHS before the outlined coercion path.
+/// is known int32, so classify only the LHS before the shared coercion path.
 inline fn applyBitAndSmi(realm: *Realm, lhs: Value, imm: i32) RunError!?Value {
     if (lhs.isInt32()) {
         @branchHint(.likely);
         return Value.fromInt32(lhs.asInt32() & imm);
     }
     if (lhs.isDouble()) return Value.fromInt32(toInt32(lhs) & imm);
-    return applyBitAndSmiSlow(realm, lhs, imm);
+    return bitwiseBinary(realm, .bit_and, lhs, Value.fromInt32(imm));
 }
 
 const SlowBinaryUnwind = union(enum) {
