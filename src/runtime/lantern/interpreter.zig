@@ -1557,23 +1557,31 @@ pub fn runFrames(
             ip += op_tag.operandSize();
             acc = Value.fromInt32(imm);
 
-            // Dense integer masks followed by BitAnd dominate the full-width
-            // and 16-bit Smi loads in the macro corpus. Thread their pure
-            // int32 fast path here while preserving the ordinary bytecode for
-            // both JIT tiers. Deliberately exclude LdaSmi8: Splay executes it
-            // over two million times without a useful BitAnd successor.
+            // Compact signed shifts and dense integer masks dominate their
+            // respective Smi widths in the macro corpus. Thread the pure
+            // int32 fast paths here while preserving the ordinary bytecode
+            // for both JIT tiers.
             //
             // If the LHS is not an Int32 (a Double, coercible object, or
-            // BigInt), leave `ip` on BitAnd so its existing slow path remains
-            // the sole conversion / re-entry / exception implementation.
-            if (op_tag != .lda_smi8 and
-                ip + 1 < code.len and
-                code[ip] == @intFromEnum(Op.bit_and))
-            {
-                // The grouped load arm is dominated overall by LdaSmi8 and
-                // non-BitAnd successors. Bias their ordinary decode path
-                // toward the laid-out fallthrough; matching masks take this
-                // side edge and remain highly predictable inside Crypto.
+            // BigInt), leave `ip` on the successor so its existing slow path
+            // remains the sole conversion / re-entry / exception
+            // implementation.
+            if (op_tag == .lda_smi8) {
+                if (ip + 1 < code.len and code[ip] == @intFromEnum(Op.shr)) {
+                    // Splay executes over two million compact loads without
+                    // this successor. Keep ordinary decode as fallthrough;
+                    // matching Crypto shifts take the predictable side edge.
+                    @branchHint(.unlikely);
+                    const r = code[ip + 1];
+                    if (intBitwise(.shr, registers[r], acc)) |res| {
+                        ip += 2;
+                        if (comptime bytecode_stats.enabled) bytecode_stats.observeDirectActive(.shr);
+                        acc = res;
+                    }
+                }
+            } else if (ip + 1 < code.len and code[ip] == @intFromEnum(Op.bit_and)) {
+                // Bias ordinary decode toward the laid-out fallthrough;
+                // matching masks remain highly predictable inside Crypto.
                 @branchHint(.unlikely);
                 const r = code[ip + 1];
                 if (intBitwise(.band, registers[r], acc)) |res| {

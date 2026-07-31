@@ -17,6 +17,69 @@ new run against the previous section with the *same host*.
 
 ## History
 
+### 2026-07-31 — compact Smi `Shr` successor threading, host `Darwin 25.6.0 arm64`
+
+Exact merged main `2758c530` and the retained candidate used normal
+ReleaseFast CLI SHA-256 binaries `42b8d24d` / `727c3c2d`. Instrumented
+Crypto traces found **4,646,114** `LdaSmi8 -> Shr` pairs: **5.175%** of
+Crypto's **89,774,038** logical instructions, **73.663%** of its compact
+Smi loads, and **99.936%** of its `Shr` executions. A temporary eligibility
+probe found **4,645,838** Int32 hits and only **276** slow-path declines
+(**99.994%** eligible). Splay executed **2,084,482** compact Smi loads but
+zero matching `Shr` successors.
+
+Lantern's existing merged Smi-load handler now recognizes only
+`LdaSmi8; Shr`. When the left operand is already Int32, it runs the shared
+signed-shift operation and consumes the successor opcode plus register
+operand. A Double, coercible object, or BigInt leaves `ip` on `Shr`, so the
+ordinary handler remains the sole ToNumeric / re-entry / mixed-numeric /
+throw implementation. The ordinary decode path remains the hinted
+fallthrough for Splay's zero-hit compact loads. Bytecode and both JIT tiers
+are unchanged.
+
+After normalizing only `direct-transfers`, the complete baseline/candidate
+Crypto telemetry reports are byte-identical: the dynamic instruction total
+and every opcode, pair, and trigram count remain exact, with no dropped
+sequences. `direct-transfers` moves **5,281,513 -> 9,927,351**, exactly the
+**4,645,838** new Int32 hits. The native cost is **52 bytes** in `runFrames`
+(**344,996 -> 345,048**) and **48 bytes** in Mach-O `__TEXT`
+(**5,095,536 -> 5,095,584**).
+
+The pinned x86_64 bench host was unreachable for three SSH attempts, so the
+retention gate used forty paired Lantern-only runs in each physical launch
+role on the local arm64 host. Forward is candidate/base, reverse is
+base/candidate after swapping the physical binaries, and neutral is
+`sqrt(forward / reverse)`:
+
+| bench | forward C/B | reverse B/C | neutral C/B |
+|---|---:|---:|---:|
+| richards | 0.990x | 1.003x | 0.993x |
+| deltablue | 1.002x | 1.005x | 0.999x |
+| crypto | 0.959x | 1.056x | 0.953x |
+| raytrace | 0.982x | 1.021x | 0.981x |
+| navier_stokes | 0.984x | 1.022x | 0.981x |
+| splay | 0.994x | 1.018x | 0.988x |
+| **geomean** |  |  | **0.982x** |
+
+The order-neutral macro geometric mean is **0.9824x**, about **1.76%**
+faster, and every resolved workload is below 1.0x. Separate 60+60 targeted
+runs measured Crypto **0.9484x**, the zero-hit Splay watchpoint **0.9865x**,
+DeltaBlue **1.0100x**, and the zero-hit `arith_loop` control **1.0055x**;
+all pass the 2% regression gate. Local pair spreads were high, so the
+sub-percent control results and aggregate magnitude are directional rather
+than precise; the targeted and compute-six Crypto estimates agree on the
+material win.
+
+Validation pins modulo-32 shift counts, signed fill, operand order, exact
+logical telemetry, the deliberately ordinary wider-immediate path, and
+coexistence with the existing width-gated `BitAnd` transfer. Slow-path tests
+cover Double and object coercion, forced-GC re-entry, a caught coercion throw,
+and mixed BigInt/Number rejection. The complete ReleaseSafe unit suite
+passed. Exact-main and candidate right-shift test262 runs matched at **36
+pass / 1 known fail**, including the candidate at `gc-threshold=1`. The
+required non-cached full main sweep retained **48,653 pass / 1,324 known
+fail** in 65 seconds with no guard failure.
+
 ### 2026-07-31 — width-gated Smi `BitAnd` successor threading, host `Linux 6.8.0-117-generic x86_64` (remote bench box)
 
 Exact merged main `7b5a04e5` and the retained candidate used normal

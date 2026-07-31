@@ -1074,6 +1074,19 @@ sampling by `/profile`.
   40+40 forward/reverse A/B measured an order-neutral **0.9795x**
   interpreter macro geometric mean, with no workload regression above 2%;
   targeted Crypto measured **0.9710x**. See `bench-results.md`.
+- **Compact Smi `Shr` successor threading (2026-07-31).** Crypto telemetry
+  found **4,646,114** `LdaSmi8 -> Shr` transitions, **5.175%** of all logical
+  instructions; **4,645,838** (**99.994%**) had an Int32 left operand. The
+  merged Smi-load handler now executes those signed shifts before the next
+  indirect dispatch, while non-Int32 operands leave `ip` on the ordinary
+  ToNumeric / BigInt / throw path. Splay's **2,084,482** zero-hit compact
+  loads retain ordinary decode as the hinted fallthrough. Bytecode, logical
+  telemetry, and both JIT tiers remain unchanged; `runFrames` grows 52 bytes.
+  A 40+40 role-swapped arm64 A/B measured an order-neutral **0.9824x** macro
+  geometric mean and **0.9530x** on Crypto, with every workload below 1.0x.
+  A separate 60+60 Crypto confirmation measured **0.9484x**; Splay,
+  DeltaBlue, and `arith_loop` controls stayed inside the 2% gate. See
+  `bench-results.md`.
 - **Impossible property-probe gates (2026-07-30).** Strict property writes now
   reject keys that cannot begin a §7.1.21 canonical numeric spelling, walk to
   the first TypedArray ancestor, and only then pay for numeric parsing and

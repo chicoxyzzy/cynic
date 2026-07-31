@@ -1694,8 +1694,9 @@ test "lda_this property direct threading: instrumented run records transfer" {
 
 // §13.15 ApplyStringOrNumericBinaryOperator / §13.10 shift operators.
 // Exact integer RHS literals use width-specific loads. Lantern threads the
-// `LdaSmi16; BitAnd` and full-width `LdaSmi; BitAnd` int32 fast paths while
-// preserving the ordinary bytecode stream for both JIT tiers.
+// compact `LdaSmi8; Shr`, `LdaSmi16; BitAnd`, and full-width
+// `LdaSmi; BitAnd` int32 fast paths while preserving the ordinary bytecode
+// stream for both JIT tiers.
 test "smi16 bit-and direct threading: instrumented run records transfer" {
     if (comptime !bytecode_stats.enabled) return error.SkipZigTest;
 
@@ -1706,19 +1707,107 @@ test "smi16 bit-and direct threading: instrumented run records transfer" {
     try expectScriptInt(
         \\function f(x) {
         \\  const masked = x & 32767;
-        \\  const right = x >> 7;
+        \\  const right = x >> 39;
         \\  const left = x << 3;
-        \\  return masked + right + left;
+        \\  const unsigned = x >>> 39;
+        \\  return masked + right + left + unsigned;
         \\}
-        \\f(257);
-    , 2315);
+        \\f(-257);
+    , 33584881);
 
     try testing.expectEqual(@as(u64, 1), stats.pairCount(.lda_smi16, .bit_and));
     try testing.expectEqual(@as(u64, 1), stats.pairCount(.lda_smi8, .shr));
     try testing.expectEqual(@as(u64, 1), stats.pairCount(.lda_smi8, .shl));
+    try testing.expectEqual(@as(u64, 1), stats.pairCount(.lda_smi8, .shr_u));
     try testing.expectEqual(@as(u64, 1), stats.opcodeCount(.bit_and));
+    try testing.expectEqual(@as(u64, 1), stats.opcodeCount(.shr));
     try testing.expectEqual(@as(u64, 0), stats.pairCount(.bit_and, .bit_and));
+    try testing.expectEqual(@as(u64, 0), stats.pairCount(.shr, .shr));
+    try testing.expectEqual(@as(u64, 2), stats.direct_transfers);
+}
+
+test "smi8 shr direct threading: instrumented run records one transfer" {
+    if (comptime !bytecode_stats.enabled) return error.SkipZigTest;
+
+    var stats: bytecode_stats.DynamicStats = .{};
+    const activation = bytecode_stats.activate(&stats);
+    defer activation.deinit();
+
+    // The result pins operand order, modulo-32 shift counts, and signed fill:
+    // -257 >> 39 is -3, while 39 >> -257 is 0.
+    try expectScriptInt(
+        \\function f(x) { return x >> 39; }
+        \\f(-257);
+    , -3);
+
+    try testing.expectEqual(@as(u64, 1), stats.pairCount(.lda_smi8, .shr));
+    try testing.expectEqual(@as(u64, 1), stats.opcodeCount(.shr));
+    try testing.expectEqual(@as(u64, 0), stats.pairCount(.shr, .shr));
     try testing.expectEqual(@as(u64, 1), stats.direct_transfers);
+}
+
+test "smi8 shr direct threading: wider shift immediates stay ordinary" {
+    if (comptime !bytecode_stats.enabled) return error.SkipZigTest;
+
+    var stats: bytecode_stats.DynamicStats = .{};
+    const activation = bytecode_stats.activate(&stats);
+    defer activation.deinit();
+
+    try expectScriptInt(
+        \\function wide(x) { return x >> 128; }
+        \\wide(257);
+    , 257);
+
+    try testing.expectEqual(@as(u64, 1), stats.pairCount(.lda_smi16, .shr));
+    try testing.expectEqual(@as(u64, 0), stats.direct_transfers);
+}
+
+test "smi8 shr direct threading: slow coercion and caught throw stay exact" {
+    // Int32 takes the inline path. Double, object, and BigInt calls must
+    // decline it with `ip` still on Shr so the ordinary handler alone owns
+    // ToNumeric re-entry, GC rooting, mixed-numeric rejection, and unwind.
+    var stats: bytecode_stats.DynamicStats = .{};
+    const activation = bytecode_stats.activate(&stats);
+    defer activation.deinit();
+
+    try expectScriptStringUnderGcPressure(
+        \\let trace = "";
+        \\function shift(x) { return x >> 39; }
+        \\const value = {
+        \\  valueOf() { trace += "O"; return -1024; }
+        \\};
+        \\const gcValue = {
+        \\  valueOf() {
+        \\    trace += "G";
+        \\    __collectGarbage();
+        \\    return 1024;
+        \\  }
+        \\};
+        \\const doubled = shift(1024.9);
+        \\const shifted = shift(value);
+        \\const gcShifted = shift(gcValue);
+        \\let caught = 0;
+        \\try {
+        \\  shift({ valueOf() { trace += "T"; throw 9; } });
+        \\} catch (e) {
+        \\  caught = e;
+        \\}
+        \\let bigintError = "none";
+        \\try {
+        \\  shift(1n);
+        \\} catch (e) {
+        \\  bigintError = e.constructor.name;
+        \\}
+        \\doubled + ":" + shifted + ":" + gcShifted + ":" + trace + ":" +
+        \\  caught + ":" + bigintError;
+    , "8:-8:8:OGT:9:TypeError");
+
+    if (comptime bytecode_stats.enabled) {
+        try testing.expectEqual(@as(u64, 5), stats.pairCount(.lda_smi8, .shr));
+        try testing.expectEqual(@as(u64, 5), stats.opcodeCount(.shr));
+        try testing.expectEqual(@as(u64, 0), stats.pairCount(.shr, .shr));
+        try testing.expectEqual(@as(u64, 0), stats.direct_transfers);
+    }
 }
 
 test "full-width smi bit-and direct threading: instrumented run records transfer" {
