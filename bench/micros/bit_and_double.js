@@ -1,7 +1,7 @@
 // Double-heavy binary bitwise AND loop. The RHS emits LdaSmi16 -> BitAnd,
 // while adding 0.5 after every result keeps the next LHS outside Int32.
-// This pins the declined direct-threading probe plus the ordinary ToInt32
-// fallback on every iteration.
+// This pins the primitive-Number successor path's ToInt32 conversion on
+// every iteration.
 'use strict';
 function run() {
     let value = 0.5;

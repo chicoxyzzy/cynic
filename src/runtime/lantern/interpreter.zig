@@ -1449,27 +1449,6 @@ inline fn intBitwise(comptime op: enum { band, bor, bxor, shl, shr, shr_u }, a: 
     }
 }
 
-const SlowBinaryUnwind = union(enum) {
-    resumed,
-    uncaught: Value,
-};
-
-noinline fn unwindSlowBinaryFailure(
-    allocator: std.mem.Allocator,
-    realm: *Realm,
-    frames: *std.ArrayListUnmanaged(CallFrame),
-    f: *CallFrame,
-    ip: usize,
-    acc: Value,
-) RunError!SlowBinaryUnwind {
-    const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
-    realm.pending_exception = null;
-    f.ip = ip;
-    f.accumulator = acc;
-    if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
-    return .resumed;
-}
-
 pub fn runFrames(
     allocator: std.mem.Allocator,
     realm: *Realm,
@@ -1580,14 +1559,14 @@ pub fn runFrames(
 
             // Dense integer masks followed by BitAnd dominate the full-width
             // and 16-bit Smi loads in the macro corpus. Thread their pure
-            // int32 fast path here while preserving the ordinary bytecode for
-            // both JIT tiers. Deliberately exclude LdaSmi8: Splay executes it
-            // over two million times without a useful BitAnd successor.
+            // Number path here while preserving the ordinary bytecode for both
+            // JIT tiers. Deliberately exclude LdaSmi8: Splay executes it over
+            // two million times without a useful BitAnd successor.
             //
-            // If the LHS is not an Int32 (a Double, coercible object, or
-            // BigInt), enter the same `bitwiseBinary` slow operation directly.
-            // Re-dispatching BitAnd would repeat the Int32 probe we just
-            // declined on every fallback-heavy site.
+            // Primitive Doubles can complete through ToInt32 without JS
+            // re-entry. Objects and BigInts leave `ip` on BitAnd so its
+            // established coercion / exception path remains the sole slow
+            // implementation.
             if (op_tag != .lda_smi8 and
                 ip + 1 < code.len and
                 code[ip] == @intFromEnum(Op.bit_and))
@@ -1598,22 +1577,15 @@ pub fn runFrames(
                 // side edge and remain highly predictable inside Crypto.
                 @branchHint(.unlikely);
                 const r = code[ip + 1];
-                if (intBitwise(.band, registers[r], acc)) |res| {
+                const lhs = registers[r];
+                if (intBitwise(.band, lhs, acc)) |res| {
                     ip += 2;
                     if (comptime bytecode_stats.enabled) bytecode_stats.observeDirectActive(.bit_and);
                     acc = res;
-                } else {
+                } else if (lhs.isDouble()) {
                     ip += 2;
-                    if (comptime bytecode_stats.enabled) bytecode_stats.observeActive(.bit_and);
-                    if (try bitwiseBinary(realm, .bit_and, registers[r], acc)) |res| {
-                        acc = res;
-                    } else {
-                        committed = true;
-                        switch (try unwindSlowBinaryFailure(allocator, realm, frames, f, ip, acc)) {
-                            .uncaught => |ex| return .{ .thrown = ex },
-                            .resumed => continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed),
-                        }
-                    }
+                    if (comptime bytecode_stats.enabled) bytecode_stats.observeDirectActive(.bit_and);
+                    acc = Value.fromInt32(toInt32(lhs) & imm);
                 }
             }
             continue :dispatch try decodeNext(code, &ip, &committed);
