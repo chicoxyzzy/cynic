@@ -1692,6 +1692,97 @@ test "lda_this property direct threading: instrumented run records transfer" {
     );
 }
 
+// §13.15 ApplyStringOrNumericBinaryOperator / §13.10 shift operators.
+// Exact integer RHS literals use width-specific loads. Lantern threads the
+// `LdaSmi16; BitAnd` and full-width `LdaSmi; BitAnd` int32 fast paths while
+// preserving the ordinary bytecode stream for both JIT tiers.
+test "smi16 bit-and direct threading: instrumented run records transfer" {
+    if (comptime !bytecode_stats.enabled) return error.SkipZigTest;
+
+    var stats: bytecode_stats.DynamicStats = .{};
+    const activation = bytecode_stats.activate(&stats);
+    defer activation.deinit();
+
+    try expectScriptInt(
+        \\function f(x) {
+        \\  const masked = x & 32767;
+        \\  const right = x >> 7;
+        \\  const left = x << 3;
+        \\  return masked + right + left;
+        \\}
+        \\f(257);
+    , 2315);
+
+    try testing.expectEqual(@as(u64, 1), stats.pairCount(.lda_smi16, .bit_and));
+    try testing.expectEqual(@as(u64, 1), stats.pairCount(.lda_smi8, .shr));
+    try testing.expectEqual(@as(u64, 1), stats.pairCount(.lda_smi8, .shl));
+    try testing.expectEqual(@as(u64, 1), stats.direct_transfers);
+}
+
+test "full-width smi bit-and direct threading: instrumented run records transfer" {
+    if (comptime !bytecode_stats.enabled) return error.SkipZigTest;
+
+    var stats: bytecode_stats.DynamicStats = .{};
+    const activation = bytecode_stats.activate(&stats);
+    defer activation.deinit();
+
+    try expectScriptInt(
+        \\function f(x) { return x & 16777215; }
+        \\f(16777217);
+    , 1);
+
+    try testing.expectEqual(@as(u64, 1), stats.pairCount(.lda_smi, .bit_and));
+    try testing.expectEqual(@as(u64, 1), stats.direct_transfers);
+}
+
+test "smi8 bit-and direct threading: compact masks stay on ordinary dispatch" {
+    if (comptime !bytecode_stats.enabled) return error.SkipZigTest;
+
+    var stats: bytecode_stats.DynamicStats = .{};
+    const activation = bytecode_stats.activate(&stats);
+    defer activation.deinit();
+
+    try expectScriptInt(
+        \\function f(x) { return x & 7; }
+        \\f(9);
+    , 1);
+
+    try testing.expectEqual(@as(u64, 1), stats.pairCount(.lda_smi8, .bit_and));
+    try testing.expectEqual(@as(u64, 0), stats.direct_transfers);
+}
+
+test "smi bit-and direct threading: slow coercion and caught throw stay exact" {
+    // The integer calls take the two inline width paths. The Double and
+    // object calls decline them with `ip` still on BitAnd, then enter the
+    // ordinary handler. Pin successful JS re-entry and exception unwinding
+    // so the optimization cannot accidentally skip or repeat ToNumeric
+    // effects.
+    try expectScriptStringWithBuiltins(
+        \\let calls = 0;
+        \\function mask(x) { return x & 32767; }
+        \\function wide(x) { return x & 16777215; }
+        \\const maskValue = {
+        \\  valueOf() { calls = calls + 1; return 32769; }
+        \\};
+        \\const wideValue = {
+        \\  valueOf() { calls = calls + 1; return 16777217; }
+        \\};
+        \\const integer = mask(32769);
+        \\const wideInteger = wide(16777217);
+        \\const doubled = mask(32769.9);
+        \\const masked = mask(maskValue);
+        \\const wideMasked = wide(wideValue);
+        \\let caught = 0;
+        \\try {
+        \\  mask({ valueOf() { throw 9; } });
+        \\} catch (e) {
+        \\  caught = e;
+        \\}
+        \\integer + ":" + wideInteger + ":" + doubled + ":" + masked + ":" +
+        \\  wideMasked + ":" + calls + ":" + caught;
+    , "1:1:1:1:1:2:9");
+}
+
 test "lda_this property direct threading: own data property" {
     try expectScriptIntWithBuiltins(
         "function read(){ return this.x; } let o = { x: 20 }; let first = read.call(o); o.x = 22; first + read.call(o);",

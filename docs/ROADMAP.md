@@ -1062,6 +1062,18 @@ sampling by `/profile`.
   measured **0.981x / 0.979x** interpreter macro geometric means on pinned
   x86_64 and **0.9952x / 0.9957x** on arm64. The arm64 production-tier
   control measured **0.9937x**. See `bench-results.md`.
+- **Width-gated Smi `BitAnd` successor threading (2026-07-31).** Lantern's
+  merged Smi-load handler now recognizes full-width / i16 integer masks
+  followed by `BitAnd` and executes the shared Int32 operation before the
+  next indirect dispatch. `LdaSmi8` is excluded to protect Splay's two
+  million nonmatching compact loads; non-Int32 left operands leave `ip` on
+  the ordinary `BitAnd` coercion / BigInt / throw path. Bytecode and both JIT
+  tiers are unchanged, and logical stats remain exactly comparable. Crypto
+  records **4,646,882** new direct transfers (**5.176%** of its logical
+  instructions), while the final native delta is 96 bytes. A pinned x86_64
+  40+40 forward/reverse A/B measured an order-neutral **0.9795x**
+  interpreter macro geometric mean, with no workload regression above 2%;
+  targeted Crypto measured **0.9710x**. See `bench-results.md`.
 - **Impossible property-probe gates (2026-07-30).** Strict property writes now
   reject keys that cannot begin a §7.1.21 canonical numeric spelling, walk to
   the first TypedArray ancestor, and only then pay for numeric parsing and
