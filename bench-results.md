@@ -20,23 +20,25 @@ new run against the previous section with the *same host*.
 ### 2026-07-31 — width-gated Smi `BitAnd` successor threading, host `Linux 6.8.0-117-generic x86_64` (remote bench box)
 
 Exact merged main `7b5a04e5` and the retained candidate used normal
-ReleaseFast CLI SHA-256 binaries `8673fc48` / `7240c01a`. Instrumented
+ReleaseFast CLI SHA-256 binaries `4152253e` / `7d808bff`. Instrumented
 Crypto traces found **3,158,688** `LdaSmi16 -> BitAnd` pairs and
 **1,488,595** full-width `LdaSmi -> BitAnd` pairs. The candidate bypassed
 the indirect successor dispatch on **4,646,882** of them: **99.991%** of
 the eligible pairs and **5.176%** of Crypto's **89,774,038** logical
 instructions. The remaining 401 pairs had a non-Int32 left operand and
-correctly entered the ordinary coercion path.
+correctly entered the shared coercion path.
 
 The bytecode and both JIT tiers remain unchanged. Lantern's existing merged
 Smi-load handler recognizes only full-width and 16-bit loads followed by
 `BitAnd`; compact `LdaSmi8` is deliberately excluded because Splay executes
 it 2,084,482 times without a useful successor. On an Int32 left operand the
 load handler runs the same pure integer AND and consumes the successor opcode
-plus register operand. A Double, coercible object, or BigInt leaves `ip` on
-`BitAnd`, so its established ToNumeric / BigInt / throw path remains the sole
-slow implementation. `observeDirectActive` records the skipped opcode before
-ordinary decoding resumes, preserving logical telemetry.
+plus register operand. A Double, coercible object, or BigInt also consumes the
+successor, then enters the shared `bitwiseBinary` ToNumeric / BigInt / throw
+operation exactly once. This avoids both a second Int32 probe and a second
+dispatch without creating another coercion implementation. Successful Int32
+hits use `observeDirectActive`; fallbacks use `observeActive`, preserving
+logical telemetry in either case.
 
 After normalizing only `direct-transfers`, the complete baseline/candidate
 Crypto reports are byte-identical: same static bytecode, dynamic instruction
@@ -44,51 +46,64 @@ total, every opcode/pair/trigram row, and zero dropped sequences.
 `direct-transfers` moves **634,631 -> 5,281,513**, exactly the **4,646,882**
 new Int32 hits. The unlikely branch hint keeps the grouped load handler's
 dominant `LdaSmi8` / non-`BitAnd` decode path biased toward fallthrough. The
-native cost is **96 bytes**: `runFrames` **334,000 -> 334,096 bytes** and
-ELF `.text` **4,087,299 -> 4,087,395 bytes**.
+native cost is **894 bytes** in `runFrames` (**331,289 -> 332,183**) and
+**896 bytes** in GNU `size` text (**4,783,754 -> 4,784,650**).
 
-Forty paired Lantern-only runs in each physical launch role pinned the driver
-and every child process to CPU 3. Forward is candidate/base, reverse is
-base/candidate after swapping the physical binaries, and neutral is
-`sqrt(forward / reverse)`:
+The runner's even-sample median was corrected during review to average the two
+middle samples; every number below was rerun after that fix. Forty paired
+Lantern-only runs in each physical launch role pinned the driver and every
+child process to CPU 0. Forward is candidate/base, reverse is base/candidate
+after swapping the physical binaries, and neutral is
+`sqrt(forward / reverse)`. Spread is `(max-min)/median` of paired ratios:
 
-| bench | forward C/B | reverse B/C | neutral C/B |
-|---|---:|---:|---:|
-| richards | 0.937x | 1.057x | 0.942x |
-| deltablue | 0.985x | 1.007x | 0.989x |
-| crypto | 0.974x | 1.022x | 0.976x |
-| raytrace | 0.964x | 1.035x | 0.965x |
-| navier_stokes | 1.013x | 1.011x | 1.001x |
-| splay | 1.002x | 0.991x | 1.006x |
-| **geomean** |  |  | **0.979x** |
+| bench | forward C/B | spread | reverse B/C | spread | neutral C/B |
+|---|---:|---:|---:|---:|---:|
+| richards | 0.976x | 22.1% | 1.025x | 19.3% | 0.9758x |
+| deltablue | 1.002x | 18.3% | 1.006x | 21.7% | 0.9980x |
+| crypto | 1.019x | 20.9% | 0.988x | 18.0% | 1.0156x |
+| raytrace | 0.991x | 30.3% | 0.983x | 26.1% | 1.0041x |
+| navier_stokes | 1.019x | 24.3% | 0.987x | 28.2% | 1.0161x |
+| splay | 1.006x | 21.6% | 0.999x | 23.5% | 1.0035x |
+| **geomean** |  |  |  |  | **1.0021x** |
 
-The order-neutral macro geometric mean is **0.9795x**, about **2.05%**
-faster, and no workload crosses the 2% regression gate. Separate 60+60
-targeted runs measured Crypto **0.9710x** and the zero-hit `arith_loop`
-control **0.9895x**. Sixty-pair confirmations of the two layout watchpoints
-measured DeltaBlue **0.9881x** and Splay **1.0095x**.
+The order-neutral macro result is retention evidence rather than a resolved
+effect size: the geomean is **1.0021x**, every workload remains inside the 2%
+regression gate, and several spreads exceed 20%. Targeted slow-path controls
+also retain performance:
+
+| control | pairs/order | forward C/B | spread | reverse B/C | spread | neutral C/B |
+|---|---:|---:|---:|---:|---:|---:|
+| `bit_and_double` | 60 | 0.990x | 29.1% | 1.010x | 45.0% | 0.9900x |
+| `bit_and_object` | 100 | 0.997x | 49.4% | 1.001x | 42.5% | 0.9980x |
+
+Twenty-pair arm64 confirmation on `Darwin 25.6.0` measured **0.9964x**
+across the same six macros. Its per-workload neutral ratios were Richards
+**0.9920x**, DeltaBlue **1.0055x**, Crypto **0.9766x**, RayTrace **1.0116x**,
+Navier-Stokes **0.9881x**, and Splay **1.0050x**; the largest regression was
+1.16%. The x86 A/A calibration itself measured **0.988x** with 45.3% spread,
+so the high-spread VM rows above are deliberately reported as gates, not
+claims of precise speedup.
 
 The small final shape matters. A V8-Ignition-style accumulator-immediate
 opcode family was prototyped (Ignition ships `BitwiseAndSmi`,
 `BitwiseOrSmi`, `BitwiseXorSmi`, and the three Smi shifts
-[in its bytecode set](https://github.com/v8/v8/blob/d405ed7c7b8141bb435ed5cf651163fa32e0d11a/src/interpreter/bytecodes.h#L225-L268)),
-but Cynic's appended handler regressed a zero-hit `arith_loop` control by
-**4.01%** and was rejected. Splitting `LdaSmi16` into a direct cross-handler
-edge triggered a whole-function LLVM phase change, grew `runFrames` by
-7,120 bytes, and regressed Navier-Stokes by **4.12%**. The first compact
-in-arm hybrid stayed at +96 bytes but regressed DeltaBlue by **3.00%**;
-retaining the normal decode path as the hinted fallthrough produced the
-gated result above. These rejected rungs are why wall-time and native-layout
-checks, not dispatch-count reduction alone, decide retention.
+[in its bytecode set](https://github.com/v8/v8/blob/d405ed7c7b8141bb435ed5cf651163fa32e0d11a/src/interpreter/bytecodes.h#L225-L268)).
+The best direct-transfer superinstruction kept object coercion neutral but
+regressed Navier-Stokes by **6.3%**; sharing the handler removed the cloned
+tail but regressed the object control by **5.2%** and Navier-Stokes by
+**3.2%**. A compact primitive-Number successor path cost only 93 native bytes
+but regressed the object control by **7.9%**. All were rejected. The retained
+bytecode-preserving path is larger, but it is the only reviewed shape that
+keeps one coercion operation and clears both architecture gates.
 
-Validation on the locked final snapshot covered both threaded widths, the
-deliberately ordinary Smi8 path, Int32 and Double operands, one-shot object
-coercion, a caught coercion throw, logical telemetry, and allocation-pressure
-GC. The complete ReleaseSafe unit suite passed **3,184 tests** with **464
-intentional skips**. Exact-main and candidate `bitwise-and` test262 pass
-lists were identical at **29 pass / 1 known fail**, including under
-`gc-threshold=1`. The required non-cached full sweep retained **48,653 pass /
-1,324 fail**, plus ShadowRealm **63 / 1**, with no pass-count change.
+Validation on the locked final snapshot covers both threaded widths, the
+deliberately ordinary Smi8 path, Int32 and Double operands, general-LHS
+evaluation order, one-shot object coercion, a caught coercion throw, logical
+telemetry, allocation-pressure GC, and the benchmark driver's true even
+median. Exact-main and candidate `bitwise-and` test262 pass lists remain
+identical at **29 pass / 1 known fail**, including under `gc-threshold=1`.
+The required non-cached full sweep retained **48,653 pass / 1,324 fail**, plus
+ShadowRealm **63 / 1**, with no pass-count change.
 
 ### 2026-07-30 — target-specific computed-receiver register reuse, host `Darwin 25.6.0 arm64`
 
