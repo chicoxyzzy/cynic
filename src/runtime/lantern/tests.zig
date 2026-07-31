@@ -1692,12 +1692,24 @@ test "lda_this property direct threading: instrumented run records transfer" {
     );
 }
 
-// §13.15.3 ApplyStringOrNumericBinaryOperator / §13.9 shift operators /
-// §13.12 binary bitwise operators.
-// Exact integer RHS literals use width-specific loads. Lantern threads the
-// `LdaSmi16; BitAnd` and full-width `LdaSmi; BitAnd` int32 fast paths while
-// preserving the ordinary bytecode stream for both JIT tiers.
-test "smi16 bit-and direct threading: instrumented run records transfer" {
+// §13.12 ApplyStringOrNumericBinaryOperator / §13.9 shift operators.
+// Wide exact-integer RHS literals use width-specific BitAndSmi
+// superinstructions. Compact i8 literals retain LdaSmi8; BitAnd.
+test "bit-and smi superinstruction: compiler fuses wide literal RHS values" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+
+    const out = try compileAndDisassemble(&realm,
+        \\function narrow(x) { return x & 32767; }
+        \\function wide(x) { return x & 16777215; }
+    );
+    defer testing.allocator.free(out);
+
+    try testing.expect(std.mem.indexOf(u8, out, "BitAndSmi16") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "BitAndSmi ") != null);
+}
+
+test "bit-and-smi16: instrumented run records one fused opcode" {
     if (comptime !bytecode_stats.enabled) return error.SkipZigTest;
 
     var stats: bytecode_stats.DynamicStats = .{};
@@ -1714,15 +1726,16 @@ test "smi16 bit-and direct threading: instrumented run records transfer" {
         \\f(257);
     , 2315);
 
-    try testing.expectEqual(@as(u64, 1), stats.pairCount(.lda_smi16, .bit_and));
+    try testing.expectEqual(@as(u64, 0), stats.pairCount(.lda_smi16, .bit_and));
     try testing.expectEqual(@as(u64, 1), stats.pairCount(.lda_smi8, .shr));
     try testing.expectEqual(@as(u64, 1), stats.pairCount(.lda_smi8, .shl));
-    try testing.expectEqual(@as(u64, 1), stats.opcodeCount(.bit_and));
+    try testing.expectEqual(@as(u64, 1), stats.opcodeCount(.bit_and_smi16));
+    try testing.expectEqual(@as(u64, 0), stats.opcodeCount(.bit_and));
     try testing.expectEqual(@as(u64, 0), stats.pairCount(.bit_and, .bit_and));
-    try testing.expectEqual(@as(u64, 1), stats.direct_transfers);
+    try testing.expectEqual(@as(u64, 0), stats.direct_transfers);
 }
 
-test "full-width smi bit-and direct threading: instrumented run records transfer" {
+test "bit-and-smi full-width: instrumented run records one fused opcode" {
     if (comptime !bytecode_stats.enabled) return error.SkipZigTest;
 
     var stats: bytecode_stats.DynamicStats = .{};
@@ -1734,13 +1747,14 @@ test "full-width smi bit-and direct threading: instrumented run records transfer
         \\f(16777217);
     , 1);
 
-    try testing.expectEqual(@as(u64, 1), stats.pairCount(.lda_smi, .bit_and));
-    try testing.expectEqual(@as(u64, 1), stats.opcodeCount(.bit_and));
+    try testing.expectEqual(@as(u64, 0), stats.pairCount(.lda_smi, .bit_and));
+    try testing.expectEqual(@as(u64, 1), stats.opcodeCount(.bit_and_smi));
+    try testing.expectEqual(@as(u64, 0), stats.opcodeCount(.bit_and));
     try testing.expectEqual(@as(u64, 0), stats.pairCount(.bit_and, .bit_and));
-    try testing.expectEqual(@as(u64, 1), stats.direct_transfers);
+    try testing.expectEqual(@as(u64, 0), stats.direct_transfers);
 }
 
-test "smi8 bit-and direct threading: compact masks stay on ordinary dispatch" {
+test "bit-and-smi: compact masks stay on ordinary dispatch" {
     if (comptime !bytecode_stats.enabled) return error.SkipZigTest;
 
     var stats: bytecode_stats.DynamicStats = .{};
@@ -1756,7 +1770,7 @@ test "smi8 bit-and direct threading: compact masks stay on ordinary dispatch" {
     try testing.expectEqual(@as(u64, 0), stats.direct_transfers);
 }
 
-test "smi bit-and direct threading: Double operand uses the Number direct transfer" {
+test "bit-and-smi16: Double operand uses the primitive Number path" {
     if (comptime !bytecode_stats.enabled) return error.SkipZigTest;
 
     var stats: bytecode_stats.DynamicStats = .{};
@@ -1768,12 +1782,13 @@ test "smi bit-and direct threading: Double operand uses the Number direct transf
         \\f(32769.9);
     , 1);
 
-    try testing.expectEqual(@as(u64, 1), stats.pairCount(.lda_smi16, .bit_and));
-    try testing.expectEqual(@as(u64, 1), stats.opcodeCount(.bit_and));
-    try testing.expectEqual(@as(u64, 1), stats.direct_transfers);
+    try testing.expectEqual(@as(u64, 0), stats.pairCount(.lda_smi16, .bit_and));
+    try testing.expectEqual(@as(u64, 1), stats.opcodeCount(.bit_and_smi16));
+    try testing.expectEqual(@as(u64, 0), stats.opcodeCount(.bit_and));
+    try testing.expectEqual(@as(u64, 0), stats.direct_transfers);
 }
 
-test "smi bit-and direct threading: object operand transfers to the coercion path" {
+test "bit-and-smi16: object operand uses the coercion path once" {
     if (comptime !bytecode_stats.enabled) return error.SkipZigTest;
 
     var stats: bytecode_stats.DynamicStats = .{};
@@ -1785,12 +1800,25 @@ test "smi bit-and direct threading: object operand transfers to the coercion pat
         \\f({ valueOf() { return 32769; } });
     , 1);
 
-    try testing.expectEqual(@as(u64, 1), stats.pairCount(.lda_smi16, .bit_and));
-    try testing.expectEqual(@as(u64, 1), stats.opcodeCount(.bit_and));
-    try testing.expectEqual(@as(u64, 1), stats.direct_transfers);
+    try testing.expectEqual(@as(u64, 0), stats.pairCount(.lda_smi16, .bit_and));
+    try testing.expectEqual(@as(u64, 1), stats.opcodeCount(.bit_and_smi16));
+    try testing.expectEqual(@as(u64, 0), stats.opcodeCount(.bit_and));
+    try testing.expectEqual(@as(u64, 0), stats.direct_transfers);
 }
 
-test "smi bit-and direct threading: slow coercion and caught throw stay exact" {
+test "bit-and-smi16: general LHS is evaluated before one coercion" {
+    try expectScriptStringWithBuiltins(
+        \\let effects = "";
+        \\function lhs() {
+        \\  effects = effects + "l";
+        \\  return { valueOf() { effects = effects + "v"; return 32769; } };
+        \\}
+        \\const result = lhs() & 32767;
+        \\effects + ":" + result;
+    , "lv:1");
+}
+
+test "bit-and-smi: slow coercion and caught throw stay exact" {
     // The integer calls take the two inline width paths. The Double and
     // object calls exercise the direct Number path and ordinary coercion path,
     // respectively. Pin successful JS re-entry and exception unwinding so the

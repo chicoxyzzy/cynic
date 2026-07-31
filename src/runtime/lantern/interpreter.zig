@@ -1422,12 +1422,11 @@ inline fn intCompare(comptime op: enum { lt, gt, le, ge }, a: Value, b: Value) ?
 /// §13.15 bitwise / shift on two int32 operands. `&` `|` `^` `<<`
 /// `>>` stay in int32; `>>>` yields a uint32 that promotes to a
 /// double when it exceeds the int32 range.
-inline fn intBitwise(comptime op: enum { band, bor, bxor, shl, shr, shr_u }, a: Value, b: Value) ?Value {
+inline fn intBitwise(comptime op: enum { bor, bxor, shl, shr, shr_u }, a: Value, b: Value) ?Value {
     if (!a.isInt32() or !b.isInt32()) return null;
     const x = a.asInt32();
     const y = b.asInt32();
     switch (op) {
-        .band => return Value.fromInt32(x & y),
         .bor => return Value.fromInt32(x | y),
         .bxor => return Value.fromInt32(x ^ y),
         .shl => {
@@ -1447,6 +1446,18 @@ inline fn intBitwise(comptime op: enum { band, bor, bxor, shl, shr, shr_u }, a: 
                 Value.fromDouble(@floatFromInt(ru));
         },
     }
+}
+
+/// §13.12 ApplyStringOrNumericBinaryOperator for BitAnd. Primitive Number
+/// operands cannot re-enter JS, so complete their ToInt32 operation here;
+/// objects and BigInts retain the shared coercion / exception path.
+inline fn applyBitAnd(realm: *Realm, lhs: Value, rhs: Value) RunError!?Value {
+    if (lhs.isNumber() and rhs.isNumber()) {
+        const left = if (lhs.isInt32()) lhs.asInt32() else toInt32(lhs);
+        const right = if (rhs.isInt32()) rhs.asInt32() else toInt32(rhs);
+        return Value.fromInt32(left & right);
+    }
+    return bitwiseBinary(realm, .bit_and, lhs, rhs);
 }
 
 pub fn runFrames(
@@ -1556,45 +1567,6 @@ pub fn runFrames(
             };
             ip += op_tag.operandSize();
             acc = Value.fromInt32(imm);
-
-            // Dense integer masks followed by BitAnd dominate the full-width
-            // and 16-bit Smi loads in the macro corpus. Thread their pure
-            // Number path here while preserving the ordinary bytecode for both
-            // JIT tiers. Deliberately exclude LdaSmi8: Splay executes it over
-            // two million times without a useful BitAnd successor.
-            //
-            // Primitive Doubles can complete through ToInt32 without JS
-            // re-entry. Objects and BigInts consume the successor too, then
-            // enter the established coercion / exception path exactly once.
-            // This keeps object-heavy sites from paying a failed fast-path
-            // probe before ordinary BitAnd dispatch on every iteration.
-            if (op_tag != .lda_smi8) {
-                // The grouped load arm is dominated overall by LdaSmi8 and
-                // non-BitAnd successors. LdaSmi16/full are different: mask
-                // successors dominate those width classes in the macro
-                // corpus, so keep their successful edge in the hot layout.
-                if (ip + 1 < code.len and code[ip] == @intFromEnum(Op.bit_and)) {
-                    @branchHint(.likely);
-                    const r = code[ip + 1];
-                    const lhs = registers[r];
-                    ip += 2;
-                    if (comptime bytecode_stats.enabled) bytecode_stats.observeDirectActive(.bit_and);
-                    if (lhs.isNumber()) {
-                        const left = if (lhs.isInt32()) lhs.asInt32() else toInt32(lhs);
-                        acc = Value.fromInt32(left & imm);
-                    } else if (try bitwiseBinary(realm, .bit_and, lhs, acc)) |res| {
-                        acc = res;
-                    } else {
-                        const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
-                        realm.pending_exception = null;
-                        f.ip = ip;
-                        f.accumulator = acc;
-                        committed = true;
-                        if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
-                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
-                    }
-                }
-            }
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
         .lda_constant => {
@@ -1916,14 +1888,28 @@ pub fn runFrames(
         },
 
         // ── Bitwise — both operands are ToInt32-coerced ─────────────
+        .bit_and_smi, .bit_and_smi16 => |op_tag| {
+            const r = code[ip];
+            const imm: i32 = switch (op_tag) {
+                .bit_and_smi16 => readI16(code, ip + 1),
+                else => readI32(code, ip + 1),
+            };
+            ip += op_tag.operandSize();
+            if (try applyBitAnd(realm, registers[r], Value.fromInt32(imm))) |res| acc = res else {
+                const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
+                realm.pending_exception = null;
+                f.ip = ip;
+                f.accumulator = acc;
+                committed = true;
+                if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
+                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+            }
+            continue :dispatch try decodeNext(code, &ip, &committed);
+        },
         .bit_and => {
             const r = code[ip];
             ip += 1;
-            if (intBitwise(.band, registers[r], acc)) |res| {
-                acc = res;
-                continue :dispatch try decodeNext(code, &ip, &committed);
-            }
-            if (try bitwiseBinary(realm, .bit_and, registers[r], acc)) |res| acc = res else {
+            if (try applyBitAnd(realm, registers[r], acc)) |res| acc = res else {
                 const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
                 realm.pending_exception = null;
                 f.ip = ip;

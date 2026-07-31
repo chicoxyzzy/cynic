@@ -1077,6 +1077,21 @@ const Compiler = struct {
                     try m.jumpCond(.vs, td);
                     try m.emit(a64.orrReg(acc_reg, .x11, int32_tag_reg));
                 },
+                .bit_and_smi, .bit_and_smi16 => {
+                    // The immediate is already an int32 Number. Guard only
+                    // the register operand; non-int32 values deopt to the
+                    // fused Lantern opcode, which performs ToNumeric once.
+                    const td = try self.tdFor(bc);
+                    const imm: i32 = switch (op) {
+                        .bit_and_smi16 => readI16(code, i + 2),
+                        else => readI32(code, i + 2),
+                    };
+                    try m.emit(a64.ldrImm(.x9, regs_reg, regSlot(code[i + 1])));
+                    try self.checkInt32(.x9, td);
+                    try m.movImm64(.x10, @as(u32, @bitCast(imm)));
+                    try m.emit(a64.andRegW(.x11, .x9, .x10));
+                    try m.emit(a64.orrReg(acc_reg, .x11, int32_tag_reg));
+                },
                 .to_int32 => {
                     // §7.1.6 fast path: an int32 is its own ToInt32.
                     const td = try self.tdFor(bc);
@@ -2491,6 +2506,46 @@ test "jit bistromath: fused register updates compile without blocking tier-up" {
     const js = g_chunk.jit_state.?;
     try testing.expectEqual(Chunk.JitState.Tier.compiled, js.bistromath.code.tier);
     try testing.expect(js.bistromath.entry() != null);
+}
+
+test "jit bistromath: BitAndSmi compiles and deopts coercion at the fused opcode" {
+    if (comptime !supported) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+
+    const src =
+        \\function mask(x) { return x & 32767; }
+        \\let i = 0;
+        \\while (i < 200) { mask(i); i = i + 1; }
+        \\let calls = 0;
+        \\const value = mask({ valueOf() { calls = calls + 1; return 32769; } });
+        \\value + calls * 10;
+    ;
+    const program = try parser_mod.parseScript(arena.allocator(), src, null);
+    var chunk = try bc_compiler.compileScriptAsChunk(testing.allocator, &realm, &program, src, null);
+    defer chunk.deinit(testing.allocator);
+
+    const body = templateNamed(&chunk, "mask");
+    var saw_bit_and_smi = false;
+    var pc: usize = 0;
+    while (pc < body.code.len) {
+        const op: Op = @enumFromInt(body.code[pc]);
+        saw_bit_and_smi = saw_bit_and_smi or op == .bit_and_smi16;
+        pc += 1 + Op.operandSize(op);
+    }
+    try testing.expect(saw_bit_and_smi);
+
+    const value = switch (try interpreter.run(testing.allocator, &realm, &chunk)) {
+        .value, .yielded => |result| result,
+        .thrown => return error.UncaughtException,
+    };
+    try testing.expectEqual(Value.fromInt32(11).bits, value.bits);
+    const state = body.jit_state.?;
+    try testing.expectEqual(Chunk.JitState.Tier.compiled, state.bistromath.code.tier);
+    try testing.expect(state.bistromath.entry() != null);
 }
 
 test "jit bistromath: StarLdar compiles and preserves argument arithmetic" {
