@@ -1568,32 +1568,31 @@ pub fn runFrames(
             // enter the established coercion / exception path exactly once.
             // This keeps object-heavy sites from paying a failed fast-path
             // probe before ordinary BitAnd dispatch on every iteration.
-            if (op_tag != .lda_smi8 and
-                ip + 1 < code.len and
-                code[ip] == @intFromEnum(Op.bit_and))
-            {
+            if (op_tag != .lda_smi8) {
                 // The grouped load arm is dominated overall by LdaSmi8 and
-                // non-BitAnd successors. Bias their ordinary decode path
-                // toward the laid-out fallthrough; matching masks take this
-                // side edge and remain highly predictable inside Crypto.
-                @branchHint(.unlikely);
-                const r = code[ip + 1];
-                const lhs = registers[r];
-                ip += 2;
-                if (comptime bytecode_stats.enabled) bytecode_stats.observeDirectActive(.bit_and);
-                if (lhs.isNumber()) {
-                    const left = if (lhs.isInt32()) lhs.asInt32() else toInt32(lhs);
-                    acc = Value.fromInt32(left & imm);
-                } else if (try bitwiseBinary(realm, .bit_and, lhs, acc)) |res| {
-                    acc = res;
-                } else {
-                    const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
-                    realm.pending_exception = null;
-                    f.ip = ip;
-                    f.accumulator = acc;
-                    committed = true;
-                    if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
-                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                // non-BitAnd successors. LdaSmi16/full are different: mask
+                // successors dominate those width classes in the macro
+                // corpus, so keep their successful edge in the hot layout.
+                if (ip + 1 < code.len and code[ip] == @intFromEnum(Op.bit_and)) {
+                    @branchHint(.likely);
+                    const r = code[ip + 1];
+                    const lhs = registers[r];
+                    ip += 2;
+                    if (comptime bytecode_stats.enabled) bytecode_stats.observeDirectActive(.bit_and);
+                    if (lhs.isNumber()) {
+                        const left = if (lhs.isInt32()) lhs.asInt32() else toInt32(lhs);
+                        acc = Value.fromInt32(left & imm);
+                    } else if (try bitwiseBinary(realm, .bit_and, lhs, acc)) |res| {
+                        acc = res;
+                    } else {
+                        const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
+                        realm.pending_exception = null;
+                        f.ip = ip;
+                        f.accumulator = acc;
+                        committed = true;
+                        if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                    }
                 }
             }
             continue :dispatch try decodeNext(code, &ip, &committed);
