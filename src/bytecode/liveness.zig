@@ -190,7 +190,9 @@ pub fn effectOf(op: Op, code: []const u8, i: usize) Effect {
         .jmp_if_not_ge8,
         .jmp_if_not_ge32,
         => Effect.read1(code[i + 1]),
-        .add_smi, .add_smi8, .add_smi16, .bit_and_smi, .bit_and_smi16 => Effect.read1(code[i + 1]),
+        .add_smi, .add_smi8, .add_smi16 => Effect.read1(code[i + 1]),
+        .bit_and_smi16 => Effect.read1(code[i + 3]),
+        .bit_and_smi => Effect.read1(code[i + 5]),
         .lda_computed, .lda_computed8 => Effect.read1(code[i + 1]),
         .switch_smi => Effect.read1(code[i + 1]),
         // `[op][k:u16][r_obj:u8]…` — receiver register at i+3.
@@ -732,7 +734,7 @@ test "liveness: effectOf classifies register operands" {
     try testing.expectEqual(@as(u8, 3), e_ldar.reads[0]);
     try testing.expectEqual(@as(?u8, null), e_ldar.write);
 
-    var bit_and_smi = [_]u8{ byteOf(.bit_and_smi16), 7, 0, 0 };
+    var bit_and_smi = [_]u8{ byteOf(.bit_and_smi16), 0, 0, 7 };
     const e_bit_and_smi = effectOf(.bit_and_smi16, &bit_and_smi, 0);
     try testing.expectEqual(@as(u8, 1), e_bit_and_smi.n_reads);
     try testing.expectEqual(@as(u8, 7), e_bit_and_smi.reads[0]);

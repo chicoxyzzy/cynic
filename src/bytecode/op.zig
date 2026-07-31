@@ -70,6 +70,8 @@ pub const OperandLayout = enum {
     reg_reg_i8,
     reg_i32,
     reg_reg_i32,
+    i16_reg,
+    i32_reg,
     u8,
     u8_u8,
     u8_reg_u8,
@@ -106,6 +108,8 @@ pub const OperandLayout = enum {
             .reg_reg_i8 => &.{ .register, .register, .i8 },
             .reg_i32 => &.{ .register, .i32 },
             .reg_reg_i32 => &.{ .register, .register, .i32 },
+            .i16_reg => &.{ .i16, .register },
+            .i32_reg => &.{ .i32, .register },
             .u8 => &.{.u8},
             .u8_u8 => &.{ .u8, .u8 },
             .u8_reg_u8 => &.{ .u8, .register, .u8 },
@@ -1494,12 +1498,12 @@ pub const Op = enum(u8) {
     /// fusion emits this for adjacent `Star dst; Ldar src` pairs whose load
     /// is not a control-flow entry and whose pair has a successor opcode.
     star_ldar,
-    /// `[op] [r:u8] [imm:i32]` — `acc = registers[r] & imm`. Fused
+    /// `[op] [imm:i32] [r:u8]` — `acc = registers[r] & imm`. Fused
     /// counterpart to `LdaSmi imm; BitAnd r` for full-width integer masks.
     /// Primitive Numbers complete through ToInt32 in one dispatch; objects
     /// and BigInts use the same §13.12 coercion / exception path as BitAnd.
     bit_and_smi,
-    /// `[op] [r:u8] [imm:i16]` — compact BitAndSmi form. Eight-bit masks stay
+    /// `[op] [imm:i16] [r:u8]` — compact BitAndSmi form. Eight-bit masks stay
     /// unfused because corpus telemetry showed no useful hot successor there.
     bit_and_smi16,
 
@@ -1556,8 +1560,8 @@ pub const Op = enum(u8) {
             .post_inc_reg => instruction("PostIncReg", .reg),
             .post_dec_reg => instruction("PostDecReg", .reg),
             .star_ldar => baselineInstruction("StarLdar", .reg_reg),
-            .bit_and_smi => baselineInstruction("BitAndSmi", .reg_i32),
-            .bit_and_smi16 => baselineInstruction("BitAndSmi16", .reg_i16),
+            .bit_and_smi => baselineInstruction("BitAndSmi", .i32_reg),
+            .bit_and_smi16 => baselineInstruction("BitAndSmi16", .i16_reg),
             .lda_smi8 => baselineInstruction("LdaSmi8", .i8),
             .lda_smi16 => baselineInstruction("LdaSmi16", .i16),
             .add_smi8 => baselineInstruction("AddSmi8", .reg_i8),
@@ -1944,8 +1948,8 @@ test "Op: instruction specs classify representative execution contracts" {
     try testing.expectEqual(OperandLayout.reg, Op.ldar.spec().layout);
     try testing.expectEqual(OperandLayout.reg_reg, Op.star_ldar.spec().layout);
     try testing.expectEqual(OperandLayout.reg_i32, Op.add_smi.spec().layout);
-    try testing.expectEqual(OperandLayout.reg_i32, Op.bit_and_smi.spec().layout);
-    try testing.expectEqual(OperandLayout.reg_i16, Op.bit_and_smi16.spec().layout);
+    try testing.expectEqual(OperandLayout.i32_reg, Op.bit_and_smi.spec().layout);
+    try testing.expectEqual(OperandLayout.i16_reg, Op.bit_and_smi16.spec().layout);
     try testing.expectEqual(OperandLayout.reg_i16, Op.jmp_if_strict_eq.spec().layout);
     try testing.expectEqual(OperandLayout.u16_reg_u8_u16_u16, Op.call_property.spec().layout);
 

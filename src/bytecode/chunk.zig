@@ -1401,12 +1401,12 @@ pub const Builder = struct {
         std.debug.assert(imm < std.math.minInt(i8) or imm > std.math.maxInt(i8));
         if (imm >= std.math.minInt(i16) and imm <= std.math.maxInt(i16)) {
             try self.emitOp(.bit_and_smi16, span);
-            try self.emitU8(r);
             try self.emitI16(@intCast(imm));
+            try self.emitU8(r);
         } else {
             try self.emitOp(.bit_and_smi, span);
-            try self.emitU8(r);
             try self.emitI32(imm);
+            try self.emitU8(r);
         }
     }
 

@@ -1898,26 +1898,15 @@ pub fn runFrames(
         },
 
         // ── Bitwise — both operands are ToInt32-coerced ─────────────
-        .bit_and_smi, .bit_and_smi16 => |op_tag| {
-            const r = code[ip];
-            const imm: i32 = switch (op_tag) {
-                .bit_and_smi16 => readI16(code, ip + 1),
-                else => readI32(code, ip + 1),
-            };
-            ip += op_tag.operandSize();
-            acc = Value.fromInt32(imm);
-            if (intBitwise(.band, registers[r], acc)) |res| {
-                acc = res;
-                continue :dispatch try decodeNext(code, &ip, &committed);
-            }
-            if (try bitwiseBinary(realm, .bit_and, registers[r], acc)) |res| acc = res else {
-                committed = true;
-                switch (try unwindSlowBinaryFailure(allocator, realm, frames, f, ip, acc)) {
-                    .uncaught => |ex| return .{ .thrown = ex },
-                    .resumed => continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed),
-                }
-            }
-            continue :dispatch try decodeNext(code, &ip, &committed);
+        .bit_and_smi16 => {
+            acc = Value.fromInt32(readI16(code, ip));
+            ip += 2;
+            continue :dispatch .bit_and;
+        },
+        .bit_and_smi => {
+            acc = Value.fromInt32(readI32(code, ip));
+            ip += 4;
+            continue :dispatch .bit_and;
         },
         .bit_and => {
             const r = code[ip];

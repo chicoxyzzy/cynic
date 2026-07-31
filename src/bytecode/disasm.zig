@@ -82,11 +82,11 @@ pub fn dump(allocator: std.mem.Allocator, chunk: *const Chunk) ![]u8 {
                 try buf.print(allocator, " r{d} {d}", .{ r, imm });
             },
             .bit_and_smi, .bit_and_smi16 => |op_tag| {
-                const r = chunk.code[i + 1];
                 const imm: i32 = switch (op_tag) {
-                    .bit_and_smi16 => readI16(chunk.code, i + 2),
-                    else => readI32(chunk.code, i + 2),
+                    .bit_and_smi16 => readI16(chunk.code, i + 1),
+                    else => readI32(chunk.code, i + 1),
                 };
+                const r = chunk.code[i + 1 + @as(usize, if (op_tag == .bit_and_smi16) 2 else 4)];
                 try buf.print(allocator, " r{d} {d}", .{ r, imm });
             },
             .lda_constant => {

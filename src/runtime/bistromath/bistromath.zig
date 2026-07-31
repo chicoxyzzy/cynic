@@ -1083,10 +1083,11 @@ const Compiler = struct {
                     // fused Lantern opcode, which performs ToNumeric once.
                     const td = try self.tdFor(bc);
                     const imm: i32 = switch (op) {
-                        .bit_and_smi16 => readI16(code, i + 2),
-                        else => readI32(code, i + 2),
+                        .bit_and_smi16 => readI16(code, i + 1),
+                        else => readI32(code, i + 1),
                     };
-                    try m.emit(a64.ldrImm(.x9, regs_reg, regSlot(code[i + 1])));
+                    const r = code[i + 1 + @as(usize, if (op == .bit_and_smi16) 2 else 4)];
+                    try m.emit(a64.ldrImm(.x9, regs_reg, regSlot(r)));
                     try self.checkInt32(.x9, td);
                     try m.movImm64(.x10, @as(u32, @bitCast(imm)));
                     try m.emit(a64.andRegW(.x11, .x9, .x10));
