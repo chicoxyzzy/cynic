@@ -1562,10 +1562,12 @@ pub fn runFrames(
             // macro corpus. Thread the pure completions here while preserving
             // the ordinary bytecode for both JIT tiers.
             //
-            // For arithmetic successors, a non-Int32 LHS (a Double,
-            // coercible object, or BigInt) leaves `ip` on the successor so
-            // its existing slow path remains the sole conversion / re-entry /
-            // exception implementation. The Star completion is an
+            // If the LHS is not an Int32 (a Double, coercible object, or
+            // BigInt), compact Shr leaves `ip` on the successor so its
+            // existing handler remains the sole conversion / re-entry /
+            // exception implementation. Wider BitAnd consumes the successor
+            // and enters that same `bitwiseBinary` operation directly,
+            // avoiding a repeated probe and dispatch. Star is an
             // unconditional frame-register store.
             if (op_tag == .lda_smi8) {
                 if (ip + 1 < code.len and code[ip] == @intFromEnum(Op.shr)) {
@@ -1600,6 +1602,20 @@ pub fn runFrames(
                     ip += 2;
                     if (comptime bytecode_stats.enabled) bytecode_stats.observeDirectActive(.bit_and);
                     acc = res;
+                } else {
+                    ip += 2;
+                    if (comptime bytecode_stats.enabled) bytecode_stats.observeDirectActive(.bit_and);
+                    if (try bitwiseBinary(realm, .bit_and, registers[r], acc)) |res| {
+                        acc = res;
+                    } else {
+                        const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
+                        realm.pending_exception = null;
+                        f.ip = ip;
+                        f.accumulator = acc;
+                        committed = true;
+                        if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                    }
                 }
             }
             continue :dispatch try decodeNext(code, &ip, &committed);

@@ -1932,12 +1932,58 @@ test "smi8 bit-and direct threading: compact masks stay on ordinary dispatch" {
     try testing.expectEqual(@as(u64, 0), stats.direct_transfers);
 }
 
+test "smi bit-and direct threading: Double transfers to shared slow path" {
+    if (comptime !bytecode_stats.enabled) return error.SkipZigTest;
+
+    var stats: bytecode_stats.DynamicStats = .{};
+    const activation = bytecode_stats.activate(&stats);
+    defer activation.deinit();
+
+    try expectScriptInt(
+        \\function f(x) { return x & 32767; }
+        \\f(32769.9);
+    , 1);
+
+    try testing.expectEqual(@as(u64, 1), stats.pairCount(.lda_smi16, .bit_and));
+    try testing.expectEqual(@as(u64, 1), stats.opcodeCount(.bit_and));
+    try testing.expectEqual(@as(u64, 1), stats.direct_transfers);
+}
+
+test "smi bit-and direct threading: general LHS precedes one coercion" {
+    try expectScriptStringWithBuiltins(
+        \\let effects = "";
+        \\function lhs() {
+        \\  effects = effects + "l";
+        \\  return { valueOf() { effects = effects + "v"; return 32769; } };
+        \\}
+        \\const result = lhs() & 32767;
+        \\effects + ":" + result;
+    , "lv:1");
+}
+
+test "smi bit-and direct threading: Symbol coercion uses shared slow path" {
+    try expectScriptStringWithBuiltins(
+        \\let calls = 0;
+        \\function mask(x) { return x & 32767; }
+        \\const value = {
+        \\  [Symbol.toPrimitive]() { calls = calls + 1; return 32769; }
+        \\};
+        \\const masked = mask(value);
+        \\let symbolError = "none";
+        \\try {
+        \\  mask(Symbol("x"));
+        \\} catch (e) {
+        \\  symbolError = e.constructor.name;
+        \\}
+        \\masked + ":" + calls + ":" + symbolError;
+    , "1:1:TypeError");
+}
+
 test "smi bit-and direct threading: slow coercion and caught throw stay exact" {
     // The integer calls take the two inline width paths. The Double and
-    // object calls decline them with `ip` still on BitAnd, then enter the
-    // ordinary handler. Pin successful JS re-entry and exception unwinding
-    // so the optimization cannot accidentally skip or repeat ToNumeric
-    // effects.
+    // object calls decline them, then enter the shared `bitwiseBinary` slow
+    // operation directly. Pin successful JS re-entry and exception unwinding
+    // so the optimization cannot accidentally skip or repeat ToNumeric effects.
     try expectScriptStringWithBuiltins(
         \\let calls = 0;
         \\function mask(x) { return x & 32767; }

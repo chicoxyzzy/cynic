@@ -1066,14 +1066,21 @@ sampling by `/profile`.
   merged Smi-load handler now recognizes full-width / i16 integer masks
   followed by `BitAnd` and executes the shared Int32 operation before the
   next indirect dispatch. `LdaSmi8` is excluded to protect Splay's two
-  million nonmatching compact loads; non-Int32 left operands leave `ip` on
-  the ordinary `BitAnd` coercion / BigInt / throw path. Bytecode and both JIT
-  tiers are unchanged, and logical stats remain exactly comparable. Crypto
-  records **4,646,882** new direct transfers (**5.176%** of its logical
-  instructions), while the final native delta is 96 bytes. A pinned x86_64
-  40+40 forward/reverse A/B measured an order-neutral **0.9795x**
-  interpreter macro geometric mean, with no workload regression above 2%;
-  targeted Crypto measured **0.9710x**. See `bench-results.md`.
+  million nonmatching compact loads. Non-Int32 left operands consume the
+  successor and enter the shared `bitwiseBinary` coercion / BigInt / throw
+  operation once, avoiding a repeated probe and dispatch. Bytecode and both
+  JIT tiers are unchanged, and logical stats remain exactly comparable.
+  Crypto records **4,647,283** new direct transfers (**5.177%** of its
+  logical instructions): 4,646,882 Int32 hits and 401 transfers into the
+  shared slow path. The native delta is 894 bytes in `runFrames` for the
+  pinned-Zig Linux x86_64 ReleaseFast build. Post-review true-median 40+40
+  x86_64 A/B measured a **1.0021x** neutral interpreter macro geomean; no
+  point-estimate regression exceeded 2%, but shared-VM variance was too high
+  to establish that bound statistically. The 20+20 arm64 point
+  estimate was **0.9964x**. Dedicated Double and object slow-path controls had
+  **0.9900x** and **0.9980x** point estimates. Rejected
+  superinstruction variants regressed Navier-Stokes or object coercion by
+  3.2-7.9%. See `bench-results.md`.
 - **Compact Smi `Shr` successor threading (2026-07-31).** Crypto telemetry
   found **4,646,114** `LdaSmi8 -> Shr` transitions, **5.175%** of all logical
   instructions; **4,645,838** (**99.994%**) had an Int32 left operand. The
