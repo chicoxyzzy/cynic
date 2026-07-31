@@ -1519,6 +1519,7 @@ pub fn runFrames(
     var ip: usize = f.ip;
     var acc: Value = f.accumulator;
     var committed: bool = false;
+    var bit_and_probe_failed: bool = false;
 
     // First opcode of this `runFrames` invocation. A fresh entry is
     // also how a suspended generator resumes, so cross the safe
@@ -1564,9 +1565,9 @@ pub fn runFrames(
             // over two million times without a useful BitAnd successor.
             //
             // If the LHS is not an Int32 (a Double, coercible object, or
-            // BigInt), enter the same `bitwiseBinary` slow operation directly.
-            // Re-dispatching BitAnd would repeat the Int32 probe we just
-            // declined on every fallback-heavy site.
+            // BigInt), keep the ordinary dispatch edge but tell BitAnd not to
+            // repeat the Int32 probe we just declined. The marker lives for
+            // exactly that next opcode and never changes bytecode semantics.
             if (op_tag != .lda_smi8 and
                 ip + 1 < code.len and
                 code[ip] == @intFromEnum(Op.bit_and))
@@ -1582,19 +1583,7 @@ pub fn runFrames(
                     if (comptime bytecode_stats.enabled) bytecode_stats.observeDirectActive(.bit_and);
                     acc = res;
                 } else {
-                    ip += 2;
-                    if (comptime bytecode_stats.enabled) bytecode_stats.observeActive(.bit_and);
-                    if (try bitwiseBinary(realm, .bit_and, registers[r], acc)) |res| {
-                        acc = res;
-                    } else {
-                        const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
-                        realm.pending_exception = null;
-                        f.ip = ip;
-                        f.accumulator = acc;
-                        committed = true;
-                        if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
-                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
-                    }
+                    bit_and_probe_failed = true;
                 }
             }
             continue :dispatch try decodeNext(code, &ip, &committed);
@@ -1921,9 +1910,13 @@ pub fn runFrames(
         .bit_and => {
             const r = code[ip];
             ip += 1;
-            if (intBitwise(.band, registers[r], acc)) |res| {
-                acc = res;
-                continue :dispatch try decodeNext(code, &ip, &committed);
+            const skip_int_probe = bit_and_probe_failed;
+            bit_and_probe_failed = false;
+            if (!skip_int_probe) {
+                if (intBitwise(.band, registers[r], acc)) |res| {
+                    acc = res;
+                    continue :dispatch try decodeNext(code, &ip, &committed);
+                }
             }
             if (try bitwiseBinary(realm, .bit_and, registers[r], acc)) |res| acc = res else {
                 const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
