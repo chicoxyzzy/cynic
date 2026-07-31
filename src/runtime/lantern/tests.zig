@@ -1770,7 +1770,7 @@ test "bit-and-smi: compact masks stay on ordinary dispatch" {
     try testing.expectEqual(@as(u64, 0), stats.direct_transfers);
 }
 
-test "bit-and-smi16: Double operand uses the primitive Number path" {
+test "bit-and-smi16: Double operand preserves ToInt32 semantics" {
     if (comptime !bytecode_stats.enabled) return error.SkipZigTest;
 
     var stats: bytecode_stats.DynamicStats = .{};

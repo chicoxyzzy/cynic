@@ -1449,16 +1449,6 @@ inline fn intBitwise(comptime op: enum { band, bor, bxor, shl, shr, shr_u }, a: 
     }
 }
 
-/// §13.12 ApplyStringOrNumericBinaryOperator for a BitAndSmi opcode. The RHS
-/// is known int32, so classify only the LHS before the shared coercion path.
-inline fn applyBitAndSmi(realm: *Realm, lhs: Value, imm: i32) RunError!?Value {
-    if (lhs.isInt32()) {
-        return Value.fromInt32(lhs.asInt32() & imm);
-    }
-    if (lhs.isDouble()) return Value.fromInt32(toInt32(lhs) & imm);
-    return bitwiseBinary(realm, .bit_and, lhs, Value.fromInt32(imm));
-}
-
 const SlowBinaryUnwind = union(enum) {
     resumed,
     uncaught: Value,
@@ -1915,7 +1905,12 @@ pub fn runFrames(
                 else => readI32(code, ip + 1),
             };
             ip += op_tag.operandSize();
-            if (try applyBitAndSmi(realm, registers[r], imm)) |res| acc = res else {
+            acc = Value.fromInt32(imm);
+            if (intBitwise(.band, registers[r], acc)) |res| {
+                acc = res;
+                continue :dispatch try decodeNext(code, &ip, &committed);
+            }
+            if (try bitwiseBinary(realm, .bit_and, registers[r], acc)) |res| acc = res else {
                 committed = true;
                 switch (try unwindSlowBinaryFailure(allocator, realm, frames, f, ip, acc)) {
                     .uncaught => |ex| return .{ .thrown = ex },
