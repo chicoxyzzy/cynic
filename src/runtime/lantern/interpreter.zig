@@ -1564,8 +1564,9 @@ pub fn runFrames(
             // over two million times without a useful BitAnd successor.
             //
             // If the LHS is not an Int32 (a Double, coercible object, or
-            // BigInt), leave `ip` on BitAnd so its existing slow path remains
-            // the sole conversion / re-entry / exception implementation.
+            // BigInt), enter the same `bitwiseBinary` slow operation directly.
+            // Re-dispatching BitAnd would repeat the Int32 probe we just
+            // declined on every fallback-heavy site.
             if (op_tag != .lda_smi8 and
                 ip + 1 < code.len and
                 code[ip] == @intFromEnum(Op.bit_and))
@@ -1580,6 +1581,20 @@ pub fn runFrames(
                     ip += 2;
                     if (comptime bytecode_stats.enabled) bytecode_stats.observeDirectActive(.bit_and);
                     acc = res;
+                } else {
+                    ip += 2;
+                    if (comptime bytecode_stats.enabled) bytecode_stats.observeActive(.bit_and);
+                    if (try bitwiseBinary(realm, .bit_and, registers[r], acc)) |res| {
+                        acc = res;
+                    } else {
+                        const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
+                        realm.pending_exception = null;
+                        f.ip = ip;
+                        f.accumulator = acc;
+                        committed = true;
+                        if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                    }
                 }
             }
             continue :dispatch try decodeNext(code, &ip, &committed);
