@@ -1449,12 +1449,37 @@ inline fn intBitwise(comptime op: enum { band, bor, bxor, shl, shr, shr_u }, a: 
     }
 }
 
+noinline fn applyBitAndSmiSlow(realm: *Realm, lhs: Value, imm: i32) RunError!?Value {
+    return bitwiseBinary(realm, .bit_and, lhs, Value.fromInt32(imm));
+}
+
 /// §13.12 ApplyStringOrNumericBinaryOperator for a BitAndSmi opcode. The RHS
-/// is known int32, so classify only the LHS before the shared coercion path.
+/// is known int32, so classify only the LHS before the outlined coercion path.
 inline fn applyBitAndSmi(realm: *Realm, lhs: Value, imm: i32) RunError!?Value {
     if (lhs.isInt32()) return Value.fromInt32(lhs.asInt32() & imm);
     if (lhs.isDouble()) return Value.fromInt32(toInt32(lhs) & imm);
-    return bitwiseBinary(realm, .bit_and, lhs, Value.fromInt32(imm));
+    return applyBitAndSmiSlow(realm, lhs, imm);
+}
+
+const SlowBinaryUnwind = union(enum) {
+    resumed,
+    uncaught: Value,
+};
+
+noinline fn unwindSlowBinaryFailure(
+    allocator: std.mem.Allocator,
+    realm: *Realm,
+    frames: *std.ArrayListUnmanaged(CallFrame),
+    f: *CallFrame,
+    ip: usize,
+    acc: Value,
+) RunError!SlowBinaryUnwind {
+    const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
+    realm.pending_exception = null;
+    f.ip = ip;
+    f.accumulator = acc;
+    if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
+    return .resumed;
 }
 
 pub fn runFrames(
@@ -1893,13 +1918,11 @@ pub fn runFrames(
             };
             ip += op_tag.operandSize();
             if (try applyBitAndSmi(realm, registers[r], imm)) |res| acc = res else {
-                const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
-                realm.pending_exception = null;
-                f.ip = ip;
-                f.accumulator = acc;
                 committed = true;
-                if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
-                continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                switch (try unwindSlowBinaryFailure(allocator, realm, frames, f, ip, acc)) {
+                    .uncaught => |ex| return .{ .thrown = ex },
+                    .resumed => continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed),
+                }
             }
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
