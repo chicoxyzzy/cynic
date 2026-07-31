@@ -1453,7 +1453,6 @@ inline fn intBitwise(comptime op: enum { band, bor, bxor, shl, shr, shr_u }, a: 
 /// is known int32, so classify only the LHS before the shared coercion path.
 inline fn applyBitAndSmi(realm: *Realm, lhs: Value, imm: i32) RunError!?Value {
     if (lhs.isInt32()) {
-        @branchHint(.likely);
         return Value.fromInt32(lhs.asInt32() & imm);
     }
     if (lhs.isDouble()) return Value.fromInt32(toInt32(lhs) & imm);
