@@ -1716,6 +1716,8 @@ test "smi16 bit-and direct threading: instrumented run records transfer" {
     try testing.expectEqual(@as(u64, 1), stats.pairCount(.lda_smi16, .bit_and));
     try testing.expectEqual(@as(u64, 1), stats.pairCount(.lda_smi8, .shr));
     try testing.expectEqual(@as(u64, 1), stats.pairCount(.lda_smi8, .shl));
+    try testing.expectEqual(@as(u64, 1), stats.opcodeCount(.bit_and));
+    try testing.expectEqual(@as(u64, 0), stats.pairCount(.bit_and, .bit_and));
     try testing.expectEqual(@as(u64, 1), stats.direct_transfers);
 }
 
@@ -1732,6 +1734,8 @@ test "full-width smi bit-and direct threading: instrumented run records transfer
     , 1);
 
     try testing.expectEqual(@as(u64, 1), stats.pairCount(.lda_smi, .bit_and));
+    try testing.expectEqual(@as(u64, 1), stats.opcodeCount(.bit_and));
+    try testing.expectEqual(@as(u64, 0), stats.pairCount(.bit_and, .bit_and));
     try testing.expectEqual(@as(u64, 1), stats.direct_transfers);
 }
 
@@ -1767,20 +1771,35 @@ test "smi bit-and direct threading: slow coercion and caught throw stay exact" {
         \\const wideValue = {
         \\  valueOf() { calls = calls + 1; return 16777217; }
         \\};
+        \\const gcValue = {
+        \\  valueOf() {
+        \\    calls = calls + 1;
+        \\    __collectGarbage();
+        \\    return 32769;
+        \\  }
+        \\};
         \\const integer = mask(32769);
         \\const wideInteger = wide(16777217);
         \\const doubled = mask(32769.9);
         \\const masked = mask(maskValue);
         \\const wideMasked = wide(wideValue);
+        \\const gcMasked = mask(gcValue);
         \\let caught = 0;
         \\try {
         \\  mask({ valueOf() { throw 9; } });
         \\} catch (e) {
         \\  caught = e;
         \\}
+        \\let bigintError = "none";
+        \\try {
+        \\  mask(1n);
+        \\} catch (e) {
+        \\  bigintError = e.constructor.name;
+        \\}
         \\integer + ":" + wideInteger + ":" + doubled + ":" + masked + ":" +
-        \\  wideMasked + ":" + calls + ":" + caught;
-    , "1:1:1:1:1:2:9");
+        \\  wideMasked + ":" + gcMasked + ":" + calls + ":" + caught + ":" +
+        \\  bigintError;
+    , "1:1:1:1:1:1:3:9:TypeError");
 }
 
 test "lda_this property direct threading: own data property" {
