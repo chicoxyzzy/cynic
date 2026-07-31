@@ -1422,11 +1422,12 @@ inline fn intCompare(comptime op: enum { lt, gt, le, ge }, a: Value, b: Value) ?
 /// §13.15 bitwise / shift on two int32 operands. `&` `|` `^` `<<`
 /// `>>` stay in int32; `>>>` yields a uint32 that promotes to a
 /// double when it exceeds the int32 range.
-inline fn intBitwise(comptime op: enum { bor, bxor, shl, shr, shr_u }, a: Value, b: Value) ?Value {
+inline fn intBitwise(comptime op: enum { band, bor, bxor, shl, shr, shr_u }, a: Value, b: Value) ?Value {
     if (!a.isInt32() or !b.isInt32()) return null;
     const x = a.asInt32();
     const y = b.asInt32();
     switch (op) {
+        .band => return Value.fromInt32(x & y),
         .bor => return Value.fromInt32(x | y),
         .bxor => return Value.fromInt32(x ^ y),
         .shl => {
@@ -1448,16 +1449,12 @@ inline fn intBitwise(comptime op: enum { bor, bxor, shl, shr, shr_u }, a: Value,
     }
 }
 
-/// §13.12 ApplyStringOrNumericBinaryOperator for BitAnd. Primitive Number
-/// operands cannot re-enter JS, so complete their ToInt32 operation here;
-/// objects and BigInts retain the shared coercion / exception path.
-inline fn applyBitAnd(realm: *Realm, lhs: Value, rhs: Value) RunError!?Value {
-    if (lhs.isNumber() and rhs.isNumber()) {
-        const left = if (lhs.isInt32()) lhs.asInt32() else toInt32(lhs);
-        const right = if (rhs.isInt32()) rhs.asInt32() else toInt32(rhs);
-        return Value.fromInt32(left & right);
-    }
-    return bitwiseBinary(realm, .bit_and, lhs, rhs);
+/// §13.12 ApplyStringOrNumericBinaryOperator for a BitAndSmi opcode. The RHS
+/// is known int32, so classify only the LHS before the shared coercion path.
+inline fn applyBitAndSmi(realm: *Realm, lhs: Value, imm: i32) RunError!?Value {
+    if (lhs.isInt32()) return Value.fromInt32(lhs.asInt32() & imm);
+    if (lhs.isDouble()) return Value.fromInt32(toInt32(lhs) & imm);
+    return bitwiseBinary(realm, .bit_and, lhs, Value.fromInt32(imm));
 }
 
 pub fn runFrames(
@@ -1895,7 +1892,7 @@ pub fn runFrames(
                 else => readI32(code, ip + 1),
             };
             ip += op_tag.operandSize();
-            if (try applyBitAnd(realm, registers[r], Value.fromInt32(imm))) |res| acc = res else {
+            if (try applyBitAndSmi(realm, registers[r], imm)) |res| acc = res else {
                 const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
                 realm.pending_exception = null;
                 f.ip = ip;
@@ -1909,7 +1906,11 @@ pub fn runFrames(
         .bit_and => {
             const r = code[ip];
             ip += 1;
-            if (try applyBitAnd(realm, registers[r], acc)) |res| acc = res else {
+            if (intBitwise(.band, registers[r], acc)) |res| {
+                acc = res;
+                continue :dispatch try decodeNext(code, &ip, &committed);
+            }
+            if (try bitwiseBinary(realm, .bit_and, registers[r], acc)) |res| acc = res else {
                 const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
                 realm.pending_exception = null;
                 f.ip = ip;
