@@ -1775,10 +1775,9 @@ test "smi bit-and direct threading: Double operand declines the direct transfer"
 
 test "smi bit-and direct threading: slow coercion and caught throw stay exact" {
     // The integer calls take the two inline width paths. The Double and
-    // object calls decline them, mark the repeated Int32 probe as unnecessary,
-    // then enter the ordinary BitAnd slow operation. Pin successful JS re-entry
-    // and exception unwinding so the optimization cannot accidentally skip or
-    // repeat ToNumeric effects.
+    // object calls decline them, then enter the shared `bitwiseBinary` slow
+    // operation directly. Pin successful JS re-entry and exception unwinding
+    // so the optimization cannot accidentally skip or repeat ToNumeric effects.
     try expectScriptStringWithBuiltins(
         \\let calls = 0;
         \\function mask(x) { return x & 32767; }

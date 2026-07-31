@@ -1449,6 +1449,27 @@ inline fn intBitwise(comptime op: enum { band, bor, bxor, shl, shr, shr_u }, a: 
     }
 }
 
+const SlowBinaryUnwind = union(enum) {
+    resumed,
+    uncaught: Value,
+};
+
+noinline fn unwindSlowBinaryFailure(
+    allocator: std.mem.Allocator,
+    realm: *Realm,
+    frames: *std.ArrayListUnmanaged(CallFrame),
+    f: *CallFrame,
+    ip: usize,
+    acc: Value,
+) RunError!SlowBinaryUnwind {
+    const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
+    realm.pending_exception = null;
+    f.ip = ip;
+    f.accumulator = acc;
+    if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .uncaught = ex };
+    return .resumed;
+}
+
 pub fn runFrames(
     allocator: std.mem.Allocator,
     realm: *Realm,
@@ -1519,7 +1540,6 @@ pub fn runFrames(
     var ip: usize = f.ip;
     var acc: Value = f.accumulator;
     var committed: bool = false;
-    var bit_and_probe_failed: bool = false;
 
     // First opcode of this `runFrames` invocation. A fresh entry is
     // also how a suspended generator resumes, so cross the safe
@@ -1565,9 +1585,9 @@ pub fn runFrames(
             // over two million times without a useful BitAnd successor.
             //
             // If the LHS is not an Int32 (a Double, coercible object, or
-            // BigInt), keep the ordinary dispatch edge but tell BitAnd not to
-            // repeat the Int32 probe we just declined. The marker lives for
-            // exactly that next opcode and never changes bytecode semantics.
+            // BigInt), enter the same `bitwiseBinary` slow operation directly.
+            // Re-dispatching BitAnd would repeat the Int32 probe we just
+            // declined on every fallback-heavy site.
             if (op_tag != .lda_smi8 and
                 ip + 1 < code.len and
                 code[ip] == @intFromEnum(Op.bit_and))
@@ -1583,7 +1603,17 @@ pub fn runFrames(
                     if (comptime bytecode_stats.enabled) bytecode_stats.observeDirectActive(.bit_and);
                     acc = res;
                 } else {
-                    bit_and_probe_failed = true;
+                    ip += 2;
+                    if (comptime bytecode_stats.enabled) bytecode_stats.observeActive(.bit_and);
+                    if (try bitwiseBinary(realm, .bit_and, registers[r], acc)) |res| {
+                        acc = res;
+                    } else {
+                        committed = true;
+                        switch (try unwindSlowBinaryFailure(allocator, realm, frames, f, ip, acc)) {
+                            .uncaught => |ex| return .{ .thrown = ex },
+                            .resumed => continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed),
+                        }
+                    }
                 }
             }
             continue :dispatch try decodeNext(code, &ip, &committed);
@@ -1910,13 +1940,9 @@ pub fn runFrames(
         .bit_and => {
             const r = code[ip];
             ip += 1;
-            const skip_int_probe = bit_and_probe_failed;
-            bit_and_probe_failed = false;
-            if (!skip_int_probe) {
-                if (intBitwise(.band, registers[r], acc)) |res| {
-                    acc = res;
-                    continue :dispatch try decodeNext(code, &ip, &committed);
-                }
+            if (intBitwise(.band, registers[r], acc)) |res| {
+                acc = res;
+                continue :dispatch try decodeNext(code, &ip, &committed);
             }
             if (try bitwiseBinary(realm, .bit_and, registers[r], acc)) |res| acc = res else {
                 const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
