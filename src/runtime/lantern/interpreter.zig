@@ -1898,14 +1898,12 @@ pub fn runFrames(
         },
 
         // ── Bitwise — both operands are ToInt32-coerced ─────────────
-        .bit_and_smi16 => {
-            acc = Value.fromInt32(readI16(code, ip));
-            ip += 2;
-            continue :dispatch .bit_and;
-        },
-        .bit_and_smi => {
-            acc = Value.fromInt32(readI32(code, ip));
-            ip += 4;
+        .bit_and_smi, .bit_and_smi16 => |op_tag| {
+            acc = Value.fromInt32(if (op_tag == .bit_and_smi16)
+                readI16(code, ip)
+            else
+                readI32(code, ip));
+            ip += if (op_tag == .bit_and_smi16) 2 else 4;
             continue :dispatch .bit_and;
         },
         .bit_and => {
