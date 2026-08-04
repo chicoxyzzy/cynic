@@ -199,12 +199,13 @@ jobs:
   wasm-build:
     name: WASM build smoke
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     # Catches freestanding-incompatible regressions before they
     # hit `gh-pages` on merge. Builds without `wasm-opt` (no
-    # Binaryen download, ~6 min cold → ~3 min); the post-merge
-    # `playground.yml` re-builds with `wasm-opt -Oz` for the
-    # deploy. We just want the compile signal.
+    # Binaryen download); recent PR runs take ~10–14 min, so the
+    # budget leaves headroom for normal runner/cache variance. The
+    # post-merge `playground.yml` re-builds with `wasm-opt -Oz`
+    # for the deploy. We just want the compile signal.
     steps:
       - name: Audit egress (advisory)
         uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411  # v2
