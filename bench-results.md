@@ -17,6 +17,72 @@ new run against the previous section with the *same host*.
 
 ## History
 
+### 2026-08-04 — compact Smi `Star` successor threading, host `Linux 6.8.0-136-generic x86_64` (remote bench box)
+
+Exact merged main `c0b3c866` and candidate `09177511` used unchanged
+bytecode and JIT input. Instrumented Splay traces found **2,068,480**
+`LdaSmi8 -> Star` pairs: **99.232%** of its **2,084,482** compact Smi
+loads and **9.717%** of **21,287,879** logical instructions. The remaining
+16,002 compact loads retain ordinary decode.
+
+Lantern's merged Smi-load handler now recognizes only the operand-bearing
+general `Star` successor after checking the existing compact `Shr` edge. It
+writes the already-boxed Int32 accumulator to the successor's frame register,
+advances over the opcode and register operand, records the logical `Star`, and
+resumes at the shared decoder. `Star` preserves the accumulator and this path
+cannot allocate, re-enter JavaScript, throw, or decline. Compact `Star0..3`
+and `StarLdar` remain ordinary; bytecode, Bistromath, and Ohaimark are
+unchanged. The normal decoder stays the statically hinted fallthrough across
+the wider Smi family so unrelated successor layouts do not move.
+
+After normalizing only `direct-transfers`, the complete baseline/candidate
+Splay telemetry reports have the same SHA-256
+(`6f8aa5f5d1983c26574da8e0f88805476ff72610bf61faaf0d18a53aa7dd84a1`):
+identical output, static bytecode, logical instruction total, every
+opcode/pair/trigram row, and zero dropped sequences. Direct transfers move
+**98,392 -> 2,166,872**, exactly the **2,068,480** measured pairs. The final
+local arm64 native snapshot is slightly smaller: `runFrames` **345,048 -> 345,028**
+bytes (**-20**) and Mach-O `__TEXT` **5,095,584 -> 5,095,568** (**-16**).
+
+A first local 61-pair run in each physical launch role was discarded in full:
+Splay reported forward candidate/base **1.052x** at **160.4%** spread and
+reverse base/candidate **0.996x** at **26.4%** spread, a nominal neutral
+**1.0277x** in two different absolute timing regimes (269-300 ms versus
+~176 ms).
+The retained gate therefore used 41 interleaved pairs in each launch role on
+the remote box. The odd sample count avoids the current driver's even-N
+upper-middle selection. Forward is candidate/base, reverse is base/candidate,
+and neutral is `sqrt(forward / reverse)`:
+
+| bench | forward C/B | reverse B/C | neutral C/B |
+|---|---:|---:|---:|
+| richards | 0.998x | 1.010x | 0.994x |
+| deltablue | 1.002x | 1.015x | 0.994x |
+| crypto | 0.990x | 1.010x | 0.990x |
+| raytrace | 0.996x | 1.011x | 0.993x |
+| navier_stokes | 1.021x | 0.997x | 1.012x |
+| splay | 0.990x | 1.014x | 0.988x |
+| **geomean** |  |  | **0.995x** |
+
+The interpreter macro geometric mean is **0.9950x**. Targeted Splay is
+**0.9881x** (about **1.19%** faster), with both launch roles independently
+agreeing on the direction. The worst control is Navier-Stokes at **1.0120x**,
+inside the 2% retention gate. The production-default-tier control is flat:
+**0.9998x** geometric mean, Splay **0.9909x**, and worst fixture Crypto
+**1.0139x**. Remote ratio spreads remain high (17.0-47.7%), so the sub-percent
+aggregate is a directional retention signal rather than a precise magnitude;
+the target's two-role agreement, exact dispatch opportunity, small native
+shape, and bounded controls decide retention.
+
+Validation pins the register write, accumulator preservation, exact logical
+pair/trigram telemetry, one transfer per general `Star`, and deliberately
+ordinary `Star0..3` controls. Focused normal and stats-enabled tests passed,
+as did the wider instrumented Smi bucket. Non-cached test262 `language/`
+counts matched exact main at **22,122 pass / 1,070 known fail**. PR CI passed
+all 34 checks, including ReleaseSafe unit tests, cross-builds, full
+conformance/RSS, GC stress, JIT differential, and WASM smoke. Independent
+runtime/safety and test/maintainability reviews found no residual issue.
+
 ### 2026-07-31 — compact Smi `Shr` successor threading, host `Darwin 25.6.0 arm64`
 
 Exact merged main `2758c530` and the retained candidate used normal
