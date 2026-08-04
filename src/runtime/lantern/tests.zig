@@ -1692,11 +1692,99 @@ test "lda_this property direct threading: instrumented run records transfer" {
     );
 }
 
+// V8 Ignition's Star and QuickJS's set_loc share Cynic's non-consuming store
+// contract: write the register while preserving the accumulator. Lantern
+// threads only the measured operand-bearing `LdaSmi8; Star` pair; compact
+// Star0..3 and StarLdar retain ordinary dispatch.
+test "smi8 star direct threading: stores register and preserves accumulator" {
+    const Op = op_mod.Op;
+    const code = [_]u8{
+        @intFromEnum(Op.lda_smi8),
+        39,
+        @intFromEnum(Op.star),
+        4,
+        @intFromEnum(Op.star),
+        5,
+        @intFromEnum(Op.lda_smi8),
+        3,
+        @intFromEnum(Op.add),
+        4,
+        @intFromEnum(Op.add),
+        5,
+        @intFromEnum(Op.return_),
+    };
+    const chunk: chunk_mod.Chunk = .{
+        .code = &code,
+        .constants = &.{},
+        .source_positions = &.{},
+        .handlers = &.{},
+        .function_templates = &.{},
+        .class_templates = &.{},
+        .register_count = 6,
+    };
+
+    var stats: bytecode_stats.DynamicStats = .{};
+    const activation = bytecode_stats.activate(&stats);
+    defer activation.deinit();
+
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    const result = try run(testing.allocator, &realm, &chunk);
+    const value = switch (result) {
+        .value, .yielded => |v| v,
+        .thrown => return error.UncaughtException,
+    };
+
+    // The first Star writes r4. Because Star leaves the accumulator intact,
+    // the second Star also writes 39 to r5: (3 + r4) + r5 == 81.
+    try testing.expect(value.isInt32());
+    try testing.expectEqual(@as(i32, 81), value.asInt32());
+
+    if (comptime bytecode_stats.enabled) {
+        try testing.expectEqual(@as(u64, 1), stats.pairCount(.lda_smi8, .star));
+        try testing.expectEqual(@as(u64, 2), stats.opcodeCount(.star));
+        try testing.expectEqual(@as(u64, 1), stats.pairCount(.star, .star));
+        try testing.expectEqual(@as(u64, 1), stats.direct_transfers);
+    }
+}
+
+test "smi8 star direct threading: compiled store and telemetry stay exact" {
+    var stats: bytecode_stats.DynamicStats = .{};
+    const activation = bytecode_stats.activate(&stats);
+    defer activation.deinit();
+
+    // The first four stores use Star0..3 and remain ordinary controls. Only
+    // x uses the measured general `LdaSmi8; Star r4` shape; y then overwrites
+    // the accumulator through a non-store successor.
+    try expectScriptInt(
+        \\(function() {
+        \\  let a = 2, b = 3, c = 4, d = 5, x = 39, y = 40;
+        \\  return x + y + a + b + c + d;
+        \\})();
+    , 93);
+
+    if (comptime bytecode_stats.enabled) {
+        try testing.expectEqual(@as(u64, 1), stats.pairCount(.lda_smi8, .star));
+        try testing.expectEqual(
+            @as(u64, 1),
+            stats.trigramCount(.lda_smi8, .star, .lda_smi8),
+        );
+        try testing.expectEqual(@as(u64, 1), stats.opcodeCount(.star));
+        try testing.expectEqual(@as(u64, 0), stats.pairCount(.star, .star));
+        try testing.expectEqual(@as(u64, 1), stats.pairCount(.lda_smi8, .star_0));
+        try testing.expectEqual(@as(u64, 1), stats.pairCount(.lda_smi8, .star_1));
+        try testing.expectEqual(@as(u64, 1), stats.pairCount(.lda_smi8, .star_2));
+        try testing.expectEqual(@as(u64, 1), stats.pairCount(.lda_smi8, .star_3));
+        try testing.expectEqual(@as(u64, 1), stats.direct_transfers);
+    }
+}
+
 // §13.15 ApplyStringOrNumericBinaryOperator / §13.10 shift operators.
 // Exact integer RHS literals use width-specific loads. Lantern threads the
 // compact `LdaSmi8; Shr`, `LdaSmi16; BitAnd`, and full-width
 // `LdaSmi; BitAnd` int32 fast paths while preserving the ordinary bytecode
 // stream for both JIT tiers.
+
 test "smi16 bit-and direct threading: instrumented run records transfer" {
     if (comptime !bytecode_stats.enabled) return error.SkipZigTest;
 

@@ -1557,20 +1557,20 @@ pub fn runFrames(
             ip += op_tag.operandSize();
             acc = Value.fromInt32(imm);
 
-            // Compact signed shifts and dense integer masks dominate their
-            // respective Smi widths in the macro corpus. Thread the pure
-            // int32 fast paths here while preserving the ordinary bytecode
-            // for both JIT tiers.
+            // Compact signed shifts, general register stores, and dense
+            // integer masks dominate their respective Smi widths in the
+            // macro corpus. Thread the pure completions here while preserving
+            // the ordinary bytecode for both JIT tiers.
             //
-            // If the LHS is not an Int32 (a Double, coercible object, or
-            // BigInt), leave `ip` on the successor so its existing slow path
-            // remains the sole conversion / re-entry / exception
-            // implementation.
+            // For arithmetic successors, a non-Int32 LHS (a Double,
+            // coercible object, or BigInt) leaves `ip` on the successor so
+            // its existing slow path remains the sole conversion / re-entry /
+            // exception implementation. The Star completion is an
+            // unconditional frame-register store.
             if (op_tag == .lda_smi8) {
                 if (ip + 1 < code.len and code[ip] == @intFromEnum(Op.shr)) {
-                    // Splay executes over two million compact loads without
-                    // this successor. Keep ordinary decode as fallthrough;
-                    // matching Crypto shifts take the predictable side edge.
+                    // Keep ordinary decode as fallthrough; matching Crypto
+                    // shifts take the predictable side edge.
                     @branchHint(.unlikely);
                     const r = code[ip + 1];
                     if (intBitwise(.shr, registers[r], acc)) |res| {
@@ -1578,6 +1578,18 @@ pub fn runFrames(
                         if (comptime bytecode_stats.enabled) bytecode_stats.observeDirectActive(.shr);
                         acc = res;
                     }
+                } else if (ip + 1 < code.len and code[ip] == @intFromEnum(Op.star)) {
+                    // Splay overwhelmingly stores these compact constants in
+                    // a general register. Star preserves the accumulator, so
+                    // this pure frame write can complete before dispatch.
+                    // Keep ordinary decode laid out as fallthrough across the
+                    // whole Smi family; the dynamic predictor learns Splay's
+                    // hot side edge without moving unrelated handlers.
+                    @branchHint(.unlikely);
+                    const r = code[ip + 1];
+                    ip += 2;
+                    registers[r] = acc;
+                    if (comptime bytecode_stats.enabled) bytecode_stats.observeDirectActive(.star);
                 }
             } else if (ip + 1 < code.len and code[ip] == @intFromEnum(Op.bit_and)) {
                 // Bias ordinary decode toward the laid-out fallthrough;
