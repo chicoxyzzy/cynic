@@ -1072,15 +1072,15 @@ sampling by `/profile`.
   JIT tiers are unchanged, and logical stats remain exactly comparable.
   Crypto records **4,647,283** new direct transfers (**5.177%** of its
   logical instructions): 4,646,882 Int32 hits and 401 transfers into the
-  shared slow path. The native delta is 894 bytes in `runFrames` for the
-  pinned-Zig Linux x86_64 ReleaseFast build. Post-review true-median 40+40
-  x86_64 A/B measured a **1.0021x** neutral interpreter macro geomean; no
-  point-estimate regression exceeded 2%, but shared-VM variance was too high
-  to establish that bound statistically. The 20+20 arm64 point
-  estimate was **0.9964x**. Dedicated Double and object slow-path controls had
-  **0.9900x** and **0.9980x** point estimates. Rejected
-  superinstruction variants regressed Navier-Stokes or object coercion by
-  3.2-7.9%. See `bench-results.md`.
+  shared slow path. The pre-composition isolation grew `runFrames` by 894
+  bytes and measured a **1.0021x** neutral interpreter macro geomean; its
+  20+20 arm64 point estimate was **0.9964x**. After compact `Shr` landed, an
+  exact `c0b3c866` / `93d6b48a` composed-artifact rerun measured an 853-byte
+  `runFrames` delta, **1.0087x** Lantern macro geomean, and **1.019x** /
+  **1.037x** Double / object controls with 35% / 22% spread. No row crossed
+  the runner's noise-adjusted regression threshold. Rejected superinstruction
+  variants regressed Navier-Stokes or object coercion by 3.2-7.9%. See
+  `bench-results.md`.
 - **Compact Smi `Shr` successor threading (2026-07-31).** Crypto telemetry
   found **4,646,114** `LdaSmi8 -> Shr` transitions, **5.175%** of all logical
   instructions; **4,645,838** (**99.994%**) had an Int32 left operand. The

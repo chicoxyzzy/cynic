@@ -83,8 +83,47 @@ all 34 checks, including ReleaseSafe unit tests, cross-builds, full
 conformance/RSS, GC stress, JIT differential, and WASM smoke. Independent
 runtime/safety and test/maintainability reviews found no residual issue.
 
+### 2026-08-04 — composed Smi successor review follow-up, host `Linux 6.8.0-136-generic x86_64` (remote bench box)
+
+Exact merged main `c0b3c866` and reviewed candidate `93d6b48a` used normal
+ReleaseFast CLI SHA-256 binaries `64a249fe` / `39baf91a`. This run closes the
+integration-evidence gap left by the separate `BitAnd` and compact `Shr`
+measurements below: the candidate preserves main's `LdaSmi8 -> Shr` transfer
+and changes only wider-Smi non-Int32 `BitAnd` successors to consume the
+successor and enter the shared `bitwiseBinary` operation once.
+
+Composed Crypto telemetry retains **89,774,038** logical instructions and
+moves `direct-transfers` **9,927,351 -> 9,927,752**, exactly the 401 slow
+`BitAnd` successors that now bypass redispatch. On the pinned Zig toolchain,
+`runFrames` grows **853 bytes** (**331,431 -> 332,284**) and GNU `size` text
+grows **848 bytes** (**4,783,898 -> 4,784,746**).
+
+Twenty interleaved pairs compared the exact artifacts back-to-back. The
+Lantern-only macro geometric mean is **1.0087x**; the production-tier macro
+geometric mean is **1.0015x**. No row crosses the benchmark runner's canonical
+regression threshold: a move must exceed both 5% and one-third of its ratio
+spread. The Lantern macro rows were:
+
+| bench | candidate/base | spread |
+|---|---:|---:|
+| richards | 1.012x | 16% |
+| deltablue | 1.016x | 26% |
+| crypto | 1.038x | 20% |
+| raytrace | 0.985x | 42% |
+| navier_stokes | 1.034x | 23% |
+| splay | 0.969x | 21% |
+| **geomean** | **1.0087x** | |
+
+The exact slow-path controls measured `bit_and_double` **1.019x** with 35%
+spread and `bit_and_object` **1.037x** with 22% spread. The complete 20-fixture
+micro suite likewise produced no flagged row. Spreads remain high on this
+shared host, so these are retention gates for the composed artifact, not
+claims of a precise effect size.
+
 ### 2026-07-31 — compact Smi `Shr` successor threading, host `Darwin 25.6.0 arm64`
 
+This historical isolation predates the direct `BitAnd` slow-transfer review
+amendment; the exact composed-artifact confirmation is recorded above.
 Exact merged main `2758c530` and the retained candidate used normal
 ReleaseFast CLI SHA-256 binaries `42b8d24d` / `727c3c2d`. Instrumented
 Crypto traces found **4,646,114** `LdaSmi8 -> Shr` pairs: **5.175%** of
@@ -148,6 +187,8 @@ fail** in 65 seconds with no guard failure.
 
 ### 2026-07-31 — width-gated Smi `BitAnd` successor threading, host `Linux 6.8.0-117-generic x86_64` (remote bench box)
 
+This historical isolation predates compact `Shr` successor threading; the
+exact composed-artifact confirmation is recorded above.
 Exact merged main `7b5a04e5` and the retained candidate used normal
 ReleaseFast CLI SHA-256 binaries `4152253e` / `7d808bff`. Instrumented
 Crypto traces found **3,158,688** `LdaSmi16 -> BitAnd` pairs and
