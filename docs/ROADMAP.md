@@ -1087,6 +1087,17 @@ sampling by `/profile`.
   A separate 60+60 Crypto confirmation measured **0.9484x**; Splay,
   DeltaBlue, and `arith_loop` controls stayed inside the 2% gate. See
   `bench-results.md`.
+- **Compact Smi `Star` successor threading (2026-08-04).** Splay telemetry
+  found **2,068,480** `LdaSmi8 -> Star` transitions: **99.232%** of its
+  compact Smi loads and **9.717%** of all logical instructions. The merged
+  load handler now performs that pure general-register store before the next
+  indirect dispatch while preserving the accumulator; compact `Star0..3`,
+  bytecode, and both JIT tiers stay unchanged. Normalized logical telemetry
+  is byte-identical, direct transfers rise by exactly **2,068,480**, and
+  `runFrames` shrinks by 20 bytes. A remote 41+41 role-swapped A/B
+  measured Splay **0.9881x**, a **0.9950x** Lantern macro geometric mean,
+  and a **0.9998x** production-tier control; the worst workload was
+  **1.0139x**, inside the 2% gate. See `bench-results.md`.
 - **Impossible property-probe gates (2026-07-30).** Strict property writes now
   reject keys that cannot begin a §7.1.21 canonical numeric spelling, walk to
   the first TypedArray ancestor, and only then pay for numeric parsing and
