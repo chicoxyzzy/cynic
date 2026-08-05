@@ -1317,14 +1317,16 @@ pub const Heap = struct {
     /// receiver, out-of-bounds, or a hole — leaving the caller to
     /// take the full path. Pure: no allocation, no side effects.
     /// Shared by Lantern's `lda_computed` arm and Bistromath's
-    /// codegen (L1: coordinate, don't fork).
-    pub fn denseElementFastGet(recv: Value, key: Value) ?Value {
+    /// codegen (L1: coordinate, don't fork). The forced inline is
+    /// deliberate: `?Value` otherwise uses a hidden return buffer on
+    /// AArch64 in both hot callers, while this pure predicate has no
+    /// separately useful cold body.
+    pub inline fn denseElementFastGet(recv: Value, key: Value) ?Value {
         if (!key.isInt32()) return null;
         const ik = key.asInt32();
         if (ik < 0) return null;
         const aobj = valueAsPlainObject(recv) orelse return null;
-        if (!aobj.brand.is_array_exotic or aobj.brand.is_sparse or
-            aobj.getProxyTarget() != null or aobj.brand.proxy_revoked) return null;
+        if (!aobj.brand.is_array_exotic or aobj.brand.is_sparse or aobj.brand.is_proxy) return null;
         const idx: usize = @intCast(ik);
         const els = aobj.elementItems();
         if (idx >= els.len or JSObject.isElementHole(els[idx])) return null;
@@ -5365,6 +5367,21 @@ test "Heap: dense array literals select compact and fused element pools" {
         error.OutOfMemory,
         heap.allocatePooledElements(Heap.element_buf_cap + 1),
     );
+}
+
+test "Heap: denseElementFastGet rejects the authoritative proxy brand" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    const arr = try heap.makeDenseArray(null, &.{Value.fromInt32(7)});
+    const arr_v = taggedObject(arr);
+    try testing.expectEqual(@as(i32, 7), Heap.denseElementFastGet(arr_v, Value.fromInt32(0)).?.asInt32());
+
+    // Proxy target / handler slots live out of line. The inline brand is the
+    // property-operation gate and must reject the fast read even if those
+    // extension slots are absent (or have already been cleared by revocation).
+    arr.brand.is_proxy = true;
+    try testing.expectEqual(@as(?Value, null), Heap.denseElementFastGet(arr_v, Value.fromInt32(0)));
 }
 
 test "Heap: denseElementFastSet overwrites only clean existing packed elements" {
