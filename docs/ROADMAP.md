@@ -996,6 +996,20 @@ sampling by `/profile`.
   instructions **1,509 → 1,456** (-3.5%), encoded bytes **3,122 →
   3,067** (-1.8%), and dynamic dispatches **107,516,101 →
   104,678,462** (-2.64%).
+- **Type-routed inline dense computed reads (2026-08-05).** Lantern now
+  routes an already-materialized `lda_computed` key before probing the
+  string-key IC: Int32 keys try the shared dense Array read, String keys keep
+  the monomorphic IC, and other key types proceed directly to §7.1.19
+  ToPropertyKey. Forcing the pure shared predicate inline removes AArch64's
+  hidden optional-Value return buffer in Lantern and Bistromath; the guard
+  uses the authoritative packed proxy brand, including callable and revoked
+  proxies. `runFrames` shrank **10,320 bytes**. A pinned-CPU 41+41
+  role-swapped x86_64 A/B measured order-neutral macro geometric means of
+  **0.9779x** in Lantern and **0.9765x** at the default tier; Crypto measured
+  **0.9402x / 0.9347x**, and the dense indexed-read micro measured
+  **0.9447x / 0.9411x**. The computed-string control was a noisy
+  **1.0207x / 1.0212x** point estimate and did not cross the runner's 5% +
+  spread-adjusted regression gate. See `bench-results.md`.
 - **Target-specific computed-receiver register reuse (2026-07-30).** For a
   non-optional computed read whose receiver is an initialized, uncaptured
   register binding and whose direct `++` / `--` key updates a distinct

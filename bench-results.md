@@ -17,6 +17,74 @@ new run against the previous section with the *same host*.
 
 ## History
 
+### 2026-08-05 — type-routed inline dense computed reads, host `Linux 6.8.0-136-generic x86_64` (remote bench box)
+
+Exact merged main `ff78af5a` and candidate `85dcaaa0` were built with the
+repository pin, Zig `0.17.0-dev.1275+59a628c6d`. `lda_computed` now routes on
+the already-materialized key type before touching the computed-string IC:
+Int32 keys probe the existing dense Array fast path, String keys retain the
+same monomorphic IC, and every other key proceeds directly to the full
+§7.1.19 ToPropertyKey path. The shared pure dense-read predicate is forced
+inline, removing AArch64's hidden `?Value` return buffer in both Lantern and
+Bistromath. Its exotic-object guard now reads the authoritative packed
+`is_proxy` brand, closing the old callable-proxy false negative.
+
+Steady-state no-JIT sampling on arm64 put the former out-of-line dense getter
+at **7.23%** self time in Crypto and **14.32%** in Navier-Stokes (the setter
+was another 3.62% / 6.78%). In the final binary the getter is inlined and no
+longer appears as a separate symbol. `runFrames` shrank **345,972 → 335,652**
+bytes (**-10,320**) and Mach-O `__text` shrank **10,416 bytes**.
+
+An initial remote screen was discarded in full: the old helper neither set
+CPU affinity nor verified the provisioned Zig and the box still exposed Zig
+`0.17.0-dev.813+2153f8143`. The retained gate first reprovisioned the exact
+pin, then ran 41 interleaved pairs in each physical launch role with every
+timed child pinned to CPU 1. Forward is candidate/base, reverse is base/
+candidate, and neutral is `sqrt(forward / reverse)`:
+
+| macro | Lantern forward C/B | Lantern reverse B/C | Lantern neutral C/B | default forward C/B | default reverse B/C | default neutral C/B |
+|---|---:|---:|---:|---:|---:|---:|
+| richards | 0.989x | 1.023x | 0.9832x | 0.988x | 1.015x | 0.9866x |
+| deltablue | 0.957x | 1.025x | 0.9663x | 0.959x | 1.038x | 0.9612x |
+| crypto | 0.945x | 1.069x | 0.9402x | 0.933x | 1.068x | 0.9347x |
+| raytrace | 0.993x | 1.010x | 0.9915x | 0.994x | 1.009x | 0.9925x |
+| navier_stokes | 0.978x | 1.015x | 0.9816x | 0.974x | 1.026x | 0.9743x |
+| splay | 1.015x | 1.003x | 1.0060x | 1.021x | 0.998x | 1.0115x |
+| **geomean** | **0.9792x** | **1.0239x** | **0.9779x** | **0.9778x** | **1.0254x** | **0.9765x** |
+
+Thus the order-neutral six-macro geometric mean improves **2.21%** in
+Lantern and **2.35%** at the default tier. Crypto improves **6.0-6.5%**;
+DeltaBlue and Navier-Stokes improve in both launch roles and both tiers.
+Splay is the only neutral macro above baseline, at **1.0060x / 1.0115x**,
+inside the 2% retention gate. No macro is a gated regression in either raw
+report.
+
+The new monomorphic computed-string fixture keeps its key in a function
+parameter, proving the bytecode is `LdaComputed8` instead of the named-load
+opcode. The reverse control used benchmark-only main `aa1f4ab5`, whose
+`src/` tree is byte-identical to `ff78af5a`, so both harness roles enumerate
+the fixture. The mechanism and control results were:
+
+| micro | Lantern forward C/B | Lantern reverse B/C | Lantern neutral C/B | default forward C/B | default reverse B/C | default neutral C/B |
+|---|---:|---:|---:|---:|---:|---:|
+| `array_literal_loop` (dense Int32 read) | 0.954x | 1.069x | **0.9447x** | 0.952x | 1.075x | **0.9411x** |
+| `computed_prop_access` (string-key control) | 1.023x | 0.982x | 1.0207x | 1.020x | 0.978x | 1.0212x |
+
+The dense-read micro improves **5.5-5.9%**. The string-key control's ~2.1%
+point estimate is retained honestly, but neither physical role crosses the
+runner's regression gate (a move must exceed both 5% and one-third of its
+29-69% spread). Other neutral micro watchpoints remain below 5% and similarly
+noisy; no micro reports a gated candidate regression.
+
+The direct heap regression test was red before the proxy-brand fix, and the
+interpreter regression demonstrates a callable Proxy whose target acquires
+Array branding still invokes its `get` trap. Full `zig build test-fast`
+passed. ReleaseFast main/candidate conformance counts matched for Array
+**3,273 / 27 known fail**, Proxy **300 / 11**, and computed property access
+**21 / 0**; forced-T1 and ReleaseSafe `--gc-threshold=1` controls retained
+the same relevant pass sets. Independent correctness, code-shape, proxy-
+brand, benchmark-method, and final-result reviews found no blocking issue.
+
 ### 2026-08-04 — compact Smi `Star` successor threading, host `Linux 6.8.0-136-generic x86_64` (remote bench box)
 
 Exact merged main `c0b3c866` and candidate `09177511` used unchanged
