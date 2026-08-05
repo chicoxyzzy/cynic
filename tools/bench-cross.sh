@@ -71,6 +71,7 @@ OUT_FILE=""
 TIER="both"
 MACROS=0          # --macros: run bench/macros/ (Octane) instead of micros
 SELF_TEST_RSS_MEDALS=0
+SELF_TEST_PYTHON_AFFINITY=0
 
 # Emit one Peak-RSS row with the same distinct-value podium semantics as
 # the timing table: the three smallest measured footprints take gold,
@@ -109,6 +110,18 @@ EOF
   printf '\n'
 }
 
+# Build the argv consumed by the Python monotonic-timer fallback. Keep the
+# affinity wrapper in the child argv just as the GNU-date path does; Linux
+# hosts without GNU date must not silently lose the requested CPU pin.
+python_timed_argv() {
+  local env="$1" cmd="$2" fixture="$3"
+  if [ "$env" = "-" ]; then
+    printf '%s\n' "$TASKSET $cmd $fixture"
+  else
+    printf '%s\n' "env $env $TASKSET $cmd $fixture"
+  fi
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
     -o|--out)   OUT_FILE="$2"; shift 2 ;;
@@ -116,6 +129,7 @@ while [ $# -gt 0 ]; do
     --tier)     TIER="$2"; shift 2 ;;
     --macros)   MACROS=1; shift ;;
     --self-test-rss-medals) SELF_TEST_RSS_MEDALS=1; shift ;;
+    --self-test-python-affinity) SELF_TEST_PYTHON_AFFINITY=1; shift ;;
     -h|--help)
       sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
       exit 0 ;;
@@ -132,6 +146,13 @@ if [ "$SELF_TEST_RSS_MEDALS" = "1" ]; then
   RCELL["bronze|tied"]=300
   RCELL["plain|tied"]=400
   emit_rss_medal_row tied
+  exit 0
+fi
+
+if [ "$SELF_TEST_PYTHON_AFFINITY" = "1" ]; then
+  TASKSET="taskset -c 7"
+  python_timed_argv - engine fixture.js
+  python_timed_argv FLAG=1 engine fixture.js
   exit 0
 fi
 
@@ -386,11 +407,7 @@ run_once() {
   # wall time — no double shell-spawn jitter) and reads the child's
   # peak RSS via getrusage.
   local argv
-  if [ "$env" = "-" ]; then
-    argv="$cmd $fixture"
-  else
-    argv="env $env $cmd $fixture"
-  fi
+  argv="$(python_timed_argv "$env" "$cmd" "$fixture")"
   python3 - "$argv" <<'PYEOF'
 import sys, time, subprocess, shlex, resource
 argv = shlex.split(sys.argv[1])
