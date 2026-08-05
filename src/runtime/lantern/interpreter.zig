@@ -10803,53 +10803,59 @@ pub fn runFrames(
                 }
                 continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
             }
-            // Computed-key IC fast path — a hot monomorphic `obj[k]`
-            // with a flat string key whose own shape data slot was
-            // cached. A *shaped* receiver is a plain ordinary object
-            // (`shadowSet` demotes proxy / namespace / typed-view /
-            // array exotics out of shape mode before stamping a shape),
-            // so a shape pointer + key-bytes match means a plain own-
-            // data read with no accessor / proxy / TypedArray in play —
-            // observably identical to the slow path below. Length and
-            // flatness are O(1) stored fields; ropes (rare for keys)
-            // and any miss fall through to the full lookup, which refills.
-            ic_hit: {
-                const cell = &local_chunk.inline_computed_caches[ic_idx];
-                // `cached_key_len == 0` is cold; `> computed_key_cap`
-                // is the megamorphic park sentinel — either way the
-                // cell can't serve, and the upper bound also keeps the
-                // `cached_key_buf[0..len]` slice in range.
-                if (cell.cached_key_len == 0 or cell.cached_key_len > chunk_mod.computed_key_cap or cell.shape == null) break :ic_hit;
-                if (!acc.isString()) break :ic_hit;
-                const ks: *JSString = @ptrCast(@alignCast(acc.asString()));
-                if (ks.byte_len != cell.cached_key_len) break :ic_hit;
-                const kb = ks.flatBytesIfFlat() orelse break :ic_hit;
-                const obj_in = heap_mod.valueAsPlainObject(recv) orelse break :ic_hit;
-                if (obj_in.shape == cell.shape and
-                    std.mem.eql(u8, kb, cell.cached_key_buf[0..cell.cached_key_len]))
-                {
-                    acc = obj_in.slotAt(cell.slot);
+            // Route by the already-materialized key type before probing the
+            // string-key side table. Numeric array loops otherwise touch its
+            // metadata before every dense read; non-string keys can never be
+            // served by that IC.
+            if (acc.isInt32()) {
+                // §10.1.8.1 OrdinaryGet step 1 — a non-negative int32
+                // key on a non-proxy dense Array exotic resolves to the
+                // own element when present, shadowing everything behind
+                // it. §7.1.19 ToPropertyKey of an int32 is side-effect-
+                // free and §7.1.21 CanonicalNumericIndexString of any
+                // non-negative int32 is exactly its decimal string, so
+                // serving `elements[idx]` directly is observably
+                // identical to the full stringify + chain walk (which
+                // was ~23 % of the ctor_array_build profile — see
+                // docs/ctor-array-build-gap.md). Every miss class —
+                // negative, hole, out-of-bounds, sparse storage, proxy
+                // receiver, accessor-promoted slot — falls through.
+                // Shared with Bistromath via `Heap.denseElementFastGet`
+                // (a pure, allocation-free check) so the compiled tier's
+                // codegen is byte-identical (L1: don't fork).
+                if (heap_mod.Heap.denseElementFastGet(recv, acc)) |v| {
+                    acc = v;
                     continue :dispatch try decodeNext(code, &ip, &committed);
                 }
-            }
-            // §10.1.8.1 OrdinaryGet step 1 — an int32 non-negative
-            // key on a non-proxy dense Array exotic resolves to the
-            // own element when present, shadowing everything behind
-            // it. §7.1.19 ToPropertyKey of an int32 is side-effect-
-            // free and §7.1.21 CanonicalNumericIndexString of any
-            // non-negative int32 is exactly its decimal string, so
-            // serving `elements[idx]` directly is observably
-            // identical to the full stringify + chain walk (which
-            // was ~23 % of the ctor_array_build profile — see
-            // docs/ctor-array-build-gap.md). Every miss class —
-            // hole, out-of-bounds, sparse storage, proxy receiver,
-            // accessor-promoted slot — falls through unchanged.
-            // Shared with Bistromath via `Heap.denseElementFastGet`
-            // (a pure, allocation-free check) so the compiled tier's
-            // codegen is byte-identical (L1: don't fork).
-            if (heap_mod.Heap.denseElementFastGet(recv, acc)) |v| {
-                acc = v;
-                continue :dispatch try decodeNext(code, &ip, &committed);
+            } else if (acc.isString()) {
+                // Computed-key IC fast path — a hot monomorphic `obj[k]`
+                // with a flat string key whose own shape data slot was
+                // cached. A *shaped* receiver is a plain ordinary object
+                // (`shadowSet` demotes proxy / namespace / typed-view /
+                // array exotics out of shape mode before stamping a shape),
+                // so a shape pointer + key-bytes match means a plain own-
+                // data read with no accessor / proxy / TypedArray in play —
+                // observably identical to the slow path below. Length and
+                // flatness are O(1) stored fields; ropes (rare for keys)
+                // and any miss fall through to the full lookup, which refills.
+                ic_hit: {
+                    const cell = &local_chunk.inline_computed_caches[ic_idx];
+                    // `cached_key_len == 0` is cold; `> computed_key_cap`
+                    // is the megamorphic park sentinel — either way the
+                    // cell can't serve, and the upper bound also keeps the
+                    // `cached_key_buf[0..len]` slice in range.
+                    if (cell.cached_key_len == 0 or cell.cached_key_len > chunk_mod.computed_key_cap or cell.shape == null) break :ic_hit;
+                    const ks: *JSString = @ptrCast(@alignCast(acc.asString()));
+                    if (ks.byte_len != cell.cached_key_len) break :ic_hit;
+                    const kb = ks.flatBytesIfFlat() orelse break :ic_hit;
+                    const obj_in = heap_mod.valueAsPlainObject(recv) orelse break :ic_hit;
+                    if (obj_in.shape == cell.shape and
+                        std.mem.eql(u8, kb, cell.cached_key_buf[0..cell.cached_key_len]))
+                    {
+                        acc = obj_in.slotAt(cell.slot);
+                        continue :dispatch try decodeNext(code, &ip, &committed);
+                    }
+                }
             }
             // §7.1.19 ToPropertyKey — for object keys (e.g.
             // `obj[arr]`), run ToPrimitive(string) so user-

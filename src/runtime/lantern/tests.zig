@@ -4577,6 +4577,23 @@ test "computed int read: proxy receiver still fires the get trap" {
     , "10:trapped");
 }
 
+test "computed int read: callable proxy with dense array brand still fires get trap" {
+    // `Array.apply` currently reuses a callable receiver whose prototype is
+    // Array.prototype and stamps it array-exotic. That must not let the dense
+    // element shortcut outrank the receiver's authoritative proxy brand.
+    try expectScriptStringWithBuiltins(
+        \\let calls = 0;
+        \\const target = function () {};
+        \\Object.setPrototypeOf(target, Array.prototype);
+        \\const p = new Proxy(target, {
+        \\  get(t, k, r) { calls++; return k === "1" ? "trapped" : Reflect.get(t, k, r); }
+        \\});
+        \\Array.apply(p, [10, 20]);
+        \\const k = 1;
+        \\p[k] + ":" + calls;
+    , "trapped:1");
+}
+
 test "later: arr[i]-- works on computed member" {
     try expectScriptIntWithBuiltins(
         \\const a = [10, 20, 30];
