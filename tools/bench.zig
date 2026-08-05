@@ -377,6 +377,39 @@ fn medianOfSortedF64(sorted: []const f64) f64 {
     return (sorted[sorted.len / 2 - 1] + sorted[sorted.len / 2]) / 2.0;
 }
 
+const PairedRatioSummary = struct {
+    median: f64,
+    spread_pct: f64,
+};
+
+fn summarizePairedRatios(ratios: []f64) PairedRatioSummary {
+    std.debug.assert(ratios.len > 0);
+    std.mem.sort(f64, ratios, {}, std.sort.asc(f64));
+    const median = medianOfSortedF64(ratios);
+    return .{
+        .median = median,
+        .spread_pct = if (median > 0)
+            (ratios[ratios.len - 1] - ratios[0]) / median * 100.0
+        else
+            0.0,
+    };
+}
+
+test "interleaved A/B ratio uses a true even-sample median" {
+    var ratios = [_]f64{ 1.06, 0.98, 1.02, 1.00 };
+    const summary = summarizePairedRatios(&ratios);
+    try std.testing.expectApproxEqAbs(
+        @as(f64, 1.01),
+        summary.median,
+        1e-12,
+    );
+    try std.testing.expectApproxEqAbs(
+        @as(f64, (1.06 - 0.98) / 1.01 * 100.0),
+        summary.spread_pct,
+        1e-12,
+    );
+}
+
 fn nearestRankF64(sorted: []const f64, percentile: u8) f64 {
     var rank = (@as(usize, percentile) * sorted.len + 99) / 100;
     rank = std.math.clamp(rank, 1, sorted.len);
@@ -386,9 +419,10 @@ fn nearestRankF64(sorted: []const f64, percentile: u8) f64 {
 /// Interleaved A/B (`--ab-baseline=<binary>`). For each fixture, alternate
 /// HEAD and baseline runs back-to-back so each pair sees the same
 /// instantaneous host speed, then take the median of the per-iteration
-/// ratios (head_i / base_i). Drift between the two halves cancels, so the
-/// ratio is trustworthy even on a noisy shared host — far better than
-/// running all of HEAD then all of baseline. `ratio < 1` = HEAD faster.
+/// ratios (head_i / base_i), averaging the two middle ratios for even N.
+/// Drift between the two halves cancels, so the ratio is trustworthy even
+/// on a noisy shared host — far better than running all of HEAD then all of
+/// baseline. `ratio < 1` = HEAD faster.
 /// `spread%` is (max-min)/median of the per-iteration ratios: low = the
 /// ratio is solid, high = genuinely unstable (re-run / suspect).
 fn runInterleavedAb(
@@ -440,10 +474,8 @@ fn runInterleavedAb(
 
         const base_ms = usToMs(medianUsOf(base));
         const head_ms = usToMs(medianUsOf(head));
-        std.mem.sort(f64, ratios, {}, std.sort.asc(f64));
-        const ratio_med = ratios[ratios.len / 2];
-        const r_spread = if (ratio_med > 0) (ratios[ratios.len - 1] - ratios[0]) / ratio_med * 100.0 else 0.0;
-        const row = try std.fmt.bufPrint(&buf, "{s:<16} {d:>10.2} {d:>10.2} {d:>8.3}x {d:>8.1}\n", .{ b.name, base_ms, head_ms, ratio_med, r_spread });
+        const ratio_summary = summarizePairedRatios(ratios);
+        const row = try std.fmt.bufPrint(&buf, "{s:<16} {d:>10.2} {d:>10.2} {d:>8.3}x {d:>8.1}\n", .{ b.name, base_ms, head_ms, ratio_summary.median, ratio_summary.spread_pct });
         try std.Io.File.stdout().writeStreamingAll(io, row);
     }
 }

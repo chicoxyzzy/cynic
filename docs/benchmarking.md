@@ -92,6 +92,8 @@ the fixture drops below ~50 ms on the lead engine.
 
 Run one fixture with `zig build bench -- --filter=<name>`; combine it with
 `--runs=<N>`, `--no-jit`, or `--ab-baseline=<binary>` for a focused gate.
+Interleaved A/B reports use the true median of the per-pair ratios, averaging
+the two middle ratios when the run count is even.
 
 | Fixture | Iters | Stresses |
 |---|---:|---|

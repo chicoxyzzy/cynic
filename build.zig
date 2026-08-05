@@ -652,6 +652,23 @@ pub fn build(b: *std.Build) void {
     const bench_step = b.step("bench", "Run the micro-bench suite (p50 + spread + outliers; --runs=N for tail percentiles)");
     bench_step.dependOn(&run_bench.step);
 
+    // Keep the benchmark driver's statistics helpers under the ordinary
+    // unit-test gates without making focused tool tests build the Debug
+    // engine. ReleaseSafe retains the checks relevant to this pure logic.
+    const bench_tests_mod = b.createModule(.{
+        .root_source_file = b.path("tools/bench.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+        .link_libc = true,
+    });
+    bench_tests_mod.addImport("cynic", lib_mod_test_safe);
+    const bench_tests = b.addTest(.{ .root_module = bench_tests_mod, .filters = test_filters });
+    const run_bench_tests = b.addRunArtifact(bench_tests);
+    const test_bench_step = b.step("test-bench", "Run benchmark-driver unit tests");
+    test_bench_step.dependOn(&run_bench_tests.step);
+    test_step.dependOn(&run_bench_tests.step);
+    test_fast_step.dependOn(&run_bench_tests.step);
+
     // (The `bench-regex` Perlex-vs-libregexp matcher benchmark — the
     // decision gate for retiring the vendored fallback — was removed
     // with libregexp itself; there is no second engine to compare
