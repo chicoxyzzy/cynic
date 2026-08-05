@@ -1557,13 +1557,13 @@ pub fn runFrames(
             ip += op_tag.operandSize();
             acc = Value.fromInt32(imm);
 
-            // Compact signed shifts, general register stores, and dense
+            // Compact integer shifts, general register stores, and dense
             // integer masks dominate their respective Smi widths in the
             // macro corpus. Thread the pure completions here while preserving
             // the ordinary bytecode for both JIT tiers.
             //
             // If the LHS is not an Int32 (a Double, coercible object, or
-            // BigInt), compact Shr leaves `ip` on the successor so its
+            // BigInt), compact Shr/Shl leave `ip` on the successor so its
             // existing handler remains the sole conversion / re-entry /
             // exception implementation. Wider BitAnd consumes the successor
             // and enters that same `bitwiseBinary` operation directly,
@@ -1592,6 +1592,17 @@ pub fn runFrames(
                     ip += 2;
                     registers[r] = acc;
                     if (comptime bytecode_stats.enabled) bytecode_stats.observeDirectActive(.star);
+                } else if (ip + 1 < code.len and code[ip] == @intFromEnum(Op.shl)) {
+                    // Keep Splay's hotter Star edge ahead of this Crypto
+                    // shift. A non-Int32 LHS leaves `ip` on Shl so the
+                    // ordinary handler remains the only coercion path.
+                    @branchHint(.unlikely);
+                    const r = code[ip + 1];
+                    if (intBitwise(.shl, registers[r], acc)) |res| {
+                        ip += 2;
+                        if (comptime bytecode_stats.enabled) bytecode_stats.observeDirectActive(.shl);
+                        acc = res;
+                    }
                 }
             } else if (ip + 1 < code.len and code[ip] == @intFromEnum(Op.bit_and)) {
                 // Bias ordinary decode toward the laid-out fallthrough;
