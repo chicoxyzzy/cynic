@@ -6,7 +6,7 @@
 # as one flock-held job on the box; the report renders locally with
 # ab-report.ts. Submit returns a JOB_ID; resume with --wait/--fetch.
 #
-#   remote-bench.sh --ref origin/<b> --baseline origin/main [--cross]
+#   remote-bench.sh --ref origin/<b> --baseline origin/main [--cpu 1] [--cross]
 #   remote-bench.sh --wait <id>     # resume waiting on a submitted A/B
 #   remote-bench.sh --fetch <id>    # pull results of a finished A/B + render
 #
@@ -24,6 +24,7 @@ REF="origin/main"
 BASELINE="origin/main"
 SUITE="both"
 RUNS="12"
+CPU="${CYNIC_BENCH_CPU:-1}"
 CROSS="0"
 WAIT_ID=""
 FETCH_ID=""
@@ -34,12 +35,17 @@ while [ $# -gt 0 ]; do
     --baseline) BASELINE="$2"; shift 2 ;;
     --suite)    SUITE="$2"; shift 2 ;;
     --runs)     RUNS="$2"; shift 2 ;;
+    --cpu)      CPU="$2"; shift 2 ;;
     --cross)    CROSS="1"; shift ;;
     --wait)     WAIT_ID="$2"; shift 2 ;;
     --fetch)    FETCH_ID="$2"; shift 2 ;;
     *) echo "remote-bench: unknown argument '$1'" >&2; exit 1 ;;
   esac
 done
+
+case "$CPU" in
+  ''|*[!0-9]*) echo "remote-bench: --cpu must be a non-negative integer" >&2; exit 1 ;;
+esac
 
 load_remote || exit 1
 command -v node >/dev/null || { echo "remote-bench: node not found (need >= 23 to render ab-report.ts)" >&2; exit 1; }
@@ -82,12 +88,25 @@ fi
 # $JOB_DIR so --fetch can pull them by id. ($BASELINE/$REF/$RUNS/$SUITE are
 # interpolated locally; $JOB_DIR/$l/$@ stay literal for the box.)
 AB_CMD=$(cat <<AB
+set -e
 mkdir -p "\$JOB_DIR/ab"
+command -v taskset >/dev/null || { echo "remote-bench: taskset is required on the benchmark host" >&2; exit 2; }
+taskset -c "$CPU" true >/dev/null 2>&1 || { echo "remote-bench: CPU $CPU is unavailable to taskset" >&2; exit 2; }
+check_zig_pin() {
+  expected="\$(grep -oE '0\.[0-9]+\.[0-9]+-dev\.[0-9]+\+[0-9a-f]+' build.zig.zon | head -1)"
+  actual="\$(zig version)"
+  [ "\$actual" = "\$expected" ] || {
+    echo "remote-bench: Zig \$actual does not match ref pin \$expected; rerun tools/bench/provision-remote.sh" >&2
+    exit 2
+  }
+}
 git checkout -f -q --detach "$BASELINE"
+check_zig_pin
 zig build -Doptimize=ReleaseFast >/dev/null 2>&1
 cp zig-out/bin/cynic /tmp/cynic-base
 git checkout -f -q --detach "$REF"
-run_ab() { local l="\$1"; shift; zig build bench -- --ab-baseline=/tmp/cynic-base --runs=$RUNS "\$@" > "\$JOB_DIR/ab/\$l.txt" 2>/dev/null || rm -f "\$JOB_DIR/ab/\$l.txt"; }
+check_zig_pin
+run_ab() { local l="\$1"; shift; taskset -c "$CPU" zig build bench -- --ab-baseline=/tmp/cynic-base --runs=$RUNS "\$@" > "\$JOB_DIR/ab/\$l.txt" 2>/dev/null || rm -f "\$JOB_DIR/ab/\$l.txt"; }
 case "$SUITE" in micros|both) run_ab micros-jit; run_ab micros-nojit --no-jit ;; esac
 case "$SUITE" in macros|both) run_ab macros-jit --macros; run_ab macros-nojit --macros --no-jit ;; esac
 AB
@@ -97,14 +116,14 @@ if [ "$CROSS" = "1" ]; then
 $AB_CMD
 git checkout -f -q --detach "$REF"
 echo ">> cross-engine micros (all peers x both tiers — the slow part)" >&2
-tools/bench-cross.sh --runs $RUNS > "\$JOB_DIR/cross-micros.md" 2>&1 || true
-tools/bench-cross.sh --macros --runs $RUNS > "\$JOB_DIR/cross-macros.md" 2>&1 || true
+CYNIC_BENCH_CPU="$CPU" tools/bench-cross.sh --runs $RUNS > "\$JOB_DIR/cross-micros.md" 2>&1 || true
+CYNIC_BENCH_CPU="$CPU" tools/bench-cross.sh --macros --runs $RUNS > "\$JOB_DIR/cross-macros.md" 2>&1 || true
 AB
 )
 fi
 
 job="$(job_submit "$REF" "$AB_CMD")"
-echo ">> submitted A/B $job on $CYNIC_REMOTE — $REF vs $BASELINE (suite=$SUITE, runs=$RUNS, cross=$CROSS)" >&2
+echo ">> submitted A/B $job on $CYNIC_REMOTE — $REF vs $BASELINE (suite=$SUITE, runs=$RUNS, cpu=$CPU, cross=$CROSS)" >&2
 echo ">> if this disconnects, resume with:  tools/bench/remote-bench.sh --wait $job" >&2
 rc=0; job_wait "$job" || rc=$?
 fetch_and_render "$job"
