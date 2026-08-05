@@ -135,6 +135,20 @@ if [ "$SELF_TEST_RSS_MEDALS" = "1" ]; then
   exit 0
 fi
 
+# Pin timed subprocesses to one core on Linux. Core 1 (not 0) leaves the
+# OS/interrupts their usual home. `remote-bench.sh` passes its `--cpu`
+# selection through this environment variable; direct callers can do the
+# same. No-op where taskset is absent (e.g. macOS).
+TASKSET=""
+if command -v taskset >/dev/null 2>&1; then
+  BENCH_CPU="${CYNIC_BENCH_CPU:-1}"
+  case "$BENCH_CPU" in
+    ''|*[!0-9]*) echo "bench-cross: CYNIC_BENCH_CPU must be a non-negative integer" >&2; exit 1 ;;
+  esac
+  taskset -c "$BENCH_CPU" true >/dev/null 2>&1 || { echo "bench-cross: CPU $BENCH_CPU is unavailable to taskset" >&2; exit 1; }
+  TASKSET="taskset -c $BENCH_CPU"
+fi
+
 # Cynic runs `--unhardened --allow=eval` for EVERY fixture (micros and
 # macros alike): the Octane bodies monkey-patch primordials (rejected by
 # the default frozen-primordials SES posture) and use the Function
@@ -324,15 +338,6 @@ fi
 USE_GNU_DATE=0
 if date +%s%3N 2>/dev/null | grep -qE '^[0-9]{10,}$'; then
   USE_GNU_DATE=1
-fi
-
-# Pin the timed subprocess to one core (Linux) to cut scheduler-migration
-# jitter on a shared host — a big source of spuriously-noisy cells. Core 1
-# (not 0) leaves the OS/interrupts their usual home. No-op where taskset is
-# absent (e.g. macOS).
-TASKSET=""
-if command -v taskset >/dev/null 2>&1; then
-  TASKSET="taskset -c 1"
 fi
 
 # run_once <env> <cmd> <fixture> -> echoes "<ms> <rss_kb>", or "FAIL".

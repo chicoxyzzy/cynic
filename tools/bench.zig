@@ -94,6 +94,7 @@ const BENCHES = [_]Bench{
     .{ .name = "div_loop", .path = "bench/micros/div_loop.js" },
     .{ .name = "mod_loop", .path = "bench/micros/mod_loop.js" },
     .{ .name = "prop_access", .path = "bench/micros/prop_access.js" },
+    .{ .name = "computed_prop_access", .path = "bench/micros/computed_prop_access.js" },
     .{ .name = "prop_write", .path = "bench/micros/prop_write.js" },
     .{ .name = "array_iter", .path = "bench/micros/array_iter.js" },
     .{ .name = "array_literal_loop", .path = "bench/micros/array_literal_loop.js" },
