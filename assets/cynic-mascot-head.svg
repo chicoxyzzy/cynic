@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="436" height="436" viewBox="38 28 436 436" role="img" aria-labelledby="title desc">
+  <title id="title">Cynic mascot</title>
+  <desc id="desc">A bored yellow cartoon face with two pointed ears, a direct half-lidded stare, and a flat deadpan mouth.</desc>
+  <defs>
+    <clipPath id="face-clip">
+      <path d="M256 112C358 112 431 186 431 291C431 393 354 452 256 452C155 452 81 393 81 291C81 185 154 112 256 112Z" />
+    </clipPath>
+    <clipPath id="left-eye-clip">
+      <ellipse cx="184" cy="278" rx="74" ry="68" />
+    </clipPath>
+    <clipPath id="right-eye-clip">
+      <ellipse cx="328" cy="278" rx="74" ry="68" />
+    </clipPath>
+  </defs>
+
+  <g fill="#ffd521" stroke="#0c0c0c" stroke-width="18" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M126 200L137 70C139 51 155 46 170 60L238 137C199 148 161 169 126 200Z" />
+    <path d="M386 200L375 70C373 51 357 46 342 60L274 137C313 148 351 169 386 200Z" />
+  </g>
+  <g fill="#e8b800" stroke="#0c0c0c" stroke-width="11" stroke-linejoin="round">
+    <path d="M151 143L157 86L200 132Z" />
+    <path d="M361 143L355 86L312 132Z" />
+  </g>
+  <path d="M256 112C358 112 431 186 431 291C431 393 354 452 256 452C155 452 81 393 81 291C81 185 154 112 256 112Z" fill="#ffd521" stroke="#0c0c0c" stroke-width="18" stroke-linecap="round" stroke-linejoin="round" />
+  <path d="M365 139C407 177 431 231 431 291C431 393 354 452 256 452C319 428 363 390 378 333C397 260 385 193 365 139Z" fill="#e8b800" opacity=".62" clip-path="url(#face-clip)" />
+
+  <g>
+    <ellipse cx="184" cy="278" rx="74" ry="68" fill="#fff" />
+    <ellipse cx="328" cy="278" rx="74" ry="68" fill="#fff" />
+    <circle cx="184" cy="306" r="22" fill="#0c0c0c" />
+    <circle cx="328" cy="302" r="22" fill="#0c0c0c" />
+    <g clip-path="url(#left-eye-clip)">
+      <path d="M100 198H268V296Q185 263 100 290Z" fill="#e8b800" />
+      <path d="M100 290Q185 263 268 296" fill="none" stroke="#0c0c0c" stroke-width="16" stroke-linecap="round" />
+    </g>
+    <g clip-path="url(#right-eye-clip)">
+      <path d="M244 198H412V282Q327 258 244 287Z" fill="#e8b800" />
+      <path d="M244 287Q327 258 412 282" fill="none" stroke="#0c0c0c" stroke-width="16" stroke-linecap="round" />
+    </g>
+    <ellipse cx="184" cy="278" rx="74" ry="68" fill="none" stroke="#0c0c0c" stroke-width="18" />
+    <ellipse cx="328" cy="278" rx="74" ry="68" fill="none" stroke="#0c0c0c" stroke-width="18" />
+  </g>
+
+  <path d="M205 378H309" fill="none" stroke="#0c0c0c" stroke-width="18" stroke-linecap="round" />
+</svg>

@@ -1,7 +1,9 @@
 {
   "name": "Cynic",
   "short_name": "Cynic",
-  "description": "A strict-only ECMAScript engine, written in Zig.",
+  "description": "A strict-only ECMAScript and WebAssembly engine written from scratch in Zig.",
+  "start_url": "./",
+  "scope": "./",
   "icons": [
     { "src": "icons/favicon-192.png", "type": "image/png", "sizes": "192x192" },
     { "src": "icons/favicon-512.png", "type": "image/png", "sizes": "512x512" }

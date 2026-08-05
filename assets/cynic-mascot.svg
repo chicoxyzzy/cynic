@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Cynic mascot icon</title>
+  <desc id="desc">A framed icon of Cynic's bored yellow mascot on a blue background.</desc>
+  <rect x="8" y="8" width="496" height="496" rx="72" fill="#70c0e8" stroke="#0c0c0c" stroke-width="16" />
+  <image href="cynic-mascot-head.svg" x="38" y="28" width="436" height="436" />
+</svg>

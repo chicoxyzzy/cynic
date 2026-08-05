@@ -1,242 +1,342 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <meta name="theme-color" content="#70c0e8" />
-<title>Cynic — Playground</title>
-<link rel="preconnect" href="https://fonts.googleapis.com" />
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link href="https://fonts.googleapis.com/css2?family=Bowlby+One&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet" />
+<meta name="description" content="Run Cynic's strict-only ECMAScript engine in the browser and inspect its output, bytecode, AST, and WebAssembly." />
+<title>Cynic Playground</title>
+<link rel="icon" type="image/png" sizes="32x32" href="../icons/favicon-32.png" />
+<link rel="icon" type="image/png" sizes="16x16" href="../icons/favicon-16.png" />
 <style>
-  /* Palette lifted from the Cynic site (gh-pages/index.html) so the
-     playground reads as part of the same project. */
   :root {
-    --sky: #70c0e8;
+    --canvas: #70c0e8;
+    --paper: #fff8e6;
+    --panel: #fff8e6;
+    --ink: #0c0c0c;
+    --ink-soft: #41413d;
+    --line: #0c0c0c;
+    --line-strong: #0c0c0c;
+    --accent: #dc4a38;
+    --accent-strong: #a92e21;
+    --blue: #087aa4;
+    --green: #6cbf3a;
+    --yellow: #ffd521;
     --skin: #ffd521;
     --skin-shade: #e8b800;
-    --ink: #0c0c0c;
-    --ink-soft: #2a2a2a;
-    --bart: #dc4a38;
-    --marge: #11a6d6;
+    --bart: var(--accent);
+    --marge: var(--blue);
     --grass: #6cbf3a;
-    --paper: #fff8e6;
-    --display: 'Bowlby One', sans-serif;
-    --mono: 'JetBrains Mono', monospace;
-    --bd: 3px solid var(--ink);
-    --bd-thick: 4px solid var(--ink);
-    --shadow-sm: 4px 4px 0 var(--ink);
+    --sky: var(--canvas);
+    --sans: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    --display: Impact, Haettenschweiler, "Arial Narrow Bold", sans-serif;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   }
 
   * { box-sizing: border-box; }
 
   html, body {
-    margin: 0;
+    min-width: 320px;
     height: 100%;
+    margin: 0;
   }
 
   body {
-    font-family: var(--mono);
     color: var(--ink);
-    background: var(--sky);
-    background-attachment: fixed;
-    padding: 28px 20px 60px;
-    /* Full-height app shell: header pinned top, footer bottom, the
-       working columns fill everything between and scroll internally. */
-    display: flex;
-    flex-direction: column;
+    background: var(--canvas);
+    font-family: var(--sans);
+    letter-spacing: 0;
+    -webkit-font-smoothing: antialiased;
   }
 
-  .wrap {
-    max-width: 1160px;
+  button, select, input { font: inherit; }
+
+  button, select, a, input { outline: none; }
+
+  button:focus-visible,
+  select:focus-visible,
+  a:focus-visible,
+  input:focus-visible {
+    outline: 3px solid var(--blue);
+    outline-offset: 2px;
+  }
+
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  .app-shell {
     width: 100%;
-    margin: 0 auto;
-    flex: 1 1 auto;
-    min-height: 0;
-    display: flex;
-    flex-direction: column;
-  }
-
-  header {
-    margin-bottom: 22px;
-    flex: 0 0 auto;
-  }
-
-  .brand {
-    font-family: var(--display);
-    font-size: 30px;
-    letter-spacing: 0.02em;
-    line-height: 1.1;
-  }
-  .brand a { color: var(--ink); text-decoration: none; }
-
-  /* Tagline now sits under the title as a calmer subtitle. Used to
-     float top-right; demoted because the tabs + Run are the real
-     drama on this page. */
-  .subtitle {
-    font-family: var(--mono);
-    font-size: 13px;
-    color: var(--ink-soft);
-    margin-top: 4px;
-    letter-spacing: 0;
-  }
-
-  button {
-    font-family: var(--display);
-    font-size: 14px;
-    color: var(--ink);
-    background: #fff;
-    border: var(--bd);
-    box-shadow: var(--shadow-sm);
-    padding: 8px 14px;
-    cursor: pointer;
-  }
-  button:active { transform: translate(2px, 2px); box-shadow: 2px 2px 0 var(--ink); }
-  button:disabled { opacity: 0.5; cursor: progress; }
-
-  /* Panel-head buttons are tighter than the page's stand-alone
-     buttons so the head row stays compact. Same palette, slimmer
-     border + shadow. */
-  .panel-head .btn-primary,
-  .panel-head .btn-secondary {
-    font-size: 13px;
-    border-width: 2px;
-    padding: 5px 12px;
-    box-shadow: 2px 2px 0 var(--ink);
-  }
-  .panel-head .btn-primary:active,
-  .panel-head .btn-secondary:active {
-    transform: translate(1px, 1px);
-    box-shadow: 1px 1px 0 var(--ink);
-  }
-  .btn-primary { background: var(--grass); }
-  .btn-secondary { background: var(--marge); color: #fff; }
-
-  /* Snippet picker is a quiet, contextual control — no shadow, just
-     a 2px ink border so it sits inside the panel head without
-     competing with the action buttons. */
-  .snippets-select {
-    font-family: var(--mono);
-    font-size: 13px;
-    color: var(--ink);
-    background: rgba(255, 255, 255, 0.7);
-    border: 2px solid var(--ink);
-    box-shadow: none;
-    padding: 4px 8px;
-    max-width: 220px;
-    cursor: pointer;
-  }
-
-  .status {
-    font-family: var(--mono);
-    font-size: 12px;
-    color: var(--ink-soft);
-    letter-spacing: 0;
-  }
-
-  /* The two-column working area: editor left, output right. */
-  .columns {
+    height: 100svh;
+    min-height: 560px;
     display: grid;
-    grid-template-columns: 1fr 1fr;
-    grid-template-rows: minmax(0, 1fr);
-    gap: 22px;
-    align-items: stretch;
-    flex: 1 1 auto;
+    grid-template-rows: 64px minmax(0, 1fr) 34px;
+  }
+
+  .app-header {
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    padding: 0 18px;
+    background: var(--skin);
+    border-bottom: 3px solid var(--ink);
+  }
+
+  .wordmark {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    color: var(--ink);
+    text-decoration: none;
+    font: 24px/1 var(--display);
+    text-transform: uppercase;
+    line-height: 1;
+  }
+
+  .wordmark-mark {
+    width: 36px;
+    height: 36px;
+    padding: 2px;
+    background: var(--canvas);
+    border: 2px solid var(--ink);
+    border-radius: 5px;
+    object-fit: contain;
+  }
+
+  .workspace-name {
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    font: 13px/1 var(--mono);
+    color: var(--ink-soft);
+  }
+
+  .workspace-name::before { content: "/"; color: var(--line-strong); }
+
+  .runtime-badge {
+    padding: 4px 7px;
+    border: 2px solid var(--ink);
+    color: var(--ink-soft);
+    background: #fff;
+    font-size: 11px;
+  }
+
+  .header-nav {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    font: 14px/1 var(--display);
+    text-transform: uppercase;
+  }
+
+  .header-nav a {
+    color: var(--ink-soft);
+    text-decoration: none;
+    border-bottom: 1px solid transparent;
+    transition: color 140ms ease, border-color 140ms ease;
+  }
+
+  .header-nav a:hover { color: var(--ink); border-color: var(--ink); }
+
+  .workspace {
+    min-width: 0;
     min-height: 0;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 16px;
+    padding: 14px 18px 18px;
   }
 
   .panel {
-    background: var(--paper);
-    border: var(--bd);
-    box-shadow: var(--shadow-sm);
-    display: flex;
-    flex-direction: column;
-    /* Grid items default to min-width/height:auto, which lets long
-       output lines / tall content blow a track past its share. Pin
-       both to 0 so the two columns stay even halves that fill the
-       grid row and scroll inside the panel instead of resizing it. */
     min-width: 0;
     min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    background: var(--panel);
+    border: 3px solid var(--ink);
+    border-radius: 0;
+    box-shadow: 5px 5px 0 var(--ink);
   }
 
   .panel-head {
-    font-family: var(--display);
-    font-size: 14px;
-    letter-spacing: 0.04em;
-    background: var(--skin);
-    border-bottom: var(--bd);
-    padding: 6px 10px;
+    min-height: 50px;
+    flex: 0 0 50px;
     display: flex;
     align-items: center;
-    justify-content: space-between;
     gap: 10px;
-    flex: 0 0 auto;
+    padding: 8px 10px;
+    background: var(--skin);
+    border-bottom: 3px solid var(--ink);
   }
 
-  /* Right-side action cluster inside a panel head — Run / Copy link
-     stay grouped while the snippet picker (or tabs) anchor the left. */
   .panel-actions {
+    min-width: 0;
+    margin-left: auto;
     display: flex;
     align-items: center;
     gap: 8px;
-    margin-left: auto;
   }
 
-  /* --unhardened toggle: a muted checkbox + label that reads as a
-     dev switch, not a primary action. */
+  .snippets-select {
+    width: min(230px, 44%);
+    height: 32px;
+    padding: 0 30px 0 9px;
+    color: var(--ink);
+    background: #fff;
+    border: 2px solid var(--ink);
+    border-radius: 0;
+    font: 12px/1 var(--mono);
+    cursor: pointer;
+  }
+
+  .action-button {
+    height: 32px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    padding: 0 11px;
+    border: 2px solid var(--ink);
+    border-radius: 0;
+    box-shadow: 2px 2px 0 var(--ink);
+    background: #fff;
+    color: var(--ink);
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 140ms ease, border-color 140ms ease, transform 140ms ease, box-shadow 140ms ease;
+  }
+
+  .action-button:hover {
+    background: var(--skin-shade);
+    transform: translate(-1px, -1px);
+    box-shadow: 3px 3px 0 var(--ink);
+  }
+  .action-button:active { transform: translate(1px, 1px); box-shadow: 1px 1px 0 var(--ink); }
+  .action-button:disabled { opacity: .5; cursor: progress; transform: none; }
+  .action-button .icon { font: 700 13px/1 var(--mono); }
+
+  .btn-primary {
+    color: var(--ink);
+    background: var(--grass);
+    border-color: var(--ink);
+  }
+
+  .btn-primary:hover { background: #8bd754; border-color: var(--ink); }
+
   .toggle {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
-    font: 13px/1 var(--mono, monospace);
-    color: var(--ink-soft, #666);
+    gap: 7px;
+    color: var(--ink-soft);
+    font: 11px/1 var(--mono);
     cursor: pointer;
     user-select: none;
+    white-space: nowrap;
   }
-  /* Custom checkbox: an 18px ink-bordered square that fills green with
-     a black checkmark when on (the native box is hidden via
-     appearance:none). */
+
   .toggle input {
     appearance: none;
     -webkit-appearance: none;
-    width: 18px;
+    width: 30px;
     height: 18px;
     margin: 0;
+    position: relative;
     flex: none;
     border: 2px solid var(--ink);
+    border-radius: 9px;
     background: #fff;
     cursor: pointer;
-    position: relative;
-  }
-  .toggle input:checked { background: var(--grass); }
-  .toggle input:checked::after {
-    content: "";
-    position: absolute;
-    left: 4px;
-    top: 1px;
-    width: 5px;
-    height: 9px;
-    border: solid var(--ink);
-    border-width: 0 2px 2px 0;
-    transform: rotate(45deg);
+    transition: background 140ms ease, border-color 140ms ease;
   }
 
-  /* The CodeMirror editor host fills the left panel body. */
+  .toggle input::after {
+    content: "";
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: #fff;
+    border: 1px solid var(--ink);
+    transition: transform 140ms ease;
+  }
+
+  .toggle input:checked { background: var(--green); border-color: var(--ink); }
+  .toggle input:checked::after { transform: translateX(12px); }
+
   #editor-host {
     flex: 1 1 auto;
     min-height: 0;
     overflow: auto;
   }
 
-  /* CodeMirror theming — see playground.js for the EditorView theme
-     that paints the --paper background, --ink text and --marge focus
-     accent. The host just needs to let the view stretch. */
   #editor-host .cm-editor { height: 100%; }
   #editor-host .cm-scroller { font-family: var(--mono); }
 
-  /* Positioning context for the off-screen-match edge hints. Takes
-     over the flex-fill role the bare <pre> used to have so the output
-     still scrolls inside the panel. */
+  .panel-head-tabs { justify-content: space-between; }
+
+  .mode-tabs {
+    min-width: 0;
+    display: inline-flex;
+    align-items: stretch;
+    overflow: hidden;
+    border: 2px solid var(--ink);
+    border-radius: 0;
+    background: #fff;
+  }
+
+  .mode-tab {
+    min-width: 62px;
+    height: 30px;
+    padding: 0 10px;
+    color: var(--ink-soft);
+    background: transparent;
+    border: 0;
+    border-right: 2px solid var(--ink);
+    font-size: 11px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: color 140ms ease, background 140ms ease;
+  }
+
+  .mode-tab:last-child { border-right: 0; }
+  .mode-tab:hover { color: var(--ink); background: var(--skin-shade); }
+  .mode-tab[aria-selected="true"] { color: #fff; background: var(--ink); }
+  .mode-tab[hidden] { display: none; }
+
+  .status {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    color: var(--ink-soft);
+    font: 11px/1 var(--mono);
+  }
+
+  .status::before {
+    content: "";
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--green);
+    box-shadow: 0 0 0 3px rgba(136, 184, 45, .16);
+  }
+
   .output-wrap {
     position: relative;
     flex: 1 1 auto;
@@ -246,231 +346,198 @@
   }
 
   pre.output {
-    margin: 0;
-    padding: 14px;
-    flex: 1 1 auto;
     min-height: 0;
+    flex: 1 1 auto;
+    margin: 0;
+    padding: 16px;
     overflow: auto;
-    font-family: var(--mono);
-    font-size: 13px;
-    line-height: 1.5;
+    color: var(--ink);
+    background: var(--paper);
+    font: 13px/1.55 var(--mono);
     white-space: pre-wrap;
     word-break: break-word;
   }
 
-  /* Off-screen-match hint. When the editor cursor highlights output
-     lines scrolled out of the panel, a faint caption at the top /
-     bottom edge points the way. Deliberately not a pill/button — no
-     border, no shadow, soft corners, low-opacity wash with a touch of
-     blur so the label reads over the disasm without looking tappable.
-     `pointer-events: none` so it never eats a scroll or click; it
-     vanishes with the highlight on mouse-leave. */
   .span-edge {
     position: absolute;
     left: 50%;
-    transform: translateX(-50%);
     z-index: 5;
+    transform: translateX(-50%);
     pointer-events: none;
-    background: rgba(255, 213, 33, 0.45);
-    backdrop-filter: blur(2px);
-    border-radius: 4px;
-    padding: 1px 8px;
-    font-family: var(--mono);
-    font-size: 11px;
-    letter-spacing: 0.02em;
-    color: var(--ink-soft);
-    opacity: 0.85;
+    padding: 3px 8px;
+    color: var(--ink);
+    background: rgba(242, 201, 76, .9);
+    border: 1px solid #b89021;
+    border-radius: 3px;
+    font: 10px/1.2 var(--mono);
   }
+
   .span-edge[hidden] { display: none; }
   .span-edge-up { top: 8px; }
   .span-edge-down { bottom: 8px; }
 
-  /* Each eval-output segment is its own block (like .bc-line and
-     .out-hint). An inline <span> drops vertical margin/padding and
-     draws border-top only across its line fragments, so the value
-     marker and separator below misrendered until these went block. */
-  .out-stdout { display: block; color: var(--ink); }
-  .out-value { display: block; color: var(--ink-soft); }
-  .out-value::before { content: "⇒ "; color: var(--grass); font-weight: 700; }
-  .out-error { display: block; color: var(--bart); font-weight: 700; }
-  .out-empty { display: block; color: var(--ink-soft); font-style: italic; }
+  .out-stdout, .out-value, .out-error, .out-empty, .out-stats { display: block; }
+  .out-value { color: var(--ink-soft); }
+  .out-value::before { content: "=> "; color: var(--green); font-weight: 800; }
+  .out-error { color: var(--accent-strong); font-weight: 700; }
+  .out-empty { color: var(--ink-soft); }
+  .out-hint { display: none; }
 
-  /* Runtime stats footer — two-line "chunk: …" / "GC: …" summary the
-     engine appends to every successful eval. Muted + smaller so it
-     sits below the result without competing; the dotted rule visually
-     separates "what the snippet did" from "what it produced". */
   .out-stats {
-    display: block;
+    margin-top: 14px;
+    padding-top: 11px;
     color: var(--ink-soft);
-    font-size: 12px;
+    border-top: 1px solid var(--line);
+    font-size: 11px;
     white-space: pre;
-    opacity: 0.85;
-    margin-top: 12px;
-    padding-top: 10px;
-    border-top: 1px dotted rgba(0, 0, 0, 0.25);
   }
 
-  /* The dashed rule + spacing set the completion value (or a thrown
-     error) off from the stdout above it — so it applies only when
-     the value/error actually follows stdout, never when it is the
-     sole line in the panel. */
   .out-stdout + .out-value,
   .out-stdout + .out-error {
-    border-top: 2px dashed rgba(0, 0, 0, 0.25);
-    padding-top: 10px;
     margin-top: 10px;
-  }
-  .out-stdout + .out-error { border-top-color: rgba(220, 74, 56, 0.4); }
-
-  /* Inspector affordance hint — a one-off muted note at the top of the
-     bytecode / AST panels telling the reader the lines are hoverable.
-     Reuses the muted palette so it never competes with the disasm. */
-  .out-hint {
-    display: block;
-    color: var(--ink-soft);
-    font-style: italic;
-    font-size: 12px;
-    margin-bottom: 8px;
-    opacity: 0.85;
+    padding-top: 10px;
+    border-top: 1px dashed var(--line-strong);
   }
 
-  /* Output-panel span-line decoration. Each disasm instruction or AST
-     node line that carries a source `[start..end]` span gets `.span-line`
-     and lights up on hover, paired with a CodeMirror range decoration
-     over the matching source. `.span-active` is the reverse-direction
-     highlight (cursor in editor over the span -> light up the line). */
   .bc-line { display: block; }
   .span-line { cursor: pointer; border-radius: 2px; }
-  .span-line:hover, .span-active { background: var(--skin); }
-  /* Reverse-hover depth tiers. When the editor cursor sits inside
-     several nested spans, the narrowest (most-specific) match gets the
-     strong `.span-active`; the wider enclosing spans get this faint
-     tint — so "what you're pointing at" reads louder than "what region
-     it's part of", instead of every containing line looking equal. */
-  .span-active-ancestor { background: rgba(255, 213, 33, 0.30); }
+  .span-line:hover, .span-active { background: rgba(242, 201, 76, .55); }
+  .span-active-ancestor { background: rgba(242, 201, 76, .20); }
 
-  /* Disasm token coloring — same families as the CodeMirror syntax
-     palette so the two panels feel like they speak the same
-     language. The exact regex sees src/bytecode/disasm.zig output. */
-  .bc-tok-offset { color: var(--ink-soft); }
-  .bc-tok-mnem   { color: #9b1d8f; font-weight: 700; }
-  .bc-tok-reg    { color: #1a64b8; }
-  .bc-tok-index  { color: #b5500f; }
-  .bc-tok-jump   { color: #0d7a8a; }
-  .bc-tok-num    { color: #b5500f; }
-  .bc-tok-paren  { color: var(--ink-soft); }
-
-  /* AST-printer S-expression token coloring — mirrors the bytecode
-     palette so the two inspector modes look related. See
-     src/ast/printer.zig for the exact output shape. */
-  .ast-tok-paren  { color: var(--ink-soft); }
-  .ast-tok-head   { color: #9b1d8f; font-weight: 700; }
-  .ast-tok-attr   { color: #1a64b8; }
-  .ast-tok-string { color: #1f7a2e; }
-  .ast-tok-num    { color: #b5500f; }
-  .ast-tok-ident  { color: #0d7a8a; }
+  .bc-tok-offset, .bc-tok-paren, .wat-tok-bytes { color: var(--ink-soft); }
+  .bc-tok-mnem, .ast-tok-head { color: #8e287f; font-weight: 700; }
+  .bc-tok-reg, .ast-tok-attr { color: var(--blue); }
+  .bc-tok-index, .bc-tok-num, .ast-tok-num { color: #a84c12; }
+  .bc-tok-jump, .ast-tok-ident { color: #08767d; }
+  .ast-tok-paren { color: var(--ink-soft); }
+  .ast-tok-string { color: #367611; }
   .wat-tok-comment { color: var(--ink-soft); font-style: italic; }
-  .wat-tok-bytes   { color: var(--ink-soft); }
 
-  /* Right-panel tab row. Replaces the toolbar mode <select>; clicking
-     a tab switches the inspector view and re-runs the source. */
-  .panel-head-tabs { padding: 6px 10px; }
-  .mode-tabs {
+  .statusbar {
+    min-width: 0;
     display: flex;
-    gap: 6px;
-    flex-wrap: wrap;
-  }
-  .mode-tab {
-    font-family: var(--display);
-    font-size: 13px;
-    letter-spacing: 0.04em;
-    color: var(--ink);
-    background: rgba(255, 255, 255, 0.55);
-    border: 2px solid var(--ink);
-    box-shadow: none;
-    padding: 4px 12px;
-    cursor: pointer;
-  }
-  .mode-tab[hidden] { display: none; }
-  .mode-tab[aria-selected="true"] {
-    background: #fff;
-    box-shadow: 2px 2px 0 var(--ink);
-  }
-  .mode-tab:active { transform: translate(1px, 1px); box-shadow: 1px 1px 0 var(--ink); }
-
-  footer {
-    margin-top: 26px;
-    font-size: 12px;
+    align-items: center;
+    gap: 9px;
+    padding: 0 18px;
     color: var(--ink-soft);
-    background: rgba(255, 255, 255, 0.55);
-    padding: 8px 10px;
-    display: inline-block;
-    flex: 0 0 auto;
-    align-self: flex-start;
+    background: var(--skin);
+    border-top: 3px solid var(--ink);
+    font: 10px/1 var(--mono);
+    white-space: nowrap;
+    overflow: hidden;
   }
-  footer a { color: var(--ink); }
 
-  /* Narrow viewports: collapse to a single stacked column and let the
-     page scroll naturally — two full-height stacked panels don't fit. */
-  @media (max-width: 760px) {
-    html, body { height: auto; }
-    .columns { grid-template-columns: 1fr; grid-template-rows: none; }
+  .statusbar strong { color: var(--ink); font-weight: 600; }
+  .statusbar .sep { color: var(--line-strong); }
+
+  @media (max-width: 900px) {
+    .app-header { gap: 12px; }
+    .runtime-badge { display: none; }
+    .header-nav a:first-child { display: none; }
+    .workspace { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(360px, 1fr) minmax(320px, .9fr); overflow: auto; }
+    .app-shell { height: auto; min-height: 100svh; grid-template-rows: 60px auto 34px; }
     .panel { min-height: 320px; }
+  }
+
+  @media (max-width: 640px) {
+    .app-header { padding: 0 12px; }
+    .workspace-name { display: none; }
+    .header-nav { gap: 12px; }
+    .workspace { padding: 8px; gap: 8px; grid-template-rows: 430px 380px; }
+    .panel-head { min-height: 92px; flex-basis: 92px; align-items: flex-start; flex-wrap: wrap; }
+    .snippets-select { width: 100%; max-width: none; }
+    .panel-actions { width: 100%; margin-left: 0; }
+    .toggle { margin-right: auto; }
+    .panel-head-tabs { min-height: 50px; flex-basis: 50px; flex-wrap: nowrap; align-items: center; }
+    .mode-tab { min-width: 54px; padding: 0 8px; }
+    .statusbar { padding: 0 10px; }
+  }
+
+  @media (max-width: 420px) {
+    .wordmark { font-size: 18px; }
+    .wordmark-mark { width: 28px; height: 28px; }
+    .header-nav a:first-child { display: none; }
+    .action-button { padding: 0 9px; }
+    .action-button .button-label-share { display: none; }
+    .mode-tab { min-width: 48px; font-size: 10px; }
+    .status { font-size: 10px; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; }
   }
 </style>
 </head>
 <body>
-<div class="wrap">
-
-  <header>
-    <div class="brand">
-      <a href="../">Cynic</a> · Playground
-      <div class="subtitle">strict-only ECMAScript, compiled to WebAssembly. No eval. That's the point.</div>
+<div class="app-shell">
+  <header class="app-header">
+    <h1 class="sr-only">Cynic Playground</h1>
+    <a class="wordmark" href="../" aria-label="Cynic project home">
+      <img class="wordmark-mark" src="../assets/cynic-mascot-head.svg" alt="" width="36" height="36" />
+      <span>Cynic</span>
+    </a>
+    <div class="workspace-name">
+      <span>Playground</span>
+      <span class="runtime-badge">wasm32-freestanding</span>
     </div>
+    <nav class="header-nav" aria-label="Project links">
+      <a href="https://github.com/chicoxyzzy/cynic/blob/main/README.md">Docs</a>
+      <a href="https://github.com/chicoxyzzy/cynic">Source</a>
+    </nav>
   </header>
 
-  <div class="columns">
-    <div class="panel">
+  <main class="workspace">
+    <section class="panel" aria-label="Source editor">
       <div class="panel-head">
-        <select id="snippets" class="snippets-select" title="Load a sample">
-          <option value="">— sample snippets —</option>
+        <label class="sr-only" for="snippets">Sample program</label>
+        <select id="snippets" class="snippets-select" title="Load a sample program">
+          <option value="">Sample program</option>
         </select>
         <div class="panel-actions">
-          <label class="toggle" title="Run with --unhardened — mutable primordials, no frozen globalThis. eval mode only.">
-            <input type="checkbox" id="unhardened">
+          <label class="toggle" title="Use mutable primordials for eval mode">
+            <input type="checkbox" id="unhardened" aria-label="Run unhardened">
             <span>unhardened</span>
           </label>
-          <button id="share" type="button" class="btn-secondary">Copy link</button>
-          <button id="run" type="button" class="btn-primary" title="Run · Ctrl/Cmd+Enter">Run</button>
+          <button id="share" type="button" class="action-button" title="Copy a link to this source">
+            <span class="icon" aria-hidden="true">↗</span>
+            <span class="button-label-share">Share</span>
+          </button>
+          <button id="run" type="button" class="action-button btn-primary" title="Run (Ctrl/Cmd+Enter)">
+            <span class="icon" aria-hidden="true">▶</span>
+            <span>Run</span>
+          </button>
         </div>
       </div>
       <div id="editor-host"></div>
-    </div>
+    </section>
 
-    <div class="panel">
+    <section class="panel" aria-label="Engine output">
       <div class="panel-head panel-head-tabs">
-        <div class="mode-tabs" role="tablist" aria-label="output mode">
-          <button id="tab-eval" class="mode-tab" data-mode="eval" type="button" role="tab" aria-selected="true" aria-controls="output">eval</button>
-          <button id="tab-bytecode" class="mode-tab" data-mode="bytecode" type="button" role="tab" aria-selected="false" aria-controls="output">bytecode</button>
-          <button id="tab-ast" class="mode-tab" data-mode="ast" type="button" role="tab" aria-selected="false" aria-controls="output">AST</button>
-          <button id="tab-wasm" class="mode-tab" data-mode="wasm" type="button" role="tab" aria-selected="false" aria-controls="output">wasm</button>
+        <div class="mode-tabs" role="tablist" aria-label="Output view">
+          <button id="tab-eval" class="mode-tab" data-mode="eval" type="button" role="tab" tabindex="0" aria-selected="true" aria-controls="output">Eval</button>
+          <button id="tab-bytecode" class="mode-tab" data-mode="bytecode" type="button" role="tab" tabindex="-1" aria-selected="false" aria-controls="output">Bytecode</button>
+          <button id="tab-ast" class="mode-tab" data-mode="ast" type="button" role="tab" tabindex="-1" aria-selected="false" aria-controls="output">AST</button>
+          <button id="tab-wasm" class="mode-tab" data-mode="wasm" type="button" role="tab" tabindex="-1" aria-selected="false" aria-controls="output">Wasm</button>
         </div>
-        <span class="status" id="status" aria-live="polite">loading engine…</span>
+        <span class="status" id="status" role="status" aria-live="polite">loading</span>
       </div>
       <div class="output-wrap">
         <pre class="output" id="output" role="tabpanel" tabindex="0" aria-labelledby="tab-eval"><span class="out-empty">Run something. Cynic will judge it.</span></pre>
-        <div class="span-edge span-edge-up" id="span-edge-up" aria-hidden="true" hidden>▲ highlighted above</div>
-        <div class="span-edge span-edge-down" id="span-edge-down" aria-hidden="true" hidden>▼ highlighted below</div>
+        <div class="span-edge span-edge-up" id="span-edge-up" aria-hidden="true" hidden>▲ match above</div>
+        <div class="span-edge span-edge-down" id="span-edge-down" aria-hidden="true" hidden>▼ match below</div>
       </div>
-    </div>
-  </div>
+    </section>
+  </main>
 
-  <footer>
-    Engine: <span id="version">cynic-wasm</span> ·
-    <a href="../">project site</a> ·
-    <a href="https://github.com/chicoxyzzy/cynic">source</a>
+  <footer class="statusbar">
+    <strong id="version">cynic-wasm</strong>
+    <span class="sep">·</span>
+    <span>strict-only</span>
+    <span class="sep">·</span>
+    <span>hardened</span>
+    <span class="sep">·</span>
+    <span>local browser runtime, no excuses</span>
   </footer>
-
 </div>
 <script type="module" src="app.js"></script>
 </body>

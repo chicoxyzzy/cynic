@@ -359,9 +359,8 @@ const errorRangeField = StateField.define({
   provide: (f) => EditorView.decorations.from(f),
 });
 
-// Editor theme — paints the playground palette onto CodeMirror.
-// CSS custom properties resolve against :root, so the Simpsons
-// palette in playground.html drives these too.
+// Editor theme — keeps CodeMirror aligned with the surrounding workspace.
+// CSS custom properties resolve against :root in playground.html.
 const cynicTheme = EditorView.theme({
   '&': {
     color: 'var(--ink)',
@@ -1097,7 +1096,9 @@ function setMode(mode) {
   if (mode === currentMode) return;
   currentMode = mode;
   for (const tab of els.modeTabs) {
-    tab.setAttribute('aria-selected', tab.dataset.mode === mode ? 'true' : 'false');
+    const selected = tab.dataset.mode === mode;
+    tab.setAttribute('aria-selected', selected ? 'true' : 'false');
+    tab.tabIndex = selected ? 0 : -1;
   }
   // Keep the tabpanel's accessible name pointed at the active tab so a
   // screen reader announces the right mode when focus enters the
@@ -1112,6 +1113,28 @@ function setMode(mode) {
 function wireModeTabs() {
   for (const tab of els.modeTabs) {
     tab.addEventListener('click', () => setMode(tab.dataset.mode));
+    tab.addEventListener('keydown', (event) => {
+      if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+
+      const visibleTabs = els.modeTabs.filter((candidate) => !candidate.hidden);
+      const currentIndex = visibleTabs.indexOf(tab);
+      if (currentIndex === -1) return;
+
+      let nextIndex = currentIndex;
+      if (event.key === 'Home') nextIndex = 0;
+      if (event.key === 'End') nextIndex = visibleTabs.length - 1;
+      if (event.key === 'ArrowLeft') {
+        nextIndex = (currentIndex - 1 + visibleTabs.length) % visibleTabs.length;
+      }
+      if (event.key === 'ArrowRight') {
+        nextIndex = (currentIndex + 1) % visibleTabs.length;
+      }
+
+      event.preventDefault();
+      const nextTab = visibleTabs[nextIndex];
+      setMode(nextTab.dataset.mode);
+      nextTab.focus();
+    });
   }
 }
 
