@@ -1425,7 +1425,7 @@ const NumberCompareOutcome = enum(u8) {
     true_,
 };
 
-/// The non-int32 remainder of §7.2.13's primitive Number comparison. Keeping
+/// The non-int32 remainder of §7.2.12's primitive Number comparison. Keeping
 /// the operator runtime-selected in one outlined body avoids cloning the f64
 /// path across the merged fused-branch handler in the monolithic dispatch loop.
 /// Non-Numbers return before any coercion or JS re-entry; mixed and Double pairs
@@ -2630,9 +2630,10 @@ pub fn runFrames(
             // when a NaN is involved (both `<` and `>=` are false), so this
             // op must test the comparison and branch on its falsity, not
             // emit the negated comparison. Mirrors the standalone `.lt` arm;
-            // two small `switch (t)` selects keep the comptime comparison op
-            // without duplicating the body. Forward-only by emit; a
-            // defensive backward offset still takes a GC safepoint.
+            // the first switch keeps int32 comparisons comptime-selected and
+            // the second maps to one runtime `RelOp` for the outlined Number
+            // body. Forward-only by emit; a defensive backward offset still
+            // takes a GC safepoint.
             const r = code[ip];
             const branch = t.branchInfoForDispatch();
             const off = branch.displacement(code, ip - 1);
