@@ -57,6 +57,8 @@ fetch_and_render() {
   local job="$1"
   mkdir -p "$OUT"
   job_fetch_dir "$job" ab "$OUT/ab"
+  # A non-cross job must not inherit reports fetched for an earlier job.
+  rm -f "$OUT/cross-micros.md" "$OUT/cross-macros.md"
   scp "${SSH_OPTS[@]}" "$CYNIC_REMOTE":"/tmp/jobs/$job/cross-micros.md" "$OUT/cross-micros.md" >/dev/null 2>&1 || true
   scp "${SSH_OPTS[@]}" "$CYNIC_REMOTE":"/tmp/jobs/$job/cross-macros.md" "$OUT/cross-macros.md" >/dev/null 2>&1 || true
   if [ -d "$OUT/ab" ]; then
