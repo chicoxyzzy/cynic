@@ -1,5 +1,5 @@
 // Coercible-object relational control. The loop condition uses ToBoolean,
-// leaving exactly one object/Number JmpIfNotLt8 comparison per iteration.
+// leaving exactly one object/Double JmpIfNotLt8 comparison per iteration.
 // `valueOf` must remain on the shared IsLessThan coercion path and run once.
 'use strict';
 
@@ -12,7 +12,7 @@ function run(limit) {
     let remaining = limit;
     let hits = 0;
     while (remaining) {
-        if (operand < 1) hits = (hits + 1) | 0;
+        if (operand < 1.5) hits = (hits + 1) | 0;
         remaining = (remaining - 1) | 0;
     }
     return hits;
