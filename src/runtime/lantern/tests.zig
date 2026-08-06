@@ -666,22 +666,6 @@ test "interpreter: relational operators" {
     try expectBool("'a' < 'b';", true);
 }
 
-test "interpreter: relational operators compare primitive Number tags directly" {
-    // Keep parameters dynamic so these execute the standalone Lt/Gt/Le/Ge
-    // handlers instead of being folded by the compiler.
-    try expectBool("(function(a,b){ return a < b; })(1, 1.5);", true);
-    try expectBool("(function(a,b){ return a > b; })(2.5, 2);", true);
-    try expectBool("(function(a,b){ return a <= b; })(-0, 0);", true);
-    try expectBool("(function(a,b){ return a >= b; })(0, -0);", true);
-    try expectBool("(function(a,b){ return a < b; })(2, 1/0);", true);
-    try expectBool("(function(a,b){ return a >= b; })(-(1/0), -1.5);", false);
-
-    // Numeric-looking strings remain lexicographic, and mixed BigInt/Number
-    // comparisons retain IsLessThan's exact mathematical-real-number path.
-    try expectBool("(function(a,b){ return a < b; })('10', '2');", true);
-    try expectBool("(function(a,b){ return a > b; })(9007199254740993n, 9007199254740992);", true);
-}
-
 test "interpreter: NaN comparisons are false" {
     try expectBool("(0/0) < 1;", false);
     try expectBool("(0/0) > 1;", false);

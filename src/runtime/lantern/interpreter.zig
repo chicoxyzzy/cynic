@@ -2,7 +2,7 @@
 //! switch-dispatched `runFrames` loop plus the top-level entry
 //! points (`run`, `evaluateScript`) and the inline dispatch
 //! helpers (`decodeNext`, `reEnterDispatch`, `runSafePoint`,
-//! `intArith` / `numberCompare` / `intBitwise`).
+//! `intArith` / `intCompare` / `intBitwise`).
 //!
 //! Reads a `Chunk` produced by the bytecode compiler and runs it
 //! against a `Realm`'s heap. The dispatch loop is a single
@@ -1406,33 +1406,42 @@ inline fn numArith(comptime op: enum { add, sub, mul, div, mod }, a: Value, b: V
     });
 }
 
-/// §7.2.13 IsLessThan — relational compare on two primitive Number operands.
-/// Keep the existing exact int32 path; a mixed or double pair widens through
-/// `numberToDouble`. Native f64 comparisons give all four operators the spec's
-/// NaN-false and signed-zero behavior. Non-Numbers return `null` before any
-/// coercion or JS re-entry so the caller retains the full abstract operation.
-inline fn numberCompare(comptime op: enum { lt, gt, le, ge }, a: Value, b: Value) ?Value {
-    if (a.isInt32() and b.isInt32()) {
-        const x = a.asInt32();
-        const y = b.asInt32();
-        return Value.fromBool(switch (op) {
-            .lt => x < y,
-            .gt => x > y,
-            .le => x <= y,
-            .ge => x >= y,
-        });
-    }
-    const a_is_number = a.isInt32() or a.isDouble();
-    const b_is_number = b.isInt32() or b.isDouble();
-    if (!a_is_number or !b_is_number) return null;
-    const x = a.numberToDouble();
-    const y = b.numberToDouble();
+/// §7.2.13 IsLessThan — relational compare on two int32 operands.
+inline fn intCompare(comptime op: RelOp, a: Value, b: Value) ?Value {
+    if (!a.isInt32() or !b.isInt32()) return null;
+    const x = a.asInt32();
+    const y = b.asInt32();
     return Value.fromBool(switch (op) {
         .lt => x < y,
         .gt => x > y,
         .le => x <= y,
         .ge => x >= y,
     });
+}
+
+const NumberCompareOutcome = enum(u8) {
+    not_number,
+    false_,
+    true_,
+};
+
+/// The non-int32 remainder of §7.2.13's primitive Number comparison. Keeping
+/// the operator runtime-selected in one outlined body avoids cloning the f64
+/// path across the merged fused-branch handler in the monolithic dispatch loop.
+/// Non-Numbers return before any coercion or JS re-entry; mixed and Double pairs
+/// widen through `numberToDouble`, whose native comparisons give the spec's
+/// NaN-false and signed-zero behavior.
+noinline fn compareNonIntNumbers(op: RelOp, a: Value, b: Value) NumberCompareOutcome {
+    if (!a.isNumber() or !b.isNumber()) return .not_number;
+    const x = a.numberToDouble();
+    const y = b.numberToDouble();
+    const result = switch (op) {
+        .lt => x < y,
+        .gt => x > y,
+        .le => x <= y,
+        .ge => x >= y,
+    };
+    return if (result) .true_ else .false_;
 }
 
 test "interpreter: primitive Number comparison fast path handles mixed tags and doubles" {
@@ -1444,19 +1453,19 @@ test "interpreter: primitive Number comparison fast path handles mixed tags and 
     const infinity = Value.fromDouble(std.math.inf(f64));
     const nan = Value.fromDouble(std.math.nan(f64));
 
-    try std.testing.expect((numberCompare(.lt, one, one_and_a_half) orelse return error.TestUnexpectedResult).asBool());
-    try std.testing.expect((numberCompare(.gt, Value.fromDouble(2.5), two) orelse return error.TestUnexpectedResult).asBool());
-    try std.testing.expect((numberCompare(.le, negative_zero, positive_zero) orelse return error.TestUnexpectedResult).asBool());
-    try std.testing.expect((numberCompare(.ge, positive_zero, negative_zero) orelse return error.TestUnexpectedResult).asBool());
-    try std.testing.expect((numberCompare(.lt, two, infinity) orelse return error.TestUnexpectedResult).asBool());
+    try std.testing.expectEqual(NumberCompareOutcome.true_, compareNonIntNumbers(.lt, one, one_and_a_half));
+    try std.testing.expectEqual(NumberCompareOutcome.true_, compareNonIntNumbers(.gt, Value.fromDouble(2.5), two));
+    try std.testing.expectEqual(NumberCompareOutcome.true_, compareNonIntNumbers(.le, negative_zero, positive_zero));
+    try std.testing.expectEqual(NumberCompareOutcome.true_, compareNonIntNumbers(.ge, positive_zero, negative_zero));
+    try std.testing.expectEqual(NumberCompareOutcome.true_, compareNonIntNumbers(.lt, two, infinity));
 
-    try std.testing.expect(!(numberCompare(.lt, nan, one) orelse return error.TestUnexpectedResult).asBool());
-    try std.testing.expect(!(numberCompare(.gt, nan, one) orelse return error.TestUnexpectedResult).asBool());
-    try std.testing.expect(!(numberCompare(.le, nan, one) orelse return error.TestUnexpectedResult).asBool());
-    try std.testing.expect(!(numberCompare(.ge, nan, one) orelse return error.TestUnexpectedResult).asBool());
+    try std.testing.expectEqual(NumberCompareOutcome.false_, compareNonIntNumbers(.lt, nan, one));
+    try std.testing.expectEqual(NumberCompareOutcome.false_, compareNonIntNumbers(.gt, nan, one));
+    try std.testing.expectEqual(NumberCompareOutcome.false_, compareNonIntNumbers(.le, nan, one));
+    try std.testing.expectEqual(NumberCompareOutcome.false_, compareNonIntNumbers(.ge, nan, one));
 
-    try std.testing.expect(numberCompare(.lt, Value.true_, one) == null);
-    try std.testing.expect(numberCompare(.lt, one, Value.false_) == null);
+    try std.testing.expectEqual(NumberCompareOutcome.not_number, compareNonIntNumbers(.lt, Value.true_, one));
+    try std.testing.expectEqual(NumberCompareOutcome.not_number, compareNonIntNumbers(.lt, one, Value.false_));
 }
 
 /// §13.15 bitwise / shift on two int32 operands. `&` `|` `^` `<<`
@@ -2308,7 +2317,7 @@ pub fn runFrames(
         .lt => {
             const r = code[ip];
             ip += 1;
-            if (numberCompare(.lt, registers[r], acc)) |res| {
+            if (intCompare(.lt, registers[r], acc)) |res| {
                 acc = res;
                 continue :dispatch try decodeNext(code, &ip, &committed);
             }
@@ -2345,7 +2354,7 @@ pub fn runFrames(
         .gt => {
             const r = code[ip];
             ip += 1;
-            if (numberCompare(.gt, registers[r], acc)) |res| {
+            if (intCompare(.gt, registers[r], acc)) |res| {
                 acc = res;
                 continue :dispatch try decodeNext(code, &ip, &committed);
             }
@@ -2382,7 +2391,7 @@ pub fn runFrames(
         .le => {
             const r = code[ip];
             ip += 1;
-            if (numberCompare(.le, registers[r], acc)) |res| {
+            if (intCompare(.le, registers[r], acc)) |res| {
                 acc = res;
                 continue :dispatch try decodeNext(code, &ip, &committed);
             }
@@ -2419,7 +2428,7 @@ pub fn runFrames(
         .ge => {
             const r = code[ip];
             ip += 1;
-            if (numberCompare(.ge, registers[r], acc)) |res| {
+            if (intCompare(.ge, registers[r], acc)) |res| {
                 acc = res;
                 continue :dispatch try decodeNext(code, &ip, &committed);
             }
@@ -2613,8 +2622,9 @@ pub fn runFrames(
         => |t| {
             // Fused relational compare-and-branch, jump-when-false sense —
             // byte-identical to `lt|le|gt|ge r; jmp_if_false`: the §13.10
-            // comparison (primitive Number fast path, else ToPrimitive/ToNumber
-            // coercion with the same throw/handler unwind), then jump when
+            // comparison (inline int32 path, outlined primitive Number path,
+            // else ToPrimitive/ToNumber coercion with the same throw/handler
+            // unwind), then jump when
             // the comparison is FALSE. The negation is on the boolean
             // result (`!(a<b)`), NOT the operator (`a>=b`) — those differ
             // when a NaN is involved (both `<` and `>=` are false), so this
@@ -2630,48 +2640,65 @@ pub fn runFrames(
             const canonical = branch.canonical;
             var take: bool = undefined;
             const fast: ?Value = switch (canonical) {
-                .jmp_if_not_lt => numberCompare(.lt, registers[r], acc),
-                .jmp_if_not_le => numberCompare(.le, registers[r], acc),
-                .jmp_if_not_gt => numberCompare(.gt, registers[r], acc),
-                else => numberCompare(.ge, registers[r], acc),
+                .jmp_if_not_lt => intCompare(.lt, registers[r], acc),
+                .jmp_if_not_le => intCompare(.le, registers[r], acc),
+                .jmp_if_not_gt => intCompare(.gt, registers[r], acc),
+                else => intCompare(.ge, registers[r], acc),
             };
             if (fast) |res| {
                 take = !res.asBool();
             } else {
-                const scope = try arith.openBinaryCoercionScope(realm, registers[r], acc);
-                defer if (scope) |s| s.close();
-                const lhs = try coerceForCompare(allocator, realm, frames, f, ip, registers[r], .number);
-                if (lhs == .uncaught) return .{ .thrown = lhs.uncaught };
-                if (lhs == .handled) {
-                    committed = true;
-                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
-                }
-                if (scope) |s| s.push(lhs.ok) catch return error.OutOfMemory;
-                const rhs = try coerceForCompare(allocator, realm, frames, f, ip, acc, .number);
-                if (rhs == .uncaught) return .{ .thrown = rhs.uncaught };
-                if (rhs == .handled) {
-                    committed = true;
-                    continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
-                }
-                if (scope) |s| s.push(rhs.ok) catch return error.OutOfMemory;
-                const res = (switch (canonical) {
-                    .jmp_if_not_lt => relational(.lt, realm, lhs.ok, rhs.ok),
-                    .jmp_if_not_le => relational(.le, realm, lhs.ok, rhs.ok),
-                    .jmp_if_not_gt => relational(.gt, realm, lhs.ok, rhs.ok),
-                    else => relational(.ge, realm, lhs.ok, rhs.ok),
-                }) catch |err| switch (err) {
-                    error.OutOfMemory => return error.OutOfMemory,
-                    error.NativeThrew => {
-                        const ex = realm.pending_exception orelse try makeTypeError(realm, "comparison threw");
-                        realm.pending_exception = null;
-                        f.ip = ip;
-                        f.accumulator = lhs.ok;
-                        if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
+                const rel_op: RelOp = switch (canonical) {
+                    .jmp_if_not_lt => .lt,
+                    .jmp_if_not_le => .le,
+                    .jmp_if_not_gt => .gt,
+                    else => .ge,
+                };
+                // Int32/Int32 was handled above, so every remaining Number
+                // pair contains a Double. Keep the outlined probe off common
+                // object/string/BigInt + Int32 coercion paths.
+                const number_fast = if (registers[r].isDouble() or acc.isDouble())
+                    compareNonIntNumbers(rel_op, registers[r], acc)
+                else
+                    NumberCompareOutcome.not_number;
+                if (number_fast != .not_number) {
+                    take = number_fast == .false_;
+                } else {
+                    const scope = try arith.openBinaryCoercionScope(realm, registers[r], acc);
+                    defer if (scope) |s| s.close();
+                    const lhs = try coerceForCompare(allocator, realm, frames, f, ip, registers[r], .number);
+                    if (lhs == .uncaught) return .{ .thrown = lhs.uncaught };
+                    if (lhs == .handled) {
                         committed = true;
                         continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
-                    },
-                };
-                take = !res.asBool();
+                    }
+                    if (scope) |s| s.push(lhs.ok) catch return error.OutOfMemory;
+                    const rhs = try coerceForCompare(allocator, realm, frames, f, ip, acc, .number);
+                    if (rhs == .uncaught) return .{ .thrown = rhs.uncaught };
+                    if (rhs == .handled) {
+                        committed = true;
+                        continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                    }
+                    if (scope) |s| s.push(rhs.ok) catch return error.OutOfMemory;
+                    const res = (switch (canonical) {
+                        .jmp_if_not_lt => relational(.lt, realm, lhs.ok, rhs.ok),
+                        .jmp_if_not_le => relational(.le, realm, lhs.ok, rhs.ok),
+                        .jmp_if_not_gt => relational(.gt, realm, lhs.ok, rhs.ok),
+                        else => relational(.ge, realm, lhs.ok, rhs.ok),
+                    }) catch |err| switch (err) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        error.NativeThrew => {
+                            const ex = realm.pending_exception orelse try makeTypeError(realm, "comparison threw");
+                            realm.pending_exception = null;
+                            f.ip = ip;
+                            f.accumulator = lhs.ok;
+                            if (!try unwindThrow(allocator, realm, frames, ex)) return .{ .thrown = ex };
+                            committed = true;
+                            continue :dispatch try reEnterDispatch(frames, &f, &local_chunk, &code, &registers, &ip, &acc, &committed);
+                        },
+                    };
+                    take = !res.asBool();
+                }
             }
             if (take) {
                 ip = applyOffset(ip, off);
