@@ -399,7 +399,8 @@ pub const Op = enum(u8) {
     /// `[op] [r:u8] [o:i16]` — fused relational compare-and-branch for the
     /// jump-when-false (if/while/for skip) sense: jump (forward) when
     /// `!(registers[r] <op> acc)`, reusing the §13.10 relational semantics
-    /// (int32 fast path; ToPrimitive/ToNumber coercion otherwise). Collapses
+    /// (inline int32 and outlined primitive-Number paths; ToPrimitive/ToNumber
+    /// coercion otherwise). Collapses
     /// `lt|le|gt|ge r; jmp_if_false`. The boolean negation is on the
     /// comparison RESULT, not the operator — `!(a<b)` is NOT `a>=b` when a
     /// NaN is involved (both are false), so the op cannot be a negated
