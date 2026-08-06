@@ -1406,7 +1406,7 @@ inline fn numArith(comptime op: enum { add, sub, mul, div, mod }, a: Value, b: V
     });
 }
 
-/// §7.2.13 IsLessThan — relational compare on two int32 operands.
+/// §7.2.12 IsLessThan — relational compare on two int32 operands.
 inline fn intCompare(comptime op: RelOp, a: Value, b: Value) ?Value {
     if (!a.isInt32() or !b.isInt32()) return null;
     const x = a.asInt32();
