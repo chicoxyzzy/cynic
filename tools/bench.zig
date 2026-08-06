@@ -90,6 +90,8 @@ const BENCHES = [_]Bench{
     .{ .name = "arith_loop", .path = "bench/micros/arith_loop.js" },
     .{ .name = "bit_and_double", .path = "bench/micros/bit_and_double.js" },
     .{ .name = "bit_and_object", .path = "bench/micros/bit_and_object.js" },
+    .{ .name = "relational_number", .path = "bench/micros/relational_number.js" },
+    .{ .name = "relational_object", .path = "bench/micros/relational_object.js" },
     .{ .name = "mul_loop", .path = "bench/micros/mul_loop.js" },
     .{ .name = "div_loop", .path = "bench/micros/div_loop.js" },
     .{ .name = "mod_loop", .path = "bench/micros/mod_loop.js" },

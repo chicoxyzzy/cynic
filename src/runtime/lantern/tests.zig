@@ -666,6 +666,22 @@ test "interpreter: relational operators" {
     try expectBool("'a' < 'b';", true);
 }
 
+test "interpreter: relational operators compare primitive Number tags directly" {
+    // Keep parameters dynamic so these execute the standalone Lt/Gt/Le/Ge
+    // handlers instead of being folded by the compiler.
+    try expectBool("(function(a,b){ return a < b; })(1, 1.5);", true);
+    try expectBool("(function(a,b){ return a > b; })(2.5, 2);", true);
+    try expectBool("(function(a,b){ return a <= b; })(-0, 0);", true);
+    try expectBool("(function(a,b){ return a >= b; })(0, -0);", true);
+    try expectBool("(function(a,b){ return a < b; })(2, 1/0);", true);
+    try expectBool("(function(a,b){ return a >= b; })(-(1/0), -1.5);", false);
+
+    // Numeric-looking strings remain lexicographic, and mixed BigInt/Number
+    // comparisons retain IsLessThan's exact mathematical-real-number path.
+    try expectBool("(function(a,b){ return a < b; })('10', '2');", true);
+    try expectBool("(function(a,b){ return a > b; })(9007199254740993n, 9007199254740992);", true);
+}
+
 test "interpreter: NaN comparisons are false" {
     try expectBool("(0/0) < 1;", false);
     try expectBool("(0/0) > 1;", false);
@@ -688,6 +704,20 @@ test "interpreter: fused relational branch is jump-on-false, not negated (NaN)" 
     try expectInt("(function(a,b){ if (a<b) return 1; return 2; })(2, 1);", 2);
     // A loop guard with a NaN bound must not enter the body.
     try expectInt("(function(n){ let i=0; while (i<n) i=i+1; return i; })(0/0);", 0);
+}
+
+test "interpreter: fused relational branches map primitive Number operators" {
+    // Finite mixed-tag pairs exercise the Number shortcut while making each
+    // operator's true and false outcomes distinguishable. These `if` forms
+    // compile to JmpIfNotLt/Le/Gt/Ge rather than standalone comparisons.
+    try expectInt("(function(a,b){ if (a<b) return 1; return 2; })(1.5, 2);", 1);
+    try expectInt("(function(a,b){ if (a<b) return 1; return 2; })(2.5, 2);", 2);
+    try expectInt("(function(a,b){ if (a<=b) return 1; return 2; })(1.5, 2);", 1);
+    try expectInt("(function(a,b){ if (a<=b) return 1; return 2; })(2.5, 2);", 2);
+    try expectInt("(function(a,b){ if (a>b) return 1; return 2; })(2.5, 2);", 1);
+    try expectInt("(function(a,b){ if (a>b) return 1; return 2; })(1.5, 2);", 2);
+    try expectInt("(function(a,b){ if (a>=b) return 1; return 2; })(2.5, 2);", 1);
+    try expectInt("(function(a,b){ if (a>=b) return 1; return 2; })(1.5, 2);", 2);
 }
 
 test "interpreter: loose equality primitive coercion" {

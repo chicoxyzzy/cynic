@@ -2,7 +2,7 @@
 //! switch-dispatched `runFrames` loop plus the top-level entry
 //! points (`run`, `evaluateScript`) and the inline dispatch
 //! helpers (`decodeNext`, `reEnterDispatch`, `runSafePoint`,
-//! `intArith` / `intCompare` / `intBitwise`).
+//! `intArith` / `numberCompare` / `intBitwise`).
 //!
 //! Reads a `Chunk` produced by the bytecode compiler and runs it
 //! against a `Realm`'s heap. The dispatch loop is a single
@@ -1406,17 +1406,57 @@ inline fn numArith(comptime op: enum { add, sub, mul, div, mod }, a: Value, b: V
     });
 }
 
-/// §7.2.13 IsLessThan — relational compare on two int32 operands.
-inline fn intCompare(comptime op: enum { lt, gt, le, ge }, a: Value, b: Value) ?Value {
-    if (!a.isInt32() or !b.isInt32()) return null;
-    const x = a.asInt32();
-    const y = b.asInt32();
+/// §7.2.13 IsLessThan — relational compare on two primitive Number operands.
+/// Keep the existing exact int32 path; a mixed or double pair widens through
+/// `numberToDouble`. Native f64 comparisons give all four operators the spec's
+/// NaN-false and signed-zero behavior. Non-Numbers return `null` before any
+/// coercion or JS re-entry so the caller retains the full abstract operation.
+inline fn numberCompare(comptime op: enum { lt, gt, le, ge }, a: Value, b: Value) ?Value {
+    if (a.isInt32() and b.isInt32()) {
+        const x = a.asInt32();
+        const y = b.asInt32();
+        return Value.fromBool(switch (op) {
+            .lt => x < y,
+            .gt => x > y,
+            .le => x <= y,
+            .ge => x >= y,
+        });
+    }
+    const a_is_number = a.isInt32() or a.isDouble();
+    const b_is_number = b.isInt32() or b.isDouble();
+    if (!a_is_number or !b_is_number) return null;
+    const x = a.numberToDouble();
+    const y = b.numberToDouble();
     return Value.fromBool(switch (op) {
         .lt => x < y,
         .gt => x > y,
         .le => x <= y,
         .ge => x >= y,
     });
+}
+
+test "interpreter: primitive Number comparison fast path handles mixed tags and doubles" {
+    const one = Value.fromInt32(1);
+    const two = Value.fromInt32(2);
+    const one_and_a_half = Value.fromDouble(1.5);
+    const negative_zero = Value.fromDouble(-0.0);
+    const positive_zero = Value.fromDouble(0.0);
+    const infinity = Value.fromDouble(std.math.inf(f64));
+    const nan = Value.fromDouble(std.math.nan(f64));
+
+    try std.testing.expect((numberCompare(.lt, one, one_and_a_half) orelse return error.TestUnexpectedResult).asBool());
+    try std.testing.expect((numberCompare(.gt, Value.fromDouble(2.5), two) orelse return error.TestUnexpectedResult).asBool());
+    try std.testing.expect((numberCompare(.le, negative_zero, positive_zero) orelse return error.TestUnexpectedResult).asBool());
+    try std.testing.expect((numberCompare(.ge, positive_zero, negative_zero) orelse return error.TestUnexpectedResult).asBool());
+    try std.testing.expect((numberCompare(.lt, two, infinity) orelse return error.TestUnexpectedResult).asBool());
+
+    try std.testing.expect(!(numberCompare(.lt, nan, one) orelse return error.TestUnexpectedResult).asBool());
+    try std.testing.expect(!(numberCompare(.gt, nan, one) orelse return error.TestUnexpectedResult).asBool());
+    try std.testing.expect(!(numberCompare(.le, nan, one) orelse return error.TestUnexpectedResult).asBool());
+    try std.testing.expect(!(numberCompare(.ge, nan, one) orelse return error.TestUnexpectedResult).asBool());
+
+    try std.testing.expect(numberCompare(.lt, Value.true_, one) == null);
+    try std.testing.expect(numberCompare(.lt, one, Value.false_) == null);
 }
 
 /// §13.15 bitwise / shift on two int32 operands. `&` `|` `^` `<<`
@@ -2268,7 +2308,7 @@ pub fn runFrames(
         .lt => {
             const r = code[ip];
             ip += 1;
-            if (intCompare(.lt, registers[r], acc)) |res| {
+            if (numberCompare(.lt, registers[r], acc)) |res| {
                 acc = res;
                 continue :dispatch try decodeNext(code, &ip, &committed);
             }
@@ -2305,7 +2345,7 @@ pub fn runFrames(
         .gt => {
             const r = code[ip];
             ip += 1;
-            if (intCompare(.gt, registers[r], acc)) |res| {
+            if (numberCompare(.gt, registers[r], acc)) |res| {
                 acc = res;
                 continue :dispatch try decodeNext(code, &ip, &committed);
             }
@@ -2342,7 +2382,7 @@ pub fn runFrames(
         .le => {
             const r = code[ip];
             ip += 1;
-            if (intCompare(.le, registers[r], acc)) |res| {
+            if (numberCompare(.le, registers[r], acc)) |res| {
                 acc = res;
                 continue :dispatch try decodeNext(code, &ip, &committed);
             }
@@ -2379,7 +2419,7 @@ pub fn runFrames(
         .ge => {
             const r = code[ip];
             ip += 1;
-            if (intCompare(.ge, registers[r], acc)) |res| {
+            if (numberCompare(.ge, registers[r], acc)) |res| {
                 acc = res;
                 continue :dispatch try decodeNext(code, &ip, &committed);
             }
@@ -2573,7 +2613,7 @@ pub fn runFrames(
         => |t| {
             // Fused relational compare-and-branch, jump-when-false sense —
             // byte-identical to `lt|le|gt|ge r; jmp_if_false`: the §13.10
-            // comparison (int32 fast path, else ToPrimitive/ToNumber
+            // comparison (primitive Number fast path, else ToPrimitive/ToNumber
             // coercion with the same throw/handler unwind), then jump when
             // the comparison is FALSE. The negation is on the boolean
             // result (`!(a<b)`), NOT the operator (`a>=b`) — those differ
@@ -2590,10 +2630,10 @@ pub fn runFrames(
             const canonical = branch.canonical;
             var take: bool = undefined;
             const fast: ?Value = switch (canonical) {
-                .jmp_if_not_lt => intCompare(.lt, registers[r], acc),
-                .jmp_if_not_le => intCompare(.le, registers[r], acc),
-                .jmp_if_not_gt => intCompare(.gt, registers[r], acc),
-                else => intCompare(.ge, registers[r], acc),
+                .jmp_if_not_lt => numberCompare(.lt, registers[r], acc),
+                .jmp_if_not_le => numberCompare(.le, registers[r], acc),
+                .jmp_if_not_gt => numberCompare(.gt, registers[r], acc),
+                else => numberCompare(.ge, registers[r], acc),
             };
             if (fast) |res| {
                 take = !res.asBool();
