@@ -1419,29 +1419,23 @@ inline fn intCompare(comptime op: RelOp, a: Value, b: Value) ?Value {
     });
 }
 
-const NumberCompareOutcome = enum(u8) {
-    not_number,
-    false_,
-    true_,
-};
-
 /// The non-int32 remainder of §7.2.12's primitive Number comparison. Keeping
 /// the operator runtime-selected in one outlined body avoids cloning the f64
 /// path across the merged fused-branch handler in the monolithic dispatch loop.
-/// Non-Numbers return before any coercion or JS re-entry; mixed and Double pairs
-/// widen through `numberToDouble`, whose native comparisons give the spec's
-/// NaN-false and signed-zero behavior.
-noinline fn compareNonIntNumbers(op: RelOp, a: Value, b: Value) NumberCompareOutcome {
-    if (!a.isNumber() or !b.isNumber()) return .not_number;
+/// The caller has already proved both operands are Numbers and that at least one
+/// is a Double. They widen through `numberToDouble`, whose native comparisons
+/// give the spec's NaN-false and signed-zero behavior.
+noinline fn compareNonIntNumbers(op: RelOp, a: Value, b: Value) bool {
+    std.debug.assert(a.isNumber() and b.isNumber());
+    std.debug.assert(a.isDouble() or b.isDouble());
     const x = a.numberToDouble();
     const y = b.numberToDouble();
-    const result = switch (op) {
+    return switch (op) {
         .lt => x < y,
         .gt => x > y,
         .le => x <= y,
         .ge => x >= y,
     };
-    return if (result) .true_ else .false_;
 }
 
 test "interpreter: primitive Number comparison fast path handles mixed tags and doubles" {
@@ -1453,19 +1447,16 @@ test "interpreter: primitive Number comparison fast path handles mixed tags and 
     const infinity = Value.fromDouble(std.math.inf(f64));
     const nan = Value.fromDouble(std.math.nan(f64));
 
-    try std.testing.expectEqual(NumberCompareOutcome.true_, compareNonIntNumbers(.lt, one, one_and_a_half));
-    try std.testing.expectEqual(NumberCompareOutcome.true_, compareNonIntNumbers(.gt, Value.fromDouble(2.5), two));
-    try std.testing.expectEqual(NumberCompareOutcome.true_, compareNonIntNumbers(.le, negative_zero, positive_zero));
-    try std.testing.expectEqual(NumberCompareOutcome.true_, compareNonIntNumbers(.ge, positive_zero, negative_zero));
-    try std.testing.expectEqual(NumberCompareOutcome.true_, compareNonIntNumbers(.lt, two, infinity));
+    try std.testing.expect(compareNonIntNumbers(.lt, one, one_and_a_half));
+    try std.testing.expect(compareNonIntNumbers(.gt, Value.fromDouble(2.5), two));
+    try std.testing.expect(compareNonIntNumbers(.le, negative_zero, positive_zero));
+    try std.testing.expect(compareNonIntNumbers(.ge, positive_zero, negative_zero));
+    try std.testing.expect(compareNonIntNumbers(.lt, two, infinity));
 
-    try std.testing.expectEqual(NumberCompareOutcome.false_, compareNonIntNumbers(.lt, nan, one));
-    try std.testing.expectEqual(NumberCompareOutcome.false_, compareNonIntNumbers(.gt, nan, one));
-    try std.testing.expectEqual(NumberCompareOutcome.false_, compareNonIntNumbers(.le, nan, one));
-    try std.testing.expectEqual(NumberCompareOutcome.false_, compareNonIntNumbers(.ge, nan, one));
-
-    try std.testing.expectEqual(NumberCompareOutcome.not_number, compareNonIntNumbers(.lt, Value.true_, one));
-    try std.testing.expectEqual(NumberCompareOutcome.not_number, compareNonIntNumbers(.lt, one, Value.false_));
+    try std.testing.expect(!compareNonIntNumbers(.lt, nan, one));
+    try std.testing.expect(!compareNonIntNumbers(.gt, nan, one));
+    try std.testing.expect(!compareNonIntNumbers(.le, nan, one));
+    try std.testing.expect(!compareNonIntNumbers(.ge, nan, one));
 }
 
 /// §13.15 bitwise / shift on two int32 operands. `&` `|` `^` `<<`
@@ -2655,15 +2646,12 @@ pub fn runFrames(
                     .jmp_if_not_gt => .gt,
                     else => .ge,
                 };
-                // Int32/Int32 was handled above, so every remaining Number
-                // pair contains a Double. Keep the outlined probe off common
-                // object/string/BigInt + Int32 coercion paths.
-                const number_fast = if (registers[r].isDouble() or acc.isDouble())
-                    compareNonIntNumbers(rel_op, registers[r], acc)
-                else
-                    NumberCompareOutcome.not_number;
-                if (number_fast != .not_number) {
-                    take = number_fast == .false_;
+                // Prove the primitive pair before entering the outlined body.
+                // Int32/Int32 was handled above, so every remaining Number pair
+                // contains a Double. Non-Numbers—including object/Double—must
+                // avoid a declined helper call and stay on the coercion path.
+                if (registers[r].isNumber() and acc.isNumber()) {
+                    take = !compareNonIntNumbers(rel_op, registers[r], acc);
                 } else {
                     const scope = try arith.openBinaryCoercionScope(realm, registers[r], acc);
                     defer if (scope) |s| s.close();
