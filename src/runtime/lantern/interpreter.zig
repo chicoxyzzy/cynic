@@ -1406,8 +1406,8 @@ inline fn numArith(comptime op: enum { add, sub, mul, div, mod }, a: Value, b: V
     });
 }
 
-/// §7.2.12 IsLessThan — relational compare on two int32 operands.
-inline fn intCompare(comptime op: RelOp, a: Value, b: Value) ?Value {
+/// §7.2.13 IsLessThan — relational compare on two int32 operands.
+inline fn intCompare(comptime op: enum { lt, gt, le, ge }, a: Value, b: Value) ?Value {
     if (!a.isInt32() or !b.isInt32()) return null;
     const x = a.asInt32();
     const y = b.asInt32();
@@ -1417,46 +1417,6 @@ inline fn intCompare(comptime op: RelOp, a: Value, b: Value) ?Value {
         .le => x <= y,
         .ge => x >= y,
     });
-}
-
-/// The non-int32 remainder of §7.2.12's primitive Number comparison. Keeping
-/// the operator runtime-selected in one outlined body avoids cloning the f64
-/// path across the merged fused-branch handler in the monolithic dispatch loop.
-/// The caller has already proved both operands are Numbers and that at least one
-/// is a Double. They widen through `numberToDouble`, whose native comparisons
-/// give the spec's NaN-false and signed-zero behavior.
-noinline fn compareNonIntNumbers(op: RelOp, a: Value, b: Value) bool {
-    std.debug.assert(a.isNumber() and b.isNumber());
-    std.debug.assert(a.isDouble() or b.isDouble());
-    const x = a.numberToDouble();
-    const y = b.numberToDouble();
-    return switch (op) {
-        .lt => x < y,
-        .gt => x > y,
-        .le => x <= y,
-        .ge => x >= y,
-    };
-}
-
-test "interpreter: primitive Number comparison fast path handles mixed tags and doubles" {
-    const one = Value.fromInt32(1);
-    const two = Value.fromInt32(2);
-    const one_and_a_half = Value.fromDouble(1.5);
-    const negative_zero = Value.fromDouble(-0.0);
-    const positive_zero = Value.fromDouble(0.0);
-    const infinity = Value.fromDouble(std.math.inf(f64));
-    const nan = Value.fromDouble(std.math.nan(f64));
-
-    try std.testing.expect(compareNonIntNumbers(.lt, one, one_and_a_half));
-    try std.testing.expect(compareNonIntNumbers(.gt, Value.fromDouble(2.5), two));
-    try std.testing.expect(compareNonIntNumbers(.le, negative_zero, positive_zero));
-    try std.testing.expect(compareNonIntNumbers(.ge, positive_zero, negative_zero));
-    try std.testing.expect(compareNonIntNumbers(.lt, two, infinity));
-
-    try std.testing.expect(!compareNonIntNumbers(.lt, nan, one));
-    try std.testing.expect(!compareNonIntNumbers(.gt, nan, one));
-    try std.testing.expect(!compareNonIntNumbers(.le, nan, one));
-    try std.testing.expect(!compareNonIntNumbers(.ge, nan, one));
 }
 
 /// §13.15 bitwise / shift on two int32 operands. `&` `|` `^` `<<`
@@ -2613,18 +2573,16 @@ pub fn runFrames(
         => |t| {
             // Fused relational compare-and-branch, jump-when-false sense —
             // byte-identical to `lt|le|gt|ge r; jmp_if_false`: the §13.10
-            // comparison (inline int32 path, outlined primitive Number path,
-            // else ToPrimitive/ToNumber coercion with the same throw/handler
-            // unwind), then jump when
+            // comparison (int32 fast path, else ToPrimitive/ToNumber
+            // coercion with the same throw/handler unwind), then jump when
             // the comparison is FALSE. The negation is on the boolean
             // result (`!(a<b)`), NOT the operator (`a>=b`) — those differ
             // when a NaN is involved (both `<` and `>=` are false), so this
             // op must test the comparison and branch on its falsity, not
             // emit the negated comparison. Mirrors the standalone `.lt` arm;
-            // the first switch keeps int32 comparisons comptime-selected and
-            // the second maps to one runtime `RelOp` for the outlined Number
-            // body. Forward-only by emit; a defensive backward offset still
-            // takes a GC safepoint.
+            // two small `switch (t)` selects keep the comptime comparison op
+            // without duplicating the body. Forward-only by emit; a
+            // defensive backward offset still takes a GC safepoint.
             const r = code[ip];
             const branch = t.branchInfoForDispatch();
             const off = branch.displacement(code, ip - 1);
@@ -2640,26 +2598,6 @@ pub fn runFrames(
             if (fast) |res| {
                 take = !res.asBool();
             } else {
-                const rel_op: RelOp = switch (canonical) {
-                    .jmp_if_not_lt => .lt,
-                    .jmp_if_not_le => .le,
-                    .jmp_if_not_gt => .gt,
-                    else => .ge,
-                };
-                // Prove the primitive pair before entering the outlined body.
-                // Int32/Int32 was handled above, so every remaining Number pair
-                // contains a Double. Non-Numbers—including object/Double—must
-                // avoid a declined helper call and stay on the coercion path.
-                if (registers[r].isNumber() and acc.isNumber()) {
-                    const number_take = !compareNonIntNumbers(rel_op, registers[r], acc);
-                    if (number_take) {
-                        ip = applyOffset(ip, off);
-                        if (off < 0) {
-                            if (try loopSafePoint(realm, f, ip, acc)) |sp| return sp;
-                        }
-                    }
-                    continue :dispatch try decodeNext(code, &ip, &committed);
-                }
                 const scope = try arith.openBinaryCoercionScope(realm, registers[r], acc);
                 defer if (scope) |s| s.close();
                 const lhs = try coerceForCompare(allocator, realm, frames, f, ip, registers[r], .number);

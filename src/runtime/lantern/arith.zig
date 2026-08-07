@@ -976,6 +976,13 @@ pub fn relational(comptime op: RelOp, realm: *Realm, lhs: Value, rhs: Value) Nat
     //
     // Symbol operands of any flavour throw TypeError (§7.1.4
     // ToNumber, §7.1.13 ToNumeric — Symbols can't be numerified).
+    // Primitive Number pairs need none of the Symbol / BigInt / String
+    // machinery below. Native comparisons also implement the required
+    // undefined-to-false behaviour for NaN and order signed zero correctly.
+    if (lhs.isNumber() and rhs.isNumber()) {
+        return Value.fromBool(applyRelOpFloat(op, lhs.numberToDouble(), rhs.numberToDouble()));
+    }
+
     if (heap_mod.valueAsSymbol(lhs) != null or heap_mod.valueAsSymbol(rhs) != null) {
         realm.pending_exception = try intrinsics_mod.newTypeError(realm, "Cannot convert a Symbol value to a number");
         return error.NativeThrew;
