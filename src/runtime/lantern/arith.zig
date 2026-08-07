@@ -982,7 +982,25 @@ pub fn relational(comptime op: RelOp, realm: *Realm, lhs: Value, rhs: Value) Nat
     // correctly.
     if (heap_mod.valueAsBigInt(lhs)) |a| {
         if (heap_mod.valueAsBigInt(rhs)) |b| {
-            return Value.fromBool(applyRelOpOrder(op, bigint_mod.compare(borrowBigInt(a), borrowBigInt(b))));
+            // Small positive BigInts dominate ordinary counters and ids; avoid
+            // the arbitrary-precision comparison walk for one-limb pairs.
+            const ord: std.math.Order = if (!a.sign and !b.sign and a.limbs.len == 1 and b.limbs.len == 1)
+                if (a.limbs[0] < b.limbs[0]) .lt else if (a.limbs[0] > b.limbs[0]) .gt else .eq
+            else
+                bigint_mod.compare(borrowBigInt(a), borrowBigInt(b));
+            return Value.fromBool(applyRelOpOrder(op, ord));
+        }
+        if (!rhs.isObject() and !rhs.isString()) {
+            const b = toNumber(rhs);
+            if (std.math.isNan(b)) return Value.false_;
+            return Value.fromBool(applyRelOpDouble(realm.heap.allocator, op, a, b, true));
+        }
+    }
+    if (heap_mod.valueAsBigInt(rhs)) |b| {
+        if (!lhs.isObject() and !lhs.isString()) {
+            const a = toNumber(lhs);
+            if (std.math.isNan(a)) return Value.false_;
+            return Value.fromBool(applyRelOpDouble(realm.heap.allocator, op, b, a, false));
         }
     }
     if (lhs.isNumber() and rhs.isNumber()) {
@@ -992,6 +1010,12 @@ pub fn relational(comptime op: RelOp, realm: *Realm, lhs: Value, rhs: Value) Nat
         const a: *JSString = @ptrCast(@alignCast(lhs.asString()));
         const b: *JSString = @ptrCast(@alignCast(rhs.asString()));
         return compareStringPair(op, a, b);
+    }
+    if (!lhs.isObject() and !rhs.isObject()) {
+        const a = toNumber(lhs);
+        const b = toNumber(rhs);
+        if (std.math.isNan(a) or std.math.isNan(b)) return Value.false_;
+        return Value.fromBool(applyRelOpFloat(op, a, b));
     }
 
     return relationalSlow(op, realm, lhs, rhs);
