@@ -1006,7 +1006,7 @@ pub fn relational(comptime op: RelOp, realm: *Realm, lhs: Value, rhs: Value) Nat
         }
         if (rhs.isString()) {
             const s: *JSString = @ptrCast(@alignCast(rhs.asString()));
-            return compareBigIntString(realm.heap.allocator, op, a, s, true);
+            return compareBigIntString(realm.heap, op, a, s, true);
         }
         if (!rhs.isObject()) {
             const b = toNumber(rhs);
@@ -1018,7 +1018,7 @@ pub fn relational(comptime op: RelOp, realm: *Realm, lhs: Value, rhs: Value) Nat
     if (heap_mod.valueAsBigInt(rhs)) |b| {
         if (lhs.isString()) {
             const s: *JSString = @ptrCast(@alignCast(lhs.asString()));
-            return compareBigIntString(realm.heap.allocator, op, b, s, false);
+            return compareBigIntString(realm.heap, op, b, s, false);
         }
         if (!lhs.isObject()) {
             const a = toNumber(lhs);
@@ -1045,45 +1045,113 @@ pub fn relational(comptime op: RelOp, realm: *Realm, lhs: Value, rhs: Value) Nat
     return relationalSlow(op, realm, lhs, rhs);
 }
 
-/// Fast-path the canonical decimal form used by ordinary counters and ids.
-/// Other StringToBigInt grammar forms and magnitudes fall back to the complete
-/// parser below.
-inline fn parseSmallDecimalBigInt(bytes: []const u8, storage: *[1]bigint_mod.Limb) ?BigIntValue {
-    if (bytes.len == 0) return null;
+const SmallStringToBigInt = union(enum) {
+    value: BigIntValue,
+    invalid,
+    too_large,
+};
+
+/// Fast-path StringToBigInt values whose magnitude fits one limb. Match the
+/// complete parser's whitespace, sign, and radix-prefix handling while
+/// distinguishing invalid input from a valid arbitrary-precision magnitude.
+inline fn parseSmallStringToBigInt(bytes: []const u8, storage: *[1]bigint_mod.Limb) SmallStringToBigInt {
+    const trimmed = std.mem.trim(u8, bytes, " \t\n\r\u{000B}\u{000C}\u{00A0}\u{FEFF}");
+    if (trimmed.len == 0) return .{ .value = .{ .sign = false, .limbs = storage[0..0] } };
+
+    var rest = trimmed;
+    var negate_it = false;
+    var has_sign = false;
+    if (rest[0] == '-') {
+        negate_it = true;
+        has_sign = true;
+        rest = rest[1..];
+    } else if (rest[0] == '+') {
+        has_sign = true;
+        rest = rest[1..];
+    }
+    if (rest.len == 0) return .invalid;
+
+    var radix: u8 = 10;
+    if (rest.len >= 2 and rest[0] == '0') {
+        radix = switch (rest[1]) {
+            'b', 'B' => 2,
+            'o', 'O' => 8,
+            'x', 'X' => 16,
+            else => 10,
+        };
+        if (radix != 10) {
+            if (has_sign) return .invalid;
+            rest = rest[2..];
+            if (rest.len == 0) return .invalid;
+        }
+    }
+
     var magnitude: u64 = 0;
-    for (bytes) |byte| {
-        if (byte < '0' or byte > '9') return null;
-        const product = @mulWithOverflow(magnitude, 10);
-        if (product[1] != 0) return null;
-        const sum = @addWithOverflow(product[0], @as(u64, byte - '0'));
-        if (sum[1] != 0) return null;
+    var saw_digit = false;
+    var too_large = false;
+    for (rest) |byte| {
+        // NumericLiteralSeparator belongs to source-text BigInt literals,
+        // not the runtime StringToBigInt grammar (§7.1.14).
+        if (byte == '_') return .invalid;
+        const digit: u8 = switch (byte) {
+            '0'...'9' => byte - '0',
+            'a'...'f' => byte - 'a' + 10,
+            'A'...'F' => byte - 'A' + 10,
+            else => return .invalid,
+        };
+        if (digit >= radix) return .invalid;
+        saw_digit = true;
+        if (too_large) continue;
+        const product = @mulWithOverflow(magnitude, @as(u64, radix));
+        if (product[1] != 0) {
+            too_large = true;
+            continue;
+        }
+        const sum = @addWithOverflow(product[0], @as(u64, digit));
+        if (sum[1] != 0) {
+            too_large = true;
+            continue;
+        }
         magnitude = sum[0];
     }
+    if (!saw_digit) return .invalid;
+    if (too_large) return .too_large;
     storage[0] = magnitude;
-    return .{ .sign = false, .limbs = storage[0..@intFromBool(magnitude != 0)] };
+    return .{ .value = .{
+        .sign = negate_it and magnitude != 0,
+        .limbs = storage[0..@intFromBool(magnitude != 0)],
+    } };
 }
 
 /// §7.2.13 StringToBigInt comparison for either operand order. The small
-/// canonical-decimal case avoids a temporary limb allocation; every other
-/// accepted spelling retains the full arbitrary-precision parser.
+/// one-limb case avoids a temporary allocation; larger valid values retain
+/// the full arbitrary-precision parser.
 noinline fn compareBigIntString(
-    allocator: std.mem.Allocator,
+    heap: *heap_mod.Heap,
     op: RelOp,
     bigint: *const JSBigInt,
     string: *const JSString,
     bigint_is_lhs: bool,
-) Value {
+) NativeError!Value {
+    const bytes = string.flatBytesIfFlat() orelse try @constCast(string).flatten(heap.bytes_allocator);
     var storage: [1]bigint_mod.Limb = undefined;
-    if (parseSmallDecimalBigInt(string.flatBytes(), &storage)) |parsed| {
-        const ord = if (bigint_is_lhs)
-            bigint_mod.compare(borrowBigInt(bigint), parsed)
-        else
-            bigint_mod.compare(parsed, borrowBigInt(bigint));
-        return Value.fromBool(applyRelOpOrder(op, ord));
+    switch (parseSmallStringToBigInt(bytes, &storage)) {
+        .value => |parsed| {
+            const ord = if (bigint_is_lhs)
+                bigint_mod.compare(borrowBigInt(bigint), parsed)
+            else
+                bigint_mod.compare(parsed, borrowBigInt(bigint));
+            return Value.fromBool(applyRelOpOrder(op, ord));
+        },
+        .invalid => return Value.false_,
+        .too_large => {},
     }
 
-    const parsed = bigint_mod.parseStringToValue(allocator, string.flatBytes()) catch return Value.false_;
-    defer if (parsed.limbs.len != 0) allocator.free(parsed.limbs);
+    const parsed = bigint_mod.parseStringToValue(heap.allocator, bytes) catch |err| switch (err) {
+        error.InvalidBigInt => return Value.false_,
+        error.OutOfMemory => return error.OutOfMemory,
+    };
+    defer if (parsed.limbs.len != 0) heap.allocator.free(parsed.limbs);
     const ord = if (bigint_is_lhs)
         bigint_mod.compare(borrowBigInt(bigint), parsed)
     else

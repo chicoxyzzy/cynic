@@ -972,6 +972,9 @@ pub fn parseStringToValue(allocator: std.mem.Allocator, bytes: []const u8) Parse
         rest = rest[1..];
     }
     if (rest.len == 0) return error.InvalidBigInt;
+    // NumericLiteralSeparator is source-text grammar only. §7.1.14
+    // StringToBigInt parses StringIntegerLiteral, which excludes `_`.
+    if (std.mem.indexOfScalar(u8, rest, '_') != null) return error.InvalidBigInt;
     // Non-decimal radix prefixes (0b / 0o / 0x): sign forbidden.
     if (rest.len >= 2 and rest[0] == '0') {
         const radix: ?u8 = switch (rest[1]) {
@@ -1185,6 +1188,12 @@ test "bigint: parse hex/oct/bin" {
         defer a.free(v.limbs);
         try expectDecimal(a, v, "42");
     }
+}
+
+test "bigint: StringToBigInt rejects numeric separators" {
+    const a = testing.allocator;
+    try testing.expectError(error.InvalidBigInt, parseStringToValue(a, "1_0"));
+    try testing.expectError(error.InvalidBigInt, parseStringToValue(a, "0x1_0"));
 }
 
 test "bigint: add crosses limb boundary" {
