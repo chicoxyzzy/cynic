@@ -1086,6 +1086,27 @@ inline fn parseSmallStringToBigInt(bytes: []const u8, storage: *[2]bigint_mod.Li
         }
     }
 
+    // Values that cannot fit two limbs go straight to the canonical parser.
+    // This length/lexicographic gate is deliberately allowed to classify an
+    // invalid string as too_large: the full parser still validates every byte,
+    // while valid wide values avoid repeating the more expensive u128 scan.
+    var significant_start: usize = 0;
+    while (significant_start < rest.len and rest[significant_start] == '0') {
+        significant_start += 1;
+    }
+    const significant = rest[significant_start..];
+    const definitely_too_large = switch (radix) {
+        2 => significant.len > 128,
+        8 => significant.len > 43 or
+            (significant.len == 43 and significant[0] > '3'),
+        10 => significant.len > 39 or
+            (significant.len == 39 and
+                std.mem.order(u8, significant, "340282366920938463463374607431768211455") == .gt),
+        16 => significant.len > 32,
+        else => unreachable,
+    };
+    if (definitely_too_large) return .too_large;
+
     var low: u64 = 0;
     var high: u64 = 0;
     var saw_digit = false;
