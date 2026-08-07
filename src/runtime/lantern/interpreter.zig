@@ -14098,26 +14098,6 @@ fn coerceForCompare(
     value: Value,
     hint: intrinsics_mod.ToPrimitiveHint,
 ) RunError!CompareOutcome {
-    // Functions are objects per §6.1.7; coerce via ToString
-    // (their source / "function() { [native code] }" placeholder)
-    // so a computed key `{ [() => {}]: 1 }` lands under the
-    // arrow's source text instead of the "[object]" fallback.
-    if (heap_mod.valueAsFunction(value)) |_| {
-        const s = intrinsics_mod.stringifyArg(realm, value) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.NativeThrew => {
-                const ex = realm.pending_exception orelse try makeTypeError(realm, "ToString failed");
-                realm.pending_exception = null;
-                f.ip = ip;
-                f.accumulator = value;
-                if (!try unwindThrow(allocator, realm, frames, ex)) {
-                    return .{ .uncaught = ex };
-                }
-                return .handled;
-            },
-        };
-        return .{ .ok = Value.fromString(s) };
-    }
     if (!value.isObject()) return .{ .ok = value };
     const prim = intrinsics_mod.toPrimitive(realm, value, hint) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,

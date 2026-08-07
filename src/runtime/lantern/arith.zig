@@ -1152,7 +1152,13 @@ noinline fn compareBigIntString(
     string: *const JSString,
     bigint_is_lhs: bool,
 ) NativeError!Value {
-    const bytes = string.flatBytesIfFlat() orelse try @constCast(string).flatten(heap.bytes_allocator);
+    const bytes = string.flatBytesIfFlat() orelse bytes: {
+        try heap.charge(string.byte_len);
+        break :bytes @constCast(string).flatten(heap.bytes_allocator) catch |err| {
+            heap.discharge(string.byte_len);
+            return err;
+        };
+    };
     var storage: [2]bigint_mod.Limb = undefined;
     switch (parseSmallStringToBigInt(bytes, &storage)) {
         .value => |parsed| {
