@@ -30,6 +30,16 @@ fn borrowBigInt(bi: *const JSBigInt) BigIntValue {
     return .{ .sign = bi.sign, .limbs = bi.limbs };
 }
 
+/// Return an exact Number representation when the BigInt is within
+/// Number.MAX_SAFE_INTEGER. This is safe for mixed BigInt/Number comparison:
+/// both operands then denote their exact mathematical values as `f64`.
+inline fn safeBigIntAsDouble(bi: *const JSBigInt) ?f64 {
+    if (bi.limbs.len == 0) return 0.0;
+    if (bi.limbs.len != 1 or bi.limbs[0] > 9_007_199_254_740_991) return null;
+    const magnitude: f64 = @floatFromInt(bi.limbs[0]);
+    return if (bi.sign) -magnitude else magnitude;
+}
+
 pub const RunError = @import("interpreter.zig").RunError;
 pub const NativeError = @import("../function.zig").NativeError;
 const makeTypeError = @import("interpreter.zig").makeTypeError;
@@ -976,24 +986,329 @@ pub fn relational(comptime op: RelOp, realm: *Realm, lhs: Value, rhs: Value) Nat
     //
     // Symbol operands of any flavour throw TypeError (§7.1.4
     // ToNumber, §7.1.13 ToNumeric — Symbols can't be numerified).
+    // Primitive Number, BigInt, and String pairs need none of the Symbol /
+    // mixed-type machinery below. Native Number comparisons also implement
+    // the required undefined-to-false behaviour for NaN and order signed zero
+    // correctly.
+    if (heap_mod.valueAsBigInt(lhs)) |a| {
+        if (heap_mod.valueAsBigInt(rhs)) |b| {
+            // Small positive BigInts dominate ordinary counters and ids; avoid
+            // the arbitrary-precision comparison walk for one-limb pairs.
+            if (!a.sign and !b.sign and a.limbs.len == 1 and b.limbs.len == 1) {
+                return Value.fromBool(switch (op) {
+                    .lt => a.limbs[0] < b.limbs[0],
+                    .gt => a.limbs[0] > b.limbs[0],
+                    .le => a.limbs[0] <= b.limbs[0],
+                    .ge => a.limbs[0] >= b.limbs[0],
+                });
+            }
+            return Value.fromBool(applyRelOpOrder(op, bigint_mod.compare(borrowBigInt(a), borrowBigInt(b))));
+        }
+        if (rhs.isString()) {
+            const s: *JSString = @ptrCast(@alignCast(rhs.asString()));
+            return compareBigIntString(realm.heap, op, a, s, true);
+        }
+        if (!rhs.isObject()) {
+            const b = toNumber(rhs);
+            if (std.math.isNan(b)) return Value.false_;
+            if (safeBigIntAsDouble(a)) |small| return Value.fromBool(applyRelOpFloat(op, small, b));
+            return Value.fromBool(applyRelOpDouble(realm.heap.allocator, op, a, b, true));
+        }
+    }
+    if (heap_mod.valueAsBigInt(rhs)) |b| {
+        if (lhs.isString()) {
+            const s: *JSString = @ptrCast(@alignCast(lhs.asString()));
+            return compareBigIntString(realm.heap, op, b, s, false);
+        }
+        if (!lhs.isObject()) {
+            const a = toNumber(lhs);
+            if (std.math.isNan(a)) return Value.false_;
+            if (safeBigIntAsDouble(b)) |small| return Value.fromBool(applyRelOpFloat(op, a, small));
+            return Value.fromBool(applyRelOpDouble(realm.heap.allocator, op, b, a, false));
+        }
+    }
+    if (lhs.isNumber() and rhs.isNumber()) {
+        return Value.fromBool(applyRelOpFloat(op, lhs.numberToDouble(), rhs.numberToDouble()));
+    }
+    if (lhs.isString() and rhs.isString()) {
+        const a: *JSString = @ptrCast(@alignCast(lhs.asString()));
+        const b: *JSString = @ptrCast(@alignCast(rhs.asString()));
+        return compareStringPair(op, a, b);
+    }
+    if (!lhs.isObject() and !rhs.isObject()) {
+        const a = toNumber(lhs);
+        const b = toNumber(rhs);
+        if (std.math.isNan(a) or std.math.isNan(b)) return Value.false_;
+        return Value.fromBool(applyRelOpFloat(op, a, b));
+    }
+
+    return relationalSlow(op, realm, lhs, rhs);
+}
+
+const SmallStringToBigInt = union(enum) {
+    value: BigIntValue,
+    invalid,
+    too_large,
+};
+
+/// Fast-path StringToBigInt values whose magnitude fits two limbs. Match the
+/// complete parser's whitespace, sign, and radix-prefix handling while
+/// distinguishing invalid input from a valid arbitrary-precision magnitude.
+inline fn parseSmallStringToBigInt(bytes: []const u8, storage: *[2]bigint_mod.Limb) SmallStringToBigInt {
+    const trimmed = bigint_mod.trimStringToBigIntWhitespace(bytes);
+    if (trimmed.len == 0) return .{ .value = .{ .sign = false, .limbs = storage[0..0] } };
+
+    var rest = trimmed;
+    var negate_it = false;
+    var has_sign = false;
+    if (rest[0] == '-') {
+        negate_it = true;
+        has_sign = true;
+        rest = rest[1..];
+    } else if (rest[0] == '+') {
+        has_sign = true;
+        rest = rest[1..];
+    }
+    if (rest.len == 0) return .invalid;
+
+    var radix: u8 = 10;
+    if (rest.len >= 2 and rest[0] == '0') {
+        radix = switch (rest[1]) {
+            'b', 'B' => 2,
+            'o', 'O' => 8,
+            'x', 'X' => 16,
+            else => 10,
+        };
+        if (radix != 10) {
+            if (has_sign) return .invalid;
+            rest = rest[2..];
+            if (rest.len == 0) return .invalid;
+        }
+    }
+
+    // Values that cannot fit two limbs go straight to the canonical parser.
+    // This length/lexicographic gate is deliberately allowed to classify an
+    // invalid string as too_large: the full parser still validates every byte,
+    // while valid wide values avoid repeating the more expensive u128 scan.
+    var significant_start: usize = 0;
+    while (significant_start < rest.len and rest[significant_start] == '0') {
+        significant_start += 1;
+    }
+    const significant = rest[significant_start..];
+    const definitely_too_large = switch (radix) {
+        2 => significant.len > 128,
+        8 => significant.len > 43 or
+            (significant.len == 43 and significant[0] > '3'),
+        10 => significant.len > 39 or
+            (significant.len == 39 and
+                std.mem.order(u8, significant, "340282366920938463463374607431768211455") == .gt),
+        16 => significant.len > 32,
+        else => unreachable,
+    };
+    if (definitely_too_large) return .too_large;
+
+    var low: u64 = 0;
+    var high: u64 = 0;
+    var saw_digit = false;
+    var too_large = false;
+    for (rest) |byte| {
+        // NumericLiteralSeparator belongs to source-text BigInt literals,
+        // not the runtime StringToBigInt grammar (§7.1.14).
+        if (byte == '_') return .invalid;
+        const digit: u8 = switch (byte) {
+            '0'...'9' => byte - '0',
+            'a'...'f' => byte - 'a' + 10,
+            'A'...'F' => byte - 'A' + 10,
+            else => return .invalid,
+        };
+        if (digit >= radix) return .invalid;
+        saw_digit = true;
+        if (too_large) continue;
+
+        // Keep the overwhelmingly common one-limb path on native u64
+        // arithmetic. Promote to the second stack limb only at the first
+        // overflow, then use a wide carry for subsequent digits.
+        if (high == 0) {
+            const product = @mulWithOverflow(low, @as(u64, radix));
+            if (product[1] == 0) {
+                const sum = @addWithOverflow(product[0], @as(u64, digit));
+                if (sum[1] == 0) {
+                    low = sum[0];
+                    continue;
+                }
+            }
+            const wide = @as(u128, low) * @as(u128, radix) + @as(u128, digit);
+            low = @truncate(wide);
+            high = @truncate(wide >> 64);
+            continue;
+        }
+
+        const low_wide = @as(u128, low) * @as(u128, radix) + @as(u128, digit);
+        const high_wide = @as(u128, high) * @as(u128, radix) + (low_wide >> 64);
+        if (high_wide > std.math.maxInt(u64)) {
+            too_large = true;
+            continue;
+        }
+        low = @truncate(low_wide);
+        high = @truncate(high_wide);
+    }
+    if (!saw_digit) return .invalid;
+    if (too_large) return .too_large;
+    storage[0] = low;
+    storage[1] = high;
+    const limb_count: usize = if (high != 0) 2 else @intFromBool(low != 0);
+    return .{ .value = .{
+        .sign = negate_it and limb_count != 0,
+        .limbs = storage[0..limb_count],
+    } };
+}
+
+test "parseSmallStringToBigInt pins radix preclassification boundaries" {
+    const Tag = std.meta.Tag(SmallStringToBigInt);
+    const Check = struct {
+        fn tag(bytes: []const u8, expected: Tag) !void {
+            var storage: [2]bigint_mod.Limb = undefined;
+            try std.testing.expectEqual(expected, std.meta.activeTag(parseSmallStringToBigInt(bytes, &storage)));
+        }
+
+        fn max(bytes: []const u8) !void {
+            var storage: [2]bigint_mod.Limb = undefined;
+            switch (parseSmallStringToBigInt(bytes, &storage)) {
+                .value => |parsed| {
+                    try std.testing.expect(!parsed.sign);
+                    try std.testing.expectEqual(@as(usize, 2), parsed.limbs.len);
+                    try std.testing.expectEqual(std.math.maxInt(u64), parsed.limbs[0]);
+                    try std.testing.expectEqual(std.math.maxInt(u64), parsed.limbs[1]);
+                },
+                else => return error.TestUnexpectedResult,
+            }
+        }
+    };
+
+    var bin_max: [2 + 128]u8 = undefined;
+    @memcpy(bin_max[0..2], "0b");
+    @memset(bin_max[2..], '1');
+    var bin_over: [2 + 129]u8 = undefined;
+    @memcpy(bin_over[0..3], "0b1");
+    @memset(bin_over[3..], '0');
+    var bin_leading_over: [2 + 4 + 129]u8 = undefined;
+    @memcpy(bin_leading_over[0..7], "0b00001");
+    @memset(bin_leading_over[7..], '0');
+    var bin_wide_invalid = bin_over;
+    bin_wide_invalid[bin_wide_invalid.len - 1] = '2';
+    try Check.max(&bin_max);
+    try Check.tag(&bin_over, .too_large);
+    try Check.tag(&bin_leading_over, .too_large);
+    try Check.tag(&bin_wide_invalid, .too_large);
+    try Check.tag("0b102", .invalid);
+
+    var oct_max: [2 + 43]u8 = undefined;
+    @memcpy(oct_max[0..3], "0o3");
+    @memset(oct_max[3..], '7');
+    var oct_over: [2 + 43]u8 = undefined;
+    @memcpy(oct_over[0..3], "0o4");
+    @memset(oct_over[3..], '0');
+    var oct_leading_over: [2 + 4 + 43]u8 = undefined;
+    @memcpy(oct_leading_over[0..7], "0o00004");
+    @memset(oct_leading_over[7..], '0');
+    var oct_wide_invalid = oct_over;
+    oct_wide_invalid[oct_wide_invalid.len - 1] = '8';
+    try Check.max(&oct_max);
+    try Check.tag(&oct_over, .too_large);
+    try Check.tag(&oct_leading_over, .too_large);
+    try Check.tag(&oct_wide_invalid, .too_large);
+    try Check.tag("0o378", .invalid);
+
+    try Check.max("340282366920938463463374607431768211455");
+    try Check.max("0000340282366920938463463374607431768211455");
+    try Check.tag("340282366920938463463374607431768211456", .too_large);
+    try Check.tag("0000340282366920938463463374607431768211456", .too_large);
+    try Check.tag("999999999999999999999999999999999999999x", .too_large);
+    try Check.tag("12x", .invalid);
+
+    var hex_max: [2 + 32]u8 = undefined;
+    @memcpy(hex_max[0..2], "0x");
+    @memset(hex_max[2..], 'f');
+    var hex_over: [2 + 33]u8 = undefined;
+    @memcpy(hex_over[0..3], "0x1");
+    @memset(hex_over[3..], '0');
+    var hex_leading_over: [2 + 4 + 33]u8 = undefined;
+    @memcpy(hex_leading_over[0..7], "0x00001");
+    @memset(hex_leading_over[7..], '0');
+    var hex_wide_invalid = hex_over;
+    hex_wide_invalid[hex_wide_invalid.len - 1] = 'g';
+    try Check.max(&hex_max);
+    try Check.tag(&hex_over, .too_large);
+    try Check.tag(&hex_leading_over, .too_large);
+    try Check.tag(&hex_wide_invalid, .too_large);
+    try Check.tag("0xfg", .invalid);
+}
+
+/// §7.2.13 StringToBigInt comparison for either operand order. The small
+/// one/two-limb case avoids a temporary allocation; larger valid values retain
+/// the full arbitrary-precision parser.
+noinline fn compareBigIntString(
+    heap: *heap_mod.Heap,
+    op: RelOp,
+    bigint: *const JSBigInt,
+    string: *const JSString,
+    bigint_is_lhs: bool,
+) NativeError!Value {
+    const bytes = string.flatBytesIfFlat() orelse bytes: {
+        try heap.charge(string.byte_len);
+        break :bytes @constCast(string).flatten(heap.bytes_allocator) catch |err| {
+            heap.discharge(string.byte_len);
+            return err;
+        };
+    };
+    var storage: [2]bigint_mod.Limb = undefined;
+    switch (parseSmallStringToBigInt(bytes, &storage)) {
+        .value => |parsed| {
+            const ord = if (bigint_is_lhs)
+                bigint_mod.compare(borrowBigInt(bigint), parsed)
+            else
+                bigint_mod.compare(parsed, borrowBigInt(bigint));
+            return Value.fromBool(applyRelOpOrder(op, ord));
+        },
+        .invalid => return Value.false_,
+        .too_large => {},
+    }
+
+    const parsed = bigint_mod.parseStringToValue(heap.allocator, bytes) catch |err| switch (err) {
+        error.InvalidBigInt => return Value.false_,
+        error.OutOfMemory => return error.OutOfMemory,
+    };
+    defer if (parsed.limbs.len != 0) heap.allocator.free(parsed.limbs);
+    const ord = if (bigint_is_lhs)
+        bigint_mod.compare(borrowBigInt(bigint), parsed)
+    else
+        bigint_mod.compare(parsed, borrowBigInt(bigint));
+    return Value.fromBool(applyRelOpOrder(op, ord));
+}
+
+/// §6.1.4 — Strings compare as sequences of UTF-16 code units rather than
+/// their WTF-8 storage bytes.
+noinline fn compareStringPair(op: RelOp, a: *const JSString, b: *const JSString) Value {
+    const cmp = utf16.compareCodeUnits(a.flatBytes(), b.flatBytes());
+    const result = switch (op) {
+        .lt => cmp == .lt,
+        .gt => cmp == .gt,
+        .le => cmp != .gt,
+        .ge => cmp != .lt,
+    };
+    return Value.fromBool(result);
+}
+
+/// The coercion-complete remainder of §7.2.13. The operator is runtime-selected
+/// so Symbol, mixed BigInt, String, and conversion handling has one outlined copy
+/// rather than four copies in the hot primitive entry points.
+noinline fn relationalSlow(op: RelOp, realm: *Realm, lhs: Value, rhs: Value) NativeError!Value {
     if (heap_mod.valueAsSymbol(lhs) != null or heap_mod.valueAsSymbol(rhs) != null) {
         realm.pending_exception = try intrinsics_mod.newTypeError(realm, "Cannot convert a Symbol value to a number");
         return error.NativeThrew;
     }
 
     if (heap_mod.valueAsBigInt(lhs)) |a| {
-        if (heap_mod.valueAsBigInt(rhs)) |b| {
-            // §6.1.6.2.12 BigInt::lessThan — exact mathematical order.
-            return Value.fromBool(applyRelOpOrder(op, bigint_mod.compare(borrowBigInt(a), borrowBigInt(b))));
-        }
-        // §7.2.13 step 3.b — BigInt vs String: StringToBigInt the
-        // string; on failure the result is undefined → false.
-        if (rhs.isString()) {
-            const s: *JSString = @ptrCast(@alignCast(rhs.asString()));
-            const parsed = bigint_mod.parseStringToValue(realm.heap.allocator, s.flatBytes()) catch return Value.false_;
-            defer if (parsed.limbs.len != 0) realm.heap.allocator.free(parsed.limbs);
-            return Value.fromBool(applyRelOpOrder(op, bigint_mod.compare(borrowBigInt(a), parsed)));
-        }
         // §7.2.13 — BigInt vs Number: compare mathematical values
         // exactly (NOT by coercion). A NaN on the Number side makes
         // the comparison undefined → false.
@@ -1002,29 +1317,9 @@ pub fn relational(comptime op: RelOp, realm: *Realm, lhs: Value, rhs: Value) Nat
         return Value.fromBool(applyRelOpDouble(realm.heap.allocator, op, a, bn, true));
     }
     if (heap_mod.valueAsBigInt(rhs)) |b| {
-        if (lhs.isString()) {
-            const s: *JSString = @ptrCast(@alignCast(lhs.asString()));
-            const parsed = bigint_mod.parseStringToValue(realm.heap.allocator, s.flatBytes()) catch return Value.false_;
-            defer if (parsed.limbs.len != 0) realm.heap.allocator.free(parsed.limbs);
-            return Value.fromBool(applyRelOpOrder(op, bigint_mod.compare(parsed, borrowBigInt(b))));
-        }
         const an = toNumber(lhs);
         if (std.math.isNan(an)) return Value.false_;
         return Value.fromBool(applyRelOpDouble(realm.heap.allocator, op, b, an, false));
-    }
-    if (lhs.isString() and rhs.isString()) {
-        // §6.1.4 — Strings are sequences of 16-bit code units;
-        // compare by UTF-16 code-unit value, not WTF-8 byte order.
-        const ls: *JSString = @ptrCast(@alignCast(lhs.asString()));
-        const rs: *JSString = @ptrCast(@alignCast(rhs.asString()));
-        const cmp = utf16.compareCodeUnits(ls.flatBytes(), rs.flatBytes());
-        const result = switch (op) {
-            .lt => cmp == .lt,
-            .gt => cmp == .gt,
-            .le => cmp != .gt,
-            .ge => cmp != .lt,
-        };
-        return Value.fromBool(result);
     }
     const a = toNumber(lhs);
     const b = toNumber(rhs);
@@ -1032,7 +1327,7 @@ pub fn relational(comptime op: RelOp, realm: *Realm, lhs: Value, rhs: Value) Nat
     return Value.fromBool(applyRelOpFloat(op, a, b));
 }
 
-inline fn applyRelOpFloat(comptime op: RelOp, a: f64, b: f64) bool {
+inline fn applyRelOpFloat(op: RelOp, a: f64, b: f64) bool {
     return switch (op) {
         .lt => a < b,
         .gt => a > b,
@@ -1043,7 +1338,7 @@ inline fn applyRelOpFloat(comptime op: RelOp, a: f64, b: f64) bool {
 
 /// Map a §7.2.13 mathematical `Order` (lhs vs rhs) to the boolean
 /// result of the requested relational operator.
-inline fn applyRelOpOrder(comptime op: RelOp, ord: std.math.Order) bool {
+inline fn applyRelOpOrder(op: RelOp, ord: std.math.Order) bool {
     return switch (op) {
         .lt => ord == .lt,
         .gt => ord == .gt,
@@ -1055,7 +1350,7 @@ inline fn applyRelOpOrder(comptime op: RelOp, ord: std.math.Order) bool {
 /// §7.2.13 — relational compare a BigInt against a finite Number
 /// by exact mathematical value. `bigint_is_lhs` records operand
 /// order so `<` / `>` come out right.
-fn applyRelOpDouble(allocator: std.mem.Allocator, comptime op: RelOp, bi: *const JSBigInt, d: f64, bigint_is_lhs: bool) bool {
+fn applyRelOpDouble(allocator: std.mem.Allocator, op: RelOp, bi: *const JSBigInt, d: f64, bigint_is_lhs: bool) bool {
     // `bigintCompareDouble` already accounts for the double's
     // fractional part, returning the exact (bigint, double) order.
     var ord = bigintCompareDouble(allocator, bi, d);

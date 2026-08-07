@@ -30,8 +30,10 @@ If you set up a remote, the laptop only orchestrates over SSH:
 back-to-back per iteration, so the ratio cancels host drift) and renders the
 report on your laptop. Timed children are pinned to CPU 1 by default (override
 with `--cpu N`), and the job refuses to compare a ref whose Zig pin differs
-from the provisioned toolchain. `remote-run.sh` runs an arbitrary command (a
-build, a test sweep) against a ref. `--cross` adds the cross-engine table.
+from the provisioned toolchain. An unavailable CPU or missing `taskset` aborts
+the job instead of silently producing an unpinned comparison. `remote-run.sh`
+runs an arbitrary command (a build, a test sweep) against a ref. `--cross`
+adds the cross-engine table.
 
 **Detached jobs (survive a local restart).** Both submit the work as a
 detached job on the box (under `setsid`+`flock`) and return a `JOB_ID`
