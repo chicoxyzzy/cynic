@@ -1051,11 +1051,11 @@ const SmallStringToBigInt = union(enum) {
     too_large,
 };
 
-/// Fast-path StringToBigInt values whose magnitude fits one limb. Match the
+/// Fast-path StringToBigInt values whose magnitude fits two limbs. Match the
 /// complete parser's whitespace, sign, and radix-prefix handling while
 /// distinguishing invalid input from a valid arbitrary-precision magnitude.
-inline fn parseSmallStringToBigInt(bytes: []const u8, storage: *[1]bigint_mod.Limb) SmallStringToBigInt {
-    const trimmed = std.mem.trim(u8, bytes, " \t\n\r\u{000B}\u{000C}\u{00A0}\u{FEFF}");
+inline fn parseSmallStringToBigInt(bytes: []const u8, storage: *[2]bigint_mod.Limb) SmallStringToBigInt {
+    const trimmed = bigint_mod.trimStringToBigIntWhitespace(bytes);
     if (trimmed.len == 0) return .{ .value = .{ .sign = false, .limbs = storage[0..0] } };
 
     var rest = trimmed;
@@ -1086,7 +1086,8 @@ inline fn parseSmallStringToBigInt(bytes: []const u8, storage: *[1]bigint_mod.Li
         }
     }
 
-    var magnitude: u64 = 0;
+    var low: u64 = 0;
+    var high: u64 = 0;
     var saw_digit = false;
     var too_large = false;
     for (rest) |byte| {
@@ -1102,29 +1103,47 @@ inline fn parseSmallStringToBigInt(bytes: []const u8, storage: *[1]bigint_mod.Li
         if (digit >= radix) return .invalid;
         saw_digit = true;
         if (too_large) continue;
-        const product = @mulWithOverflow(magnitude, @as(u64, radix));
-        if (product[1] != 0) {
+
+        // Keep the overwhelmingly common one-limb path on native u64
+        // arithmetic. Promote to the second stack limb only at the first
+        // overflow, then use a wide carry for subsequent digits.
+        if (high == 0) {
+            const product = @mulWithOverflow(low, @as(u64, radix));
+            if (product[1] == 0) {
+                const sum = @addWithOverflow(product[0], @as(u64, digit));
+                if (sum[1] == 0) {
+                    low = sum[0];
+                    continue;
+                }
+            }
+            const wide = @as(u128, low) * @as(u128, radix) + @as(u128, digit);
+            low = @truncate(wide);
+            high = @truncate(wide >> 64);
+            continue;
+        }
+
+        const low_wide = @as(u128, low) * @as(u128, radix) + @as(u128, digit);
+        const high_wide = @as(u128, high) * @as(u128, radix) + (low_wide >> 64);
+        if (high_wide > std.math.maxInt(u64)) {
             too_large = true;
             continue;
         }
-        const sum = @addWithOverflow(product[0], @as(u64, digit));
-        if (sum[1] != 0) {
-            too_large = true;
-            continue;
-        }
-        magnitude = sum[0];
+        low = @truncate(low_wide);
+        high = @truncate(high_wide);
     }
     if (!saw_digit) return .invalid;
     if (too_large) return .too_large;
-    storage[0] = magnitude;
+    storage[0] = low;
+    storage[1] = high;
+    const limb_count: usize = if (high != 0) 2 else @intFromBool(low != 0);
     return .{ .value = .{
-        .sign = negate_it and magnitude != 0,
-        .limbs = storage[0..@intFromBool(magnitude != 0)],
+        .sign = negate_it and limb_count != 0,
+        .limbs = storage[0..limb_count],
     } };
 }
 
 /// §7.2.13 StringToBigInt comparison for either operand order. The small
-/// one-limb case avoids a temporary allocation; larger valid values retain
+/// one/two-limb case avoids a temporary allocation; larger valid values retain
 /// the full arbitrary-precision parser.
 noinline fn compareBigIntString(
     heap: *heap_mod.Heap,
@@ -1134,7 +1153,7 @@ noinline fn compareBigIntString(
     bigint_is_lhs: bool,
 ) NativeError!Value {
     const bytes = string.flatBytesIfFlat() orelse try @constCast(string).flatten(heap.bytes_allocator);
-    var storage: [1]bigint_mod.Limb = undefined;
+    var storage: [2]bigint_mod.Limb = undefined;
     switch (parseSmallStringToBigInt(bytes, &storage)) {
         .value => |parsed| {
             const ord = if (bigint_is_lhs)

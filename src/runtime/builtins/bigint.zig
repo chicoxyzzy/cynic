@@ -104,7 +104,7 @@ pub fn toBigIntValue(realm: *Realm, v_in: Value) !Value {
     // §7.1.13 step 1 — ToPrimitive(arg, hint "number") for objects.
     // Without this, ToBigInt({ valueOf: () => 1n }) takes the
     // throwTypeError fall-through instead of returning 1n.
-    const v = if (heap_mod.valueAsPlainObject(v_in) != null)
+    const v = if (heap_mod.isJSObject(v_in))
         try intrinsics.toPrimitive(realm, v_in, .number)
     else
         v_in;

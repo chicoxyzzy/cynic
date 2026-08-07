@@ -894,6 +894,40 @@ fn makePow2(allocator: std.mem.Allocator, bits: usize) ![]Limb {
 
 // ── String ⇄ BigInt ─────────────────────────────────────────────
 
+/// §12.6 StrWhiteSpace for the StringIntegerLiteral grammar used by
+/// §7.1.14 StringToBigInt. Decode whole code points: treating a UTF-8
+/// encoding as a byte set can strip one byte from an unrelated character and
+/// turn invalid input into the empty string (0n).
+pub fn trimStringToBigIntWhitespace(bytes: []const u8) []const u8 {
+    var lo: usize = 0;
+    while (lo < bytes.len) {
+        const cp_len: usize = std.unicode.utf8ByteSequenceLength(bytes[lo]) catch break;
+        if (cp_len > bytes.len - lo) break;
+        const cp = std.unicode.utf8Decode(bytes[lo .. lo + cp_len]) catch break;
+        if (!isStringToBigIntWhitespace(cp)) break;
+        lo += cp_len;
+    }
+
+    var hi = bytes.len;
+    while (hi > lo) {
+        var start = hi - 1;
+        while (start > lo and (bytes[start] & 0xC0) == 0x80) start -= 1;
+        const cp = std.unicode.utf8Decode(bytes[start..hi]) catch break;
+        if (!isStringToBigIntWhitespace(cp)) break;
+        hi = start;
+    }
+    return bytes[lo..hi];
+}
+
+fn isStringToBigIntWhitespace(cp: u21) bool {
+    return switch (cp) {
+        0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x20, 0xA0, 0x1680 => true,
+        0x2000...0x200A => true,
+        0x2028, 0x2029, 0x202F, 0x205F, 0x3000, 0xFEFF => true,
+        else => false,
+    };
+}
+
 /// Parse a magnitude from `digits` in `radix` (2/8/10/16). Skips
 /// `_` separators. Returns a normalized owned magnitude. Errors on
 /// any invalid digit or an empty body.
@@ -958,7 +992,7 @@ fn addSmall(allocator: std.mem.Allocator, m: []const Limb, x: Limb) ![]Limb {
 
 /// §7.1.14 StringToBigInt result, ready to hand to the heap.
 pub fn parseStringToValue(allocator: std.mem.Allocator, bytes: []const u8) ParseError!BigIntValue {
-    const trimmed = std.mem.trim(u8, bytes, " \t\n\r\u{000B}\u{000C}\u{00A0}\u{FEFF}");
+    const trimmed = trimStringToBigIntWhitespace(bytes);
     if (trimmed.len == 0) return .{ .sign = false, .limbs = try allocator.alloc(Limb, 0) };
     var rest = trimmed;
     var negate_it = false;

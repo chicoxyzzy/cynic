@@ -107,6 +107,8 @@ Run one fixture with `zig build bench -- --filter=<name>`; combine it with
 | `relational_number_bigint` | 1,000,000 | Mixed Number/BigInt `JmpIfNotLt8` execution. Pins the reversed exact mathematical cross-type ordering path and its operand-order correction. |
 | `relational_bigint_string` | 1,000,000 | Mixed BigInt/String `JmpIfNotLt8` execution. Pins §7.2.13 StringToBigInt parsing and exact mathematical ordering without object coercion. |
 | `relational_bigint_string_syntax` | 1,000,000 | Mixed BigInt/String `JmpIfNotLt8` execution split across whitespace, signed-decimal, and radix-prefixed StringToBigInt forms. Samples representative §7.1.14 grammar branches while pinning the allocation-free one-limb path. |
+| `relational_bigint_string_wide` | 1,000,000 | Mixed BigInt/String `JmpIfNotLt8` execution straddling the 64-bit limb boundary. Pins the allocation-free two-limb parser and guards the handoff to exact wide ordering. |
+| `relational_bigint_string_huge` | 200,000 | Mixed BigInt/String `JmpIfNotLt8` execution straddling the 128-bit boundary. Pins the validated handoff from the stack parser to the full arbitrary-precision parser. |
 | `relational_string_bigint` | 1,000,000 | Mixed String/BigInt `JmpIfNotLt8` execution. Pins the reversed §7.2.13 StringToBigInt operand order and exact mathematical comparison. |
 | `relational_nullish` | 3,000,000 | Undefined/null `JmpIfNotLt8` execution. Pins primitive numeric conversion and the §7.2.13 undefined-to-false result. |
 | `relational_string_number` | 2,000,000 | Mixed String/Number `JmpIfNotLt8` execution. Pins primitive numeric conversion of a String without user-code re-entry. |
