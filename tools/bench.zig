@@ -99,6 +99,8 @@ const BENCHES = [_]Bench{
     .{ .name = "relational_number_bigint", .path = "bench/micros/relational_number_bigint.js" },
     .{ .name = "relational_bigint_string", .path = "bench/micros/relational_bigint_string.js" },
     .{ .name = "relational_bigint_string_syntax", .path = "bench/micros/relational_bigint_string_syntax.js" },
+    .{ .name = "relational_bigint_string_wide", .path = "bench/micros/relational_bigint_string_wide.js" },
+    .{ .name = "relational_bigint_string_huge", .path = "bench/micros/relational_bigint_string_huge.js" },
     .{ .name = "relational_string_bigint", .path = "bench/micros/relational_string_bigint.js" },
     .{ .name = "relational_nullish", .path = "bench/micros/relational_nullish.js" },
     .{ .name = "relational_string_number", .path = "bench/micros/relational_string_number.js" },
