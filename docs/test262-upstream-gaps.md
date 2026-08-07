@@ -38,6 +38,145 @@ the corpus under the relevant section's directory before adding.
 
 ## Entries
 
+### Runtime StringToBigInt accepted source-only numeric separators
+
+- **Fixed in:** TBD
+- **Spec:** §7.1.14 StringToBigInt — StringIntegerLiteral does not
+  include NumericLiteralSeparator; `_` is accepted only by the
+  source-text BigInt literal grammar.
+- **Reproducer:**
+  ```js
+  assert.throws(SyntaxError, () => BigInt("1_0"));
+  assert.throws(SyntaxError, () => BigInt("0x1_0"));
+  assert.sameValue(1n < "1_0", false);
+  assert.sameValue(10n == "1_0", false);
+  assert.sameValue(0n < "0x1_0", false);
+  const view = new DataView(new ArrayBuffer(8));
+  assert.throws(SyntaxError, () => view.setBigInt64(0, "1_0"));
+  ```
+- **Before fix:** `BigInt("1_0")` returned `10n`, relational
+  comparison parsed the same string as a valid BigInt, and DataView's
+  duplicate conversion accepted it for `setBigInt64` / `setBigUint64`.
+- **After fix:** The constructor throws `SyntaxError`; relational
+  StringToBigInt parse failure produces the specified `false` result;
+  DataView routes through the same canonical conversion.
+- **Suggested fixture shape:** negative runtime fixtures under
+  `built-ins/BigInt/` plus mixed BigInt/String cases under
+  `language/expressions/relational/`, loose-equality cases under
+  `language/expressions/equals/`, and DataView setter cases under
+  `built-ins/DataView/prototype/setBigInt64/`, tagged `features:
+  [BigInt]`. The corpus covers numeric separators in source literals
+  but has no runtime string-parsing case containing `_`.
+
+### StringToBigInt trimmed UTF-8 bytes instead of Unicode whitespace code points
+
+- **Fixed in:** TBD
+- **Spec:** §7.1.14 StringToBigInt and §12.6 StrWhiteSpace — trimming
+  applies to complete Unicode code points in the WhiteSpace or
+  LineTerminator sets, not to individual bytes from their UTF-8 encodings.
+- **Reproducer:**
+  ```js
+  assert.throws(SyntaxError, () => BigInt("¿"));
+  assert.throws(SyntaxError, () => BigInt("»"));
+  assert.throws(SyntaxError, () => BigInt("\uFEFB"));
+  assert.sameValue(0n == "¿", false);
+  const view = new DataView(new ArrayBuffer(8));
+  assert.throws(SyntaxError, () => view.setBigInt64(0, "¿"));
+  ```
+- **Before fix:** A byte-set trim treated bytes shared with NBSP / ZWNBSP
+  encodings as whitespace, reduced these unrelated characters to the empty
+  string, and converted them to `0n`.
+- **After fix:** StringToBigInt decodes and classifies whole code points;
+  invalid strings throw `SyntaxError` in converting APIs and produce `false`
+  in relational / loose-equality comparisons, as specified.
+- **Suggested fixture shape:** negative runtime fixtures under
+  `built-ins/BigInt/`, `language/expressions/equals/`, and
+  `built-ins/DataView/prototype/setBigInt64/`, tagged `features: [BigInt]`,
+  pairing valid multibyte StrWhiteSpace with non-whitespace characters that
+  share one of its UTF-8 bytes.
+
+### DataView BigInt setters used a duplicate, i128-bounded string parser
+
+- **Fixed in:** TBD
+- **Spec:** §25.3.4.20 DataView.prototype.setBigInt64 and §7.1.13
+  ToBigInt — a String input is parsed by StringToBigInt at arbitrary
+  precision before SetViewValue stores the low 64 bits.
+- **Reproducer:**
+  ```js
+  const view = new DataView(new ArrayBuffer(8));
+  view.setBigInt64(0, "340282366920938463463374607431768211457"); // 2^128 + 1
+  assert.sameValue(view.getBigInt64(0), 1n);
+  ```
+- **Before fix:** DataView's local `std.fmt.parseInt(i128, ...)` rejected
+  otherwise-valid strings above `2^127 - 1`, instead of parsing the BigInt
+  and applying the specified modulo-2^64 storage conversion.
+- **After fix:** DataView delegates to the canonical ToBigInt /
+  StringToBigInt implementation, preserving arbitrary precision and the
+  shared syntax/error behavior.
+- **Suggested fixture shape:** positive runtime fixtures under
+  `built-ins/DataView/prototype/setBigInt64/` and `setBigUint64/`, tagged
+  `features: [BigInt]`, with string values above the signed-i128 boundary
+  whose low 64 bits are easy to assert.
+
+### ToPrimitive was skipped for callable objects passed to BigInt conversions
+
+- **Fixed in:** TBD
+- **Spec:** §21.2.1.1 BigInt, §7.1.13 ToBigInt, and §7.1.1 ToPrimitive —
+  ECMAScript functions are Objects and must run `@@toPrimitive` / ordinary
+  primitive conversion just like non-callable objects.
+- **Reproducer:**
+  ```js
+  const numberValue = function () {};
+  numberValue[Symbol.toPrimitive] = () => 7;
+  assert.sameValue(BigInt(numberValue), 7n);
+  const bigintValue = function () {};
+  bigintValue[Symbol.toPrimitive] = () => 7n;
+  assert.sameValue(BigInt.asIntN(8, bigintValue), 7n);
+  ```
+- **Before fix:** object detection in the BigInt constructor and the shared
+  ToBigInt helper recognized ordinary property-bag objects but excluded
+  callable JSFunction objects, so affected callers skipped ToPrimitive and
+  threw `TypeError`.
+- **After fix:** every JS object representation, callable or otherwise,
+  enters ToPrimitive with hint `number`; BigInt's constructor then applies
+  NumberToBigInt to a numeric primitive while the other callers require a
+  BigInt primitive.
+- **Suggested fixture shape:** positive runtime fixtures under
+  `built-ins/BigInt/`, `built-ins/BigInt/asIntN/`, and
+  `built-ins/BigInt/asUintN/`, tagged `features: [BigInt]`, using a function
+  object with an observable `Symbol.toPrimitive` method. DataView already
+  coerced callable objects correctly before its parser was routed through the
+  shared helper; Cynic retains a regression test for that refactor boundary.
+
+### Relational comparison gave callable objects the string ToPrimitive hint
+
+- **Fixed in:** TBD
+- **Spec:** §7.2.13 IsLessThan steps 3 and 4 — both operands are converted
+  with ToPrimitive using the `number` hint, regardless of whether an Object
+  has a `[[Call]]` internal method.
+- **Reproducer:**
+  ```js
+  const value = function () {};
+  const hints = [];
+  value[Symbol.toPrimitive] = hint => {
+    hints.push(hint);
+    return hint === "number" ? 1 : 3;
+  };
+  assert.sameValue(value < 2, true);
+  assert.sameValue(2 > value, true);
+  assert.compareArray(hints, ["number", "number"]);
+  ```
+- **Before fix:** the interpreter special-cased callable objects through a
+  ToString helper, so `@@toPrimitive` observed `"string"` and both
+  comparisons above returned `false`.
+- **After fix:** callable and non-callable objects share the specified
+  ToPrimitive path and receive the operator's `number` hint in both operand
+  orders.
+- **Suggested fixture shape:** positive runtime fixtures under
+  `language/expressions/less-than/` and `greater-than/` (or the shared
+  `relational/` directory), asserting the hint, result, order, and call count
+  with a function object carrying `Symbol.toPrimitive`.
+
 ### Deep recursion through a native builtin crashed instead of throwing RangeError
 
 - **Fixed in:** `833f8ca`

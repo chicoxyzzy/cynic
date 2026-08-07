@@ -690,6 +690,248 @@ test "interpreter: fused relational branch is jump-on-false, not negated (NaN)" 
     try expectInt("(function(n){ let i=0; while (i<n) i=i+1; return i; })(0/0);", 0);
 }
 
+test "interpreter: fused relational branches map primitive Number operators" {
+    // Finite mixed-tag pairs exercise the Number shortcut while making each
+    // operator's true and false outcomes distinguishable. These `if` forms
+    // compile to JmpIfNotLt/Le/Gt/Ge rather than standalone comparisons.
+    try expectInt("(function(a,b){ if (a<b) return 1; return 2; })(1.5, 2);", 1);
+    try expectInt("(function(a,b){ if (a<b) return 1; return 2; })(2.5, 2.5);", 2);
+    try expectInt("(function(a,b){ if (a<b) return 1; return 2; })(2.5, 2);", 2);
+    try expectInt("(function(a,b){ if (a<=b) return 1; return 2; })(1.5, 2);", 1);
+    try expectInt("(function(a,b){ if (a<=b) return 1; return 2; })(2.5, 2.5);", 1);
+    try expectInt("(function(a,b){ if (a<=b) return 1; return 2; })(2.5, 2);", 2);
+    try expectInt("(function(a,b){ if (a>b) return 1; return 2; })(2.5, 2);", 1);
+    try expectInt("(function(a,b){ if (a>b) return 1; return 2; })(2.5, 2.5);", 2);
+    try expectInt("(function(a,b){ if (a>b) return 1; return 2; })(1.5, 2);", 2);
+    try expectInt("(function(a,b){ if (a>=b) return 1; return 2; })(2.5, 2);", 1);
+    try expectInt("(function(a,b){ if (a>=b) return 1; return 2; })(2.5, 2.5);", 1);
+    try expectInt("(function(a,b){ if (a>=b) return 1; return 2; })(1.5, 2);", 2);
+}
+
+test "interpreter: fused relational branches preserve BigInt and String operators" {
+    // Parameter operands ensure these reach the runtime's primitive lanes.
+    try expectInt("(function(a,b){ if (a<b) return 1; return 2; })(1n, 2n);", 1);
+    try expectInt("(function(a,b){ if (a<b) return 1; return 2; })(2n, 2n);", 2);
+    try expectInt("(function(a,b){ if (a<=b) return 1; return 2; })(1n, 2n);", 1);
+    try expectInt("(function(a,b){ if (a<=b) return 1; return 2; })(2n, 2n);", 1);
+    try expectInt("(function(a,b){ if (a>b) return 1; return 2; })(2n, 1n);", 1);
+    try expectInt("(function(a,b){ if (a>b) return 1; return 2; })(2n, 2n);", 2);
+    try expectInt("(function(a,b){ if (a>=b) return 1; return 2; })(2n, 1n);", 1);
+    try expectInt("(function(a,b){ if (a>=b) return 1; return 2; })(2n, 2n);", 1);
+
+    try expectInt("(function(a,b){ if (a<b) return 1; return 2; })('alpha', 'beta');", 1);
+    try expectInt("(function(a,b){ if (a<b) return 1; return 2; })('beta', 'beta');", 2);
+    try expectInt("(function(a,b){ if (a<=b) return 1; return 2; })('alpha', 'beta');", 1);
+    try expectInt("(function(a,b){ if (a<=b) return 1; return 2; })('beta', 'beta');", 1);
+    try expectInt("(function(a,b){ if (a>b) return 1; return 2; })('beta', 'alpha');", 1);
+    try expectInt("(function(a,b){ if (a>b) return 1; return 2; })('beta', 'beta');", 2);
+    try expectInt("(function(a,b){ if (a>=b) return 1; return 2; })('beta', 'alpha');", 1);
+    try expectInt("(function(a,b){ if (a>=b) return 1; return 2; })('beta', 'beta');", 1);
+}
+
+test "interpreter: fused relational branches preserve mixed primitive lanes" {
+    // These pairs bypass user-code coercion but still cover ToNumber, exact
+    // BigInt/Number ordering, and the undefined result from NaN involvement.
+    try expectInt("(function(a,b){ if (a<b) return 1; return 2; })(false, true);", 1);
+    try expectInt("(function(a,b){ if (a<=b) return 1; return 2; })(false, false);", 1);
+    try expectInt("(function(a,b){ if (a>b) return 1; return 2; })(true, false);", 1);
+    try expectInt("(function(a,b){ if (a>=b) return 1; return 2; })(true, true);", 1);
+
+    try expectInt("(function(a,b){ if (a<b) return 1; return 2; })(undefined, null);", 2);
+    try expectInt("(function(a,b){ if (a>=b) return 1; return 2; })(null, undefined);", 2);
+    try expectInt("(function(a,b){ if (a<b) return 1; return 2; })('1', 2);", 1);
+    try expectInt("(function(a,b){ if (a>b) return 1; return 2; })('3', 2);", 1);
+
+    try expectInt("(function(a,b){ if (a<b) return 1; return 2; })(1n, 2);", 1);
+    try expectInt("(function(a,b){ if (a<=b) return 1; return 2; })(2n, 2);", 1);
+    try expectInt("(function(a,b){ if (a>b) return 1; return 2; })(2n, 1);", 1);
+    try expectInt("(function(a,b){ if (a>=b) return 1; return 2; })(2, 2n);", 1);
+    try expectInt("(function(a,b){ if (a<b) return 1; return 2; })(1, 2n);", 1);
+    try expectInt("(function(a,b){ if (a<b) return 1; return 2; })(3, 2n);", 2);
+    try expectInt("(function(a,b){ if (a>b) return 1; return 2; })(3, 2n);", 1);
+    try expectInt("(function(a,b){ if (a>b) return 1; return 2; })(1, 2n);", 2);
+
+    // BigInt/String pairs must stay on StringToBigInt rather than ToNumber.
+    try expectInt("(function(a,b){ if (a<b) return 1; return 2; })(1n, '2');", 1);
+    try expectInt("(function(a,b){ if (a<b) return 1; return 2; })('1', 2n);", 1);
+    try expectInt("(function(a,b){ if (a<b) return 1; return 2; })(1n, '1.5');", 2);
+    try expectInt("(function(a,b){ if (a<b) return 1; return 2; })('1.5', 2n);", 2);
+    try expectInt("(function(a,b){ if (a<b) return 1; return 2; })(1n, ' 2 ');", 1);
+    try expectInt("(function(a,b){ if (a<b) return 1; return 2; })(-2n, '-1');", 1);
+    try expectInt("(function(a,b){ if (a<b) return 1; return 2; })(1n, '+2');", 1);
+    try expectInt("(function(a,b){ if (a<b) return 1; return 2; })(0n, '0b10');", 1);
+    try expectInt("(function(a,b){ if (a<b) return 1; return 2; })(0n, '0o10');", 1);
+    try expectInt("(function(a,b){ if (a<b) return 1; return 2; })(0n, '0x10');", 1);
+    try expectInt("(function(a,b){ if (a<=b) return 1; return 2; })(0n, '');", 1);
+    try expectInt("(function(a,b){ if (a<b) return 1; return 2; })(1n, '1_0');", 2);
+    try expectInt("(function(a,b){ if (a<b) return 1; return 2; })(1n, '\\u00a02\\ufeff');", 1);
+    try expectInt("(function(a,b){ if (a<b) return 1; return 2; })(0n, '¿');", 2);
+    try expectInt("(function(a,b){ if (a<b) return 1; return 2; })(18446744073709551615n, '18446744073709551616');", 1);
+    try expectInt("(function(a,b){ if (a<b) return 1; return 2; })(340282366920938463463374607431768211455n, '340282366920938463463374607431768211456');", 1);
+
+    // Mixed safe BigInts use an exact f64 representation; values outside
+    // ±(2^53−1) retain the arbitrary-precision comparison.
+    try expectInt("(function(a,b){ if (a<b) return 1; return 2; })(9007199254740991n, 9007199254740992);", 1);
+    try expectInt("(function(a,b){ if (a>b) return 1; return 2; })(9007199254740993n, 9007199254740992);", 1);
+    try expectInt("(function(a,b){ if (a<b) return 1; return 2; })(9007199254740992, 9007199254740993n);", 1);
+    try expectInt("(function(a,b){ if (a<b) return 1; return 2; })(9007199254740994, 9007199254740993n);", 2);
+    try expectInt("(function(a,b){ if (a<b) return 1; return 2; })(-2n, -1);", 1);
+
+    // Zero, negative, and multi-limb BigInts take the general exact-order path.
+    try expectInt("(function(a,b){ if (a<b) return 1; return 2; })(0n, 1n);", 1);
+    try expectInt("(function(a,b){ if (a<b) return 1; return 2; })(-2n, -1n);", 1);
+    try expectInt("(function(a,b){ if (a<=b) return 1; return 2; })(-1n, -1n);", 1);
+    try expectInt("(function(a,b){ if (a>b) return 1; return 2; })(18446744073709551616n, 18446744073709551615n);", 1);
+    try expectInt("(function(a,b){ if (a>=b) return 1; return 2; })(18446744073709551616n, 18446744073709551616n);", 1);
+}
+
+test "interpreter: fused relational branches use the number hint for callable objects" {
+    try expectScriptStringWithBuiltins(
+        \\function lt(a, b) { if (a < b) return true; return false; }
+        \\function gt(a, b) { if (a > b) return true; return false; }
+        \\const value = function () {};
+        \\let hints = "";
+        \\value[Symbol.toPrimitive] = hint => { hints += hint; return hint === "number" ? 1 : 3; };
+        \\lt(value, 2) + ":" + gt(2, value) + ":" + hints;
+    , "true:true:numbernumber");
+}
+
+test "interpreter: BigInt/String relational propagates rope flatten OOM" {
+    const heap_mod = @import("../heap.zig");
+    var failing = std.testing.FailingAllocator.init(testing.allocator, .{});
+    var realm = Realm.initWithBytesAllocator(testing.allocator, failing.allocator());
+    defer {
+        failing.fail_index = std.math.maxInt(usize);
+        realm.deinit();
+    }
+
+    const lhs = heap_mod.taggedBigInt(try realm.heap.allocateBigInt(0));
+    const left = try realm.heap.allocateString("0000000000");
+    const right = try realm.heap.allocateString("0000000002");
+    const rope = try realm.heap.allocateConsString(left, right);
+    try testing.expect(!rope.isFlat());
+
+    failing.fail_index = failing.alloc_index;
+    try testing.expectError(
+        error.OutOfMemory,
+        lantern_arith.relational(.lt, &realm, lhs, Value.fromString(rope)),
+    );
+}
+
+test "interpreter: BigInt/String relational charges rope materialization" {
+    const heap_mod = @import("../heap.zig");
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+
+    const lhs = heap_mod.taggedBigInt(try realm.heap.allocateBigInt(0));
+    const left = try realm.heap.allocateString("0000000000");
+    const right = try realm.heap.allocateString("0000000002");
+    const rope = try realm.heap.allocateConsString(left, right);
+    try testing.expect(!rope.isFlat());
+
+    realm.setMemoryLimit(0);
+    try testing.expectError(
+        error.OutOfMemory,
+        lantern_arith.relational(.lt, &realm, lhs, Value.fromString(rope)),
+    );
+}
+
+test "interpreter: BigInt/String relational propagates full-parser OOM" {
+    const heap_mod = @import("../heap.zig");
+    var failing = std.testing.FailingAllocator.init(testing.allocator, .{});
+    var realm = Realm.init(failing.allocator());
+    defer {
+        failing.fail_index = std.math.maxInt(usize);
+        realm.deinit();
+    }
+
+    const lhs = heap_mod.taggedBigInt(try realm.heap.allocateBigInt(0));
+    const rhs = try realm.heap.allocateString("340282366920938463463374607431768211456");
+
+    failing.fail_index = failing.alloc_index;
+    try testing.expectError(
+        error.OutOfMemory,
+        lantern_arith.relational(.lt, &realm, lhs, Value.fromString(rhs)),
+    );
+}
+
+test "interpreter: BigInt/String radix boundaries retain canonical validation" {
+    const heap_mod = @import("../heap.zig");
+    const bigint_mod = @import("../bigint.zig");
+    const Check = struct {
+        fn less(realm: *Realm, lhs: Value, bytes: []const u8, expected: bool) !void {
+            const rhs = try realm.heap.allocateString(bytes);
+            const result = try lantern_arith.relational(.lt, realm, lhs, Value.fromString(rhs));
+            try testing.expect(result.isBool());
+            try testing.expectEqual(expected, result.asBool());
+        }
+    };
+
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    const max_value = try bigint_mod.parseStringToValue(
+        realm.heap.allocator,
+        "340282366920938463463374607431768211455",
+    );
+    const lhs = heap_mod.taggedBigInt(try realm.heap.allocateBigIntValue(max_value));
+
+    var bin_max: [2 + 128]u8 = undefined;
+    @memcpy(bin_max[0..2], "0b");
+    @memset(bin_max[2..], '1');
+    var bin_over: [2 + 129]u8 = undefined;
+    @memcpy(bin_over[0..3], "0b1");
+    @memset(bin_over[3..], '0');
+    var bin_leading_over: [2 + 4 + 129]u8 = undefined;
+    @memcpy(bin_leading_over[0..7], "0b00001");
+    @memset(bin_leading_over[7..], '0');
+    var bin_invalid = bin_over;
+    bin_invalid[bin_invalid.len - 1] = '2';
+    try Check.less(&realm, lhs, &bin_max, false);
+    try Check.less(&realm, lhs, &bin_over, true);
+    try Check.less(&realm, lhs, &bin_leading_over, true);
+    try Check.less(&realm, lhs, &bin_invalid, false);
+
+    var oct_max: [2 + 43]u8 = undefined;
+    @memcpy(oct_max[0..3], "0o3");
+    @memset(oct_max[3..], '7');
+    var oct_over: [2 + 43]u8 = undefined;
+    @memcpy(oct_over[0..3], "0o4");
+    @memset(oct_over[3..], '0');
+    var oct_leading_over: [2 + 4 + 43]u8 = undefined;
+    @memcpy(oct_leading_over[0..7], "0o00004");
+    @memset(oct_leading_over[7..], '0');
+    var oct_invalid = oct_over;
+    oct_invalid[oct_invalid.len - 1] = '8';
+    try Check.less(&realm, lhs, &oct_max, false);
+    try Check.less(&realm, lhs, &oct_over, true);
+    try Check.less(&realm, lhs, &oct_leading_over, true);
+    try Check.less(&realm, lhs, &oct_invalid, false);
+
+    var hex_max: [2 + 32]u8 = undefined;
+    @memcpy(hex_max[0..2], "0x");
+    @memset(hex_max[2..], 'f');
+    var hex_over: [2 + 33]u8 = undefined;
+    @memcpy(hex_over[0..3], "0x1");
+    @memset(hex_over[3..], '0');
+    var hex_leading_over: [2 + 4 + 33]u8 = undefined;
+    @memcpy(hex_leading_over[0..7], "0x00001");
+    @memset(hex_leading_over[7..], '0');
+    var hex_invalid = hex_over;
+    hex_invalid[hex_invalid.len - 1] = 'g';
+    try Check.less(&realm, lhs, &hex_max, false);
+    try Check.less(&realm, lhs, &hex_over, true);
+    try Check.less(&realm, lhs, &hex_leading_over, true);
+    try Check.less(&realm, lhs, &hex_invalid, false);
+
+    try Check.less(&realm, lhs, "340282366920938463463374607431768211455", false);
+    try Check.less(&realm, lhs, "340282366920938463463374607431768211456", true);
+    try Check.less(&realm, lhs, "0000340282366920938463463374607431768211456", true);
+    var decimal_invalid: [40]u8 = undefined;
+    @memset(&decimal_invalid, '9');
+    decimal_invalid[decimal_invalid.len - 1] = 'x';
+    try Check.less(&realm, lhs, &decimal_invalid, false);
+}
+
 test "interpreter: loose equality primitive coercion" {
     try expectInt("(function(a,b){ if(a==b) return 1; return 2; })(1, '1');", 1);
 }
@@ -2329,6 +2571,14 @@ test "later: BigInt() coerces from Number, String, Boolean" {
     , "42:100:1");
 }
 
+test "later: BigInt() coerces callable objects before NumberToBigInt" {
+    try expectScriptStringWithBuiltins(
+        \\const value = function () {};
+        \\value[Symbol.toPrimitive] = () => 7;
+        \\BigInt(value).toString();
+    , "7");
+}
+
 test "later: BigInt comparison + equality" {
     try expectScriptStringWithBuiltins(
         \\(5n === 5n) + ":" + (5n < 10n) + ":" + (5n === 5);
@@ -2364,8 +2614,9 @@ test "later: BigInt unsigned right-shift throws TypeError" {
 test "later: BigInt loose-equals String" {
     try expectScriptStringWithBuiltins(
         \\(0n == "") + ":" + (0n == "0") + ":" + (1n == "1") +
-        \\":" + (-1n == "-1") + ":" + (1n == "foo") + ":" + (1n == "1.5");
-    , "true:true:true:true:false:false");
+        \\":" + (-1n == "-1") + ":" + (1n == "foo") + ":" + (1n == "1.5") +
+        \\":" + (10n == "1_0") + ":" + (0n == "¿");
+    , "true:true:true:true:false:false:false:false");
 }
 
 test "later: BigInt loose-equals Number / Boolean" {
@@ -2405,6 +2656,34 @@ test "later: Int32Array view onto an ArrayBuffer" {
         \\i32[0] = 100; i32[1] = 200;
         \\i32.length + i32[0] + i32[1];
     , 304);
+}
+
+test "later: DataView ToBigInt rejects runtime numeric separators" {
+    try expectScriptStringWithBuiltins(
+        \\const view = new DataView(new ArrayBuffer(8));
+        \\let result = "no separator throw";
+        \\try { view.setBigInt64(0, "1_0"); } catch (e) { result = e.name; }
+        \\try { view.setBigInt64(0, "¿"); } catch (e) { result += ":" + e.name; }
+        \\result;
+    , "SyntaxError:SyntaxError");
+}
+
+test "later: DataView ToBigInt accepts arbitrary-precision strings" {
+    try expectScriptIntWithBuiltins(
+        \\const view = new DataView(new ArrayBuffer(8));
+        \\view.setBigInt64(0, "340282366920938463463374607431768211457");
+        \\view.getBigInt64(0) === 1n ? 1 : 0;
+    , 1);
+}
+
+test "later: DataView ToBigInt coerces callable objects" {
+    try expectScriptIntWithBuiltins(
+        \\const view = new DataView(new ArrayBuffer(8));
+        \\const value = function () {};
+        \\value[Symbol.toPrimitive] = () => 7n;
+        \\view.setBigInt64(0, value);
+        \\view.getBigInt64(0) === 7n ? 1 : 0;
+    , 1);
 }
 
 test "later: TypedArray fill" {

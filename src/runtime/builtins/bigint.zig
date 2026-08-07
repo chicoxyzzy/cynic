@@ -67,8 +67,8 @@ fn bigintConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
     // §21.2.1.1 BigInt(value) — step 1: prim = ? ToPrimitive(value, number).
     // Step 2: if prim is a Number, return ? NumberToBigInt(prim).
     // Step 3: else return ? ToBigInt(prim).
-    const prim = if (heap_mod.valueAsPlainObject(arg) != null)
-        intrinsics.toPrimitive(realm, arg, .number) catch return error.NativeThrew
+    const prim = if (heap_mod.isJSObject(arg))
+        try intrinsics.toPrimitive(realm, arg, .number)
     else
         arg;
     if (prim.isInt32()) {
@@ -104,7 +104,7 @@ pub fn toBigIntValue(realm: *Realm, v_in: Value) !Value {
     // §7.1.13 step 1 — ToPrimitive(arg, hint "number") for objects.
     // Without this, ToBigInt({ valueOf: () => 1n }) takes the
     // throwTypeError fall-through instead of returning 1n.
-    const v = if (heap_mod.valueAsPlainObject(v_in) != null)
+    const v = if (heap_mod.isJSObject(v_in))
         try intrinsics.toPrimitive(realm, v_in, .number)
     else
         v_in;
@@ -248,4 +248,26 @@ fn bigintAsUintN(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     const v = bigint_mod.asUintN(realm.heap.allocator, @intCast(bits_i), borrow(bi)) catch return error.OutOfMemory;
     const out = realm.heap.allocateBigIntValue(v) catch return error.OutOfMemory;
     return heap_mod.taggedBigInt(out);
+}
+
+test "BigInt constructor preserves callable ToPrimitive OOM" {
+    const Noop = struct {
+        fn call(_: *Realm, _: Value, _: []const Value) NativeError!Value {
+            return Value.undefined_;
+        }
+    };
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var realm = Realm.init(failing.allocator());
+    defer {
+        failing.fail_index = std.math.maxInt(usize);
+        realm.deinit();
+    }
+    const func = try realm.heap.allocateFunctionNative(&realm, Noop.call, 0, "callable");
+    const arg = heap_mod.taggedFunction(func);
+
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(
+        error.OutOfMemory,
+        bigintConstructor(&realm, Value.undefined_, &.{arg}),
+    );
 }
