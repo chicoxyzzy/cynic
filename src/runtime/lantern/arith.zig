@@ -976,19 +976,43 @@ pub fn relational(comptime op: RelOp, realm: *Realm, lhs: Value, rhs: Value) Nat
     //
     // Symbol operands of any flavour throw TypeError (§7.1.4
     // ToNumber, §7.1.13 ToNumeric — Symbols can't be numerified).
-    // Primitive Number pairs need none of the Symbol / BigInt / String
-    // machinery below. Native comparisons also implement the required
-    // undefined-to-false behaviour for NaN and order signed zero correctly.
+    // Primitive Number, BigInt, and String pairs need none of the Symbol /
+    // mixed-type machinery below. Native Number comparisons also implement
+    // the required undefined-to-false behaviour for NaN and order signed zero
+    // correctly.
+    if (heap_mod.valueAsBigInt(lhs)) |a| {
+        if (heap_mod.valueAsBigInt(rhs)) |b| {
+            return Value.fromBool(applyRelOpOrder(op, bigint_mod.compare(borrowBigInt(a), borrowBigInt(b))));
+        }
+    }
     if (lhs.isNumber() and rhs.isNumber()) {
         return Value.fromBool(applyRelOpFloat(op, lhs.numberToDouble(), rhs.numberToDouble()));
+    }
+    if (lhs.isString() and rhs.isString()) {
+        const a: *JSString = @ptrCast(@alignCast(lhs.asString()));
+        const b: *JSString = @ptrCast(@alignCast(rhs.asString()));
+        return compareStringPair(op, a, b);
     }
 
     return relationalSlow(op, realm, lhs, rhs);
 }
 
-/// The coercion-complete, non-Number remainder of §7.2.13. The operator is
-/// runtime-selected so Symbol, BigInt, String, and conversion handling has one
-/// outlined copy rather than four copies in the hot Number entry points.
+/// §6.1.4 — Strings compare as sequences of UTF-16 code units rather than
+/// their WTF-8 storage bytes.
+noinline fn compareStringPair(op: RelOp, a: *const JSString, b: *const JSString) Value {
+    const cmp = utf16.compareCodeUnits(a.flatBytes(), b.flatBytes());
+    const result = switch (op) {
+        .lt => cmp == .lt,
+        .gt => cmp == .gt,
+        .le => cmp != .gt,
+        .ge => cmp != .lt,
+    };
+    return Value.fromBool(result);
+}
+
+/// The coercion-complete remainder of §7.2.13. The operator is runtime-selected
+/// so Symbol, mixed BigInt, String, and conversion handling has one outlined copy
+/// rather than four copies in the hot primitive entry points.
 noinline fn relationalSlow(op: RelOp, realm: *Realm, lhs: Value, rhs: Value) NativeError!Value {
     if (heap_mod.valueAsSymbol(lhs) != null or heap_mod.valueAsSymbol(rhs) != null) {
         realm.pending_exception = try intrinsics_mod.newTypeError(realm, "Cannot convert a Symbol value to a number");
@@ -996,10 +1020,6 @@ noinline fn relationalSlow(op: RelOp, realm: *Realm, lhs: Value, rhs: Value) Nat
     }
 
     if (heap_mod.valueAsBigInt(lhs)) |a| {
-        if (heap_mod.valueAsBigInt(rhs)) |b| {
-            // §6.1.6.2.12 BigInt::lessThan — exact mathematical order.
-            return Value.fromBool(applyRelOpOrder(op, bigint_mod.compare(borrowBigInt(a), borrowBigInt(b))));
-        }
         // §7.2.13 step 3.b — BigInt vs String: StringToBigInt the
         // string; on failure the result is undefined → false.
         if (rhs.isString()) {
@@ -1025,20 +1045,6 @@ noinline fn relationalSlow(op: RelOp, realm: *Realm, lhs: Value, rhs: Value) Nat
         const an = toNumber(lhs);
         if (std.math.isNan(an)) return Value.false_;
         return Value.fromBool(applyRelOpDouble(realm.heap.allocator, op, b, an, false));
-    }
-    if (lhs.isString() and rhs.isString()) {
-        // §6.1.4 — Strings are sequences of 16-bit code units;
-        // compare by UTF-16 code-unit value, not WTF-8 byte order.
-        const ls: *JSString = @ptrCast(@alignCast(lhs.asString()));
-        const rs: *JSString = @ptrCast(@alignCast(rhs.asString()));
-        const cmp = utf16.compareCodeUnits(ls.flatBytes(), rs.flatBytes());
-        const result = switch (op) {
-            .lt => cmp == .lt,
-            .gt => cmp == .gt,
-            .le => cmp != .gt,
-            .ge => cmp != .lt,
-        };
-        return Value.fromBool(result);
     }
     const a = toNumber(lhs);
     const b = toNumber(rhs);
