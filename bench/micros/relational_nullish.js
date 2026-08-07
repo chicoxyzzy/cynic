@@ -13,4 +13,4 @@ function run(left, right, limit) {
     return hits;
 }
 
-print(run(undefined, null, 1_000_000));
+print(run(undefined, null, 3_000_000));
