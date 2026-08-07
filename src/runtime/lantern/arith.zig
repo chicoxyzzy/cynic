@@ -983,6 +983,13 @@ pub fn relational(comptime op: RelOp, realm: *Realm, lhs: Value, rhs: Value) Nat
         return Value.fromBool(applyRelOpFloat(op, lhs.numberToDouble(), rhs.numberToDouble()));
     }
 
+    return relationalSlow(op, realm, lhs, rhs);
+}
+
+/// The coercion-complete, non-Number remainder of §7.2.13. The operator is
+/// runtime-selected so Symbol, BigInt, String, and conversion handling has one
+/// outlined copy rather than four copies in the hot Number entry points.
+noinline fn relationalSlow(op: RelOp, realm: *Realm, lhs: Value, rhs: Value) NativeError!Value {
     if (heap_mod.valueAsSymbol(lhs) != null or heap_mod.valueAsSymbol(rhs) != null) {
         realm.pending_exception = try intrinsics_mod.newTypeError(realm, "Cannot convert a Symbol value to a number");
         return error.NativeThrew;
@@ -1039,7 +1046,7 @@ pub fn relational(comptime op: RelOp, realm: *Realm, lhs: Value, rhs: Value) Nat
     return Value.fromBool(applyRelOpFloat(op, a, b));
 }
 
-inline fn applyRelOpFloat(comptime op: RelOp, a: f64, b: f64) bool {
+inline fn applyRelOpFloat(op: RelOp, a: f64, b: f64) bool {
     return switch (op) {
         .lt => a < b,
         .gt => a > b,
@@ -1050,7 +1057,7 @@ inline fn applyRelOpFloat(comptime op: RelOp, a: f64, b: f64) bool {
 
 /// Map a §7.2.13 mathematical `Order` (lhs vs rhs) to the boolean
 /// result of the requested relational operator.
-inline fn applyRelOpOrder(comptime op: RelOp, ord: std.math.Order) bool {
+inline fn applyRelOpOrder(op: RelOp, ord: std.math.Order) bool {
     return switch (op) {
         .lt => ord == .lt,
         .gt => ord == .gt,
@@ -1062,7 +1069,7 @@ inline fn applyRelOpOrder(comptime op: RelOp, ord: std.math.Order) bool {
 /// §7.2.13 — relational compare a BigInt against a finite Number
 /// by exact mathematical value. `bigint_is_lhs` records operand
 /// order so `<` / `>` come out right.
-fn applyRelOpDouble(allocator: std.mem.Allocator, comptime op: RelOp, bi: *const JSBigInt, d: f64, bigint_is_lhs: bool) bool {
+fn applyRelOpDouble(allocator: std.mem.Allocator, op: RelOp, bi: *const JSBigInt, d: f64, bigint_is_lhs: bool) bool {
     // `bigintCompareDouble` already accounts for the double's
     // fractional part, returning the exact (bigint, double) order.
     var ord = bigintCompareDouble(allocator, bi, d);

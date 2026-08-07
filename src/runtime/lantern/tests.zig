@@ -695,12 +695,16 @@ test "interpreter: fused relational branches map primitive Number operators" {
     // operator's true and false outcomes distinguishable. These `if` forms
     // compile to JmpIfNotLt/Le/Gt/Ge rather than standalone comparisons.
     try expectInt("(function(a,b){ if (a<b) return 1; return 2; })(1.5, 2);", 1);
+    try expectInt("(function(a,b){ if (a<b) return 1; return 2; })(2.5, 2.5);", 2);
     try expectInt("(function(a,b){ if (a<b) return 1; return 2; })(2.5, 2);", 2);
     try expectInt("(function(a,b){ if (a<=b) return 1; return 2; })(1.5, 2);", 1);
+    try expectInt("(function(a,b){ if (a<=b) return 1; return 2; })(2.5, 2.5);", 1);
     try expectInt("(function(a,b){ if (a<=b) return 1; return 2; })(2.5, 2);", 2);
     try expectInt("(function(a,b){ if (a>b) return 1; return 2; })(2.5, 2);", 1);
+    try expectInt("(function(a,b){ if (a>b) return 1; return 2; })(2.5, 2.5);", 2);
     try expectInt("(function(a,b){ if (a>b) return 1; return 2; })(1.5, 2);", 2);
     try expectInt("(function(a,b){ if (a>=b) return 1; return 2; })(2.5, 2);", 1);
+    try expectInt("(function(a,b){ if (a>=b) return 1; return 2; })(2.5, 2.5);", 1);
     try expectInt("(function(a,b){ if (a>=b) return 1; return 2; })(1.5, 2);", 2);
 }
 
