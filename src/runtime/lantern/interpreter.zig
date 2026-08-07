@@ -1453,7 +1453,7 @@ pub fn runFrames(
     allocator: std.mem.Allocator,
     realm: *Realm,
     frames: *std.ArrayListUnmanaged(CallFrame),
-) RunError!RunResult {
+) align(256) RunError!RunResult {
     // §spec — native re-entry stack guard. A builtin that called back
     // into JS (accessor getter, `.map` callback, `Reflect.apply`,
     // Proxy trap, promise drain) re-entered here on a fresh native
