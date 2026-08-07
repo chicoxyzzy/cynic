@@ -102,10 +102,10 @@ Run one fixture with `zig build bench -- --filter=<name>`; combine it with
 | `relational_object` | 250,000 | Coercible-object/Double `JmpIfNotLt8` execution. A stable `valueOf` operand pins §7.2.13 IsLessThan / §7.1.1 ToPrimitive exactly once before the shared primitive-Number comparison path; the outer loop uses truthiness rather than a second relational condition. |
 | `relational_string` | 1,000,000 | Primitive String/String `JmpIfNotLt8` execution. Stable parameter operands pin §7.2.13's lexicographic UTF-16 path and guard against Number-focused fast paths slowing other primitive comparisons. |
 | `relational_bigint` | 1,000,000 | Primitive BigInt/BigInt `JmpIfNotLt8` execution. Stable parameter operands pin §6.1.6.2.12 exact mathematical ordering and guard against outlined coercion paths slowing native BigInt comparisons. |
-| `relational_boolean` | 1,000,000 | Primitive Boolean/Boolean `JmpIfNotLt8` execution. Pins the cheap numeric primitive fallback without object coercion or heap access. |
+| `relational_boolean` | 3,000,000 | Primitive Boolean/Boolean `JmpIfNotLt8` execution. Pins the cheap numeric primitive fallback without object coercion or heap access. |
 | `relational_bigint_number` | 1,000,000 | Mixed BigInt/Number `JmpIfNotLt8` execution. Pins exact mathematical cross-type ordering without String parsing or object coercion. |
-| `relational_nullish` | 1,000,000 | Undefined/null `JmpIfNotLt8` execution. Pins primitive numeric conversion and the §7.2.13 undefined-to-false result. |
-| `relational_string_number` | 1,000,000 | Mixed String/Number `JmpIfNotLt8` execution. Pins primitive numeric conversion of a String without user-code re-entry. |
+| `relational_nullish` | 3,000,000 | Undefined/null `JmpIfNotLt8` execution. Pins primitive numeric conversion and the §7.2.13 undefined-to-false result. |
+| `relational_string_number` | 2,000,000 | Mixed String/Number `JmpIfNotLt8` execution. Pins primitive numeric conversion of a String without user-code re-entry. |
 | `mul_loop` | 3,000,000 | Numeric `Op.mul` dispatch with an Int32/Double raw-operand pair and a Double result. Pins Lantern's one-byte per-site operand profile plus the fused Number multiplication path; the changing multiplicand prevents constant folding. |
 | `div_loop` | 3,000,000 | Numeric `Op.div` dispatch with Int32 raw operands and a Double result. Pins Lantern's one-byte per-site operand profile plus the fused Number division path; the changing numerator prevents constant folding. |
 | `mod_loop` | 3,000,000 | Numeric `Op.mod` dispatch with two Int32 operands. Pins Lantern's direct truncating Number-remainder path; the changing dividend prevents constant folding, while an accumulated checksum keeps every result observable. |

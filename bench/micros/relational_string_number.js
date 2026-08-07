@@ -13,4 +13,4 @@ function run(left, right, limit) {
     return hits;
 }
 
-print(run('1', 2, 1_000_000));
+print(run('1', 2, 2_000_000));
