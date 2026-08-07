@@ -14,7 +14,6 @@ const std = @import("std");
 
 const Realm = @import("../realm.zig").Realm;
 const Value = @import("../value.zig").Value;
-const JSString = @import("../string.zig").JSString;
 const JSObject = @import("../object.zig").JSObject;
 const JSFunction = @import("../function.zig").JSFunction;
 const NativeError = @import("../function.zig").NativeError;
@@ -3342,36 +3341,16 @@ fn dvToNumber(realm: *Realm, v: Value) NativeError!Value {
     return coerceToNumber(prim);
 }
 
-/// §7.1.13 ToBigInt — DataView's BigInt setters need this. Inlined
-/// here because `bigint.zig` keeps `toBigIntValue` private. Returns
-/// the i64 value already truncated for storage.
+/// §7.1.13 ToBigInt — DataView's BigInt setters use the canonical shared
+/// conversion, then truncate the resulting mathematical value for storage.
 fn dvToBigInt64(realm: *Realm, v: Value) NativeError!i64 {
-    // ToPrimitive(value, hint Number) — the spec says "default" hint
-    // for ToBigInt actually, but for our purposes (no Date/Symbol
-    // detection), `.number` is fine since BigInt-flavoured `valueOf`
-    // returns a BigInt directly.
-    const prim = try intrinsics.toPrimitive(realm, v, .number);
-    if (heap_mod.valueAsBigInt(prim)) |bi| return bi.toI64Truncating();
-    if (prim.isBool()) return if (prim.asBool()) 1 else 0;
-    if (prim.isString()) {
-        const s: *JSString = @ptrCast(@alignCast(prim.asString()));
-        const trimmed = std.mem.trim(u8, s.flatBytes(), " \t\n\r");
-        if (trimmed.len == 0) return 0;
-        var negate = false;
-        var rest = trimmed;
-        if (rest[0] == '-') {
-            negate = true;
-            rest = rest[1..];
-        } else if (rest[0] == '+') {
-            rest = rest[1..];
-        }
-        if (rest.len == 0) return throwTypeError(realm, "Cannot convert string to BigInt");
-        const parsed = std.fmt.parseInt(i128, rest, 0) catch return throwTypeError(realm, "Cannot convert string to BigInt");
-        const final: i128 = if (negate) -parsed else parsed;
-        return @as(i64, @truncate(final));
-    }
-    // Numbers, null, undefined, Symbol → TypeError per §7.1.13.
-    return throwTypeError(realm, "Cannot convert value to BigInt");
+    const coerced = toBigIntValue(realm, v) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.NativeThrew,
+    };
+    const bigint = heap_mod.valueAsBigInt(coerced) orelse
+        return throwTypeError(realm, "ToBigInt did not produce a BigInt");
+    return bigint.toI64Truncating();
 }
 
 fn dvOf(this_value: Value) ?ObjMod.DataView {

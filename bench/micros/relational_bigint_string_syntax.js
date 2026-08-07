@@ -1,4 +1,4 @@
-// Non-decimal StringToBigInt relational control. Three invocations keep
+// StringToBigInt syntax-variant relational control. Three invocations keep
 // whitespace, signed decimal, and radix-prefixed spellings in the measured
 // path while leaving one BigInt/String JmpIfNotLt8 per iteration.
 'use strict';
