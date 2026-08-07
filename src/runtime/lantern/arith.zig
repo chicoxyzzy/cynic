@@ -871,6 +871,28 @@ pub fn looseEq(allocator: std.mem.Allocator, a: Value, b: Value) bool {
     return false;
 }
 
+/// Runtime §7.2.14 BigInt/String equality. The compiler-only `looseEq`
+/// helper never sees BigInt literals; the interpreter routes this allocating
+/// pair here so rope materialization and parser OOM remain host errors instead
+/// of being mistaken for the empty string or an ordinary parse mismatch.
+pub noinline fn looseEqBigIntString(realm: *Realm, a: Value, b: Value) error{OutOfMemory}!bool {
+    const Pair = struct { bigint: *const JSBigInt, string: *JSString };
+    const pair: ?Pair = if (heap_mod.valueAsBigInt(a)) |bigint|
+        if (b.isString()) .{ .bigint = bigint, .string = @ptrCast(@alignCast(b.asString())) } else null
+    else if (heap_mod.valueAsBigInt(b)) |bigint|
+        if (a.isString()) .{ .bigint = bigint, .string = @ptrCast(@alignCast(a.asString())) } else null
+    else
+        null;
+    const resolved = pair orelse return false;
+    const bytes = try realm.heap.flattenString(resolved.string);
+    const parsed = bigint_mod.parseStringToValue(realm.heap.allocator, bytes) catch |err| switch (err) {
+        error.InvalidBigInt => return false,
+        error.OutOfMemory => return error.OutOfMemory,
+    };
+    defer if (parsed.limbs.len != 0) realm.heap.allocator.free(parsed.limbs);
+    return bigint_mod.equals(parsed, borrowBigInt(resolved.bigint));
+}
+
 /// §7.1.14 StringToBigInt + §7.2.14 BigInt/String comparison.
 /// Returns true iff `s` parses (per StringToBigInt — optional
 /// sign + decimal / hex / oct / bin, whitespace-trimmed) into a
@@ -1254,13 +1276,7 @@ noinline fn compareBigIntString(
     string: *const JSString,
     bigint_is_lhs: bool,
 ) NativeError!Value {
-    const bytes = string.flatBytesIfFlat() orelse bytes: {
-        try heap.charge(string.byte_len);
-        break :bytes @constCast(string).flatten(heap.bytes_allocator) catch |err| {
-            heap.discharge(string.byte_len);
-            return err;
-        };
-    };
+    const bytes = try heap.flattenString(string);
     var storage: [2]bigint_mod.Limb = undefined;
     switch (parseSmallStringToBigInt(bytes, &storage)) {
         .value => |parsed| {

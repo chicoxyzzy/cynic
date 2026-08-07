@@ -98,9 +98,10 @@ the corpus under the relevant section's directory before adding.
 ### DataView BigInt setters used a duplicate, i128-bounded string parser
 
 - **Fixed in:** TBD
-- **Spec:** §25.3.4.20 DataView.prototype.setBigInt64 and §7.1.13
-  ToBigInt — a String input is parsed by StringToBigInt at arbitrary
-  precision before SetViewValue stores the low 64 bits.
+- **Spec:** §25.3.4.16 DataView.prototype.setBigInt64,
+  §25.3.4.17 DataView.prototype.setBigUint64, and §7.1.13 ToBigInt —
+  a String input is parsed by StringToBigInt at arbitrary precision before
+  §25.3.1.6 SetViewValue stores the low 64 bits.
 - **Reproducer:**
   ```js
   const view = new DataView(new ArrayBuffer(8));
