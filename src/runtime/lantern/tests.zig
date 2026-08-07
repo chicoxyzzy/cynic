@@ -796,6 +796,46 @@ test "interpreter: fused relational branches use the number hint for callable ob
     , "true:true:numbernumber");
 }
 
+test "interpreter: callable ToPrimitive resolves accessor descriptors" {
+    try expectScriptStringWithBuiltins(
+        \\const bigintValue = function () {};
+        \\let bigintGets = 0;
+        \\Object.defineProperty(bigintValue, Symbol.toPrimitive, {
+        \\  get() { bigintGets += 1; return hint => hint === "number" ? 7 : 9; }
+        \\});
+        \\const relationalValue = function () {};
+        \\let relationalGets = 0;
+        \\let hints = "";
+        \\Object.defineProperty(relationalValue, Symbol.toPrimitive, {
+        \\  get() { relationalGets += 1; return hint => { hints += hint; return 1; }; }
+        \\});
+        \\const ordinaryValue = function () {};
+        \\let valueOfGets = 0;
+        \\Object.defineProperty(ordinaryValue, "valueOf", {
+        \\  get() { valueOfGets += 1; return () => -1n; }
+        \\});
+        \\BigInt(bigintValue).toString() + ":" + (relationalValue < 2) + ":" +
+        \\  BigInt.asIntN(8, ordinaryValue).toString() + ":" + bigintGets + ":" +
+        \\  relationalGets + ":" + valueOfGets + ":" + hints;
+    , "7:true:-1:1:1:1:number");
+}
+
+test "interpreter: callable ToPrimitive propagates accessor throws" {
+    try expectScriptStringWithBuiltins(
+        \\const exoticMarker = {};
+        \\const exotic = function () {};
+        \\Object.defineProperty(exotic, Symbol.toPrimitive, { get() { throw exoticMarker; } });
+        \\let exoticCaught = false;
+        \\try { exotic < 2; } catch (error) { exoticCaught = error === exoticMarker; }
+        \\const ordinaryMarker = {};
+        \\const ordinary = function () {};
+        \\Object.defineProperty(ordinary, "valueOf", { get() { throw ordinaryMarker; } });
+        \\let ordinaryCaught = false;
+        \\try { BigInt.asUintN(8, ordinary); } catch (error) { ordinaryCaught = error === ordinaryMarker; }
+        \\exoticCaught + ":" + ordinaryCaught;
+    , "true:true");
+}
+
 test "interpreter: BigInt/String relational propagates rope flatten OOM" {
     const heap_mod = @import("../heap.zig");
     var failing = std.testing.FailingAllocator.init(testing.allocator, .{});
@@ -942,6 +982,63 @@ test "interpreter: loose inequality polarity" {
 
 test "interpreter: loose equality nullish pair" {
     try expectInt("(function(a,b){ if(a==b) return 1; return 2; })(null, void 0);", 1);
+}
+
+test "interpreter: BigInt/String loose equality bytecode propagates rope OOM" {
+    const heap_mod = @import("../heap.zig");
+    var failing = std.testing.FailingAllocator.init(testing.allocator, .{});
+    var realm = Realm.initWithBytesAllocator(testing.allocator, failing.allocator());
+    defer {
+        failing.fail_index = std.math.maxInt(usize);
+        realm.deinit();
+    }
+    const source = "HOST_BIGINT == HOST_STRING;";
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const program = try parser_mod.parseScript(arena.allocator(), source, null);
+    var chunk = try compileScriptAsChunk(testing.allocator, &realm, &program, source, null);
+    defer chunk.deinit(testing.allocator);
+
+    const lhs = heap_mod.taggedBigInt(try realm.heap.allocateBigInt(1));
+    const left = try realm.heap.allocateString("0000000000");
+    const right = try realm.heap.allocateString("0000000001");
+    const rope = try realm.heap.allocateConsString(left, right);
+    try testing.expect(!rope.isFlat());
+    try realm.globals.put(realm.allocator, "HOST_BIGINT", lhs);
+    try realm.globals.put(realm.allocator, "HOST_STRING", Value.fromString(rope));
+
+    failing.fail_index = failing.alloc_index;
+    try testing.expectError(
+        error.OutOfMemory,
+        run(testing.allocator, &realm, &chunk),
+    );
+}
+
+test "interpreter: BigInt/String loose equality bytecode charges rope materialization" {
+    const heap_mod = @import("../heap.zig");
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+
+    const source = "HOST_BIGINT == HOST_STRING;";
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const program = try parser_mod.parseScript(arena.allocator(), source, null);
+    var chunk = try compileScriptAsChunk(testing.allocator, &realm, &program, source, null);
+    defer chunk.deinit(testing.allocator);
+
+    const lhs = heap_mod.taggedBigInt(try realm.heap.allocateBigInt(1));
+    const left = try realm.heap.allocateString("0000000000");
+    const right = try realm.heap.allocateString("0000000001");
+    const rope = try realm.heap.allocateConsString(left, right);
+    try testing.expect(!rope.isFlat());
+    try realm.globals.put(realm.allocator, "HOST_BIGINT", lhs);
+    try realm.globals.put(realm.allocator, "HOST_STRING", Value.fromString(rope));
+
+    realm.setMemoryLimit(0);
+    try testing.expectError(
+        error.OutOfMemory,
+        run(testing.allocator, &realm, &chunk),
+    );
 }
 
 test "interpreter: loose equality snapshots lhs before rhs" {
