@@ -68,7 +68,7 @@ fn bigintConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
     // Step 2: if prim is a Number, return ? NumberToBigInt(prim).
     // Step 3: else return ? ToBigInt(prim).
     const prim = if (heap_mod.isJSObject(arg))
-        intrinsics.toPrimitive(realm, arg, .number) catch return error.NativeThrew
+        try intrinsics.toPrimitive(realm, arg, .number)
     else
         arg;
     if (prim.isInt32()) {
