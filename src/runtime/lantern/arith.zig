@@ -30,6 +30,16 @@ fn borrowBigInt(bi: *const JSBigInt) BigIntValue {
     return .{ .sign = bi.sign, .limbs = bi.limbs };
 }
 
+/// Return an exact Number representation when the BigInt is within
+/// Number.MAX_SAFE_INTEGER. This is safe for mixed BigInt/Number comparison:
+/// both operands then denote their exact mathematical values as `f64`.
+inline fn safeBigIntAsDouble(bi: *const JSBigInt) ?f64 {
+    if (bi.limbs.len == 0) return 0.0;
+    if (bi.limbs.len != 1 or bi.limbs[0] > 9_007_199_254_740_991) return null;
+    const magnitude: f64 = @floatFromInt(bi.limbs[0]);
+    return if (bi.sign) -magnitude else magnitude;
+}
+
 pub const RunError = @import("interpreter.zig").RunError;
 pub const NativeError = @import("../function.zig").NativeError;
 const makeTypeError = @import("interpreter.zig").makeTypeError;
@@ -984,22 +994,36 @@ pub fn relational(comptime op: RelOp, realm: *Realm, lhs: Value, rhs: Value) Nat
         if (heap_mod.valueAsBigInt(rhs)) |b| {
             // Small positive BigInts dominate ordinary counters and ids; avoid
             // the arbitrary-precision comparison walk for one-limb pairs.
-            const ord: std.math.Order = if (!a.sign and !b.sign and a.limbs.len == 1 and b.limbs.len == 1)
-                if (a.limbs[0] < b.limbs[0]) .lt else if (a.limbs[0] > b.limbs[0]) .gt else .eq
-            else
-                bigint_mod.compare(borrowBigInt(a), borrowBigInt(b));
-            return Value.fromBool(applyRelOpOrder(op, ord));
+            if (!a.sign and !b.sign and a.limbs.len == 1 and b.limbs.len == 1) {
+                return Value.fromBool(switch (op) {
+                    .lt => a.limbs[0] < b.limbs[0],
+                    .gt => a.limbs[0] > b.limbs[0],
+                    .le => a.limbs[0] <= b.limbs[0],
+                    .ge => a.limbs[0] >= b.limbs[0],
+                });
+            }
+            return Value.fromBool(applyRelOpOrder(op, bigint_mod.compare(borrowBigInt(a), borrowBigInt(b))));
         }
-        if (!rhs.isObject() and !rhs.isString()) {
+        if (rhs.isString()) {
+            const s: *JSString = @ptrCast(@alignCast(rhs.asString()));
+            return compareBigIntString(realm.heap.allocator, op, a, s, true);
+        }
+        if (!rhs.isObject()) {
             const b = toNumber(rhs);
             if (std.math.isNan(b)) return Value.false_;
+            if (safeBigIntAsDouble(a)) |small| return Value.fromBool(applyRelOpFloat(op, small, b));
             return Value.fromBool(applyRelOpDouble(realm.heap.allocator, op, a, b, true));
         }
     }
     if (heap_mod.valueAsBigInt(rhs)) |b| {
-        if (!lhs.isObject() and !lhs.isString()) {
+        if (lhs.isString()) {
+            const s: *JSString = @ptrCast(@alignCast(lhs.asString()));
+            return compareBigIntString(realm.heap.allocator, op, b, s, false);
+        }
+        if (!lhs.isObject()) {
             const a = toNumber(lhs);
             if (std.math.isNan(a)) return Value.false_;
+            if (safeBigIntAsDouble(b)) |small| return Value.fromBool(applyRelOpFloat(op, a, small));
             return Value.fromBool(applyRelOpDouble(realm.heap.allocator, op, b, a, false));
         }
     }
@@ -1019,6 +1043,52 @@ pub fn relational(comptime op: RelOp, realm: *Realm, lhs: Value, rhs: Value) Nat
     }
 
     return relationalSlow(op, realm, lhs, rhs);
+}
+
+/// Fast-path the canonical decimal form used by ordinary counters and ids.
+/// Other StringToBigInt grammar forms and magnitudes fall back to the complete
+/// parser below.
+inline fn parseSmallDecimalBigInt(bytes: []const u8, storage: *[1]bigint_mod.Limb) ?BigIntValue {
+    if (bytes.len == 0) return null;
+    var magnitude: u64 = 0;
+    for (bytes) |byte| {
+        if (byte < '0' or byte > '9') return null;
+        const product = @mulWithOverflow(magnitude, 10);
+        if (product[1] != 0) return null;
+        const sum = @addWithOverflow(product[0], @as(u64, byte - '0'));
+        if (sum[1] != 0) return null;
+        magnitude = sum[0];
+    }
+    storage[0] = magnitude;
+    return .{ .sign = false, .limbs = storage[0..@intFromBool(magnitude != 0)] };
+}
+
+/// §7.2.13 StringToBigInt comparison for either operand order. The small
+/// canonical-decimal case avoids a temporary limb allocation; every other
+/// accepted spelling retains the full arbitrary-precision parser.
+noinline fn compareBigIntString(
+    allocator: std.mem.Allocator,
+    op: RelOp,
+    bigint: *const JSBigInt,
+    string: *const JSString,
+    bigint_is_lhs: bool,
+) Value {
+    var storage: [1]bigint_mod.Limb = undefined;
+    if (parseSmallDecimalBigInt(string.flatBytes(), &storage)) |parsed| {
+        const ord = if (bigint_is_lhs)
+            bigint_mod.compare(borrowBigInt(bigint), parsed)
+        else
+            bigint_mod.compare(parsed, borrowBigInt(bigint));
+        return Value.fromBool(applyRelOpOrder(op, ord));
+    }
+
+    const parsed = bigint_mod.parseStringToValue(allocator, string.flatBytes()) catch return Value.false_;
+    defer if (parsed.limbs.len != 0) allocator.free(parsed.limbs);
+    const ord = if (bigint_is_lhs)
+        bigint_mod.compare(borrowBigInt(bigint), parsed)
+    else
+        bigint_mod.compare(parsed, borrowBigInt(bigint));
+    return Value.fromBool(applyRelOpOrder(op, ord));
 }
 
 /// §6.1.4 — Strings compare as sequences of UTF-16 code units rather than
@@ -1044,14 +1114,6 @@ noinline fn relationalSlow(op: RelOp, realm: *Realm, lhs: Value, rhs: Value) Nat
     }
 
     if (heap_mod.valueAsBigInt(lhs)) |a| {
-        // §7.2.13 step 3.b — BigInt vs String: StringToBigInt the
-        // string; on failure the result is undefined → false.
-        if (rhs.isString()) {
-            const s: *JSString = @ptrCast(@alignCast(rhs.asString()));
-            const parsed = bigint_mod.parseStringToValue(realm.heap.allocator, s.flatBytes()) catch return Value.false_;
-            defer if (parsed.limbs.len != 0) realm.heap.allocator.free(parsed.limbs);
-            return Value.fromBool(applyRelOpOrder(op, bigint_mod.compare(borrowBigInt(a), parsed)));
-        }
         // §7.2.13 — BigInt vs Number: compare mathematical values
         // exactly (NOT by coercion). A NaN on the Number side makes
         // the comparison undefined → false.
@@ -1060,12 +1122,6 @@ noinline fn relationalSlow(op: RelOp, realm: *Realm, lhs: Value, rhs: Value) Nat
         return Value.fromBool(applyRelOpDouble(realm.heap.allocator, op, a, bn, true));
     }
     if (heap_mod.valueAsBigInt(rhs)) |b| {
-        if (lhs.isString()) {
-            const s: *JSString = @ptrCast(@alignCast(lhs.asString()));
-            const parsed = bigint_mod.parseStringToValue(realm.heap.allocator, s.flatBytes()) catch return Value.false_;
-            defer if (parsed.limbs.len != 0) realm.heap.allocator.free(parsed.limbs);
-            return Value.fromBool(applyRelOpOrder(op, bigint_mod.compare(parsed, borrowBigInt(b))));
-        }
         const an = toNumber(lhs);
         if (std.math.isNan(an)) return Value.false_;
         return Value.fromBool(applyRelOpDouble(realm.heap.allocator, op, b, an, false));

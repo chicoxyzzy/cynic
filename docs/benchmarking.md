@@ -104,6 +104,8 @@ Run one fixture with `zig build bench -- --filter=<name>`; combine it with
 | `relational_bigint` | 1,000,000 | Primitive BigInt/BigInt `JmpIfNotLt8` execution. Stable parameter operands pin §6.1.6.2.12 exact mathematical ordering and guard against outlined coercion paths slowing native BigInt comparisons. |
 | `relational_boolean` | 3,000,000 | Primitive Boolean/Boolean `JmpIfNotLt8` execution. Pins the cheap numeric primitive fallback without object coercion or heap access. |
 | `relational_bigint_number` | 1,000,000 | Mixed BigInt/Number `JmpIfNotLt8` execution. Pins exact mathematical cross-type ordering without String parsing or object coercion. |
+| `relational_bigint_string` | 1,000,000 | Mixed BigInt/String `JmpIfNotLt8` execution. Pins §7.2.13 StringToBigInt parsing and exact mathematical ordering without object coercion. |
+| `relational_string_bigint` | 1,000,000 | Mixed String/BigInt `JmpIfNotLt8` execution. Pins the reversed §7.2.13 StringToBigInt operand order and exact mathematical comparison. |
 | `relational_nullish` | 3,000,000 | Undefined/null `JmpIfNotLt8` execution. Pins primitive numeric conversion and the §7.2.13 undefined-to-false result. |
 | `relational_string_number` | 2,000,000 | Mixed String/Number `JmpIfNotLt8` execution. Pins primitive numeric conversion of a String without user-code re-entry. |
 | `mul_loop` | 3,000,000 | Numeric `Op.mul` dispatch with an Int32/Double raw-operand pair and a Double result. Pins Lantern's one-byte per-site operand profile plus the fused Number multiplication path; the changing multiplicand prevents constant folding. |

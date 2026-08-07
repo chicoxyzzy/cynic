@@ -96,6 +96,8 @@ const BENCHES = [_]Bench{
     .{ .name = "relational_bigint", .path = "bench/micros/relational_bigint.js" },
     .{ .name = "relational_boolean", .path = "bench/micros/relational_boolean.js" },
     .{ .name = "relational_bigint_number", .path = "bench/micros/relational_bigint_number.js" },
+    .{ .name = "relational_bigint_string", .path = "bench/micros/relational_bigint_string.js" },
+    .{ .name = "relational_string_bigint", .path = "bench/micros/relational_string_bigint.js" },
     .{ .name = "relational_nullish", .path = "bench/micros/relational_nullish.js" },
     .{ .name = "relational_string_number", .path = "bench/micros/relational_string_number.js" },
     .{ .name = "mul_loop", .path = "bench/micros/mul_loop.js" },
