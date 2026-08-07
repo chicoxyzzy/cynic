@@ -126,7 +126,7 @@ pub fn toBigIntValue(realm: *Realm, v_in: Value) !Value {
         // StrUnsignedDecimalLiteral with DecimalDigits (so no
         // `Infinity` / `.` / exponent). Failure is a SyntaxError,
         // *not* TypeError per §7.1.13 step 3.b.
-        return stringToBigInt(realm, s.flatBytes());
+        return stringToBigInt(realm, try realm.heap.flattenString(s));
     }
     return throwTypeError(realm, "Cannot convert value to BigInt");
 }
@@ -251,23 +251,58 @@ fn bigintAsUintN(realm: *Realm, this_value: Value, args: []const Value) NativeEr
 }
 
 test "BigInt constructor preserves callable ToPrimitive OOM" {
-    const Noop = struct {
-        fn call(_: *Realm, _: Value, _: []const Value) NativeError!Value {
+    const Native = struct {
+        fn receiver(_: *Realm, _: Value, _: []const Value) NativeError!Value {
             return Value.undefined_;
         }
+
+        fn trap(_: *Realm, _: Value, _: []const Value) NativeError!Value {
+            return error.OutOfMemory;
+        }
     };
+    var realm = Realm.init(std.testing.allocator);
+    defer realm.deinit();
+    const func = try realm.heap.allocateFunctionNative(&realm, Native.receiver, 0, "callable");
+    const trap = try realm.heap.allocateFunctionNative(&realm, Native.trap, 1, "@@toPrimitive");
+    try func.set(realm.allocator, "@@toPrimitive", heap_mod.taggedFunction(trap));
+    const arg = heap_mod.taggedFunction(func);
+
+    try std.testing.expectError(
+        error.OutOfMemory,
+        bigintConstructor(&realm, Value.undefined_, &.{arg}),
+    );
+}
+
+test "ToBigInt propagates rope materialization OOM" {
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-    var realm = Realm.init(failing.allocator());
+    var realm = Realm.initWithBytesAllocator(std.testing.allocator, failing.allocator());
     defer {
         failing.fail_index = std.math.maxInt(usize);
         realm.deinit();
     }
-    const func = try realm.heap.allocateFunctionNative(&realm, Noop.call, 0, "callable");
-    const arg = heap_mod.taggedFunction(func);
+    const left = try realm.heap.allocateString("0000000000");
+    const right = try realm.heap.allocateString("0000000001");
+    const rope = try realm.heap.allocateConsString(left, right);
+    try std.testing.expect(!rope.isFlat());
 
     failing.fail_index = failing.alloc_index;
     try std.testing.expectError(
         error.OutOfMemory,
-        bigintConstructor(&realm, Value.undefined_, &.{arg}),
+        toBigIntValue(&realm, Value.fromString(rope)),
+    );
+}
+
+test "ToBigInt charges rope materialization" {
+    var realm = Realm.init(std.testing.allocator);
+    defer realm.deinit();
+    const left = try realm.heap.allocateString("0000000000");
+    const right = try realm.heap.allocateString("0000000001");
+    const rope = try realm.heap.allocateConsString(left, right);
+    try std.testing.expect(!rope.isFlat());
+
+    realm.setMemoryLimit(0);
+    try std.testing.expectError(
+        error.OutOfMemory,
+        toBigIntValue(&realm, Value.fromString(rope)),
     );
 }
