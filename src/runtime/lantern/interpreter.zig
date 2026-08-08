@@ -14497,21 +14497,28 @@ fn coerceForCompare(
     value: Value,
     hint: intrinsics_mod.ToPrimitiveHint,
 ) RunError!CompareOutcome {
-    if (!value.isObject()) return .{ .ok = value };
-    const prim = intrinsics_mod.toPrimitive(realm, value, hint) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.NativeThrew => {
-            const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
-            realm.pending_exception = null;
-            f.ip = ip;
-            f.accumulator = value;
-            if (!try unwindThrow(allocator, realm, frames, ex)) {
-                return .{ .uncaught = ex };
-            }
-            return .handled;
-        },
-    };
-    return .{ .ok = prim };
+    // §7.1.1 step 1 returns primitives unchanged; Symbol and BigInt share
+    // the `kind_symbol` bit, while Object and Function leave it clear.
+    if (value.isObject()) {
+        @branchHint(.unlikely);
+        if ((value.bits & heap_mod.kind_symbol) == 0) {
+            const prim = intrinsics_mod.toPrimitive(realm, value, hint) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.NativeThrew => {
+                    const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
+                    realm.pending_exception = null;
+                    f.ip = ip;
+                    f.accumulator = value;
+                    if (!try unwindThrow(allocator, realm, frames, ex)) {
+                        return .{ .uncaught = ex };
+                    }
+                    return .handled;
+                },
+            };
+            return .{ .ok = prim };
+        }
+    }
+    return .{ .ok = value };
 }
 
 /// §7.1.19 ToPropertyKey wrapper — when a computed key (`obj[k]`,
