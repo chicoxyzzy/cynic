@@ -589,7 +589,7 @@ const Capture = struct {
         }
         if (heap.handle_scopes.items.len != 0 or
             heap.const_roots.items.len != 0 or
-            heap.native_ctor_roots.items.len != 0 or
+            heap.native_roots.items.len != 0 or
             heap.realms.items.len != 1)
         {
             return error.RealmNotQuiescent;
