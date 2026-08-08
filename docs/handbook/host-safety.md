@@ -105,8 +105,10 @@ returned by an accessor getter, a set-like's `has`/`keys`, or a
 once-read `constructor.resolve` is the classic offender — reachable
 through nothing until you root it.
 
-Root with a `HandleScope` (or move engine state into a typed
-`JSObject` slot). The contract is in
+Root with a `HandleScope`; a hot synchronous strict-LIFO window may use
+`Heap.pushNativeRoot` with an immediately installed
+`defer heap.popNativeRoot()` instead. For longer-lived state, move it
+into a typed `JSObject` slot. The contract is in
 [gc.md](gc.md) ("the `HandleScope` contract for natives"); the
 "No engine state on user-visible objects" rule in
 [../../AGENTS.md](../../AGENTS.md) is the typed-slot half. Precedent:

@@ -185,7 +185,7 @@ container, not the value, so its marking arm re-scans the container's
 typed slots (`markObjectInternalSlots` — the Steele-style re-grey); (2)
 `finishIncrementalMajor`'s termination re-scan covered only the realm
 (interpreter-stack) roots, not the **transient heap-side roots** — handle
-scopes, in-flight native-ctor instances, and the mutable shallow-cons memo
+scopes, synchronous native-operation values, and the mutable shallow-cons memo
 the mutator changes between slices — so `markTransientRoots` re-scans them
 too (the Dijkstra barrier doesn't cover a pointer pinned only in a native
 local). Both are invisible to a normal run; both surface only under
@@ -358,6 +358,12 @@ for the common case). Open scopes are walked as roots by every
 collection. A native that allocates and immediately uses a value
 without re-entering JS in between needs no scope.
 
+For a hot synchronous path that needs one or a few strict-LIFO roots,
+`Heap.pushNativeRoot` plus `defer heap.popNativeRoot()` uses the shared
+transient native-root stack. Its retained capacity makes steady-state
+push/pop allocation-free. Install the defer only after a successful
+push, and never let a root escape the synchronous call.
+
 "Re-enters JS" is broader than an explicit `callJSFunction`: a
 `ToString` / `ToNumber` / `@@toPrimitive` argument coercion, an
 accessor getter reached through `getPropertyChain`, the iterator
@@ -371,7 +377,7 @@ can trigger a collection. Three recurring shapes:
     instance and hands it to the native as `this`; if the native
     re-enters JS while coercing an argument the instance can be
     swept. The `new_call` opcode and `constructValue` root it on the
-    `Heap.native_ctor_roots` stack; a native that allocates its own
+    transient `Heap.native_roots` stack; a native that allocates its own
     instance (the `defers_proto_lookup` path) roots it itself.
   * **Constants** — objects and BigInt literals parked in a chunk's
     constant pool are not pinned the way constant strings are; they

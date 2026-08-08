@@ -1884,7 +1884,7 @@ pub const Realm = struct {
     /// before any `markValue` (`markRoots` marks every WeakRef / WeakMap /
     /// WeakSet / FinalizationRegistry held by a global). Marks every
     /// sharing realm's roots plus the heap-side roots (handle scopes,
-    /// const + native-ctor roots — `beginIncrementalMark` sees
+    /// const + transient native roots — `beginIncrementalMark` sees
     /// `cycle_started` and skips its own arm), seeding the mark worklist,
     /// and arms the incremental write barrier (`marking_phase = .marking`).
     pub fn beginIncrementalMajor(self: *Realm) void {
@@ -1918,7 +1918,7 @@ pub const Realm = struct {
     pub fn finishIncrementalMajor(self: *Realm, lazy: bool) void {
         self.markAllSharingRealmRoots();
         // Re-scan the transient HEAP-side roots too — handle scopes,
-        // in-flight native-ctor instances, and the shallow-cons memo cache
+        // synchronous native-operation values, and the shallow-cons memo cache
         // can change across a sliced mark, and the Dijkstra barrier doesn't
         // cover a native-local-only pin. The realm-root re-scan above is the
         // interpreter-stack analogue.

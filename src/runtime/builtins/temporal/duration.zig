@@ -108,7 +108,7 @@ pub fn install(realm: *Realm, ns: *JSObject) !void {
 /// non-finite or non-integral result. Maps -0 to +0. Re-enters JS
 /// via ToNumber (valueOf / @@toPrimitive), so the caller's instance
 /// must be rooted across the loop (the interpreter roots `this` on
-/// `native_ctor_roots`; we hold only stack-local f64 in between).
+/// `native_roots`; we hold only stack-local f64 in between).
 fn toIntegerIfIntegral(realm: *Realm, v: Value) NativeError!f64 {
     const num = try toNumber(realm, v);
     const n = numberToF64(num);

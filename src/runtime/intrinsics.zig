@@ -2137,9 +2137,8 @@ pub fn toPrimitive(realm: *Realm, value: Value, hint: ToPrimitiveHint) NativeErr
     // native local, so under allocation pressure a sweep would reclaim
     // the receiver mid-coercion and the next slot read
     // (`obj.getProxyTarget()`, `fn_obj.get`) would hit freed memory.
-    const recv_scope = realm.heap.openScope() catch return error.OutOfMemory;
-    defer recv_scope.close();
-    recv_scope.push(value) catch return error.OutOfMemory;
+    realm.heap.pushNativeRoot(value) catch return error.OutOfMemory;
+    defer realm.heap.popNativeRoot();
 
     // §7.1.1.1 OrdinaryToPrimitive maps "default"→"number" for
     // non-Date objects, but the @@toPrimitive trap receives the
@@ -2305,6 +2304,68 @@ test "ToPrimitive returns BigInt and Symbol primitives without allocating" {
     failing.fail_index = failing.alloc_index;
     try std.testing.expectEqual(bigint.bits, (try toPrimitive(&realm, bigint, .number)).bits);
     try std.testing.expectEqual(symbol.bits, (try toPrimitive(&realm, symbol, .string)).bits);
+}
+
+test "ToPrimitive reuses its transient native root without allocating" {
+    const ReturnSeven = struct {
+        fn call(_: *Realm, _: Value, _: []const Value) NativeError!Value {
+            return Value.fromInt32(7);
+        }
+    };
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var realm = Realm.init(failing.allocator());
+    defer {
+        failing.fail_index = std.math.maxInt(usize);
+        failing.resize_fail_index = std.math.maxInt(usize);
+        realm.deinit();
+    }
+
+    const obj = try realm.heap.allocateObject();
+    const value_of = try realm.heap.allocateFunctionNative(&realm, ReturnSeven.call, 0, "valueOf");
+    try obj.set(realm.allocator, "valueOf", heap_mod.taggedFunction(value_of));
+    const receiver = heap_mod.taggedObject(obj);
+
+    // First use reserves the transient root stack. A steady-state coercion
+    // through an allocation-free native method must not allocate again.
+    try std.testing.expectEqual(@as(i32, 7), (try toPrimitive(&realm, receiver, .number)).asInt32());
+    try std.testing.expectEqual(@as(usize, 0), realm.heap.native_roots.items.len);
+    failing.fail_index = failing.alloc_index;
+    failing.resize_fail_index = failing.resize_index;
+    try std.testing.expectEqual(@as(i32, 7), (try toPrimitive(&realm, receiver, .number)).asInt32());
+    try std.testing.expectEqual(@as(usize, 0), realm.heap.native_roots.items.len);
+}
+
+test "ToPrimitive pops its transient native root after hint allocation OOM" {
+    const ReturnOne = struct {
+        fn call(_: *Realm, _: Value, _: []const Value) NativeError!Value {
+            return Value.fromInt32(1);
+        }
+    };
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var realm = Realm.init(failing.allocator());
+    defer {
+        failing.fail_index = std.math.maxInt(usize);
+        realm.deinit();
+    }
+
+    const obj = try realm.heap.allocateObject();
+    const exotic = try realm.heap.allocateFunctionNative(&realm, ReturnOne.call, 1, "@@toPrimitive");
+    try obj.set(realm.allocator, "@@toPrimitive", heap_mod.taggedFunction(exotic));
+    const receiver = heap_mod.taggedObject(obj);
+
+    // Keep an enclosing root live, warm the nested stack capacity, then fail
+    // the hint-string allocation after ToPrimitive's successful push. The
+    // abrupt path must preserve both the caller's depth and its root value.
+    const outer_root = Value.fromInt32(99);
+    try realm.heap.pushNativeRoot(outer_root);
+    defer realm.heap.popNativeRoot();
+    try std.testing.expectEqual(@as(i32, 1), (try toPrimitive(&realm, receiver, .number)).asInt32());
+    try std.testing.expectEqual(@as(usize, 1), realm.heap.native_roots.items.len);
+    try std.testing.expectEqual(outer_root.bits, realm.heap.native_roots.items[0].bits);
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(error.OutOfMemory, toPrimitive(&realm, receiver, .number));
+    try std.testing.expectEqual(@as(usize, 1), realm.heap.native_roots.items.len);
+    try std.testing.expectEqual(outer_root.bits, realm.heap.native_roots.items[0].bits);
 }
 
 /// §7.1.4 ToNumber — like `coerceToNumber` but consults

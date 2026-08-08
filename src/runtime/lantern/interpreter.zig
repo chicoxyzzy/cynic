@@ -5268,7 +5268,7 @@ pub fn runFrames(
                 // run while coercing an argument — can trigger a GC
                 // mid-call; root the instance so the sweep can't
                 // free it out from under the native. The
-                // `native_ctor_roots` stack is allocation-free at
+                // `native_roots` stack is allocation-free at
                 // steady state, unlike a `HandleScope` per `new`.
                 realm.heap.pushNativeRoot(this_value) catch return error.OutOfMemory;
                 defer realm.heap.popNativeRoot();

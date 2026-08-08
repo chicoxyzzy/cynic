@@ -805,7 +805,7 @@ pub fn constructValue(
         // native constructor that re-enters JS (a user `toString` /
         // `valueOf` during argument coercion) can trigger a GC while
         // `this_arg` is still only a native-stack local. The
-        // `native_ctor_roots` stack is allocation-free at steady
+        // `native_roots` stack is allocation-free at steady
         // state, unlike a `HandleScope` per construct.
         realm.heap.pushNativeRoot(this_arg) catch return error.OutOfMemory;
         defer realm.heap.popNativeRoot();

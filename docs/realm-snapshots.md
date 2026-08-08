@@ -280,7 +280,7 @@ Fields that carry heap references or must survive the round trip:
   runtime state, not image state. Capture clears the two strong roots
   before its pre-capture full GC so cache-only rope graphs are reclaimed;
   restore starts with an empty cache and zeroed counters.
-- `const_roots`, `native_ctor_roots`, `handle_scopes`, `dirty_list`,
+- `const_roots`, `native_roots`, `handle_scopes`, `dirty_list`,
   `young_ptr_set`, weak worklists, `jit_code` — all empty/null at
   capture (assert), default at restore.
 - GC tuning fields (`gc_threshold` etc.) — restore defaults; do not
@@ -627,7 +627,7 @@ envelope and errors otherwise (`error.RealmNotQuiescent` /
 `error.Unsnapshotable`):
 
 - `microtask_queue`, `frame_stacks`, `handle_scopes`,
-  `native_ctor_roots`, `kept_alive`, `pending_async_waits`,
+  `native_roots`, `kept_alive`, `pending_async_waits`,
   `modules`, `script_chunks`, `eval_sources`, `child_realms`,
   `const_roots`, `dirty_list` all empty; `pending_exception == null`;
   `heap.realms.items.len == 1`; `wasm_arena == null`;

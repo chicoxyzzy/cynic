@@ -508,18 +508,15 @@ pub const Heap = struct {
     /// index keys) reachable. Realm-lifetime; freed in `deinit`.
     const_roots: std.ArrayListUnmanaged(Value) = .empty,
 
-    /// Native-constructor instance roots — a LIFO stack of the
-    /// freshly-allocated instances currently "in flight" inside a
-    /// native constructor call. The `new_call` opcode / `constructValue`
-    /// push the instance here before invoking the native and pop it
-    /// after; a GC triggered by the native re-entering JS (argument
-    /// coercion, an executor callback) marks the stack so the instance
-    /// can't be swept mid-construction. A plain `Value` stack rather
-    /// than a `HandleScope` per construct — the backing capacity is
-    /// retained across calls, so steady-state push/pop is allocation-
-    /// free (a `HandleScope` per `new` cost two allocs each). Balanced
-    /// push/pop keeps it bounded; freed in `deinit`.
-    native_ctor_roots: std.ArrayListUnmanaged(Value) = .empty,
+    /// Transient native roots — a LIFO stack of Values held across a
+    /// synchronous native operation that can allocate or re-enter JS.
+    /// Native constructors protect their in-flight instance here, and
+    /// hot coercion paths can use the same stack when one strict-LIFO
+    /// root is sufficient. A plain Value stack avoids a HandleScope per
+    /// operation; retained capacity makes steady-state push/pop
+    /// allocation-free. Balanced push/pop keeps it bounded; freed in
+    /// `deinit`.
+    native_roots: std.ArrayListUnmanaged(Value) = .empty,
 
     /// Dirty-container list — every mature container that may hold a
     /// pointer to a young object. This is the pooled-heap adaptation
@@ -1106,7 +1103,7 @@ pub const Heap = struct {
         self.dirty_list.deinit(self.allocator);
         self.young_ptr_set.deinit(self.allocator);
         self.const_roots.deinit(self.allocator);
-        self.native_ctor_roots.deinit(self.allocator);
+        self.native_roots.deinit(self.allocator);
         self.handle_scopes.deinit(self.allocator);
         self.weak_refs_seen.deinit(self.allocator);
         self.weak_collections_seen.deinit(self.allocator);
@@ -3100,7 +3097,7 @@ pub const Heap = struct {
 
     /// Begin a major cycle's mark by snapshotting the roots — the
     /// start-of-cycle stop-the-world step: arm the cycle and mark every
-    /// root + handle-scope + const + native-ctor + mutable shallow-cons
+    /// root + handle-scope + const + transient-native + mutable shallow-cons
     /// memo root, seeding the worklist with the grey set. The worklist is
     /// then drained (to completion STW today, or sliced at the safe-point
     /// in the incremental path). Extracted from `collectFull` so an
@@ -3121,19 +3118,19 @@ pub const Heap = struct {
             for (scope.handles.items) |r| self.markValue(r);
         }
         // Chunk-constant heap values (tagged-template `strs` / `raw`
-        // arrays, BigInt literals) + native-constructor instances in
-        // flight — permanently / transiently live roots.
+        // arrays, BigInt literals) + synchronous native-operation
+        // values in flight — permanently / transiently live roots.
         for (self.const_roots.items) |v| self.markValue(v);
-        for (self.native_ctor_roots.items) |v| self.markValue(v);
+        for (self.native_roots.items) |v| self.markValue(v);
         self.markShallowConsCacheRoots();
     }
 
     /// Re-mark the TRANSIENT heap-side roots — handle-scope handles and
-    /// in-flight native-constructor instances — at the incremental
+    /// values held by synchronous native operations — at the incremental
     /// termination. `beginIncrementalMark` seeds them at the start, but a
     /// sliced mark lets the mutator change them between slices (a native
-    /// re-entry pushes/pops a handle scope, an in-flight constructor comes
-    /// and goes). The Dijkstra barrier covers heap stores, NOT a pointer
+    /// re-entry pushes/pops a handle scope or the transient native-root
+    /// stack). The Dijkstra barrier covers heap stores, NOT a pointer
     /// pinned only in a native local, so — exactly like the realm-root
     /// re-scan — the termination must re-scan these or the sweep frees a
     /// still-pinned object (a use-after-free the next minor's mark hits).
@@ -3144,7 +3141,7 @@ pub const Heap = struct {
         for (self.handle_scopes.items) |scope| {
             for (scope.handles.items) |r| self.markValue(r);
         }
-        for (self.native_ctor_roots.items) |v| self.markValue(v);
+        for (self.native_roots.items) |v| self.markValue(v);
         self.markShallowConsCacheRoots();
     }
 
@@ -3605,8 +3602,8 @@ pub const Heap = struct {
         // time) are promoted on the first minor cycle and stay
         // reachable thereafter.
         for (self.const_roots.items) |v| self.markValue(v);
-        // Native-constructor instances currently in flight.
-        for (self.native_ctor_roots.items) |v| self.markValue(v);
+        // Values held by synchronous native operations currently in flight.
+        for (self.native_roots.items) |v| self.markValue(v);
         self.markShallowConsCacheRoots();
         // Registered symbols are pinned (§20.4.2.2); promoteYoungList
         // honours `entry.pinned` and tenures them straight into the
@@ -4556,16 +4553,16 @@ pub const Heap = struct {
         return scope;
     }
 
-    /// Push a native-constructor instance onto the in-flight root
-    /// stack — see `native_ctor_roots`. Pair every call with a
+    /// Push a Value onto the transient native-root stack — see
+    /// `native_roots`. Pair every successful call with a
     /// `defer heap.popNativeRoot()`.
     pub fn pushNativeRoot(self: *Heap, v: Value) !void {
-        try self.native_ctor_roots.append(self.allocator, v);
+        try self.native_roots.append(self.allocator, v);
     }
 
-    /// Pop the most recent native-constructor instance root.
+    /// Pop the most recent transient native root.
     pub fn popNativeRoot(self: *Heap) void {
-        _ = self.native_ctor_roots.pop();
+        _ = self.native_roots.pop();
     }
 
     // -----------------------------------------------------------------
