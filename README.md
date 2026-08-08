@@ -50,8 +50,10 @@ RegExp engine), Sarcasm (the from-scratch WebAssembly engine —
 Unicode tables, and
 the hardened-by-default realm-boot pipeline. The runtime is filling
 in §19-§28 one bucket at a time. Bistromath (the baseline JIT)
-runs by default (`--no-jit` opts out) since the step-3 exit
-([`docs/jit.md`](docs/jit.md)); Ohaimark's typed-feedback snapshot,
+runs by default on AArch64 and x86_64 hosts on macOS and Linux
+(`--no-jit` opts out); other targets stay in Lantern
+([`docs/jit.md`](docs/jit.md)). Ohaimark's AArch64-only typed-feedback
+snapshot,
 block-argument SSA, specialization and representation planners, and verified
 logical deopt plus direct-entry/stable-home physical metadata and a
 graph/Lantern differential evaluator, deterministic register/spill allocation,
@@ -79,7 +81,12 @@ rollout bench) until its own differential and performance gates pass. The final
 fixture of `1.041x`, and 0.8 KiB installed code, passing both rollout ceilings.
 Baseline and forced-T2 test262 sweeps produced the exact same 48,517-pass set;
 focused ReleaseSafe GC-pressure runs and bounded crash/value-differential fuzz
-campaigns found no verifier failure, host crash, or differential. See
+campaigns found no verifier failure, host crash, or differential. Bistromath's
+x86_64 qualification ran the full interpreter and forced-T1 sweeps on macOS
+under Rosetta: both passed 48,517 fixtures, their pass-set diff was empty, and
+the fail-closed `--require-bistromath-entry` witness counted 2,455,587 generated
+entries. `x86_64-linux-musl` and `aarch64-linux-musl` cross-builds and focused
+ReleaseSafe suites on both ISAs passed as well. See
 [`docs/ROADMAP.md`](docs/ROADMAP.md) for the thematic breakdown.
 
 ### Conformance
@@ -207,6 +214,7 @@ your local `zig version` reports an older dev tag, bump it.
 - `--threads=<n>` — worker count (`0` = auto, `1` = sequential, `>1` = pool).
 - `--only-failing` — skip-as-pass any path in `.test262-pass-cache.txt`. After a full sweep populates the cache, the next iteration runs only the ~7 k failing/skipped fixtures — ≤ 30 s vs ≤ 100 s. Don't use for score rows; use it for per-fix verification.
 - `--jit` / `--ohaimark` — force Bistromath alone, or default-on Ohaimark before Bistromath, at threshold 1 for independent pass-set differential runs.
+- `--require-bistromath-entry` — with `--jit`, fail unless the sweep actually crosses generated T1 code. The differential gate uses this so an unsupported or disconnected backend cannot pass by comparing Lantern with itself.
 - `--ohaimark-stats` — with `--ohaimark`, print aggregate T2 compile attempts, publications/refusals, compile time, installed bytes, generated entries, completions, guard exits, refusal-stage counts, and the top unsupported bytecodes. Remains parallel-safe.
 
 Top-level CLI (not a test262 harness flag): `--ohaimark-osr` enables

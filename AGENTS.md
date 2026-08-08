@@ -430,9 +430,11 @@ sequence), `--no-harness` (disable the `sta.js` +
 `--jit` (run every realm with Bistromath enabled and the tier-up
 threshold forced to 1 — the docs/jit.md §10 differential gate: a
 full sweep with this flag must produce the exact pass-set of one
-without it; aarch64 hosts only, a comptime no-op elsewhere. CI
-runs the comparison as the gating `test262-jit-differential`
-job. The harness flag is independent of the `cynic` CLI, where
+without it; AArch64 and x86_64 hosts on macOS/Linux, a comptime
+no-op elsewhere. Pair differential runs with
+`--require-bistromath-entry` so they fail unless generated T1 code
+actually executes. CI gates both native architectures. The harness
+flag is independent of the `cynic` CLI, where
 the tier is on by default at natural thresholds and `--no-jit`
 opts out),
 `--ohaimark` (force the default-on Ohaimark tier before Bistromath and

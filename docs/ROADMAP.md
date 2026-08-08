@@ -1139,6 +1139,18 @@ sampling by `/profile`.
   the hardened `hasOwnProperty` path **304.6 → 152.8 ms p50 (-49.8%)**.
   Full main test262 reference and `--jit` sweeps match at
   **48,653 / 49,977 (97.35%)**; the SES suite remains **36 / 36**.
+- **Bistromath x86_64 qualification (2026-08-08).** The shared one-pass T1
+  compiler now selects AArch64 or x86_64 through a thin register/ABI adapter,
+  with SysV helper calls, rel32 control flow, exact Lantern tier-down state,
+  exception unwinding, and GC-root preservation covered by native tests. Full
+  interpreter and forced-Bistromath test262 sweeps on macOS under Rosetta each
+  passed **48,517** fixtures with an empty pass-set diff; the forced sweep
+  crossed **2,455,587** generated entries under the fail-closed
+  `--require-bistromath-entry` witness. `x86_64-linux-musl` and
+  `aarch64-linux-musl` cross-builds and focused ReleaseSafe suites on both ISAs
+  passed. Bistromath is therefore supported on AArch64 and x86_64 hosts on
+  macOS and Linux; Ohaimark remains AArch64-only and other targets stay in
+  Lantern.
 - **Ohaimark optimizer front end (2026-07-16).** The T2 ADR is now
   concrete: typed ICs snapshot into immutable same-index arrays without
   copying GC-managed callee/prototype/snapshot pointers; finalized bytecode
@@ -1943,7 +1955,8 @@ and the per-builtin checklist; this section tracks status.
 
 ## Future work (post-strict-only-runtime)
 
-- **Bistromath** — baseline JIT (T1). Direct opcode-to-native,
+- **Bistromath** — baseline JIT (T1). Direct opcode-to-native on AArch64 and
+  x86_64 hosts on macOS and Linux,
   inline caches for property access. Modeled on JSC Baseline /
   V8 Sparkplug. **Shipped** (M5, 2026-06) and on by default —
   `--no-jit` opts out; coverage, gates, and measured wins are

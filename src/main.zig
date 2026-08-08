@@ -460,7 +460,8 @@ pub const ParsedFlags = struct {
     /// byte-identical through every increment, gc-stress and bench
     /// gates green). `--no-jit` is the permanent escape hatch;
     /// `--jit` is still accepted as an explicit no-op. Sets
-    /// `realm.jit_enabled`; a comptime no-op off aarch64.
+    /// `realm.jit_enabled`; a comptime no-op outside AArch64/x86_64
+    /// macOS/Linux hosts, where Lantern remains the complete engine.
     jit: bool = true,
     /// Ohaimark (docs/ohaimark.md) — ON by default after its performance,
     /// differential, GC-pressure, and fuzz gates passed. `--no-ohaimark`
