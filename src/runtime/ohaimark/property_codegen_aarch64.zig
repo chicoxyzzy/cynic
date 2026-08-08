@@ -274,7 +274,7 @@ pub fn emitSlotRead(
     try machine.emit(a64.addReg(destination, destination, object));
     try machine.emit(a64.ldrImm(destination, destination, layout.object.inline_slots));
     try machine.jump(&done);
-    machine.bind(&overflow);
+    try machine.bind(&overflow);
     try machine.emit(a64.ldrImm(destination, object, layout.object.overflow_items_ptr));
     try machine.emit(a64.subImm(
         slot,
@@ -285,7 +285,7 @@ pub fn emitSlotRead(
     try machine.emit(a64.lslImm(slot, slot, 3));
     try machine.emit(a64.addReg(destination, destination, slot));
     try machine.emit(a64.ldrImm(destination, destination, 0));
-    machine.bind(&done);
+    try machine.bind(&done);
 }
 
 /// Load an aligned u64 field from a Realm-sized base, materializing the high
@@ -320,7 +320,7 @@ fn jumpToGuardIf(
     const inverse: a64.Cond = @enumFromInt(@intFromEnum(condition) ^ 1);
     try machine.jumpCond(inverse, &passed);
     try machine.jump(guard);
-    machine.bind(&passed);
+    try machine.bind(&passed);
 }
 
 fn jumpToGuardIfNonzero(
@@ -333,5 +333,5 @@ fn jumpToGuardIfNonzero(
     defer zero.deinit(allocator);
     try machine.jumpCbz(value, &zero);
     try machine.jump(guard);
-    machine.bind(&zero);
+    try machine.bind(&zero);
 }

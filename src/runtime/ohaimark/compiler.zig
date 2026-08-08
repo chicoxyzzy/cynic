@@ -22,8 +22,9 @@ const lowering = @import("lowering_aarch64.zig");
 const representation = @import("representation.zig");
 const specialize = @import("specialize.zig");
 const stats_mod = @import("stats.zig");
+const policy = @import("policy.zig");
 
-pub const supported = masm.native_aarch64;
+pub const supported = policy.supported;
 
 /// Realm-facing entry for the runtime dispatcher. Keeping allocator lookup here
 /// makes unavailable executable memory a T2-local refusal like every other

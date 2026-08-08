@@ -30,7 +30,6 @@
 //! type speculation are Ohaimark's (§5).
 
 const std = @import("std");
-const builtin = @import("builtin");
 
 const chunk_mod = @import("../../bytecode/chunk.zig");
 const Chunk = chunk_mod.Chunk;
@@ -43,19 +42,18 @@ const interpreter = @import("../lantern/interpreter.zig");
 const CallFrame = interpreter.CallFrame;
 const RunError = interpreter.RunError;
 const code_alloc = @import("../jit/code_alloc.zig");
-const masm_mod = @import("../jit/masm.zig");
+const masm_mod = @import("masm.zig");
 const Masm = masm_mod.Masm;
-const a64 = @import("../jit/asm_aarch64.zig");
+const isa = masm_mod;
 const layout = @import("../jit/layout.zig");
 const JSObject = @import("../object.zig").JSObject;
 const heap_mod = @import("../heap.zig");
 const ohaimark_policy = @import("../ohaimark/policy.zig");
 
-/// Bistromath needs both an executable-memory target and an
-/// emitter for the host ISA. x86_64 hosts run the engine fine but
-/// stay interpreter-only until the second encoder lands
-/// (docs/jit.md §14).
-pub const supported = code_alloc.supported and builtin.cpu.arch == .aarch64;
+/// Bistromath needs both an executable-memory target and a qualified emitter
+/// for the host ISA. The compiler itself remains shared across the two native
+/// backends; only `bistromath/masm.zig` owns their ABI/code-encoding details.
+pub const supported = code_alloc.supported and masm_mod.supported_isa;
 
 /// What compiled code reports back to the dispatcher.
 pub const EntryResult = enum(u32) {
@@ -284,7 +282,9 @@ fn driveTop(
     var stub = entry;
     while (true) {
         const fr = &frames.items[frames.items.len - 1];
-        switch (@as(EntryResult, @enumFromInt(stub(realm, fr, fr.registers.ptr)))) {
+        realm.heap.bistromath_stats.recordEntry();
+        const raw_result = stub(realm, fr, fr.registers.ptr);
+        switch (@as(EntryResult, @enumFromInt(raw_result))) {
             .done => {
                 // §10.2.2 ConstructResult for construct frames.
                 var ret = fr.accumulator;
@@ -370,7 +370,7 @@ fn compile(realm: *Realm, chunk: *const Chunk, js: *Chunk.JitState) void {
     var c = Compiler.init(realm.heap.allocator, chunk);
     defer c.deinit();
     c.run() catch return;
-    var code = ca.installOwned(c.m.code.items) catch return;
+    var code = ca.installOwned(c.m.bytes()) catch return;
     defer code.deinit();
     // The OSR table rides in the code region (same allocator as the
     // code). If its install fails the chunk still
@@ -430,21 +430,29 @@ pub fn tryOsrEnterTop(
     };
 }
 
-const CompileError = error{ OutOfMemory, UnsupportedOp };
+const CompileError = error{
+    OutOfMemory,
+    UnsupportedOp,
+    UnsupportedInstruction,
+    LabelAlreadyBound,
+    InvalidLabel,
+    BranchOutOfRange,
+    UnresolvedLabel,
+};
 
 // Pinned registers inside compiled code (docs/jit.md §4.2). x19-x24
 // are callee-saved per AAPCS64 and restored in the epilogue;
 // x9-x13 are scratch.
-const realm_reg: a64.Reg = .x19;
-const frame_reg: a64.Reg = .x20;
-const regs_reg: a64.Reg = .x21;
-const acc_reg: a64.Reg = .x22;
+const realm_reg: isa.Reg = .x19;
+const frame_reg: isa.Reg = .x20;
+const regs_reg: isa.Reg = .x21;
+const acc_reg: isa.Reg = .x22;
 /// Pinned `Value.fromInt32(0).bits` — the int32 tag in the high
 /// half-word. `eor` against it + `lsr #48` is the tag test.
-const int32_tag_reg: a64.Reg = .x23;
+const int32_tag_reg: isa.Reg = .x23;
 /// Pinned `Value.false_.bits` — the bool tag for compare results
 /// and `jmp_if_*` truthiness.
-const bool_tag_reg: a64.Reg = .x24;
+const bool_tag_reg: isa.Reg = .x24;
 
 // Struct offsets come from the layout contract (docs/jit.md §12
 // step 3a) — never derived locally.
@@ -488,7 +496,10 @@ fn ohaimarkOsrYieldProbe(
     target_bc: u64,
 ) callconv(.c) u32 {
     if (!r.ohaimark_osr_enabled or !r.ohaimark_enabled or !r.jit_enabled) return 0;
-    if (comptime !supported) return 0;
+    // Never yield a Bistromath activation to an Ohaimark backend that cannot
+    // install native code on this target. Keep this tied to T2's cycle-free
+    // policy constant so a future backend addition cannot leave a stale gate.
+    if (comptime !ohaimark_policy.supported) return 0;
     const state = frame.chunk.jit_state orelse return 0;
     if (state.ohaimark_osr_strikes >= ohaimark_policy.osr_strike_limit) return 0;
     if (target_bc > std.math.maxInt(u32)) return 0;
@@ -888,6 +899,30 @@ const Compiler = struct {
         try self.prologue();
         try self.body();
         try self.tail();
+        try self.validateLabels();
+    }
+
+    /// A missing bind must be a normal compile refusal. Installing a rel32
+    /// placeholder would silently turn an intended jump into fallthrough.
+    fn validateLabels(self: *const Compiler) CompileError!void {
+        for (self.labels.items) |*label| if (!Masm.labelResolved(label))
+            return error.UnresolvedLabel;
+        for (self.tds.items) |*stub| if (!Masm.labelResolved(&stub.label))
+            return error.UnresolvedLabel;
+        for (self.threws.items) |*stub| if (!Masm.labelResolved(&stub.label))
+            return error.UnresolvedLabel;
+        for (self.resume_points.items) |*point| if (!Masm.labelResolved(&point.label))
+            return error.UnresolvedLabel;
+        const fixed = [_]*const Masm.Label{
+            &self.body_start,
+            &self.done_label,
+            &self.frame_pushed_label,
+            &self.tier_down_label,
+            &self.threw_label,
+            &self.oom_label,
+        };
+        for (fixed) |label| if (!Masm.labelResolved(label))
+            return error.UnresolvedLabel;
     }
 
     /// Pass 1 — reject unsupported opcodes before any emission and
@@ -935,26 +970,23 @@ const Compiler = struct {
 
     fn prologue(self: *Compiler) CompileError!void {
         const m = &self.m;
-        try m.emit(a64.stpPreIdxSp(.fp, .lr, -16));
-        try m.emit(a64.stpPreIdxSp(.x19, .x20, -16));
-        try m.emit(a64.stpPreIdxSp(.x21, .x22, -16));
-        try m.emit(a64.stpPreIdxSp(.x23, .x24, -16));
-        try m.emit(a64.movReg(realm_reg, .x0));
-        try m.emit(a64.movReg(frame_reg, .x1));
-        try m.emit(a64.movReg(regs_reg, .x2));
-        try m.emit(a64.ldrImm(acc_reg, frame_reg, acc_off));
+        try m.enterFrame();
+        try m.moveEntryArg(realm_reg, 0);
+        try m.moveEntryArg(frame_reg, 1);
+        try m.moveEntryArg(regs_reg, 2);
+        try m.emit(isa.ldrImm(acc_reg, frame_reg, acc_off));
         try m.movImm64(int32_tag_reg, int32_tag_bits);
         try m.movImm64(bool_tag_reg, bool_tag_bits);
     }
 
     fn body(self: *Compiler) CompileError!void {
         const m = &self.m;
-        m.bind(&self.body_start);
+        try m.bind(&self.body_start);
         const code = self.chunk.code;
         var i: usize = 0;
         while (i < code.len) {
             const bc: u32 = @intCast(i);
-            if (self.target_labels.get(bc)) |idx| m.bind(&self.labels.items[idx]);
+            if (self.target_labels.get(bc)) |idx| try m.bind(&self.labels.items[idx]);
             const op: Op = @enumFromInt(code[i]);
             const after = i + 1 + Op.operandSize(op);
             switch (op) {
@@ -978,20 +1010,20 @@ const Compiler = struct {
                     const k = readU16(code, i + 1);
                     try m.movImm64(acc_reg, self.chunk.constants[k].bits);
                 },
-                .ldar => try m.emit(a64.ldrImm(acc_reg, regs_reg, regSlot(code[i + 1]))),
-                .star => try m.emit(a64.strImm(acc_reg, regs_reg, regSlot(code[i + 1]))),
+                .ldar => try m.emit(isa.ldrImm(acc_reg, regs_reg, regSlot(code[i + 1]))),
+                .star => try m.emit(isa.strImm(acc_reg, regs_reg, regSlot(code[i + 1]))),
                 // Compact forms — index/constant baked into the opcode.
                 .lda_zero => try m.movImm64(acc_reg, Value.fromInt32(0).bits),
                 .lda_one => try m.movImm64(acc_reg, Value.fromInt32(1).bits),
-                .ldar_0, .ldar_1, .ldar_2, .ldar_3 => try m.emit(a64.ldrImm(acc_reg, regs_reg, regSlot(@intFromEnum(op) - @intFromEnum(Op.ldar_0)))),
-                .star_0, .star_1, .star_2, .star_3 => try m.emit(a64.strImm(acc_reg, regs_reg, regSlot(@intFromEnum(op) - @intFromEnum(Op.star_0)))),
+                .ldar_0, .ldar_1, .ldar_2, .ldar_3 => try m.emit(isa.ldrImm(acc_reg, regs_reg, regSlot(@intFromEnum(op) - @intFromEnum(Op.ldar_0)))),
+                .star_0, .star_1, .star_2, .star_3 => try m.emit(isa.strImm(acc_reg, regs_reg, regSlot(@intFromEnum(op) - @intFromEnum(Op.star_0)))),
                 .mov => {
-                    try m.emit(a64.ldrImm(.x9, regs_reg, regSlot(code[i + 1])));
-                    try m.emit(a64.strImm(.x9, regs_reg, regSlot(code[i + 2])));
+                    try m.emit(isa.ldrImm(.x9, regs_reg, regSlot(code[i + 1])));
+                    try m.emit(isa.strImm(.x9, regs_reg, regSlot(code[i + 2])));
                 },
                 .star_ldar => {
-                    try m.emit(a64.strImm(acc_reg, regs_reg, regSlot(code[i + 1])));
-                    try m.emit(a64.ldrImm(acc_reg, regs_reg, regSlot(code[i + 2])));
+                    try m.emit(isa.strImm(acc_reg, regs_reg, regSlot(code[i + 1])));
+                    try m.emit(isa.ldrImm(acc_reg, regs_reg, regSlot(code[i + 2])));
                 },
                 .inc_reg, .dec_reg => {
                     // §13.4 fast path. The bytecode's general semantics are
@@ -1001,30 +1033,30 @@ const Compiler = struct {
                     // the observable slow path exactly once.
                     const td = try self.tdFor(bc);
                     const r = code[i + 1];
-                    try m.emit(a64.ldrImm(.x9, regs_reg, regSlot(r)));
+                    try m.emit(isa.ldrImm(.x9, regs_reg, regSlot(r)));
                     try self.checkInt32(.x9, td);
                     if (op == .inc_reg) {
-                        try m.emit(a64.addsImmW(.x11, .x9, 1));
+                        try m.emit(isa.addsImmW(.x11, .x9, 1));
                     } else {
                         try m.movImm64(.x10, 1);
-                        try m.emit(a64.subsRegW(.x11, .x9, .x10));
+                        try m.emit(isa.subsRegW(.x11, .x9, .x10));
                     }
                     try m.jumpCond(.vs, td);
-                    try m.emit(a64.orrReg(acc_reg, .x11, int32_tag_reg));
-                    try m.emit(a64.strImm(acc_reg, regs_reg, regSlot(r)));
+                    try m.emit(isa.orrReg(acc_reg, .x11, int32_tag_reg));
+                    try m.emit(isa.strImm(acc_reg, regs_reg, regSlot(r)));
                 },
 
                 .add, .sub => {
                     const td = try self.tdFor(bc);
-                    try m.emit(a64.ldrImm(.x9, regs_reg, regSlot(code[i + 1])));
+                    try m.emit(isa.ldrImm(.x9, regs_reg, regSlot(code[i + 1])));
                     try self.checkInt32(.x9, td);
                     try self.checkInt32(acc_reg, td);
                     try m.emit(if (op == .add)
-                        a64.addsRegW(.x11, .x9, acc_reg)
+                        isa.addsRegW(.x11, .x9, acc_reg)
                     else
-                        a64.subsRegW(.x11, .x9, acc_reg));
+                        isa.subsRegW(.x11, .x9, acc_reg));
                     try m.jumpCond(.vs, td);
-                    try m.emit(a64.orrReg(acc_reg, .x11, int32_tag_reg));
+                    try m.emit(isa.orrReg(acc_reg, .x11, int32_tag_reg));
                 },
                 .add_to_int32 => {
                     // `acc = ToInt32(reg + acc)`. Like `.add` but the
@@ -1033,23 +1065,23 @@ const Compiler = struct {
                     // low word IS the answer. Both operands must be
                     // int32 (else deopt); the tagged retag follows.
                     const td = try self.tdFor(bc);
-                    try m.emit(a64.ldrImm(.x9, regs_reg, regSlot(code[i + 1])));
+                    try m.emit(isa.ldrImm(.x9, regs_reg, regSlot(code[i + 1])));
                     try self.checkInt32(.x9, td);
                     try self.checkInt32(acc_reg, td);
-                    try m.emit(a64.addsRegW(.x11, .x9, acc_reg));
-                    try m.emit(a64.orrReg(acc_reg, .x11, int32_tag_reg));
+                    try m.emit(isa.addsRegW(.x11, .x9, acc_reg));
+                    try m.emit(isa.orrReg(acc_reg, .x11, int32_tag_reg));
                 },
                 .mul => {
                     const td = try self.tdFor(bc);
-                    try m.emit(a64.ldrImm(.x9, regs_reg, regSlot(code[i + 1])));
+                    try m.emit(isa.ldrImm(.x9, regs_reg, regSlot(code[i + 1])));
                     try self.checkInt32(.x9, td);
                     try self.checkInt32(acc_reg, td);
                     // 64-bit product of the 32-bit payloads; the
                     // result is i32-representable iff it sign-
                     // extends to itself.
-                    try m.emit(a64.smull(.x11, .x9, acc_reg));
-                    try m.emit(a64.sxtw(.x12, .x11));
-                    try m.emit(a64.cmpReg(.x12, .x11));
+                    try m.emit(isa.smull(.x11, .x9, acc_reg));
+                    try m.emit(isa.sxtw(.x12, .x11));
+                    try m.emit(isa.cmpReg(.x12, .x11));
                     try m.jumpCond(.ne, td);
                     // §6.1.6.1.4: int32 cannot encode -0. A zero product
                     // with one negative operand resumes in Lantern, whose
@@ -1059,9 +1091,9 @@ const Compiler = struct {
                     try m.jumpCbnz(.x11, &nonzero);
                     try m.jumpTbnz(.x9, 31, td);
                     try m.jumpTbnz(acc_reg, 31, td);
-                    m.bind(&nonzero);
-                    try m.emit(a64.movRegW(.x11, .x11));
-                    try m.emit(a64.orrReg(acc_reg, .x11, int32_tag_reg));
+                    try m.bind(&nonzero);
+                    try m.emit(isa.movRegW(.x11, .x11));
+                    try m.emit(isa.orrReg(acc_reg, .x11, int32_tag_reg));
                 },
                 .add_smi, .add_smi8, .add_smi16 => {
                     const td = try self.tdFor(bc);
@@ -1070,12 +1102,12 @@ const Compiler = struct {
                         .add_smi16 => readI16(code, i + 2),
                         else => readI32(code, i + 2),
                     };
-                    try m.emit(a64.ldrImm(.x9, regs_reg, regSlot(code[i + 1])));
+                    try m.emit(isa.ldrImm(.x9, regs_reg, regSlot(code[i + 1])));
                     try self.checkInt32(.x9, td);
                     try m.movImm64(.x10, @as(u32, @bitCast(imm)));
-                    try m.emit(a64.addsRegW(.x11, .x9, .x10));
+                    try m.emit(isa.addsRegW(.x11, .x9, .x10));
                     try m.jumpCond(.vs, td);
-                    try m.emit(a64.orrReg(acc_reg, .x11, int32_tag_reg));
+                    try m.emit(isa.orrReg(acc_reg, .x11, int32_tag_reg));
                 },
                 .to_int32 => {
                     // §7.1.6 fast path: an int32 is its own ToInt32.
@@ -1084,33 +1116,33 @@ const Compiler = struct {
                 },
                 .bit_and, .bit_or, .bit_xor => {
                     const td = try self.tdFor(bc);
-                    try m.emit(a64.ldrImm(.x9, regs_reg, regSlot(code[i + 1])));
+                    try m.emit(isa.ldrImm(.x9, regs_reg, regSlot(code[i + 1])));
                     try self.checkInt32(.x9, td);
                     try self.checkInt32(acc_reg, td);
                     try m.emit(switch (op) {
-                        .bit_and => a64.andRegW(.x11, .x9, acc_reg),
-                        .bit_or => a64.orrRegW(.x11, .x9, acc_reg),
-                        else => a64.eorRegW(.x11, .x9, acc_reg),
+                        .bit_and => isa.andRegW(.x11, .x9, acc_reg),
+                        .bit_or => isa.orrRegW(.x11, .x9, acc_reg),
+                        else => isa.eorRegW(.x11, .x9, acc_reg),
                     });
-                    try m.emit(a64.orrReg(acc_reg, .x11, int32_tag_reg));
+                    try m.emit(isa.orrReg(acc_reg, .x11, int32_tag_reg));
                 },
 
                 .lt, .gt, .le, .ge, .eq, .neq, .strict_eq, .strict_neq => {
                     const td = try self.tdFor(bc);
-                    try m.emit(a64.ldrImm(.x9, regs_reg, regSlot(code[i + 1])));
+                    try m.emit(isa.ldrImm(.x9, regs_reg, regSlot(code[i + 1])));
                     try self.checkInt32(.x9, td);
                     try self.checkInt32(acc_reg, td);
                     // acc = reg CMP acc, on the int32 payloads.
-                    try m.emit(a64.cmpRegW(.x9, acc_reg));
-                    try m.emit(a64.csetW(.x11, switch (op) {
-                        .lt => a64.Cond.lt,
+                    try m.emit(isa.cmpRegW(.x9, acc_reg));
+                    try m.emit(isa.csetW(.x11, switch (op) {
+                        .lt => isa.Cond.lt,
                         .gt => .gt,
                         .le => .le,
                         .ge => .ge,
                         .eq, .strict_eq => .eq,
                         else => .ne,
                     }));
-                    try m.emit(a64.orrReg(acc_reg, .x11, bool_tag_reg));
+                    try m.emit(isa.orrReg(acc_reg, .x11, bool_tag_reg));
                 },
 
                 .make_environment => {
@@ -1152,8 +1184,8 @@ const Compiler = struct {
                     const threw = try self.threwFor(bc);
                     // Root the live accumulator through the frame —
                     // the callee may allocate and GC (§4.2).
-                    try m.emit(a64.strImm(acc_reg, frame_reg, acc_off));
-                    try m.emit(a64.ldrImm(.x9, regs_reg, regSlot(r_callee)));
+                    try m.emit(isa.strImm(acc_reg, frame_reg, acc_off));
+                    try m.emit(isa.ldrImm(.x9, regs_reg, regSlot(r_callee)));
                     try self.emitCallDispatch(.x9, null, r_callee + 1, argc, ic_call, @intCast(after), td, threw);
                     try self.bindResume(@intCast(after));
                 },
@@ -1168,8 +1200,8 @@ const Compiler = struct {
                     const ic_call: u16 = if (op == .call_method8) code[i + 4] else readU16(code, i + 4);
                     const td = try self.tdFor(bc);
                     const threw = try self.threwFor(bc);
-                    try m.emit(a64.strImm(acc_reg, frame_reg, acc_off));
-                    try m.emit(a64.ldrImm(.x9, regs_reg, regSlot(r_callee)));
+                    try m.emit(isa.strImm(acc_reg, frame_reg, acc_off));
+                    try m.emit(isa.ldrImm(.x9, regs_reg, regSlot(r_callee)));
                     try self.emitCallDispatch(.x9, r_recv, r_callee + 1, argc, ic_call, @intCast(after), td, threw);
                     try self.bindResume(@intCast(after));
                 },
@@ -1192,8 +1224,8 @@ const Compiler = struct {
                     // acc_reg, so acc_reg must stay the pre-op value
                     // until the call commits (x14 carries the
                     // callee instead).
-                    try m.emit(a64.strImm(acc_reg, frame_reg, acc_off));
-                    try m.emit(a64.ldrImm(.x14, regs_reg, regSlot(r_recv)));
+                    try m.emit(isa.strImm(acc_reg, frame_reg, acc_off));
+                    try m.emit(isa.ldrImm(.x14, regs_reg, regSlot(r_recv)));
                     try self.emitPropertyIcLoad(.x14, .x14, ic_load, td);
                     try self.emitCallDispatch(.x14, r_recv, r_recv + 1, argc, ic_call, @intCast(after), td, threw);
                     try self.bindResume(@intCast(after));
@@ -1232,30 +1264,30 @@ const Compiler = struct {
                         // before the callee pointer is computed. A
                         // trip re-runs this tail_call in Lantern.
                         try self.backEdgeSafePoint(bc);
-                        try m.emit(a64.ldrImm(.x9, regs_reg, regSlot(r_callee)));
+                        try m.emit(isa.ldrImm(.x9, regs_reg, regSlot(r_callee)));
                         // Function-kind heap pointer (kind bits 0).
                         try m.movImm64(.x13, layout.value_bits.tag_object_shifted);
-                        try m.emit(a64.eorReg(.x13, .x9, .x13));
-                        try m.emit(a64.lsrImm(.x12, .x13, 48));
+                        try m.emit(isa.eorReg(.x13, .x9, .x13));
+                        try m.emit(isa.lsrImm(.x12, .x13, 48));
                         try m.jumpCbnz(.x12, td);
-                        try m.emit(a64.lslImm(.x12, .x13, 62));
-                        try m.emit(a64.lsrImm(.x12, .x12, 62));
+                        try m.emit(isa.lslImm(.x12, .x13, 62));
+                        try m.emit(isa.lsrImm(.x12, .x12, 62));
                         try m.jumpCbnz(.x12, td);
-                        try m.emit(a64.lsrImm(.x10, .x13, 2));
-                        try m.emit(a64.lslImm(.x10, .x10, 2));
+                        try m.emit(isa.lsrImm(.x10, .x13, 2));
+                        try m.emit(isa.lslImm(.x10, .x10, 2));
                         // Same chunk, not an arrow.
-                        try m.emit(a64.ldrImm(.x11, .x10, layout.function.chunk));
+                        try m.emit(isa.ldrImm(.x11, .x10, layout.function.chunk));
                         try m.movImm64(.x12, @intFromPtr(self.chunk));
-                        try m.emit(a64.cmpReg(.x11, .x12));
+                        try m.emit(isa.cmpReg(.x11, .x12));
                         try m.jumpCond(.ne, td);
-                        try m.emit(a64.ldrbImm(.x11, .x10, layout.function.is_arrow));
+                        try m.emit(isa.ldrbImm(.x11, .x10, layout.function.is_arrow));
                         try m.jumpCbnz(.x11, td);
                         // Args window down to r0..argc-1 (dest is
                         // always below source — forward copy safe).
                         var k: u8 = 0;
                         while (k < argc) : (k += 1) {
-                            try m.emit(a64.ldrImm(.x11, regs_reg, regSlot(r_callee + 1 + k)));
-                            try m.emit(a64.strImm(.x11, regs_reg, regSlot(k)));
+                            try m.emit(isa.ldrImm(.x11, regs_reg, regSlot(r_callee + 1 + k)));
+                            try m.emit(isa.strImm(.x11, regs_reg, regSlot(k)));
                         }
                         // Frame rebuild from the callee's capture
                         // set — the interpreter's reframe store set,
@@ -1264,21 +1296,21 @@ const Compiler = struct {
                         // wrap flags) and argc (only the arguments
                         // machinery reads it, which register-safe
                         // bodies cannot contain).
-                        try m.emit(a64.ldrImm(.x11, .x10, layout.function.captured_env));
-                        try m.emit(a64.strImm(.x11, frame_reg, layout.frame.env));
+                        try m.emit(isa.ldrImm(.x11, .x10, layout.function.captured_env));
+                        try m.emit(isa.strImm(.x11, frame_reg, layout.frame.env));
                         try m.movImm64(.x12, Value.undefined_.bits);
-                        try m.emit(a64.strImm(.x12, frame_reg, layout.frame.this_value));
-                        try m.emit(a64.strImm(.x12, frame_reg, layout.frame.new_target));
-                        try m.emit(a64.ldrImm(.x11, .x10, layout.function.home_object));
-                        try m.emit(a64.strImm(.x11, frame_reg, layout.frame.home_object));
-                        try m.emit(a64.ldrImm(.x11, .x10, layout.function.home_function));
-                        try m.emit(a64.strImm(.x11, frame_reg, layout.frame.home_function));
-                        try m.emit(a64.ldrImm(.x11, .x10, layout.function.super_called_cell));
-                        try m.emit(a64.strImm(.x11, frame_reg, layout.frame.super_called_cell));
-                        try m.emit(a64.ldrImm(.x11, .x10, layout.function.owning_module));
-                        try m.emit(a64.strImm(.x11, frame_reg, layout.frame.owning_module));
-                        try m.emit(a64.ldrImm(.x11, .x10, layout.function.realm));
-                        try m.emit(a64.strImm(.x11, frame_reg, layout.frame.running_realm));
+                        try m.emit(isa.strImm(.x12, frame_reg, layout.frame.this_value));
+                        try m.emit(isa.strImm(.x12, frame_reg, layout.frame.new_target));
+                        try m.emit(isa.ldrImm(.x11, .x10, layout.function.home_object));
+                        try m.emit(isa.strImm(.x11, frame_reg, layout.frame.home_object));
+                        try m.emit(isa.ldrImm(.x11, .x10, layout.function.home_function));
+                        try m.emit(isa.strImm(.x11, frame_reg, layout.frame.home_function));
+                        try m.emit(isa.ldrImm(.x11, .x10, layout.function.super_called_cell));
+                        try m.emit(isa.strImm(.x11, frame_reg, layout.frame.super_called_cell));
+                        try m.emit(isa.ldrImm(.x11, .x10, layout.function.owning_module));
+                        try m.emit(isa.strImm(.x11, frame_reg, layout.frame.owning_module));
+                        try m.emit(isa.ldrImm(.x11, .x10, layout.function.realm));
+                        try m.emit(isa.strImm(.x11, frame_reg, layout.frame.running_realm));
                         // A fresh activation's accumulator.
                         try m.movImm64(acc_reg, Value.undefined_.bits);
                         try m.jump(&self.body_start);
@@ -1297,31 +1329,31 @@ const Compiler = struct {
                     // down.
                     const td = try self.tdFor(bc);
                     try self.checkInt32(acc_reg, td);
-                    try m.emit(a64.movRegW(.x11, acc_reg));
+                    try m.emit(isa.movRegW(.x11, acc_reg));
                     try m.jumpCbz(.x11, td);
-                    try m.emit(a64.movz(.x13, 0, 0));
-                    try m.emit(a64.subsRegW(.x11, .x13, .x11));
+                    try m.emit(isa.movz(.x13, 0, 0));
+                    try m.emit(isa.subsRegW(.x11, .x13, .x11));
                     try m.jumpCond(.vs, td);
-                    try m.emit(a64.orrReg(acc_reg, .x11, int32_tag_reg));
+                    try m.emit(isa.orrReg(acc_reg, .x11, int32_tag_reg));
                 },
                 .bit_not => {
                     // §13.5.6 — ~int32 stays int32 always.
                     const td = try self.tdFor(bc);
                     try self.checkInt32(acc_reg, td);
-                    try m.emit(a64.movn(.x13, 0, 0));
-                    try m.emit(a64.eorRegW(.x11, acc_reg, .x13));
-                    try m.emit(a64.orrReg(acc_reg, .x11, int32_tag_reg));
+                    try m.emit(isa.movn(.x13, 0, 0));
+                    try m.emit(isa.eorRegW(.x11, acc_reg, .x13));
+                    try m.emit(isa.orrReg(acc_reg, .x11, int32_tag_reg));
                 },
                 .logical_not => {
                     // §13.5.7 on an already-Boolean acc — payload
                     // bit 0 flips and the tag bits are untouched, so
                     // no retag. Non-bool acc tiers down to ToBoolean.
                     const td = try self.tdFor(bc);
-                    try m.emit(a64.eorReg(.x13, acc_reg, bool_tag_reg));
-                    try m.emit(a64.cmpImm(.x13, 1, false));
+                    try m.emit(isa.eorReg(.x13, acc_reg, bool_tag_reg));
+                    try m.emit(isa.cmpImm(.x13, 1, false));
                     try m.jumpCond(.hi, td);
-                    try m.emit(a64.movz(.x13, 1, 0));
-                    try m.emit(a64.eorReg(acc_reg, acc_reg, .x13));
+                    try m.emit(isa.movz(.x13, 1, 0));
+                    try m.emit(isa.eorReg(acc_reg, acc_reg, .x13));
                 },
                 .lda_env => {
                     // Fixed-depth chain walk (the compiler
@@ -1331,18 +1363,18 @@ const Compiler = struct {
                     const depth = code[i + 1];
                     const slot = code[i + 2];
                     const td = try self.tdFor(bc);
-                    try m.emit(a64.ldrImm(.x9, frame_reg, layout.frame.env));
+                    try m.emit(isa.ldrImm(.x9, frame_reg, layout.frame.env));
                     try m.jumpCbz(.x9, td);
                     var d = depth;
                     while (d > 0) : (d -= 1) {
-                        try m.emit(a64.ldrImm(.x9, .x9, layout.env.parent));
+                        try m.emit(isa.ldrImm(.x9, .x9, layout.env.parent));
                         try m.jumpCbz(.x9, td);
                     }
-                    try m.emit(a64.ldrImm(.x11, .x9, layout.env.slots_len));
-                    try m.emit(a64.cmpImm(.x11, slot, false));
+                    try m.emit(isa.ldrImm(.x11, .x9, layout.env.slots_len));
+                    try m.emit(isa.cmpImm(.x11, slot, false));
                     try m.jumpCond(.ls, td);
-                    try m.emit(a64.ldrImm(.x10, .x9, layout.env.slots));
-                    try m.emit(a64.ldrImm(acc_reg, .x10, @as(u15, slot) * 8));
+                    try m.emit(isa.ldrImm(.x10, .x9, layout.env.slots));
+                    try m.emit(isa.ldrImm(acc_reg, .x10, @as(u15, slot) * 8));
                 },
                 .sta_env => {
                     // Same walk; the store runs the interpreter's
@@ -1351,20 +1383,20 @@ const Compiler = struct {
                     const depth = code[i + 1];
                     const slot = code[i + 2];
                     const td = try self.tdFor(bc);
-                    try m.emit(a64.ldrImm(.x9, frame_reg, layout.frame.env));
+                    try m.emit(isa.ldrImm(.x9, frame_reg, layout.frame.env));
                     try m.jumpCbz(.x9, td);
                     var d = depth;
                     while (d > 0) : (d -= 1) {
-                        try m.emit(a64.ldrImm(.x9, .x9, layout.env.parent));
+                        try m.emit(isa.ldrImm(.x9, .x9, layout.env.parent));
                         try m.jumpCbz(.x9, td);
                     }
-                    try m.emit(a64.ldrImm(.x11, .x9, layout.env.slots_len));
-                    try m.emit(a64.cmpImm(.x11, slot, false));
+                    try m.emit(isa.ldrImm(.x11, .x9, layout.env.slots_len));
+                    try m.emit(isa.cmpImm(.x11, slot, false));
                     try m.jumpCond(.ls, td);
-                    try m.emit(a64.movReg(.x0, realm_reg));
-                    try m.emit(a64.movReg(.x1, .x9));
+                    try m.emit(isa.movReg(.x0, realm_reg));
+                    try m.emit(isa.movReg(.x1, .x9));
                     try m.movImm64(.x2, slot);
-                    try m.emit(a64.movReg(.x3, acc_reg));
+                    try m.emit(isa.movReg(.x3, acc_reg));
                     try m.callAbs(.x16, @intFromPtr(&envStoreBarrier));
                 },
                 .lda_global_slot => {
@@ -1376,10 +1408,10 @@ const Compiler = struct {
                     const abs_idx: usize = @as(usize, self.chunk.global_lexical_base) + readU32(code, i + 1);
                     var have_gr = Masm.Label{};
                     defer have_gr.fixups.deinit(m.gpa);
-                    try m.emit(a64.ldrImm(.x9, frame_reg, layout.frame.running_realm));
+                    try m.emit(isa.ldrImm(.x9, frame_reg, layout.frame.running_realm));
                     try m.jumpCbnz(.x9, &have_gr);
-                    try m.emit(a64.movReg(.x9, realm_reg));
-                    m.bind(&have_gr);
+                    try m.emit(isa.movReg(.x9, realm_reg));
+                    try m.bind(&have_gr);
                     try self.loadFieldU64(.x10, .x9, layout.realm.globals_decl_slots_ptr);
                     try self.loadFieldU64(acc_reg, .x10, abs_idx * 8);
                 },
@@ -1389,10 +1421,10 @@ const Compiler = struct {
                     const abs_idx: usize = @as(usize, self.chunk.global_lexical_base) + readU32(code, i + 1);
                     var have_gr = Masm.Label{};
                     defer have_gr.fixups.deinit(m.gpa);
-                    try m.emit(a64.ldrImm(.x9, frame_reg, layout.frame.running_realm));
+                    try m.emit(isa.ldrImm(.x9, frame_reg, layout.frame.running_realm));
                     try m.jumpCbnz(.x9, &have_gr);
-                    try m.emit(a64.movReg(.x9, realm_reg));
-                    m.bind(&have_gr);
+                    try m.emit(isa.movReg(.x9, realm_reg));
+                    try m.bind(&have_gr);
                     try self.loadFieldU64(.x10, .x9, layout.realm.globals_decl_slots_ptr);
                     try self.storeFieldU64(acc_reg, .x10, abs_idx * 8);
                 },
@@ -1407,17 +1439,17 @@ const Compiler = struct {
                     const td = try self.tdFor(bc);
                     var have_gr = Masm.Label{};
                     defer have_gr.fixups.deinit(m.gpa);
-                    try m.emit(a64.ldrImm(.x9, frame_reg, layout.frame.running_realm));
+                    try m.emit(isa.ldrImm(.x9, frame_reg, layout.frame.running_realm));
                     try m.jumpCbnz(.x9, &have_gr);
-                    try m.emit(a64.movReg(.x9, realm_reg));
-                    m.bind(&have_gr);
+                    try m.emit(isa.movReg(.x9, realm_reg));
+                    try m.bind(&have_gr);
                     try self.loadFieldU64(.x10, .x9, layout.realm.globals_decl_slots_ptr);
                     try self.loadFieldU64(.x11, .x10, abs_idx * 8);
                     try m.movImm64(.x12, Value.hole_.bits);
-                    try m.emit(a64.cmpReg(.x11, .x12));
+                    try m.emit(isa.cmpReg(.x11, .x12));
                     try m.jumpCond(.eq, td);
                     try self.loadFieldU64(.x12, .x9, layout.realm.globals_decl_const_flags_ptr);
-                    try m.emit(a64.ldrbImm(.x13, .x12, @intCast(abs_idx)));
+                    try m.emit(isa.ldrbImm(.x13, .x12, @intCast(abs_idx)));
                     try m.jumpCbnz(.x13, td);
                     try self.storeFieldU64(acc_reg, .x10, abs_idx * 8);
                 },
@@ -1432,9 +1464,9 @@ const Compiler = struct {
                     // presence and read the (always-initialised)
                     // `this_value` otherwise.
                     const td = try self.tdFor(bc);
-                    try m.emit(a64.ldrImm(.x9, frame_reg, layout.frame.super_called_cell));
+                    try m.emit(isa.ldrImm(.x9, frame_reg, layout.frame.super_called_cell));
                     try m.jumpCbnz(.x9, td);
-                    try m.emit(a64.ldrImm(acc_reg, frame_reg, layout.frame.this_value));
+                    try m.emit(isa.ldrImm(acc_reg, frame_reg, layout.frame.this_value));
                 },
                 .lda_property, .lda_property8 => {
                     const td = try self.tdFor(bc);
@@ -1456,7 +1488,7 @@ const Compiler = struct {
                     const r_at = i + if (narrow) @as(usize, 2) else 3;
                     const r_obj = code[r_at];
                     const ic_idx: u16 = if (narrow) code[r_at + 1] else readU16(code, r_at + 1);
-                    try m.emit(a64.ldrImm(.x9, regs_reg, regSlot(r_obj)));
+                    try m.emit(isa.ldrImm(.x9, regs_reg, regSlot(r_obj)));
                     try self.emitPropertyIcLoad(.x9, acc_reg, ic_idx, td);
                 },
                 .sta_property, .sta_property8 => {
@@ -1470,19 +1502,19 @@ const Compiler = struct {
                     const r_at = i + if (narrow) @as(usize, 2) else 3;
                     const r_obj = code[r_at];
                     const ic_idx: u16 = if (narrow) code[r_at + 1] else readU16(code, r_at + 1);
-                    try m.emit(a64.ldrImm(.x9, regs_reg, regSlot(r_obj)));
+                    try m.emit(isa.ldrImm(.x9, regs_reg, regSlot(r_obj)));
                     try self.emitPlainObject(.x9, .x9, td);
                     try self.emitStoreCellAddr(.x10, ic_idx);
-                    try m.emit(a64.ldrImm(.x11, .x10, layout.store_ic_cell.shape));
+                    try m.emit(isa.ldrImm(.x11, .x10, layout.store_ic_cell.shape));
                     try m.jumpCbz(.x11, td);
-                    try m.emit(a64.ldrImm(.x12, .x9, layout.object.shape));
-                    try m.emit(a64.cmpReg(.x11, .x12));
+                    try m.emit(isa.ldrImm(.x12, .x9, layout.object.shape));
+                    try m.emit(isa.cmpReg(.x11, .x12));
                     try m.jumpCond(.ne, td);
-                    try m.emit(a64.ldrImmW(.x11, .x10, layout.store_ic_cell.slot));
+                    try m.emit(isa.ldrImmW(.x11, .x10, layout.store_ic_cell.slot));
                     try self.emitSlotWrite(acc_reg, .x9, .x11);
-                    try m.emit(a64.movReg(.x0, realm_reg));
-                    try m.emit(a64.movReg(.x1, .x9));
-                    try m.emit(a64.movReg(.x2, acc_reg));
+                    try m.emit(isa.movReg(.x0, realm_reg));
+                    try m.emit(isa.movReg(.x1, .x9));
+                    try m.emit(isa.movReg(.x2, acc_reg));
                     try m.callAbs(.x16, @intFromPtr(&storeBarrier));
                 },
                 .lda_global, .lda_global_or_undef, .lda_global8, .lda_global_or_undef8 => {
@@ -1498,25 +1530,25 @@ const Compiler = struct {
                     const ic_idx: u16 = if (narrow) code[i + 2] else readU16(code, i + 3);
                     var have_gr = Masm.Label{};
                     defer have_gr.fixups.deinit(m.gpa);
-                    try m.emit(a64.ldrImm(.x9, frame_reg, layout.frame.running_realm));
+                    try m.emit(isa.ldrImm(.x9, frame_reg, layout.frame.running_realm));
                     try m.jumpCbnz(.x9, &have_gr);
-                    try m.emit(a64.movReg(.x9, realm_reg));
-                    m.bind(&have_gr);
+                    try m.emit(isa.movReg(.x9, realm_reg));
+                    try m.bind(&have_gr);
                     try self.emitCellAddr(.x10, ic_idx);
                     try self.loadFieldU64(.x12, .x9, layout.realm.globals_target);
                     try m.jumpCbz(.x12, td);
-                    try m.emit(a64.ldrImm(.x11, .x10, layout.load_ic_cell.shape));
+                    try m.emit(isa.ldrImm(.x11, .x10, layout.load_ic_cell.shape));
                     try m.jumpCbz(.x11, td);
-                    try m.emit(a64.ldrImm(.x13, .x12, layout.object.shape));
-                    try m.emit(a64.cmpReg(.x11, .x13));
+                    try m.emit(isa.ldrImm(.x13, .x12, layout.object.shape));
+                    try m.emit(isa.cmpReg(.x11, .x13));
                     try m.jumpCond(.ne, td);
-                    try m.emit(a64.ldrImm(.x11, .x10, layout.load_ic_cell.proto));
+                    try m.emit(isa.ldrImm(.x11, .x10, layout.load_ic_cell.proto));
                     try m.jumpCbnz(.x11, td);
                     try self.loadFieldU64(.x13, .x9, layout.realm.globals_decl_revision);
-                    try m.emit(a64.ldrImm(.x9, .x10, layout.load_ic_cell.proto_rev));
-                    try m.emit(a64.cmpReg(.x13, .x9));
+                    try m.emit(isa.ldrImm(.x9, .x10, layout.load_ic_cell.proto_rev));
+                    try m.emit(isa.cmpReg(.x13, .x9));
                     try m.jumpCond(.ne, td);
-                    try m.emit(a64.ldrImmW(.x11, .x10, layout.load_ic_cell.slot));
+                    try m.emit(isa.ldrImmW(.x11, .x10, layout.load_ic_cell.slot));
                     try self.emitSlotRead(acc_reg, .x12, .x11);
                 },
 
@@ -1524,7 +1556,7 @@ const Compiler = struct {
                     const td = try self.tdFor(bc);
                     const table_index = readU16(code, i + 2);
                     const table = self.chunk.switch_tables[table_index];
-                    try m.emit(a64.ldrImm(.x9, regs_reg, regSlot(code[i + 1])));
+                    try m.emit(isa.ldrImm(.x9, regs_reg, regSlot(code[i + 1])));
                     // Lantern handles integer-valued doubles and every
                     // non-int32 default miss. The baseline's hot path stays a
                     // tag check plus native comparisons with no JS re-entry.
@@ -1533,7 +1565,7 @@ const Compiler = struct {
                         if (target == table.default_target) continue;
                         const case_value: i32 = @intCast(@as(i64, table.min) + @as(i64, @intCast(slot)));
                         try m.movImm64(.x10, @as(u32, @bitCast(case_value)));
-                        try m.emit(a64.cmpRegW(.x9, .x10));
+                        try m.emit(isa.cmpRegW(.x9, .x10));
                         try m.jumpCond(.eq, try self.labelForExisting(target));
                     }
                     try m.jump(try self.labelForExisting(table.default_target));
@@ -1560,8 +1592,8 @@ const Compiler = struct {
                     // Bool-tagged accumulators only; anything else
                     // (numbers, strings, objects in a condition)
                     // tiers down to ToBoolean in Lantern.
-                    try m.emit(a64.eorReg(.x11, acc_reg, bool_tag_reg));
-                    try m.emit(a64.lsrImm(.x11, .x11, 48));
+                    try m.emit(isa.eorReg(.x11, acc_reg, bool_tag_reg));
+                    try m.emit(isa.lsrImm(.x11, .x11, 48));
                     try m.jumpCbnz(.x11, td);
                     var skip = Masm.Label{};
                     defer skip.fixups.deinit(m.gpa);
@@ -1574,7 +1606,7 @@ const Compiler = struct {
                     }
                     if (off < 0) try self.backEdgeSafePoint(target);
                     try m.jump(try self.labelForExisting(target));
-                    m.bind(&skip);
+                    try m.bind(&skip);
                 },
                 .loop_inc_lt, .loop_inc_lt8, .loop_inc_lt32 => {
                     const td = try self.tdFor(bc);
@@ -1583,21 +1615,21 @@ const Compiler = struct {
                     const info = op.branchInfo().?;
                     const off = info.displacement(code, i);
                     const target = info.target(code, i);
-                    try m.emit(a64.ldrImm(.x9, regs_reg, regSlot(r_counter)));
-                    try m.emit(a64.ldrImm(.x10, regs_reg, regSlot(r_bound)));
+                    try m.emit(isa.ldrImm(.x9, regs_reg, regSlot(r_counter)));
+                    try m.emit(isa.ldrImm(.x10, regs_reg, regSlot(r_bound)));
                     try self.checkInt32(.x9, td);
                     try self.checkInt32(.x10, td);
-                    try m.emit(a64.addsImmW(.x11, .x9, 1));
+                    try m.emit(isa.addsImmW(.x11, .x9, 1));
                     try m.jumpCond(.vs, td);
-                    try m.emit(a64.orrReg(.x12, .x11, int32_tag_reg));
-                    try m.emit(a64.strImm(.x12, regs_reg, regSlot(r_counter)));
-                    try m.emit(a64.cmpRegW(.x11, .x10));
+                    try m.emit(isa.orrReg(.x12, .x11, int32_tag_reg));
+                    try m.emit(isa.strImm(.x12, regs_reg, regSlot(r_counter)));
+                    try m.emit(isa.cmpRegW(.x11, .x10));
                     var skip = Masm.Label{};
                     defer skip.fixups.deinit(m.gpa);
                     try m.jumpCond(.ge, &skip);
                     if (off < 0) try self.backEdgeSafePoint(target);
                     try m.jump(try self.labelForExisting(target));
-                    m.bind(&skip);
+                    try m.bind(&skip);
                 },
                 .jmp_if_strict_eq,
                 .jmp_if_strict_eq8,
@@ -1630,10 +1662,10 @@ const Compiler = struct {
                     const info = op.branchInfo().?;
                     const target = info.target(code, i);
                     const canonical = info.canonical;
-                    try m.emit(a64.ldrImm(.x9, regs_reg, regSlot(code[i + 1])));
+                    try m.emit(isa.ldrImm(.x9, regs_reg, regSlot(code[i + 1])));
                     try self.checkInt32(.x9, td);
                     try self.checkInt32(acc_reg, td);
-                    try m.emit(a64.cmpRegW(.x9, acc_reg));
+                    try m.emit(isa.cmpRegW(.x9, acc_reg));
                     var skip = Masm.Label{};
                     defer skip.fixups.deinit(m.gpa);
                     // Skip the branch when it should NOT be taken. For the
@@ -1641,7 +1673,7 @@ const Compiler = struct {
                     // `jmp_if_not_*` (jump-on-false) ops it is "comparison
                     // holds" — int32 has no NaN, so the signed condition is
                     // exact here.
-                    const skip_cond: a64.Cond = switch (canonical) {
+                    const skip_cond: isa.Cond = switch (canonical) {
                         .jmp_if_strict_eq => .ne,
                         .jmp_if_strict_neq => .eq,
                         .jmp_if_not_lt => .lt,
@@ -1651,7 +1683,7 @@ const Compiler = struct {
                     };
                     try m.jumpCond(skip_cond, &skip);
                     try m.jump(try self.labelForExisting(target));
-                    m.bind(&skip);
+                    try m.bind(&skip);
                 },
 
                 .throw_if_hole => {
@@ -1660,7 +1692,7 @@ const Compiler = struct {
                     // ReferenceError with its proper message.
                     const td = try self.tdFor(bc);
                     try m.movImm64(.x9, Value.hole_.bits);
-                    try m.emit(a64.cmpReg(acc_reg, .x9));
+                    try m.emit(isa.cmpReg(acc_reg, .x9));
                     try m.jumpCond(.eq, td);
                 },
 
@@ -1674,13 +1706,13 @@ const Compiler = struct {
                     // hole) tiers down to re-run the full op in Lantern.
                     const r_obj = code[i + 1];
                     const td = try self.tdFor(bc);
-                    try m.emit(a64.ldrImm(.x0, regs_reg, regSlot(r_obj)));
-                    try m.emit(a64.movReg(.x1, acc_reg));
-                    try m.emit(a64.addImm(.x2, frame_reg, acc_off, false));
+                    try m.emit(isa.ldrImm(.x0, regs_reg, regSlot(r_obj)));
+                    try m.emit(isa.movReg(.x1, acc_reg));
+                    try m.emit(isa.addImm(.x2, frame_reg, acc_off, false));
                     try m.callAbs(.x16, @intFromPtr(&denseGetShim));
-                    try m.emit(a64.movRegW(.x0, .x0));
+                    try m.emit(isa.movRegW(.x0, .x0));
                     try m.jumpCbz(.x0, td);
-                    try m.emit(a64.ldrImm(acc_reg, frame_reg, acc_off));
+                    try m.emit(isa.ldrImm(acc_reg, frame_reg, acc_off));
                 },
                 .make_array_n => {
                     // docs/ctor-array-build-gap.md L2 — helper-mediated
@@ -1692,16 +1724,16 @@ const Compiler = struct {
                     // register file (regs_reg == f.registers).
                     const r_base = code[i + 1];
                     const n = code[i + 2];
-                    try m.emit(a64.strImm(acc_reg, frame_reg, acc_off));
-                    try m.emit(a64.movReg(.x0, realm_reg));
-                    try m.emit(a64.movReg(.x1, regs_reg));
+                    try m.emit(isa.strImm(acc_reg, frame_reg, acc_off));
+                    try m.emit(isa.movReg(.x0, realm_reg));
+                    try m.emit(isa.movReg(.x1, regs_reg));
                     try m.movImm64(.x2, r_base);
                     try m.movImm64(.x3, n);
-                    try m.emit(a64.addImm(.x4, frame_reg, acc_off, false));
+                    try m.emit(isa.addImm(.x4, frame_reg, acc_off, false));
                     try m.callAbs(.x16, @intFromPtr(&makeArrayShim));
-                    try m.emit(a64.movRegW(.x0, .x0));
+                    try m.emit(isa.movRegW(.x0, .x0));
                     try m.jumpCbnz(.x0, &self.oom_label);
-                    try m.emit(a64.ldrImm(acc_reg, frame_reg, acc_off));
+                    try m.emit(isa.ldrImm(acc_reg, frame_reg, acc_off));
                 },
 
                 .return_ => try m.jump(&self.done_label),
@@ -1723,47 +1755,44 @@ const Compiler = struct {
     fn tail(self: *Compiler) CompileError!void {
         const m = &self.m;
         for (self.tds.items) |*t| {
-            m.bind(&t.label);
+            try m.bind(&t.label);
             try m.movImm64(.x9, t.resume_off);
             try m.jump(&self.tier_down_label);
         }
         for (self.threws.items) |*t| {
-            m.bind(&t.label);
+            try m.bind(&t.label);
             try m.movImm64(.x9, t.resume_off);
             try m.jump(&self.threw_label);
         }
-        m.bind(&self.done_label);
-        try m.emit(a64.strImm(acc_reg, frame_reg, acc_off));
-        try m.emit(a64.movz(.x0, 1, 0)); // EntryResult.done
+        try m.bind(&self.done_label);
+        try m.emit(isa.strImm(acc_reg, frame_reg, acc_off));
+        try m.emit(isa.movz(.x0, 1, 0)); // EntryResult.done
         var epilogue = Masm.Label{};
         defer epilogue.fixups.deinit(m.gpa);
         try m.jump(&epilogue);
         // x9 = the faulting call op's offset; the accumulator was
         // synced before the call, so only ip needs the store.
-        m.bind(&self.threw_label);
-        try m.emit(a64.strImm(.x9, frame_reg, ip_off));
-        try m.emit(a64.movz(.x0, 2, 0)); // EntryResult.threw
+        try m.bind(&self.threw_label);
+        try m.emit(isa.strImm(.x9, frame_reg, ip_off));
+        try m.emit(isa.movz(.x0, 2, 0)); // EntryResult.threw
         try m.jump(&epilogue);
-        m.bind(&self.oom_label);
-        try m.emit(a64.movz(.x0, 3, 0)); // EntryResult.host_oom
+        try m.bind(&self.oom_label);
+        try m.emit(isa.movz(.x0, 3, 0)); // EntryResult.host_oom
         try m.jump(&epilogue);
         // In-line frame-reentry (docs/jit.md §4.5): the call/construct
         // site already stamped the resume ip and flushed acc to the
         // frame, and pushed the callee — just report `frame_pushed`.
-        m.bind(&self.frame_pushed_label);
-        try m.emit(a64.movz(.x0, @intFromEnum(EntryResult.frame_pushed), 0));
+        try m.bind(&self.frame_pushed_label);
+        try m.emit(isa.movz(.x0, @intFromEnum(EntryResult.frame_pushed), 0));
         try m.jump(&epilogue);
         // x9 = bytecode offset to resume at.
-        m.bind(&self.tier_down_label);
-        try m.emit(a64.strImm(.x9, frame_reg, ip_off));
-        try m.emit(a64.strImm(acc_reg, frame_reg, acc_off));
-        try m.emit(a64.movz(.x0, 0, 0)); // EntryResult.resume_interp
-        m.bind(&epilogue);
-        try m.emit(a64.ldpPostIdxSp(.x23, .x24, 16));
-        try m.emit(a64.ldpPostIdxSp(.x21, .x22, 16));
-        try m.emit(a64.ldpPostIdxSp(.x19, .x20, 16));
-        try m.emit(a64.ldpPostIdxSp(.fp, .lr, 16));
-        try m.emit(a64.ret());
+        try m.bind(&self.tier_down_label);
+        try m.emit(isa.strImm(.x9, frame_reg, ip_off));
+        try m.emit(isa.strImm(acc_reg, frame_reg, acc_off));
+        try m.emit(isa.movz(.x0, 0, 0)); // EntryResult.resume_interp
+        try m.bind(&epilogue);
+        try m.leaveFrame();
+        try m.emit(isa.ret());
         // OSR entry stubs (docs/jit.md §12 3f): one per loop
         // header — the same prologue, then a jump into the body at
         // the header. The dispatcher enters here from a Lantern
@@ -1786,7 +1815,7 @@ const Compiler = struct {
         for (self.resume_points.items) |*r| {
             try self.osr_entries.append(m.gpa, .{
                 .bc = r.bc,
-                .code_off = @intCast(m.code.items.len),
+                .code_off = try continuationOffset(m.offset()),
             });
             try self.prologue();
             try m.jump(&r.label);
@@ -1796,7 +1825,7 @@ const Compiler = struct {
     fn emitTargetReentry(self: *Compiler, bc: u32) CompileError!void {
         try self.osr_entries.append(self.m.gpa, .{
             .bc = bc,
-            .code_off = @intCast(self.m.code.items.len),
+            .code_off = try continuationOffset(self.m.offset()),
         });
         try self.prologue();
         const idx = self.target_labels.get(bc) orelse return error.UnsupportedOp;
@@ -1820,34 +1849,38 @@ const Compiler = struct {
         const td = try self.tdFor(target);
         try self.loadRealmU64(.x9, step_budget_off);
         try m.jumpCbz(.x9, td);
-        try m.emit(a64.subImm(.x9, .x9, 1, false));
+        try m.emit(isa.subImm(.x9, .x9, 1, false));
         try self.storeRealmU64(.x9, step_budget_off);
         try self.loadRealmU8(.x10, interrupt_off);
         try m.jumpCbnz(.x10, td);
 
-        var osr_skip: Masm.Label = .{};
-        defer osr_skip.deinit(m.gpa);
-        try self.loadRealmU8(.x9, layout.realm.ohaimark_osr_enabled);
-        try m.jumpCbz(.x9, &osr_skip);
-        // Flush the pinned accumulator before the helper; tier-down
-        // reloads from the frame, and a concurrent GC sees it rooted.
-        try m.emit(a64.strImm(acc_reg, frame_reg, acc_off));
-        try m.emit(a64.movReg(.x0, realm_reg));
-        try m.emit(a64.movReg(.x1, frame_reg));
-        try m.movImm64(.x2, target);
-        try m.callAbs(.x16, @intFromPtr(&ohaimarkOsrYieldProbe));
-        try m.jumpCbnz(.x0, td);
-        // Helper returns 0: keep the flushed acc in the register.
-        try m.emit(a64.ldrImm(acc_reg, frame_reg, acc_off));
-        m.bind(&osr_skip);
+        if (comptime ohaimark_policy.supported) {
+            var osr_skip: Masm.Label = .{};
+            defer osr_skip.deinit(m.gpa);
+            try self.loadRealmU8(.x9, layout.realm.ohaimark_osr_enabled);
+            try m.jumpCbz(.x9, &osr_skip);
+            // Flush the pinned accumulator before the helper; tier-down
+            // reloads from the frame, and a concurrent GC sees it rooted.
+            try m.emit(isa.strImm(acc_reg, frame_reg, acc_off));
+            try m.emit(isa.movReg(.x0, realm_reg));
+            try m.emit(isa.movReg(.x1, frame_reg));
+            try m.movImm64(.x2, target);
+            try m.callAbs(.x16, @intFromPtr(&ohaimarkOsrYieldProbe));
+            // C only promises the low u32 return register on both ABIs.
+            try m.emit(isa.movRegW(.x0, .x0));
+            try m.jumpCbnz(.x0, td);
+            // Helper returns 0: keep the flushed acc in the register.
+            try m.emit(isa.ldrImm(acc_reg, frame_reg, acc_off));
+            try m.bind(&osr_skip);
+        }
     }
 
     /// `eor` against the pinned tag, shift the payload away, and
     /// tier down unless the high half-word matched int32.
-    fn checkInt32(self: *Compiler, src: a64.Reg, td: *Masm.Label) CompileError!void {
+    fn checkInt32(self: *Compiler, src: isa.Reg, td: *Masm.Label) CompileError!void {
         const m = &self.m;
-        try m.emit(a64.eorReg(.x13, src, int32_tag_reg));
-        try m.emit(a64.lsrImm(.x13, .x13, 48));
+        try m.emit(isa.eorReg(.x13, src, int32_tag_reg));
+        try m.emit(isa.lsrImm(.x13, .x13, 48));
         try m.jumpCbnz(.x13, td);
     }
 
@@ -1858,50 +1891,50 @@ const Compiler = struct {
 
     /// 64-bit field load from `base + off`; the big-offset path
     /// stages through `dst`, so no scratch is clobbered.
-    fn loadFieldU64(self: *Compiler, dst: a64.Reg, base: a64.Reg, off: usize) CompileError!void {
+    fn loadFieldU64(self: *Compiler, dst: isa.Reg, base: isa.Reg, off: usize) CompileError!void {
         const m = &self.m;
         if (off <= 32760) {
-            try m.emit(a64.ldrImm(dst, base, @intCast(off)));
+            try m.emit(isa.ldrImm(dst, base, @intCast(off)));
         } else {
-            try m.emit(a64.addImm(dst, base, @intCast(off >> 12), true));
-            try m.emit(a64.ldrImm(dst, dst, @intCast(off & 0xFFF)));
+            try m.emit(isa.addImm(dst, base, try fieldPageImmediate(off), true));
+            try m.emit(isa.ldrImm(dst, dst, @intCast(off & 0xFFF)));
         }
     }
 
-    fn loadRealmU64(self: *Compiler, dst: a64.Reg, off: usize) CompileError!void {
+    fn loadRealmU64(self: *Compiler, dst: isa.Reg, off: usize) CompileError!void {
         try self.loadFieldU64(dst, realm_reg, off);
     }
 
     /// Clobbers x13 on the big-offset path (the source register
     /// must be preserved, unlike `loadFieldU64`'s dst-staging).
-    fn storeFieldU64(self: *Compiler, src: a64.Reg, base: a64.Reg, off: usize) CompileError!void {
+    fn storeFieldU64(self: *Compiler, src: isa.Reg, base: isa.Reg, off: usize) CompileError!void {
         const m = &self.m;
         if (off <= 32760) {
-            try m.emit(a64.strImm(src, base, @intCast(off)));
+            try m.emit(isa.strImm(src, base, @intCast(off)));
         } else {
-            try m.emit(a64.addImm(.x13, base, @intCast(off >> 12), true));
-            try m.emit(a64.strImm(src, .x13, @intCast(off & 0xFFF)));
+            try m.emit(isa.addImm(.x13, base, try fieldPageImmediate(off), true));
+            try m.emit(isa.strImm(src, .x13, @intCast(off & 0xFFF)));
         }
     }
 
     /// Clobbers x13 on the big-offset path.
-    fn storeRealmU64(self: *Compiler, src: a64.Reg, off: usize) CompileError!void {
+    fn storeRealmU64(self: *Compiler, src: isa.Reg, off: usize) CompileError!void {
         const m = &self.m;
         if (off <= 32760) {
-            try m.emit(a64.strImm(src, realm_reg, @intCast(off)));
+            try m.emit(isa.strImm(src, realm_reg, @intCast(off)));
         } else {
-            try m.emit(a64.addImm(.x13, realm_reg, @intCast(off >> 12), true));
-            try m.emit(a64.strImm(src, .x13, @intCast(off & 0xFFF)));
+            try m.emit(isa.addImm(.x13, realm_reg, try fieldPageImmediate(off), true));
+            try m.emit(isa.strImm(src, .x13, @intCast(off & 0xFFF)));
         }
     }
 
-    fn loadRealmU8(self: *Compiler, dst: a64.Reg, off: usize) CompileError!void {
+    fn loadRealmU8(self: *Compiler, dst: isa.Reg, off: usize) CompileError!void {
         const m = &self.m;
         if (off <= 4095) {
-            try m.emit(a64.ldrbImm(dst, realm_reg, @intCast(off)));
+            try m.emit(isa.ldrbImm(dst, realm_reg, @intCast(off)));
         } else {
-            try m.emit(a64.addImm(dst, realm_reg, @intCast(off >> 12), true));
-            try m.emit(a64.ldrbImm(dst, dst, @intCast(off & 0xFFF)));
+            try m.emit(isa.addImm(dst, realm_reg, try fieldPageImmediate(off), true));
+            try m.emit(isa.ldrbImm(dst, dst, @intCast(off & 0xFFF)));
         }
     }
 
@@ -1910,19 +1943,19 @@ const Compiler = struct {
     /// functions, symbols, and BigInts share the tag and tier
     /// down. On success `dst` holds the object pointer (kind bits
     /// cleared). `src` survives; x12/x13 are clobbered.
-    fn emitPlainObject(self: *Compiler, src: a64.Reg, dst: a64.Reg, td: *Masm.Label) CompileError!void {
+    fn emitPlainObject(self: *Compiler, src: isa.Reg, dst: isa.Reg, td: *Masm.Label) CompileError!void {
         const m = &self.m;
         try m.movImm64(.x13, layout.value_bits.tag_object_shifted);
-        try m.emit(a64.eorReg(.x13, src, .x13));
-        try m.emit(a64.lsrImm(.x12, .x13, 48));
+        try m.emit(isa.eorReg(.x13, src, .x13));
+        try m.emit(isa.lsrImm(.x12, .x13, 48));
         try m.jumpCbnz(.x12, td);
         // Kind bits live in the pointer's alignment slack (low 2).
-        try m.emit(a64.lslImm(.x12, .x13, 62));
-        try m.emit(a64.lsrImm(.x12, .x12, 62));
-        try m.emit(a64.cmpImm(.x12, @intCast(layout.value_bits.kind_object), false));
+        try m.emit(isa.lslImm(.x12, .x13, 62));
+        try m.emit(isa.lsrImm(.x12, .x12, 62));
+        try m.emit(isa.cmpImm(.x12, @intCast(layout.value_bits.kind_object), false));
         try m.jumpCond(.ne, td);
-        try m.emit(a64.lsrImm(dst, .x13, 2));
-        try m.emit(a64.lslImm(dst, dst, 2));
+        try m.emit(isa.lsrImm(dst, .x13, 2));
+        try m.emit(isa.lslImm(dst, dst, 2));
     }
 
     /// `JSObject.slotAt` in machine code: inline slot when
@@ -1930,48 +1963,48 @@ const Compiler = struct {
     /// layout-contract slice witness covers the latter). `obj` and
     /// `slot` survive; x12/x13 are clobbered; `dst` may be the
     /// accumulator.
-    fn emitSlotRead(self: *Compiler, dst: a64.Reg, obj: a64.Reg, slot: a64.Reg) CompileError!void {
+    fn emitSlotRead(self: *Compiler, dst: isa.Reg, obj: isa.Reg, slot: isa.Reg) CompileError!void {
         const m = &self.m;
         var ovf = Masm.Label{};
         defer ovf.fixups.deinit(m.gpa);
         var done = Masm.Label{};
         defer done.fixups.deinit(m.gpa);
-        try m.emit(a64.cmpImm(slot, @intCast(layout.object.inline_slot_cap), false));
+        try m.emit(isa.cmpImm(slot, @intCast(layout.object.inline_slot_cap), false));
         try m.jumpCond(.cs, &ovf);
-        try m.emit(a64.lslImm(.x13, slot, 3));
-        try m.emit(a64.addReg(.x13, .x13, obj));
-        try m.emit(a64.ldrImm(dst, .x13, layout.object.inline_slots));
+        try m.emit(isa.lslImm(.x13, slot, 3));
+        try m.emit(isa.addReg(.x13, .x13, obj));
+        try m.emit(isa.ldrImm(dst, .x13, layout.object.inline_slots));
         try m.jump(&done);
-        m.bind(&ovf);
-        try m.emit(a64.ldrImm(.x12, obj, layout.object.overflow_items_ptr));
-        try m.emit(a64.subImm(.x13, slot, @intCast(layout.object.inline_slot_cap), false));
-        try m.emit(a64.lslImm(.x13, .x13, 3));
-        try m.emit(a64.addReg(.x13, .x13, .x12));
-        try m.emit(a64.ldrImm(dst, .x13, 0));
-        m.bind(&done);
+        try m.bind(&ovf);
+        try m.emit(isa.ldrImm(.x12, obj, layout.object.overflow_items_ptr));
+        try m.emit(isa.subImm(.x13, slot, @intCast(layout.object.inline_slot_cap), false));
+        try m.emit(isa.lslImm(.x13, .x13, 3));
+        try m.emit(isa.addReg(.x13, .x13, .x12));
+        try m.emit(isa.ldrImm(dst, .x13, 0));
+        try m.bind(&done);
     }
 
     /// `JSObject.setSlot` in machine code — the mirror of
     /// `emitSlotRead` with stores.
-    fn emitSlotWrite(self: *Compiler, src: a64.Reg, obj: a64.Reg, slot: a64.Reg) CompileError!void {
+    fn emitSlotWrite(self: *Compiler, src: isa.Reg, obj: isa.Reg, slot: isa.Reg) CompileError!void {
         const m = &self.m;
         var ovf = Masm.Label{};
         defer ovf.fixups.deinit(m.gpa);
         var done = Masm.Label{};
         defer done.fixups.deinit(m.gpa);
-        try m.emit(a64.cmpImm(slot, @intCast(layout.object.inline_slot_cap), false));
+        try m.emit(isa.cmpImm(slot, @intCast(layout.object.inline_slot_cap), false));
         try m.jumpCond(.cs, &ovf);
-        try m.emit(a64.lslImm(.x13, slot, 3));
-        try m.emit(a64.addReg(.x13, .x13, obj));
-        try m.emit(a64.strImm(src, .x13, layout.object.inline_slots));
+        try m.emit(isa.lslImm(.x13, slot, 3));
+        try m.emit(isa.addReg(.x13, .x13, obj));
+        try m.emit(isa.strImm(src, .x13, layout.object.inline_slots));
         try m.jump(&done);
-        m.bind(&ovf);
-        try m.emit(a64.ldrImm(.x12, obj, layout.object.overflow_items_ptr));
-        try m.emit(a64.subImm(.x13, slot, @intCast(layout.object.inline_slot_cap), false));
-        try m.emit(a64.lslImm(.x13, .x13, 3));
-        try m.emit(a64.addReg(.x13, .x13, .x12));
-        try m.emit(a64.strImm(src, .x13, 0));
-        m.bind(&done);
+        try m.bind(&ovf);
+        try m.emit(isa.ldrImm(.x12, obj, layout.object.overflow_items_ptr));
+        try m.emit(isa.subImm(.x13, slot, @intCast(layout.object.inline_slot_cap), false));
+        try m.emit(isa.lslImm(.x13, .x13, 3));
+        try m.emit(isa.addReg(.x13, .x13, .x12));
+        try m.emit(isa.strImm(src, .x13, 0));
+        try m.bind(&done);
     }
 
     /// The named-property IC read — mirrors the interpreter's three
@@ -1983,55 +2016,55 @@ const Compiler = struct {
     /// (written last; may equal `src_val`). Clobbers x9-x13.
     fn emitPropertyIcLoad(
         self: *Compiler,
-        src_val: a64.Reg,
-        dst: a64.Reg,
+        src_val: isa.Reg,
+        dst: isa.Reg,
         ic_idx: u16,
         td: *Masm.Label,
     ) CompileError!void {
         const m = &self.m;
         try self.emitPlainObject(src_val, .x9, td);
         try self.emitCellAddr(.x10, ic_idx);
-        try m.emit(a64.ldrImm(.x11, .x10, layout.load_ic_cell.shape));
+        try m.emit(isa.ldrImm(.x11, .x10, layout.load_ic_cell.shape));
         try m.jumpCbz(.x11, td);
-        try m.emit(a64.ldrImm(.x12, .x9, layout.object.shape));
-        try m.emit(a64.cmpReg(.x11, .x12));
+        try m.emit(isa.ldrImm(.x12, .x9, layout.object.shape));
+        try m.emit(isa.cmpReg(.x11, .x12));
         try m.jumpCond(.ne, td);
         var proto_path = Masm.Label{};
         defer proto_path.fixups.deinit(m.gpa);
         var next = Masm.Label{};
         defer next.fixups.deinit(m.gpa);
-        try m.emit(a64.ldrImm(.x11, .x10, layout.load_ic_cell.proto));
+        try m.emit(isa.ldrImm(.x11, .x10, layout.load_ic_cell.proto));
         try m.jumpCbnz(.x11, &proto_path);
         // Own-data hit: dst = recv.slots[cell.slot].
-        try m.emit(a64.ldrImmW(.x11, .x10, layout.load_ic_cell.slot));
+        try m.emit(isa.ldrImmW(.x11, .x10, layout.load_ic_cell.slot));
         try self.emitSlotRead(dst, .x9, .x11);
         try m.jump(&next);
         // Proto-load hit: identity of the cached proto, the proto's
         // own shape, AND the realm-wide §10.1.1-mutation counter,
         // exactly per the interpreter's predicate.
-        m.bind(&proto_path);
-        try m.emit(a64.ldrImm(.x12, .x9, layout.object.prototype));
-        try m.emit(a64.cmpReg(.x12, .x11));
+        try m.bind(&proto_path);
+        try m.emit(isa.ldrImm(.x12, .x9, layout.object.prototype));
+        try m.emit(isa.cmpReg(.x12, .x11));
         try m.jumpCond(.ne, td);
-        try m.emit(a64.ldrImm(.x9, .x10, layout.load_ic_cell.proto_shape));
-        try m.emit(a64.ldrImm(.x13, .x12, layout.object.shape));
-        try m.emit(a64.cmpReg(.x9, .x13));
+        try m.emit(isa.ldrImm(.x9, .x10, layout.load_ic_cell.proto_shape));
+        try m.emit(isa.ldrImm(.x13, .x12, layout.object.shape));
+        try m.emit(isa.cmpReg(.x9, .x13));
         try m.jumpCond(.ne, td);
         try self.loadRealmU64(.x9, layout.realm.proto_revision_counter);
-        try m.emit(a64.ldrImm(.x13, .x10, layout.load_ic_cell.proto_rev));
-        try m.emit(a64.cmpReg(.x9, .x13));
+        try m.emit(isa.ldrImm(.x13, .x10, layout.load_ic_cell.proto_rev));
+        try m.emit(isa.cmpReg(.x9, .x13));
         try m.jumpCond(.ne, td);
         var synthetic = Masm.Label{};
         defer synthetic.fixups.deinit(m.gpa);
-        try m.emit(a64.ldrbImm(.x11, .x10, layout.load_ic_cell.kind));
-        try m.emit(a64.cmpImm(.x11, layout.load_ic_cell.kind_synthetic_accessor, false));
+        try m.emit(isa.ldrbImm(.x11, .x10, layout.load_ic_cell.kind));
+        try m.emit(isa.cmpImm(.x11, layout.load_ic_cell.kind_synthetic_accessor, false));
         try m.jumpCond(.eq, &synthetic);
-        try m.emit(a64.ldrImmW(.x11, .x10, layout.load_ic_cell.slot));
+        try m.emit(isa.ldrImmW(.x11, .x10, layout.load_ic_cell.slot));
         try self.emitSlotRead(dst, .x12, .x11);
         try m.jump(&next);
-        m.bind(&synthetic);
-        try m.emit(a64.ldrImm(dst, .x10, layout.load_ic_cell.synthetic_value));
-        m.bind(&next);
+        try m.bind(&synthetic);
+        try m.emit(isa.ldrImm(dst, .x10, layout.load_ic_cell.synthetic_value));
+        try m.bind(&next);
     }
 
     /// The shared helperCall result dispatch: zero-extend the u32
@@ -2040,22 +2073,22 @@ const Compiler = struct {
     /// frame on success.
     fn emitCallStatus(self: *Compiler, threw: *Masm.Label) CompileError!void {
         const m = &self.m;
-        try m.emit(a64.movRegW(.x0, .x0));
+        try m.emit(isa.movRegW(.x0, .x0));
         var ok = Masm.Label{};
         defer ok.fixups.deinit(m.gpa);
         try m.jumpCbz(.x0, &ok);
-        try m.emit(a64.cmpImm(.x0, @intFromEnum(HelperCallStatus.threw), false));
+        try m.emit(isa.cmpImm(.x0, @intFromEnum(HelperCallStatus.threw), false));
         try m.jumpCond(.eq, threw);
         try m.jump(&self.oom_label);
-        m.bind(&ok);
-        try m.emit(a64.ldrImm(acc_reg, frame_reg, acc_off));
+        try m.bind(&ok);
+        try m.emit(isa.ldrImm(acc_reg, frame_reg, acc_off));
     }
 
     /// Bake the address of this site's IC cell into `dst`. Cells
     /// are chunk-owned mutable side-state; the chunk outlives the
     /// code, and compiled code only loads through the pointer, so
     /// the GC weak-clear protocol is untouched (docs/jit.md §4.4).
-    fn emitCellAddr(self: *Compiler, dst: a64.Reg, ic_idx: u16) CompileError!void {
+    fn emitCellAddr(self: *Compiler, dst: isa.Reg, ic_idx: u16) CompileError!void {
         if (ic_idx >= self.chunk.inline_load_caches.len) return error.UnsupportedOp;
         const addr: u64 = @intFromPtr(&self.chunk.inline_load_caches[ic_idx]);
         try self.m.movImm64(dst, addr);
@@ -2064,14 +2097,14 @@ const Compiler = struct {
     /// Like `emitCellAddr` for a named-store IC. Load and store sites have
     /// independent index spaces and layouts; crossing them silently tiers a
     /// valid compiled store down (or reads the wrong cell).
-    fn emitStoreCellAddr(self: *Compiler, dst: a64.Reg, ic_idx: u16) CompileError!void {
+    fn emitStoreCellAddr(self: *Compiler, dst: isa.Reg, ic_idx: u16) CompileError!void {
         if (ic_idx >= self.chunk.inline_store_caches.len) return error.UnsupportedOp;
         const addr: u64 = @intFromPtr(&self.chunk.inline_store_caches[ic_idx]);
         try self.m.movImm64(dst, addr);
     }
 
     /// Like `emitCellAddr` for the call-IC table.
-    fn emitCallCellAddr(self: *Compiler, dst: a64.Reg, ic_idx: u16) CompileError!void {
+    fn emitCallCellAddr(self: *Compiler, dst: isa.Reg, ic_idx: u16) CompileError!void {
         if (ic_idx >= self.chunk.inline_call_caches.len) return error.UnsupportedOp;
         const addr: u64 = @intFromPtr(&self.chunk.inline_call_caches[ic_idx]);
         try self.m.movImm64(dst, addr);
@@ -2093,7 +2126,7 @@ const Compiler = struct {
     /// Clobbers x9-x13 and the argument registers.
     fn emitCallDispatch(
         self: *Compiler,
-        callee_val: a64.Reg,
+        callee_val: isa.Reg,
         this_from: ?u8,
         args_base: u8,
         argc: u8,
@@ -2107,19 +2140,19 @@ const Compiler = struct {
         defer generic.fixups.deinit(m.gpa);
         // Function-kind heap pointer? (kind bits 0) — else generic.
         try m.movImm64(.x13, layout.value_bits.tag_object_shifted);
-        try m.emit(a64.eorReg(.x13, callee_val, .x13));
-        try m.emit(a64.lsrImm(.x12, .x13, 48));
+        try m.emit(isa.eorReg(.x13, callee_val, .x13));
+        try m.emit(isa.lsrImm(.x12, .x13, 48));
         try m.jumpCbnz(.x12, &generic);
-        try m.emit(a64.lslImm(.x12, .x13, 62));
-        try m.emit(a64.lsrImm(.x12, .x12, 62));
+        try m.emit(isa.lslImm(.x12, .x13, 62));
+        try m.emit(isa.lsrImm(.x12, .x12, 62));
         try m.jumpCbnz(.x12, &generic);
-        try m.emit(a64.lsrImm(.x10, .x13, 2));
-        try m.emit(a64.lslImm(.x10, .x10, 2));
+        try m.emit(isa.lsrImm(.x10, .x13, 2));
+        try m.emit(isa.lslImm(.x10, .x10, 2));
         // Cell compare.
         try self.emitCallCellAddr(.x11, ic_call);
-        try m.emit(a64.ldrImm(.x12, .x11, layout.call_ic_cell.callee));
+        try m.emit(isa.ldrImm(.x12, .x11, layout.call_ic_cell.callee));
         try m.jumpCbz(.x12, &generic);
-        try m.emit(a64.cmpReg(.x10, .x12));
+        try m.emit(isa.cmpReg(.x10, .x12));
         try m.jumpCond(.ne, &generic);
         // Hit: in-line push. Stamp the resume ip (the op after the
         // call) so the driver's `resumeCodeOffset(frame.ip)` finds the
@@ -2128,39 +2161,39 @@ const Compiler = struct {
         // frame pointer may dangle after the shim's `frames.append`
         // realloc, so we must not touch `frame_reg` after the call.
         try m.movImm64(.x9, after_bc);
-        try m.emit(a64.strImm(.x9, frame_reg, ip_off));
-        try m.emit(a64.movReg(.x0, realm_reg));
-        try m.emit(a64.movReg(.x1, .x10)); // callee fn ptr
+        try m.emit(isa.strImm(.x9, frame_reg, ip_off));
+        try m.emit(isa.movReg(.x0, realm_reg));
+        try m.emit(isa.movReg(.x1, .x10)); // callee fn ptr
         if (this_from) |r_this| {
-            try m.emit(a64.ldrImm(.x2, regs_reg, regSlot(r_this)));
+            try m.emit(isa.ldrImm(.x2, regs_reg, regSlot(r_this)));
         } else {
             try m.movImm64(.x2, Value.undefined_.bits);
         }
-        try m.emit(a64.addImm(.x3, regs_reg, @intCast(@as(u32, regSlot(args_base))), false));
+        try m.emit(isa.addImm(.x3, regs_reg, @intCast(@as(u32, regSlot(args_base))), false));
         try m.movImm64(.x4, argc);
         try m.callAbs(.x16, @intFromPtr(&pushCallFrameShim));
         // PushStatus: 0 pushed → frame_pushed; 1 tier_down → re-run the
         // op in Lantern; 2 host_oom.
-        try m.emit(a64.movRegW(.x0, .x0));
+        try m.emit(isa.movRegW(.x0, .x0));
         try m.jumpCbz(.x0, &self.frame_pushed_label);
-        try m.emit(a64.cmpImm(.x0, @intFromEnum(PushStatus.tier_down), false));
+        try m.emit(isa.cmpImm(.x0, @intFromEnum(PushStatus.tier_down), false));
         try m.jumpCond(.eq, td);
         try m.jump(&self.oom_label);
         // Miss: generic dispatch on the raw Value (nested path; handles
         // every exotic callee kind). Falls through to the resume label
         // (next op) with the result in acc.
-        m.bind(&generic);
-        try m.emit(a64.movReg(.x2, callee_val));
-        try m.emit(a64.movReg(.x0, realm_reg));
-        try m.emit(a64.movReg(.x1, frame_reg));
+        try m.bind(&generic);
+        try m.emit(isa.movReg(.x2, callee_val));
+        try m.emit(isa.movReg(.x0, realm_reg));
+        try m.emit(isa.movReg(.x1, frame_reg));
         if (this_from) |r_this| {
-            try m.emit(a64.ldrImm(.x3, regs_reg, regSlot(r_this)));
+            try m.emit(isa.ldrImm(.x3, regs_reg, regSlot(r_this)));
         } else {
             try m.movImm64(.x3, Value.undefined_.bits);
         }
-        try m.emit(a64.addImm(.x4, regs_reg, @intCast(@as(u32, regSlot(args_base))), false));
+        try m.emit(isa.addImm(.x4, regs_reg, @intCast(@as(u32, regSlot(args_base))), false));
         try m.movImm64(.x5, argc);
-        try m.emit(a64.addImm(.x6, frame_reg, acc_off, false));
+        try m.emit(isa.addImm(.x6, frame_reg, acc_off, false));
         try m.callAbs(.x16, @intFromPtr(&helperCall));
         try self.emitCallStatus(threw);
     }
@@ -2187,43 +2220,43 @@ const Compiler = struct {
     ) CompileError!void {
         const m = &self.m;
         const td = try self.tdFor(bc);
-        try m.emit(a64.ldrImm(.x9, regs_reg, regSlot(r_callee)));
+        try m.emit(isa.ldrImm(.x9, regs_reg, regSlot(r_callee)));
         // Function-kind heap pointer? (kind bits 0) — else tier down.
         try m.movImm64(.x13, layout.value_bits.tag_object_shifted);
-        try m.emit(a64.eorReg(.x13, .x9, .x13));
-        try m.emit(a64.lsrImm(.x12, .x13, 48));
+        try m.emit(isa.eorReg(.x13, .x9, .x13));
+        try m.emit(isa.lsrImm(.x12, .x13, 48));
         try m.jumpCbnz(.x12, td);
-        try m.emit(a64.lslImm(.x12, .x13, 62));
-        try m.emit(a64.lsrImm(.x12, .x12, 62));
+        try m.emit(isa.lslImm(.x12, .x13, 62));
+        try m.emit(isa.lsrImm(.x12, .x12, 62));
         try m.jumpCbnz(.x12, td);
-        try m.emit(a64.lsrImm(.x10, .x13, 2));
-        try m.emit(a64.lslImm(.x10, .x10, 2)); // x10 = callee fn ptr
+        try m.emit(isa.lsrImm(.x10, .x13, 2));
+        try m.emit(isa.lslImm(.x10, .x10, 2)); // x10 = callee fn ptr
         // Cell compare: callee match.
         try self.emitCallCellAddr(.x11, ic_call);
-        try m.emit(a64.ldrImm(.x12, .x11, layout.call_ic_cell.callee));
+        try m.emit(isa.ldrImm(.x12, .x11, layout.call_ic_cell.callee));
         try m.jumpCbz(.x12, td);
-        try m.emit(a64.cmpReg(.x10, .x12));
+        try m.emit(isa.cmpReg(.x10, .x12));
         try m.jumpCond(.ne, td);
         // §10.1.14 guard: `callee_fn.prototype` == `cell.proto`.
-        try m.emit(a64.ldrImm(.x12, .x10, layout.function.prototype));
-        try m.emit(a64.ldrImm(.x13, .x11, layout.call_ic_cell.proto));
-        try m.emit(a64.cmpReg(.x12, .x13));
+        try m.emit(isa.ldrImm(.x12, .x10, layout.function.prototype));
+        try m.emit(isa.ldrImm(.x13, .x11, layout.call_ic_cell.proto));
+        try m.emit(isa.cmpReg(.x12, .x13));
         try m.jumpCond(.ne, td);
         // Hit: stamp resume ip, flush acc (the shim allocates/GCs —
         // §4.2), and push the construct frame. `frame_reg` may dangle
         // after the append realloc, so touch it only before the call.
-        try m.emit(a64.strImm(acc_reg, frame_reg, acc_off));
+        try m.emit(isa.strImm(acc_reg, frame_reg, acc_off));
         try m.movImm64(.x9, after_bc);
-        try m.emit(a64.strImm(.x9, frame_reg, ip_off));
-        try m.emit(a64.movReg(.x0, realm_reg));
-        try m.emit(a64.movReg(.x1, .x11)); // cell ptr
-        try m.emit(a64.movReg(.x2, .x10)); // callee fn ptr
-        try m.emit(a64.addImm(.x3, regs_reg, @intCast(@as(u32, regSlot(r_callee + 1))), false));
+        try m.emit(isa.strImm(.x9, frame_reg, ip_off));
+        try m.emit(isa.movReg(.x0, realm_reg));
+        try m.emit(isa.movReg(.x1, .x11)); // cell ptr
+        try m.emit(isa.movReg(.x2, .x10)); // callee fn ptr
+        try m.emit(isa.addImm(.x3, regs_reg, @intCast(@as(u32, regSlot(r_callee + 1))), false));
         try m.movImm64(.x4, argc);
         try m.callAbs(.x16, @intFromPtr(&pushConstructFrameShim));
-        try m.emit(a64.movRegW(.x0, .x0));
+        try m.emit(isa.movRegW(.x0, .x0));
         try m.jumpCbz(.x0, &self.frame_pushed_label);
-        try m.emit(a64.cmpImm(.x0, @intFromEnum(PushStatus.tier_down), false));
+        try m.emit(isa.cmpImm(.x0, @intFromEnum(PushStatus.tier_down), false));
         try m.jumpCond(.eq, td);
         try m.jump(&self.oom_label);
     }
@@ -2234,12 +2267,26 @@ const Compiler = struct {
     /// push path, or by fall-through on the generic-call miss path).
     fn bindResume(self: *Compiler, after_bc: u32) CompileError!void {
         try self.resume_points.append(self.m.gpa, .{ .bc = after_bc, .label = .{} });
-        self.m.bind(&self.resume_points.items[self.resume_points.items.len - 1].label);
+        try self.m.bind(&self.resume_points.items[self.resume_points.items.len - 1].label);
     }
 };
 
 fn regSlot(r: u8) u15 {
     return @as(u15, r) * 8;
+}
+
+/// Split a byte offset into the high immediate used by the shared
+/// page-plus-low-offset field sequence. Refuse values the A64-shaped logical
+/// operation cannot encode; never let a user-sized global slot reach a cast
+/// trap on either backend.
+fn fieldPageImmediate(off: usize) CompileError!u12 {
+    return std.math.cast(u12, off >> 12) orelse error.UnsupportedOp;
+}
+
+/// Continuation metadata stores native code offsets as u32. A pathological
+/// chunk must refuse compilation if its emitted code exceeds that contract.
+fn continuationOffset(off: usize) CompileError!u32 {
+    return std.math.cast(u32, off) orelse error.UnsupportedOp;
 }
 
 fn targetOf(after_operand: usize, off: i16) u32 {
@@ -3845,5 +3892,21 @@ test "jit bistromath: in-line construct returns the constructed object (§10.2.2
     try testing.expectEqual(
         Chunk.JitState.Tier.compiled,
         templateNamed(&chunk, "step").jit_state.?.bistromath.code.tier,
+    );
+}
+
+test "jit bistromath: oversized field and continuation offsets refuse without trapping" {
+    try testing.expectEqual(
+        @as(u12, std.math.maxInt(u12)),
+        try fieldPageImmediate(0x00ff_ffff),
+    );
+    try testing.expectError(error.UnsupportedOp, fieldPageImmediate(0x0100_0000));
+    try testing.expectEqual(
+        std.math.maxInt(u32),
+        try continuationOffset(std.math.maxInt(u32)),
+    );
+    try testing.expectError(
+        error.UnsupportedOp,
+        continuationOffset(@as(usize, std.math.maxInt(u32)) + 1),
     );
 }

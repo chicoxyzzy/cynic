@@ -1,10 +1,10 @@
 //! MacroAssembler facade for the JIT substrate — the instruction
 //! buffer, labels with forward-fixup patching, and multi-instruction
 //! helpers (64-bit immediate materialization, absolute calls).
-//! Call sites stay target-independent; bodies are per-ISA
-//! (docs/jit.md §7 — the SpiderMonkey model). aarch64 only today;
-//! the x86_64 body is a mechanical port behind the same surface
-//! (docs/jit.md §14).
+//! This facade is AArch64-specific today and is shared by Ohaimark and
+//! Spasm. Bistromath's target-neutral adapter lives in
+//! `bistromath/masm.zig` and selects this facade or `asm_x86_64.zig`
+//! (docs/jit.md §7 — the SpiderMonkey model).
 //!
 //! The buffer is plain heap memory — code is assembled here in
 //! full, then copied into executable pages by
@@ -22,6 +22,17 @@ pub const Cond = a64.Cond;
 /// True when this build can both emit for and execute on the host —
 /// what the execution tests below require.
 pub const native_aarch64 = code_alloc.supported and builtin.cpu.arch == .aarch64;
+
+/// Assembly can fail because the byte buffer grows, or because a user-sized
+/// chunk cannot be represented by the selected ISA's relative branch.  The
+/// latter must make the tier refuse the chunk; it must never reach an
+/// `@intCast` trap and abort the host (AGENTS.md host-safety contract).
+pub const Error = error{
+    OutOfMemory,
+    LabelAlreadyBound,
+    InvalidLabel,
+    BranchOutOfRange,
+};
 
 pub const Masm = struct {
     gpa: std.mem.Allocator,
@@ -70,17 +81,18 @@ pub const Masm = struct {
         }
     };
 
-    pub fn bind(self: *Masm, label: *Label) void {
-        std.debug.assert(label.bound == null);
-        label.bound = self.offset();
-        for (label.fixups.items) |fixup| self.patch(fixup, label.bound.?);
+    pub fn bind(self: *Masm, label: *Label) Error!void {
+        if (label.bound != null) return error.LabelAlreadyBound;
+        const target = self.offset();
+        for (label.fixups.items) |fixup| try self.patch(fixup, target);
+        label.bound = target;
         label.fixups.clearRetainingCapacity();
     }
 
     /// B <label>
-    pub fn jump(self: *Masm, label: *Label) error{OutOfMemory}!void {
+    pub fn jump(self: *Masm, label: *Label) Error!void {
         if (label.bound) |target| {
-            try self.emit(a64.b(deltaWords(i26, self.offset(), target)));
+            try self.emit(a64.b(try deltaWords(i26, self.offset(), target)));
         } else {
             try label.fixups.append(self.gpa, .{ .at = self.offset(), .kind = .imm26 });
             try self.emit(a64.b(0));
@@ -88,9 +100,9 @@ pub const Masm = struct {
     }
 
     /// B.cond <label>
-    pub fn jumpCond(self: *Masm, cond: Cond, label: *Label) error{OutOfMemory}!void {
+    pub fn jumpCond(self: *Masm, cond: Cond, label: *Label) Error!void {
         if (label.bound) |target| {
-            try self.emit(a64.bCond(cond, deltaWords(i19, self.offset(), target)));
+            try self.emit(a64.bCond(cond, try deltaWords(i19, self.offset(), target)));
         } else {
             try label.fixups.append(self.gpa, .{ .at = self.offset(), .kind = .imm19 });
             try self.emit(a64.bCond(cond, 0));
@@ -98,9 +110,9 @@ pub const Masm = struct {
     }
 
     /// CBZ Xt, <label>
-    pub fn jumpCbz(self: *Masm, rt: Reg, label: *Label) error{OutOfMemory}!void {
+    pub fn jumpCbz(self: *Masm, rt: Reg, label: *Label) Error!void {
         if (label.bound) |target| {
-            try self.emit(a64.cbz(rt, deltaWords(i19, self.offset(), target)));
+            try self.emit(a64.cbz(rt, try deltaWords(i19, self.offset(), target)));
         } else {
             try label.fixups.append(self.gpa, .{ .at = self.offset(), .kind = .imm19 });
             try self.emit(a64.cbz(rt, 0));
@@ -108,9 +120,9 @@ pub const Masm = struct {
     }
 
     /// CBNZ Xt, <label>
-    pub fn jumpCbnz(self: *Masm, rt: Reg, label: *Label) error{OutOfMemory}!void {
+    pub fn jumpCbnz(self: *Masm, rt: Reg, label: *Label) Error!void {
         if (label.bound) |target| {
-            try self.emit(a64.cbnz(rt, deltaWords(i19, self.offset(), target)));
+            try self.emit(a64.cbnz(rt, try deltaWords(i19, self.offset(), target)));
         } else {
             try label.fixups.append(self.gpa, .{ .at = self.offset(), .kind = .imm19 });
             try self.emit(a64.cbnz(rt, 0));
@@ -118,9 +130,9 @@ pub const Masm = struct {
     }
 
     /// TBZ Xt, #bit, <label>
-    pub fn jumpTbz(self: *Masm, rt: Reg, bit: u6, label: *Label) error{OutOfMemory}!void {
+    pub fn jumpTbz(self: *Masm, rt: Reg, bit: u6, label: *Label) Error!void {
         if (label.bound) |target| {
-            try self.emit(a64.tbz(rt, bit, deltaWords(i14, self.offset(), target)));
+            try self.emit(a64.tbz(rt, bit, try deltaWords(i14, self.offset(), target)));
         } else {
             try label.fixups.append(self.gpa, .{ .at = self.offset(), .kind = .imm14 });
             try self.emit(a64.tbz(rt, bit, 0));
@@ -128,9 +140,9 @@ pub const Masm = struct {
     }
 
     /// TBNZ Xt, #bit, <label>
-    pub fn jumpTbnz(self: *Masm, rt: Reg, bit: u6, label: *Label) error{OutOfMemory}!void {
+    pub fn jumpTbnz(self: *Masm, rt: Reg, bit: u6, label: *Label) Error!void {
         if (label.bound) |target| {
-            try self.emit(a64.tbnz(rt, bit, deltaWords(i14, self.offset(), target)));
+            try self.emit(a64.tbnz(rt, bit, try deltaWords(i14, self.offset(), target)));
         } else {
             try label.fixups.append(self.gpa, .{ .at = self.offset(), .kind = .imm14 });
             try self.emit(a64.tbnz(rt, bit, 0));
@@ -165,25 +177,30 @@ pub const Masm = struct {
         return ca.install(self.code.items);
     }
 
-    fn deltaWords(comptime T: type, from: usize, to: usize) T {
-        const delta = @divExact(@as(isize, @intCast(to)) - @as(isize, @intCast(from)), 4);
-        return @intCast(delta);
+    fn deltaWords(comptime T: type, from: usize, to: usize) Error!T {
+        if ((from | to) & 3 != 0) return error.InvalidLabel;
+        const delta_bytes = @as(i128, @intCast(to)) - @as(i128, @intCast(from));
+        const delta_words = @divExact(delta_bytes, 4);
+        return std.math.cast(T, delta_words) orelse error.BranchOutOfRange;
     }
 
-    fn patch(self: *Masm, fixup: Label.Fixup, target: usize) void {
+    fn patch(self: *Masm, fixup: Label.Fixup, target: usize) Error!void {
+        if (fixup.at > self.code.items.len or 4 > self.code.items.len - fixup.at) {
+            return error.InvalidLabel;
+        }
         const slot = self.code.items[fixup.at..][0..4];
         var word = std.mem.readInt(u32, slot, .little);
         switch (fixup.kind) {
             .imm26 => {
-                const d = deltaWords(i26, fixup.at, target);
+                const d = try deltaWords(i26, fixup.at, target);
                 word |= @as(u32, @as(u26, @bitCast(d)));
             },
             .imm19 => {
-                const d = deltaWords(i19, fixup.at, target);
+                const d = try deltaWords(i19, fixup.at, target);
                 word |= @as(u32, @as(u19, @bitCast(d))) << 5;
             },
             .imm14 => {
-                const d = deltaWords(i14, fixup.at, target);
+                const d = try deltaWords(i14, fixup.at, target);
                 word |= @as(u32, @as(u14, @bitCast(d))) << 5;
             },
         }
@@ -268,13 +285,13 @@ test "jit masm: labels — backward and forward branches in a loop" {
 
     try m.movImm64(.x2, 0); // sum
     try m.movImm64(.x3, 0); // i
-    m.bind(&head);
+    try m.bind(&head);
     try m.emit(a64.cmpReg(.x3, .x0));
     try m.jumpCond(.eq, &done); // forward fixup
     try m.emit(a64.addReg(.x2, .x2, .x3));
     try m.emit(a64.addImm(.x3, .x3, 1, false));
     try m.jump(&head); // backward, already bound
-    m.bind(&done);
+    try m.bind(&done);
     try m.emit(a64.movReg(.x0, .x2));
     try m.emit(a64.ret());
 
