@@ -50,27 +50,27 @@ pub fn installAll(realm: *Realm, obj_proto: *JSObject) !void {
     // is Cynic's slot for the constructor's own [[Prototype]]
     // when the parent is a JSFunction; `objectGetPrototypeOf`
     // reads it first.
-    realm.intrinsics.type_error_constructor.?.static_parent = error_ctor;
+    realm.heap.setFunctionStaticParent(realm.intrinsics.type_error_constructor.?, error_ctor);
 
     realm.intrinsics.range_error_constructor = try installError(realm, "RangeError", rangeErrorNative, error_proto, 1);
     realm.intrinsics.range_error_prototype = realm.intrinsics.range_error_constructor.?.prototype;
-    realm.intrinsics.range_error_constructor.?.static_parent = error_ctor;
+    realm.heap.setFunctionStaticParent(realm.intrinsics.range_error_constructor.?, error_ctor);
 
     realm.intrinsics.reference_error_constructor = try installError(realm, "ReferenceError", referenceErrorNative, error_proto, 1);
     realm.intrinsics.reference_error_prototype = realm.intrinsics.reference_error_constructor.?.prototype;
-    realm.intrinsics.reference_error_constructor.?.static_parent = error_ctor;
+    realm.heap.setFunctionStaticParent(realm.intrinsics.reference_error_constructor.?, error_ctor);
 
     realm.intrinsics.syntax_error_constructor = try installError(realm, "SyntaxError", syntaxErrorNative, error_proto, 1);
     realm.intrinsics.syntax_error_prototype = realm.intrinsics.syntax_error_constructor.?.prototype;
-    realm.intrinsics.syntax_error_constructor.?.static_parent = error_ctor;
+    realm.heap.setFunctionStaticParent(realm.intrinsics.syntax_error_constructor.?, error_ctor);
 
     realm.intrinsics.uri_error_constructor = try installError(realm, "URIError", uriErrorNative, error_proto, 1);
     realm.intrinsics.uri_error_prototype = realm.intrinsics.uri_error_constructor.?.prototype;
-    realm.intrinsics.uri_error_constructor.?.static_parent = error_ctor;
+    realm.heap.setFunctionStaticParent(realm.intrinsics.uri_error_constructor.?, error_ctor);
 
     realm.intrinsics.eval_error_constructor = try installError(realm, "EvalError", evalErrorNative, error_proto, 1);
     realm.intrinsics.eval_error_prototype = realm.intrinsics.eval_error_constructor.?.prototype;
-    realm.intrinsics.eval_error_constructor.?.static_parent = error_ctor;
+    realm.heap.setFunctionStaticParent(realm.intrinsics.eval_error_constructor.?, error_ctor);
 
     // §20.5.6.3 NativeError prototype object — each NativeError
     // prototype is an Error instance shape with own
@@ -106,7 +106,7 @@ pub fn installAll(realm: *Realm, obj_proto: *JSObject) !void {
     // as an own data property on the instance.
     realm.intrinsics.aggregate_error_constructor = try installAggregateError(realm, error_proto);
     realm.intrinsics.aggregate_error_prototype = realm.intrinsics.aggregate_error_constructor.?.prototype;
-    realm.intrinsics.aggregate_error_constructor.?.static_parent = error_ctor;
+    realm.heap.setFunctionStaticParent(realm.intrinsics.aggregate_error_constructor.?, error_ctor);
 
     // §20.5.x SuppressedError(error, suppressed, message) — ES2026
     // explicit-resource-management. `DisposeResources` wraps an
@@ -114,7 +114,7 @@ pub fn installAll(realm: *Realm, obj_proto: *JSObject) !void {
     // (`.error` is the new throw, `.suppressed` is the previous).
     realm.intrinsics.suppressed_error_constructor = try installSuppressedError(realm, error_proto);
     realm.intrinsics.suppressed_error_prototype = realm.intrinsics.suppressed_error_constructor.?.prototype;
-    realm.intrinsics.suppressed_error_constructor.?.static_parent = error_ctor;
+    realm.heap.setFunctionStaticParent(realm.intrinsics.suppressed_error_constructor.?, error_ctor);
 }
 
 /// §20.5.7.1.1 AggregateError(errors, message[, options]) — built

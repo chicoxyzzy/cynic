@@ -1002,6 +1002,36 @@ the corpus under the relevant section's directory before adding.
   `setPrototypeOf` on a callable with a Proxy proto and a
   subsequent ToPrimitive trigger.
 
+### Function-valued [[Prototype]] was not retained across GC
+
+- **Fixed in:** TBD
+- **Spec:** §10.1.1 OrdinaryGetPrototypeOf and §10.1.2.1
+  OrdinarySetPrototypeOf — a function-valued [[Prototype]] is a strong
+  ordinary-object edge; §15.7.14 ClassDefinitionEvaluation creates the
+  same edge for derived constructors' static inheritance.
+- **Reproducer:**
+  ```js
+  const child = () => {};
+  (() => {
+    const parent = () => {};
+    parent[Symbol.toPrimitive] = () => 42;
+    Object.setPrototypeOf(child, parent);
+  })();
+  $262.gc();
+  assert.sameValue(+child, 42);
+  ```
+- **Before fix:** Cynic marked a function's object-typed `proto` but not its
+  function-typed `static_parent`; a parent reachable only through that edge
+  could be reclaimed, leaving later inherited-property walks dangling.
+- **After fix:** Full, minor, and incremental marking retain the static
+  parent, and every runtime mutation of the edge passes through the heap's
+  generational/incremental write barrier.
+- **Suggested fixture shape:** positive runtime fixture under
+  `built-ins/Object/setPrototypeOf/`, plus a class-static-inheritance variant,
+  using `$262.gc()`. Cynic's deterministic local regression uses
+  `__collectGarbage` and alternating-GC pressure because corpus coverage via
+  `$262.gc()` is not authoritative for collector timing.
+
 ### `new Date(0, 1e308)` aborted the host on the `@intFromFloat` cast
 
 - **Fixed in:** `43cc2ea`

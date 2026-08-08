@@ -9546,6 +9546,24 @@ test "GC: ToPrimitive receiver survives gc_threshold=1" {
     , 42);
 }
 
+test "GC: callable static parent keeps inherited ToPrimitive alive" {
+    // Pretenure parent + trap while they are precise IIFE locals, then
+    // install the child edge and drop the frame. The second full collection
+    // cannot retain the now-mature parent through the young-pointer native-
+    // stack backstop; it survives only through `rootedChild.static_parent`.
+    try expectScriptIntWithBuiltins(
+        \\const rootedChild = () => {};
+        \\(() => {
+        \\  const parent = () => {};
+        \\  parent[Symbol.toPrimitive] = () => 42;
+        \\  __collectGarbage();
+        \\  Object.setPrototypeOf(rootedChild, parent);
+        \\})();
+        \\__collectGarbage();
+        \\+rootedChild;
+    , 42);
+}
+
 test "GC: String.prototype.slice fresh-ToString receiver survives gc_threshold=1" {
     // §22.1.3.20 — an object receiver makes `coerceThisToJSString`
     // stringify via §7.1.17 ToString, producing a FRESH `JSString`
@@ -16706,6 +16724,113 @@ test "prototype chain: setPrototypeOf to a function" {
         \\Object.setPrototypeOf(o, f);
         \\"" + o.x + "," + (Object.getPrototypeOf(o) === f);
     , "42,true");
+}
+
+test "prototype chain: setPrototypeOf rejects cycles through functions" {
+    try expectScriptStringWithBuiltins(
+        \\const self = function () {};
+        \\let selfCycle = false;
+        \\try { Object.setPrototypeOf(self, self); }
+        \\catch (error) { selfCycle = error instanceof TypeError; }
+        \\const a = function () {};
+        \\const b = function () {};
+        \\Object.setPrototypeOf(a, b);
+        \\let functionCycle = false;
+        \\try { Object.setPrototypeOf(b, a); }
+        \\catch (error) { functionCycle = error instanceof TypeError; }
+        \\const mixedFunction = function () {};
+        \\const mixedObject = {};
+        \\Object.setPrototypeOf(mixedObject, mixedFunction);
+        \\let mixedCycle = false;
+        \\try { Object.setPrototypeOf(mixedFunction, mixedObject); }
+        \\catch (error) { mixedCycle = error instanceof TypeError; }
+        \\selfCycle + ":" + functionCycle + ":" + mixedCycle + ":" + (Object.getPrototypeOf(self) !== self);
+    , "true:true:true:true");
+}
+
+test "prototype chain: setPrototypeOf rejects a cycle through a retargeted function parent" {
+    try expectScriptStringWithBuiltins(
+        \\const oldFallback = {};
+        \\const freshFallback = {};
+        \\const parent = function () {};
+        \\const child = function () {};
+        \\Object.setPrototypeOf(parent, oldFallback);
+        \\Object.setPrototypeOf(child, parent);
+        \\Object.setPrototypeOf(parent, freshFallback);
+        \\let rejected = false;
+        \\try { Object.setPrototypeOf(freshFallback, child); }
+        \\catch (error) { rejected = error instanceof TypeError; }
+        \\rejected + ":" + (Object.getPrototypeOf(freshFallback) !== child);
+    , "true:true");
+}
+
+test "prototype chain: setPrototypeOf rejects cycles through duplicated function fallbacks" {
+    // P1 retains the compatibility representation where a function parent
+    // is stored both by identity (`static_parent`) and as the parent's
+    // instance `.prototype` object (`proto`). Validate the effective lookup
+    // continuation too: every missing-property read below must stay finite.
+    try expectScriptStringWithBuiltins(
+        \\const functionTarget = function () {};
+        \\const functionParent = function () {};
+        \\Object.setPrototypeOf(functionParent.prototype, functionTarget);
+        \\let functionRejected = false;
+        \\try { Object.setPrototypeOf(functionTarget, functionParent); }
+        \\catch (error) { functionRejected = error instanceof TypeError; }
+        \\const functionFinite = typeof functionTarget.missing === "undefined";
+        \\const objectTarget = {};
+        \\const objectParent = function () {};
+        \\const objectGrandparent = function () {};
+        \\Object.setPrototypeOf(objectGrandparent.prototype, objectTarget);
+        \\Object.setPrototypeOf(objectParent, objectGrandparent);
+        \\let objectRejected = false;
+        \\try { Object.setPrototypeOf(objectTarget, objectParent); }
+        \\catch (error) { objectRejected = error instanceof TypeError; }
+        \\const objectFinite = !("missing" in objectTarget);
+        \\const reflectTarget = {};
+        \\const reflectParent = function () {};
+        \\Object.setPrototypeOf(reflectParent.prototype, reflectTarget);
+        \\const reflectAccepted = Reflect.setPrototypeOf(reflectTarget, reflectParent);
+        \\const reflectFinite = typeof reflectTarget.missing === "undefined";
+        \\functionRejected + ":" + functionFinite + ":" + objectRejected + ":" +
+        \\  objectFinite + ":" + reflectAccepted + ":" + reflectFinite;
+    , "true:true:true:true:false:true");
+}
+
+test "prototype chain: Reflect.setPrototypeOf rejects a mixed cycle without mutation" {
+    // target → mid would close target → mid → f → target. Keep the
+    // postcondition finite: inspect only Reflect's boolean and the
+    // target's immediate [[Prototype]], never a property-chain walk.
+    try expectScriptStringWithBuiltins(
+        \\const target = {};
+        \\const original = Object.getPrototypeOf(target);
+        \\const f = () => {};
+        \\const mid = {};
+        \\Object.setPrototypeOf(mid, f);
+        \\Object.setPrototypeOf(f, target);
+        \\const accepted = Reflect.setPrototypeOf(target, mid);
+        \\accepted + ":" + (Object.getPrototypeOf(target) === original);
+    , "false:true");
+}
+
+test "prototype chain: setPrototypeOf observes function extensibility after SameValue" {
+    try expectScriptStringWithBuiltins(
+        \\const fn = function () {};
+        \\const current = Object.getPrototypeOf(fn);
+        \\Object.preventExtensions(fn);
+        \\const same = Object.setPrototypeOf(fn, current) === fn;
+        \\let changed = false;
+        \\try { Object.setPrototypeOf(fn, null); }
+        \\catch (error) { changed = error instanceof TypeError; }
+        \\same + ":" + changed + ":" + (Object.getPrototypeOf(fn) === current);
+    , "true:true:true");
+}
+
+test "prototype chain: setPrototypeOf function to null succeeds" {
+    try expectScriptStringWithBuiltins(
+        \\const fn = function () {};
+        \\const result = Object.setPrototypeOf(fn, null);
+        \\(result === fn) + ":" + (Object.getPrototypeOf(fn) === null) + ":" + typeof fn.apply;
+    , "true:true:undefined");
 }
 
 // §14.7 LoopEvaluation — an iteration statement's completion value is

@@ -1671,7 +1671,7 @@ const Restore = struct {
                 fn_tag_proto => f.proto = try self.objectAt(try r.r32()),
                 fn_tag_home_object => f.home_object = try self.objectAt(try r.r32()),
                 fn_tag_home_function => f.home_function = try self.functionAt(try r.r32()),
-                fn_tag_static_parent => f.static_parent = try self.functionAt(try r.r32()),
+                fn_tag_static_parent => self.realm.heap.setFunctionStaticParent(f, try self.functionAt(try r.r32())),
                 fn_tag_synth_accessor => {
                     const idx = try r.r32();
                     if (idx >= self.cells.items.len) return error.SnapshotCorrupt;
