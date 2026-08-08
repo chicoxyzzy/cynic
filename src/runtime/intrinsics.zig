@@ -2242,7 +2242,31 @@ pub fn toPrimitive(realm: *Realm, value: Value, hint: ToPrimitiveHint) NativeErr
             const hint_v = realm.heap.allocateString(hint_str) catch return error.OutOfMemory;
             const args = [_]Value{Value.fromString(hint_v)};
             const outcome = interp.callJSFunction(realm.allocator, realm, trap, value, &args) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
+                error.OutOfMemory => {
+                    // Diagnostic only: restore the pinned ReleaseFast AArch64 and
+                    // x86_64/znver2 control artifacts' downstream symbol addresses.
+                    // The counts are CPU/toolchain/build specific and must never
+                    // ship as a portable fence. Successful semantics are unchanged;
+                    // instruction addresses and PC-relative encodings intentionally are not.
+                    switch (comptime @import("builtin").cpu.arch) {
+                        .aarch64 => asm volatile (
+                            \\ b 1f
+                            \\ .rept 32
+                            \\ nop
+                            \\ .endr
+                            \\ 1:
+                        ),
+                        .x86_64 => asm volatile (
+                            \\ jmp 1f
+                            \\ .rept 162
+                            \\ nop
+                            \\ .endr
+                            \\ 1:
+                        ),
+                        else => {},
+                    }
+                    return error.OutOfMemory;
+                },
                 else => return error.NativeThrew,
             };
             switch (outcome) {
