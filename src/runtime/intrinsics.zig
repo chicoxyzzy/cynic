@@ -2117,7 +2117,10 @@ pub const ToPrimitiveHint = enum { default, number, string };
 /// (`valueOf` then `toString`, hint-ordered) per §7.1.1.1.
 /// Primitive inputs return as-is.
 pub fn toPrimitive(realm: *Realm, value: Value, hint: ToPrimitiveHint) NativeError!Value {
-    if (!value.isObject()) return value;
+    // §7.1.1 step 1 tests the ECMAScript Type, not Cynic's broad
+    // tagged-pointer family (which also contains primitive BigInts
+    // and Symbols). Primitive inputs must return without allocating.
+    if (!heap_mod.isJSObject(value)) return value;
     const interp = @import("lantern/interpreter.zig");
 
     // Root the receiver for the duration of the coercion. §7.1.1 /
@@ -2280,8 +2283,24 @@ pub fn toPrimitive(realm: *Realm, value: Value, hint: ToPrimitiveHint) NativeErr
         }
         return throwTypeError(realm, "Cannot convert function to primitive value");
     }
-    // Symbols / BigInts already exit at the top `!isObject()` check.
+    // Symbols / BigInts already exit at the top `!isJSObject()` check.
     return value;
+}
+
+test "ToPrimitive returns BigInt and Symbol primitives without allocating" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var realm = Realm.init(failing.allocator());
+    defer {
+        failing.fail_index = std.math.maxInt(usize);
+        realm.deinit();
+    }
+
+    const bigint = heap_mod.taggedBigInt(try realm.heap.allocateBigInt(1));
+    const symbol = heap_mod.taggedSymbol(try realm.heap.allocateSymbol("primitive"));
+
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectEqual(bigint.bits, (try toPrimitive(&realm, bigint, .number)).bits);
+    try std.testing.expectEqual(symbol.bits, (try toPrimitive(&realm, symbol, .string)).bits);
 }
 
 /// §7.1.4 ToNumber — like `coerceToNumber` but consults
