@@ -45,6 +45,7 @@ const Value = @import("../value.zig").Value;
 const JSString = @import("../string.zig").JSString;
 const utf16 = @import("../utf16.zig");
 const JSFunction = @import("../function.zig").JSFunction;
+const NativeError = @import("../function.zig").NativeError;
 const object_mod = @import("../object.zig");
 const JSObject = object_mod.JSObject;
 const Environment = @import("../environment.zig").Environment;
@@ -14482,6 +14483,21 @@ fn coerceForCompareEq(
     return coerceForCompare(allocator, realm, frames, f, ip, self, .default);
 }
 
+/// §7.1.1 step 1 — the comparison wrapper has already selected Cynic's
+/// broad heap-tag family. Symbol and BigInt share `kind_symbol`, while the
+/// Object and Function kinds leave that bit clear. Keep this representation
+/// specialization outlined so `coerceForCompare` retains its existing frame
+/// and branch shape; true objects delegate to the generic, receiver-rooting
+/// ToPrimitive implementation unchanged.
+noinline fn toPrimitiveForCompare(
+    realm: *Realm,
+    value: Value,
+    hint: intrinsics_mod.ToPrimitiveHint,
+) NativeError!Value {
+    if ((value.bits & heap_mod.kind_symbol) != 0) return value;
+    return intrinsics_mod.toPrimitive(realm, value, hint);
+}
+
 /// §7.1.1 ToPrimitive wrapper for the comparison opcodes. Mirrors
 /// `strictSetProperty` — propagates an uncaught throw to the host
 /// or routes a caught throw through the bytecode handler chain.
@@ -14498,7 +14514,7 @@ fn coerceForCompare(
     hint: intrinsics_mod.ToPrimitiveHint,
 ) RunError!CompareOutcome {
     if (!value.isObject()) return .{ .ok = value };
-    const prim = intrinsics_mod.toPrimitive(realm, value, hint) catch |err| switch (err) {
+    const prim = toPrimitiveForCompare(realm, value, hint) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.NativeThrew => {
             const ex = realm.pending_exception orelse try makeTypeError(realm, "ToPrimitive failed");
