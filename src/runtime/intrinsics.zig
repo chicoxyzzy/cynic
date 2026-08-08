@@ -2117,10 +2117,14 @@ pub const ToPrimitiveHint = enum { default, number, string };
 /// (`valueOf` then `toString`, hint-ordered) per §7.1.1.1.
 /// Primitive inputs return as-is.
 pub fn toPrimitive(realm: *Realm, value: Value, hint: ToPrimitiveHint) NativeError!Value {
-    // §7.1.1 step 1 tests the ECMAScript Type, not Cynic's broad
-    // tagged-pointer family (which also contains primitive BigInts
-    // and Symbols). Primitive inputs must return without allocating.
-    if (!heap_mod.isJSObject(value)) return value;
+    // §7.1.1 step 1 tests the ECMAScript Type. Preserve the common
+    // top-tag fast path, then reject the shared Symbol/BigInt kind bit;
+    // object and function kinds deliberately leave that bit clear.
+    if (!value.isObject()) return value;
+    if ((value.bits & heap_mod.kind_symbol) != 0) {
+        @branchHint(.unlikely);
+        return value;
+    }
     const interp = @import("lantern/interpreter.zig");
 
     // Root the receiver for the duration of the coercion. §7.1.1 /
@@ -2283,7 +2287,7 @@ pub fn toPrimitive(realm: *Realm, value: Value, hint: ToPrimitiveHint) NativeErr
         }
         return throwTypeError(realm, "Cannot convert function to primitive value");
     }
-    // Symbols / BigInts already exit at the top `!isJSObject()` check.
+    // Symbols / BigInts already exit at the top heap-kind check.
     return value;
 }
 
