@@ -124,6 +124,7 @@
 const std = @import("std");
 const cynic = @import("cynic");
 const Op = cynic.bytecode.Op;
+const BistromathEntryCounter = cynic.runtime.BistromathEntryCounter;
 const OhaimarkStats = cynic.runtime.OhaimarkStats;
 
 const frontmatter = @import("test262/frontmatter.zig");
@@ -430,7 +431,7 @@ const AgentThreadState = struct {
     group: *AgentGroup,
     /// Sweep-wide native-entry witness inherited from the parent fixture.
     /// `reapAgents` guarantees the sink outlives this task.
-    bistromath_entries: ?*std.atomic.Value(u64) = null,
+    bistromath_entries: ?*BistromathEntryCounter = null,
     /// parent → agent: the broadcast block (set by `$262.agent.broadcast`).
     bcast: std.atomic.Value(?*AgentSDB) = std.atomic.Value(?*AgentSDB).init(null),
     /// owned copy of the agent source (page_allocator). The compiled
@@ -2153,7 +2154,7 @@ fn runSweep(
         gc_time_list.deinit(gpa);
     }
     var mem_agg: MemAggregate = .{};
-    var bistromath_entries = std.atomic.Value(u64).init(0);
+    var bistromath_entries = BistromathEntryCounter.init(0);
     var ohaimark_agg: OhaimarkStats = .{};
 
     // `--only-failing` shortcut: only the main phase consults the
@@ -2765,7 +2766,7 @@ const WorkerCtx = struct {
     global_ohaimark: *OhaimarkStats,
     /// Sweep-wide cross-heap T1 witness. Agent realms receive this same sink
     /// through `AgentThreadState`.
-    bistromath_entries: ?*std.atomic.Value(u64),
+    bistromath_entries: ?*BistromathEntryCounter,
     /// Set when `workerLoop` returns a fatal error instead of draining its
     /// assigned paths. Differential evidence refuses such a partial sweep.
     worker_failed: *std.atomic.Value(bool),
@@ -2993,7 +2994,7 @@ fn classifyAndRun(
     gc_threshold: u32,
     gc_stats: bool,
     mem_out: ?*FixtureMem,
-    bistromath_entries: ?*std.atomic.Value(u64),
+    bistromath_entries: ?*BistromathEntryCounter,
     ohaimark_out: ?*OhaimarkStats,
     phase: Phase,
 ) !RunResult {
@@ -3043,7 +3044,7 @@ fn classifyAndRunInner(
     /// Optional sweep-wide T1 native-entry witness. Child realms share this
     /// heap; independent agent realms receive the same atomic through their
     /// task state.
-    bistromath_entries: ?*std.atomic.Value(u64),
+    bistromath_entries: ?*BistromathEntryCounter,
     /// Optional T2 telemetry snapshot. A non-null pointer enables collection
     /// for this heap; child realms share it. Independent agent heaps are not
     /// included in the fixture-local snapshot.

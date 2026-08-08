@@ -559,7 +559,7 @@ pub const Masm = struct {
         if (rd == rn) {
             try self.backend.subReg32(rd, rm);
         } else if (rd == rm) {
-            if (rd == .rax) return error.UnsupportedInstruction;
+            if (rd == .rax or rn == .rax) return error.UnsupportedInstruction;
             // Preserve the right operand in call-clobbered rax.  The shared
             // compiler has no live ABI argument/result across an ALU opcode.
             try self.backend.movReg32(.rax, rm);

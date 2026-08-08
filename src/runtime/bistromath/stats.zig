@@ -7,13 +7,19 @@
 
 const std = @import("std");
 
+/// wasm32 supports atomics only up to 32 bits. The shared value is a positive
+/// execution witness, not a lossless profiler counter, so saturation at u32
+/// preserves its contract on every target while heap-local telemetry stays
+/// u64.
+pub const SharedEntryCounter = std.atomic.Value(u32);
+
 pub const Stats = struct {
     enabled: bool = false,
     executed_entries: u64 = 0,
     /// Optional cross-heap witness used by hosts that create independent
     /// agent realms. The owner must keep the atomic alive until every realm
     /// carrying this pointer has stopped executing generated code.
-    shared_entries: ?*std.atomic.Value(u64) = null,
+    shared_entries: ?*SharedEntryCounter = null,
 
     pub fn recordEntry(self: *Stats) void {
         if (!self.enabled) return;
@@ -28,9 +34,9 @@ pub const Stats = struct {
     }
 };
 
-fn incrementSaturating(counter: *std.atomic.Value(u64)) void {
+fn incrementSaturating(counter: *SharedEntryCounter) void {
     var current = counter.load(.monotonic);
-    while (current != std.math.maxInt(u64)) {
+    while (current != std.math.maxInt(u32)) {
         if (counter.cmpxchgWeak(current, current + 1, .monotonic, .monotonic)) |observed| {
             current = observed;
         } else return;
@@ -54,7 +60,7 @@ test "Bistromath stats merge saturates executed entries" {
 }
 
 test "Bistromath stats publish to a shared cross-heap witness" {
-    var shared = std.atomic.Value(u64).init(0);
+    var shared = SharedEntryCounter.init(0);
     var stats: Stats = .{ .enabled = true, .shared_entries = &shared };
     stats.recordEntry();
     try std.testing.expectEqual(@as(u64, 1), stats.executed_entries);
