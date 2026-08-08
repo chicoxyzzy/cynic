@@ -2118,6 +2118,13 @@ pub const ToPrimitiveHint = enum { default, number, string };
 /// Primitive inputs return as-is.
 pub fn toPrimitive(realm: *Realm, value: Value, hint: ToPrimitiveHint) NativeError!Value {
     if (!value.isObject()) return value;
+    // Cache the heap kind once before opening a HandleScope. Function/Object
+    // are 0b00/0b01; Symbol/BigInt are 0b10/0b11 and remain primitives.
+    const value_kind = value.bits & heap_mod.kind_mask;
+    if ((value_kind & heap_mod.kind_symbol) != 0) {
+        @branchHint(.unlikely);
+        return value;
+    }
     const interp = @import("lantern/interpreter.zig");
 
     // Root the receiver for the duration of the coercion. §7.1.1 /
@@ -2142,7 +2149,12 @@ pub fn toPrimitive(realm: *Realm, value: Value, hint: ToPrimitiveHint) NativeErr
         .number => "number",
         .string => "string",
     };
-    if (heap_mod.valueAsPlainObject(value)) |obj| {
+    // `value_kind` was validated before the scope opened. Decode the stable,
+    // non-moving heap pointer once instead of repeating the full tag/kind
+    // predicates in valueAsPlainObject/valueAsFunction below.
+    const pointer_bits = (value.bits & Value.pointer_mask) & ~heap_mod.kind_mask;
+    if (value_kind == heap_mod.kind_object) {
+        const obj: *JSObject = @ptrFromInt(@as(usize, @intCast(pointer_bits)));
         // Symbol.toPrimitive override. Use `getPropertyChain` so
         // an accessor `get [Symbol.toPrimitive]() {…}` fires
         // (fixtures install poisoned getters and assert the
@@ -2226,7 +2238,8 @@ pub fn toPrimitive(realm: *Realm, value: Value, hint: ToPrimitiveHint) NativeErr
     // shape as the plain-object path, but Cynic stores functions in
     // a separate value family. Symbols / BigInts are primitives and
     // exit at the top check; they never reach this branch.
-    if (heap_mod.valueAsFunction(value)) |fn_obj| {
+    if (value_kind == heap_mod.kind_function) {
+        const fn_obj: *JSFunction = @ptrFromInt(@as(usize, @intCast(pointer_bits)));
         // GetMethod(@@toPrimitive) — Function objects don't usually
         // expose it but a user can `defineProperty(fn, @@toPrimitive,
         // …)` to install one. Read via the function's data + chain.
@@ -2280,8 +2293,25 @@ pub fn toPrimitive(realm: *Realm, value: Value, hint: ToPrimitiveHint) NativeErr
         }
         return throwTypeError(realm, "Cannot convert function to primitive value");
     }
-    // Symbols / BigInts already exit at the top `!isObject()` check.
+    // Defensive fallback if the heap-kind encoding grows: keep an unknown
+    // tagged value a normal completion rather than aborting the host.
     return value;
+}
+
+test "ToPrimitive returns BigInt and Symbol primitives without allocating" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var realm = Realm.init(failing.allocator());
+    defer {
+        failing.fail_index = std.math.maxInt(usize);
+        realm.deinit();
+    }
+
+    const bigint = heap_mod.taggedBigInt(try realm.heap.allocateBigInt(1));
+    const symbol = heap_mod.taggedSymbol(try realm.heap.allocateSymbol("primitive"));
+
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectEqual(bigint.bits, (try toPrimitive(&realm, bigint, .number)).bits);
+    try std.testing.expectEqual(symbol.bits, (try toPrimitive(&realm, symbol, .string)).bits);
 }
 
 /// §7.1.4 ToNumber — like `coerceToNumber` but consults
