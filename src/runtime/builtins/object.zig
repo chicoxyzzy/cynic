@@ -3806,6 +3806,211 @@ pub fn proxySetPrototypeOfBool(realm: *Realm, obj: *JSObject, proto_v: Value) Na
     return true;
 }
 
+/// A node in Cynic's split ordinary-[[Prototype]] graph. Objects can
+/// point at objects or functions; functions can point at a function
+/// (`static_parent`) or an object (`proto`). Keeping the walk typed
+/// avoids manufacturing temporary Values while validating a mutation.
+pub const PrototypeNode = union(enum) {
+    object: *JSObject,
+    function: *JSFunction,
+};
+
+pub fn prototypeNodeFromValue(value: Value) ?PrototypeNode {
+    if (heap_mod.valueAsFunction(value)) |fn_obj| return .{ .function = fn_obj };
+    if (heap_mod.valueAsPlainObject(value)) |obj| return .{ .object = obj };
+    return null;
+}
+
+/// §10.1.1 OrdinaryGetPrototypeOf over Cynic's split storage. For
+/// ordinary nodes this is the canonical identity path observed by repeated
+/// `Object.getPrototypeOf` calls; Proxy storage is traversed conservatively
+/// for host safety. The property-lookup path below is temporarily different
+/// while P1 retains duplicated function-parent storage.
+fn nextPrototypeNode(node: PrototypeNode) ?PrototypeNode {
+    return switch (node) {
+        .object => |obj| blk: {
+            if (obj.prototype) |proto| break :blk .{ .object = proto };
+            if (obj.prototype_fn) |proto_fn| break :blk .{ .function = proto_fn };
+            break :blk null;
+        },
+        .function => |fn_obj| blk: {
+            if (fn_obj.static_parent) |parent| break :blk .{ .function = parent };
+            if (fn_obj.proto) |proto| break :blk .{ .object = proto };
+            break :blk null;
+        },
+    };
+}
+
+/// Cursor for the engine-effective property-lookup graph while P1 retains
+/// Cynic's duplicated function-parent representation. `JSFunction.get`
+/// walks `static_parent` but then continues through the ORIGINATING
+/// function's `proto`, not the terminal parent's `proto`. Carry that
+/// fallback through every static-parent step so validation matches the
+/// representation that will actually be installed.
+const PrototypeCursor = struct {
+    node: PrototypeNode,
+    function_fallback: ?*JSObject = null,
+    fallback_active: bool = false,
+};
+
+fn prototypeCursorFromNode(node: PrototypeNode) PrototypeCursor {
+    return switch (node) {
+        .object => .{ .node = node },
+        .function => |fn_obj| .{
+            .node = node,
+            .function_fallback = fn_obj.proto,
+            .fallback_active = true,
+        },
+    };
+}
+
+fn nextPrototypeCursor(cursor: PrototypeCursor) ?PrototypeCursor {
+    return switch (cursor.node) {
+        .object => |obj| blk: {
+            // §10.1.2.1 would stop at a Proxy/non-ordinary
+            // [[GetPrototypeOf]] boundary. Cynic's function-chain get /
+            // has / accessor paths currently follow the stored links
+            // directly, however, so stopping here could admit a cycle
+            // that those native walks cannot terminate. Traverse the
+            // engine-effective graph conservatively until Proxy-aware
+            // function-chain dispatch lands.
+            if (obj.prototype) |proto| {
+                break :blk .{ .node = .{ .object = proto } };
+            }
+            if (obj.prototype_fn) |proto_fn| {
+                break :blk prototypeCursorFromNode(.{ .function = proto_fn });
+            }
+            break :blk null;
+        },
+        .function => |fn_obj| blk: {
+            if (fn_obj.static_parent) |parent| {
+                break :blk .{
+                    .node = .{ .function = parent },
+                    .function_fallback = cursor.function_fallback,
+                    .fallback_active = cursor.fallback_active,
+                };
+            }
+            if (cursor.fallback_active) {
+                if (cursor.function_fallback) |proto| {
+                    break :blk .{ .node = .{ .object = proto } };
+                }
+            }
+            break :blk null;
+        },
+    };
+}
+
+fn samePrototypeNode(a: PrototypeNode, b: PrototypeNode) bool {
+    return switch (a) {
+        .object => |a_obj| switch (b) {
+            .object => |b_obj| a_obj == b_obj,
+            .function => false,
+        },
+        .function => |a_fn| switch (b) {
+            .object => false,
+            .function => |b_fn| a_fn == b_fn,
+        },
+    };
+}
+
+fn prototypeNodeWouldCycle(target: PrototypeNode, requested: ?PrototypeNode) bool {
+    var cursor = requested;
+    var tortoise = requested;
+    var hare = requested;
+
+    while (cursor) |node| {
+        if (samePrototypeNode(node, target)) return true;
+        cursor = nextPrototypeNode(node);
+
+        tortoise = if (tortoise) |slow| nextPrototypeNode(slow) else null;
+        hare = if (hare) |fast| blk: {
+            const first = nextPrototypeNode(fast) orelse break :blk null;
+            break :blk nextPrototypeNode(first);
+        } else null;
+
+        if (tortoise != null and hare != null and samePrototypeNode(tortoise.?, hare.?)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn samePrototypeCursor(a: PrototypeCursor, b: PrototypeCursor) bool {
+    if (!samePrototypeNode(a.node, b.node)) return false;
+    return switch (a.node) {
+        .object => true,
+        .function => a.fallback_active == b.fallback_active and
+            a.function_fallback == b.function_fallback,
+    };
+}
+
+/// §10.1.2.1 OrdinarySetPrototypeOf step 7. Reject a requested chain
+/// that reaches `target`; also reject an already-cyclic requested graph.
+/// The cursor performs the target check while Floyd's tortoise/hare makes
+/// the validation bounded even if malformed state contains a cycle that
+/// does not include `target`.
+fn prototypeCursorWouldCycle(target: PrototypeNode, requested: ?PrototypeCursor) bool {
+    var cursor = requested;
+    var tortoise = requested;
+    var hare = requested;
+
+    while (cursor) |state| {
+        if (samePrototypeNode(state.node, target)) return true;
+        cursor = nextPrototypeCursor(state);
+
+        tortoise = if (tortoise) |slow| nextPrototypeCursor(slow) else null;
+        hare = if (hare) |fast| blk: {
+            const first = nextPrototypeCursor(fast) orelse break :blk null;
+            break :blk nextPrototypeCursor(first);
+        } else null;
+
+        if (tortoise != null and hare != null and samePrototypeCursor(tortoise.?, hare.?)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+pub fn prototypeMutationWouldCycle(target: PrototypeNode, requested: ?PrototypeNode) bool {
+    // Preserve both safety invariants during the temporary duplicated
+    // representation: repeated [[GetPrototypeOf]] must remain finite, and
+    // the engine's property-lookup continuation must remain finite.
+    if (prototypeNodeWouldCycle(target, requested)) return true;
+    const requested_cursor = if (requested) |node| prototypeCursorFromNode(node) else null;
+    return prototypeCursorWouldCycle(target, requested_cursor);
+}
+
+/// Function targets keep their requested function identity in
+/// `static_parent` and duplicate its instance `.prototype` object in
+/// `proto`. Model that exact post-mutation lookup state without installing
+/// it: the parent's static chain runs first, then the child's duplicated
+/// fallback. P2 will remove this compatibility representation atomically.
+fn functionPrototypeMutationWouldCycle(
+    target: *JSFunction,
+    requested_parent: ?*JSFunction,
+    requested_fallback: ?*JSObject,
+) bool {
+    const requested_node: ?PrototypeNode = if (requested_parent) |parent|
+        .{ .function = parent }
+    else if (requested_fallback) |fallback|
+        .{ .object = fallback }
+    else
+        null;
+    if (prototypeNodeWouldCycle(.{ .function = target }, requested_node)) return true;
+
+    const requested_cursor: ?PrototypeCursor = if (requested_parent) |parent|
+        .{
+            .node = .{ .function = parent },
+            .function_fallback = requested_fallback,
+            .fallback_active = true,
+        }
+    else if (requested_fallback) |fallback|
+        .{ .node = .{ .object = fallback } }
+    else
+        null;
+    return prototypeCursorWouldCycle(.{ .function = target }, requested_cursor);
+}
+
 pub fn objectSetPrototypeOf(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
     const target_v = argOr(args, 0, Value.undefined_);
@@ -3821,22 +4026,22 @@ pub fn objectSetPrototypeOf(realm: *Realm, this_value: Value, args: []const Valu
             if (!ok) return throwTypeError(realm, "'setPrototypeOf' on proxy returned falsy");
             return target_v;
         }
-        // §10.1.2.1 OrdinarySetPrototypeOf step 8 — if proto is
+        // §10.1.2.1 OrdinarySetPrototypeOf step 7 — if proto is
         // already in obj's chain (or *is* obj), accepting would
         // create a cycle and every subsequent chain walk would
         // spin. Spec says return false, which Object.setPrototypeOf
         // turns into TypeError.
         const new_proto: ?*@import("../object.zig").JSObject = heap_mod.valueAsPlainObject(proto_v);
         const new_proto_fn: ?*@import("../function.zig").JSFunction = heap_mod.valueAsFunction(proto_v);
+        // §10.1.2.1 step 2 — SameValue is an early success, including
+        // for a non-extensible ordinary object.
+        if (new_proto == obj.prototype and new_proto_fn == obj.prototype_fn) return target_v;
         // §10.4.7 — `%Object.prototype%` is an Immutable Prototype
         // Exotic Object: [[SetPrototypeOf]] only succeeds if the
         // new value SameValue's the current one. Object.setPrototypeOf
         // then translates the `false` return into TypeError.
         if (obj == realm.intrinsics.object_prototype.?) {
-            if (new_proto != obj.prototype or new_proto_fn != obj.prototype_fn) {
-                return throwTypeError(realm, "Immutable prototype object cannot have its prototype set");
-            }
-            return target_v;
+            return throwTypeError(realm, "Immutable prototype object cannot have its prototype set");
         }
         // §10.1.2.1 OrdinarySetPrototypeOf step 3 — when
         // `extensible` is false the new prototype MUST SameValue
@@ -3849,20 +4054,10 @@ pub fn objectSetPrototypeOf(realm: *Realm, this_value: Value, args: []const Valu
         // IsExtensible-false signal here so a `Object.setPrototypeOf
         // (ns, anything)` always rejects per the spec.
         if (!obj.brand.extensible or obj.brand.is_module_namespace) {
-            if (new_proto != obj.prototype or new_proto_fn != obj.prototype_fn) {
-                return throwTypeError(realm, "Cannot set prototype on non-extensible object");
-            }
-            return target_v;
+            return throwTypeError(realm, "Cannot set prototype on non-extensible object");
         }
-        // Cycle check walks through function links too: a function
-        // node itself can't equal `obj` (different heap types), but
-        // the chain continues through its `proto`.
-        var cursor: ?*@import("../object.zig").JSObject = new_proto orelse if (new_proto_fn) |pf| pf.proto else null;
-        while (cursor) |node| {
-            if (node == obj) {
-                return throwTypeError(realm, "cyclic __proto__ value");
-            }
-            cursor = node.prototype orelse if (node.prototype_fn) |pf| pf.proto else null;
+        if (prototypeMutationWouldCycle(.{ .object = obj }, prototypeNodeFromValue(proto_v))) {
+            return throwTypeError(realm, "cyclic __proto__ value");
         }
         if (new_proto_fn) |pf| {
             realm.heap.setObjectPrototypeFn(obj, pf);
@@ -3895,8 +4090,26 @@ pub fn objectSetPrototypeOf(realm: *Realm, this_value: Value, args: []const Valu
             if (heap_mod.valueAsFunction(proto_v)) |fn_obj| break :blk fn_obj.prototype;
             break :blk null;
         };
-        target_fn.static_parent = new_static_parent;
-        target_fn.proto = new_proto_obj;
+
+        // §10.1.2.1 steps 2-7, in spec order: an unchanged prototype
+        // succeeds even on a non-extensible function; any actual change
+        // to a non-extensible function fails before the cycle walk.
+        const current_proto = if (target_fn.static_parent) |parent|
+            heap_mod.taggedFunction(parent)
+        else if (target_fn.proto) |proto|
+            heap_mod.taggedObject(proto)
+        else
+            Value.null_;
+        if (intrinsics.sameValue(proto_v, current_proto)) return target_v;
+        if (!target_fn.extensible) {
+            return throwTypeError(realm, "Cannot set prototype on non-extensible function");
+        }
+        if (functionPrototypeMutationWouldCycle(target_fn, new_static_parent, new_proto_obj)) {
+            return throwTypeError(realm, "cyclic __proto__ value");
+        }
+
+        realm.heap.setFunctionStaticParent(target_fn, new_static_parent);
+        realm.heap.setFunctionObjectPrototype(target_fn, new_proto_obj);
         // Function-target [[Prototype]] swap — bump the proto IC
         // revision so dependent caches miss + refill.
         realm.proto_revision_counter +%= 1;

@@ -642,7 +642,7 @@ fn installVariantCtor(realm: *Realm, name: []const u8, native: @import("../funct
     // `objectGetPrototypeOf` in builtins/object.zig).
     if (realm.globals.get("Function")) |fn_ctor_v| {
         if (heap_mod.valueAsFunction(fn_ctor_v)) |fn_ctor| {
-            fn_obj.static_parent = fn_ctor;
+            realm.heap.setFunctionStaticParent(fn_obj, fn_ctor);
         }
     }
     const proto = try realm.heap.allocateObject();

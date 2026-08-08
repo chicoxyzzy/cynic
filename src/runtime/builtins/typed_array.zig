@@ -368,7 +368,7 @@ pub fn install(realm: *Realm) !void {
         // fires before the spec-mandated validation gates. See
         // throw-type-error-before-custom-proto-access.js.
         ctor.defers_proto_lookup = true;
-        ctor.static_parent = ta_ctor; // §23.2.6 — Int8Array.[[Prototype]] = %TypedArray%
+        realm.heap.setFunctionStaticParent(ctor, ta_ctor); // §23.2.6 — Int8Array.[[Prototype]] = %TypedArray%
         const proto = try realm.heap.allocateObject();
         realm.heap.setObjectPrototype(proto, ta_proto); // §23.2.6 — concrete proto inherits from %TypedArray%.prototype.
         try setNonEnumerable(proto, realm.allocator, "constructor", heap_mod.taggedFunction(ctor));

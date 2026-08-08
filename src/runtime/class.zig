@@ -310,7 +310,7 @@ pub fn buildClass(
         // reads on the constructor walk it. Plumbing that
         // through `JSFunction.get` is a small change — see
         // function.zig for the staticParent slot.
-        ctor.static_parent = pc;
+        realm.heap.setFunctionStaticParent(ctor, pc);
     }
 
     // 6. Install instance methods on the prototype. Methods

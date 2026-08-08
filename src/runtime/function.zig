@@ -316,7 +316,9 @@ pub const JSFunction = struct {
     /// edge of the function-object graph. (§15.7.14 sets
     /// `ctor.[[Prototype]] = parentCtor` directly, but our
     /// `proto` slot points at a JSObject; this is the
-    /// JSFunction-typed equivalent.)
+    /// JSFunction-typed equivalent.) Mutate through
+    /// `Heap.setFunctionStaticParent` so old→young edges are
+    /// remembered.
     static_parent: ?*JSFunction = null,
     /// §28.2.2.1.1 `[[RevocableProxy]]` — the proxy captured by a
     /// `Proxy.revocable` revoke function. Non-null marks this

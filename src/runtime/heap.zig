@@ -822,13 +822,15 @@ pub const Heap = struct {
     /// enqueues the cleanup job and tombstones the cell.
     finalization_registries_seen: std.ArrayListUnmanaged(*JSObject) = .empty,
     /// Deferred-mark worklists — values / environments whose
-    /// traversal would otherwise blow the call stack. Three
+    /// traversal would otherwise blow the call stack. Four
     /// recursion chains that overflow at ~5-10k frames under GC
     /// pressure pay the worklist cost: (1) Promise reaction chain
     /// (`reaction.result_promise`), (2) closure-env chain
     /// (`env.slots[i]` is a function whose captured_env contains
-    /// another function …), (3) proto chain
-    /// (`obj.prototype` walking up a 10k-deep `Object.create` tower).
+    /// another function …), (3) object proto chain
+    /// (`obj.prototype` walking up a 10k-deep `Object.create` tower),
+    /// and (4) function static-parent chain (deep class inheritance or
+    /// function-valued `Object.setPrototypeOf`).
     /// Items pushed here are processed iteratively by
     /// `drainMarkWorklist` at cycle boundaries (before sweep),
     /// alternating between the two worklists until both are empty.
@@ -2020,6 +2022,12 @@ pub const Heap = struct {
                 // and a later chain walk (e.g. ToPrimitive looking up
                 // `@@toPrimitive`) reads 0xaa-poisoned memory.
                 if (f.proto) |p| self.enqueue(taggedObject(p));
+                // §15.7.14 class-static inheritance / function-valued
+                // [[Prototype]]. A derived constructor can be the only
+                // root holding its parent function alive. Enqueue instead
+                // of recursing because `class Cn extends Cn-1` chains are
+                // user-sized and must not overflow the native mark stack.
+                if (f.static_parent) |p| self.enqueue(taggedFunction(p));
                 // §10.2.3 [[HomeObject]] — a method's home object
                 // (and, for the typed-slot split Cynic uses, the
                 // owning `home_function`) back `super` lookups.
@@ -3563,7 +3571,7 @@ pub const Heap = struct {
     ///  2. **Mature typed internal slots.** A residue of raw
     ///     `container.field = young` writes in `builtins/*.zig` and the
     ///     object model bypass the routed setters and so never mark the
-    ///     container dirty (`prototype`, `static_parent`,
+    ///     container dirty (`prototype`,
     ///     `typed_view.viewed`, accessor halves, iter-helper state,
     ///     capability records, …). These are all *typed* slots, so a
     ///     generic per-type scan over every mature container catches
@@ -3627,7 +3635,7 @@ pub const Heap = struct {
         // Root source 2 — typed internal slots on every mature
         // container. A residue of raw `container.field = young` writes
         // in the object model + builtins (e.g.
-        // `Object.setPrototypeOf` writing `proto` / `static_parent`,
+        // `Object.setPrototypeOf` writing `proto`,
         // iterator-helper / capability state) bypasses the routed
         // setters and so never marks the container dirty. These are
         // all *typed* slots, so a generic per-type scan over every
@@ -4364,6 +4372,10 @@ pub const Heap = struct {
                 self.markValue(taggedObject(p));
             };
         }
+        // §15.7.14 class-static inheritance / function-valued
+        // [[Prototype]]. Keep this iterative for arbitrarily deep class
+        // chains, matching markValue's function arm.
+        if (f.static_parent) |p| self.enqueue(taggedFunction(p));
         // §10.2.3 [[HomeObject]] — see the `markValue` function arm.
         if (f.home_object) |ho| self.markValue(taggedObject(ho));
         if (f.home_function) |hf| self.markValue(taggedFunction(hf));
@@ -4506,6 +4518,16 @@ pub const Heap = struct {
                         "verifyRememberedSet: un-barriered mature\u{2192}young edge: " ++
                             "JSFunction {*} property \"{s}\" -> young {*}\n",
                         .{ f, entry.key_ptr.*, valueHeapPtr(entry.value_ptr.*) },
+                    );
+                    std.debug.assert(false);
+                }
+            }
+            if (f.static_parent) |p| {
+                if (p.generation == .young and !f.dirty) {
+                    std.debug.print(
+                        "verifyRememberedSet: un-barriered mature\u{2192}young edge: " ++
+                            "JSFunction {*} static_parent -> young {*}\n",
+                        .{ f, p },
                     );
                     std.debug.assert(false);
                 }
@@ -4810,6 +4832,23 @@ pub const Heap = struct {
     pub fn setFunctionPrototype(self: *Heap, fn_obj: *JSFunction, proto: ?*JSObject) void {
         if (proto) |p| self.writeBarrier(.{ .function = fn_obj }, taggedObject(p));
         fn_obj.prototype = proto;
+    }
+
+    /// `fn_obj.static_parent = parent` — the function-typed
+    /// [[Prototype]] edge used by class-static inheritance and
+    /// `Object.setPrototypeOf` on callable objects.
+    pub fn setFunctionStaticParent(self: *Heap, fn_obj: *JSFunction, parent: ?*JSFunction) void {
+        if (parent) |p| self.writeBarrier(.{ .function = fn_obj }, taggedFunction(p));
+        fn_obj.static_parent = parent;
+    }
+
+    /// `fn_obj.proto = proto` — the object-typed [[Prototype]] edge
+    /// used when `Object.setPrototypeOf` installs a plain object on a
+    /// callable. Distinct from `setFunctionPrototype`, which writes the
+    /// function's instance-construction `.prototype` slot.
+    pub fn setFunctionObjectPrototype(self: *Heap, fn_obj: *JSFunction, proto: ?*JSObject) void {
+        if (proto) |p| self.writeBarrier(.{ .function = fn_obj }, taggedObject(p));
+        fn_obj.proto = proto;
     }
 
     /// §10.2.3 `[[HomeObject]]` setter on a function. Used by
@@ -5500,6 +5539,122 @@ test "Heap: write barrier records an old→young store" {
     const young2 = try heap.allocateObject();
     heap.writeBarrier(.{ .object = container }, taggedObject(young2));
     try testing.expectEqual(@as(usize, 1), heap.dirty_list.items.len);
+}
+
+test "Heap: full mark retains a function through static_parent" {
+    const Native = struct {
+        fn noop(_: *Realm, _: Value, _: []const Value) @import("function.zig").NativeError!Value {
+            return Value.undefined_;
+        }
+    };
+
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    const heap = realm.heap;
+    heap.scan_native_stack = false;
+
+    const child = try heap.allocateFunctionNative(&realm, Native.noop, 0, "child");
+    const parent = try heap.allocateFunctionNative(&realm, Native.noop, 0, "parent");
+    heap.setFunctionStaticParent(child, parent);
+    try testing.expectEqual(@as(usize, 2), heap.functionCount());
+
+    // Only the child is a precise root. The parent survives solely via
+    // the function-typed [[Prototype]] mark edge.
+    heap.collectFull(&.{taggedFunction(child)});
+    try testing.expectEqual(@as(usize, 2), heap.functionCount());
+    try testing.expect(child.static_parent == parent);
+    try testing.expectEqual(Generation.mature, parent.generation);
+}
+
+test "Heap: setFunctionStaticParent remembers a young parent on a mature child" {
+    const Native = struct {
+        fn noop(_: *Realm, _: Value, _: []const Value) @import("function.zig").NativeError!Value {
+            return Value.undefined_;
+        }
+    };
+
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    const heap = realm.heap;
+
+    const child = try heap.allocateFunctionNative(&realm, Native.noop, 0, "child");
+    heap.collectYoung(&.{taggedFunction(child)});
+    try testing.expectEqual(Generation.mature, child.generation);
+
+    const parent = try heap.allocateFunctionNative(&realm, Native.noop, 0, "parent");
+    try testing.expectEqual(Generation.young, parent.generation);
+    heap.setFunctionStaticParent(child, parent);
+
+    try testing.expect(child.dirty);
+    try testing.expectEqual(@as(usize, 1), heap.dirty_list.items.len);
+    try testing.expect(child.static_parent == parent);
+
+    // The parent is absent from the explicit root set. The remembered
+    // mature child plus the static-parent mark edge must keep it alive.
+    heap.collectYoung(&.{});
+    try testing.expectEqual(Generation.mature, parent.generation);
+    try testing.expect(child.static_parent == parent);
+    try testing.expect(!child.dirty);
+}
+
+test "Heap: setFunctionStaticParent shades a white parent stored into a black child" {
+    const Native = struct {
+        fn noop(_: *Realm, _: Value, _: []const Value) @import("function.zig").NativeError!Value {
+            return Value.undefined_;
+        }
+    };
+
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    const heap = realm.heap;
+
+    // Both functions must predate the cycle's live-color flip. Root only
+    // the child while static_parent is null: the child becomes black and
+    // the otherwise-unreachable parent remains white.
+    const child = try heap.allocateFunctionNative(&realm, Native.noop, 0, "child");
+    const parent = try heap.allocateFunctionNative(&realm, Native.noop, 0, "parent");
+    try testing.expect(child.static_parent == null);
+    heap.beginIncrementalMark(&.{taggedFunction(child)});
+    try testing.expectEqual(heap.live_color, child.mark_color);
+    try testing.expect(parent.mark_color != heap.live_color);
+
+    // A mid-mark black→white store must shade the parent through the
+    // Dijkstra arm of writeBarrier; draining turns it black/live.
+    heap.setFunctionStaticParent(child, parent);
+    try testing.expect(parent.mark_color != heap.live_color);
+    heap.drainMarkWorklist();
+    try testing.expectEqual(heap.live_color, parent.mark_color);
+}
+
+test "Heap: setFunctionObjectPrototype remembers a young object on a mature function" {
+    const Native = struct {
+        fn noop(_: *Realm, _: Value, _: []const Value) @import("function.zig").NativeError!Value {
+            return Value.undefined_;
+        }
+    };
+
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    const heap = realm.heap;
+
+    const child = try heap.allocateFunctionNative(&realm, Native.noop, 0, "child");
+    heap.collectYoung(&.{taggedFunction(child)});
+    try testing.expectEqual(Generation.mature, child.generation);
+
+    const proto = try heap.allocateObject();
+    try testing.expectEqual(Generation.young, proto.generation);
+    heap.setFunctionObjectPrototype(child, proto);
+
+    try testing.expect(child.dirty);
+    try testing.expectEqual(@as(usize, 1), heap.dirty_list.items.len);
+    try testing.expect(child.proto == proto);
+
+    // The prototype is absent from the explicit root set. The remembered
+    // mature function plus its object-prototype mark edge must keep it alive.
+    heap.collectYoung(&.{});
+    try testing.expectEqual(Generation.mature, proto.generation);
+    try testing.expect(child.proto == proto);
+    try testing.expect(!child.dirty);
 }
 
 test "Heap: write barrier ignores a young container" {

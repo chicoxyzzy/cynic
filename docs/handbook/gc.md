@@ -526,7 +526,7 @@ dispatch, so its values no longer have a queue-based root.
 `markValue` and `markEnvironment` recurse through their target's
 fields by default. That's fine for objects with a fixed number
 of typed slots — the recursion depth is bounded by the
-field-count graph. But three edges in the object model can form
+field-count graph. But four chain shapes in the object model can form
 N-deep linear chains where the recursion depth tracks the
 user-program's chain length, and 5-10k user-side chain entries
 overflow the Debug call stack:
@@ -542,16 +542,20 @@ overflow the Debug call stack:
 - **Prototype chain.** A 10k-deep `Object.create(prev)` tower
   recurses through `markValue → markObjectInternalSlots →
   markValue(taggedObject(o.prototype)) → …`.
+- **Function static-parent chain.** A deep `class Cn extends Cn-1`
+  tower (or equivalent function-valued `Object.setPrototypeOf`
+  chain) follows `JSFunction.static_parent` through another
+  function at every level.
 
 `Heap` carries two worklists for these edges:
 
 - `mark_worklist: ArrayListUnmanaged(Value)` — for Value
   pushes (`promise_reactions[i].result_promise`,
-  `o.prototype`).
+  `o.prototype`, `f.static_parent`).
 - `mark_env_worklist: ArrayListUnmanaged(*Environment)` — for
   Environment pushes (`env.parent`, `f.captured_env`).
 
-At those four edges, code pushes to the relevant worklist
+At those five edges, code pushes to the relevant worklist
 instead of calling `markValue` / `markEnvironment` recursively:
 
     self.mark_worklist.append(self.allocator, taggedObject(p)) catch {
@@ -566,7 +570,7 @@ function pushes its captured_env onto `mark_env_worklist`;
 marking an env pushes its slot values onto `mark_worklist`. The
 outer while re-checks both after each inner drain.
 
-The four edges above are the only ones that form unbounded
+The five edges above are the only ones that form unbounded
 chains today. Other recursive `markValue` calls inside the body
 — property bag values, Map / Set entries, FinalizationRegistry
 held_values, accessor pairs, key anchors — stay recursive
@@ -596,7 +600,7 @@ on `Heap`:
 | Container | Helpers |
 |---|---|
 | `*JSObject` | `setObjectPrototype`, `setProxyTarget` / `setProxyHandler` / `setProxyTargetFn`, `setBoxedPrimitive` / `setBoxedString`, `setFinallyCallback` / `setFinallyValue` / `setFinallyConstructor`, `setRegexpSource` / `setRegexpFlags`, `setGeneratorRef`, `setAccessorGetter` / `setAccessorSetter`, `settlePromise` |
-| `*JSFunction` | `setFunctionPrototype`, `setHomeObject`, `setHomeFunction`, `setCapturedEnv`, `setCapturedThis`, `setCapturedNewTarget`, `setBoundTarget` / `setBoundThis` / `setBoundArgs`, `setFunctionNameString`, `setAccessorGetter` / `setAccessorSetter` |
+| `*JSFunction` | `setFunctionPrototype`, `setFunctionObjectPrototype`, `setFunctionStaticParent`, `setHomeObject`, `setHomeFunction`, `setCapturedEnv`, `setCapturedThis`, `setCapturedNewTarget`, `setBoundTarget` / `setBoundThis` / `setBoundArgs`, `setFunctionNameString`, `setAccessorGetter` / `setAccessorSetter` |
 | `*JSGenerator` | `setGeneratorHomeObject`, `setGeneratorHomeFunction`, `setGeneratorEnv` |
 | `*Environment` | `setEnvironmentParent` |
 

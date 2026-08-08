@@ -1017,11 +1017,12 @@ fn reflectSetPrototypeOf(realm: *Realm, this_value: Value, args: []const Value) 
     // `Reflect/setPrototypeOf/return-false-if-target-is-not-
     // extensible.js` checks this branch.
     if (!target.brand.extensible) return Value.false_;
-    // §10.1.2.1 OrdinarySetPrototypeOf step 8 — cycle detection.
-    var cursor: ?*@import("../object.zig").JSObject = new_proto;
-    while (cursor) |node| {
-        if (node == target) return Value.false_;
-        cursor = node.prototype;
+    // §10.1.2.1 step 7 — walk the same mixed object/function graph
+    // Object.setPrototypeOf validates, with bounded cycle detection.
+    const obj_mod = @import("object.zig");
+    const requested: ?obj_mod.PrototypeNode = if (new_proto) |proto| .{ .object = proto } else null;
+    if (obj_mod.prototypeMutationWouldCycle(.{ .object = target }, requested)) {
+        return Value.false_;
     }
     realm.heap.setObjectPrototype(target, new_proto);
     // Proto-link swap — bump the proto IC revision so dependent
