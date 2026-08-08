@@ -1541,6 +1541,19 @@ pub const Heap = struct {
         return s;
     }
 
+    /// Return a string's contiguous WTF-8 bytes while preserving the heap's
+    /// memory ceiling and allocation-failure contract. Flat strings are a
+    /// zero-cost borrow. A rope is charged before its cached materialization;
+    /// if the backing allocation fails, undo that speculative charge.
+    pub fn flattenString(self: *Heap, string: *const JSString) error{OutOfMemory}![]const u8 {
+        if (string.flatBytesIfFlat()) |bytes| return bytes;
+        try self.charge(string.byte_len);
+        return @constCast(string).flatten(self.bytes_allocator) catch |err| {
+            self.discharge(string.byte_len);
+            return err;
+        };
+    }
+
     /// Pinned, shared `JSString` for the decimal form of `n` when
     /// `0 <= n < small_int_cache_max`; `null` otherwise (the caller
     /// allocates normally). The returned string is immutable and

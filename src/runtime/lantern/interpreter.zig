@@ -181,6 +181,7 @@ const addValues = arith.addValues;
 const valueToOwnedString = arith.valueToOwnedString;
 const strictEq = arith.strictEq;
 const looseEq = arith.looseEq;
+const looseEqBigIntString = arith.looseEqBigIntString;
 const relational = arith.relational;
 const typeOf = arith.typeOf;
 const NumericOp = arith.NumericOp;
@@ -14045,7 +14046,16 @@ fn evaluateLooseEqualitySlow(
             return switch (rhs) {
                 .handled => .handled,
                 .uncaught => |ex| .{ .uncaught = ex },
-                .ok => |rhs_primitive| .{ .value = looseEq(allocator, lhs_primitive, rhs_primitive) },
+                .ok => |rhs_primitive| blk: {
+                    const bigint_string_pair =
+                        (heap_mod.valueAsBigInt(lhs_primitive) != null and rhs_primitive.isString()) or
+                        (lhs_primitive.isString() and heap_mod.valueAsBigInt(rhs_primitive) != null);
+                    const equal = if (bigint_string_pair)
+                        try looseEqBigIntString(realm, lhs_primitive, rhs_primitive)
+                    else
+                        looseEq(allocator, lhs_primitive, rhs_primitive);
+                    break :blk .{ .value = equal };
+                },
             };
         },
     }

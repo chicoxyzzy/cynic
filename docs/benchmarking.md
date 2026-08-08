@@ -106,6 +106,7 @@ Run one fixture with `zig build bench -- --filter=<name>`; combine it with
 | `relational_bigint_number` | 1,000,000 | Mixed BigInt/Number `JmpIfNotLt8` execution. Pins exact mathematical cross-type ordering without String parsing or object coercion. |
 | `relational_number_bigint` | 1,000,000 | Mixed Number/BigInt `JmpIfNotLt8` execution. Pins the reversed exact mathematical cross-type ordering path and its operand-order correction. |
 | `relational_bigint_string` | 1,000,000 | Mixed BigInt/String `JmpIfNotLt8` execution. Pins §7.2.13 StringToBigInt parsing and exact mathematical ordering without object coercion. |
+| `loose_eq_bigint_string` | 125,000 × 2 orders | Mixed BigInt/String `==` execution in both operand orders. Pins §7.2.14 StringToBigInt parsing through the interpreter's OOM-aware allocating path without object coercion. |
 | `relational_bigint_string_syntax` | 1,000,000 | Mixed BigInt/String `JmpIfNotLt8` execution split across whitespace, signed-decimal, and radix-prefixed StringToBigInt forms. Samples representative §7.1.14 grammar branches while pinning the allocation-free one-limb path. |
 | `relational_bigint_string_wide` | 1,000,000 | Mixed BigInt/String `JmpIfNotLt8` execution straddling the 64-bit limb boundary. Pins the allocation-free two-limb parser and guards the handoff to exact wide ordering. |
 | `relational_bigint_string_huge` | 200,000 | Mixed BigInt/String `JmpIfNotLt8` execution straddling the 128-bit boundary. Pins the validated handoff from the stack parser to the full arbitrary-precision parser. |
