@@ -4,6 +4,14 @@
 //! strike limits without forming a module import cycle (bistromath cannot
 //! import driver.zig). Keep every shared number here.
 
+const builtin = @import("builtin");
+const code_alloc = @import("../jit/code_alloc.zig");
+
+/// Cycle-free target gate shared by T2 itself and T1's optional OSR probe.
+/// Keeping this here prevents an x86_64 T1 from yielding to an unavailable
+/// AArch64-only T2 backend.
+pub const supported = code_alloc.supported and builtin.cpu.arch == .aarch64;
+
 /// Starting T2 heat floor (docs/ohaimark.md §3.15). Full threshold is
 /// `tier_up_base + 32 * min(code_len, 1<<20)`.
 pub const tier_up_base: u32 = 8 * 1024;

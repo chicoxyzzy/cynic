@@ -37,6 +37,7 @@ const Environment = @import("environment.zig").Environment;
 const Chunk = @import("../bytecode/chunk.zig").Chunk;
 const JSGenerator = @import("generator.zig").JSGenerator;
 const jit_code_alloc = @import("jit/code_alloc.zig");
+const BistromathStats = @import("bistromath/stats.zig").Stats;
 const OhaimarkStats = @import("ohaimark/stats.zig").Stats;
 const JSSymbol = @import("symbol.zig").JSSymbol;
 const JSBigInt = @import("bigint.zig").JSBigInt;
@@ -404,6 +405,9 @@ pub const Heap = struct {
     /// the reservation fails (tier-up then degrades to "stay
     /// interpreted").
     jit_code: ?jit_code_alloc.CodeAllocator = null,
+    /// Opt-in T1 execution witness. Heap scope aggregates child realms; when
+    /// disabled, native entry pays only the predictable flag check.
+    bistromath_stats: BistromathStats = .{},
     /// Opt-in T2 rollout counters. Heap scope deliberately aggregates child
     /// realms, which share executable memory and object identity with their
     /// parent. Disabled means no clock reads or hot-entry counter traffic.

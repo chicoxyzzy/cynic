@@ -84,7 +84,13 @@ pub const trap_invalid_conversion: u32 = 4;
 /// the channel having to enumerate each variant.
 pub const trap_pending: u32 = 5;
 
-pub const CompileError = error{ OutOfMemory, UnsupportedOp };
+pub const CompileError = error{
+    OutOfMemory,
+    UnsupportedOp,
+    LabelAlreadyBound,
+    InvalidLabel,
+    BranchOutOfRange,
+};
 
 /// The native call helper a compiled `call` (§5.4.1) branches to:
 /// `(instance, func_index, buf) -> status`. It marshals the args staged
@@ -890,7 +896,7 @@ pub fn compile(
                 try m.jumpCbz(.x0, &get_ok);
                 try m.emit(a64.addSpImm(framebytes));
                 try m.jump(&epilogue);
-                m.bind(&get_ok);
+                try m.bind(&get_ok);
 
                 // Success: the helper has written the ref into its depth-keyed
                 // cell. Recompute x6 from SP (AAPCS64 callee-restores SP;
@@ -1010,7 +1016,7 @@ pub fn compile(
                 try m.jumpCbz(.x0, &set_ok);
                 try m.emit(a64.addSpImm(framebytes));
                 try m.jump(&epilogue);
-                m.bind(&set_ok);
+                try m.bind(&set_ok);
 
                 // Success: recompute x6 from SP (AAPCS64 callee-restores SP;
                 // nothing moved it since the reserve), reload the boundary
@@ -1434,7 +1440,7 @@ pub fn compile(
                     try m.emit(a64.cmpRegW(ra, .x16));
                     try m.jumpCond(.eq, &trap_overflow);
                     trap_overflow_used = true;
-                    m.bind(&skip);
+                    try m.bind(&skip);
                 }
 
                 switch (op) {
@@ -1630,7 +1636,7 @@ pub fn compile(
                     try m.emit(a64.cmpReg(ra, .x16));
                     try m.jumpCond(.eq, &trap_overflow);
                     trap_overflow_used = true;
-                    m.bind(&skip);
+                    try m.bind(&skip);
                 }
 
                 switch (op) {
@@ -2161,13 +2167,13 @@ pub fn compile(
                     var fill_done: masm_mod.Masm.Label = .{};
                     defer fill_loop.deinit(gpa);
                     defer fill_done.deinit(gpa);
-                    m.bind(&fill_loop);
+                    try m.bind(&fill_loop);
                     try m.jumpCbz(r_n, &fill_done);
                     try m.emit(a64.strbRegW(r_val, .x2, r_dst));
                     try m.emit(a64.addImm(r_dst, r_dst, 1, false));
                     try m.emit(a64.subImm(r_n, r_n, 1, false));
                     try m.jump(&fill_loop);
-                    m.bind(&fill_done);
+                    try m.bind(&fill_done);
                     sp -= 3;
                 } else if (sub == 10) {
                     // §4.4.7 memory.copy — move n bytes from src to dst
@@ -2206,7 +2212,7 @@ pub fn compile(
                     // backward: start past the end and walk down.
                     try m.emit(a64.addReg(r_dst, r_dst, r_n));
                     try m.emit(a64.addReg(r_src, r_src, r_n));
-                    m.bind(&bwd_loop);
+                    try m.bind(&bwd_loop);
                     try m.jumpCbz(r_n, &copy_done);
                     try m.emit(a64.subImm(r_dst, r_dst, 1, false));
                     try m.emit(a64.subImm(r_src, r_src, 1, false));
@@ -2214,7 +2220,7 @@ pub fn compile(
                     try m.emit(a64.strbRegW(.x16, .x2, r_dst));
                     try m.emit(a64.subImm(r_n, r_n, 1, false));
                     try m.jump(&bwd_loop);
-                    m.bind(&fwd_loop);
+                    try m.bind(&fwd_loop);
                     try m.jumpCbz(r_n, &copy_done);
                     try m.emit(a64.ldrbRegW(.x16, .x2, r_src));
                     try m.emit(a64.strbRegW(.x16, .x2, r_dst));
@@ -2222,7 +2228,7 @@ pub fn compile(
                     try m.emit(a64.addImm(r_dst, r_dst, 1, false));
                     try m.emit(a64.subImm(r_n, r_n, 1, false));
                     try m.jump(&fwd_loop);
-                    m.bind(&copy_done);
+                    try m.bind(&copy_done);
                     sp -= 3;
                 } else if (sub == 8) {
                     // §4.4.7 memory.init — copy `len` bytes from passive data
@@ -2303,7 +2309,7 @@ pub fn compile(
                     try m.jumpCbz(.x0, &init_ok);
                     try m.emit(a64.addSpImm(framebytes));
                     try m.jump(&epilogue);
-                    m.bind(&init_ok);
+                    try m.bind(&init_ok);
 
                     // Success: recompute x6 from SP (AAPCS64 callee-restores SP;
                     // nothing moved it since the reserve), reload the boundary
@@ -2521,7 +2527,7 @@ pub fn compile(
                     try m.jumpCbz(.x0, &copy_ok);
                     try m.emit(a64.addSpImm(framebytes));
                     try m.jump(&epilogue);
-                    m.bind(&copy_ok);
+                    try m.bind(&copy_ok);
 
                     try m.emit(a64.addRegSp(.x6, 0));
                     try m.emit(a64.ldrImm(.x0, .x6, spill_off));
@@ -2598,7 +2604,7 @@ pub fn compile(
                     try m.jumpCbz(.x0, &init_ok);
                     try m.emit(a64.addSpImm(framebytes));
                     try m.jump(&epilogue);
-                    m.bind(&init_ok);
+                    try m.bind(&init_ok);
 
                     try m.emit(a64.addRegSp(.x6, 0));
                     try m.emit(a64.ldrImm(.x0, .x6, spill_off));
@@ -2853,7 +2859,7 @@ pub fn compile(
                     try m.jumpCbz(.x0, &fill_ok);
                     try m.emit(a64.addSpImm(framebytes));
                     try m.jump(&epilogue);
-                    m.bind(&fill_ok);
+                    try m.bind(&fill_ok);
 
                     try m.emit(a64.addRegSp(.x6, 0));
                     try m.emit(a64.ldrImm(.x0, .x6, spill_off));
@@ -3001,7 +3007,7 @@ pub fn compile(
                 const arity = readBlockArity(body, &i) orelse return null;
                 if (ctrl_len >= max_ctrl_depth) return null;
                 ctrl[ctrl_len] = .{ .label = .{}, .else_label = .{}, .height = sp, .branch_arity = 0, .result_arity = arity, .kind = .loop };
-                m.bind(&ctrl[ctrl_len].label);
+                try m.bind(&ctrl[ctrl_len].label);
                 ctrl_len += 1;
             },
             op_if => {
@@ -3032,7 +3038,7 @@ pub fn compile(
                     stack[d] = .{ .reg = r };
                 }
                 try m.jump(&c.label);
-                m.bind(&c.else_label);
+                try m.bind(&c.else_label);
                 c.kind = .if_else;
                 sp = c.height; // the else-arm starts with a fresh stack
             },
@@ -3069,7 +3075,7 @@ pub fn compile(
                 // result type for the continuation — those result values
                 // were placed in the canonical registers by whatever
                 // branch reaches the merge.
-                if (cur.kind == .block) m.bind(&cur.label);
+                if (cur.kind == .block) try m.bind(&cur.label);
                 cur.label.deinit(gpa);
                 cur.else_label.deinit(gpa); // `.empty` for block/loop — safe
                 sp = cur.height + cur.result_arity;
@@ -3145,7 +3151,7 @@ pub fn compile(
                 const cur = &ctrl[ctrl_len - 1];
                 if (cur.kind == .if_then or cur.kind == .if_else) return null;
                 skipToFrameEnd(body, &i) orelse return null;
-                if (cur.kind == .block) m.bind(&cur.label);
+                if (cur.kind == .block) try m.bind(&cur.label);
                 cur.label.deinit(gpa);
                 cur.else_label.deinit(gpa);
                 sp = cur.height + cur.result_arity;
@@ -3271,7 +3277,7 @@ pub fn compile(
                 try m.jumpCbz(.x0, &call_ok); // status == 0 -> success
                 try m.emit(a64.addSpImm(framebytes)); // release buffer
                 try m.jump(&epilogue); // propagate w0 (the status)
-                m.bind(&call_ok);
+                try m.bind(&call_ok);
 
                 // Success. x6 is caller-saved, so the helper may have
                 // clobbered it — but AAPCS64 guarantees SP is callee-
@@ -3394,7 +3400,7 @@ pub fn compile(
                 try m.jumpCbz(.x0, &call_ok);
                 try m.emit(a64.addSpImm(framebytes));
                 try m.jump(&epilogue);
-                m.bind(&call_ok);
+                try m.bind(&call_ok);
 
                 // Success: recompute x6 from SP, reload results above the
                 // survivors, restore the boundary registers and survivors,
@@ -3445,14 +3451,14 @@ pub fn compile(
                     // bind it here. A `loop`'s label was already bound at
                     // its header (no back-edge fixups: a back-edge jumps
                     // to an already-bound label).
-                    .block, .if_else => m.bind(&c.label),
+                    .block, .if_else => try m.bind(&c.label),
                     .loop => {},
                     // An `if` with no `else`: a false condition jumped to
                     // the else label, which lands straight at the `end`
                     // alongside the then-arm's fall-through.
                     .if_then => {
-                        m.bind(&c.label);
-                        m.bind(&c.else_label);
+                        try m.bind(&c.label);
+                        try m.bind(&c.else_label);
                     },
                 }
                 c.label.deinit(gpa);
@@ -3516,7 +3522,7 @@ pub fn compile(
     // the frame teardown (the non-leaf prologue's pop) is emitted once.
     // The normal return falls in; each trap exit jumps in after loading
     // its status. Pop x19 + the link register, then `ret`.
-    m.bind(&epilogue);
+    try m.bind(&epilogue);
     try m.emit(a64.ldpPostIdxSp(.x19, .lr, 16));
     try m.emit(a64.ret());
 
@@ -3525,22 +3531,22 @@ pub fn compile(
     // (which restores the frame), writing no result (the caller raises
     // the matching TrapError and ignores x1).
     if (trap_div0_used) {
-        m.bind(&trap_div0);
+        try m.bind(&trap_div0);
         try m.movImm64(.x0, trap_divide_by_zero);
         try m.jump(&epilogue);
     }
     if (trap_overflow_used) {
-        m.bind(&trap_overflow);
+        try m.bind(&trap_overflow);
         try m.movImm64(.x0, trap_int_overflow);
         try m.jump(&epilogue);
     }
     if (trap_oob_used) {
-        m.bind(&trap_oob);
+        try m.bind(&trap_oob);
         try m.movImm64(.x0, trap_out_of_bounds);
         try m.jump(&epilogue);
     }
     if (trap_invalid_used) {
-        m.bind(&trap_invalid);
+        try m.bind(&trap_invalid);
         try m.movImm64(.x0, trap_invalid_conversion);
         try m.jump(&epilogue);
     }

@@ -245,14 +245,14 @@ const Compiler = struct {
         try self.emitEntryParameters();
         for (self.graph.blocks, 0..) |block, block_index| {
             if (!block.reachable) continue;
-            self.machine.bind(&self.block_labels[block_index]);
+            try self.machine.bind(&self.block_labels[block_index]);
             try self.emitBlock(block_index, block);
         }
         // OSR stubs after the ordinary body so fallthrough never lands in one.
         // Each stub shares the same spill layout and block labels as entry.
         try self.emitOsrEntries();
         for (self.physical_deopt.points, 0..) |_, point_index| {
-            self.machine.bind(&self.guard_labels[point_index]);
+            try self.machine.bind(&self.guard_labels[point_index]);
             try self.emitGuardExit(point_index);
         }
     }
@@ -371,7 +371,7 @@ const Compiler = struct {
                 // write it). Release the spill area and bail to Lantern —
                 // use the OSR-bail sentinel so thrash accounting only
                 // charges true enter-and-bail, not safepoint resumes.
-                self.machine.bind(&int32_fail);
+                try self.machine.bind(&int32_fail);
                 try self.machine.movImm64(.x0, osr_bail_sentinel_bits);
                 try emitter.emitEpilogue(self.machine, self.lowered.frame);
             }
@@ -574,7 +574,7 @@ const Compiler = struct {
         try self.machine.jumpCond(.ne, &nonzero);
         try self.machine.emit(a64.eorReg(guard_scratch, lhs_scratch, rhs_scratch));
         try self.jumpToGuardIfBitSet(guard_scratch, 31, guard);
-        self.machine.bind(&nonzero);
+        try self.machine.bind(&nonzero);
     }
 
     /// §6.1.6.1.5 Number::divide, exact-int32 subset. AArch64 `sdiv` is
@@ -590,7 +590,7 @@ const Compiler = struct {
         try self.machine.emit(a64.cmpImm(lhs_scratch, 0, false));
         try self.machine.jumpCond(.ne, &nonzero_lhs);
         try self.jumpToGuardIfBitSet(rhs_scratch, 31, guard);
-        self.machine.bind(&nonzero_lhs);
+        try self.machine.bind(&nonzero_lhs);
 
         try self.machine.emit(a64.sdivW(result_scratch, lhs_scratch, rhs_scratch));
         try self.machine.emit(a64.smull(guard_scratch, result_scratch, rhs_scratch));
@@ -688,9 +688,9 @@ const Compiler = struct {
         try self.machine.emit(a64.fmovXtoD(fp, result_scratch));
         try self.machine.jump(&done);
 
-        self.machine.bind(&int32_value);
+        try self.machine.bind(&int32_value);
         try self.machine.emit(a64.scvtfDfromW(fp, value));
-        self.machine.bind(&done);
+        try self.machine.bind(&done);
     }
 
     fn emitInt32Input(
@@ -822,7 +822,7 @@ const Compiler = struct {
         ));
         try self.machine.jumpCbnz(.x9, &have_running_realm);
         try self.machine.emit(a64.movReg(.x9, lowering.realm_register));
-        self.machine.bind(&have_running_realm);
+        try self.machine.bind(&have_running_realm);
 
         try property_codegen.emitRealmU64(
             self.machine,
@@ -894,7 +894,7 @@ const Compiler = struct {
         ));
         try self.machine.jumpCbnz(lhs_scratch, &have_running_realm);
         try self.machine.emit(a64.movReg(lhs_scratch, lowering.realm_register));
-        self.machine.bind(&have_running_realm);
+        try self.machine.bind(&have_running_realm);
 
         try property_codegen.emitRealmU64(
             self.machine,
@@ -1024,7 +1024,7 @@ const Compiler = struct {
         const inverse: a64.Cond = @enumFromInt(@intFromEnum(condition) ^ 1);
         try self.machine.jumpCond(inverse, &passed);
         try self.machine.jump(guard);
-        self.machine.bind(&passed);
+        try self.machine.bind(&passed);
     }
 
     fn jumpToGuardIfNonzero(
@@ -1036,7 +1036,7 @@ const Compiler = struct {
         defer zero.deinit(self.allocator);
         try self.machine.jumpCbz(value, &zero);
         try self.machine.jump(guard);
-        self.machine.bind(&zero);
+        try self.machine.bind(&zero);
     }
 
     fn jumpToGuardIfBitSet(
@@ -1049,7 +1049,7 @@ const Compiler = struct {
         defer clear.deinit(self.allocator);
         try self.machine.jumpTbz(value, bit, &clear);
         try self.machine.jump(guard);
-        self.machine.bind(&clear);
+        try self.machine.bind(&clear);
     }
 
     fn emitReturn(self: *Compiler, node_id: ir.ValueId) !void {
@@ -1196,7 +1196,7 @@ const Compiler = struct {
                 try self.machine.jumpCbz(value, &fallthrough);
             }
             try self.emitEdgeAndJump(try self.edgeForKind(block_index, .branch_taken));
-            self.machine.bind(&fallthrough);
+            try self.machine.bind(&fallthrough);
             return;
         }
         var taken: Masm.Label = .{};
@@ -1207,7 +1207,7 @@ const Compiler = struct {
             try self.machine.jumpCbnz(value, &taken);
         }
         try self.emitEdgeAndJump(try self.edgeForKind(block_index, .branch_fallthrough));
-        self.machine.bind(&taken);
+        try self.machine.bind(&taken);
         try self.emitEdgeAndJump(try self.edgeForKind(block_index, .branch_taken));
     }
 
@@ -1222,14 +1222,14 @@ const Compiler = struct {
             const inverse: a64.Cond = @enumFromInt(@intFromEnum(taken_condition) ^ 1);
             try self.machine.jumpCond(inverse, &fallthrough);
             try self.emitEdgeAndJump(try self.edgeForKind(block_index, .branch_taken));
-            self.machine.bind(&fallthrough);
+            try self.machine.bind(&fallthrough);
             return;
         }
         var taken: Masm.Label = .{};
         defer taken.deinit(self.allocator);
         try self.machine.jumpCond(taken_condition, &taken);
         try self.emitEdgeAndJump(try self.edgeForKind(block_index, .branch_fallthrough));
-        self.machine.bind(&taken);
+        try self.machine.bind(&taken);
         try self.emitEdgeAndJump(try self.edgeForKind(block_index, .branch_taken));
     }
 
@@ -1282,7 +1282,7 @@ const Compiler = struct {
                 &slow,
             );
             try self.machine.jump(&self.block_labels[target]);
-            self.machine.bind(&slow);
+            try self.machine.bind(&slow);
             try self.emitSafepointExit(target);
             return;
         }
