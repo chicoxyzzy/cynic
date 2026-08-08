@@ -307,12 +307,13 @@ export fn cynic_eval(src: [*]const u8, len: u32, hardened: u32) [*]u8 {
     // runs at the end of install and only fires when `hardened`.
     realm.hardened = hardened != 0;
     // The playground is a demo sandbox (it also installs the debug test
-    // globals below), so open the `--allow=wasm` gate: snippets can
+    // globals below), so open the dynamic Wasm byte-compilation policy:
+    // snippets can
     // `WebAssembly.compile` / `instantiate` and run modules through the
     // Sarcasm engine, which is already linked into this build. Frozen-
     // primordial (hardened) instantiation is covered by `wasm_js_test.zig`
     // ("…hardened realm (playground posture)").
-    realm.allow_wasm = true;
+    realm.allow_wasm_compile = true;
     realm.installBuiltins() catch {
         return buildFrame(.parse_error, "", "", "internal error: builtin install failed", empty_span);
     };
@@ -544,9 +545,9 @@ export fn cynic_wasm_inspect(src: [*]const u8, len: u32) [*]u8 {
 
     var realm = Realm.init(gpa);
     defer realm.deinit();
-    // Open the wasm gate so `new WebAssembly.Module(...)` runs (and is
-    // captured); install the debug globals as `cynic_eval` does.
-    realm.allow_wasm = true;
+    // Open dynamic Wasm byte compilation so `new WebAssembly.Module(...)`
+    // runs (and is captured); install debug globals as `cynic_eval` does.
+    realm.allow_wasm_compile = true;
     realm.installBuiltins() catch {
         return buildFrame(.parse_error, "", "", "internal error: builtin install failed", empty_span);
     };

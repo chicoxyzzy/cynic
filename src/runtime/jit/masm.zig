@@ -104,6 +104,18 @@ pub const Masm = struct {
         }
     }
 
+    /// BL <label>. The imm26 fixup encoding is shared with `B`; the
+    /// placeholder already carries BL's opcode bits, and `patch` fills only
+    /// its displacement field.
+    pub fn call(self: *Masm, label: *Label) Error!void {
+        if (label.bound) |target| {
+            try self.emit(a64.bl(try deltaWords(i26, self.offset(), target)));
+        } else {
+            try label.fixups.append(self.gpa, .{ .at = self.offset(), .kind = .imm26 });
+            try self.emit(a64.bl(0));
+        }
+    }
+
     /// B.cond <label>
     pub fn jumpCond(self: *Masm, cond: Cond, label: *Label) Error!void {
         if (label.bound) |target| {
@@ -370,4 +382,28 @@ test "jit masm: callAbs reaches a Zig helper and back" {
 
     const f = code_alloc.asFn(*const fn (u64) callconv(.c) u64, try m.install(&ca));
     try testing.expectEqual(@as(u64, 85), f(42));
+}
+
+test "jit masm: local call label returns to the caller" {
+    if (comptime !native_aarch64) return error.SkipZigTest;
+    var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
+    defer ca.deinit();
+
+    // fn (x: u64) u64 { return callee(x) + 1; }
+    // callee(x) { return x + 41; }
+    var m = Masm.init(testing.allocator);
+    defer m.deinit();
+    var callee = Masm.Label{};
+    defer callee.deinit(testing.allocator);
+    try m.emit(a64.strPreIdxSp(.lr, -16));
+    try m.call(&callee); // forward imm26 fixup
+    try m.emit(a64.addImm(.x0, .x0, 1, false));
+    try m.emit(a64.ldrPostIdxSp(.lr, 16));
+    try m.emit(a64.ret());
+    try m.bind(&callee);
+    try m.emit(a64.addImm(.x0, .x0, 41, false));
+    try m.emit(a64.ret());
+
+    const f = code_alloc.asFn(*const fn (u64) callconv(.c) u64, try m.install(&ca));
+    try testing.expectEqual(@as(u64, 42), f(0));
 }

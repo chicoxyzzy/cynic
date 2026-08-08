@@ -21,16 +21,19 @@ const heap_mod = @import("../heap.zig");
 const Heap = heap_mod.Heap;
 const Realm = @import("../realm.zig").Realm;
 const GlobalBindings = @import("../realm.zig").GlobalBindings;
+const Intrinsics = @import("../intrinsics.zig").Intrinsics;
 const object_mod = @import("../object.zig");
 const JSObject = object_mod.JSObject;
 const chunk_mod = @import("../../bytecode/chunk.zig");
 const LoadICCell = chunk_mod.LoadICCell;
 const StoreICCell = chunk_mod.StoreICCell;
 const CallICCell = chunk_mod.CallICCell;
+const ComputedICCell = chunk_mod.ComputedICCell;
 const Shape = @import("../shape.zig").Shape;
 const CallFrame = @import("../lantern/interpreter.zig").CallFrame;
 const Environment = @import("../environment.zig").Environment;
 const JSFunction = @import("../function.zig").JSFunction;
+const JSString = @import("../string.zig").JSString;
 
 /// `CallFrame` — the frame-identity rule's contact surface
 /// (docs/jit.md §4.2).
@@ -82,6 +85,7 @@ pub const realm = struct {
     pub const interrupt_raw: usize =
         @offsetOf(Realm, "interrupt") + @offsetOf(std.atomic.Value(bool), "raw");
     pub const interrupt_hook: usize = @offsetOf(Realm, "interrupt_hook");
+    pub const fuel_exhaustion: usize = @offsetOf(Realm, "fuel_exhaustion");
     pub const proto_revision_counter: usize =
         @offsetOf(Realm, "proto_revision_counter");
     pub const globals_target: usize =
@@ -97,9 +101,28 @@ pub const realm = struct {
         globals_decl_slots_ptr + @sizeOf(*Value);
     pub const globals_decl_const_flags_ptr: usize =
         @offsetOf(Realm, "globals") + @offsetOf(GlobalBindings, "decl_const_flags");
+    /// §13.5.3's per-realm immutable string cache. Ohaimark's direct
+    /// `typeof` dispatch reads these Values from the active Realm, so one
+    /// compiled chunk remains correct across child realms.
+    pub const typeof_undefined_string: usize =
+        @offsetOf(Realm, "intrinsics") + @offsetOf(Intrinsics, "typeof_undefined_string");
+    pub const typeof_object_string: usize =
+        @offsetOf(Realm, "intrinsics") + @offsetOf(Intrinsics, "typeof_object_string");
+    pub const typeof_boolean_string: usize =
+        @offsetOf(Realm, "intrinsics") + @offsetOf(Intrinsics, "typeof_boolean_string");
+    pub const typeof_number_string: usize =
+        @offsetOf(Realm, "intrinsics") + @offsetOf(Intrinsics, "typeof_number_string");
+    pub const typeof_string_string: usize =
+        @offsetOf(Realm, "intrinsics") + @offsetOf(Intrinsics, "typeof_string_string");
+    pub const typeof_function_string: usize =
+        @offsetOf(Realm, "intrinsics") + @offsetOf(Intrinsics, "typeof_function_string");
+    pub const typeof_symbol_string: usize =
+        @offsetOf(Realm, "intrinsics") + @offsetOf(Intrinsics, "typeof_symbol_string");
+    pub const typeof_bigint_string: usize =
+        @offsetOf(Realm, "intrinsics") + @offsetOf(Intrinsics, "typeof_bigint_string");
     /// Ohaimark loop-header OSR policy (docs/ohaimark.md §3.17). Bistromath
-    /// backedges load this first so the default-off path stays a single
-    /// compare against zero with no helper call.
+    /// backedges load this before T2 state so the explicit host opt-out stays
+    /// a single compare against zero with no helper call.
     pub const ohaimark_osr_enabled: usize = @offsetOf(Realm, "ohaimark_osr_enabled");
 };
 
@@ -122,6 +145,10 @@ pub const heap = struct {
 pub const object = struct {
     pub const shape: u15 = @offsetOf(JSObject, "shape");
     pub const prototype: u15 = @offsetOf(JSObject, "prototype");
+    /// Packed `BrandFlags` word. `typeof` only reads the callable-exotic bit;
+    /// the comptime witness below pins its bit position to the Zig layout.
+    pub const brand: u14 = @offsetOf(JSObject, "brand");
+    pub const brand_proxy_callable_bit: u6 = 4;
     pub const inline_slots: u15 = @offsetOf(JSObject, "inline_slots");
     /// Byte offset of `secondary_values.items.ptr`. Once an object
     /// needs a named slot past `inline_slot_cap`,
@@ -150,6 +177,24 @@ pub const load_ic_cell = struct {
     pub const kind_synthetic_accessor: u8 = @intFromEnum(LoadICCell.Kind.synthetic_accessor);
 };
 
+/// `ComputedICCell` — Ohaimark's monomorphic `obj[key]` own-data lane reads
+/// only its pointer-free shape / slot / inline-key snapshot.
+pub const computed_ic_cell = struct {
+    pub const shape: u15 = @offsetOf(ComputedICCell, "shape");
+    pub const slot: u15 = @offsetOf(ComputedICCell, "slot");
+    pub const key_len: u12 = @offsetOf(ComputedICCell, "cached_key_len");
+    pub const key_buf: u12 = @offsetOf(ComputedICCell, "cached_key_buf");
+};
+
+/// `JSString` fields used after a tag guard. The raw payload pointer is valid
+/// only when the separately loaded depth is zero, which is the flat-string
+/// invariant maintained by `JSString`.
+pub const string = struct {
+    pub const byte_len: u15 = @offsetOf(JSString, "byte_len");
+    pub const depth: u12 = @offsetOf(JSString, "depth");
+    pub const flat_bytes_ptr: u15 = @offsetOf(JSString, "payload");
+};
+
 /// Store-cache prefix consumed by Bistromath's same-shape write fast path.
 /// Transition-only fields remain Lantern-owned and need no native offsets.
 pub const store_ic_cell = struct {
@@ -170,9 +215,18 @@ pub const call_ic_cell = struct {
 /// re-exported from value.zig / heap.zig so they cannot drift.
 pub const value_bits = struct {
     pub const tag_object_shifted: u64 = @as(u64, Value.tag_object) << 48;
+    pub const tag_object: u64 = Value.tag_object;
+    pub const tag_string: u64 = Value.tag_string;
+    pub const tag_int32: u64 = Value.tag_int32;
+    pub const tag_bool: u64 = Value.tag_bool;
+    pub const tag_null: u64 = Value.tag_null;
+    pub const tag_undefined: u64 = Value.tag_undefined;
     pub const pointer_mask: u64 = Value.pointer_mask;
     pub const kind_mask: u64 = heap_mod.kind_mask;
+    pub const kind_function: u64 = heap_mod.kind_function;
     pub const kind_object: u64 = heap_mod.kind_object;
+    pub const kind_symbol: u64 = heap_mod.kind_symbol;
+    pub const kind_bigint: u64 = heap_mod.kind_bigint;
 };
 
 comptime {
@@ -186,12 +240,17 @@ comptime {
         object.overflow_items_ptr,          load_ic_cell.shape,
         load_ic_cell.proto,                 load_ic_cell.proto_shape,
         load_ic_cell.proto_rev,             load_ic_cell.synthetic_value,
+        computed_ic_cell.shape,             string.flat_bytes_ptr,
         store_ic_cell.shape,                call_ic_cell.callee,
         realm.heap,                         realm.step_budget,
         realm.interrupt_hook,               realm.proto_revision_counter,
         realm.globals_target,               realm.globals_decl_revision,
         realm.globals_decl_slots_ptr,       realm.globals_decl_slots_len,
         realm.globals_decl_const_flags_ptr, heap.bytes_since_gc,
+        realm.typeof_undefined_string,      realm.typeof_object_string,
+        realm.typeof_boolean_string,        realm.typeof_number_string,
+        realm.typeof_string_string,         realm.typeof_function_string,
+        realm.typeof_symbol_string,         realm.typeof_bigint_string,
         heap.gc_byte_threshold,
     }) |off| std.debug.assert(off % 8 == 0);
     // `slot` is a u32 field — 4-aligned is enough (loaded via ldr-w
@@ -199,14 +258,31 @@ comptime {
     // 8-aligned base; keep it 4-aligned and loaded as the low half
     // only if the emitters say so. Today they load it 32-bit.)
     std.debug.assert(load_ic_cell.slot % 4 == 0);
+    std.debug.assert(computed_ic_cell.slot % 4 == 0);
     std.debug.assert(store_ic_cell.slot % 4 == 0);
+    std.debug.assert(string.byte_len % 4 == 0);
+    std.debug.assert(object.brand % 4 == 0);
     std.debug.assert(heap.allocs_since_gc % 4 == 0);
     std.debug.assert(heap.gc_young_threshold % 4 == 0);
     // The kind bits live inside the 8-byte alignment slack.
     std.debug.assert(heap_mod.kind_mask < 8);
     // `is_arrow` is a byte load (ldrb imm12).
     std.debug.assert(function.is_arrow < 4096);
+    std.debug.assert(realm.fuel_exhaustion < 4096);
     std.debug.assert(load_ic_cell.kind < 4096);
+    std.debug.assert(computed_ic_cell.key_len < 4096);
+    std.debug.assert(
+        computed_ic_cell.key_buf + chunk_mod.computed_key_cap - 1 < 4096,
+    );
+    std.debug.assert(string.depth + 1 < 4096);
+    const callable_brand: object_mod.BrandFlags = .{
+        .extensible = false,
+        .array_length_writable = false,
+        .proxy_callable = true,
+    };
+    std.debug.assert(
+        @as(u32, @bitCast(callable_brand)) == (@as(u32, 1) << object.brand_proxy_callable_bit),
+    );
 }
 
 // ── Executable proof ────────────────────────────────────────────────
@@ -307,6 +383,11 @@ test "jit layout: machine loads match Zig reads on live values" {
         @as(u64, @intFromPtr(realm_v.interrupt_hook.?)),
         try loadVia(&ca, realm.interrupt_hook, &realm_v),
     );
+    realm_v.setFuel(7);
+    try testing.expectEqual(
+        @intFromEnum(Realm.FuelExhaustion.terminate),
+        try loadViaB(&ca, realm.fuel_exhaustion, &realm_v),
+    );
     try testing.expectEqual(
         realm_v.proto_revision_counter,
         try loadVia(&ca, realm.proto_revision_counter, &realm_v),
@@ -324,6 +405,32 @@ test "jit layout: machine loads match Zig reads on live values" {
         @as(u64, realm_v.globals.decl_slots.len),
         try loadVia(&ca, realm.globals_decl_slots_len, &realm_v),
     );
+    const typeof_string = try realm_v.heap.allocateString("undefined");
+    const cached_typeof = Value.fromString(typeof_string);
+    inline for ([_][]const u8{
+        "typeof_undefined_string",
+        "typeof_object_string",
+        "typeof_boolean_string",
+        "typeof_number_string",
+        "typeof_string_string",
+        "typeof_function_string",
+        "typeof_symbol_string",
+        "typeof_bigint_string",
+    }) |field_name| {
+        @field(realm_v.intrinsics, field_name) = cached_typeof;
+    }
+    inline for ([_]usize{
+        realm.typeof_undefined_string,
+        realm.typeof_object_string,
+        realm.typeof_boolean_string,
+        realm.typeof_number_string,
+        realm.typeof_string_string,
+        realm.typeof_function_string,
+        realm.typeof_symbol_string,
+        realm.typeof_bigint_string,
+    }) |offset| {
+        try testing.expectEqual(cached_typeof.bits, try loadVia(&ca, offset, &realm_v));
+    }
 
     // Heap safepoint fields: count/byte pressure and incremental phases.
     realm_v.heap.allocs_since_gc = 17;
@@ -363,6 +470,12 @@ test "jit layout: machine loads match Zig reads on live values" {
         @as(u64, @intFromPtr(obj.prototype orelse @as(?*JSObject, null))),
         try loadVia(&ca, object.prototype, obj),
     );
+    obj.brand.proxy_callable = true;
+    try testing.expectEqual(
+        @as(u32, 1) << object.brand_proxy_callable_bit,
+        (try loadViaW(&ca, object.brand, obj)) &
+            (@as(u32, 1) << object.brand_proxy_callable_bit),
+    );
     const inline1 = try loadVia(&ca, object.inline_slots + 8, obj);
     try testing.expectEqual(obj.slotAt(1).bits, inline1);
     const overflow_base = try loadVia(&ca, object.overflow_items_ptr, obj);
@@ -389,6 +502,42 @@ test "jit layout: machine loads match Zig reads on live values" {
     try testing.expectEqual(
         @as(u64, @intFromPtr(&shape_witness)),
         try loadVia(&ca, store_ic_cell.shape, &store_cell),
+    );
+
+    // Computed IC / flat string fields. The flat-slice pointer witness keeps
+    // the bytecode emitter's raw load coupled to Zig's slice layout.
+    var computed_cell: ComputedICCell = .{};
+    computed_cell.shape = &shape_witness;
+    computed_cell.slot = 7;
+    computed_cell.cached_key_len = 2;
+    computed_cell.cached_key_buf[0] = 'o';
+    computed_cell.cached_key_buf[1] = 'k';
+    try testing.expectEqual(
+        @as(u64, @intFromPtr(&shape_witness)),
+        try loadVia(&ca, computed_ic_cell.shape, &computed_cell),
+    );
+    try testing.expectEqual(
+        @as(u32, 7),
+        try loadViaW(&ca, computed_ic_cell.slot, &computed_cell),
+    );
+    try testing.expectEqual(
+        @as(u8, 2),
+        try loadViaB(&ca, computed_ic_cell.key_len, &computed_cell),
+    );
+    try testing.expectEqual(
+        @as(u8, 'k'),
+        try loadViaB(&ca, computed_ic_cell.key_buf + 1, &computed_cell),
+    );
+    const flat = try realm_v.heap.allocateString("ok");
+    try testing.expectEqual(
+        @as(u32, 2),
+        try loadViaW(&ca, string.byte_len, flat),
+    );
+    try testing.expectEqual(@as(u8, 0), try loadViaB(&ca, string.depth, flat));
+    try testing.expectEqual(@as(u8, 0), try loadViaB(&ca, string.depth + 1, flat));
+    try testing.expectEqual(
+        @as(u64, @intFromPtr(flat.flatBytesIfFlat().?.ptr)),
+        try loadVia(&ca, string.flat_bytes_ptr, flat),
     );
 
     // Tag facts: a tagged object round-trips through the baked

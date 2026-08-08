@@ -12,6 +12,78 @@ const ValType = wasm.ValType;
 
 // ── execution harness ───────────────────────────────────────────────
 
+const CountingExecutionControl = struct {
+    polls: u32 = 0,
+
+    fn poll(ctx: *anyopaque) wasm.ExecutionPoll {
+        const self: *CountingExecutionControl = @ptrCast(@alignCast(ctx));
+        self.polls +%= 1;
+        return .proceed;
+    }
+
+    fn armed(_: *anyopaque) bool {
+        return true;
+    }
+
+    fn control(self: *CountingExecutionControl) wasm.ExecutionControl {
+        return .{ .ctx = self, .poll_fn = poll, .armed_fn = armed };
+    }
+};
+
+const DeferredInterruptControl = struct {
+    requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+    fn poll(ctx: *anyopaque) wasm.ExecutionPoll {
+        const self: *DeferredInterruptControl = @ptrCast(@alignCast(ctx));
+        return if (self.requested.load(.acquire)) .cooperative_interrupted else .proceed;
+    }
+
+    fn armed(ctx: *anyopaque) bool {
+        const self: *DeferredInterruptControl = @ptrCast(@alignCast(ctx));
+        return self.requested.load(.acquire);
+    }
+
+    fn control(self: *DeferredInterruptControl) wasm.ExecutionControl {
+        return .{
+            .ctx = self,
+            .poll_fn = poll,
+            .armed_fn = armed,
+            .wake_flag = &self.requested,
+        };
+    }
+};
+
+const SpasmInterruptBarrier = struct {
+    enabled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    entered: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    released: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+    fn call(ctx: ?*anyopaque, args: []const u128, results: []u128) wasm.TrapError!void {
+        _ = args;
+        _ = results;
+        const self: *SpasmInterruptBarrier = @ptrCast(@alignCast(ctx.?));
+        if (!self.enabled.load(.acquire)) return;
+        self.entered.store(true, .release);
+        while (!self.released.load(.acquire)) std.atomic.spinLoopHint();
+    }
+};
+
+const SpasmInterruptWorker = struct {
+    instance: *interp.Instance,
+    allocator: std.mem.Allocator,
+    func_index: u32,
+    status: std.atomic.Value(u8) = std.atomic.Value(u8).init(0),
+
+    fn run(self: *SpasmInterruptWorker) void {
+        const result = interp.invoke(self.instance, self.allocator, self.func_index, &.{}) catch |err| {
+            self.status.store(if (err == error.ExecutionInterrupted) 1 else 3, .release);
+            return;
+        };
+        self.allocator.free(result);
+        self.status.store(2, .release);
+    }
+};
+
 /// Decode + validate + instantiate `bytes`, invoke the i32-returning
 /// export `name` with i32 `args`, and return the i32 result.
 fn runI32(bytes: []const u8, name: []const u8, args: []const i32) !i32 {
@@ -437,9 +509,9 @@ test "wasm spasm: a direct call to a leaf function runs Spasm-compiled" {
     // `(i32)->i32` functions: func 0 "main" calls func 1 (a leaf that
     // squares its argument). Before the call arm shipped, "main" was
     // non-emittable and degraded — the interpreter ran it and interpreted
-    // the callee inline, so `spasm_runs` stayed 0. With the call arm,
-    // "main" runs via Spasm and its helper re-enters `invoke`, which runs
-    // the leaf via Spasm too.
+    // the callee inline, so `spasm_runs` stayed 0. With the direct-call
+    // ABI, "main" runs via Spasm and the leaf enters its cached native
+    // EntryFn without re-entering `invoke`.
     if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -487,6 +559,203 @@ test "wasm spasm: a direct call to a leaf function runs Spasm-compiled" {
     try testing.expectEqual(@as(u32, 25), @as(u32, @truncate(res[0])));
     // ...and "main" (which has a `call`) ran Spasm-compiled, not degraded.
     try testing.expect(instance.spasm_runs >= 1);
+    try testing.expectEqual(@as(u32, 1), instance.spasm_native_calls);
+
+    // The first edge compiles `square` through the cold helper. Once its
+    // native entry is cached, a second `main` invocation must enter it through
+    // the same-instance native link rather than crossing `spasmCall` again.
+    const warm_res = try interp.invoke(&instance, testing.allocator, fidx, cells);
+    defer testing.allocator.free(warm_res);
+    try testing.expectEqual(@as(u32, 25), @as(u32, @truncate(warm_res[0])));
+    try testing.expectEqual(@as(u32, 1), instance.spasm_native_calls);
+
+    // The warm gate carries the armed execution controller in x7 while its
+    // stable gate record lives in x8. Both main and square poll at entry.
+    var control: CountingExecutionControl = .{};
+    instance.execution_control = control.control();
+    const metered_res = try interp.invoke(&instance, testing.allocator, fidx, cells);
+    defer testing.allocator.free(metered_res);
+    try testing.expectEqual(@as(u32, 25), @as(u32, @truncate(metered_res[0])));
+    try testing.expectEqual(@as(u32, 2), control.polls);
+    instance.execution_control = null;
+
+    // Production keeps the counters off unless a host asks for diagnostics.
+    // The compiled main and its native-linked leaf call still run normally;
+    // only their observational telemetry stays unchanged.
+    const runs_before = instance.spasm_runs;
+    const native_calls_before = instance.spasm_native_calls;
+    instance.spasm_diagnostics = false;
+    const quiet_res = try interp.invoke(&instance, testing.allocator, fidx, cells);
+    defer testing.allocator.free(quiet_res);
+    try testing.expectEqual(@as(u32, 25), @as(u32, @truncate(quiet_res[0])));
+    try testing.expectEqual(runs_before, instance.spasm_runs);
+    try testing.expectEqual(native_calls_before, instance.spasm_native_calls);
+}
+
+test "wasm spasm: warm mutually recursive calls use same-instance native links" {
+    // §4.4.1 / §5.4.1 — `even(n)` and `odd(n)` call one another. Unlike a
+    // self-recursive BL, each edge needs a stable target entry that survives
+    // the lazy compilation order. The first invocation may visit the cold
+    // helper while it compiles `odd`; after that, no recursive edge may do so.
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // type 0: (i32)->(i32); two defined funcs, both type 0; export even.
+    const tbody = [_]u8{ 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f };
+    const fbody = [_]u8{ 0x02, 0x00, 0x00 };
+    const xbody = [_]u8{ 0x01, 0x04, 'e', 'v', 'e', 'n', 0x00, 0x00 };
+    // even(n): n == 0 ? 1 : odd(n - 1)
+    // odd(n):  n == 0 ? 0 : even(n - 1)
+    const cbody = [_]u8{
+        0x02,
+        0x12,
+        0x00,
+        0x20,
+        0x00,
+        0x45,
+        0x04,
+        0x7f,
+        0x41,
+        0x01,
+        0x05,
+        0x20,
+        0x00,
+        0x41,
+        0x01,
+        0x6b,
+        0x10,
+        0x01,
+        0x0b,
+        0x0b,
+        0x12,
+        0x00,
+        0x20,
+        0x00,
+        0x45,
+        0x04,
+        0x7f,
+        0x41,
+        0x00,
+        0x05,
+        0x20,
+        0x00,
+        0x41,
+        0x01,
+        0x6b,
+        0x10,
+        0x00,
+        0x0b,
+        0x0b,
+    };
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 10, .body = &cbody },
+    });
+
+    const m = try wasm.decode(a, bytes);
+    const mp = try a.create(wasm.Module);
+    mp.* = m;
+
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, mp, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true;
+
+    const fidx = funcExport(mp, "even") orelse return error.NoSuchExport;
+    const cells = try a.alloc(u128, 1);
+    cells[0] = @as(u128, 8);
+
+    const cold = try interp.invoke(&instance, testing.allocator, fidx, cells);
+    defer testing.allocator.free(cold);
+    try testing.expectEqual(@as(u32, 1), @as(u32, @truncate(cold[0])));
+    const calls_after_cold = instance.spasm_native_calls;
+    try testing.expect(calls_after_cold > 0);
+
+    const warm = try interp.invoke(&instance, testing.allocator, fidx, cells);
+    defer testing.allocator.free(warm);
+    try testing.expectEqual(@as(u32, 1), @as(u32, @truncate(warm[0])));
+    try testing.expectEqual(calls_after_cold, instance.spasm_native_calls);
+
+    // The gate's hot tail path has no C helper depth cap. Its projected-SP
+    // guard must still make pathological mutual recursion catchable rather
+    // than exhausting the host stack.
+    cells[0] = @as(u128, 1_000_000);
+    try testing.expectError(error.CallStackExhausted, interp.invoke(&instance, testing.allocator, fidx, cells));
+}
+
+test "wasm spasm: a warm native link reinitializes declared callee locals" {
+    // §4.6.5 — a direct target owns one i32 local. It returns that local's
+    // initial value, then writes 42 into it. The cold helper initializes the
+    // first frame; the second call reuses the native stack area and proves the
+    // hot gate emits the same zero-initialization before entering the target.
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // type 0: (i32)->(i32); func 0 main calls func 1 target; export main.
+    const tbody = [_]u8{ 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f };
+    const fbody = [_]u8{ 0x02, 0x00, 0x00 };
+    const xbody = [_]u8{ 0x01, 0x04, 'm', 'a', 'i', 'n', 0x00, 0x00 };
+    // main: local.get 0; call 1
+    // target: local.get 1; i32.const 42; local.set 1
+    const cbody = [_]u8{
+        0x02,
+        0x06,
+        0x00,
+        0x20,
+        0x00,
+        0x10,
+        0x01,
+        0x0b,
+        0x0a,
+        0x01,
+        0x01,
+        0x7f,
+        0x20,
+        0x01,
+        0x41,
+        0x2a,
+        0x21,
+        0x01,
+        0x0b,
+    };
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 10, .body = &cbody },
+    });
+
+    const m = try wasm.decode(a, bytes);
+    const mp = try a.create(wasm.Module);
+    mp.* = m;
+
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, mp, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true;
+
+    const fidx = funcExport(mp, "main") orelse return error.NoSuchExport;
+    const cells = try a.alloc(u128, 1);
+    cells[0] = @as(u128, 99);
+
+    const cold = try interp.invoke(&instance, testing.allocator, fidx, cells);
+    defer testing.allocator.free(cold);
+    try testing.expectEqual(@as(u32, 0), @as(u32, @truncate(cold[0])));
+    const calls_after_cold = instance.spasm_native_calls;
+    try testing.expectEqual(@as(u32, 1), calls_after_cold);
+
+    const warm = try interp.invoke(&instance, testing.allocator, fidx, cells);
+    defer testing.allocator.free(warm);
+    try testing.expectEqual(@as(u32, 0), @as(u32, @truncate(warm[0])));
+    try testing.expectEqual(calls_after_cold, instance.spasm_native_calls);
 }
 
 test "wasm spasm: a call with a live operand under the args runs Spasm-compiled" {
@@ -773,9 +1042,9 @@ test "wasm spasm: ref.is_null folds ref.null to 1 and ref.func to 0, runs Spasm-
 
 test "wasm spasm: a self-recursive call traps CallStackExhausted, never crashes" {
     // Host-safety (AGENTS.md never-abort-the-host): a Spasm-compiled body
-    // that recurses unboundedly nests `invoke` on the *native* stack via
-    // the call helper. Without the depth guard that is a SIGSEGV; the
-    // guard must turn pathological depth into a catchable trap instead.
+    // that recurses unboundedly adds native call frames through the helper.
+    // Without the stack guard that is a SIGSEGV; the guard must turn
+    // pathological depth into a catchable trap instead.
     // The function `f(n)` returns 0 at n==0 and otherwise calls f(n-1):
     //   block (result i32)
     //     local.get 0; i32.eqz; br_if 0 (drop-through pushes 0? no —)
@@ -834,11 +1103,20 @@ test "wasm spasm: a self-recursive call traps CallStackExhausted, never crashes"
 
     // Safe depth returns normally (the recursion bottoms out at n==0).
     {
+        var control: CountingExecutionControl = .{};
+        instance.execution_control = control.control();
         const cells = try a.alloc(u128, 1);
         cells[0] = @as(u128, 8);
         const res = try interp.invoke(&instance, testing.allocator, fidx, cells);
         defer testing.allocator.free(res);
         try testing.expectEqual(@as(u32, 0), @as(u32, @truncate(res[0])));
+        try testing.expectEqual(@as(u32, 9), control.polls);
+        instance.execution_control = null;
+
+        // `rec(8)` has eight nested calls. The self-recursive native link
+        // must stay entirely inside the generated code, rather than going
+        // through the direct-call helper once per depth.
+        try testing.expectEqual(@as(u32, 0), instance.spasm_native_calls);
     }
 
     // Pathological depth traps (a catchable error), it does not SIGSEGV.
@@ -4819,6 +5097,221 @@ test "wasm link: an imported function is called across instances" {
     try testing.expectEqual(@as(i32, 7), try invokeInst(a, importer, "run", &.{}));
 }
 
+test "wasm spasm: an imported call keeps the generic invocation boundary" {
+    // An import has no caller-known local layout. Seven scalar results make
+    // the compact call buffer coincidentally as large as a leaf EntryFn's
+    // scratch requirement, so this proves direct entry is gated on instance
+    // identity rather than buffer capacity alone.
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const seven_i32 = [_]u8{ I32, I32, I32, I32, I32, I32, I32 };
+    // provider: (func (export "callee") (result i32 i32 i32 i32 i32 i32 i32)
+    //   i32.const 1 ... i32.const 7)
+    const provider = try instOf(a, try buildFunc(a, &.{}, &seven_i32, &.{
+        0x00,
+        0x41,
+        0x01,
+        0x41,
+        0x02,
+        0x41,
+        0x03,
+        0x41,
+        0x04,
+        0x41,
+        0x05,
+        0x41,
+        0x06,
+        0x41,
+        0x07,
+        0x0b,
+    }, "callee"), .{});
+    provider.spasm_enabled = true;
+
+    // importer: import "p"."callee"; (func (export "run") (result x7) call 0)
+    const tbody = [_]u8{ 0x01, 0x60, 0x00, 0x07, I32, I32, I32, I32, I32, I32, I32 };
+    const ibody = [_]u8{ 0x01, 0x01, 0x70, 0x06, 0x63, 0x61, 0x6c, 0x6c, 0x65, 0x65, 0x00, 0x00 };
+    const fbody = [_]u8{ 0x01, 0x00 };
+    const xbody = [_]u8{ 0x01, 0x03, 0x72, 0x75, 0x6e, 0x00, 0x01 };
+    const cbody = [_]u8{ 0x01, 0x04, 0x00, 0x10, 0x00, 0x0b };
+    const ibytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 2, .body = &ibody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 10, .body = &cbody },
+    });
+    const importer = try instOf(a, ibytes, .{ .funcs = &.{provider.exportedFuncRef("callee").?} });
+    importer.spasm_enabled = true;
+    importer.invocation_allocator = testing.allocator;
+
+    const fidx = funcExport(importer.module, "run") orelse return error.NoSuchExport;
+    const out = try interp.invoke(importer, testing.allocator, fidx, &.{});
+    defer testing.allocator.free(out);
+    try testing.expectEqual(@as(usize, 7), out.len);
+    for (out, 1..) |value, want| {
+        try testing.expectEqual(@as(u32, @intCast(want)), @as(u32, @truncate(value)));
+    }
+    try testing.expect(importer.spasm_runs >= 1);
+    try testing.expectEqual(@as(u32, 0), provider.spasm_native_calls);
+
+    // The first call warms every native cache. Repeating the generic import
+    // fallback must use short-lived invocation storage, not retain another
+    // 64K-cell interpreter stack in the instance's realm-lifetime arena.
+    const warm_capacity = arena.queryCapacity();
+    for (0..8) |_| {
+        const repeated = try interp.invoke(importer, testing.allocator, fidx, &.{});
+        testing.allocator.free(repeated);
+    }
+    try testing.expectEqual(warm_capacity, arena.queryCapacity());
+}
+
+test "wasm spasm: imported execution control reaches a cold native callee" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // provider.outer calls provider.leaf. Both entries are cold when the
+    // importer first invokes outer, so the call-gate slow path must preserve
+    // the importer's effective execution controller while compiling leaf.
+    const ptypes = [_]u8{ 0x01, 0x60, 0x00, 0x01, I32 };
+    const pfuncs = [_]u8{ 0x02, 0x00, 0x00 };
+    const pexports = [_]u8{ 0x01, 0x05, 'o', 'u', 't', 'e', 'r', 0x00, 0x00 };
+    const pcodes = [_]u8{
+        0x02,
+        0x04, 0x00, 0x10, 0x01, 0x0b, // outer: call leaf
+        0x04, 0x00, 0x41, 0x07, 0x0b, // leaf: i32.const 7
+    };
+    const pbytes = try assemble(a, &.{
+        .{ .id = 1, .body = &ptypes },
+        .{ .id = 3, .body = &pfuncs },
+        .{ .id = 7, .body = &pexports },
+        .{ .id = 10, .body = &pcodes },
+    });
+    const provider = try instOf(a, pbytes, .{});
+    provider.spasm_enabled = true;
+
+    // importer.run calls the provider's exported outer function.
+    const itypes = [_]u8{ 0x01, 0x60, 0x00, 0x01, I32 };
+    const iimports = [_]u8{ 0x01, 0x01, 'p', 0x05, 'o', 'u', 't', 'e', 'r', 0x00, 0x00 };
+    const ifuncs = [_]u8{ 0x01, 0x00 };
+    const iexports = [_]u8{ 0x01, 0x03, 'r', 'u', 'n', 0x00, 0x01 };
+    const icodes = [_]u8{ 0x01, 0x04, 0x00, 0x10, 0x00, 0x0b };
+    const ibytes = try assemble(a, &.{
+        .{ .id = 1, .body = &itypes },
+        .{ .id = 2, .body = &iimports },
+        .{ .id = 3, .body = &ifuncs },
+        .{ .id = 7, .body = &iexports },
+        .{ .id = 10, .body = &icodes },
+    });
+    const importer = try instOf(a, ibytes, .{ .funcs = &.{provider.exportedFuncRef("outer").?} });
+    importer.spasm_enabled = true;
+
+    var control: CountingExecutionControl = .{};
+    importer.execution_control = control.control();
+    try testing.expectEqual(@as(i32, 7), try invokeInst(a, importer, "run", &.{}));
+    try testing.expectEqual(@as(u32, 3), control.polls);
+}
+
+test "wasm spasm: an interrupt raised after native entry stops the next backedge" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // import host.barrier : () -> (); export run : () -> i32. The barrier
+    // holds the compiled body after its entry poll. Once released, the
+    // two-trip loop guarantees one taken native backedge.
+    const tbody = [_]u8{
+        0x02,
+        0x60,
+        0x00,
+        0x00,
+        0x60,
+        0x00,
+        0x01,
+        I32,
+    };
+    const ibody = [_]u8{
+        0x01,
+        0x04,
+        'h',
+        'o',
+        's',
+        't',
+        0x07,
+        'b',
+        'a',
+        'r',
+        'r',
+        'i',
+        'e',
+        'r',
+        0x00,
+        0x00,
+    };
+    const fbody = [_]u8{ 0x01, 0x01 };
+    const xbody = [_]u8{ 0x01, 0x03, 'r', 'u', 'n', 0x00, 0x01 };
+    const cbody = [_]u8{
+        0x01, 0x18,
+        0x01, 0x01,
+        I32,  0x10,
+        0x00, 0x41,
+        0x02, 0x21,
+        0x00, 0x03,
+        0x40, 0x20,
+        0x00, 0x41,
+        0x01, 0x6b,
+        0x22, 0x00,
+        0x0d, 0x00,
+        0x0b, 0x20,
+        0x00, 0x0b,
+    };
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 2, .body = &ibody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 10, .body = &cbody },
+    });
+
+    var barrier: SpasmInterruptBarrier = .{};
+    const host = wasm.FuncRef{ .host = .{
+        .fn_ptr = &SpasmInterruptBarrier.call,
+        .ctx = &barrier,
+        .params = 0,
+        .results = 0,
+    } };
+    const instance = try instOf(a, bytes, .{ .funcs = &.{host} });
+    instance.spasm_enabled = true;
+    instance.invocation_allocator = testing.allocator;
+    const fidx = funcExport(instance.module, "run") orelse return error.NoSuchExport;
+
+    // Compile and warm the call gate before involving another thread.
+    const warm = try interp.invoke(instance, testing.allocator, fidx, &.{});
+    testing.allocator.free(warm);
+    try testing.expect(instance.spasm_runs >= 1);
+
+    var control: DeferredInterruptControl = .{};
+    instance.execution_control = control.control();
+    barrier.enabled.store(true, .release);
+    var worker: SpasmInterruptWorker = .{
+        .instance = instance,
+        .allocator = testing.allocator,
+        .func_index = fidx,
+    };
+    const thread = try std.Thread.spawn(.{}, SpasmInterruptWorker.run, .{&worker});
+    while (!barrier.entered.load(.acquire)) std.atomic.spinLoopHint();
+    control.requested.store(true, .release);
+    barrier.released.store(true, .release);
+    thread.join();
+
+    try testing.expectEqual(@as(u8, 1), worker.status.load(.acquire));
+}
+
 test "wasm link: an imported global value is read" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -4930,6 +5423,36 @@ test "wasm decoder: a 64-bit memory limit sets is_64" {
     try testing.expectEqual(@as(u64, 1), m.mems[0].limits.min);
 }
 
+test "wasm validator: memory and table limits reject invalid ranges" {
+    // memory32 is bounded to 2^16 pages by the core validation rule.
+    const memory32_too_large = [_]u8{ 0x01, 0x00, 0x81, 0x80, 0x04 }; // min 65,537
+    try expectModuleInvalid(error.InvalidLimits, &.{.{ .id = 5, .body = &memory32_too_large }});
+
+    // memory64 is bounded to 2^48 pages. 2^48 + 1 must be rejected before
+    // instantiation can narrow the page count or multiply it by PAGE_SIZE.
+    const memory64_too_large = [_]u8{ 0x01, 0x04, 0x81, 0x80, 0x80, 0x80, 0x80, 0x80, 0x40 };
+    try expectModuleInvalid(error.InvalidLimits, &.{.{ .id = 5, .body = &memory64_too_large }});
+
+    const memory_min_above_max = [_]u8{ 0x01, 0x01, 0x02, 0x01 };
+    try expectModuleInvalid(error.InvalidLimits, &.{.{ .id = 5, .body = &memory_min_above_max }});
+
+    const table_min_above_max = [_]u8{ 0x01, 0x70, 0x01, 0x02, 0x01 };
+    try expectModuleInvalid(error.InvalidLimits, &.{.{ .id = 4, .body = &table_min_above_max }});
+}
+
+test "wasm validator: table64 accepts the core u64 maximum" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const table64_max = [_]u8{
+        0x01, 0x70, 0x05, 0x00,
+        0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff,
+        0xff, 0x01,
+    };
+    const bytes = try assemble(arena.allocator(), &.{.{ .id = 4, .body = &table64_max }});
+    try loadErr(bytes);
+}
+
 test "wasm interp: a memory64 store/load round-trips with i64 addressing" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -4959,6 +5482,48 @@ test "wasm interp: a memory64 store/load round-trips with i64 addressing" {
     const res = try runRaw(bytes, "f", &.{});
     defer testing.allocator.free(res);
     try testing.expectEqual(@as(i64, 42), asI64(res[0]));
+}
+
+test "wasm interp: overflowing memory64 grow delta returns -1" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tbody = [_]u8{ 0x01, 0x60, 0x01, 0x7e, 0x01, 0x7e };
+    const fbody = [_]u8{ 0x01, 0x00 };
+    const mbody = [_]u8{ 0x01, 0x04, 0x01 };
+    const xbody = [_]u8{ 0x01, 0x01, 0x66, 0x00, 0x00 };
+    const cbody = [_]u8{ 0x01, 0x06, 0x00, 0x20, 0x00, 0x40, 0x00, 0x0b };
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 5, .body = &mbody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 10, .body = &cbody },
+    });
+    const res = try runRaw(bytes, "f", &.{std.math.maxInt(u64)});
+    defer testing.allocator.free(res);
+    try testing.expectEqual(@as(i64, -1), asI64(res[0]));
+}
+
+test "wasm interp: overflowing table64 grow delta returns -1" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tbody = [_]u8{ 0x01, 0x60, 0x01, 0x7e, 0x01, 0x7e };
+    const fbody = [_]u8{ 0x01, 0x00 };
+    const tabbody = [_]u8{ 0x01, 0x70, 0x04, 0x01 };
+    const xbody = [_]u8{ 0x01, 0x01, 0x66, 0x00, 0x00 };
+    const cbody = [_]u8{ 0x01, 0x09, 0x00, 0xd0, 0x70, 0x20, 0x00, 0xfc, 0x0f, 0x00, 0x0b };
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 4, .body = &tabbody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 10, .body = &cbody },
+    });
+    const res = try runRaw(bytes, "f", &.{std.math.maxInt(u64)});
+    defer testing.allocator.free(res);
+    try testing.expectEqual(@as(i64, -1), asI64(res[0]));
 }
 
 // ── memory.init / data.drop and start function ──────────────────────

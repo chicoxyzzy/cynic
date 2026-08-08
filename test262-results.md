@@ -76,6 +76,7 @@ triage; add a line to the registry or fix the engine).
 | sloppy-mode (body-audited) | 95 | sloppy-mode semantics the classifier can't see from frontmatter — a `Function(...)` / `eval(...)` body that runs as non-strict code, a `-non-strict` fixture, an in-body `with`. Cynic is strict-only by design. Attributed per fixture by the body-audit registry (`tools/test262/gap_audit.zig`) |
 | Annex B (body-audited) | 9 | an Annex-B surface used inside the fixture body — an Annex-B regex form, a legacy `String.prototype.substr`, an `__proto__` / `__lookup*` poke in the test logic. Cynic ships no Annex B. Registry-attributed, same source as above |
 | outdated fixture | 1 | an upstream fixture that predates a spec / data bump Cynic tracks (e.g. a CLDR version) — Cynic is spec-correct, the fixture should be refreshed upstream. Not a Cynic decline. Registry-attributed |
+| **engine gaps** | 0 | the real engine work list: failures NOT explained by a policy class OR the body-audit registry. Each is either a genuine engine bug or a NEW by-design fixture not yet audited — triage the body (`--list-gaps` prints them), then fix the engine or add a line to `tools/test262/gap_audit.zig`. Includes any genuinely-unimplemented in-scope surface (e.g. `intl402/` at `-Dintl=full`) |
 
 **Failing areas.** Only areas with at least one failure are
 listed (everything else passes). `gaps` is the slice of the
@@ -161,6 +162,24 @@ Biggest movers:
 - `built-ins/DataView` +550
 - `built-ins/Iterator` +514
 - `built-ins/Atomics` +381
+
+### 2026-07-28 — cynic `f8c30570`, test262 `de8e621c`
+
+| passing | failing | total | pass% | Δ pass | elapsed |
+|---:|---:|---:|---:|---:|---:|
+| 48653 | 1324 | 49977 | 97.35 % | ±0 | 1m 30s |
+
+### 2026-07-23 — cynic `f8c30570`, test262 `de8e621c`
+
+| passing | failing | total | pass% | Δ pass | elapsed |
+|---:|---:|---:|---:|---:|---:|
+| 48653 | 1324 | 49977 | 97.35 % | ±0 | 1m 10s |
+
+### 2026-07-15 — cynic `065e77b9`, test262 `de8e621c`
+
+| passing | failing | total | pass% | Δ pass | elapsed |
+|---:|---:|---:|---:|---:|---:|
+| 48653 | 1324 | 49977 | 97.35 % | ±0 | 2m 00s |
 
 ### 2026-07-08 — cynic `05c71887`, test262 `de8e621cdb`
 

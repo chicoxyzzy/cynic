@@ -39,7 +39,7 @@
 //!   zig build bench -- --filter=mul_loop
 //!   zig build bench -- --ohaimark             # natural-threshold T2
 //!   zig build bench -- --ohaimark-rollout     # interleaved T1 vs T2 gate
-//!   zig build bench -- --ohaimark-osr-rollout # T1 vs T1+T2 OSR (default-off gate)
+//!   zig build bench -- --ohaimark-osr-rollout # T1 vs default T2+OSR regression gate
 //!   zig build bench -- --macros     # Octane macro set (bench/macros/),
 //!                                   # run --unhardened; Splay is heavy,
 //!                                   # so --runs=3 for a quick pass
@@ -119,6 +119,7 @@ const BENCHES = [_]Bench{
     .{ .name = "object_alloc", .path = "bench/micros/object_alloc.js" },
     .{ .name = "method_call", .path = "bench/micros/method_call.js" },
     .{ .name = "class_instantiate", .path = "bench/micros/class_instantiate.js" },
+    .{ .name = "construct_loop", .path = "bench/micros/construct_loop.js" },
     // Constructor `this.x = …` write IC surviving an array literal
     // built in the same loop — guards the make_array proto-struct-epoch
     // false-positive deopt.

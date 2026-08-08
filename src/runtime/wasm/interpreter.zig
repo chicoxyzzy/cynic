@@ -13,6 +13,8 @@
 //! once the conformance tests guard it.
 
 const std = @import("std");
+const builtin = @import("builtin");
+const stack_guard = @import("../../stack_guard.zig");
 const types = @import("types.zig");
 const module_mod = @import("module.zig");
 const code_mod = @import("code.zig");
@@ -80,6 +82,19 @@ pub const Table = struct {
     elems: []u128,
     max: ?u64,
     is_64: bool = false,
+    backing_allocator: ?std.mem.Allocator = null,
+    backing_released: bool = false,
+
+    pub fn storeAllocator(self: *const Table, fallback: std.mem.Allocator) std.mem.Allocator {
+        return self.backing_allocator orelse fallback;
+    }
+
+    pub fn releaseBacking(self: *Table, fallback: std.mem.Allocator) void {
+        if (self.backing_released) return;
+        self.storeAllocator(fallback).free(self.elems);
+        self.elems = &.{};
+        self.backing_released = true;
+    }
 };
 
 /// A parsed element segment (for `table.init`). Active and declarative
@@ -96,7 +111,40 @@ const DataSegment = struct {
     dropped: bool,
 };
 
-pub const Error = TrapError || validator.ValidateError || error{ NoSuchExport, OutOfMemory };
+/// Host execution-control result. The JS embedding wires this to Realm's
+/// shared fuel/interrupt poll; the bare Wasm engine leaves it null.
+pub const ExecutionPoll = enum {
+    proceed,
+    step_budget_exhausted,
+    cooperative_interrupted,
+    terminated,
+};
+
+pub const ExecutionControl = struct {
+    ctx: *anyopaque,
+    poll_fn: *const fn (*anyopaque) ExecutionPoll,
+    armed_fn: *const fn (*anyopaque) bool,
+    /// Optional acquire-polled byte that can arm native execution after
+    /// entry. Realm-backed instances point this at `requestInterrupt`'s
+    /// atomic flag; standalone controllers may omit it.
+    wake_flag: ?*const std.atomic.Value(bool) = null,
+
+    pub inline fn poll(self: ExecutionControl) ExecutionPoll {
+        return self.poll_fn(self.ctx);
+    }
+
+    pub inline fn isArmed(self: ExecutionControl) bool {
+        return self.armed_fn(self.ctx);
+    }
+};
+
+pub const Error = TrapError || validator.ValidateError || error{
+    NoSuchExport,
+    OutOfMemory,
+    StepBudgetExhausted,
+    ExecutionInterrupted,
+    ExecutionTerminated,
+};
 
 const STACK_CELLS = 1 << 16;
 const MAX_FRAMES = 1 << 12;
@@ -154,6 +202,22 @@ const MAX_TABLE_ELEMS = 1 << 24;
 /// WebAssembly linear-memory page size (§2.5.2): 64 KiB.
 pub const PAGE_SIZE = 1 << 16;
 
+const spasm_helpers: spasm.Helpers = .{
+    .call = spasmCall,
+    .call_indirect = spasmCallIndirect,
+    .mem_grow = spasmMemoryGrow,
+    .mem_init = spasmMemoryInit,
+    .data_drop = spasmDataDrop,
+    .table_size = spasmTableSize,
+    .table_copy = spasmTableCopy,
+    .table_init = spasmTableInit,
+    .elem_drop = spasmElemDrop,
+    .table_get = spasmTableGet,
+    .table_set = spasmTableSet,
+    .table_grow = spasmTableGrow,
+    .table_fill = spasmTableFill,
+};
+
 /// A runtime global cell. 128-bit to hold a `v128` (scalars use the
 /// low bits). Public so an embedder (the JS API, the conformance
 /// harness) can provide and alias globals across instances.
@@ -200,6 +264,19 @@ pub const Imports = struct {
     /// Imported tag identities, in tag-import order. A wasm tag imported
     /// from JS or another module shares that provider's `*TagType`.
     tags: []const *const TagType = &.{},
+    /// Optional allocator for mutable memory/table backings. Realm-backed
+    /// instances use the immediate-free quota allocator while immutable
+    /// instance metadata remains in the realm arena.
+    store_allocator: ?std.mem.Allocator = null,
+};
+
+/// One JS `ArrayBuffer` view cached by a `WebAssembly.Memory` wrapper. Kept
+/// opaque so the standalone Wasm engine does not depend on JSObject layout.
+/// Realm root marking follows `object`; a successful non-shared grow invokes
+/// `detach_fn` before execution can re-enter JS.
+pub const MemoryHostView = struct {
+    object: *anyopaque,
+    detach_fn: *const fn (*anyopaque) void,
 };
 
 /// Linear memory: a byte-addressable, page-granular buffer. (The
@@ -209,9 +286,45 @@ pub const Memory = struct {
     data: []u8,
     max_pages: ?u64,
     is_64: bool = false,
+    is_shared: bool = false,
+    backing_allocator: ?std.mem.Allocator = null,
+    backing_released: bool = false,
+    host_views: std.ArrayListUnmanaged(MemoryHostView) = .empty,
+    host_view_allocator: ?std.mem.Allocator = null,
 
     fn pages(self: *const Memory) u64 {
         return self.data.len / PAGE_SIZE;
+    }
+
+    pub fn storeAllocator(self: *const Memory, fallback: std.mem.Allocator) std.mem.Allocator {
+        return self.backing_allocator orelse fallback;
+    }
+
+    pub fn registerHostView(self: *Memory, fallback: std.mem.Allocator, view: MemoryHostView) error{OutOfMemory}!void {
+        // Imported memories may be viewed from a shorter-lived child Realm.
+        // Allocate this list with the provider Memory's allocator, never the
+        // viewing Realm's inline quota adapter.
+        if (self.host_view_allocator == null) self.host_view_allocator = self.storeAllocator(fallback);
+        try self.host_views.append(self.host_view_allocator.?, view);
+    }
+
+    pub fn detachHostViewsAfterGrow(self: *Memory) void {
+        // Shared memories expose a non-detachable SharedArrayBuffer. Their
+        // backing-store growth remains a separate shared-data-block concern.
+        if (self.is_shared) return;
+        for (self.host_views.items) |view| view.detach_fn(view.object);
+        self.host_views.clearRetainingCapacity();
+    }
+
+    pub fn releaseBacking(self: *Memory, fallback: std.mem.Allocator) void {
+        if (self.backing_released) return;
+        for (self.host_views.items) |view| view.detach_fn(view.object);
+        if (self.host_view_allocator) |allocator| self.host_views.deinit(allocator);
+        self.host_views = .empty;
+        self.host_view_allocator = null;
+        self.storeAllocator(fallback).free(self.data);
+        self.data = &.{};
+        self.backing_released = true;
     }
 };
 
@@ -222,8 +335,9 @@ pub const Memory = struct {
 /// emittable function once and reuses the native `EntryFn` across
 /// invocations (the v1 path compiled fresh per call). Owns the
 /// `CodeAllocator` whose executable pages the cached `EntryFn`s point
-/// into, so it must outlive every Spasm-run call — it is freed only in
-/// `Instance.deinit`.
+/// into, so it must outlive every Spasm-run call. Realm-backed instances
+/// release it explicitly before their arena is dropped; bare instances do so
+/// from `Instance.deinit`.
 const SpasmCache = struct {
     /// Per-defined-function compilation state. `failed` records that the
     /// body is outside Spasm's emittable class, so a function that can't
@@ -235,9 +349,17 @@ const SpasmCache = struct {
     };
     ca: code_alloc.CodeAllocator,
     slots: []Slot,
+    /// Stable heap records referenced by generated callers. They share the
+    /// cache lifetime, so a lazy entry publication never invalidates an
+    /// embedded gate address.
+    gates: []spasm.CallGate,
+    /// One W^X-installed tail-dispatch stub for every gate in this instance.
+    /// A null stub simply leaves calls on the existing checked helper path.
+    call_gate_stub: ?spasm.CallGateStubFn,
 
     fn deinit(self: *SpasmCache, gpa: std.mem.Allocator) void {
         self.ca.deinit();
+        gpa.free(self.gates);
         gpa.free(self.slots);
     }
 };
@@ -279,9 +401,15 @@ pub const Instance = struct {
     elem_segments: []ElemSegment,
     /// Passive/active data segments, in declaration order.
     data_segments: []DataSegment,
-    /// Owns `globals`, `memory.data`, and the table backing; used to
-    /// grow and free them.
+    /// Owns instance metadata. Memory/Table records may override it with a
+    /// dedicated backing allocator that can reclaim obsolete growth buffers.
     gpa: std.mem.Allocator,
+    /// Short-lived allocator for nested interpreter fallbacks reached from
+    /// Spasm. JS instances point this at Realm.wasmInvocationAllocator so
+    /// operand/frame stacks are released after each call instead of being
+    /// retained by the realm-lifetime Wasm arena. Bare embedders may leave it
+    /// null, preserving the allocator supplied to `instantiate`.
+    invocation_allocator: ?std.mem.Allocator = null,
     /// Reified exceptions thrown by (or materialized for) this instance —
     /// an `exnref` points at one. Held for the instance's lifetime so an
     /// exnref stored in a global / table / handed to JS never dangles.
@@ -305,12 +433,22 @@ pub const Instance = struct {
     /// `WebAssembly.Exception` keeps its tag identity.
     host_exn_ctx: ?*anyopaque = null,
     host_exn_hook: ?*const fn (*anyopaque, *Instance) ?*ExnRecord = null,
+    /// Optional embedder execution controller. Sarcasm and Spasm poll it at
+    /// function entry and loop backedges; Sarcasm additionally polls proper-
+    /// tail-call re-entry. A null controller keeps Spasm to one predictable
+    /// branch; a Realm-backed unarmed controller acquire-probes its async wake
+    /// byte without spilling registers or calling the host.
+    execution_control: ?ExecutionControl = null,
 
     /// Spasm baseline-JIT opt-in (docs/jit.md §6). Off by default; the
     /// wasm-testsuite differential forces it on. When set, `invoke`
     /// tries to compile the entry function and run native code,
     /// degrading to the interpreter for anything Spasm can't emit.
     spasm_enabled: bool = false,
+    /// Per-instance diagnostics for Spasm's counters. Test builds enable this
+    /// by default so counter-based coverage stays load-bearing; production
+    /// instances leave it off, keeping telemetry out of hot calls.
+    spasm_diagnostics: bool = builtin.is_test,
     /// Invocations that actually ran Spasm-compiled code — lets a
     /// differential/unit test prove the compiled path was taken (the
     /// result alone is identical to the interpreter's, by design).
@@ -323,10 +461,19 @@ pub const Instance = struct {
     /// reuses an `EntryFn` instead of recompiling every call (N runs,
     /// 1 compile). docs/jit.md §6.
     spasm_compiles: u32 = 0,
+    /// Nested helper-mediated direct `call`s that entered a cached Spasm
+    /// `EntryFn` without re-entering `invoke`. Hot local and same-instance
+    /// gate links do not update this per-call diagnostic counter. The top-level
+    /// `spasmRun` entry is intentionally excluded, so tests can distinguish an
+    /// outer-only JIT from the generic direct-call boundary.
+    spasm_native_calls: u32 = 0,
     /// Per-function Spasm code cache, lazily created on the first
     /// Spasm-enabled invoke. Owns the executable memory the compiled
     /// `EntryFn`s point into, so it lives for the instance's lifetime.
     spasm_cache: ?SpasmCache = null,
+    /// Optional Realm live-byte ledger for the cache's OS-backed executable
+    /// reservation. Bare embedders leave it null.
+    spasm_memory_ledger: ?code_alloc.MemoryLedger = null,
     /// The concrete error a nested `call` from Spasm-compiled code raised
     /// (§5.4.1). The call helper stashes it here and returns
     /// `spasm.trap_pending`; `spasmRun` re-raises it. This carries any of
@@ -354,12 +501,12 @@ pub const Instance = struct {
     }
 
     pub fn deinit(self: *Instance) void {
+        self.releaseExecutableCode();
+        self.releaseOwnedStoreBackings();
         self.gpa.free(self.globals);
         self.gpa.free(self.owned_globals);
-        for (self.owned_memories) |m| self.gpa.free(m.data);
         self.gpa.free(self.owned_memories);
         self.gpa.free(self.memories);
-        for (self.owned_tables) |t| self.gpa.free(t.elems);
         self.gpa.free(self.owned_tables);
         self.gpa.free(self.tables);
         for (self.exn_pool.items) |rec| {
@@ -369,7 +516,23 @@ pub const Instance = struct {
         self.exn_pool.deinit(self.gpa);
         self.gpa.free(self.tag_identities);
         self.gpa.free(self.owned_tag_types);
+    }
+
+    /// Release only the mutable store backings this instance owns. Imported
+    /// shared memories/tables belong to their provider and are not present in
+    /// these slices. Idempotence lets Realm teardown and bare-instance cleanup
+    /// share the operation safely.
+    pub fn releaseOwnedStoreBackings(self: *Instance) void {
+        for (self.owned_memories) |*memory| memory.releaseBacking(self.gpa);
+        for (self.owned_tables) |*table| table.releaseBacking(self.gpa);
+    }
+
+    /// Unmap this instance's native code without touching arena-owned store
+    /// state. Realm teardown calls this before dropping the Wasm arena because
+    /// an ArenaAllocator cannot run `CodeAllocator.deinit` on its own.
+    pub fn releaseExecutableCode(self: *Instance) void {
         if (self.spasm_cache) |*c| c.deinit(self.gpa);
+        self.spasm_cache = null;
     }
 
     /// Return the cached Spasm `EntryFn` for `func`, compiling and
@@ -382,37 +545,89 @@ pub const Instance = struct {
         if (comptime !spasm.supported) return null;
         // Lazily create the cache on the first Spasm-enabled invoke, so an
         // instance that never tiers up pays no executable-memory cost.
-        if (self.spasm_cache == null) {
-            var ca = code_alloc.CodeAllocator.init(self.gpa, 64 * 1024) catch return null;
-            const slots = self.gpa.alloc(SpasmCache.Slot, self.funcs.len) catch {
-                ca.deinit();
-                return null;
-            };
-            @memset(slots, .untried);
-            self.spasm_cache = .{ .ca = ca, .slots = slots };
-        }
+        if (self.spasm_cache == null) self.spasm_cache = self.initSpasmCache() orelse return null;
         const cache = &self.spasm_cache.?;
 
         // Recover the defined-function index from `func`'s position in
         // `self.funcs` — robust across a cross-module re-export, where an
         // index relative to the *calling* instance would be wrong.
         const idx = (@intFromPtr(func) - @intFromPtr(self.funcs.ptr)) / @sizeOf(CompiledFunc);
-        if (idx >= cache.slots.len) return null;
+        if (idx >= cache.slots.len or idx >= cache.gates.len) return null;
 
         switch (cache.slots[idx]) {
-            .compiled => |e| return e,
+            .compiled => |e| {
+                // Keep the gate publication coupled to the cache state. This
+                // is normally already true, but it makes a future cache-state
+                // repair unable to leave a warm entry unreachable.
+                cache.gates[idx].entry = e;
+                return e;
+            },
             .failed => return null,
             .untried => {
                 const ftype = &self.module.types[func.type_index];
-                if (spasm.compile(self.gpa, &cache.ca, func, ftype, self.module) catch null) |e| {
+                const defined_index = std.math.cast(u32, idx) orelse return null;
+                const func_index = std.math.add(u32, self.func_import_count, defined_index) catch return null;
+                if (spasm.compile(self.gpa, &cache.ca, func, ftype, self.module, self.funcs, func_index, cache.gates, cache.call_gate_stub, spasm_helpers, spasmPollExecution) catch null) |e| {
                     cache.slots[idx] = .{ .compiled = e };
-                    self.spasm_compiles += 1;
+                    // Code pages are never patched after installation. This
+                    // data-only store is the lazy-link publication the gate
+                    // stub loads on later calls, preserving W^X.
+                    cache.gates[idx].entry = e;
+                    if (self.spasm_diagnostics) self.spasm_compiles +%= 1;
                     return e;
                 }
                 cache.slots[idx] = .failed;
                 return null;
             },
         }
+    }
+
+    /// Create the per-instance native cache and its stable call-gate records.
+    /// The allocator and gate slice have the same lifetime; generated callers
+    /// can therefore embed gate addresses while the entry pointer itself is
+    /// filled later by lazy compilation.
+    fn initSpasmCache(self: *Instance) ?SpasmCache {
+        var ca = code_alloc.CodeAllocator.initMetered(self.gpa, 64 * 1024, self.spasm_memory_ledger) catch return null;
+        const slots = self.gpa.alloc(SpasmCache.Slot, self.funcs.len) catch {
+            ca.deinit();
+            return null;
+        };
+        const gates = self.gpa.alloc(spasm.CallGate, self.funcs.len) catch {
+            self.gpa.free(slots);
+            ca.deinit();
+            return null;
+        };
+        @memset(slots, .untried);
+
+        for (self.funcs, 0..) |_, local_index| {
+            const func = &self.funcs[local_index];
+            const func_index = blk: {
+                const defined_index = std.math.cast(u32, local_index) orelse break :blk 0;
+                break :blk std.math.add(u32, self.func_import_count, defined_index) catch 0;
+            };
+            const frame_cells = if (func.type_index < self.module.types.len)
+                std.math.cast(u32, spasm.nativeFrameCellCount(func, &self.module.types[func.type_index]) orelse 0) orelse 0
+            else
+                0;
+            gates[local_index] = .{
+                .entry = null,
+                .instance = @ptrCast(self),
+                .func_index = func_index,
+                .frame_cells = frame_cells,
+            };
+        }
+
+        // Install before moving `ca` into the cache: CodeAllocator is a value
+        // type, so installing inside the struct literal after `.ca = ca` would
+        // advance only the local copy and let the first function overwrite the
+        // stub at offset zero.
+        const call_gate_stub = spasm.compileCallGateStub(self.gpa, &ca, spasmCallGateSlow);
+        return .{
+            .ca = ca,
+            .slots = slots,
+            .gates = gates,
+            .call_gate_stub = call_gate_stub,
+        };
     }
 
     /// Read a global's raw cell by its index in the global index space
@@ -625,6 +840,7 @@ pub fn instantiate(
     imports: Imports,
 ) Error!void {
     const funcs = try validator.validateModule(arena, module);
+    const store_allocator = imports.store_allocator orelse allocator;
 
     var func_imports: u32 = 0;
     for (module.imports) |imp| {
@@ -680,6 +896,8 @@ pub fn instantiate(
     const owned_count = (if (imports.share_memory) 0 else mem_imports) + module.mems.len;
     const owned_memories = try allocator.alloc(Memory, owned_count);
     errdefer allocator.free(owned_memories);
+    var initialized_memories: usize = 0;
+    errdefer for (owned_memories[0..initialized_memories]) |*memory| memory.releaseBacking(allocator);
     const memories = try allocator.alloc(*Memory, mem_imports + module.mems.len);
     errdefer allocator.free(memories);
     {
@@ -697,10 +915,13 @@ pub fn instantiate(
                 memories[mi] = src;
             } else {
                 owned_memories[oi] = .{
-                    .data = try allocator.dupe(u8, src.data),
+                    .data = try store_allocator.dupe(u8, src.data),
                     .max_pages = src.max_pages,
                     .is_64 = src.is_64,
+                    .is_shared = src.is_shared,
+                    .backing_allocator = store_allocator,
                 };
+                initialized_memories += 1;
                 memories[mi] = &owned_memories[oi];
                 oi += 1;
             }
@@ -709,9 +930,22 @@ pub fn instantiate(
         }
         for (module.mems) |m| {
             const lim = m.limits;
-            const bytes = try allocator.alloc(u8, @as(usize, @intCast(lim.min)) * PAGE_SIZE);
+            const pages = std.math.cast(usize, lim.min) orelse return error.OutOfMemory;
+            const byte_len = std.math.mul(usize, pages, PAGE_SIZE) catch return error.OutOfMemory;
+            // Realm-backed shared memories stay arena-retained until their
+            // eventual SharedDataBlock in-place backing lands; moving and
+            // freeing a store observed by another agent would be a UAF.
+            const backing_allocator = if (lim.shared) allocator else store_allocator;
+            const bytes = try backing_allocator.alloc(u8, byte_len);
             @memset(bytes, 0);
-            owned_memories[oi] = .{ .data = bytes, .max_pages = lim.max, .is_64 = lim.is_64 };
+            owned_memories[oi] = .{
+                .data = bytes,
+                .max_pages = lim.max,
+                .is_64 = lim.is_64,
+                .is_shared = lim.shared,
+                .backing_allocator = backing_allocator,
+            };
+            initialized_memories += 1;
             memories[mi] = &owned_memories[oi];
             oi += 1;
             mi += 1;
@@ -722,11 +956,20 @@ pub fn instantiate(
     // function-references explicit initializer when present, else null.
     const owned_tables = try allocator.alloc(Table, module.tables.len);
     errdefer allocator.free(owned_tables);
+    var initialized_tables: usize = 0;
+    errdefer for (owned_tables[0..initialized_tables]) |*table| table.releaseBacking(allocator);
     for (module.tables, 0..) |t, i| {
-        const elems = try allocator.alloc(u128, @intCast(t.limits.min));
+        const elem_count = std.math.cast(usize, t.limits.min) orelse return error.OutOfMemory;
+        const elems = try store_allocator.alloc(u128, elem_count);
         const fill: u128 = if (t.init_expr) |expr| evalConstExpr(expr, globals, self) else REF_NULL;
         @memset(elems, fill);
-        owned_tables[i] = .{ .elems = elems, .max = t.limits.max, .is_64 = t.limits.is_64 };
+        owned_tables[i] = .{
+            .elems = elems,
+            .max = t.limits.max,
+            .is_64 = t.limits.is_64,
+            .backing_allocator = store_allocator,
+        };
+        initialized_tables += 1;
     }
 
     // The table index space: imported tables (shared — the provider's
@@ -1045,9 +1288,24 @@ const Interp = struct {
     nframes: usize,
     handlers: []Handler,
     nhandlers: usize,
+    execution_control: ?ExecutionControl,
     /// The exception record built when a throw escapes the whole call —
     /// handed to the entry instance's `pending_exn` for the JS boundary.
     uncaught: ?*const ExnRecord = null,
+
+    inline fn pollExecution(self: *Interp) Error!void {
+        const control = self.execution_control orelse return;
+        return switch (control.poll()) {
+            .proceed => {},
+            .step_budget_exhausted => error.StepBudgetExhausted,
+            .cooperative_interrupted => error.ExecutionInterrupted,
+            .terminated => error.ExecutionTerminated,
+        };
+    }
+
+    inline fn pollBackwardBranch(self: *Interp, op_ip: usize, target_pc: usize) Error!void {
+        if (target_pc <= op_ip) try self.pollExecution();
+    }
 
     inline fn pushCell(self: *Interp, v: Cell) TrapError!void {
         if (self.sp >= self.stack.len) return error.ValueStackOverflow;
@@ -1121,7 +1379,8 @@ const Interp = struct {
     /// caller. `nframes` is unchanged — that is what makes deep tail
     /// recursion run in constant stack. The top `param_count` operands are
     /// the callee's arguments; everything else in this frame is discarded.
-    fn tailReplaceFrame(self: *Interp, instance: *Instance, func: *const CompiledFunc, param_count: u32) TrapError!void {
+    fn tailReplaceFrame(self: *Interp, instance: *Instance, func: *const CompiledFunc, param_count: u32) Error!void {
+        try self.pollExecution();
         const f = &self.frames[self.nframes - 1];
         const lb = f.locals_base;
         // PTC: the caller's frame is semantically popped before the
@@ -1199,6 +1458,16 @@ pub fn invoke(
     func_index: u32,
     args: []const u128,
 ) Error![]u128 {
+    return invokeWithControl(self, allocator, func_index, args, null);
+}
+
+fn invokeWithControl(
+    self: *Instance,
+    allocator: std.mem.Allocator,
+    func_index: u32,
+    args: []const u128,
+    inherited_execution_control: ?ExecutionControl,
+) Error![]u128 {
     // Resolve through the import chain: a re-exported import names a
     // function whose body, types, and state (memories, globals,
     // tables) belong to the *defining* instance, not `self`.
@@ -1209,12 +1478,12 @@ pub fn invoke(
     };
 
     // Spasm baseline-JIT fast path (docs/jit.md §6): if the tier is on,
-    // compile the entry function and run native code for the class
-    // Spasm can emit (straight-line i32 + structured control flow);
-    // anything it can't emit returns null and falls through to the
-    // interpreter below.
+    // compile the entry function and run any body in Spasm's supported
+    // scalar/control/call/reference subset; anything it can't emit returns
+    // null and falls through to the interpreter below.
+    const execution_control = inherited_execution_control orelse self.execution_control orelse target.instance.execution_control;
     if (target.instance.spasm_enabled) {
-        if (try spasmRun(allocator, target.instance, target.func, args)) |out| {
+        if (try spasmRun(allocator, target.instance, target.func, args, execution_control)) |out| {
             return out;
         }
     }
@@ -1226,7 +1495,18 @@ pub fn invoke(
     const handlers = try allocator.alloc(Handler, MAX_HANDLERS);
     defer allocator.free(handlers);
 
-    var ip: Interp = .{ .instance = target.instance, .stack = stack, .sp = 0, .frames = frames, .nframes = 0, .handlers = handlers, .nhandlers = 0 };
+    var ip: Interp = .{
+        .instance = target.instance,
+        .stack = stack,
+        .sp = 0,
+        .frames = frames,
+        .nframes = 0,
+        .handlers = handlers,
+        .nhandlers = 0,
+        .execution_control = execution_control,
+    };
+
+    try ip.pollExecution();
 
     // Seed the entry function's parameters as its first locals.
     const param_count: u32 = @intCast(target.instance.module.types[target.func.type_index].params.len);
@@ -1249,33 +1529,181 @@ pub fn invoke(
     return out;
 }
 
-/// Native-stack recursion depth of Spasm-compiled `call`s (§5.4.1). Each
-/// `spasmCall` re-enters `invoke`, which for a Spasm-compiled callee adds
-/// a native frame (the compiled body + this helper) — so an unbounded
-/// self-recursive wasm function would otherwise overflow the *native*
-/// stack and SIGSEGV. The guard turns pathological depth into a catchable
-/// `CallStackExhausted` trap (AGENTS.md never-abort-the-host). The cap is
-/// well under the native stack budget for the helper+body frames; the
-/// interpreter has its own deeper `MAX_FRAMES` cap, but a Spasm callee
-/// nests real C frames, which are far costlier. Thread-local so concurrent
-/// instances on different threads don't share a counter.
+/// Native-stack recursion depth of Spasm-compiled `call`s (§5.4.1). A nested
+/// call either enters another native `EntryFn` directly or re-enters
+/// `invoke`; both add native frames, so an unbounded self-recursive wasm
+/// function would otherwise overflow the host stack and SIGSEGV. The shared
+/// address-based guard below adapts to the running thread's actual stack
+/// bounds; this cap remains a cheap backstop. Both yield a catchable
+/// `CallStackExhausted` trap. Thread-local so concurrent instances on
+/// different threads do not share a counter.
 threadlocal var spasm_call_depth: u32 = 0;
 const spasm_call_depth_cap: u32 = 512;
+const spasm_always_poll = std.atomic.Value(bool).init(true);
+
+/// Bridge Spasm's compact native status channel to the embedding-neutral
+/// execution controller shared with Sarcasm. Generated code calls this only
+/// when its parked controller pointer is non-null.
+fn spasmPollExecution(control_opaque: *anyopaque) callconv(.c) u32 {
+    const native: *const spasm.NativeExecutionControl = @ptrCast(@alignCast(control_opaque));
+    const control: *ExecutionControl = @ptrCast(@alignCast(native.poll_context));
+    return switch (control.poll()) {
+        .proceed => spasm.trap_ok,
+        .step_budget_exhausted => spasm.trap_step_budget_exhausted,
+        .cooperative_interrupted => spasm.trap_execution_interrupted,
+        .terminated => spasm.trap_execution_terminated,
+    };
+}
+
+/// Execute an `EntryFn` with the same memory/global boundary setup used by
+/// the outer `spasmRun`. A nested direct call and a top-level invocation share
+/// the trap mapping, so a compiled callee remains observationally identical to
+/// the interpreter at the Wasm boundary.
+fn runSpasmEntry(
+    instance: *Instance,
+    entry: spasm.EntryFn,
+    locals: [*]spasm.Cell,
+    results: [*]spasm.Cell,
+    nested_direct: bool,
+    execution_control: ?ExecutionControl,
+) Error!void {
+    // A top-level compiled entry can itself be reached from a deeply nested
+    // host callback, so establish the shared native stack guard before
+    // crossing into generated code. Its raw cutoff travels through x6 and is
+    // preserved in x20 by the native prologue for linked self-recursion.
+    if (stack_guard.nearLimit()) return error.CallStackExhausted;
+    const stack_limit = stack_guard.nativeStackLimit();
+    const has_mem = instance.memories.len > 0;
+    const mem_base: [*]u8 = if (has_mem) instance.memories[0].data.ptr else @ptrCast(locals);
+    const mem_len: u64 = if (has_mem) instance.memories[0].data.len else 0;
+    const globals_base: [*]const *anyopaque = if (instance.globals.len > 0)
+        @ptrCast(instance.globals.ptr)
+    else
+        @ptrCast(locals);
+
+    // Counters are opt-in diagnostics, never a production hot-path cost.
+    // Wrap rather than turning a very long-running untrusted workload into a
+    // host arithmetic trap when diagnostics are requested.
+    if (instance.spasm_diagnostics) {
+        instance.spasm_runs +%= 1;
+        if (nested_direct) instance.spasm_native_calls +%= 1;
+    }
+    var active_control = execution_control;
+    var native_control: spasm.NativeExecutionControl = undefined;
+    const execution_control_ptr: ?*anyopaque = if (active_control) |*control| blk: {
+        const wake_flag = if (control.isArmed())
+            &spasm_always_poll
+        else
+            control.wake_flag orelse break :blk null;
+        native_control = .{
+            .wake_flag = wake_flag,
+            .poll_context = @ptrCast(control),
+        };
+        break :blk @ptrCast(&native_control);
+    } else null;
+    switch (entry(locals, results, mem_base, mem_len, globals_base, @ptrCast(instance), stack_limit, execution_control_ptr)) {
+        spasm.trap_ok => {},
+        spasm.trap_divide_by_zero => return error.IntegerDivideByZero,
+        spasm.trap_int_overflow => return error.IntegerOverflow,
+        spasm.trap_out_of_bounds => return error.OutOfBoundsMemoryAccess,
+        spasm.trap_invalid_conversion => return error.InvalidConversionToInteger,
+        spasm.trap_call_stack_exhausted => return error.CallStackExhausted,
+        spasm.trap_step_budget_exhausted => return error.StepBudgetExhausted,
+        spasm.trap_execution_interrupted => return error.ExecutionInterrupted,
+        spasm.trap_execution_terminated => return error.ExecutionTerminated,
+        // A nested call stashed its concrete error on this entry's instance.
+        spasm.trap_pending => return instance.spasm_call_trap orelse error.UnsupportedImportCall,
+        // A generated body can only return the statuses above. Do not execute
+        // it again through the interpreter if that invariant is broken: the
+        // body may already have performed visible stores before this point.
+        else => return error.UnsupportedImportCall,
+    }
+}
+
+const SpasmDirectCall = union(enum) {
+    unavailable,
+    completed,
+    trapped: Error,
+};
+
+/// Enter a cached native callee using caller-provided native-stack cells. The
+/// compiler reserves this shape only for statically defined functions in the
+/// same module. Everything else remains eligible for the generic `invoke`
+/// fallback below, preserving imports and unsupported callees.
+fn trySpasmDirectCall(
+    instance: *Instance,
+    func: *const CompiledFunc,
+    buf: [*]spasm.Cell,
+    buf_cells: u32,
+    execution_control: ?ExecutionControl,
+) SpasmDirectCall {
+    if (!instance.spasm_enabled) return .unavailable;
+    if (func.type_index >= instance.module.types.len) return .unavailable;
+    const ftype = &instance.module.types[func.type_index];
+    const needed = spasm.nativeFrameCellCount(func, ftype) orelse return .unavailable;
+    if (@as(usize, buf_cells) < needed) return .unavailable;
+    if (ftype.params.len > func.local_types.len) return .unavailable;
+    const entry = instance.spasmEntryFor(func) orelse return .unavailable;
+
+    // Params already occupy the front of `buf`. Recreate §4.6.5's fresh
+    // frame defaults for declared locals while retaining the caller-staged
+    // arguments. The trailing native operand slots are producer-written.
+    const frame = buf[0..needed];
+    @memset(frame[ftype.params.len..func.local_types.len], 0);
+    for (func.local_types[ftype.params.len..], ftype.params.len..) |t, i| {
+        if (t.isRef()) frame[i] = REF_NULL;
+    }
+
+    runSpasmEntry(instance, entry, frame.ptr, frame.ptr, true, execution_control) catch |e| {
+        return .{ .trapped = e };
+    };
+    return .completed;
+}
+
+fn executionControlFromOpaque(control_opaque: ?*anyopaque) ?ExecutionControl {
+    const ptr = control_opaque orelse return null;
+    const native: *const spasm.NativeExecutionControl = @ptrCast(@alignCast(ptr));
+    const control: *const ExecutionControl = @ptrCast(@alignCast(native.poll_context));
+    return control.*;
+}
+
+/// Cold half of a same-instance native call gate. The gate stub tail-branches
+/// here only until its target EntryFn has been lazily compiled; the existing
+/// `spasmCall` boundary then preserves every fallback and trap behavior before
+/// publishing the entry pointer for subsequent hot calls.
+fn spasmCallGateSlow(
+    buf: [*]spasm.Cell,
+    gate: *const spasm.CallGate,
+    execution_control: ?*anyopaque,
+) callconv(.c) u32 {
+    return spasmCall(gate.instance, gate.func_index, buf, gate.frame_cells, execution_control);
+}
 
 /// The native call helper a Spasm-compiled `call` (§5.4.1) branches to.
 /// `buf` holds the marshalled argument cells on entry (the compiled body
 /// staged the top `nparams` operand-stack values there); on success the
-/// `nresults` result cells are written back over `buf`. Returns
-/// `spasm.trap_ok` on success or `spasm.trap_pending` on any trap — the
-/// concrete error is stashed on the instance, which `spasmRun` re-raises.
-/// Never returns a Zig error (it is `callconv(.c)`): every failure path
-/// becomes a stashed error + `trap_pending`.
-fn spasmCall(instance_opaque: *anyopaque, func_index: u32, buf: [*]u128) callconv(.c) u32 {
+/// `nresults` result cells are written back over `buf`. A sufficiently large
+/// buffer enters a cached native callee directly only when it belongs to the
+/// calling instance; the generic `invoke` path remains the fallback for
+/// imports and bodies Spasm cannot emit. Returns `spasm.trap_ok` on success
+/// or `spasm.trap_pending` on any trap. The concrete error is stashed on the
+/// calling instance, which `spasmRun`
+/// re-raises. Never returns a Zig error (it is `callconv(.c)`): every failure
+/// path becomes a stashed error + `trap_pending`.
+fn spasmCall(
+    instance_opaque: *anyopaque,
+    func_index: u32,
+    buf: [*]spasm.Cell,
+    buf_cells: u32,
+    execution_control_opaque: ?*anyopaque,
+) callconv(.c) u32 {
     const inst: *Instance = @ptrCast(@alignCast(instance_opaque));
+    const execution_control = executionControlFromOpaque(execution_control_opaque);
 
-    // Native-stack recursion guard (host-safety): refuse before the
-    // nested `invoke` can overflow the C stack.
-    if (spasm_call_depth >= spasm_call_depth_cap) {
+    // Host-safety: the address-based check accounts for each thread's actual
+    // stack allocation, while the counter cheaply bounds the deepest normal
+    // path. Refuse before another native entry can overflow the host stack.
+    if (stack_guard.nearLimit() or spasm_call_depth >= spasm_call_depth_cap) {
         inst.spasm_call_trap = error.CallStackExhausted;
         return spasm.trap_pending;
     }
@@ -1293,14 +1721,30 @@ fn spasmCall(instance_opaque: *anyopaque, func_index: u32, buf: [*]u128) callcon
             const cftype = &w.instance.module.types[w.func.type_index];
             const nparams = cftype.params.len;
             const nresults = cftype.results.len;
+            // Only a function defined by this instance has the native-frame
+            // capacity the compiler computed statically. An imported function
+            // may happen to fit the compact argument/result buffer, but its
+            // local layout belongs to another instance and stays on the
+            // generic invoke boundary.
+            if (w.instance == inst) {
+                switch (trySpasmDirectCall(w.instance, w.func, buf, buf_cells, execution_control)) {
+                    .completed => return spasm.trap_ok,
+                    .trapped => |e| {
+                        inst.spasm_call_trap = e;
+                        return spasm.trap_pending;
+                    },
+                    .unavailable => {},
+                }
+            }
             // Run the callee to completion (Spasm-compiled if emittable,
             // interpreted otherwise — `invoke` decides). It returns a
             // freshly-allocated results slice owned by us.
-            const out = invoke(inst, inst.gpa, func_index, buf[0..nparams]) catch |e| {
+            const invocation_allocator = inst.invocation_allocator orelse inst.gpa;
+            const out = invokeWithControl(inst, invocation_allocator, func_index, buf[0..nparams], execution_control) catch |e| {
                 inst.spasm_call_trap = e;
                 return spasm.trap_pending;
             };
-            defer inst.gpa.free(out);
+            defer invocation_allocator.free(out);
             // Write results back over the buffer (args are dead now).
             var k: usize = 0;
             while (k < nresults) : (k += 1) buf[k] = out[k];
@@ -1340,6 +1784,7 @@ fn spasmCallIndirect(
     table_index: u32,
     elem_index: u32,
     buf: [*]u128,
+    execution_control: ?*anyopaque,
 ) callconv(.c) u32 {
     const inst: *Instance = @ptrCast(@alignCast(instance_opaque));
     if (table_index >= inst.tables.len) {
@@ -1381,7 +1826,10 @@ fn spasmCallIndirect(
     // Type-checked: run it via the direct-call helper on the defining
     // instance. A nested trap is stashed on `def_inst`; surface it on the
     // calling instance (the one `spasmRun` reads) when they differ.
-    const status = spasmCall(@ptrCast(def_inst), fidx, buf);
+    // `call_indirect` has no statically known callee layout, so its compact
+    // buffer deliberately disables the direct-EntryFn path here. The helper
+    // still routes through the same generic fallback and trap channel.
+    const status = spasmCall(@ptrCast(def_inst), fidx, buf, 0, execution_control);
     if (status == spasm.trap_pending and def_inst != inst) {
         inst.spasm_call_trap = def_inst.spasm_call_trap;
     }
@@ -1400,16 +1848,19 @@ fn spasmMemoryGrow(instance_opaque: *anyopaque, mem_idx: u32, delta: u64, out_ba
     const inst: *Instance = @ptrCast(@alignCast(instance_opaque));
     const mem = inst.memories[mem_idx];
     const old = mem.pages();
-    const new_pages: u64 = old + delta;
     var result: i64 = -1;
     grow: {
+        const new_pages = std.math.add(u64, old, delta) catch break :grow;
         if (new_pages > 65536) break :grow; // hard cap (4 GiB) bounds allocation
         if (mem.max_pages) |mx| {
             if (new_pages > mx) break :grow;
         }
+        const page_count = std.math.cast(usize, new_pages) orelse break :grow;
+        const byte_len = std.math.mul(usize, page_count, PAGE_SIZE) catch break :grow;
         const old_len = mem.data.len;
-        const grown = inst.gpa.realloc(mem.data, @as(usize, @intCast(new_pages)) * PAGE_SIZE) catch break :grow;
+        const grown = mem.storeAllocator(inst.gpa).realloc(mem.data, byte_len) catch break :grow;
         @memset(grown[old_len..], 0);
+        mem.detachHostViewsAfterGrow();
         mem.data = grown;
         result = @bitCast(old);
     }
@@ -1645,7 +2096,7 @@ fn spasmTableGrow(
     if (table_idx >= inst.tables.len) return -1;
     const table = inst.tables[table_idx];
     const old: u64 = table.elems.len;
-    const new_len: u64 = old + delta;
+    const new_len = std.math.add(u64, old, delta) catch return -1;
     // §4.5.4 permits growth to fail for any implementation limit; cap well
     // below the point where a huge request would lazily "succeed" and fault
     // on first touch (mirrors `growTable`).
@@ -1653,8 +2104,10 @@ fn spasmTableGrow(
     if (table.max) |mx| {
         if (new_len > mx) return -1;
     }
-    const grown = inst.gpa.realloc(table.elems, @intCast(new_len)) catch return -1;
-    for (grown[@intCast(old)..]) |*e| e.* = init_slot[0];
+    const new_count = std.math.cast(usize, new_len) orelse return -1;
+    const old_count = std.math.cast(usize, old) orelse return -1;
+    const grown = table.storeAllocator(inst.gpa).realloc(table.elems, new_count) catch return -1;
+    for (grown[old_count..]) |*e| e.* = init_slot[0];
     table.elems = grown;
     return @intCast(old);
 }
@@ -1706,32 +2159,11 @@ fn spasmRun(
     instance: *Instance,
     func: *const CompiledFunc,
     args: []const u128,
+    execution_control: ?ExecutionControl,
 ) Error!?[]u128 {
     if (comptime !spasm.supported) return null;
     const ftype = &instance.module.types[func.type_index];
     if (args.len != ftype.params.len) return null;
-
-    // §5.4.1 — wire the native `call` helper BEFORE compiling. `compile`
-    // reads `spasm.call_helper` to decide whether a `call` op is emittable;
-    // a null helper degrades the whole body. `spasmEntryFor` compiles on
-    // first touch and caches the outcome, so wiring after it would cache a
-    // spurious degrade that never retries. The address is constant and the
-    // store idempotent (every instance shares the one helper); the import
-    // cycle that forces a runtime wire — spasm.zig can't reference the
-    // interpreter's `spasmCall` — is why this isn't a comptime `const`.
-    if (comptime spasm.supported) spasm.call_helper = spasmCall;
-    if (comptime spasm.supported) spasm.call_indirect_helper = spasmCallIndirect;
-    if (comptime spasm.supported) spasm.mem_grow_helper = spasmMemoryGrow;
-    if (comptime spasm.supported) spasm.mem_init_helper = spasmMemoryInit;
-    if (comptime spasm.supported) spasm.data_drop_helper = spasmDataDrop;
-    if (comptime spasm.supported) spasm.table_size_helper = spasmTableSize;
-    if (comptime spasm.supported) spasm.table_copy_helper = spasmTableCopy;
-    if (comptime spasm.supported) spasm.table_init_helper = spasmTableInit;
-    if (comptime spasm.supported) spasm.elem_drop_helper = spasmElemDrop;
-    if (comptime spasm.supported) spasm.table_get_helper = spasmTableGet;
-    if (comptime spasm.supported) spasm.table_set_helper = spasmTableSet;
-    if (comptime spasm.supported) spasm.table_grow_helper = spasmTableGrow;
-    if (comptime spasm.supported) spasm.table_fill_helper = spasmTableFill;
 
     const entry = instance.spasmEntryFor(func) orelse return null;
 
@@ -1743,7 +2175,8 @@ fn spasmRun(
     // operand has a home slot. A body with no reference op never touches the
     // trailing cells; the over-allocation only adds them, leaving every scalar
     // local's offset (params + declared locals, keyed by index) unchanged.
-    const locals = try allocator.alloc(spasm.Cell, func.local_types.len + spasm.operand_reg_count);
+    const local_cells = spasm.nativeFrameCellCount(func, ftype) orelse return null;
+    const locals = try allocator.alloc(spasm.Cell, local_cells);
     defer allocator.free(locals);
     @memset(locals, 0);
     for (args, 0..) |x, i| locals[i] = x;
@@ -1763,48 +2196,7 @@ fn spasmRun(
     const results = try allocator.alloc(spasm.Cell, @max(ftype.results.len, 1));
     defer allocator.free(results);
 
-    // The active linear memory (memory 0) — its base + length are passed
-    // so compiled memory ops can bounds-check and address off it. A
-    // memory-free module has no compilable memory op (validation forbids
-    // them), so the dummy base is never dereferenced; len 0 makes any
-    // stray access trap rather than read out of bounds.
-    const has_mem = instance.memories.len > 0;
-    const mem_base: [*]u8 = if (has_mem) instance.memories[0].data.ptr else @ptrCast(locals.ptr);
-    const mem_len: u64 = if (has_mem) instance.memories[0].data.len else 0;
-
-    // The instance globals — an array of `*Global` pointers (compiled
-    // global.get/set double-indirect through it: base + idx*8 -> *Global
-    // -> .value). A globals-free module never emits a global op, so the
-    // dummy base is never dereferenced.
-    const globals_base: [*]const *anyopaque = if (instance.globals.len > 0)
-        @ptrCast(instance.globals.ptr)
-    else
-        @ptrCast(locals.ptr);
-
-    // The trap channel (spasm.EntryFn): a non-zero status means the body
-    // trapped before writing results. Map it to the matching TrapError so
-    // a Spasm trap surfaces exactly like the interpreter's — the JS
-    // boundary turns either into a WebAssembly.RuntimeError the same way.
-    // The compiled body runs here. Count the entry whether it returns
-    // normally or traps — a trap is still a Spasm execution (and a test
-    // proving a trap came from compiled code reads `spasm_runs`). A status
-    // the switch can't map degrades, so the increment is rolled back there.
-    instance.spasm_runs += 1;
-    switch (entry(locals.ptr, results.ptr, mem_base, mem_len, globals_base, @ptrCast(instance))) {
-        spasm.trap_ok => {},
-        spasm.trap_divide_by_zero => return error.IntegerDivideByZero,
-        spasm.trap_int_overflow => return error.IntegerOverflow,
-        spasm.trap_out_of_bounds => return error.OutOfBoundsMemoryAccess,
-        spasm.trap_invalid_conversion => return error.InvalidConversionToInteger,
-        // A nested `call` trapped: re-raise the concrete error the helper
-        // stashed (covers all TrapError variants + OutOfMemory without
-        // enumerating them here).
-        spasm.trap_pending => return instance.spasm_call_trap.?,
-        else => {
-            instance.spasm_runs -= 1; // unrecognized status — degrade, uncount
-            return null;
-        },
-    }
+    try runSpasmEntry(instance, entry, locals.ptr, results.ptr, false, execution_control);
 
     const out = try allocator.alloc(u128, ftype.results.len);
     for (0..ftype.results.len) |i| out[i] = results[i];
@@ -1998,7 +2390,9 @@ fn run(ip: *Interp) Error!void {
             const op_ip = pc - 1;
             const e = side_table[stp];
             moveValues(ip, e);
-            pc = @intCast(@as(i64, @intCast(op_ip)) + e.delta_ip);
+            const target_pc: usize = @intCast(@as(i64, @intCast(op_ip)) + e.delta_ip);
+            try ip.pollBackwardBranch(op_ip, target_pc);
+            pc = target_pc;
             stp = @intCast(@as(i64, @intCast(stp)) + e.delta_stp);
             continue :dispatch nextOp(body, &pc);
         },
@@ -2009,7 +2403,9 @@ fn run(ip: *Interp) Error!void {
             if (cond != 0) {
                 const e = side_table[stp];
                 moveValues(ip, e);
-                pc = @intCast(@as(i64, @intCast(op_ip)) + e.delta_ip);
+                const target_pc: usize = @intCast(@as(i64, @intCast(op_ip)) + e.delta_ip);
+                try ip.pollBackwardBranch(op_ip, target_pc);
+                pc = target_pc;
                 stp = @intCast(@as(i64, @intCast(stp)) + e.delta_stp);
             } else {
                 stp += 1;
@@ -2027,7 +2423,9 @@ fn run(ip: *Interp) Error!void {
             const entry_index = stp + sel;
             const e = side_table[entry_index];
             moveValues(ip, e);
-            pc = @intCast(@as(i64, @intCast(op_ip)) + e.delta_ip);
+            const target_pc: usize = @intCast(@as(i64, @intCast(op_ip)) + e.delta_ip);
+            try ip.pollBackwardBranch(op_ip, target_pc);
+            pc = target_pc;
             stp = @intCast(@as(i64, @intCast(entry_index)) + e.delta_stp);
             continue :dispatch nextOp(body, &pc);
         },
@@ -2373,7 +2771,9 @@ fn run(ip: *Interp) Error!void {
             if (v == REF_NULL) {
                 const e = side_table[stp];
                 moveValues(ip, e);
-                pc = @intCast(@as(i64, @intCast(op_ip)) + e.delta_ip);
+                const target_pc: usize = @intCast(@as(i64, @intCast(op_ip)) + e.delta_ip);
+                try ip.pollBackwardBranch(op_ip, target_pc);
+                pc = target_pc;
                 stp = @intCast(@as(i64, @intCast(stp)) + e.delta_stp);
             } else {
                 try ip.pushCell(v);
@@ -2390,7 +2790,9 @@ fn run(ip: *Interp) Error!void {
                 try ip.pushCell(v);
                 const e = side_table[stp];
                 moveValues(ip, e);
-                pc = @intCast(@as(i64, @intCast(op_ip)) + e.delta_ip);
+                const target_pc: usize = @intCast(@as(i64, @intCast(op_ip)) + e.delta_ip);
+                try ip.pollBackwardBranch(op_ip, target_pc);
+                pc = target_pc;
                 stp = @intCast(@as(i64, @intCast(stp)) + e.delta_stp);
             } else {
                 stp += 1;
@@ -2995,14 +3397,17 @@ fn memGrow(ip: *Interp, mi: u32) TrapError!void {
 
 fn growMem(ip: *Interp, mem: *Memory, delta: u64) ?u64 {
     const old = mem.pages();
-    const new_pages: u64 = old + delta;
+    const new_pages = std.math.add(u64, old, delta) catch return null;
     if (new_pages > 65536) return null; // hard cap (4 GiB) bounds allocation
     if (mem.max_pages) |mx| {
         if (new_pages > mx) return null;
     }
+    const page_count = std.math.cast(usize, new_pages) orelse return null;
+    const byte_len = std.math.mul(usize, page_count, PAGE_SIZE) catch return null;
     const old_len = mem.data.len;
-    const grown = ip.instance.gpa.realloc(mem.data, @as(usize, @intCast(new_pages)) * PAGE_SIZE) catch return null;
+    const grown = mem.storeAllocator(ip.instance.gpa).realloc(mem.data, byte_len) catch return null;
     @memset(grown[old_len..], 0);
+    mem.detachHostViewsAfterGrow();
     mem.data = grown;
     return old;
 }
@@ -3118,7 +3523,7 @@ fn tableGrow(ip: *Interp, tidx: u32) TrapError!void {
 
 fn growTable(ip: *Interp, table: *Table, n: u64, init_val: u128) ?u64 {
     const old: u64 = table.elems.len;
-    const new_len: u64 = old + n;
+    const new_len = std.math.add(u64, old, n) catch return null;
     // §4.5.4 permits growth to fail for any implementation limit; cap
     // well below the point where a huge request would lazily "succeed"
     // and fault on first touch.
@@ -3126,8 +3531,10 @@ fn growTable(ip: *Interp, table: *Table, n: u64, init_val: u128) ?u64 {
     if (table.max) |mx| {
         if (new_len > mx) return null;
     }
-    const grown = ip.instance.gpa.realloc(table.elems, @intCast(new_len)) catch return null;
-    for (grown[@intCast(old)..]) |*e| e.* = init_val;
+    const new_count = std.math.cast(usize, new_len) orelse return null;
+    const old_count = std.math.cast(usize, old) orelse return null;
+    const grown = table.storeAllocator(ip.instance.gpa).realloc(table.elems, new_count) catch return null;
+    for (grown[old_count..]) |*e| e.* = init_val;
     table.elems = grown;
     return old;
 }

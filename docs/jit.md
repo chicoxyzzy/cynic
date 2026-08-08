@@ -1,33 +1,54 @@
 # JIT tiers — Bistromath (T1), Ohaimark (T2), Spasm (wasm T1), and the shared substrate
 
-Status: **Bistromath ships on AArch64 and x86_64 hosts on macOS and Linux;
-Ohaimark remains AArch64-only.** Both ship on by default where supported
-(`--no-ohaimark` isolates T1; `--no-jit` selects Lantern), while targets
-without qualified native codegen stay in Lantern. Ohaimark's feedback/SSA,
-specialization, representation/deopt plans, allocation, AArch64 codegen,
-live-cell property guards, exact Lantern recovery, backedge safepoints, and
-transactional executable ownership have landed. Its helper-free ABI now adds
-single-predecessor edge coalescing, physical next-block fallthrough, a one-word
-completion result, and exact Int32/Double operand-shape specialization. The
-graduation 30-pair T2/T1 run measured `0.997x` geometric mean, `1.041x` worst,
-and 0.8 KiB installed code. Baseline and forced-T2 test262 pass lists match at
-48,517 paths; focused ReleaseSafe GC-pressure runs and bounded crash/value
+Status: **Bistromath and Ohaimark ship on by default** (`--no-ohaimark`
+isolates T1; `--no-jit` selects Lantern). Ohaimark's feedback/SSA,
+specialization, representation/deopt plans, allocation, AArch64 and x86_64
+codegen, live-cell named and computed-own-data property guards, same-shape
+named stores, feedback-scoped cold-IC retry, exact Lantern recovery, backedge
+safepoints, and transactional executable ownership have landed. Its ordinary
+helper-free ABI now adds single-predecessor edge coalescing, physical next-block
+fallthrough, a one-word completion result, and exact Int32/Double operand-shape
+specialization. The graduation 30-pair T2/T1 run measured `0.997x` geometric
+mean, `1.041x` worst, and 0.8 KiB installed code. Baseline and forced-T2
+test262 pass lists match at
+48,653 paths; focused ReleaseSafe GC-pressure runs and bounded crash/value
 differential fuzz campaigns found no verifier failure, host crash, or
-differential. CI now gates both T1 and T2 pass-set equality. Bistromath's
-x86_64 qualification ran full interpreter and forced-T1 test262 sweeps on
-macOS under Rosetta: both passed 48,517 fixtures, the pass-set diff was empty,
-and `--require-bistromath-entry` counted 2,455,587 generated entries.
-`x86_64-linux-musl` and `aarch64-linux-musl` cross-builds and focused
-ReleaseSafe suites on both ISAs also passed. Loop-header OSR
-into Ohaimark is implemented behind a realm-local **default-off** gate
-(`Realm.ohaimark_osr_enabled` / CLI `--ohaimark-osr`); it does not graduate to
-default-on until its own differential and natural-threshold gates pass (see
-[ohaimark.md](ohaimark.md) §3.17). Rooted helper calls, broader opcode
-coverage, and additional codegen targets remain future work. Spasm's
-delivery state is tracked below. The document
-doubles as the design record that pinned the architecture before the first
-emitter was written and as the delivery ledger (the "Delivery order" section
-tracks what each increment shipped). It is the
+differential. CI now gates both T1 and T2 pass-set equality. Loop-header OSR
+into Ohaimark also ships by default on AArch64 and x86_64 after independent
+exact differential, ReleaseSafe, and natural-threshold performance gates;
+`--no-ohaimark-osr` isolates function-entry T2 (see
+[ohaimark.md](ohaimark.md) §6). A bounded rooted non-reentrant helper family
+now covers lexical environments, unmapped arguments, closures/methods,
+object/array literals, template properties, and computed delete. A direct
+monomorphic compact call/construct/property frame handoff
+(`call_method8`, `call0_8` through `call3_8`, `call8`, `call_property8`, and
+`new_call8`) now also ships, as does terminal `throw_` replay through Lantern's
+existing exception unwinder.
+The x86_64 backend now shares the qualified AArch64 graph, recovery, feedback,
+and rooted-helper plans. Its general CFG path covers checked Int32 and
+relational operations, static branch edges, named and monomorphic flat-string
+computed data ICs, lexical/arguments/closure/method/object/array helpers,
+computed delete, terminal replay, backedge safepoints, loop-header OSR, and
+rooted compact call/construct/property-call handoff over the SysV ABI. Every
+helper stages the exact Lantern frame first; the compact call handoff
+revalidates weak IC state and returns a driver sentinel without a native
+post-call continuation. Bistromath now also ships on x86_64; an Ohaimark
+refusal or guard exit resumes through T1 when eligible and Lantern otherwise.
+Its x86 qualification used exact interpreter/forced-T1 pass-set equality with
+the fail-closed `--require-bistromath-entry` execution witness, plus
+Linux-musl and macOS cross-target suites. The final Ohaimark x86-target
+architecture bucket has 152 passes, zero failures, and 69 intentional skips;
+the CI-shaped forced-T2 pass set is byte-identical to baseline at 48,517 paths.
+The final local Rosetta rollout measured `0.963x` geometric mean with `0.996x`
+worst at function entry and `0.338x` with `0.368x` worst for OSR. Current
+qualification and module ownership are recorded in
+[ohaimark.md](ohaimark.md) "x86_64 architecture-parity closure."
+Generalized JS-reentrant helpers, native post-call continuations, remaining
+opcode families, and additional codegen targets remain future work. Spasm's
+delivery state is tracked below. This document doubles as the design record
+that pinned the architecture before the first emitter was written and as the
+delivery ledger (the "Delivery order" section tracks what each increment
+shipped). It is the
 durable output of a prior-art survey (per
 [handbook/prior-art.md](handbook/prior-art.md)) across V8, JSC,
 SpiderMonkey, Hermes, LuaJIT, YJIT/ZJIT, CPython's copy-and-patch
@@ -51,10 +72,10 @@ Pinned here:
 - the verification gate: differential test262 at force-compile, plus
   gc-stress (§10).
 
-Deferred, each with an owner section: Ohaimark runtime deoptimization/codegen
-([ohaimark.md](ohaimark.md) — §5), per-realm code-cache scoping (the ADR
-[multi-realm.md](multi-realm.md) already reserves — §14), additional
-codegen targets (§8), and background compilation (§14).
+Remaining work, each with an owner section: generalized Ohaimark helper and
+continuation coverage ([ohaimark.md](ohaimark.md)), per-realm code-cache
+scoping ([multi-realm.md](multi-realm.md), discussed here in §14), additional
+opcode/target coverage (§8), and background compilation (§14).
 
 ## 1. Why a JIT, and why now
 
@@ -477,9 +498,16 @@ direct frame aliases as bounded parallel moves, and writes the pre-operation
 accumulator, live registers, and bytecode offset directly into the existing
 Lantern frame before returning `resume_interp`; the bailout path allocates
 nothing and calls no helper. The graph compiler also emits specialized
-own-data, prototype-data, and frozen synthetic-accessor named loads. It validates
-the snapshot's realm-stable shape/slot/revision facts against the live
-chunk-owned `LoadICCell`, then reads the GC-managed prototype or synthetic value
+own-data, prototype-data, and frozen synthetic-accessor named loads, plus
+monomorphic flat-string computed own-data loads and writable own-data stores.
+The latter snapshots only shape, slot, and inline key bytes, validates the live
+`ComputedICCell`, plain-object receiver, and dynamic flat-string key, then
+performs the shared slot access. Stores call the ordinary heap barrier only
+after every guard succeeds; all other computed semantics replay the original
+bytecode in Lantern.
+The named-load path validates the snapshot's realm-stable shape/slot/revision
+facts against the live chunk-owned `LoadICCell`, then reads the GC-managed
+prototype or synthetic value
 only through that cell. Shape, holder, prototype-identity, revision, mode, or
 cell invalidation misses use the same pre-operation guard exit; native arm64
 tests resume Lantern and compare exact results. Every taken backedge now polls
@@ -489,8 +517,44 @@ accumulator and liveness-derived register parameters into the existing Lantern
 frame and returns `resume_interp`; Lantern performs the slow work with those
 tagged values in its normal precise root set. Native tests include a real young
 collection that preserves a loop-carried object and reclaims an unrooted peer.
-The supported native subset still makes no helper call or allocation; such
-nodes continue to reject until rooted call safepoints land. Completed code now
+The supported native subset remains helper-free except for a bounded,
+non-reentrant frame-staged family and a direct compact call/construct/property
+handoff. A single entry `make_environment` still runs before SSA
+materialization; any later or multiple allocation, plus `sta_env`, first
+stages the physical pre-operation state in the Lantern frame, preserves
+`x0`-`x8`, `x16`, and LR across the C helper, then continues on success or
+resumes Lantern at the original opcode on failure. `sta_env` routes through
+`Heap.storeEnvSlot`, preserving the GC write barrier. The same rule now covers
+ordinary closure creation, literal allocation, `MakeMethod`, and the static
+fresh-object `PropertyDefinitionEvaluation` lane: helpers may allocate or
+perform an ordinary raw write only after the complete pre-operation frame is
+authoritative, and every guard miss occurs before mutation. No helper gains a
+generic JS-reentrant continuation contract.
+The deliberate JS-reentrant exceptions are monomorphic compact direct calls,
+construction, and data-only property calls: `call_method8`, `call0_8` through
+`call3_8`, `call8`, `call_property8`, and `new_call8`. After staging its
+pre-operation physical state, generated code validates the live `CallICCell`;
+calls use their method receiver or strict `undefined`, while construction
+additionally guards the cached prototype against the live constructor. A
+`call_property8` additionally proves a plain-object receiver, matching
+data-only `LoadICCell`, and same-target `CallICCell`; prototype loads verify
+identity, shape, and the Realm prototype revision. Its receiver is `this` and
+its arguments immediately follow it in the staged window. Synthetic accessors,
+accessors/exotics, cold or mismatching ICs, and every excluded callable replay
+the original bytecode in Lantern. Shared Lantern helpers push only eligible
+ordinary bytecode child frames. The construct helper allocates from the cached
+prototype, preserves the initial-shape capacity hint, marks the child as a
+constructor, and leaves §10.2.2 ConstructResult to Lantern's normal return
+path. Both helpers advance the caller IP and return a handoff control word.
+They preserve the volatile JIT convention except status `x0`, so a cold or
+mismatching IC can reconstruct and replay the exact opcode in Lantern. Lantern
+then drives the child and the parent's ordinary bytecode continuation. This is
+not a generic helper ABI: native post-call continuations, other JS-reentrant
+calls, and compiled exception continuations still refuse until they have full
+stack-map and continuation support. Explicit `throw_` is narrower: it restores
+the physical pre-operation Lantern frame and resumes at the original bytecode,
+so Lantern performs the only exception unwind and any catch/finally dispatch.
+Completed code now
 publishes transactionally into a chunk-owned T2 record, independently of
 Bistromath's owned main/continuation records. The production CLI's default-on
 driver enters fresh ordinary functions after sustained heat (or threshold 1
@@ -498,9 +562,10 @@ under the test262 `--ohaimark` differential), then returns a tagged completion
 in AAPCS64 `x0` or resumes Lantern's reconstructed frame after receiving the
 reserved one-word sentinel. `--no-ohaimark` retains Bistromath; `--no-jit`
 retains Lantern alone. Constructors, generators, async frames, and Ohaimark OSR
-remain lower-tier paths unless `Realm.ohaimark_osr_enabled` is set (default
-off). With OSR on, Lantern and Bistromath backedges may enter published T2
-stubs at loop headers using the existing frame-identity ABI.
+remain lower-tier paths unless all master JIT/T2 gates are enabled. With the
+default OSR policy on, Lantern and Bistromath backedges may enter published T2
+stubs at loop headers using the existing frame-identity ABI; hosts can isolate
+function-entry T2 through `Realm.ohaimark_osr_enabled = false`.
 The production-threshold rollout harness in [benchmarking.md](benchmarking.md)
 now compares T1 and T1+T2 with interleaved process pairs and machine-readable
 publication telemetry. Its first 30-pair arm64 sample published five supported
@@ -632,6 +697,28 @@ same line.
 | Value representation handling | **no** | NaN-boxed `Value` vs raw wasm scalars/cells. |
 | ICs, shapes, feedback, deopt | **no** | JS-only by construction; bolting ICs onto the wasm tier would cost the compile throughput that justifies it. |
 
+Spasm participates in the shared safe-point convention without giving up its
+unmetered fast path. Its append-only entry ABI carries an optional execution
+controller in `x7`; the prologue parks it in callee-saved `x21`, and direct
+self-links, W^X-safe call gates (including their cold helper), generic imported
+calls, and indirect dispatch propagate it to callees. Function entry and each
+taken structured-loop backedge first test `x21`. Null skips with one predictable
+branch. A non-null controller acquire-loads its wake byte and still skips all
+spills and host calls while that byte is clear; once set, Spasm spills the live
+operand bank, calls the outlined Realm poll, restores on success, or returns the
+poll's status through its existing trap epilogue. Sarcasm retains the same
+entry/backedge polls plus proper-tail-call re-entry for bodies Spasm cannot
+compile.
+
+The placement follows the established Wasm baseline practice:
+[SpiderMonkey's baseline compiler](https://searchfox.org/firefox-main/source/js/src/wasm/WasmBaselineCompile.cpp)
+emits interrupt checks at function entry and loop starts,
+[V8 Liftoff](https://chromium.googlesource.com/v8/v8/+/a1dee7c835ccc2020067010dffea493dbeab1c1d/src/wasm/baseline/liftoff-compiler.cc)
+checks stack/interrupt state at loop headers, and
+[Wasmtime](https://docs.wasmtime.dev/examples-interrupting-wasm.html)
+instruments function entries and loop headers for fuel/epoch interruption.
+Cynic's outlined helper differs in mechanics, not safe-point granularity.
+
 Concretely, the tree gains one shared directory and two consumers:
 
 ```
@@ -722,8 +809,8 @@ porting-JIT guide; all of it lives in `code_alloc.zig` so no tier
 ever touches a syscall:
 
 - **Supported hosts:** the executable allocator supports macOS and Linux on
-  AArch64 and x86_64. Bistromath is qualified on both ISAs; Ohaimark remains
-  AArch64-only, and targets without a qualified emitter interpret in Lantern.
+  AArch64 and x86_64. Bistromath and Ohaimark are qualified on both ISAs;
+  targets without a qualified emitter interpret in Lantern.
 - **macOS AArch64:** `mmap(PROT_READ|WRITE|EXEC,
   MAP_PRIVATE|ANONYMOUS|MAP_JIT)` — Zig's `std.c.MAP` for darwin
   already carries the `JIT` bit. Writes happen inside a
@@ -762,6 +849,12 @@ ever touches a syscall:
   question (per-realm pools vs engine-wide) stays with the ADR
   [multi-realm.md](multi-realm.md) reserved for it; nothing in v1
   forecloses either answer.
+- **Realm quota accounting:** `CodeAllocator.initMetered` accepts an optional
+  live-byte ledger. Realm-backed Spasm uses it for each lazy 64 KiB
+  per-instance reservation: charge the page-aligned length before `mmap`,
+  roll the charge back if mapping fails, and discharge only after `munmap`.
+  A refused reservation leaves that instance on Sarcasm. Bare Wasm and the
+  shared JS-tier allocator keep the ordinary unmetered constructor.
 - **Targets without codegen:** the playground builds Cynic to
   `wasm32-freestanding` — the entire `src/runtime/jit/` directory is
   comptime-gated on native targets, and every tier-up check
@@ -851,8 +944,9 @@ The tier ships dark, proves equivalence, then flips on:
 
 ## 11. Performance expectations
 
-Targets are gates, not hopes; all measured by the existing
-harnesses, recorded in `bench-results.md` / `wasm-bench-results.md`:
+Targets are gates, not hopes; all measured by the existing harnesses and
+recorded in the Ohaimark rollout record, `bench-cross-results.md`, and
+`wasm-bench-results.md` (with `bench-results.md` retained as an archive):
 
 - **Bistromath:** ≥1.5× p50 on the dispatch-bound micros
   (`arith_loop`, `method_call`, `prop_access`, `tail_recursion`)
@@ -925,9 +1019,8 @@ useful:
        a runtime witness, not a comment. Shipped 2026-06.
    3b. **Bench `--jit` mode** — `cynic-bench` grows the flag so
        increments land with measured numbers. Shipped 2026-06
-       (natural tier-up thresholds — the user posture);
-       bench-results.md records both tables per entry from the
-       first IC coverage onward.
+       (natural tier-up thresholds — the user posture); rollout gates and
+       `docs/ohaimark.md` record the resulting T1/T2 evidence.
    3c. **Property/global IC reads** — `lda_property` own-data
        and proto-load hits, `lda_global[_or_undef]`: inline
        cell-hit fast paths reading the cells as data (§4.4),
@@ -1206,9 +1299,9 @@ useful:
    a body Spasm can't emit is recorded `failed` so it isn't re-attempted).
    A counter-proven unit test (1 compile across N runs) and the
    `zig build wasm-bench` interp-vs-Spasm A/B back it — the fully
-   compilable `sum(i*i)` loop runs ~10× faster as cached native code on
-   that workload, results byte-identical, while `call`-using `fib`
-   degrades to the interpreter at parity. **Spasm is now the default
+   compilable `sum(i*i)` loop runs ~9–10× faster as cached native code on
+   that workload, and recursive `fib` is now roughly 1.7-1.9x faster after native
+   direct calls. **Spasm is now the default
    production wasm tier**: the JS `WebAssembly` API turns it on for every
    instance when the JIT is on (`spasm_enabled = realm.jit_enabled`, set
    in `populateInstance`), so a JS-instantiated module's emittable
@@ -1234,13 +1327,34 @@ useful:
    body reloads x2/x3 from — growth invalidates the cached pointers; the i32
    result is the previous page count or -1), and both `call` and
    `call_indirect` (a non-leaf prologue parks the `*Instance` in callee-saved
-   x19; the args marshal through a per-frame cell buffer to a native helper
-   that re-enters `invoke`; operands live below the args are spilled across
-   the helper call and reloaded after — a constant one stays a constant,
-   re-materialized on each control-flow arm; `call_indirect` resolves and
-   type-checks the table element in its helper, trapping on a bad index,
-   null element, or signature mismatch; a thread-local depth guard turns
-   runaway native recursion into a catchable `CallStackExhausted`); and
+   x19; a same-module call reserves the callee's full Cell frame on the native
+   stack. Each defined function owns a stable heap `CallGate` beside the
+   per-instance code cache. A scalar-signature cross-function call uses `BLR`
+   to one W^X-installed shared stub, passing that stable gate address in x7.
+   The stub loads its data-only `EntryFn` pointer: null tail-branches to the
+   existing checked helper for lazy compilation, §4.6.5 defaults, traps, and
+   interpreter fallback; a published pointer tail-branches directly into the
+   target entry, removing the helper and cache lookup without patching code.
+   The caller emits declared-local defaults before the hot entry (including
+   `REF_NULL` for reference locals). An eligible scalar self-call with no
+   declared locals remains the smaller local `BL` straight to its own entry.
+   The hidden x6 stack cutoff is preserved in x20; the generated guard projects
+   both the staging frame and target prologue before returning the fixed
+   `CallStackExhausted` status. This implements the fresh
+   `{ locals args ++ defaults }` frame required by
+   [WebAssembly Core §4.6.5](https://www.w3.org/TR/wasm-core/#exec-instr-call)
+   and follows the direct wasm-call / stable-frame shape used by
+   [V8 Liftoff](https://chromium.googlesource.com/v8/v8/+/352e408b0edd6e574d251281e395fcde92ec6898/src/wasm/baseline/liftoff-assembler.h)
+   and [Wasmtime Winch](https://github.com/bytecodealliance/rfcs/blob/main/accepted/wasmtime-baseline-compilation.md).
+   Imports, `call_indirect`, cross-instance calls, overlarge frames, and bodies
+   Spasm cannot compile keep the generic helper / `invoke` fallback. Operands
+   live below the args are spilled across either helper call and reloaded after
+   — a constant one stays a
+   constant, re-materialized on each control-flow arm; `call_indirect` resolves
+   and type-checks the table element in its helper, trapping on a bad index,
+   null element, or signature mismatch; the generic helper retains its
+   thread-local depth backstop while the linked lane uses the shared native
+   stack cutoff); and
    `memory.init` / `data.drop` (the passive-segment ops, via the same
    helper-call shape) — so the whole bulk-memory family now compiles. The
    reference types open with `ref.null` / `ref.func` / `ref.is_null`: both ref
@@ -1284,17 +1398,19 @@ useful:
    overflow recovery against Lantern. Register allocation, AArch64 frame/edge lowering,
    checked int32 arithmetic/control emission, and direct guard-exit frame
    reconstruction now also ship in the default-on tier, along with guarded
-   own/prototype/synthetic named loads through live IC cells and
+   own/prototype/synthetic named loads plus monomorphic flat-string computed
+   own-data loads and writable stores through live IC cells and
    frame-reconstructing backedge safepoints. Transactional full-pipeline
    compilation now publishes owned code into independent T1/T2 chunk state.
    Single-predecessor edge coalescing, physical fallthrough, one-word
    completion, and exact Number operand-shape specialization passed the
    performance gate; full differential, focused GC-pressure, and bounded fuzz
-   evidence passed the rollout audit. Ordinary-function entry now reaches T2
-   by default at natural thresholds. OSR ships default-off (ohaimark.md §3.17).
-   Next: OSR graduation, rooted helper calls, broader
-   opcode coverage, and additional architectures; see
-   [ohaimark.md](ohaimark.md).
+   evidence passed the rollout audit. Ordinary-function entry and loop-header
+   OSR now reach T2 by default at natural thresholds on AArch64 and x86_64;
+   x86 currently limits loops to its qualified helper-free checked-Int32
+   subset. `--no-ohaimark-osr` retains an entry-only diagnostic posture. Next:
+   native continuations for JS-reentrant helpers, remaining opcode families,
+   and broader architecture coverage; see [ohaimark.md](ohaimark.md).
 
 ## 13. Considered and declined
 
@@ -1346,6 +1462,18 @@ useful:
   engine compiles its optimizing tier off-thread; Cynic realms are
   single-threaded today, which is the complication to design
   around).
+- **x86_64 breadth** — function entry, checked-Int32 CFG/OSR, relational and
+  static control, monomorphic named/computed data ICs, rooted non-reentrant
+  environment/arguments/closure/literal/property helpers, terminal replay, and
+  compact direct/property call plus construction handoff are
+  production-qualified. The compiler publishes a per-entry
+  `ohaimark_requires_frame_scope` capability: helper and direct-call graphs
+  register the frame list before entering native code, while helper-free leaves
+  and loops retain the original zero-bookkeeping fast path. Bistromath provides
+  the x86 T1 fallback; ineligible or refused T1 work resumes Lantern.
+  Accessor/exotic property paths, generic JS-reentrant helpers, native post-call
+  continuations, and the remaining unsupported opcode families stay absent;
+  each broader slice must preserve the exact differential and rollout gates.
 - **Polymorphic ICs** — stay deferred per
   [inline-caches.md](inline-caches.md) until Ohaimark consumes
   feedback; T1 neither needs nor wants them.

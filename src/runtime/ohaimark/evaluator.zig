@@ -24,6 +24,9 @@ pub const Entry = struct {
     accumulator: Value,
     registers: []const Value,
     this_value: Value = Value.undefined_,
+    /// Optional because the evaluator still covers realm-independent graph
+    /// shapes. `typeof_` supplies it to share Lantern's cached-string logic.
+    realm: ?*Realm = null,
     step_limit: usize,
 };
 
@@ -146,6 +149,7 @@ const Runner = struct {
     int32_spills: []i32,
     steps_left: usize,
     this_value: Value,
+    realm: ?*Realm,
     entry_accumulator: Value,
     entry_registers: []const Value,
 
@@ -185,6 +189,7 @@ const Runner = struct {
             .int32_spills = int32_spills,
             .steps_left = entry.step_limit,
             .this_value = entry.this_value,
+            .realm = entry.realm,
             .entry_accumulator = entry.accumulator,
             .entry_registers = entry.registers,
         };
@@ -221,18 +226,46 @@ const Runner = struct {
                     .div,
                     .strict_eq,
                     .logical_not,
+                    .to_numeric,
+                    .to_string,
+                    .require_object_coercible,
                     .less_than,
                     .load_named,
+                    .load_computed,
                     .load_this,
                     .load_global,
                     .load_global_slot,
                     .load_environment,
+                    .throw_if_hole,
+                    .typeof_,
                     => {
                         switch (try self.evaluateValueNode(node_id)) {
                             .value => |value| try self.define(node_id, value),
                             .guard_failed => return self.deoptAt(node_id),
                         }
                     },
+                    .allocate_environment,
+                    .store_environment,
+                    .pop_environment,
+                    .store_global,
+                    .store_global_slot_init,
+                    .store_global_slot,
+                    .store_named,
+                    .store_computed,
+                    .delete_computed_property,
+                    .create_unmapped_arguments_object,
+                    .create_ordinary_function,
+                    .set_home,
+                    .define_object_method_property,
+                    .create_object_literal,
+                    .create_dense_array_literal,
+                    .create_array_literal,
+                    .append_dense_array_literal_element,
+                    .define_template_property,
+                    .direct_call,
+                    .tail_dispatch,
+                    .throw_,
+                    => return self.deoptAt(node_id),
                     .jump => {
                         const edge = try self.singleOutgoingEdge(block_index);
                         block_index = try self.transfer(edge);
@@ -294,10 +327,26 @@ const Runner = struct {
             .div => self.arithmetic(node_id, info, .div),
             .strict_eq => self.strictEqual(node_id, info),
             .logical_not => self.logicalNot(node_id, info),
+            .to_numeric => self.toNumeric(node_id, info),
+            .to_string => if (info.lowering == .checked_string_to_string) blk: {
+                const value = try self.taggedNodeInput(node_id, 0);
+                if (!value.isString()) break :blk .guard_failed;
+                break :blk .{ .value = .{ .tagged = value } };
+            } else error.MalformedGraph,
+            .require_object_coercible => if (info.lowering == .require_object_coercible) blk: {
+                const value = try self.taggedNodeInput(node_id, 0);
+                if (value.isNull() or value.isUndefined()) break :blk .guard_failed;
+                break :blk .{ .value = .{ .tagged = value } };
+            } else error.MalformedGraph,
             .less_than => self.lessThan(node_id, info),
             .load_named => switch (info.lowering) {
                 .load_named_own, .load_named_prototype, .load_named_synthetic => .guard_failed,
                 .load_named_generic => error.UnsupportedNode,
+                else => error.MalformedGraph,
+            },
+            .load_computed => switch (info.lowering) {
+                .load_computed_own => .guard_failed,
+                .load_computed_generic => error.UnsupportedNode,
                 else => error.MalformedGraph,
             },
             .load_this => if (info.lowering == .load_this)
@@ -317,6 +366,18 @@ const Runner = struct {
                 .guard_failed
             else
                 error.MalformedGraph,
+            .throw_if_hole => if (info.lowering == .throw_if_hole) blk: {
+                const value = try self.taggedNodeInput(node_id, 0);
+                if (value.isHole()) break :blk .guard_failed;
+                break :blk .{ .value = .{ .tagged = value } };
+            } else error.MalformedGraph,
+            .typeof_ => if (info.lowering == .typeof_) blk: {
+                const realm = self.realm orelse return error.UnsupportedNode;
+                break :blk .{ .value = .{ .tagged = try arith.typeOf(
+                    realm,
+                    try self.taggedNodeInput(node_id, 0),
+                ) } };
+            } else error.MalformedGraph,
             else => error.MalformedGraph,
         };
     }
@@ -442,6 +503,16 @@ const Runner = struct {
             return error.MalformedGraph;
         }
         return .{ .value = .{ .tagged = Value.fromBool(!input.asBool()) } };
+    }
+
+    fn toNumeric(
+        self: *Runner,
+        node_id: ir.ValueId,
+        info: specialize.NodeInfo,
+    ) !NodeResult {
+        if (info.lowering != .checked_int32_to_numeric) return error.MalformedGraph;
+        const input = try self.int32NodeInput(node_id, 0) orelse return .guard_failed;
+        return .{ .value = .{ .int32 = input } };
     }
 
     fn lessThan(

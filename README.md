@@ -5,296 +5,138 @@
 [![Playground](https://github.com/chicoxyzzy/cynic/actions/workflows/playground.yml/badge.svg)](https://github.com/chicoxyzzy/cynic/actions/workflows/playground.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-A strict-only ECMAScript and WebAssembly engine, written from scratch
-in Zig.
+Cynic is a strict-only ECMAScript and WebAssembly engine written from
+scratch in Zig. It deliberately leaves out JavaScript's legacy
+web-compatibility surface and starts each realm in a hardened posture.
 
-**[Try it in your browser →](https://chicoxyzzy.github.io/cynic/playground/)** — run JavaScript in Cynic, no install.
+**[Try the browser playground](https://chicoxyzzy.github.io/cynic/playground/)**
 
-Security-hardened by default, it declines JavaScript's legacy
-web-compatibility surfaces on purpose — strict-only and SES-by-default
-as a thesis, not a deployment side effect:
+> Cynic is pre-alpha. Language coverage is broad, but the embedding API and
+> runtime behavior are still evolving.
 
-- **No sloppy mode.** Every source is parsed as strict. The strict
-  reserved-word set, restricted assignment to `eval` / `arguments`, and
-  the absence of `with`, labels, legacy octal, HTML-like comments, and
-  Annex B *language* extensions (sloppy-mode-only function-in-block,
-  `for-in` initializer, …) are baked in at the language level.
-- **No web-compatibility built-ins.** `escape` / `unescape`, the 13
-  `String.prototype` HTML wrappers (`anchor`, `bold`, …),
-  `Date.prototype.{getYear, setYear, toGMTString}`, and the
-  `String.prototype.{substr, trimLeft, trimRight}` aliases aren't
-  shipped. The canonical modern names (`trimStart` / `trimEnd`,
-  `toUTCString`) are the only spelling.
-- **No runtime code construction.** `eval`, `new Function(string)`,
-  `new GeneratorFunction(string)`, `new AsyncFunction(string)`. Aligns
-  with [SES / Hardened JavaScript](https://github.com/endojs/endo/tree/main/packages/ses).
-- **SES-hardened by default.** Every modern JS runtime is
-  "SES-friendly" — meaning user code can call `lockdown()` to harden
-  primordials. Cynic skips the call. Realms boot with every intrinsic
-  frozen (`[[Extensible]] = false`, non-writable / non-configurable
-  descriptors), `harden()` shipped as a native global (recursive deep
-  freeze, matches `@endo/ses`), and the override-mistake fix in place
-  (`obj.x = 2` shadows a frozen prototype's data slot instead of
-  throwing TypeError). `--unhardened` opts the whole posture out
-  atomically for code that genuinely needs `OrdinarySet` semantics.
-  Compartments are deferred (a TC39 Stage 1 proposal — the multi-realm
-  substrate they need largely ships). See
-  [`docs/ses-alignment.md`](docs/ses-alignment.md).
+## Design contract
 
-## Status
+- **Strict-only ECMAScript.** Every script is parsed as strict code. Sloppy
+  mode, Annex B, and legacy web-compatibility built-ins are intentionally out
+  of scope.
+- **Hardened by default.** Primordials are frozen, `harden()` is built in, and
+  the override-mistake fix is enabled. Use `--unhardened` only when mutable
+  primordials are required.
+- **Code construction is host-controlled.** Runtime JavaScript strings require
+  `--allow=eval`. WebAssembly is ready to use in the CLI; direct embedders can
+  deny dynamic byte compilation with `Realm.allow_wasm_compile` while still
+  accepting trusted modules and ordinary Wasm objects.
+- **Modern features do not imply experiments.** Pre-Stage-4 proposals stay
+  disabled unless selected with `--enable=<name>` or
+  `--enable-experimental`.
 
-Pre-alpha. Lexer + parser + Lantern (T0 bytecode interpreter) +
-Metla (mark-sweep GC) ship, alongside Perlex (the native §22.2
-RegExp engine), Sarcasm (the from-scratch WebAssembly engine —
-100 % of the spec-testsuite commands it scores), the native §3
-Unicode tables, and
-the hardened-by-default realm-boot pipeline. The runtime is filling
-in §19-§28 one bucket at a time. Bistromath (the baseline JIT)
-runs by default on AArch64 and x86_64 hosts on macOS and Linux
-(`--no-jit` opts out); other targets stay in Lantern
-([`docs/jit.md`](docs/jit.md)). Ohaimark's AArch64-only typed-feedback
-snapshot,
-block-argument SSA, specialization and representation planners, and verified
-logical deopt plus direct-entry/stable-home physical metadata and a
-graph/Lantern differential evaluator, deterministic register/spill allocation,
-and AArch64 frame/edge
-lowering plans plus verified native frame entry/exit emission have landed,
-along with typed physical moves, folded-value returns, checked int32
-add/sub/mul, checked int32 strict equality (including every fused equality and
-inequality branch width), branch-exclusive equality control fusion, standalone
-strict inequality, guarded Boolean logical not, int32 control flow, and
-allocation-free guard exits that rebuild the
-existing Lantern frame. Guarded own/prototype/synthetic
-named-property loads now execute through live typed IC cells as well. Taken
-backedges poll fuel, interrupts, hooks, and pending GC work; a slow poll
-transfers the exact loop-header state into Lantern's precise root set before
-returning. Ohaimark also has chunk-owned executable lifetime, transactional
-full-pipeline installation, single-predecessor edge coalescing, physical
-fallthrough, and a one-word completion ABI. Its one-byte arithmetic profile
-distinguishes Int32/Double operand order so generated Number operations emit
-only the guards and conversions they need. Ohaimark now runs by default at its
-natural production threshold: `--no-ohaimark` isolates Bistromath, while
-`--no-jit` disables both tiers. Loop-header OSR is implemented but **default-off**
-(`Realm.ohaimark_osr_enabled` / `--ohaimark-osr` for validation and the OSR
-rollout bench) until its own differential and performance gates pass. The final
-30-pair T2/T1 function-entry rollout measured `0.997x` geometric mean, a worst
-fixture of `1.041x`, and 0.8 KiB installed code, passing both rollout ceilings.
-Baseline and forced-T2 test262 sweeps produced the exact same 48,517-pass set;
-focused ReleaseSafe GC-pressure runs and bounded crash/value-differential fuzz
-campaigns found no verifier failure, host crash, or differential. Bistromath's
-x86_64 qualification ran the full interpreter and forced-T1 sweeps on macOS
-under Rosetta: both passed 48,517 fixtures, their pass-set diff was empty, and
-the fail-closed `--require-bistromath-entry` witness counted 2,455,587 generated
-entries. `x86_64-linux-musl` and `aarch64-linux-musl` cross-builds and focused
-ReleaseSafe suites on both ISAs passed as well. See
-[`docs/ROADMAP.md`](docs/ROADMAP.md) for the thematic breakdown.
+The rationale and exact behavior are documented in
+[`docs/ses-alignment.md`](docs/ses-alignment.md) and
+[`AGENTS.md`](AGENTS.md).
 
-### Conformance
+## Quick start
 
-Current scores, history, and per-bucket breakdown live in
-[`test262-results.md`](test262-results.md). Scoring is binary under a
-single posture (`--unhardened --allow=eval`): `pass%` is
-`passing / total`, where `total` is `passing + failing` — there is
-**no** "expected fail" reclassification, so an Annex B, no-Intl,
-strict-only, SES, or eval miss counts as a plain `failing`, the same as
-an engine bug. `total` excludes the upstream `harness/` / `staging/` /
-`annexB/` paths, every Stage ≤ 3 proposal, and structurally-unrunnable
-fixtures; shipped pre-Stage-4 proposals get their own per-feature
-scoreboard. The WebAssembly engine has its own conformance run
-([`wasm-results.md`](wasm-results.md) — 100 % of the commands it scores;
-the scored set excludes tests for not-yet-implemented proposals).
-The unit-test suite (`zig build test`) runs alongside.
-
-### Build targets
-
-- **Native CI (gating):** `x86_64-linux-gnu`,
-  `aarch64-macos` (Apple Silicon). Full battery — build +
-  unit tests + SES coverage.
-- **Cross-compile CI (build-only, gating):** `aarch64-linux-gnu`,
-  `x86_64-linux-musl`, `aarch64-macos` from Linux. Catches
-  platform-specific compile breaks pre-merge.
-- **WASM:** `wasm32-freestanding` powers the
-  [playground](https://chicoxyzzy.github.io/cynic/playground/).
-- **Not yet:** Windows (POSIX carve-outs in `src/runtime/heap.zig` +
-  `tools/test262.zig`), Android (NDK + `build.zig` sysroot plumbing),
-  iOS (Xcode SDK forwarding). Tracked separately.
-
-### What works today
-
-The shape, in broad strokes — the per-bucket numbers live in the
-[`test262-results.md`](test262-results.md) scoreboard.
-
-- **Parser** — every §13 expression form, classes (private members,
-  static blocks, getters/setters), generators + async + async
-  generators, ES6 modules in all forms, destructuring in every
-  position the spec allows.
-- **Statements & control flow** — the usual `if` / `switch` /
-  `while` / `for` / `try` family, including TDZ enforcement and
-  per-iteration closures for `for-let`. `for-of` walks any
-  `@@iterator`-bearing iterable; iterator-close fires on `break`
-  per §7.4.6.
-- **Functions & classes** — closures, `arguments`, `bind` chains,
-  `extends` / `super`, default-ctor synthesis, only-via-`new`,
-  instance + private + static fields, static blocks, getters and
-  setters.
-- **Built-ins** — `Object`, `Array`, `String` / `Number` /
-  `Boolean` / `BigInt` / `Symbol` (real primitives, not polyfills),
-  `Math`, `JSON`, `Map` / `Set` / `WeakMap` / `WeakSet`,
-  `WeakRef` / `FinalizationRegistry`,
-  `Reflect`, ES2025 `Set` ops (`union` / `intersection` / …),
-  `Iterator` helpers (`map` / `filter` / `take` / `drop` /
-  `flatMap` / etc.),
-  `Proxy` (most traps), `Date` (UTC-only), the URI globals, the
-  standard error hierarchy with `error-cause`.
-- **TypedArrays** — `ArrayBuffer`, `DataView`, the typed-array
-  family backed by the canonical `%TypedArray%.prototype`.
-- **Shared memory & atomics** — `SharedArrayBuffer` (growable) and the
-  full `Atomics` surface (`wait` / `notify` / `waitAsync` /
-  `compareExchange` / `isLockFree` / …), with real cross-thread
-  `wait` / `notify` over OS threads, not a single-threaded stub.
-- **RegExp** — full ECMA-262 via **Perlex**, Cynic's own native
-  engine (named groups, lookbehind, `u` / `v` flags, indices). String
-  methods dispatch through it.
-- **Promises & async/await** — full chaining (settled and pending),
-  pending-await suspension via `JSGenerator` capture, async
-  generators with promise-reaction chaining, `Promise.try` and
-  `Promise.withResolvers`.
-- **WebAssembly** — Cynic runs Wasm through the `WebAssembly` JS
-  API (`Module` / `Instance` / `Memory` / `Table` / `Global` /
-  `Tag` / `Exception`, `compile` / `instantiate`, host imports,
-  cross-module linking), powered by **Sarcasm** — a from-scratch
-  in-place interpreter (SIMD, reference types, typed function
-  references, memory64, multiple memories, tail calls, relaxed-SIMD,
-  and the exception-handling proposal —
-  `try_table` / `throw` / `throw_ref` / `exnref`). **100 %
-  of the commands it scores (58779/58779)** on the official
-  WebAssembly spec testsuite — the scored set excludes tests for
-  not-yet-implemented proposals (see
-  [`wasm-results.md`](wasm-results.md)). Off by default; opt in with
-  `--allow=wasm` (same SES posture as `eval` — see
-  [`docs/wasm-engine.md`](docs/wasm-engine.md)).
-- **Proper Tail Calls** (ES2015 §15.10) — calls in tail position
-  reuse the caller's frame instead of pushing a fresh one;
-  `function f(n) { return f(n - 1); }` recurses without growing
-  the dispatch stack. Second engine shipping spec-mandated PTC
-  alongside JavaScriptCore.
-- **Tooling** — `cynic parse | eval | run` plus a parallel test262
-  harness with `--threads=N`, `--only-failing` cache, and a
-  per-area scoreboard.
-
-Internals: NaN-boxed values, Ignition-style register-file +
-accumulator bytecode, stop-the-world mark-sweep heap fired on
-allocation pressure (the heap stays bounded under any allocating
-loop / recursion / promise chain — see
-[`docs/handbook/gc.md`](docs/handbook/gc.md) for the trigger and
-the `HandleScope` contract for natives).
-
-## Build
+The required Zig development build is pinned in
+[`build.zig.zon`](build.zig.zon). [anyzig](https://github.com/marler8997/anyzig)
+can resolve that exact version.
 
 ```sh
-git submodule update --init vendor/test262   # one-time; needed for `zig build test262`
-
-zig build              # build cynic into zig-out/bin/
-zig build test         # run all unit tests
-zig build test262      # test262 conformance (parse + compile + execute; --write-results also runs each pre-Stage-4 feature phase)
+zig build
+./zig-out/bin/cynic eval '1 + 2 * 3'
+zig build test-fast
 ```
 
-Requires Zig **0.17-dev** (master). The Zig project skipped a stable
-0.16, so CI tracks `master` via
-[`xyzzylabs/setup-zig`](https://github.com/xyzzylabs/setup-zig). If
-your local `zig version` reports an older dev tag, bump it.
+For test262 work, initialize the pinned suite once:
 
-`zig build test262` accepts forwarded flags after `--`:
-
-- `--filter=<substring>` — run only matching paths.
-- `--list-failures=<n>` — print the first `n` failing paths after the tally.
-- `--phase=<spec>` — pin the harness to a single sweep. `--phase=main` is the headline ECMA-262 sweep (pre-Stage-4 fixtures excluded); `--phase=feature:<name>` (e.g. `feature:ShadowRealm`) runs only that proposal's dedicated isolated sweep. Default: just main, unless `--write-results` is set — then main + every tracked feature run in sequence.
-- `--quiet` / `--verbose` — progress noise dial.
-- `--no-harness` — skip the `sta.js` + `assert.js` preamble (for measuring the no-harness floor).
-- `--threads=<n>` — worker count (`0` = auto, `1` = sequential, `>1` = pool).
-- `--only-failing` — skip-as-pass any path in `.test262-pass-cache.txt`. After a full sweep populates the cache, the next iteration runs only the ~7 k failing/skipped fixtures — ≤ 30 s vs ≤ 100 s. Don't use for score rows; use it for per-fix verification.
-- `--jit` / `--ohaimark` — force Bistromath alone, or default-on Ohaimark before Bistromath, at threshold 1 for independent pass-set differential runs.
-- `--require-bistromath-entry` — with `--jit`, fail unless the sweep actually crosses generated T1 code. The differential gate uses this so an unsupported or disconnected backend cannot pass by comparing Lantern with itself.
-- `--ohaimark-stats` — with `--ohaimark`, print aggregate T2 compile attempts, publications/refusals, compile time, installed bytes, generated entries, completions, guard exits, refusal-stage counts, and the top unsupported bytecodes. Remains parallel-safe.
-
-Top-level CLI (not a test262 harness flag): `--ohaimark-osr` enables
-loop-header OSR into Ohaimark (default off; validation and
-`zig build bench -- --ohaimark-osr-rollout` only until graduation).
-- `--gc-threshold=<n>` — per-fixture allocation-pressure GC threshold (default 32,768; engine default 16,384). `0` falls through to the engine default. The engine also has a 16 MiB byte trigger so allocate-and-discard patterns GC promptly regardless of count.
-- `--write-results` — update `test262-results.md` with today's row. Re-running on the same date replaces that day's row rather than appending. The default run never touches that file.
-- **Memory / leak instrumentation:** `--gc-stats` (per-cycle pool counts + bytes), `--mem-summary` (end-of-sweep totals: cumulative bytes, max charged peak, GC cycles), `--top-rss=<n>` (top-N fixtures by process RSS delta ≥ 8 MiB), `--top-alloc=<n>` (top-N by cumulative bytes allocated ≥ 64 KiB — catches GC-cleaned thrash that RSS hides), `--leak-check` (route per-fixture bytes allocator through `std.heap.DebugAllocator`; stack trace per unfreed allocation), `--max-rss=<mb>` (abort with the offending path when RSS crosses budget).
-
-The Unicode tables under `src/unicode/` are generated and committed:
-`ident_tables.zig` (lexer `ID_Start` / `ID_Continue`),
-`property_tables.zig` (RegExp `\p{…}` property escapes),
-`case_fold_tables.zig` (RegExp `/iu` / `/iv` case folding),
-`case_conv_tables.zig` (`String.prototype.toLowerCase` / `toUpperCase`),
-`normalization_tables.zig` (UAX #15 NF{C,D,KC,KD}). Currently
-Unicode 17.0. ECMA-262 §3 references `unicode.org/versions/latest`,
-so we track upstream: drop the refreshed UCD files into
-`vendor/unicode/` and run `zig build gen-unicode` to regenerate.
+```sh
+git submodule update --init vendor/test262
+zig build test262 -- --quiet
+```
 
 ## Run
 
-After `zig build`, the CLI is at `zig-out/bin/cynic` — put it on your
-PATH or run `./zig-out/bin/cynic`. The examples use `cynic`:
-
 ```sh
-cynic lex   path/to/file.js              # tokenize and print
-cynic parse path/to/file.js              # parse a Script
-cynic parse --module path/to/file.js     # parse a Module
-cynic parse path/to/file.mjs             # .mjs ⇒ module
-cynic eval  '1 + 2 * 3'                  # evaluate an expression
-cynic run   path/to/file.js              # run a script
-cynic run   a.js b.js c.js               # multiple files share one realm
-cynic repl                               # interactive REPL (persistent realm)
+./zig-out/bin/cynic lex path/to/file.js
+./zig-out/bin/cynic parse path/to/file.js
+./zig-out/bin/cynic parse --module path/to/file.js
+./zig-out/bin/cynic eval '6 * 7'
+./zig-out/bin/cynic run app.js
+./zig-out/bin/cynic run first.js second.js   # one shared realm
+./zig-out/bin/cynic repl                     # persistent realm
 ```
 
-The `cynic` CLI keeps pre-Stage-4 / experimental TC39 proposals off
-by default — embedders see only stable ECMA-262. Opt in:
+Top-level policy and feature controls come before the command:
 
 ```sh
-cynic --list-features                       # show available proposals
-cynic --enable=ShadowRealm eval '...'       # one feature
-cynic --enable-experimental run foo.js      # all tracked features
+./zig-out/bin/cynic --allow=eval eval 'eval("40 + 2")'
+./zig-out/bin/cynic --unhardened run legacy-library.js
+./zig-out/bin/cynic --list-features
+./zig-out/bin/cynic --enable=ShadowRealm eval 'typeof ShadowRealm'
+./zig-out/bin/cynic --no-jit run app.js
 ```
 
-See `src/runtime/features.zig` for the set and
-[`docs/ROADMAP.md`](docs/ROADMAP.md) for what each proposal ships.
+`Intl` is a compile-time choice rather than a runtime permission:
 
-## Working on Cynic
+```sh
+zig build -Dintl=off    # default: no Intl global
+zig build -Dintl=stub   # structural Intl and Temporal extras
+zig build -Dintl=full   # embedded tzdata and CLDR-backed formatting
+```
 
-Contributors — human or AI agent — should read
-[`AGENTS.md`](AGENTS.md) for project conventions (tests-first,
-prior-art surveys, spec-faithful naming) and pointers into the
-engineering handbook under [`docs/handbook/`](docs/handbook/).
+## Status
 
-## Security
+Broad ECMAScript and WebAssembly coverage is working today; conformance and
+embedding work remain active. Current details live in the
+[roadmap](docs/ROADMAP.md), [test262 results](test262-results.md),
+[WebAssembly results](wasm-results.md), and [JIT notes](docs/jit.md).
 
-Security policy, in-scope / out-of-scope, and disclosure channel:
-see [`SECURITY.md`](SECURITY.md).
+## Test and measure
+
+```sh
+zig build test-fast                         # ReleaseSafe, normal iteration
+zig build test                              # Debug, canonical stack traces
+zig build test-ses                          # hardened-realm coverage
+zig build test262 -- --filter=Promise       # focused conformance run
+zig build test262 -- --quiet                # full ECMAScript sweep
+zig build wasm-testsuite -- --quiet         # generated official Wasm suite; see Wasm docs
+zig build bench                             # local micro-benchmarks
+```
+
+The complete harness options, GC-stress postures, JIT differential gates, and
+toolchain setup are maintained in [`AGENTS.md`](AGENTS.md). Before changing
+shared runtime machinery, also read
+[`docs/handbook/agent-checks.md`](docs/handbook/agent-checks.md).
+
+## Supported targets
+
+Native CI runs on `x86_64-linux-gnu` and Apple Silicon macOS. CI also
+cross-builds `aarch64-linux-gnu`, `x86_64-linux-musl`, and `aarch64-macos`.
+The browser playground uses `wasm32-freestanding`. Windows and mobile platform
+integration are not yet supported.
+
+## Project map
+
+| Topic | Document |
+|---|---|
+| Documentation index and source-of-truth map | [`docs/README.md`](docs/README.md) |
+| Architecture and component boundaries | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) |
+| Shipped work and remaining scope | [`docs/ROADMAP.md`](docs/ROADMAP.md) |
+| Hardened realms, eval policy, and SES alignment | [`docs/ses-alignment.md`](docs/ses-alignment.md) |
+| JIT tiers and rollout gates | [`docs/jit.md`](docs/jit.md) |
+| WebAssembly engine and JS API | [`docs/wasm-engine.md`](docs/wasm-engine.md) |
+| Benchmark methodology and results | [`docs/benchmarking.md`](docs/benchmarking.md) |
+| Contributor rules and engineering handbook | [`AGENTS.md`](AGENTS.md), [`docs/handbook/`](docs/handbook/) |
+| Security reports | [`SECURITY.md`](SECURITY.md) |
+
+## Contributing
+
+Start with [`AGENTS.md`](AGENTS.md). The project requires tests first,
+ECMA-262-aligned naming, prior-art review for non-trivial engine decisions, and
+catchable JavaScript exceptions instead of host aborts for untrusted input.
 
 ## License
 
-Cynic is [MIT-licensed](LICENSE). Bundled third-party data under
-`vendor/` keeps its own license:
-
-- `vendor/unicode/` — Unicode Character Database files
-  (`UnicodeData.txt`, `SpecialCasing.txt`, `CaseFolding.txt`, the
-  Derived / PropList / Scripts / emoji set, and `NormalizationTest.txt`
-  for the conformance test). All under the Unicode, Inc. License
-  Agreement. Upstream: <https://www.unicode.org/license.txt>.
-- `vendor/tzdata/iana/` — IANA tzdata *source* release (africa,
-  europe, …), fetched with `tools/fetch-tzdata.sh` from
-  <https://data.iana.org/time-zones/>. Compiled with system `zic` and
-  packed into `vendor/tzdata/cynic_tzdb.bin` for `-Dintl=full`
-  (`zig build pack-tzdata`). License: see `vendor/tzdata/iana/LICENSE`.
-- `vendor/cldr/` — Unicode CLDR locale data. The JSON *sources*
-  (`vendor/cldr/json/`, fetched with `tools/fetch-cldr.sh` from the
-  [cldr-json](https://github.com/unicode-org/cldr-json) npm packages) are
-  large and gitignored; the committed artifact is the packed
-  `vendor/cldr/cynic_cldr.bin` (`zig build pack-cldr`), embedded only at
-  `-Dintl=full`. License: Unicode License v3, `vendor/cldr/LICENSE`.
-- `vendor/test262/` — ECMAScript Test Suite, BSD-3-Clause (with
-  Ecma International notices). Git submodule pinned to
-  [`tc39/test262`](https://github.com/tc39/test262).
+Cynic is [MIT-licensed](LICENSE). Vendored test and data assets retain their
+upstream licenses: Unicode and CLDR data under `vendor/unicode/` and
+`vendor/cldr/`, IANA tzdata under `vendor/tzdata/iana/`, and test262 under
+`vendor/test262/`.

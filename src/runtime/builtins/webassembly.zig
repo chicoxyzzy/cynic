@@ -4,8 +4,8 @@
 //! Surface:
 //!   - `validate(bytes)` — ungated (only inspects bytes).
 //!   - `Module` / `Instance` constructors + `compile` / `instantiate`
-//!     Promises, gated behind `--allow=wasm`
-//!     (HostEnsureCanCompileWasmBytes; see docs/wasm-engine.md §8-§9).
+//!     Promises. HostEnsureCanCompileWasmBytes gates only dynamic bytes;
+//!     predecoded modules remain usable (docs/wasm-engine.md §8-§9).
 //!   - `Memory` (aliasing, detach-on-grow `buffer`), `Table` (anyfunc),
 //!     `Global` (typed cell) — as standalone constructors and as
 //!     instance exports.
@@ -16,21 +16,20 @@
 //!     externref↔JS value (incl. externref tables / globals and
 //!     reference round-trips through host calls).
 //!
-//! Most wasm artifacts live in the realm's `wasm_arena`, freed at realm
-//! teardown, so they need no per-object cleanup or GC marking. The one
-//! exception is `externref`: a JS value handed to wasm is kept alive as
-//! a GC root — *transiently* while it is on the wasm stack during a call
+//! Immutable wasm metadata and store headers live in the realm's `wasm_arena`.
+//! Movable Memory/Table backings use an immediate-free quota allocator, and
+//! Spasm executable mappings are explicitly unmapped before the arena drops.
+//! The GC-facing exception is `externref`: a JS value handed to wasm is kept
+//! alive as a GC root — *transiently* while it is on the wasm stack during a call
 //! (dropped when the outermost call returns), and *persistently* while
 //! it sits in a registered externref table / global (walked each GC). So
 //! it survives wherever wasm holds it (the non-moving collector
 //! preserves identity) and is reclaimed once wasm drops it. See §5.
 //!
-//! Deliberate limitation: an imported memory shares the provider's bytes
-//! (writes propagate both ways), but a JS-side `grow` after instantiation
-//! isn't observed by the importer — its aliased slice header goes stale.
-//! Propagating it would require the instance to hold its memory by
-//! pointer (an indirection on every load/store), not worth this rare
-//! case. A v128 value crossing the JS boundary throws a TypeError — that
+//! Ordinary imported memories share the provider's `Memory` record, so writes
+//! and growth propagate both ways. Wasm shared-memory threads remain out of
+//! scope; their eventual backing must use SharedDataBlock for non-moving,
+//! in-place growth. A v128 value crossing the JS boundary throws a TypeError — that
 //! is spec-mandated (§ToJSValue / §ToWebAssemblyValue), not a Cynic gap.
 //! `Instance.prototype.exports` is a prototype getter per spec; this
 //! implementation exposes the exports object as an own data property.
@@ -104,6 +103,11 @@ const MemoryState = struct {
     /// SharedArrayBuffer (JS-API §Memory), required to carry a maximum.
     shared: bool = false,
 };
+
+fn detachMemoryHostView(object: *anyopaque) void {
+    const buffer: *JSObject = @ptrCast(@alignCast(object));
+    if (buffer.arrayBufferSlot()) |slot| slot.* = null;
+}
 
 pub fn install(realm: *Realm) !void {
     const ns = try realm.heap.allocateObject();
@@ -252,9 +256,9 @@ fn wasmValidate(realm: *Realm, this_value: Value, args: []const Value) NativeErr
 }
 
 /// `new WebAssembly.Module(bytes)` — decode + validate `bytes` into a
-/// realm-resident module. Gated by `--allow=wasm`.
+/// realm-resident module. This is the HostEnsureCanCompileWasmBytes gate.
 fn moduleConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    if (!realm.allow_wasm) return wasmDisabled(realm);
+    if (!realm.allow_wasm_compile) return wasmCompileDisabled(realm);
     const self = heap_mod.valueAsPlainObject(this_value) orelse
         return intrinsics.throwTypeError(realm, "WebAssembly.Module requires 'new'");
     const bytes = bufferSourceBytes(args) orelse
@@ -292,10 +296,9 @@ fn makeModuleObject(realm: *Realm, bytes: []const u8) NativeError!Value {
     return heap_mod.taggedObject(obj);
 }
 
-/// `new WebAssembly.Instance(module, importObject?)` — instantiate a
-/// `WebAssembly.Module` and expose its function exports. Gated.
+/// `new WebAssembly.Instance(module, importObject?)` — instantiate an
+/// already-decoded module. No byte compilation occurs here.
 fn instanceConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    if (!realm.allow_wasm) return wasmDisabled(realm);
     const self = heap_mod.valueAsPlainObject(this_value) orelse
         return intrinsics.throwTypeError(realm, "WebAssembly.Instance requires 'new'");
 
@@ -310,18 +313,55 @@ fn instanceConstructor(realm: *Realm, this_value: Value, args: []const Value) Na
 /// Resolve imports, instantiate, run the start function, and attach the
 /// `exports` namespace to `self`.
 fn populateInstance(realm: *Realm, self: *JSObject, mstate: *ModuleState, import_object: Value) NativeError!void {
-    const imports = try resolveImports(realm, mstate.module, import_object);
+    var imports = try resolveImports(realm, mstate.module, import_object);
+    imports.store_allocator = realm.wasmStoreAllocator();
 
     const a = realm.wasmAllocator();
     const ip = a.create(wasm.Instance) catch return error.OutOfMemory;
     wasm.instantiate(ip, a, a, mstate.module, imports) catch
         return throwLinkError(realm, "WebAssembly.Instance: instantiation failed");
+    ip.spasm_memory_ledger = realm.wasmCodeMemoryLedger();
+    realm.registerWasmInstance(ip) catch {
+        ip.releaseOwnedStoreBackings();
+        return error.OutOfMemory;
+    };
+    var registered_extern_tables: usize = 0;
+    var registered_extern_globals: usize = 0;
+    errdefer {
+        var tables_remaining = registered_extern_tables;
+        for (0..ip.tables.len) |i| {
+            if (tables_remaining == 0) break;
+            if ((ip.tableElemType(@intCast(i)) orelse continue) != .externref) continue;
+            const table = ip.tableRef(@intCast(i)) orelse continue;
+            realm.unregisterExternTable(table);
+            tables_remaining -= 1;
+        }
+
+        var globals_remaining = registered_extern_globals;
+        for (0..ip.globals.len) |i| {
+            if (globals_remaining == 0) break;
+            const gt = ip.globalTypeAt(@intCast(i)) orelse continue;
+            if (gt.val != .externref) continue;
+            const cell = ip.globalCellPtr(@intCast(i)) orelse continue;
+            realm.unregisterExternGlobalCell(cell);
+            globals_remaining -= 1;
+        }
+
+        realm.unregisterWasmInstance(ip);
+    }
 
     // Let a `try_table` in this instance catch a JS exception thrown by a
     // host import (the JS->wasm direction): the interpreter reifies the
     // realm's pending exception through this bridge.
     ip.host_exn_ctx = realm;
     ip.host_exn_hook = convertHostException;
+    ip.execution_control = .{
+        .ctx = realm,
+        .poll_fn = pollWasmExecution,
+        .armed_fn = wasmExecutionMeteringArmed,
+        .wake_flag = realm.executionWakeFlag(),
+    };
+    ip.invocation_allocator = realm.wasmInvocationAllocator();
 
     // Baseline-compile this instance's functions through Spasm when the
     // JIT is on (docs/jit.md §6) — the production wasm posture every
@@ -337,18 +377,26 @@ fn populateInstance(realm: *Realm, self: *JSObject, mstate: *ModuleState, import
     // JS value a wasm body stores into one survives past the call that put
     // it there (its transient pin is dropped at the outermost return).
     for (0..ip.tables.len) |i| {
-        if ((ip.tableElemType(@intCast(i)) orelse continue) == .externref)
+        if ((ip.tableElemType(@intCast(i)) orelse continue) == .externref) {
             realm.registerExternTable(ip.tableRef(@intCast(i)).?) catch return error.OutOfMemory;
+            registered_extern_tables += 1;
+        }
     }
     for (0..ip.globals.len) |i| {
         const gt = ip.globalTypeAt(@intCast(i)) orelse continue;
-        if (gt.val == .externref)
+        if (gt.val == .externref) {
             realm.registerExternGlobalCell(ip.globalCellPtr(@intCast(i)).?) catch return error.OutOfMemory;
+            registered_extern_globals += 1;
+        }
     }
 
-    wasm.runStart(ip, a) catch |err| switch (err) {
+    wasm.runStart(ip, realm.wasmInvocationAllocator()) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.HostThrew => return error.NativeThrew, // a host import threw during start
+        error.StepBudgetExhausted,
+        error.ExecutionInterrupted,
+        error.ExecutionTerminated,
+        => return throwWasmExecutionError(realm, err),
         else => return throwRuntimeError(realm, "WebAssembly.Instance: start function trapped"),
     };
 
@@ -401,7 +449,7 @@ fn wasmCompile(realm: *Realm, this_value: Value, args: []const Value) NativeErro
 }
 
 fn compileToModule(realm: *Realm, args: []const Value) NativeError!Value {
-    if (!realm.allow_wasm) return wasmDisabled(realm);
+    if (!realm.allow_wasm_compile) return wasmCompileDisabled(realm);
     const bytes = bufferSourceBytes(args) orelse
         return intrinsics.throwTypeError(realm, "WebAssembly.compile expects a BufferSource");
     return makeModuleObject(realm, bytes);
@@ -413,12 +461,18 @@ fn compileToModule(realm: *Realm, args: []const Value) NativeError!Value {
 fn wasmInstantiate(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
     const cap = try promise_mod.newPromiseCapability(realm, try promiseCtor(realm));
-    const result = instantiateToResult(realm, args) catch |err| return rejectFromError(realm, cap, err);
+    const result = instantiateToResult(realm, args) catch |err| {
+        // Host termination is not an ECMAScript abrupt completion and must
+        // not be made catchable by converting it into a rejected Promise.
+        // Preserve the termination latch and unwind through the native-call
+        // boundary exactly like synchronous `new WebAssembly.Instance`.
+        if (err == error.NativeThrew and realm.terminationReason() != null) return error.NativeThrew;
+        return rejectFromError(realm, cap, err);
+    };
     return promise_mod.capabilityResolve(realm, cap, result);
 }
 
 fn instantiateToResult(realm: *Realm, args: []const Value) NativeError!Value {
-    if (!realm.allow_wasm) return wasmDisabled(realm);
     const import_object = if (args.len > 1) args[1] else Value.undefined_;
 
     // A Module argument instantiates directly, resolving to the Instance.
@@ -433,6 +487,7 @@ fn instantiateToResult(realm: *Realm, args: []const Value) NativeError!Value {
 
     // Otherwise a BufferSource: compile then instantiate, resolving to
     // `{ module, instance }`.
+    if (!realm.allow_wasm_compile) return wasmCompileDisabled(realm);
     const bytes = bufferSourceBytes(args) orelse
         return intrinsics.throwTypeError(realm, "WebAssembly.instantiate expects a BufferSource or Module");
     const module_v = try makeModuleObject(realm, bytes);
@@ -450,9 +505,8 @@ fn instantiateToResult(realm: *Realm, args: []const Value) NativeError!Value {
 // ── WebAssembly.Global ──────────────────────────────────────────────
 
 /// `new WebAssembly.Global(descriptor, value?)` — a typed, optionally
-/// mutable global cell. Gated.
+/// mutable global cell. It constructs store state, not executable code.
 fn globalConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    if (!realm.allow_wasm) return wasmDisabled(realm);
     const self = heap_mod.valueAsPlainObject(this_value) orelse
         return intrinsics.throwTypeError(realm, "WebAssembly.Global requires 'new'");
     const desc = (if (args.len > 0) heap_mod.valueAsPlainObject(args[0]) else null) orelse
@@ -524,9 +578,8 @@ fn makeGlobal(realm: *Realm, valtype: wasm.ValType, mutable: bool, g: *wasm.Glob
 // ── WebAssembly.Table ───────────────────────────────────────────────
 
 /// `new WebAssembly.Table({element, initial, maximum?}, value?)` — a
-/// growable funcref table. Gated.
+/// growable reference table. It is independent of byte compilation policy.
 fn tableConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    if (!realm.allow_wasm) return wasmDisabled(realm);
     const self = heap_mod.valueAsPlainObject(this_value) orelse
         return intrinsics.throwTypeError(realm, "WebAssembly.Table requires 'new'");
     const desc = (if (args.len > 0) heap_mod.valueAsPlainObject(args[0]) else null) orelse
@@ -551,17 +604,35 @@ fn tableConstructor(realm: *Realm, this_value: Value, args: []const Value) Nativ
         if (m < initial) return intrinsics.throwRangeError(realm, "WebAssembly.Table: maximum is less than initial");
     }
 
-    const a = realm.wasmAllocator();
-    const elems = a.alloc(u128, initial) catch return error.OutOfMemory;
     const fill = if (args.len > 1) try tableElemFromValue(realm, is_funcref, args[1]) else wasm.REF_NULL;
+    const a = realm.wasmAllocator();
+    const store_allocator = realm.wasmStoreAllocator();
+    const elems = store_allocator.alloc(u128, initial) catch return error.OutOfMemory;
     @memset(elems, fill);
 
-    const tbl = a.create(wasm.Table) catch return error.OutOfMemory;
-    tbl.* = .{ .elems = elems, .max = max, .is_64 = false };
+    const tbl = a.create(wasm.Table) catch {
+        store_allocator.free(elems);
+        return error.OutOfMemory;
+    };
+    tbl.* = .{
+        .elems = elems,
+        .max = max,
+        .is_64 = false,
+        .backing_allocator = store_allocator,
+    };
+    var backing_registered = false;
+    errdefer if (!backing_registered) tbl.releaseBacking(store_allocator);
     const st = a.create(TableState) catch return error.OutOfMemory;
     st.* = .{ .table = tbl, .funcref = is_funcref };
     try self.setWasmTable(realm.allocator, st);
-    if (!is_funcref) realm.registerExternTable(tbl) catch return error.OutOfMemory;
+    var extern_root_registered = false;
+    errdefer if (extern_root_registered) realm.unregisterExternTable(tbl);
+    if (!is_funcref) {
+        realm.registerExternTable(tbl) catch return error.OutOfMemory;
+        extern_root_registered = true;
+    }
+    realm.registerWasmTable(tbl) catch return error.OutOfMemory;
+    backing_registered = true;
     return this_value;
 }
 
@@ -605,11 +676,13 @@ fn tableGrow(realm: *Realm, this_value: Value, args: []const Value) NativeError!
     // externref table accepts any JS value, not just a funcref.
     const fill = if (args.len > 1) try tableElemFromValue(realm, st.funcref, args[1]) else wasm.REF_NULL;
     const old_len = st.table.elems.len;
-    const new_len = old_len + delta;
+    const new_len = std.math.add(usize, old_len, delta) catch
+        return intrinsics.throwRangeError(realm, "WebAssembly.Table.grow size is too large");
     if (st.table.max) |m| {
         if (new_len > m) return intrinsics.throwRangeError(realm, "WebAssembly.Table.grow exceeds the maximum");
     }
-    const new_elems = realm.wasmAllocator().realloc(st.table.elems, new_len) catch return error.OutOfMemory;
+    const new_elems = st.table.storeAllocator(realm.wasmStoreAllocator()).realloc(st.table.elems, new_len) catch
+        return error.OutOfMemory;
     @memset(new_elems[old_len..], fill);
     st.table.elems = new_elems;
     return Value.fromInt32(@intCast(old_len));
@@ -661,10 +734,9 @@ fn makeTable(realm: *Realm, table: *wasm.Table, funcref: bool) NativeError!Value
 // ── WebAssembly.Memory ──────────────────────────────────────────────
 
 /// `new WebAssembly.Memory({initial, maximum?})` — a page-granular
-/// linear memory. Gated. The bytes live in the realm's wasm arena;
+/// linear memory. The bytes use the Realm's immediate-free metered allocator;
 /// `buffer` exposes a non-owning ArrayBuffer view over them.
 fn memoryConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    if (!realm.allow_wasm) return wasmDisabled(realm);
     const self = heap_mod.valueAsPlainObject(this_value) orelse
         return intrinsics.throwTypeError(realm, "WebAssembly.Memory requires 'new'");
     const desc = (if (args.len > 0) heap_mod.valueAsPlainObject(args[0]) else null) orelse
@@ -687,14 +759,36 @@ fn memoryConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
     if (shared and max == null)
         return intrinsics.throwTypeError(realm, "WebAssembly.Memory: a shared memory requires a maximum");
 
+    const byte_len = std.math.mul(usize, initial, wasm.PAGE_SIZE) catch
+        return intrinsics.throwRangeError(realm, "WebAssembly.Memory size is too large");
+    if (byte_len > realm.heap.max_bytes -| realm.heap.bytes_live)
+        return intrinsics.throwRangeError(realm, "WebAssembly.Memory exceeds the Realm memory limit");
     const a = realm.wasmAllocator();
-    const bytes = a.alloc(u8, initial * wasm.PAGE_SIZE) catch return error.OutOfMemory;
+    const store_allocator = realm.wasmStoreAllocator();
+    // SharedArrayBuffer views are non-detachable and may be observed from
+    // another agent. Keep their provisional backing arena-retained until the
+    // Wasm shared-memory path uses SharedDataBlock in-place growth.
+    const backing_allocator = if (shared) a else store_allocator;
+    const bytes = backing_allocator.alloc(u8, byte_len) catch return error.OutOfMemory;
     @memset(bytes, 0);
-    const mem = a.create(wasm.Memory) catch return error.OutOfMemory;
-    mem.* = .{ .data = bytes, .max_pages = max, .is_64 = false };
+    const mem = a.create(wasm.Memory) catch {
+        backing_allocator.free(bytes);
+        return error.OutOfMemory;
+    };
+    mem.* = .{
+        .data = bytes,
+        .max_pages = max,
+        .is_64 = false,
+        .is_shared = shared,
+        .backing_allocator = backing_allocator,
+    };
+    var backing_registered = false;
+    errdefer if (!backing_registered) mem.releaseBacking(backing_allocator);
     const st = a.create(MemoryState) catch return error.OutOfMemory;
     st.* = .{ .mem = mem, .buffer = null, .shared = shared };
     try self.setWasmMemory(realm.allocator, st);
+    realm.registerWasmMemory(mem) catch return error.OutOfMemory;
+    backing_registered = true;
     return this_value;
 }
 
@@ -711,7 +805,10 @@ fn memoryStateOf(realm: *Realm, this_value: Value) NativeError!*MemoryState {
 fn memoryBufferGet(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const st = try memoryStateOf(realm, this_value);
-    if (st.buffer) |b| return heap_mod.taggedObject(b);
+    if (st.buffer) |buffer| {
+        if (buffer.getArrayBuffer() != null) return heap_mod.taggedObject(buffer);
+        st.buffer = null;
+    }
     const buf = realm.heap.allocateObject() catch return error.OutOfMemory;
     // A shared memory's buffer is a SharedArrayBuffer (JS-API §Memory):
     // the SAB prototype plus the `array_buffer_shared` flag, over the
@@ -724,6 +821,10 @@ fn memoryBufferGet(realm: *Realm, this_value: Value, args: []const Value) Native
     buf.setExternalArrayBuffer(realm.allocator, st.mem.data) catch return error.OutOfMemory;
     buf.brand.has_array_buffer_data = true;
     if (st.shared) buf.brand.array_buffer_shared = true;
+    st.mem.registerHostView(realm.wasmStoreAllocator(), .{
+        .object = buf,
+        .detach_fn = detachMemoryHostView,
+    }) catch return error.OutOfMemory;
     st.buffer = buf;
     return heap_mod.taggedObject(buf);
 }
@@ -734,19 +835,23 @@ fn memoryGrow(realm: *Realm, this_value: Value, args: []const Value) NativeError
     const st = try memoryStateOf(realm, this_value);
     const delta = try indexArg(realm, if (args.len > 0) args[0] else Value.undefined_);
     const old_pages = st.mem.data.len / wasm.PAGE_SIZE;
-    const new_pages = old_pages + delta;
+    const new_pages = std.math.add(usize, old_pages, delta) catch
+        return intrinsics.throwRangeError(realm, "WebAssembly.Memory.grow size is too large");
     if (st.mem.max_pages) |m| {
         if (new_pages > m) return intrinsics.throwRangeError(realm, "WebAssembly.Memory.grow exceeds the maximum");
     }
-    const a = realm.wasmAllocator();
-    const new_bytes = a.alloc(u8, new_pages * wasm.PAGE_SIZE) catch return error.OutOfMemory;
-    @memset(new_bytes, 0);
-    @memcpy(new_bytes[0..st.mem.data.len], st.mem.data);
-    // DetachArrayBuffer (§25.1.3.4) on the prior buffer, if materialized.
-    if (st.buffer) |b| {
-        b.setArrayBuffer(realm.allocator, null) catch {};
-        st.buffer = null;
-    }
+    const byte_len = std.math.mul(usize, new_pages, wasm.PAGE_SIZE) catch
+        return intrinsics.throwRangeError(realm, "WebAssembly.Memory.grow size is too large");
+    const growth_bytes = byte_len - st.mem.data.len;
+    if (growth_bytes > realm.heap.max_bytes -| realm.heap.bytes_live)
+        return intrinsics.throwRangeError(realm, "WebAssembly.Memory.grow exceeds the Realm memory limit");
+    const old_len = st.mem.data.len;
+    const new_bytes = st.mem.storeAllocator(realm.wasmStoreAllocator()).realloc(st.mem.data, byte_len) catch
+        return error.OutOfMemory;
+    @memset(new_bytes[old_len..], 0);
+    // DetachArrayBuffer (§25.1.3.4) on every materialized non-shared view,
+    // including wrappers created for imports/exports of this Memory record.
+    st.mem.detachHostViewsAfterGrow();
     st.mem.data = new_bytes;
     return Value.fromInt32(@intCast(old_pages));
 }
@@ -756,7 +861,7 @@ fn makeMemory(realm: *Realm, mem: *wasm.Memory) NativeError!Value {
     const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
     realm.heap.setObjectPrototype(obj, realm.wasm_memory_prototype);
     const st = realm.wasmAllocator().create(MemoryState) catch return error.OutOfMemory;
-    st.* = .{ .mem = mem, .buffer = null };
+    st.* = .{ .mem = mem, .buffer = null, .shared = mem.is_shared };
     try obj.setWasmMemory(realm.allocator, st);
     return heap_mod.taggedObject(obj);
 }
@@ -798,6 +903,21 @@ fn jsHostTrampoline(ctx: ?*anyopaque, args: []const u128, results: []u128) wasm.
         },
     };
     if (c.results.len == 1) results[0] = marshalArg(realm, c.results[0], ret) catch return error.HostThrew;
+}
+
+fn pollWasmExecution(ctx: *anyopaque) wasm.ExecutionPoll {
+    const realm: *Realm = @ptrCast(@alignCast(ctx));
+    return switch (realm.pollExecution()) {
+        .proceed => .proceed,
+        .step_budget_exhausted => .step_budget_exhausted,
+        .cooperative_interrupted => .cooperative_interrupted,
+        .terminated => .terminated,
+    };
+}
+
+fn wasmExecutionMeteringArmed(ctx: *anyopaque) bool {
+    const realm: *Realm = @ptrCast(@alignCast(ctx));
+    return realm.executionMeteringArmed();
 }
 
 /// Build the engine `Imports` from a module's import list and a JS
@@ -1011,10 +1131,15 @@ fn exportTrampoline(realm: *Realm, this_value: Value, args: []const Value) Nativ
         argbuf[i] = try marshalArg(realm, pt, v);
     }
 
-    const results = wasm.invoke(rec.instance, realm.allocator, rec.func_index, argbuf[0..ft.params.len]) catch |err| switch (err) {
+    const invoke_allocator = realm.wasmInvocationAllocator();
+    const results = wasm.invoke(rec.instance, invoke_allocator, rec.func_index, argbuf[0..ft.params.len]) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         // A JS-backed host import threw — re-raise its pending exception.
         error.HostThrew => return error.NativeThrew,
+        error.StepBudgetExhausted,
+        error.ExecutionInterrupted,
+        error.ExecutionTerminated,
+        => return throwWasmExecutionError(realm, err),
         // An uncaught exception surfaces to JS. One that entered wasm as a
         // JS throw is re-raised as its original value (identity preserved);
         // a pure wasm throw is reified as a WebAssembly.Exception.
@@ -1032,7 +1157,7 @@ fn exportTrampoline(realm: *Realm, this_value: Value, args: []const Value) Nativ
         error.NullExnRef => return throwRuntimeError(realm, "WebAssembly: throw_ref of a null exnref"),
         else => return throwRuntimeError(realm, "WebAssembly exported function trapped"),
     };
-    defer realm.allocator.free(results);
+    defer invoke_allocator.free(results);
 
     if (ft.results.len == 0) return Value.undefined_;
     if (ft.results.len == 1) return try marshalResult(realm, ft.results[0], results[0]);
@@ -1144,9 +1269,19 @@ fn marshalResult(realm: *Realm, vt: wasm.ValType, cell: u128) NativeError!Value 
     }
 }
 
-/// The `--allow=wasm` host refusal (HostEnsureCanCompileWasmBytes).
-fn wasmDisabled(realm: *Realm) NativeError {
-    return intrinsics.throwEvalError(realm, "WebAssembly is not enabled; pass --allow=wasm to enable");
+/// HostEnsureCanCompileWasmBytes refusal. CSP uses CompileError for this
+/// hook; the object model and predecoded modules remain available.
+fn wasmCompileDisabled(realm: *Realm) NativeError {
+    return throwCompileError(realm, "WebAssembly byte compilation is disabled by host policy");
+}
+
+fn throwWasmExecutionError(realm: *Realm, err: anyerror) NativeError {
+    return switch (err) {
+        error.StepBudgetExhausted => intrinsics.throwRangeError(realm, "interpreter step budget exhausted"),
+        error.ExecutionInterrupted => intrinsics.throwRangeError(realm, "execution interrupted"),
+        error.ExecutionTerminated => intrinsics.throwRangeError(realm, realm.terminationMessage()),
+        else => unreachable,
+    };
 }
 
 // ── WebAssembly.Tag / WebAssembly.Exception ────────────────────────
@@ -1194,7 +1329,6 @@ fn makeTagForInstance(realm: *Realm, ip: *wasm.Instance, tag_idx: u32) NativeErr
 }
 
 fn tagConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    if (!realm.allow_wasm) return wasmDisabled(realm);
     const self = heap_mod.valueAsPlainObject(this_value) orelse
         return intrinsics.throwTypeError(realm, "WebAssembly.Tag requires 'new'");
     const desc = (if (args.len > 0) heap_mod.valueAsPlainObject(args[0]) else null) orelse
@@ -1240,6 +1374,11 @@ fn makeExceptionFromRecord(realm: *Realm, rec: *const wasm.ExnRecord) NativeErro
 /// value is rooted so a bound exnref or a re-raise keeps it alive.
 fn convertHostException(ctx: *anyopaque, owner: *wasm.Instance) ?*wasm.ExnRecord {
     const realm: *Realm = @ptrCast(@alignCast(ctx));
+    // Host termination is not a JavaScript exception and must never be
+    // captured by a Wasm `catch_all`. Leave the pending synthetic value
+    // intact for the JS boundary; Lantern's termination latch then skips
+    // every JS catch/finally handler too.
+    if (realm.terminationReason() != null) return null;
     const ex = realm.pending_exception orelse return null;
     realm.pending_exception = null;
     const js_bits: u128 = ex.bits;
@@ -1252,7 +1391,6 @@ fn convertHostException(ctx: *anyopaque, owner: *wasm.Instance) ?*wasm.ExnRecord
 }
 
 fn exceptionConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    if (!realm.allow_wasm) return wasmDisabled(realm);
     const self = heap_mod.valueAsPlainObject(this_value) orelse
         return intrinsics.throwTypeError(realm, "WebAssembly.Exception requires 'new'");
     const tt = tagTypeOf(if (args.len > 0) args[0] else Value.undefined_) orelse
@@ -1467,11 +1605,22 @@ fn wasmModuleCustomSections(realm: *Realm, this_value: Value, args: []const Valu
         if (!std.mem.eql(u8, cs.name, want)) continue;
         const buf_obj = realm.heap.allocateObject() catch return error.OutOfMemory;
         realm.heap.setObjectPrototype(buf_obj, realm.intrinsics.array_buffer_prototype);
+        const buf_scope = realm.heap.openScope() catch return error.OutOfMemory;
+        defer buf_scope.close();
+        buf_scope.push(heap_mod.taggedObject(buf_obj)) catch return error.OutOfMemory;
         // A fresh, engine-owned copy of the payload (the §ArrayBuffer is
         // mutable and outlives the borrowed wasm-arena slice).
-        const copy = realm.allocator.alloc(u8, cs.bytes.len) catch return error.OutOfMemory;
+        realm.heap.charge(cs.bytes.len) catch return error.OutOfMemory;
+        const copy = realm.allocator.alloc(u8, cs.bytes.len) catch {
+            realm.heap.discharge(cs.bytes.len);
+            return error.OutOfMemory;
+        };
         @memcpy(copy, cs.bytes);
-        buf_obj.setArrayBuffer(realm.allocator, copy) catch return error.OutOfMemory;
+        buf_obj.setArrayBuffer(realm.allocator, copy) catch {
+            realm.allocator.free(copy);
+            realm.heap.discharge(cs.bytes.len);
+            return error.OutOfMemory;
+        };
         buf_obj.brand.has_array_buffer_data = true;
         try arraySetElem(realm, arr, n, heap_mod.taggedObject(buf_obj));
         n += 1;
@@ -1496,6 +1645,44 @@ fn bufferSourceBytes(args: []const Value) ?[]const u8 {
 }
 
 // ── tests ───────────────────────────────────────────────────────────
+
+const RealmInterruptWorker = struct {
+    realm: *Realm,
+    function: *JSFunction,
+    status: std.atomic.Value(u8) = std.atomic.Value(u8).init(0),
+
+    fn run(self: *RealmInterruptWorker) void {
+        const outcome = call.callJSFunction(
+            self.realm.allocator,
+            self.realm,
+            self.function,
+            Value.undefined_,
+            &.{},
+        ) catch {
+            self.status.store(3, .release);
+            return;
+        };
+        self.status.store(switch (outcome) {
+            .thrown => 1,
+            .value, .yielded => 2,
+        }, .release);
+    }
+};
+
+const RealmInterruptBarrier = struct {
+    enabled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    entered: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    released: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+    fn invoke(ctx: ?*anyopaque, args: []const u128, results: []u128) wasm.TrapError!void {
+        _ = args;
+        _ = results;
+        const self: *RealmInterruptBarrier = @ptrCast(@alignCast(ctx orelse return));
+        if (!self.enabled.load(.acquire)) return;
+        self.entered.store(true, .release);
+        while (!self.released.load(.acquire)) std.atomic.spinLoopHint();
+    }
+};
 
 test "WebAssembly JS API: a jit-enabled realm runs instance exports through Spasm" {
     const testing = std.testing;
@@ -1529,7 +1716,7 @@ test "WebAssembly JS API: a jit-enabled realm runs instance exports through Spas
 
     var realm = Realm.init(testing.allocator);
     defer realm.deinit();
-    realm.allow_wasm = true;
+    realm.allow_wasm_compile = true;
     realm.jit_enabled = true; // the production default; Spasm should engage
     try realm.installBuiltins();
 
@@ -1545,4 +1732,602 @@ test "WebAssembly JS API: a jit-enabled realm runs instance exports through Spas
     // actually ran Spasm-compiled native code (not the interpreter).
     try testing.expect(rec.instance.spasm_enabled);
     try testing.expect(rec.instance.spasm_runs >= 1);
+    try testing.expectEqual(@as(usize, 1), realm.wasm_instances.items.len);
+
+    // Realm teardown uses the same idempotent release operation before its
+    // arena invalidates the instance pointer.
+    try testing.expect(rec.instance.spasm_cache != null);
+    const live_before_release = realm.heap.bytes_live;
+    rec.instance.releaseExecutableCode();
+    try testing.expect(rec.instance.spasm_cache == null);
+    try testing.expectEqual(live_before_release - 64 * 1024, realm.heap.bytes_live);
+}
+
+test "WebAssembly JS API: growable store backings charge only their live size" {
+    const testing = std.testing;
+    const lantern = @import("../lantern/interpreter.zig");
+
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.allow_wasm_compile = true;
+    try realm.installBuiltins();
+
+    const memory_result = try lantern.evaluateScript(
+        testing.allocator,
+        &realm,
+        "new WebAssembly.Memory({initial:1,maximum:3})",
+    );
+    const memory_value = switch (memory_result) {
+        .value => |v| v,
+        else => return error.TestUnexpectedResult,
+    };
+    const memory_live = realm.heap.bytes_live;
+    _ = try memoryGrow(&realm, memory_value, &.{Value.fromInt32(1)});
+    try testing.expectEqual(memory_live + wasm.PAGE_SIZE, realm.heap.bytes_live);
+    const memory_after_growth = realm.heap.bytes_live;
+    _ = try memoryGrow(&realm, memory_value, &.{Value.fromInt32(0)});
+    try testing.expectEqual(memory_after_growth, realm.heap.bytes_live);
+
+    const table_result = try lantern.evaluateScript(
+        testing.allocator,
+        &realm,
+        "new WebAssembly.Table({element:'anyfunc',initial:2,maximum:10})",
+    );
+    const table_value = switch (table_result) {
+        .value => |v| v,
+        else => return error.TestUnexpectedResult,
+    };
+    const table_live = realm.heap.bytes_live;
+    _ = try tableGrow(&realm, table_value, &.{Value.fromInt32(3)});
+    try testing.expectEqual(table_live + 3 * @sizeOf(u128), realm.heap.bytes_live);
+    const table_after_growth = realm.heap.bytes_live;
+    _ = try tableGrow(&realm, table_value, &.{Value.fromInt32(0)});
+    try testing.expectEqual(table_after_growth, realm.heap.bytes_live);
+}
+
+test "WebAssembly.Memory keeps its cached buffer alive across GC" {
+    const testing = std.testing;
+    const lantern = @import("../lantern/interpreter.zig");
+
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try realm.installBuiltins();
+
+    const evaluated = try lantern.evaluateScript(
+        testing.allocator,
+        &realm,
+        "const rootedMemory=new WebAssembly.Memory({initial:1});({memory:rootedMemory,ref:new WeakRef(rootedMemory.buffer)});",
+    );
+    const container_value = switch (evaluated) {
+        .value => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    const scope = try realm.heap.openScope();
+    defer scope.close();
+    try scope.push(container_value);
+    const container = heap_mod.valueAsPlainObject(container_value) orelse return error.TestUnexpectedResult;
+    const memory_value = container.get("memory");
+    const weak = heap_mod.valueAsPlainObject(container.get("ref")) orelse return error.TestUnexpectedResult;
+
+    realm.clearKeptObjects();
+    realm.collectGarbage();
+    const target = weak.getWeakRefTarget();
+    try testing.expect(!target.isUndefined());
+    const cached = try memoryBufferGet(&realm, memory_value, &.{});
+    try testing.expectEqual(target.bits, cached.bits);
+}
+
+test "WebAssembly.Memory host views outlive an importing child Realm" {
+    const testing = std.testing;
+    const lantern = @import("../lantern/interpreter.zig");
+
+    // (module (import "m" "mem" (memory 1)) (export "mem" (memory 0)))
+    const mod_bytes = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+        0x02, 0x0a, 0x01, 0x01, 'm',  0x03, 'm',  'e',
+        'm',  0x02, 0x00, 0x01, 0x07, 0x07, 0x01, 0x03,
+        'm',  'e',  'm',  0x02, 0x00,
+    };
+
+    var parent = Realm.init(testing.allocator);
+    defer parent.deinit();
+    try parent.installBuiltins();
+
+    const child = try parent.allocator.create(Realm);
+    child.* = Realm.initChild(&parent);
+    var child_live = true;
+    defer if (child_live) {
+        child.deinit();
+        parent.allocator.destroy(child);
+    };
+    child.allow_wasm_compile = true;
+    try child.installBuiltins();
+
+    const scope = try parent.heap.openScope();
+    defer scope.close();
+    const memory_result = try lantern.evaluateScript(
+        testing.allocator,
+        &parent,
+        "new WebAssembly.Memory({initial:1,maximum:2})",
+    );
+    const parent_memory = switch (memory_result) {
+        .value => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try scope.push(parent_memory);
+
+    const namespace = parent.heap.allocateObject() catch return error.OutOfMemory;
+    try scope.push(heap_mod.taggedObject(namespace));
+    try namespace.set(parent.allocator, "mem", parent_memory);
+    const imports = parent.heap.allocateObject() catch return error.OutOfMemory;
+    try scope.push(heap_mod.taggedObject(imports));
+    try imports.set(parent.allocator, "m", heap_mod.taggedObject(namespace));
+
+    const module_value = try makeModuleObject(child, &mod_bytes);
+    try scope.push(module_value);
+    const module_object = heap_mod.valueAsPlainObject(module_value) orelse return error.TestUnexpectedResult;
+    const module_state: *ModuleState = @ptrCast(@alignCast(module_object.getWasmModule() orelse return error.TestUnexpectedResult));
+    const instance_value = try makeInstanceObject(child, module_state, heap_mod.taggedObject(imports));
+    try scope.push(instance_value);
+    const instance_object = heap_mod.valueAsPlainObject(instance_value) orelse return error.TestUnexpectedResult;
+    const exports = heap_mod.valueAsPlainObject(instance_object.get("exports")) orelse return error.TestUnexpectedResult;
+    const child_memory = exports.get("mem");
+    const child_buffer = try memoryBufferGet(child, child_memory, &.{});
+    try scope.push(child_buffer);
+    const buffer_object = heap_mod.valueAsPlainObject(child_buffer) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, wasm.PAGE_SIZE), buffer_object.getArrayBuffer().?.len);
+
+    // The provider Memory keeps only the rooted buffer pointer, never a
+    // callback context into the importing Realm's arena. Growing after child
+    // teardown therefore detaches safely instead of touching freed metadata.
+    child.deinit();
+    parent.allocator.destroy(child);
+    child_live = false;
+    _ = try memoryGrow(&parent, parent_memory, &.{Value.fromInt32(1)});
+    try testing.expect(buffer_object.getArrayBuffer() == null);
+}
+
+fn testRealmBackedMemoryGrow(jit_enabled: bool) !void {
+    const testing = std.testing;
+
+    // (module (memory (export "m") 1 3)
+    //         (func (export "gr") (param i32) (result i32)
+    //           local.get 0 memory.grow))
+    const mod_bytes = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+        0x01, 0x06, 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f,
+        0x03, 0x02, 0x01, 0x00, 0x05, 0x04, 0x01, 0x01,
+        0x01, 0x03, 0x07, 0x0a, 0x02, 0x01, 'm',  0x02,
+        0x00, 0x02, 'g',  'r',  0x00, 0x00, 0x0a, 0x08,
+        0x01, 0x06, 0x00, 0x20, 0x00, 0x40, 0x00, 0x0b,
+    };
+
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.allow_wasm_compile = true;
+    realm.jit_enabled = jit_enabled;
+    try realm.installBuiltins();
+
+    const scope = try realm.heap.openScope();
+    defer scope.close();
+    const module_value = try makeModuleObject(&realm, &mod_bytes);
+    try scope.push(module_value);
+    const module_object = heap_mod.valueAsPlainObject(module_value) orelse return error.TestUnexpectedResult;
+    const module_state: *ModuleState = @ptrCast(@alignCast(module_object.getWasmModule() orelse return error.TestUnexpectedResult));
+    const instance_value = try makeInstanceObject(&realm, module_state, Value.undefined_);
+    try scope.push(instance_value);
+    const instance_object = heap_mod.valueAsPlainObject(instance_value) orelse return error.TestUnexpectedResult;
+    const exports = heap_mod.valueAsPlainObject(instance_object.get("exports")) orelse return error.TestUnexpectedResult;
+    const memory_value = exports.get("m");
+    const grow_function = heap_mod.valueAsFunction(exports.get("gr")) orelse return error.TestUnexpectedResult;
+    const record: *ExportRecord = @ptrCast(@alignCast(grow_function.wasm_export orelse return error.TestUnexpectedResult));
+
+    // Compile the JIT posture before taking the quota baseline. A zero grow
+    // leaves the live backing size unchanged and avoids mixing code-page
+    // reservation into the storage assertion below.
+    const warm = try call.callJSFunction(realm.allocator, &realm, grow_function, Value.undefined_, &.{Value.fromInt32(0)});
+    switch (warm) {
+        .value => |value| try testing.expectEqual(@as(i32, 1), value.asInt32()),
+        else => return error.TestUnexpectedResult,
+    }
+    if (jit_enabled and comptime @import("../wasm/spasm.zig").supported)
+        try testing.expect(record.instance.spasm_runs >= 1);
+    if (!jit_enabled) {
+        try testing.expect(!record.instance.spasm_enabled);
+        try testing.expectEqual(@as(u32, 0), record.instance.spasm_runs);
+    }
+
+    const old_buffer_value = try memoryBufferGet(&realm, memory_value, &.{});
+    try scope.push(old_buffer_value);
+    const old_buffer = heap_mod.valueAsPlainObject(old_buffer_value) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, wasm.PAGE_SIZE), old_buffer.getArrayBuffer().?.len);
+
+    const live_before_grow = realm.heap.bytes_live;
+    const runs_before_grow = record.instance.spasm_runs;
+    const outcome = try call.callJSFunction(realm.allocator, &realm, grow_function, Value.undefined_, &.{Value.fromInt32(1)});
+    switch (outcome) {
+        .value => |value| try testing.expectEqual(@as(i32, 1), value.asInt32()),
+        else => return error.TestUnexpectedResult,
+    }
+    try testing.expectEqual(live_before_grow + wasm.PAGE_SIZE, realm.heap.bytes_live);
+    if (jit_enabled and comptime @import("../wasm/spasm.zig").supported)
+        try testing.expect(record.instance.spasm_runs > runs_before_grow);
+    if (!jit_enabled) try testing.expectEqual(@as(u32, 0), record.instance.spasm_runs);
+    try testing.expect(old_buffer.getArrayBuffer() == null);
+    const new_buffer_value = try memoryBufferGet(&realm, memory_value, &.{});
+    try testing.expect(new_buffer_value.bits != old_buffer_value.bits);
+    const new_buffer = heap_mod.valueAsPlainObject(new_buffer_value) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 2 * wasm.PAGE_SIZE), new_buffer.getArrayBuffer().?.len);
+}
+
+test "WebAssembly-side memory.grow uses the Realm store allocator in the interpreter" {
+    try testRealmBackedMemoryGrow(false);
+}
+
+test "WebAssembly-side memory.grow uses the Realm store allocator with JIT enabled" {
+    try testRealmBackedMemoryGrow(true);
+}
+
+fn testRealmBackedTableGrow(jit_enabled: bool) !void {
+    const testing = std.testing;
+
+    // (module (table (export "t") 2 10 funcref)
+    //         (func (export "gr") (param i32) (result i32)
+    //           ref.null func local.get 0 table.grow 0))
+    const mod_bytes = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+        0x01, 0x06, 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f,
+        0x03, 0x02, 0x01, 0x00, 0x04, 0x05, 0x01, 0x70,
+        0x01, 0x02, 0x0a, 0x07, 0x0a, 0x02, 0x01, 't',
+        0x01, 0x00, 0x02, 'g',  'r',  0x00, 0x00, 0x0a,
+        0x0b, 0x01, 0x09, 0x00, 0xd0, 0x70, 0x20, 0x00,
+        0xfc, 0x0f, 0x00, 0x0b,
+    };
+
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.allow_wasm_compile = true;
+    realm.jit_enabled = jit_enabled;
+    try realm.installBuiltins();
+
+    const scope = try realm.heap.openScope();
+    defer scope.close();
+    const module_value = try makeModuleObject(&realm, &mod_bytes);
+    try scope.push(module_value);
+    const module_object = heap_mod.valueAsPlainObject(module_value) orelse return error.TestUnexpectedResult;
+    const module_state: *ModuleState = @ptrCast(@alignCast(module_object.getWasmModule() orelse return error.TestUnexpectedResult));
+    const instance_value = try makeInstanceObject(&realm, module_state, Value.undefined_);
+    try scope.push(instance_value);
+    const instance_object = heap_mod.valueAsPlainObject(instance_value) orelse return error.TestUnexpectedResult;
+    const exports = heap_mod.valueAsPlainObject(instance_object.get("exports")) orelse return error.TestUnexpectedResult;
+    try testing.expect(!exports.get("t").isUndefined());
+    const grow_function = heap_mod.valueAsFunction(exports.get("gr")) orelse return error.TestUnexpectedResult;
+    const record: *ExportRecord = @ptrCast(@alignCast(grow_function.wasm_export orelse return error.TestUnexpectedResult));
+
+    const warm = try call.callJSFunction(realm.allocator, &realm, grow_function, Value.undefined_, &.{Value.fromInt32(0)});
+    switch (warm) {
+        .value => |value| try testing.expectEqual(@as(i32, 2), value.asInt32()),
+        else => return error.TestUnexpectedResult,
+    }
+    if (jit_enabled and comptime @import("../wasm/spasm.zig").supported)
+        try testing.expect(record.instance.spasm_runs >= 1);
+    if (!jit_enabled) {
+        try testing.expect(!record.instance.spasm_enabled);
+        try testing.expectEqual(@as(u32, 0), record.instance.spasm_runs);
+    }
+
+    const live_before_grow = realm.heap.bytes_live;
+    const runs_before_grow = record.instance.spasm_runs;
+    const outcome = try call.callJSFunction(realm.allocator, &realm, grow_function, Value.undefined_, &.{Value.fromInt32(3)});
+    switch (outcome) {
+        .value => |value| try testing.expectEqual(@as(i32, 2), value.asInt32()),
+        else => return error.TestUnexpectedResult,
+    }
+    try testing.expectEqual(live_before_grow + 3 * @sizeOf(u128), realm.heap.bytes_live);
+    try testing.expectEqual(@as(usize, 5), record.instance.tables[0].elems.len);
+    if (jit_enabled and comptime @import("../wasm/spasm.zig").supported)
+        try testing.expect(record.instance.spasm_runs > runs_before_grow);
+    if (!jit_enabled) try testing.expectEqual(@as(u32, 0), record.instance.spasm_runs);
+}
+
+test "WebAssembly-side table.grow uses the Realm store allocator in the interpreter" {
+    try testRealmBackedTableGrow(false);
+}
+
+test "WebAssembly-side table.grow uses the Realm store allocator with JIT enabled" {
+    try testRealmBackedTableGrow(true);
+}
+
+test "WebAssembly.Instance rolls back a trapping start transaction" {
+    const testing = std.testing;
+    const lantern = @import("../lantern/interpreter.zig");
+    const spasm = @import("../wasm/spasm.zig");
+
+    // Outer: import host.spawn, call it from start, then trap on i32.div_s.
+    // The large memory makes retained store backing unambiguous; its
+    // externref table/global exercise transactional root rollback.
+    const outer_bytes = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+        0x01, 0x04, 0x01, 0x60, 0x00, 0x00, 0x02, 0x0e,
+        0x01, 0x04, 'h',  'o',  's',  't',  0x05, 's',
+        'p',  'a',  'w',  'n',  0x00, 0x00, 0x03, 0x02,
+        0x01, 0x00, 0x04, 0x04, 0x01, 0x6f, 0x00, 0x02,
+        0x05, 0x03, 0x01, 0x00, 0x10, 0x06, 0x06, 0x01,
+        0x6f, 0x00, 0xd0, 0x6f, 0x0b, 0x08, 0x01, 0x01,
+        0x0a, 0x0c, 0x01, 0x0a, 0x00, 0x10, 0x00, 0x41,
+        0x01, 0x41, 0x00, 0x6d, 0x1a, 0x0b,
+    };
+    // Nested: one unique externref table and global, no functions. The host
+    // callback instantiates this synchronously while the outer start runs.
+    const nested_bytes = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+        0x04, 0x04, 0x01, 0x6f, 0x00, 0x01, 0x06, 0x06,
+        0x01, 0x6f, 0x00, 0xd0, 0x6f, 0x0b,
+    };
+
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.allow_wasm_compile = true;
+    realm.jit_enabled = true;
+    try realm.installBuiltins();
+
+    const scope = try realm.heap.openScope();
+    defer scope.close();
+    const nested_module = try makeModuleObject(&realm, &nested_bytes);
+    try scope.push(nested_module);
+    try realm.globals.put(realm.allocator, "nestedModuleForStart", nested_module);
+    const imports_result = try lantern.evaluateScript(
+        testing.allocator,
+        &realm,
+        "({host:{spawn:function(){new WebAssembly.Instance(nestedModuleForStart);}}})",
+    );
+    const imports_value = switch (imports_result) {
+        .value => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try scope.push(imports_value);
+
+    const outer_module = try makeModuleObject(&realm, &outer_bytes);
+    try scope.push(outer_module);
+    const outer_object = heap_mod.valueAsPlainObject(outer_module) orelse return error.TestUnexpectedResult;
+    const outer_state: *ModuleState = @ptrCast(@alignCast(outer_object.getWasmModule() orelse return error.TestUnexpectedResult));
+
+    var expected_instances = realm.wasm_instances.items.len;
+    var expected_table_roots = realm.wasm_extern_tables.items.len;
+    var expected_global_roots = realm.wasm_extern_global_cells.items.len;
+    const code_live_baseline = realm.wasm_code_bytes_live;
+    var expected_reservations = realm.wasm_code_reservations_total;
+    var live_before_attempt = realm.heap.bytes_live;
+    for (0..3) |_| {
+        try testing.expectError(
+            error.NativeThrew,
+            makeInstanceObject(&realm, outer_state, imports_value),
+        );
+        realm.pending_exception = null;
+        realm.collectGarbage();
+
+        expected_instances += 1;
+        expected_table_roots += 1;
+        expected_global_roots += 1;
+        try testing.expectEqual(expected_instances, realm.wasm_instances.items.len);
+        try testing.expectEqual(expected_table_roots, realm.wasm_extern_tables.items.len);
+        try testing.expectEqual(expected_global_roots, realm.wasm_extern_global_cells.items.len);
+        // The nested instance remains registered; the exact outer code
+        // reservation and every outer root/backing return to baseline.
+        try testing.expectEqual(code_live_baseline, realm.wasm_code_bytes_live);
+        if (comptime spasm.supported) {
+            expected_reservations += 1;
+            try testing.expectEqual(expected_reservations, realm.wasm_code_reservations_total);
+        }
+        const retained = realm.heap.bytes_live -| live_before_attempt;
+        try testing.expect(retained < 16 * wasm.PAGE_SIZE);
+        live_before_attempt = realm.heap.bytes_live;
+    }
+}
+
+test "WebAssembly JS API: a fuel-metered loop remains in Spasm" {
+    const testing = std.testing;
+    const lantern = @import("../lantern/interpreter.zig");
+    const spasm = @import("../wasm/spasm.zig");
+    if (comptime !spasm.supported) return error.SkipZigTest;
+
+    // `(func (export "spin") (loop br 0))` -- the backedge must enter
+    // Spasm's execution poll and propagate Realm fuel termination.
+    const mod_bytes = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+        0x01, 0x04, 0x01, 0x60, 0x00, 0x00, 0x03, 0x02,
+        0x01, 0x00, 0x07, 0x08, 0x01, 0x04, 0x73, 0x70,
+        0x69, 0x6e, 0x00, 0x00, 0x0a, 0x09, 0x01, 0x07,
+        0x00, 0x03, 0x40, 0x0c, 0x00, 0x0b, 0x0b,
+    };
+
+    var src: std.ArrayListUnmanaged(u8) = .empty;
+    defer src.deinit(testing.allocator);
+    try src.appendSlice(testing.allocator, "const meteredInstance=new WebAssembly.Instance(new WebAssembly.Module(new Uint8Array([");
+    for (mod_bytes, 0..) |b, idx| {
+        if (idx != 0) try src.append(testing.allocator, ',');
+        var tmp: [3]u8 = undefined;
+        try src.appendSlice(testing.allocator, std.fmt.bufPrint(&tmp, "{d}", .{b}) catch unreachable);
+    }
+    try src.appendSlice(testing.allocator, "])));meteredInstance.exports.spin;");
+
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.allow_wasm_compile = true;
+    realm.jit_enabled = true;
+    try realm.installBuiltins();
+
+    const fn_result = try lantern.evaluateScript(testing.allocator, &realm, src.items);
+    const fn_val = switch (fn_result) {
+        .value => |v| v,
+        else => return error.TestUnexpectedResult,
+    };
+    const fn_obj = heap_mod.valueAsFunction(fn_val) orelse return error.TestUnexpectedResult;
+    const rec: *ExportRecord = @ptrCast(@alignCast(fn_obj.wasm_export orelse return error.TestUnexpectedResult));
+    const runs_before = rec.instance.spasm_runs;
+
+    realm.setFuel(4);
+    const outcome = try lantern.evaluateScript(testing.allocator, &realm, "meteredInstance.exports.spin()");
+    switch (outcome) {
+        .thrown => {},
+        else => return error.TestUnexpectedResult,
+    }
+    try testing.expectEqual(@as(?Realm.TerminationReason, .fuel_exhausted), realm.terminationReason());
+    try testing.expect(rec.instance.spasm_runs > runs_before);
+}
+
+test "WebAssembly JS API: Realm.requestInterrupt wakes Spasm after native entry" {
+    const testing = std.testing;
+    const lantern = @import("../lantern/interpreter.zig");
+    const spasm = @import("../wasm/spasm.zig");
+    if (comptime !spasm.supported) return error.SkipZigTest;
+
+    // import host.barrier : () -> (); export run : () -> i32. The imported
+    // host function parks after Spasm's entry poll; the two-trip loop then
+    // guarantees a taken native backedge.
+    const mod_bytes = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+        0x01, 0x08, 0x02, 0x60, 0x00, 0x00, 0x60, 0x00,
+        0x01, 0x7f, 0x02, 0x10, 0x01, 0x04, 'h',  'o',
+        's',  't',  0x07, 'b',  'a',  'r',  'r',  'i',
+        'e',  'r',  0x00, 0x00, 0x03, 0x02, 0x01, 0x01,
+        0x07, 0x07, 0x01, 0x03, 'r',  'u',  'n',  0x00,
+        0x01, 0x0a, 0x1a, 0x01, 0x18, 0x01, 0x01, 0x7f,
+        0x10, 0x00, 0x41, 0x02, 0x21, 0x00, 0x03, 0x40,
+        0x20, 0x00, 0x41, 0x01, 0x6b, 0x22, 0x00, 0x0d,
+        0x00, 0x0b, 0x20, 0x00, 0x0b,
+    };
+
+    var src: std.ArrayListUnmanaged(u8) = .empty;
+    defer src.deinit(testing.allocator);
+    try src.appendSlice(testing.allocator,
+        \\const interruptImports={host:{barrier:function(){}}};
+        \\const interruptInstance=new WebAssembly.Instance(new WebAssembly.Module(new Uint8Array([
+    );
+    for (mod_bytes, 0..) |byte, index| {
+        if (index != 0) try src.append(testing.allocator, ',');
+        var tmp: [3]u8 = undefined;
+        try src.appendSlice(testing.allocator, std.fmt.bufPrint(&tmp, "{d}", .{byte}) catch unreachable);
+    }
+    try src.appendSlice(testing.allocator,
+        \\])),interruptImports);
+        \\interruptInstance.exports.run;
+    );
+
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.allow_wasm_compile = true;
+    realm.jit_enabled = true;
+    try realm.installBuiltins();
+
+    const evaluated = try lantern.evaluateScript(testing.allocator, &realm, src.items);
+    const function_value = switch (evaluated) {
+        .value => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    const scope = try realm.heap.openScope();
+    defer scope.close();
+    try scope.push(function_value);
+    const function = heap_mod.valueAsFunction(function_value) orelse return error.TestUnexpectedResult;
+    const record: *ExportRecord = @ptrCast(@alignCast(function.wasm_export orelse return error.TestUnexpectedResult));
+
+    // Import resolution and populateInstance ran through the public JS API.
+    // Replace its placeholder JS callback with a direct host barrier only for
+    // deterministic cross-thread synchronization: no Lantern safe point can
+    // consume the request between barrier release and the Spasm backedge.
+    var barrier: RealmInterruptBarrier = .{};
+    const imported_funcs: []wasm.FuncRef = @constCast(record.instance.imported_funcs);
+    imported_funcs[0] = .{ .host = .{
+        .fn_ptr = RealmInterruptBarrier.invoke,
+        .ctx = &barrier,
+        .params = 0,
+        .results = 0,
+    } };
+
+    // Warm the exact JS-created instance while the barrier is disabled, so
+    // the worker enters already-published Spasm code with an unarmed Realm.
+    const warm = try call.callJSFunction(realm.allocator, &realm, function, Value.undefined_, &.{});
+    switch (warm) {
+        .value => {},
+        else => return error.TestUnexpectedResult,
+    }
+    try testing.expect(record.instance.spasm_runs >= 1);
+    const runs_before_worker = record.instance.spasm_runs;
+
+    barrier.enabled.store(true, .release);
+    var worker: RealmInterruptWorker = .{ .realm = &realm, .function = function };
+    const thread = try std.Thread.spawn(.{}, RealmInterruptWorker.run, .{&worker});
+    while (!barrier.entered.load(.acquire) and worker.status.load(.acquire) == 0) std.atomic.spinLoopHint();
+    if (!barrier.entered.load(.acquire)) {
+        thread.join();
+        return error.TestUnexpectedResult;
+    }
+    realm.requestInterrupt();
+    barrier.released.store(true, .release);
+    thread.join();
+
+    try testing.expectEqual(@as(u8, 1), worker.status.load(.acquire));
+    try testing.expect(record.instance.spasm_runs > runs_before_worker);
+    try testing.expect(!realm.executionWakeFlag().load(.acquire));
+    try testing.expectEqual(@as(?Realm.TerminationReason, null), realm.terminationReason());
+}
+
+test "WebAssembly.instantiate does not turn start-function termination into a rejection" {
+    const testing = std.testing;
+
+    // (module (func (loop br 0)) (start 0))
+    const mod_bytes = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+        0x01, 0x04, 0x01, 0x60, 0x00, 0x00, 0x03, 0x02,
+        0x01, 0x00, 0x08, 0x01, 0x00, 0x0a, 0x09, 0x01,
+        0x07, 0x00, 0x03, 0x40, 0x0c, 0x00, 0x0b, 0x0b,
+    };
+
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.allow_wasm_compile = true;
+    realm.jit_enabled = false;
+    try realm.installBuiltins();
+
+    const module = try makeModuleObject(&realm, &mod_bytes);
+    realm.setFuel(1);
+    try testing.expectError(
+        error.NativeThrew,
+        wasmInstantiate(&realm, Value.undefined_, &.{module}),
+    );
+    try testing.expectEqual(@as(?Realm.TerminationReason, .fuel_exhausted), realm.terminationReason());
+}
+
+test "WebAssembly.Module.customSections charges ArrayBuffer payloads to the Realm ceiling" {
+    const testing = std.testing;
+    const payload_len = 64 * 1024;
+
+    var bytes: std.ArrayListUnmanaged(u8) = .empty;
+    defer bytes.deinit(testing.allocator);
+    try bytes.appendSlice(testing.allocator, &.{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+        0x00, 0x82, 0x80, 0x04, // custom section, 65,538-byte body
+        0x01, 'x', // one-byte name; the rest is payload
+    });
+    const payload_start = bytes.items.len;
+    try bytes.resize(testing.allocator, payload_start + payload_len);
+    @memset(bytes.items[payload_start..], 0x5a);
+
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.allow_wasm_compile = true;
+    try realm.installBuiltins();
+
+    const module = try makeModuleObject(&realm, bytes.items);
+    const name = Value.fromString(try realm.heap.allocateString("x"));
+    const scope = try realm.heap.openScope();
+    defer scope.close();
+    try scope.push(module);
+    try scope.push(name);
+
+    realm.setMemoryLimit(realm.heap.bytes_live + payload_len / 2);
+    try testing.expectError(
+        error.OutOfMemory,
+        wasmModuleCustomSections(&realm, Value.undefined_, &.{ module, name }),
+    );
 }

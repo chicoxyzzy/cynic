@@ -3,24 +3,34 @@
 //! The compiler consumes only finished specialization, representation,
 //! deoptimization, allocation, and physical-lowering plans. Guard exits write
 //! the pre-operation state back into the existing Lantern `CallFrame`, then
-//! return `resume_interp`; no helper call, allocation, or second frame format
-//! exists on the bailout path. Taken backedges poll host/GC state and use the
+//! return `resume_interp`. Narrow non-reentrant environment helpers use the
+//! same frame reconstruction as a rooted call safepoint; JS-reentrant helpers
+//! remain outside this subset. Taken backedges poll host/GC state and use the
 //! same frame-compatible exit before Lantern performs any slow work.
 
 const std = @import("std");
 
-const BinaryNumberShape = @import("../../bytecode/chunk.zig").BinaryNumberShape;
-const Chunk = @import("../../bytecode/chunk.zig").Chunk;
+const chunk_mod = @import("../../bytecode/chunk.zig");
+const BinaryNumberShape = chunk_mod.BinaryNumberShape;
+const Chunk = chunk_mod.Chunk;
 const a64 = @import("../jit/asm_aarch64.zig");
 const layout = @import("../jit/layout.zig");
 const Masm = @import("../jit/masm.zig").Masm;
 const arith = @import("../lantern/arith.zig");
+const call_mod = @import("../lantern/call.zig");
+const heap_mod = @import("../heap.zig");
 const Value = @import("../value.zig").Value;
 const allocation = @import("allocation.zig");
+const call_handoff = @import("call_handoff.zig");
+const computed_codegen = @import("computed_codegen_aarch64.zig");
 const control_fusion = @import("control_fusion.zig");
 const deopt = @import("deopt.zig");
 const deopt_physical = @import("deopt_physical.zig");
 const emitter = @import("emitter_aarch64.zig");
+const entry_result = @import("entry_result.zig");
+const feedback_retry = @import("feedback_retry.zig");
+const frame_recovery = @import("frame_recovery.zig");
+const frame_safepoint = @import("frame_safepoint.zig");
 const ir = @import("ir.zig");
 const lowering = @import("lowering_aarch64.zig");
 const parallel_moves = @import("parallel_moves.zig");
@@ -30,34 +40,19 @@ const representation = @import("representation.zig");
 const safepoint_codegen = @import("safepoint_codegen_aarch64.zig");
 const specialize = @import("specialize.zig");
 
-/// Matches the established Bistromath dispatcher contract. Ohaimark remains
-/// test-only, but uses the production ABI now so tier-up needs no frame shim.
-pub const EntryResult = enum(u32) {
-    resume_interp = 0,
-    done = 1,
-};
+/// A generic property lowering can become compilable after Lantern fills the
+/// corresponding inline cache. This is deliberately distinct from ordinary
+/// unsupported codegen so the tier driver never retries unrelated failures.
+pub const EmitError = feedback_retry.Error;
+pub const RetryableFeedback = feedback_retry.Site;
+pub const retryFeedbackFingerprint = feedback_retry.fingerprint;
 
-/// Generated entries return one word in x0: a canonical tagged `Value` on
-/// completion, or this noncanonical encoded-NaN payload after reconstructing
-/// the Lantern frame. `Value.fromDouble` canonicalizes every NaN to payload
-/// zero, and non-double values occupy the 0xFFF9..0xFFFF tag range, so valid JS
-/// values cannot collide with this internal control sentinel.
-pub const resume_sentinel_bits: u64 = 0x7FFA_0000_0000_0001;
-
-/// OSR entry refused before any optimized body ran (e.g. int32 tag check on a
-/// header parameter). Distinct from `resume_sentinel_bits` so the driver can
-/// strike enter-and-bail thrash without charging cooperative safepoint exits.
-pub const osr_bail_sentinel_bits: u64 = 0x7FFA_0000_0000_0002;
-
-comptime {
-    const decoded: f64 = @bitCast(resume_sentinel_bits -% Value.double_encode_offset);
-    std.debug.assert(std.math.isNan(decoded));
-    std.debug.assert(resume_sentinel_bits != Value.fromDouble(std.math.nan(f64)).bits);
-    const bail_decoded: f64 = @bitCast(osr_bail_sentinel_bits -% Value.double_encode_offset);
-    std.debug.assert(std.math.isNan(bail_decoded));
-    std.debug.assert(osr_bail_sentinel_bits != resume_sentinel_bits);
-    std.debug.assert(osr_bail_sentinel_bits != Value.fromDouble(std.math.nan(f64)).bits);
-}
+pub const EntryResult = entry_result.EntryResult;
+pub const resume_sentinel_bits = entry_result.resume_sentinel_bits;
+pub const osr_bail_sentinel_bits = entry_result.osr_bail_sentinel_bits;
+pub const call_pushed_sentinel_bits = entry_result.call_pushed_sentinel_bits;
+pub const host_oom_sentinel_bits = entry_result.host_oom_sentinel_bits;
+pub const safepoint_sentinel_bits = entry_result.safepoint_sentinel_bits;
 
 const max_graph_items = 16 * 1024;
 const max_graph_nodes = 4 * 1024;
@@ -84,20 +79,7 @@ fn numberInputKind(shape: ?BinaryNumberShape, operand: usize) NumberInputKind {
     };
 }
 
-const FrameLocation = union(enum) {
-    accumulator,
-    register: u8,
-};
-
-const FrameMoveSource = union(enum) {
-    frame: FrameLocation,
-    cycle_scratch,
-};
-
-const FrameMove = struct {
-    source: FrameMoveSource,
-    destination: FrameLocation,
-};
+const FrameLocation = frame_recovery.Location;
 
 pub fn emitGraph(
     allocator: std.mem.Allocator,
@@ -115,7 +97,8 @@ pub fn emitGraph(
 ) !void {
     var osr_entries: std.ArrayListUnmanaged(Chunk.JitState.OsrEntry) = .empty;
     defer osr_entries.deinit(allocator);
-    try emitGraphCollectingOsr(
+    var retryable_feedback: ?RetryableFeedback = null;
+    try emitGraphCollectingOsrDiagnosed(
         allocator,
         machine,
         chunk,
@@ -129,6 +112,7 @@ pub fn emitGraph(
         allocated,
         lowered,
         &osr_entries,
+        &retryable_feedback,
     );
 }
 
@@ -150,6 +134,44 @@ pub fn emitGraphCollectingOsr(
     allocated: *const allocation.Plan,
     lowered: *const lowering.Plan,
     osr_entries: *std.ArrayListUnmanaged(Chunk.JitState.OsrEntry),
+) !void {
+    var retryable_feedback: ?RetryableFeedback = null;
+    return emitGraphCollectingOsrDiagnosed(
+        allocator,
+        machine,
+        chunk,
+        graph,
+        specialization,
+        representations,
+        fused_control,
+        logical,
+        homes,
+        physical_deopt,
+        allocated,
+        lowered,
+        osr_entries,
+        &retryable_feedback,
+    );
+}
+
+/// Variant used by the runtime compiler to retain the precise cold property
+/// IC that stopped emission. The ordinary entry point above keeps tests and
+/// lower-level callers source-compatible.
+pub fn emitGraphCollectingOsrDiagnosed(
+    allocator: std.mem.Allocator,
+    machine: *Masm,
+    chunk: *const Chunk,
+    graph: *const ir.Graph,
+    specialization: *const specialize.Plan,
+    representations: *const representation.Plan,
+    fused_control: *const control_fusion.Plan,
+    logical: *const deopt.Metadata,
+    homes: *const deopt_physical.Homes,
+    physical_deopt: *const deopt_physical.Metadata,
+    allocated: *const allocation.Plan,
+    lowered: *const lowering.Plan,
+    osr_entries: *std.ArrayListUnmanaged(Chunk.JitState.OsrEntry),
+    retryable_feedback: *?RetryableFeedback,
 ) !void {
     if (graph.blocks.len == 0) return error.MalformedGraph;
     if (graph.blocks.len > max_graph_items or graph.nodes.len > max_graph_nodes or
@@ -217,6 +239,7 @@ pub fn emitGraphCollectingOsr(
         .point_for_node = point_for_node,
         .osr_meta = &osr_meta,
         .osr_entries = osr_entries,
+        .retryable_feedback = retryable_feedback,
     };
     const code_start = machine.code.items.len;
     errdefer machine.code.shrinkRetainingCapacity(code_start);
@@ -239,9 +262,13 @@ const Compiler = struct {
     point_for_node: []const ?usize,
     osr_meta: *const osr_mod.Metadata,
     osr_entries: *std.ArrayListUnmanaged(Chunk.JitState.OsrEntry),
+    retryable_feedback: *?RetryableFeedback,
 
     fn emit(self: *Compiler) !void {
         try emitter.emitPrologue(self.machine, self.lowered.frame);
+        if (self.graph.entry_environment_slots) |slot_count| {
+            try self.emitEntryEnvironment(slot_count);
+        }
         try self.emitEntryParameters();
         for (self.graph.blocks, 0..) |block, block_index| {
             if (!block.reachable) continue;
@@ -261,6 +288,75 @@ const Compiler = struct {
         const entry = self.graph.blocks[0];
         if (!entry.reachable) return error.MalformedGraph;
         try self.materializeBlockParametersFromFrame(0, null);
+    }
+
+    /// The AAPCS64 call boundary is deliberately local to the entry helper:
+    /// until entry parameters are materialized, all JS Values remain in the
+    /// registered Lantern frame, so no optimized-only root needs a stack map.
+    /// Preserve volatile ABI state the ordinary entry body still needs, plus
+    /// LR, without imposing callee-save traffic on helper-free code.
+    fn emitEntryEnvironment(self: *Compiler, slot_count: u8) !void {
+        var failed: Masm.Label = .{};
+        defer failed.deinit(self.allocator);
+        var done: Masm.Label = .{};
+        defer done.deinit(self.allocator);
+
+        try self.machine.emit(a64.stpPreIdxSp(
+            lowering.realm_register,
+            lowering.lantern_frame_register,
+            -16,
+        ));
+        try self.machine.emit(a64.stpPreIdxSp(
+            lowering.lantern_registers_register,
+            lowering.spill_base_register,
+            -16,
+        ));
+        try self.machine.emit(a64.strPreIdxSp(.lr, -16));
+
+        const helper_call = frame_safepoint.call(.{
+            .allocate = .{ .slot_count = slot_count },
+        });
+        try self.machine.movImm64(
+            lowering.lantern_registers_register,
+            helper_call.arg2.?,
+        );
+        try self.machine.callAbs(
+            lowering.spill_base_register,
+            helper_call.target,
+        );
+        try self.machine.jumpCbnz(lowering.realm_register, &failed);
+
+        try self.emitEntryEnvironmentRestore();
+        try self.machine.jump(&done);
+
+        try self.machine.bind(&failed);
+        try self.emitEntryEnvironmentRestore();
+        // Leave the original frame state intact. Lantern retries the exact
+        // MakeEnvironment opcode and surfaces OutOfMemory normally if needed.
+        try self.machine.movImm64(lhs_scratch, 0);
+        try self.machine.emit(a64.strImm(
+            lhs_scratch,
+            lowering.lantern_frame_register,
+            layout.frame.ip,
+        ));
+        try self.machine.movImm64(.x0, resume_sentinel_bits);
+        try emitter.emitEpilogue(self.machine, self.lowered.frame);
+
+        try self.machine.bind(&done);
+    }
+
+    fn emitEntryEnvironmentRestore(self: *Compiler) !void {
+        try self.machine.emit(a64.ldrPostIdxSp(.lr, 16));
+        try self.machine.emit(a64.ldpPostIdxSp(
+            lowering.lantern_registers_register,
+            lowering.spill_base_register,
+            16,
+        ));
+        try self.machine.emit(a64.ldpPostIdxSp(
+            lowering.realm_register,
+            lowering.lantern_frame_register,
+            16,
+        ));
     }
 
     /// Map the live Lantern frame into the SSA parameters of `block_index`.
@@ -284,7 +380,10 @@ const Compiler = struct {
             }
             const destination = self.lowered.locations[param.value];
             if (destination == .none) continue;
-            if (destination == .immediate) return error.UnsupportedNode;
+            // A folded loop phi is rematerialized at each use. Its value is
+            // identical on every incoming edge, so OSR does not need to load
+            // or validate the corresponding Lantern-frame slot.
+            if (destination == .immediate) continue;
             const kind = self.representations.outputs[param.value];
             switch (param.role) {
                 .accumulator => try self.machine.emit(a64.ldrImm(
@@ -426,6 +525,23 @@ const Compiler = struct {
                 try self.emitLogicalNot(node_id, info.lowering);
                 return false;
             },
+            .to_numeric => {
+                try self.emitToNumeric(node_id, info.lowering);
+                return false;
+            },
+            .to_string => {
+                try self.emitToString(node_id, info.lowering);
+                return false;
+            },
+            .require_object_coercible => {
+                try self.emitRequireObjectCoercible(node_id, info.lowering);
+                return false;
+            },
+            .less_than => {
+                if (info.lowering == .constant) return false;
+                try self.emitLessThan(node_id, info.lowering);
+                return false;
+            },
             .jump => {
                 const edge_index = try self.singleEdge(block_index);
                 try self.emitEdgeAndJump(edge_index);
@@ -439,6 +555,22 @@ const Compiler = struct {
                 try self.emitNamedLoad(node_id, info.lowering);
                 return false;
             },
+            .store_named => {
+                try self.emitNamedStore(node_id, info.lowering);
+                return false;
+            },
+            .load_computed => {
+                try self.emitComputedLoad(node_id, info.lowering);
+                return false;
+            },
+            .store_computed => {
+                try self.emitComputedStore(node_id, info.lowering);
+                return false;
+            },
+            .delete_computed_property => {
+                try self.emitComputedDelete(node_id, info.lowering);
+                return false;
+            },
             .load_this => {
                 try self.emitThisLoad(node_id, info.lowering);
                 return false;
@@ -447,19 +579,98 @@ const Compiler = struct {
                 try self.emitGlobalLoad(node_id, info.lowering);
                 return false;
             },
+            .store_global => {
+                try self.emitGlobalStore(node_id, info.lowering);
+                return false;
+            },
             .load_global_slot => {
                 try self.emitGlobalSlotLoad(node_id, info.lowering);
+                return false;
+            },
+            .store_global_slot_init, .store_global_slot => {
+                try self.emitGlobalSlotStore(node_id, info.lowering);
                 return false;
             },
             .load_environment => {
                 try self.emitEnvironmentLoad(node_id, info.lowering);
                 return false;
             },
+            .allocate_environment => {
+                try self.emitEnvironmentAllocate(node_id, info.lowering);
+                return false;
+            },
+            .store_environment => {
+                try self.emitEnvironmentStore(node_id, info.lowering);
+                return false;
+            },
+            .pop_environment => {
+                try self.emitEnvironmentPop(node_id, info.lowering);
+                return false;
+            },
+            .create_unmapped_arguments_object => {
+                try self.emitUnmappedArgumentsObject(node_id, info.lowering);
+                return false;
+            },
+            .create_ordinary_function => {
+                try self.emitOrdinaryFunction(node_id, info.lowering);
+                return false;
+            },
+            .set_home => {
+                try self.emitSetHome(node_id, info.lowering);
+                return false;
+            },
+            .define_object_method_property => {
+                try self.emitObjectMethodProperty(node_id, info.lowering);
+                return false;
+            },
+            .create_object_literal => {
+                try self.emitObjectLiteral(node_id, info.lowering);
+                return false;
+            },
+            .create_dense_array_literal => {
+                try self.emitDenseArrayLiteral(node_id, info.lowering);
+                return false;
+            },
+            .create_array_literal => {
+                try self.emitArrayLiteral(node_id, info.lowering);
+                return false;
+            },
+            .append_dense_array_literal_element => {
+                try self.emitDenseArrayAppend(node_id, info.lowering);
+                return false;
+            },
+            .define_template_property => {
+                try self.emitTemplateProperty(node_id, info.lowering);
+                return false;
+            },
+            .direct_call => {
+                // A direct handoff returns to the driver on every outcome.
+                // Keep emitting the bytecode continuation structurally: it is
+                // reached by Lantern after the callee returns, never by native
+                // fallthrough from this call site.
+                try self.emitDirectCall(node_id, info.lowering);
+                return false;
+            },
+            .tail_dispatch => {
+                try self.emitTailDispatch(node_id, info.lowering);
+                return true;
+            },
+            .throw_ => {
+                try self.emitThrow(node_id, info.lowering);
+                return true;
+            },
+            .throw_if_hole => {
+                try self.emitThrowIfHole(node_id, info.lowering);
+                return false;
+            },
+            .typeof_ => {
+                try self.emitTypeOf(node_id, info.lowering);
+                return false;
+            },
             .return_ => {
                 try self.emitReturn(node_id);
                 return true;
             },
-            .less_than => return error.UnsupportedNode,
         }
     }
 
@@ -503,6 +714,11 @@ const Compiler = struct {
             else => unreachable,
         }
 
+        // A consumed postfix update saves the coerced old value, then its
+        // bump result is overwritten before the function returns. The checked
+        // operation and overflow guard are still required, but register
+        // allocation correctly leaves that dead SSA result locationless.
+        if (self.lowered.locations[node_id] == .none) return;
         const destination = try self.valueLocation(node_id);
         try emitter.emitMove(self.machine, .{
             .source = .{ .register = result_scratch },
@@ -512,6 +728,81 @@ const Compiler = struct {
             .conversion = .none,
         }, self.chunk.constants);
         try self.emitDefinitionHome(node_id);
+    }
+
+    /// §7.1.4's already-numeric Int32 lane. Objects, strings, BigInts,
+    /// Doubles, Symbols, and every exception-capable coercion guard-exit at
+    /// the original ToNumeric bytecode so Lantern remains the sole owner of
+    /// observable conversion semantics.
+    fn emitToNumeric(
+        self: *Compiler,
+        node_id: ir.ValueId,
+        lowering_kind: specialize.Lowering,
+    ) !void {
+        if (lowering_kind != .checked_int32_to_numeric or
+            self.representations.outputs[node_id] != .int32)
+        {
+            return error.UnsupportedNode;
+        }
+        const guard = try self.guardFor(node_id);
+        try self.emitInt32Input(node_id, 0, result_scratch, guard);
+        if (self.lowered.locations[node_id] == .none) return;
+        try emitter.emitMove(self.machine, .{
+            .source = .{ .register = result_scratch },
+            .destination = try self.valueLocation(node_id),
+            .source_kind = .int32,
+            .destination_kind = .int32,
+            .conversion = .none,
+        }, self.chunk.constants);
+        try self.emitDefinitionHome(node_id);
+    }
+
+    /// §7.1.17's String identity case. All non-string inputs can allocate,
+    /// invoke user code through ToPrimitive, or throw, so they replay the
+    /// original bytecode before any conversion becomes visible.
+    fn emitToString(
+        self: *Compiler,
+        node_id: ir.ValueId,
+        lowering_kind: specialize.Lowering,
+    ) !void {
+        if (lowering_kind != .checked_string_to_string or
+            self.representations.outputs[node_id] != .tagged)
+        {
+            return error.UnsupportedNode;
+        }
+        const guard = try self.guardFor(node_id);
+        try self.emitTaggedInput(node_id, 0, lhs_scratch);
+        try self.machine.emit(a64.lsrImm(guard_scratch, lhs_scratch, 48));
+        try self.machine.movImm64(rhs_scratch, Value.tag_string);
+        try self.machine.emit(a64.cmpReg(guard_scratch, rhs_scratch));
+        try self.jumpToGuardIf(.ne, guard);
+        if (self.lowered.locations[node_id] == .none) return;
+        try self.emitTaggedResult(node_id, lhs_scratch);
+    }
+
+    /// §7.2.1 RequireObjectCoercible is an identity for every non-nullish
+    /// value. The two error tags guard-exit before Lantern creates and unwinds
+    /// its canonical TypeError.
+    fn emitRequireObjectCoercible(
+        self: *Compiler,
+        node_id: ir.ValueId,
+        lowering_kind: specialize.Lowering,
+    ) !void {
+        if (lowering_kind != .require_object_coercible or
+            self.representations.outputs[node_id] != .tagged)
+        {
+            return error.UnsupportedNode;
+        }
+        const guard = try self.guardFor(node_id);
+        try self.emitTaggedInput(node_id, 0, lhs_scratch);
+        try self.machine.movImm64(guard_scratch, Value.null_.bits);
+        try self.machine.emit(a64.cmpReg(lhs_scratch, guard_scratch));
+        try self.jumpToGuardIf(.eq, guard);
+        try self.machine.movImm64(guard_scratch, Value.undefined_.bits);
+        try self.machine.emit(a64.cmpReg(lhs_scratch, guard_scratch));
+        try self.jumpToGuardIf(.eq, guard);
+        if (self.lowered.locations[node_id] == .none) return;
+        try self.emitTaggedResult(node_id, lhs_scratch);
     }
 
     fn emitStrictEqual(
@@ -560,6 +851,27 @@ const Compiler = struct {
         }
         try self.machine.emit(a64.movz(rhs_scratch, 1, 0));
         try self.machine.emit(a64.eorReg(result_scratch, lhs_scratch, rhs_scratch));
+        try self.emitTaggedResult(node_id, result_scratch);
+    }
+
+    /// §7.2.13 IsLessThan's tagged-Int32 subset. All Number, BigInt,
+    /// string, and object inputs guard-exit before the comparison so Lantern
+    /// retains coercion ordering and the original bytecode operation.
+    fn emitLessThan(
+        self: *Compiler,
+        node_id: ir.ValueId,
+        lowering_kind: specialize.Lowering,
+    ) !void {
+        if (lowering_kind != .less_than or self.representations.outputs[node_id] != .tagged) {
+            return error.UnsupportedNode;
+        }
+        const guard = try self.guardFor(node_id);
+        try self.emitInt32Input(node_id, 0, lhs_scratch, guard);
+        try self.emitInt32Input(node_id, 1, rhs_scratch, guard);
+        try self.machine.emit(a64.cmpRegW(lhs_scratch, rhs_scratch));
+        try self.machine.emit(a64.csetW(result_scratch, .lt));
+        try self.machine.movImm64(guard_scratch, Value.false_.bits);
+        try self.machine.emit(a64.orrReg(result_scratch, result_scratch, guard_scratch));
         try self.emitTaggedResult(node_id, result_scratch);
     }
 
@@ -732,20 +1044,102 @@ const Compiler = struct {
         }
     }
 
+    fn deferForFeedback(
+        self: *Compiler,
+        feedback: RetryableFeedback,
+    ) EmitError {
+        // Emission stops at the first generic property node. Preserve that
+        // site even if a future emitter path reports the same error twice.
+        if (self.retryable_feedback.* == null) {
+            self.retryable_feedback.* = feedback;
+        }
+        return EmitError.RetryableFeedback;
+    }
+
+    fn namedLoadSite(self: *const Compiler, node_id: ir.ValueId) !ir.NamedLoad {
+        if (node_id >= self.graph.nodes.len) return error.MalformedGraph;
+        const node = self.graph.nodes[node_id];
+        if (node.input_count != 1) return error.MalformedGraph;
+        const site = switch (node.payload) {
+            .named_load => |named| named,
+            else => return error.MalformedGraph,
+        };
+        if (site.key_constant >= self.chunk.constants.len or
+            !self.chunk.constants[site.key_constant].isString() or
+            site.feedback_index >= self.chunk.inline_load_caches.len or
+            site.feedback_index >= self.graph.feedback.loads.len)
+        {
+            return error.InvalidMetadata;
+        }
+        return site;
+    }
+
+    fn namedStoreSite(self: *const Compiler, node_id: ir.ValueId) !ir.NamedStore {
+        if (node_id >= self.graph.nodes.len) return error.MalformedGraph;
+        const node = self.graph.nodes[node_id];
+        if (node.input_count != 2) return error.MalformedGraph;
+        const site = switch (node.payload) {
+            .named_store => |named| named,
+            else => return error.MalformedGraph,
+        };
+        if (site.key_constant >= self.chunk.constants.len or
+            !self.chunk.constants[site.key_constant].isString() or
+            site.feedback_index >= self.chunk.inline_store_caches.len or
+            site.feedback_index >= self.graph.feedback.stores.len)
+        {
+            return error.InvalidMetadata;
+        }
+        return site;
+    }
+
+    fn computedLoadSite(self: *const Compiler, node_id: ir.ValueId) !ir.ComputedLoad {
+        if (node_id >= self.graph.nodes.len) return error.MalformedGraph;
+        const node = self.graph.nodes[node_id];
+        if (node.input_count != 2) return error.MalformedGraph;
+        const site = switch (node.payload) {
+            .computed_load => |computed| computed,
+            else => return error.MalformedGraph,
+        };
+        if (site.feedback_index >= self.chunk.inline_computed_caches.len or
+            site.feedback_index >= self.graph.feedback.computed.len)
+        {
+            return error.InvalidMetadata;
+        }
+        return site;
+    }
+
+    fn computedStoreSite(self: *const Compiler, node_id: ir.ValueId) !ir.ComputedStore {
+        if (node_id >= self.graph.nodes.len) return error.MalformedGraph;
+        const node = self.graph.nodes[node_id];
+        if (node.input_count != 3) return error.MalformedGraph;
+        const site = switch (node.payload) {
+            .computed_store => |computed| computed,
+            else => return error.MalformedGraph,
+        };
+        if (site.feedback_index >= self.chunk.inline_computed_caches.len or
+            site.feedback_index >= self.graph.feedback.computed.len)
+        {
+            return error.InvalidMetadata;
+        }
+        return site;
+    }
+
     fn emitNamedLoad(
         self: *Compiler,
         node_id: ir.ValueId,
         lowering_kind: specialize.Lowering,
     ) !void {
+        const site = try self.namedLoadSite(node_id);
         const assumption_kind: specialize.AssumptionKind, const mode: property_codegen.Mode = switch (lowering_kind) {
             .load_named_own => .{ .load_own, .own_data },
             .load_named_prototype => .{ .load_prototype, .prototype_data },
             .load_named_synthetic => .{ .load_synthetic, .synthetic_accessor },
+            .load_named_generic => return self.deferForFeedback(.{ .named_load = site.feedback_index }),
             else => return error.UnsupportedNode,
         };
         const assumption = try self.assumptionFor(node_id, assumption_kind);
         const receiver_shape = assumption.receiver_shape orelse return error.InvalidMetadata;
-        const cell_index: usize = assumption.feedback_index;
+        const cell_index: usize = site.feedback_index;
         if (cell_index >= self.chunk.inline_load_caches.len) return error.InvalidMetadata;
         const cell = &self.chunk.inline_load_caches[cell_index];
         const guard = try self.guardFor(node_id);
@@ -766,6 +1160,213 @@ const Compiler = struct {
             guard,
         );
         try self.emitTaggedResult(node_id, result);
+    }
+
+    fn emitComputedLoad(
+        self: *Compiler,
+        node_id: ir.ValueId,
+        lowering_kind: specialize.Lowering,
+    ) !void {
+        const site = try self.computedLoadSite(node_id);
+        if (lowering_kind == .load_computed_generic) {
+            return self.deferForFeedback(.{ .computed_load = site.feedback_index });
+        }
+        if (lowering_kind != .load_computed_own or
+            self.representations.outputs[node_id] != .tagged)
+        {
+            return error.UnsupportedNode;
+        }
+        const assumption = try self.assumptionFor(node_id, .load_computed_own);
+        const receiver_shape = assumption.receiver_shape orelse return error.InvalidMetadata;
+        const observed = self.graph.feedback.computed[site.feedback_index];
+        if (observed.mode != .monomorphic or observed.receiver_shape == null or
+            observed.receiver_shape.? != receiver_shape or
+            observed.slot != assumption.slot or assumption.holder_shape != null or
+            assumption.revision != 0 or observed.key_len == 0 or
+            observed.key_len > observed.key_buf.len)
+        {
+            return error.InvalidMetadata;
+        }
+        const cell = &self.chunk.inline_computed_caches[site.feedback_index];
+        const guard = try self.guardFor(node_id);
+        try self.emitTaggedInput(node_id, 0, lhs_scratch);
+        try property_codegen.emitPlainObject(
+            self.allocator,
+            self.machine,
+            lhs_scratch,
+            rhs_scratch,
+            guard,
+        );
+        try self.emitTaggedInput(node_id, 1, lhs_scratch);
+        const result = try computed_codegen.emit(
+            self.allocator,
+            self.machine,
+            cell,
+            .{
+                .receiver_shape = receiver_shape,
+                .slot = assumption.slot,
+                .key = observed.key_buf[0..observed.key_len],
+            },
+            guard,
+        );
+        try self.emitTaggedResult(node_id, result);
+    }
+
+    fn emitComputedStore(
+        self: *Compiler,
+        node_id: ir.ValueId,
+        lowering_kind: specialize.Lowering,
+    ) !void {
+        const site = try self.computedStoreSite(node_id);
+        if (lowering_kind == .store_computed_generic) {
+            return self.deferForFeedback(.{ .computed_store = site.feedback_index });
+        }
+        if (lowering_kind != .store_computed_own or
+            self.representations.outputs[node_id] != .none)
+        {
+            return error.UnsupportedNode;
+        }
+        const assumption = try self.assumptionFor(node_id, .store_computed_own);
+        const receiver_shape = assumption.receiver_shape orelse return error.InvalidMetadata;
+        const observed = self.graph.feedback.computed[site.feedback_index];
+        if (observed.mode != .monomorphic or observed.receiver_shape == null or
+            observed.receiver_shape.? != receiver_shape or
+            observed.slot != assumption.slot or assumption.holder_shape != null or
+            assumption.revision != 0 or observed.key_len == 0 or
+            observed.key_len > observed.key_buf.len)
+        {
+            return error.InvalidMetadata;
+        }
+        const cell = &self.chunk.inline_computed_caches[site.feedback_index];
+        const guard = try self.guardFor(node_id);
+        try self.emitTaggedInput(node_id, 0, lhs_scratch);
+        try property_codegen.emitPlainObject(
+            self.allocator,
+            self.machine,
+            lhs_scratch,
+            rhs_scratch,
+            guard,
+        );
+        try self.emitTaggedInput(node_id, 1, lhs_scratch);
+        const slot = try computed_codegen.emitGuards(
+            self.allocator,
+            self.machine,
+            cell,
+            .{
+                .receiver_shape = receiver_shape,
+                .slot = assumption.slot,
+                .key = observed.key_buf[0..observed.key_len],
+            },
+            guard,
+        );
+        try self.emitTaggedInput(node_id, 2, lhs_scratch);
+        try property_codegen.emitSlotWrite(
+            self.allocator,
+            self.machine,
+            lhs_scratch,
+            rhs_scratch,
+            slot,
+            result_scratch,
+        );
+
+        // All guard exits precede the write. The barrier is the only C ABI
+        // boundary after it, and is deliberately non-reentrant, so restoring
+        // volatile optimized locations is sufficient without staging a frame.
+        try self.emitNonReentrantCallSave();
+        try self.machine.emit(a64.movReg(.x0, lowering.realm_register));
+        try self.machine.emit(a64.movReg(.x1, rhs_scratch));
+        try self.machine.emit(a64.movReg(.x2, lhs_scratch));
+        try self.machine.callAbs(
+            lowering.spill_base_register,
+            @intFromPtr(&frame_safepoint.storeBarrier),
+        );
+        try self.emitNonReentrantCallRestore();
+    }
+
+    fn emitNamedStore(
+        self: *Compiler,
+        node_id: ir.ValueId,
+        lowering_kind: specialize.Lowering,
+    ) !void {
+        const site = try self.namedStoreSite(node_id);
+        if (lowering_kind == .store_named_generic) {
+            return self.deferForFeedback(.{ .named_store = site.feedback_index });
+        }
+        if (lowering_kind != .store_named_own or
+            self.representations.outputs[node_id] != .none)
+        {
+            return error.UnsupportedNode;
+        }
+        const assumption = try self.assumptionFor(node_id, .store_named_own);
+        const receiver_shape = assumption.receiver_shape orelse return error.InvalidMetadata;
+        const observed = self.graph.feedback.stores[site.feedback_index];
+        if (observed.mode != .own_data or observed.receiver_shape == null or
+            observed.receiver_shape.? != receiver_shape or
+            observed.slot != assumption.slot or assumption.holder_shape != null or
+            assumption.revision != 0 or assumption.slot >= receiver_shape.property_count)
+        {
+            return error.InvalidMetadata;
+        }
+        const cell = &self.chunk.inline_store_caches[site.feedback_index];
+        const guard = try self.guardFor(node_id);
+
+        // This is the same-shape `sta_property` lane: it mirrors the
+        // interpreter's direct slot write, with a live-cell guard before any
+        // mutation. Transition stores and every other [[Set]] case deopt.
+        try self.emitTaggedInput(node_id, 0, lhs_scratch);
+        try property_codegen.emitPlainObject(
+            self.allocator,
+            self.machine,
+            lhs_scratch,
+            rhs_scratch,
+            guard,
+        );
+        try self.machine.movImm64(lhs_scratch, @intFromPtr(cell));
+        try self.machine.emit(a64.ldrImm(
+            result_scratch,
+            lhs_scratch,
+            layout.store_ic_cell.shape,
+        ));
+        try self.machine.movImm64(guard_scratch, @intFromPtr(receiver_shape));
+        try self.machine.emit(a64.cmpReg(result_scratch, guard_scratch));
+        try self.jumpToGuardIf(.ne, guard);
+        try self.machine.emit(a64.ldrImm(
+            guard_scratch,
+            rhs_scratch,
+            layout.object.shape,
+        ));
+        try self.machine.emit(a64.cmpReg(result_scratch, guard_scratch));
+        try self.jumpToGuardIf(.ne, guard);
+        try self.machine.emit(a64.ldrImmW(
+            result_scratch,
+            lhs_scratch,
+            layout.store_ic_cell.slot,
+        ));
+        try self.machine.movImm64(guard_scratch, assumption.slot);
+        try self.machine.emit(a64.cmpReg(result_scratch, guard_scratch));
+        try self.jumpToGuardIf(.ne, guard);
+
+        try self.emitTaggedInput(node_id, 1, lhs_scratch);
+        try property_codegen.emitSlotWrite(
+            self.allocator,
+            self.machine,
+            lhs_scratch,
+            rhs_scratch,
+            result_scratch,
+            guard_scratch,
+        );
+
+        // The direct write is visible to the collector before the subsequent
+        // non-reentrant barrier call, exactly like Lantern's StoreIC hit.
+        try self.emitNonReentrantCallSave();
+        try self.machine.emit(a64.movReg(.x0, lowering.realm_register));
+        try self.machine.emit(a64.movReg(.x1, rhs_scratch));
+        try self.machine.emit(a64.movReg(.x2, lhs_scratch));
+        try self.machine.callAbs(
+            lowering.spill_base_register,
+            @intFromPtr(&frame_safepoint.storeBarrier),
+        );
+        try self.emitNonReentrantCallRestore();
     }
 
     fn emitThisLoad(
@@ -874,6 +1475,30 @@ const Compiler = struct {
         try self.emitTaggedResult(node_id, lhs_scratch);
     }
 
+    fn emitGlobalStore(
+        self: *Compiler,
+        node_id: ir.ValueId,
+        lowering_kind: specialize.Lowering,
+    ) !void {
+        if (lowering_kind != .store_global or
+            self.representations.outputs[node_id] != .none)
+        {
+            return error.UnsupportedNode;
+        }
+        const node = self.graph.nodes[node_id];
+        if (node.input_count != 1) return error.MalformedGraph;
+        const store: ir.GlobalStore = switch (node.payload) {
+            .global_store => |value| value,
+            else => return error.MalformedGraph,
+        };
+        if (store.key_constant >= self.chunk.constants.len or
+            !self.chunk.constants[store.key_constant].isString())
+        {
+            return error.MalformedGraph;
+        }
+        try self.emitFrameSafepoint(node_id, .{ .global_store = store });
+    }
+
     fn emitGlobalSlotLoad(
         self: *Compiler,
         node_id: ir.ValueId,
@@ -917,6 +1542,77 @@ const Compiler = struct {
         try self.emitTaggedResult(node_id, lhs_scratch);
     }
 
+    /// §9.1.1.4's slot-indexed global lexical writes. `decl_slots` belongs to
+    /// the Realm root, so the guarded in-place store needs no write barrier.
+    /// A cross-realm entry may see a shorter lexical slice, so bounds always
+    /// deopt before touching it; ordinary writes also leave TDZ / const errors
+    /// to Lantern at the original bytecode.
+    fn emitGlobalSlotStore(
+        self: *Compiler,
+        node_id: ir.ValueId,
+        lowering_kind: specialize.Lowering,
+    ) !void {
+        const is_init = switch (lowering_kind) {
+            .store_global_slot_init => true,
+            .store_global_slot => false,
+            else => return error.UnsupportedNode,
+        };
+        if (self.representations.outputs[node_id] != .none) return error.UnsupportedNode;
+        const absolute_index = switch (self.graph.nodes[node_id].payload) {
+            .global_slot => |slot| slot,
+            else => return error.MalformedGraph,
+        };
+        const guard = try self.guardFor(node_id);
+        var have_running_realm: Masm.Label = .{};
+        defer have_running_realm.deinit(self.allocator);
+        try self.machine.emit(a64.ldrImm(
+            rhs_scratch,
+            lowering.lantern_frame_register,
+            layout.frame.running_realm,
+        ));
+        try self.machine.jumpCbnz(rhs_scratch, &have_running_realm);
+        try self.machine.emit(a64.movReg(rhs_scratch, lowering.realm_register));
+        try self.machine.bind(&have_running_realm);
+
+        try property_codegen.emitRealmU64(
+            self.machine,
+            rhs_scratch,
+            guard_scratch,
+            layout.realm.globals_decl_slots_len,
+        );
+        try self.machine.movImm64(result_scratch, absolute_index);
+        try self.machine.emit(a64.cmpReg(guard_scratch, result_scratch));
+        try self.jumpToGuardIf(.ls, guard);
+        try property_codegen.emitRealmU64(
+            self.machine,
+            rhs_scratch,
+            guard_scratch,
+            layout.realm.globals_decl_slots_ptr,
+        );
+        try self.machine.emit(a64.lslImm(lhs_scratch, result_scratch, 3));
+        try self.machine.emit(a64.addReg(guard_scratch, guard_scratch, lhs_scratch));
+
+        if (!is_init) {
+            try self.machine.emit(a64.ldrImm(lhs_scratch, guard_scratch, 0));
+            try self.machine.movImm64(result_scratch, Value.hole_.bits);
+            try self.machine.emit(a64.cmpReg(lhs_scratch, result_scratch));
+            try self.jumpToGuardIf(.eq, guard);
+            try property_codegen.emitRealmU64(
+                self.machine,
+                rhs_scratch,
+                lhs_scratch,
+                layout.realm.globals_decl_const_flags_ptr,
+            );
+            try self.machine.movImm64(result_scratch, absolute_index);
+            try self.machine.emit(a64.ldrbRegW(lhs_scratch, lhs_scratch, result_scratch));
+            try self.machine.emit(a64.cmpImm(lhs_scratch, 0, false));
+            try self.jumpToGuardIf(.ne, guard);
+        }
+
+        try self.emitTaggedInput(node_id, 0, lhs_scratch);
+        try self.machine.emit(a64.strImm(lhs_scratch, guard_scratch, 0));
+    }
+
     fn emitEnvironmentLoad(
         self: *Compiler,
         node_id: ir.ValueId,
@@ -952,6 +1648,619 @@ const Compiler = struct {
             @as(u15, site.slot) * 8,
         ));
         try self.emitTaggedResult(node_id, lhs_scratch);
+    }
+
+    fn emitEnvironmentAllocate(
+        self: *Compiler,
+        node_id: ir.ValueId,
+        lowering_kind: specialize.Lowering,
+    ) !void {
+        if (lowering_kind != .allocate_environment) return error.UnsupportedNode;
+        const allocation_site = switch (self.graph.nodes[node_id].payload) {
+            .environment_allocation => |site| site,
+            else => return error.MalformedGraph,
+        };
+        try self.emitFrameSafepoint(node_id, .{ .allocate = allocation_site });
+    }
+
+    fn emitEnvironmentStore(
+        self: *Compiler,
+        node_id: ir.ValueId,
+        lowering_kind: specialize.Lowering,
+    ) !void {
+        if (lowering_kind != .store_environment) return error.UnsupportedNode;
+        const store_site = switch (self.graph.nodes[node_id].payload) {
+            .environment_store => |site| site,
+            else => return error.MalformedGraph,
+        };
+        try self.emitFrameSafepoint(node_id, .{ .store = store_site });
+    }
+
+    fn emitEnvironmentPop(
+        self: *Compiler,
+        node_id: ir.ValueId,
+        lowering_kind: specialize.Lowering,
+    ) !void {
+        if (lowering_kind != .pop_environment or
+            self.representations.outputs[node_id] != .none)
+        {
+            return error.UnsupportedNode;
+        }
+        const node = self.graph.nodes[node_id];
+        if (node.input_count != 0 or node.payload != .none) return error.MalformedGraph;
+        var no_environment: Masm.Label = .{};
+        defer no_environment.deinit(self.allocator);
+        try self.machine.emit(a64.ldrImm(
+            lhs_scratch,
+            lowering.lantern_frame_register,
+            layout.frame.env,
+        ));
+        try self.machine.jumpCbz(lhs_scratch, &no_environment);
+        try self.machine.emit(a64.ldrImm(lhs_scratch, lhs_scratch, layout.env.parent));
+        try self.machine.emit(a64.strImm(
+            lhs_scratch,
+            lowering.lantern_frame_register,
+            layout.frame.env,
+        ));
+        try self.machine.bind(&no_environment);
+    }
+
+    fn emitUnmappedArgumentsObject(
+        self: *Compiler,
+        node_id: ir.ValueId,
+        lowering_kind: specialize.Lowering,
+    ) !void {
+        if (lowering_kind != .create_unmapped_arguments_object or
+            self.representations.outputs[node_id] != .tagged)
+        {
+            return error.UnsupportedNode;
+        }
+        const node = self.graph.nodes[node_id];
+        if (node.input_count != 0 or node.payload != .none) return error.MalformedGraph;
+        try self.emitFrameSafepoint(node_id, .unmapped_arguments_object);
+    }
+
+    fn emitOrdinaryFunction(
+        self: *Compiler,
+        node_id: ir.ValueId,
+        lowering_kind: specialize.Lowering,
+    ) !void {
+        if (lowering_kind != .create_ordinary_function or
+            self.representations.outputs[node_id] != .tagged)
+        {
+            return error.UnsupportedNode;
+        }
+        const node = self.graph.nodes[node_id];
+        if (node.input_count != 0) return error.MalformedGraph;
+        const template: ir.FunctionTemplateRef = switch (node.payload) {
+            .function_template => |value| value,
+            else => return error.MalformedGraph,
+        };
+        if (template.template_index >= self.chunk.function_templates.len) {
+            return error.MalformedGraph;
+        }
+        const function_template = &self.chunk.function_templates[template.template_index];
+        if (function_template.is_arrow or function_template.is_generator or function_template.is_async) {
+            return error.MalformedGraph;
+        }
+        try self.emitFrameSafepoint(node_id, .{ .ordinary_function = template });
+    }
+
+    fn emitSetHome(
+        self: *Compiler,
+        node_id: ir.ValueId,
+        lowering_kind: specialize.Lowering,
+    ) !void {
+        if (lowering_kind != .set_home or
+            self.representations.outputs[node_id] != .none)
+        {
+            return error.UnsupportedNode;
+        }
+        const node = self.graph.nodes[node_id];
+        if (node.input_count != 2) return error.MalformedGraph;
+        const home = switch (node.payload) {
+            .home_object => |value| value,
+            else => return error.MalformedGraph,
+        };
+        try self.emitFrameSafepoint(node_id, .{ .set_home = home });
+    }
+
+    fn emitObjectMethodProperty(
+        self: *Compiler,
+        node_id: ir.ValueId,
+        lowering_kind: specialize.Lowering,
+    ) !void {
+        if (lowering_kind != .define_object_method_property or
+            self.representations.outputs[node_id] != .none)
+        {
+            return error.UnsupportedNode;
+        }
+        const node = self.graph.nodes[node_id];
+        if (node.input_count != 2) return error.MalformedGraph;
+        const property: ir.ObjectMethodProperty = switch (node.payload) {
+            .object_method_property => |value| value,
+            else => return error.MalformedGraph,
+        };
+        if (property.key_constant >= self.chunk.constants.len or
+            !self.chunk.constants[property.key_constant].isString())
+        {
+            return error.MalformedGraph;
+        }
+        try self.emitFrameSafepoint(node_id, .{ .object_method_property = property });
+    }
+
+    fn emitObjectLiteral(
+        self: *Compiler,
+        node_id: ir.ValueId,
+        lowering_kind: specialize.Lowering,
+    ) !void {
+        if (lowering_kind != .create_object_literal or
+            self.representations.outputs[node_id] != .tagged)
+        {
+            return error.UnsupportedNode;
+        }
+        const node = self.graph.nodes[node_id];
+        if (node.input_count != 0) return error.MalformedGraph;
+        const literal: ir.ObjectLiteral = switch (node.payload) {
+            .object_literal => |value| value,
+            else => return error.MalformedGraph,
+        };
+        try self.emitFrameSafepoint(node_id, .{ .object_literal = literal });
+    }
+
+    fn emitDenseArrayLiteral(
+        self: *Compiler,
+        node_id: ir.ValueId,
+        lowering_kind: specialize.Lowering,
+    ) !void {
+        if (lowering_kind != .create_dense_array_literal or
+            self.representations.outputs[node_id] != .tagged)
+        {
+            return error.UnsupportedNode;
+        }
+        const node = self.graph.nodes[node_id];
+        if (node.input_count != 0) return error.MalformedGraph;
+        const literal: ir.DenseArrayLiteral = switch (node.payload) {
+            .dense_array_literal => |value| value,
+            else => return error.MalformedGraph,
+        };
+        const base: usize = literal.base;
+        const count: usize = literal.count;
+        if (literal.count == 0 or count > heap_mod.Heap.element_buf_cap or
+            base > self.chunk.register_count or count > self.chunk.register_count - base)
+        {
+            return error.MalformedGraph;
+        }
+        try self.emitFrameSafepoint(node_id, .{ .dense_array_literal = literal });
+    }
+
+    fn emitArrayLiteral(
+        self: *Compiler,
+        node_id: ir.ValueId,
+        lowering_kind: specialize.Lowering,
+    ) !void {
+        if (lowering_kind != .create_array_literal or
+            self.representations.outputs[node_id] != .tagged)
+        {
+            return error.UnsupportedNode;
+        }
+        const node = self.graph.nodes[node_id];
+        if (node.input_count != 0 or node.payload != .none) return error.MalformedGraph;
+        try self.emitFrameSafepoint(node_id, .array_literal);
+    }
+
+    fn emitDenseArrayAppend(
+        self: *Compiler,
+        node_id: ir.ValueId,
+        lowering_kind: specialize.Lowering,
+    ) !void {
+        if (lowering_kind != .append_dense_array_literal_element or
+            self.representations.outputs[node_id] != .none)
+        {
+            return error.UnsupportedNode;
+        }
+        const node = self.graph.nodes[node_id];
+        if (node.input_count != 2) return error.MalformedGraph;
+        const append: ir.DenseArrayAppend = switch (node.payload) {
+            .dense_array_append => |value| value,
+            else => return error.MalformedGraph,
+        };
+        if (append.key_constant >= self.chunk.constants.len or
+            !self.chunk.constants[append.key_constant].isString() or
+            append.object_register >= self.chunk.register_count)
+        {
+            return error.MalformedGraph;
+        }
+        const inputs = self.graph.nodeInputs(node_id);
+        if (inputs.len != 2 or inputs[0] >= self.graph.nodes.len or
+            self.graph.nodes[inputs[0]].kind != .create_array_literal)
+        {
+            return error.MalformedGraph;
+        }
+        try self.emitFrameSafepoint(node_id, .{ .dense_array_append = append });
+    }
+
+    fn emitComputedDelete(
+        self: *Compiler,
+        node_id: ir.ValueId,
+        lowering_kind: specialize.Lowering,
+    ) !void {
+        if (lowering_kind != .delete_computed_property or
+            self.representations.outputs[node_id] != .tagged)
+        {
+            return error.UnsupportedNode;
+        }
+        const node = self.graph.nodes[node_id];
+        if (node.input_count != 2) return error.MalformedGraph;
+        const delete: ir.ComputedDelete = switch (node.payload) {
+            .computed_delete => |value| value,
+            else => return error.MalformedGraph,
+        };
+        if (delete.object_register >= self.chunk.register_count or
+            delete.key_register >= self.chunk.register_count)
+        {
+            return error.MalformedGraph;
+        }
+        try self.emitFrameSafepoint(node_id, .{ .computed_delete = delete });
+    }
+
+    fn emitTemplateProperty(
+        self: *Compiler,
+        node_id: ir.ValueId,
+        lowering_kind: specialize.Lowering,
+    ) !void {
+        if (lowering_kind != .define_template_property or
+            self.representations.outputs[node_id] != .none)
+        {
+            return error.UnsupportedNode;
+        }
+        const node = self.graph.nodes[node_id];
+        if (node.input_count != 2) return error.MalformedGraph;
+        const property: ir.TemplateProperty = switch (node.payload) {
+            .template_property => |value| value,
+            else => return error.MalformedGraph,
+        };
+        if (property.key_constant >= self.chunk.constants.len or
+            !self.chunk.constants[property.key_constant].isString())
+        {
+            return error.MalformedGraph;
+        }
+        try self.emitFrameSafepoint(node_id, .{ .template_property = property });
+    }
+
+    fn emitDirectCall(
+        self: *Compiler,
+        node_id: ir.ValueId,
+        lowering_kind: specialize.Lowering,
+    ) !void {
+        if (lowering_kind != .direct_call or
+            self.representations.outputs[node_id] != .tagged)
+        {
+            return error.UnsupportedNode;
+        }
+        const node = self.graph.nodes[node_id];
+        if (node.input_count != 0) return error.MalformedGraph;
+        const site: ir.DirectCallSite = switch (node.payload) {
+            .direct_call => |direct_call| direct_call,
+            else => return error.MalformedGraph,
+        };
+        const point_index = try self.pointIndexForNode(node_id);
+        var point = try self.physical_deopt.decode(self.allocator, point_index);
+        defer point.deinit();
+        if (point.bytecode_offset != node.bytecode_offset) return error.InvalidMetadata;
+        try call_handoff.validateRoots(point, site);
+        const after_bytecode = try call_handoff.afterBytecode(
+            self.chunk,
+            node.bytecode_offset,
+            site,
+        );
+
+        // Commit the exact pre-call state before an allocation boundary. The
+        // helper reads the operands from this rooted frame, then may append a
+        // callee and relocate the `frames` backing array.
+        try self.emitFrameState(point);
+        try self.machine.movImm64(lhs_scratch, after_bytecode);
+        try self.machine.emit(a64.strImm(
+            lhs_scratch,
+            lowering.lantern_frame_register,
+            layout.frame.ip,
+        ));
+
+        var pushed: Masm.Label = .{};
+        defer pushed.deinit(self.allocator);
+        var tier_down: Masm.Label = .{};
+        defer tier_down.deinit(self.allocator);
+
+        // `blr` may clobber every caller-saved register. The direct helper
+        // returns to Lantern on success, but its tier-down path must still
+        // restore the JIT frame/register bases before reconstructing the
+        // original bytecode operation. Leave x0 unsaved so it keeps the
+        // helper's status code.
+        try self.emitDirectCallSave();
+        try self.machine.emit(a64.movReg(.x0, lowering.realm_register));
+        try self.machine.emit(a64.movReg(.x1, lowering.lantern_frame_register));
+        switch (site) {
+            .direct => |direct| {
+                const this_register: u64 = if (direct.this_register) |receiver|
+                    receiver
+                else
+                    call_handoff.no_this_register;
+                try self.machine.movImm64(.x2, this_register);
+                try self.machine.movImm64(.x3, direct.callee);
+                try self.machine.movImm64(.x4, direct.argc);
+                try self.machine.movImm64(.x5, direct.feedback_index);
+                switch (direct.kind) {
+                    .call => try self.machine.callAbs(
+                        lowering.spill_base_register,
+                        @intFromPtr(&call_handoff.pushMonomorphicDirectCall),
+                    ),
+                    .construct => try self.machine.callAbs(
+                        lowering.spill_base_register,
+                        @intFromPtr(&call_handoff.pushMonomorphicConstruct),
+                    ),
+                }
+            },
+            .property => |property| {
+                try self.machine.movImm64(.x2, property.receiver);
+                try self.machine.movImm64(.x3, property.argc);
+                try self.machine.movImm64(.x4, property.load_feedback_index);
+                try self.machine.movImm64(.x5, property.call_feedback_index);
+                try self.machine.callAbs(
+                    lowering.spill_base_register,
+                    @intFromPtr(&call_handoff.pushMonomorphicPropertyCall),
+                );
+            },
+        }
+        try self.machine.emit(a64.movRegW(.x0, .x0));
+        try self.machine.jumpCbz(.x0, &pushed);
+        try self.machine.emit(a64.cmpImm(
+            .x0,
+            @intFromEnum(call_mod.JitPushStatus.tier_down),
+            false,
+        ));
+        try self.machine.jumpCond(.eq, &tier_down);
+
+        // Any status other than pushed/tier-down is host OOM. The frame was
+        // already staged, but must not be replayed because allocation may have
+        // occurred before the failure.
+        try self.emitDirectCallRestore();
+        try self.machine.movImm64(.x0, host_oom_sentinel_bits);
+        try emitter.emitEpilogue(self.machine, self.lowered.frame);
+
+        try self.machine.bind(&pushed);
+        // Do not touch the Lantern frame after this point: append may have
+        // invalidated its address. Lantern derives the new top frame.
+        try self.emitDirectCallRestore();
+        try self.machine.movImm64(.x0, call_pushed_sentinel_bits);
+        try emitter.emitEpilogue(self.machine, self.lowered.frame);
+
+        try self.machine.bind(&tier_down);
+        // The helper left the frame unmodified except for our staged state;
+        // replay the original opcode through Lantern's complete call path.
+        try self.emitDirectCallRestore();
+        try self.emitResumeAt(point.bytecode_offset);
+    }
+
+    /// §15.10 must reuse the current Lantern frame. A native helper call would
+    /// grow the host stack, so T2 treats the terminal as an exact deopt to the
+    /// canonical tail dispatcher after executing any preceding optimized work.
+    fn emitTailDispatch(
+        self: *Compiler,
+        node_id: ir.ValueId,
+        lowering_kind: specialize.Lowering,
+    ) !void {
+        if (lowering_kind != .tail_dispatch or
+            self.representations.outputs[node_id] != .none)
+        {
+            return error.UnsupportedNode;
+        }
+        const node = self.graph.nodes[node_id];
+        if (node.input_count != 0 or node.payload != .none) return error.MalformedGraph;
+        try self.machine.jump(try self.guardFor(node_id));
+    }
+
+    /// Preserve all caller-saved registers that remain part of Ohaimark's
+    /// register convention across a direct-call helper. x0 deliberately stays
+    /// live for the helper status; no native continuation uses its prior value.
+    fn emitDirectCallSave(self: *Compiler) !void {
+        try self.machine.emit(a64.stpPreIdxSp(.x1, .x2, -16));
+        try self.machine.emit(a64.stpPreIdxSp(.x3, .x4, -16));
+        try self.machine.emit(a64.stpPreIdxSp(.x5, .x6, -16));
+        try self.machine.emit(a64.stpPreIdxSp(.x7, .x8, -16));
+        try self.machine.emit(a64.stpPreIdxSp(.x16, .lr, -16));
+    }
+
+    fn emitDirectCallRestore(self: *Compiler) !void {
+        try self.machine.emit(a64.ldpPostIdxSp(.x16, .lr, 16));
+        try self.machine.emit(a64.ldpPostIdxSp(.x7, .x8, 16));
+        try self.machine.emit(a64.ldpPostIdxSp(.x5, .x6, 16));
+        try self.machine.emit(a64.ldpPostIdxSp(.x3, .x4, 16));
+        try self.machine.emit(a64.ldpPostIdxSp(.x1, .x2, 16));
+    }
+
+    fn emitThrowIfHole(
+        self: *Compiler,
+        node_id: ir.ValueId,
+        lowering_kind: specialize.Lowering,
+    ) !void {
+        if (lowering_kind != .throw_if_hole) return error.UnsupportedNode;
+        const guard = try self.guardFor(node_id);
+        try self.emitTaggedInput(node_id, 0, lhs_scratch);
+        try self.machine.movImm64(guard_scratch, Value.hole_.bits);
+        try self.machine.emit(a64.cmpReg(lhs_scratch, guard_scratch));
+        try self.jumpToGuardIf(.eq, guard);
+        try self.emitTaggedResult(node_id, lhs_scratch);
+    }
+
+    /// §13.5.3. This remains allocation-free on the native path: classify the
+    /// NaN-boxed input, then load the active Realm's immutable cached result
+    /// string. A cold cache is a normal guard exit, letting Lantern allocate
+    /// and cache it before this entry is used again.
+    fn emitTypeOf(
+        self: *Compiler,
+        node_id: ir.ValueId,
+        lowering_kind: specialize.Lowering,
+    ) !void {
+        if (lowering_kind != .typeof_ or self.representations.outputs[node_id] != .tagged) {
+            return error.UnsupportedNode;
+        }
+        const guard = try self.guardFor(node_id);
+        var number: Masm.Label = .{};
+        defer number.deinit(self.allocator);
+        var undefined_: Masm.Label = .{};
+        defer undefined_.deinit(self.allocator);
+        var object: Masm.Label = .{};
+        defer object.deinit(self.allocator);
+        var boolean: Masm.Label = .{};
+        defer boolean.deinit(self.allocator);
+        var string: Masm.Label = .{};
+        defer string.deinit(self.allocator);
+        var function: Masm.Label = .{};
+        defer function.deinit(self.allocator);
+        var symbol: Masm.Label = .{};
+        defer symbol.deinit(self.allocator);
+        var bigint: Masm.Label = .{};
+        defer bigint.deinit(self.allocator);
+        var object_tag: Masm.Label = .{};
+        defer object_tag.deinit(self.allocator);
+        var done: Masm.Label = .{};
+        defer done.deinit(self.allocator);
+
+        try self.emitTaggedInput(node_id, 0, lhs_scratch);
+        try self.machine.emit(a64.lsrImm(guard_scratch, lhs_scratch, 48));
+        try self.machine.movImm64(rhs_scratch, layout.value_bits.tag_object);
+        try self.machine.emit(a64.cmpReg(guard_scratch, rhs_scratch));
+        // Doubles occupy every top-tag value below Object. Int32 uses its
+        // own tag, but has the same `typeof` result and joins below.
+        try self.machine.jumpCond(.cc, &number);
+        try self.machine.jumpCond(.eq, &object_tag);
+
+        try self.machine.movImm64(rhs_scratch, layout.value_bits.tag_string);
+        try self.machine.emit(a64.cmpReg(guard_scratch, rhs_scratch));
+        try self.machine.jumpCond(.eq, &string);
+        try self.machine.movImm64(rhs_scratch, layout.value_bits.tag_int32);
+        try self.machine.emit(a64.cmpReg(guard_scratch, rhs_scratch));
+        try self.machine.jumpCond(.eq, &number);
+        try self.machine.movImm64(rhs_scratch, layout.value_bits.tag_bool);
+        try self.machine.emit(a64.cmpReg(guard_scratch, rhs_scratch));
+        try self.machine.jumpCond(.eq, &boolean);
+        try self.machine.movImm64(rhs_scratch, layout.value_bits.tag_null);
+        try self.machine.emit(a64.cmpReg(guard_scratch, rhs_scratch));
+        try self.machine.jumpCond(.eq, &object);
+        try self.machine.movImm64(rhs_scratch, layout.value_bits.tag_undefined);
+        try self.machine.emit(a64.cmpReg(guard_scratch, rhs_scratch));
+        try self.machine.jumpCond(.eq, &undefined_);
+        // Hole cannot reach a valid `typeof` bytecode site, but Lantern's
+        // fallback classifies it as `undefined`; retain that total behavior.
+        try self.machine.jump(&undefined_);
+
+        try self.machine.bind(&object_tag);
+        try self.machine.movImm64(rhs_scratch, layout.value_bits.tag_object_shifted);
+        try self.machine.emit(a64.eorReg(guard_scratch, lhs_scratch, rhs_scratch));
+        try self.machine.emit(a64.lslImm(rhs_scratch, guard_scratch, 62));
+        try self.machine.emit(a64.lsrImm(rhs_scratch, rhs_scratch, 62));
+        try self.machine.emit(a64.cmpImm(
+            rhs_scratch,
+            @intCast(layout.value_bits.kind_function),
+            false,
+        ));
+        try self.machine.jumpCond(.eq, &function);
+        try self.machine.emit(a64.cmpImm(
+            rhs_scratch,
+            @intCast(layout.value_bits.kind_symbol),
+            false,
+        ));
+        try self.machine.jumpCond(.eq, &symbol);
+        try self.machine.emit(a64.cmpImm(
+            rhs_scratch,
+            @intCast(layout.value_bits.kind_bigint),
+            false,
+        ));
+        try self.machine.jumpCond(.eq, &bigint);
+        try self.machine.emit(a64.cmpImm(
+            rhs_scratch,
+            @intCast(layout.value_bits.kind_object),
+            false,
+        ));
+        try self.machine.jumpCond(.ne, &undefined_);
+        try self.machine.emit(a64.lsrImm(result_scratch, guard_scratch, 2));
+        try self.machine.emit(a64.lslImm(result_scratch, result_scratch, 2));
+        try self.machine.emit(a64.ldrImmW(
+            rhs_scratch,
+            result_scratch,
+            layout.object.brand,
+        ));
+        try self.machine.jumpTbnz(
+            rhs_scratch,
+            layout.object.brand_proxy_callable_bit,
+            &function,
+        );
+        try self.machine.jump(&object);
+
+        try self.machine.bind(&number);
+        try self.emitTypeOfCachedString(node_id, guard, layout.realm.typeof_number_string);
+        try self.machine.jump(&done);
+
+        try self.machine.bind(&undefined_);
+        try self.emitTypeOfCachedString(node_id, guard, layout.realm.typeof_undefined_string);
+        try self.machine.jump(&done);
+
+        try self.machine.bind(&object);
+        try self.emitTypeOfCachedString(node_id, guard, layout.realm.typeof_object_string);
+        try self.machine.jump(&done);
+
+        try self.machine.bind(&boolean);
+        try self.emitTypeOfCachedString(node_id, guard, layout.realm.typeof_boolean_string);
+        try self.machine.jump(&done);
+
+        try self.machine.bind(&string);
+        try self.emitTypeOfCachedString(node_id, guard, layout.realm.typeof_string_string);
+        try self.machine.jump(&done);
+
+        try self.machine.bind(&function);
+        try self.emitTypeOfCachedString(node_id, guard, layout.realm.typeof_function_string);
+        try self.machine.jump(&done);
+
+        try self.machine.bind(&symbol);
+        try self.emitTypeOfCachedString(node_id, guard, layout.realm.typeof_symbol_string);
+        try self.machine.jump(&done);
+
+        try self.machine.bind(&bigint);
+        try self.emitTypeOfCachedString(node_id, guard, layout.realm.typeof_bigint_string);
+        try self.machine.jump(&done);
+
+        try self.machine.bind(&done);
+    }
+
+    /// `throw_` is deliberately not a native unwind. Its deopt point contains
+    /// the exact input frame, and Lantern owns §14.14 completion plus the
+    /// handler-table walk that installs catch/finally state.
+    fn emitThrow(
+        self: *Compiler,
+        node_id: ir.ValueId,
+        lowering_kind: specialize.Lowering,
+    ) !void {
+        if (lowering_kind != .throw_) return error.UnsupportedNode;
+        try self.machine.jump(try self.guardFor(node_id));
+    }
+
+    fn emitTypeOfCachedString(
+        self: *Compiler,
+        node_id: ir.ValueId,
+        guard: *Masm.Label,
+        cache_offset: usize,
+    ) !void {
+        try property_codegen.emitRealmU64(
+            self.machine,
+            lowering.realm_register,
+            result_scratch,
+            cache_offset,
+        );
+        try self.machine.emit(a64.lsrImm(guard_scratch, result_scratch, 48));
+        try self.machine.movImm64(rhs_scratch, layout.value_bits.tag_string);
+        try self.machine.emit(a64.cmpReg(guard_scratch, rhs_scratch));
+        try self.jumpToGuardIf(.ne, guard);
+        try self.emitTaggedResult(node_id, result_scratch);
     }
 
     fn emitTaggedInput(
@@ -1009,6 +2318,9 @@ const Compiler = struct {
         if (assumption.kind != expected_kind) return error.InvalidMetadata;
         const feedback_index = switch (self.graph.nodes[node_id].payload) {
             .named_load => |named| named.feedback_index,
+            .named_store => |named| named.feedback_index,
+            .computed_load => |computed| computed.feedback_index,
+            .computed_store => |computed| computed.feedback_index,
             .global_load => |global| global.feedback_index,
             else => return error.MalformedGraph,
         };
@@ -1098,7 +2410,7 @@ const Compiler = struct {
         // Unboxed int32 conditions use checked_branch + output_kind.int32 below.
         const boxed_int32 = output_kind == .int32 and input_conversion == .box_int32;
         const strict_boolean = output_kind == .tagged and input_conversion == .none and switch (self.graph.nodes[producer].kind) {
-            .strict_eq, .logical_not => true,
+            .strict_eq, .logical_not, .less_than => true,
             else => false,
         };
         const checked_truthy = info.lowering == .checked_branch;
@@ -1416,7 +2728,7 @@ const Compiler = struct {
             lowering.lantern_frame_register,
             layout.frame.ip,
         ));
-        try self.machine.movImm64(.x0, resume_sentinel_bits);
+        try self.machine.movImm64(.x0, safepoint_sentinel_bits);
         try emitter.emitEpilogue(self.machine, self.lowered.frame);
     }
 
@@ -1448,15 +2760,120 @@ const Compiler = struct {
     fn emitGuardExit(self: *Compiler, point_index: usize) !void {
         var point = try self.physical_deopt.decode(self.allocator, point_index);
         defer point.deinit();
-        try self.emitDirectFrameRecoveries(point);
-        try self.emitExternalRecovery(point.accumulator, .accumulator);
-        for (point.slots) |slot| {
+        try self.emitFrameState(point);
+        try self.emitResumeAt(point.bytecode_offset);
+    }
+
+    fn emitFrameSafepoint(
+        self: *Compiler,
+        node_id: ir.ValueId,
+        helper: frame_safepoint.Helper,
+    ) !void {
+        const point_index = try self.pointIndexForNode(node_id);
+        var point = try self.physical_deopt.decode(self.allocator, point_index);
+        defer point.deinit();
+        var succeeded: Masm.Label = .{};
+        defer succeeded.deinit(self.allocator);
+        var tier_down: Masm.Label = .{};
+        defer tier_down.deinit(self.allocator);
+        var out_of_memory: Masm.Label = .{};
+        defer out_of_memory.deinit(self.allocator);
+        var done: Masm.Label = .{};
+        defer done.deinit(self.allocator);
+
+        // The physical deopt point is the exact pre-op Lantern state. Commit
+        // it before the ABI boundary so every JS root is visible through the
+        // registered frame while the helper allocates or writes a typed slot.
+        try self.emitFrameState(point);
+        try self.emitNonReentrantCallSave();
+        const helper_call = frame_safepoint.call(helper);
+        if (helper_call.arg2) |arg2| try self.machine.movImm64(.x2, arg2);
+        if (helper_call.arg3) |arg3| try self.machine.movImm64(.x3, arg3);
+        try self.machine.callAbs(lowering.spill_base_register, helper_call.target);
+        // Preserve the helper status outside the restored volatile register
+        // set. `x15` is a codegen scratch, never an allocated value location.
+        try self.machine.emit(a64.movRegW(guard_scratch, lowering.realm_register));
+        try self.machine.jumpCbz(guard_scratch, &succeeded);
+        if (frame_safepoint.outOfMemoryStatus(helper)) |out_of_memory_status| {
+            try self.machine.emit(a64.cmpImm(
+                guard_scratch,
+                @intCast(out_of_memory_status),
+                false,
+            ));
+            try self.machine.jumpCond(.eq, &out_of_memory);
+        }
+        try self.machine.jump(&tier_down);
+
+        try self.machine.bind(&succeeded);
+        try self.emitNonReentrantCallRestore();
+        if (frame_safepoint.returnsTaggedResult(helper)) {
+            try self.machine.emit(a64.ldrImm(
+                guard_scratch,
+                lowering.lantern_frame_register,
+                layout.frame.accumulator,
+            ));
+            try self.emitTaggedResult(node_id, guard_scratch);
+        }
+        try self.machine.jump(&done);
+
+        try self.machine.bind(&tier_down);
+        try self.emitNonReentrantCallRestore();
+        try self.emitResumeAt(point.bytecode_offset);
+
+        try self.machine.bind(&out_of_memory);
+        try self.emitNonReentrantCallRestore();
+        try self.machine.movImm64(.x0, host_oom_sentinel_bits);
+        try emitter.emitEpilogue(self.machine, self.lowered.frame);
+
+        try self.machine.bind(&done);
+    }
+
+    /// Save every caller-saved location that can hold Ohaimark state across a
+    /// non-reentrant C ABI call. x3-x8 carry tagged SSA values and x16 anchors
+    /// the spill area. Five pairs plus the padded LR save are 96 bytes,
+    /// preserving AAPCS64's 16-byte stack alignment at `blr`. Callers that
+    /// can allocate or re-enter JavaScript must stage the full Lantern frame
+    /// separately before invoking this helper.
+    fn emitNonReentrantCallSave(self: *Compiler) !void {
+        try self.machine.emit(a64.stpPreIdxSp(.x0, .x1, -16));
+        try self.machine.emit(a64.stpPreIdxSp(.x2, .x3, -16));
+        try self.machine.emit(a64.stpPreIdxSp(.x4, .x5, -16));
+        try self.machine.emit(a64.stpPreIdxSp(.x6, .x7, -16));
+        try self.machine.emit(a64.stpPreIdxSp(.x8, .x16, -16));
+        try self.machine.emit(a64.strPreIdxSp(.lr, -16));
+    }
+
+    fn emitNonReentrantCallRestore(self: *Compiler) !void {
+        try self.machine.emit(a64.ldrPostIdxSp(.lr, 16));
+        try self.machine.emit(a64.ldpPostIdxSp(.x8, .x16, 16));
+        try self.machine.emit(a64.ldpPostIdxSp(.x6, .x7, 16));
+        try self.machine.emit(a64.ldpPostIdxSp(.x4, .x5, 16));
+        try self.machine.emit(a64.ldpPostIdxSp(.x2, .x3, 16));
+        try self.machine.emit(a64.ldpPostIdxSp(.x0, .x1, 16));
+    }
+
+    fn emitFrameState(
+        self: *Compiler,
+        point: deopt_physical.DecodedPoint,
+    ) !void {
+        var plan = try frame_recovery.Plan.build(self.allocator, point);
+        defer plan.deinit();
+        for (plan.steps) |step| switch (step) {
+            .save_cycle => |source| {
+                try self.emitFrameLoad(source, guard_scratch);
+            },
+            .move => |move| try self.emitFrameMove(move),
+        };
+        for (plan.externals) |external| {
             try self.emitExternalRecovery(
-                slot.recovery,
-                .{ .register = slot.register },
+                external.recovery,
+                external.destination,
             );
         }
-        try self.machine.movImm64(lhs_scratch, point.bytecode_offset);
+    }
+
+    fn emitResumeAt(self: *Compiler, bytecode_offset: u32) !void {
+        try self.machine.movImm64(lhs_scratch, bytecode_offset);
         try self.machine.emit(a64.strImm(
             lhs_scratch,
             lowering.lantern_frame_register,
@@ -1466,63 +2883,7 @@ const Compiler = struct {
         try emitter.emitEpilogue(self.machine, self.lowered.frame);
     }
 
-    /// Entry-frame recoveries are parallel assignments: a destination may
-    /// still hold another recipe's source. Resolve those moves before any
-    /// spill/immediate write can overwrite an original Lantern value.
-    fn emitDirectFrameRecoveries(
-        self: *Compiler,
-        point: deopt_physical.DecodedPoint,
-    ) !void {
-        var pending: std.ArrayListUnmanaged(FrameMove) = .empty;
-        defer pending.deinit(self.allocator);
-        try appendFrameMove(&pending, self.allocator, point.accumulator, .accumulator);
-        for (point.slots) |slot| {
-            try appendFrameMove(
-                &pending,
-                self.allocator,
-                slot.recovery,
-                .{ .register = slot.register },
-            );
-        }
-
-        var steps_left = pending.items.len * 2 + 1;
-        while (pending.items.len != 0) {
-            if (steps_left == 0) return error.InvalidMetadata;
-            steps_left -= 1;
-            var ready: ?usize = null;
-            for (pending.items, 0..) |move, index| {
-                if (!frameDestinationIsSource(move.destination, pending.items)) {
-                    ready = index;
-                    break;
-                }
-            }
-            if (ready) |index| {
-                try self.emitFrameMove(pending.orderedRemove(index));
-                continue;
-            }
-
-            var cycle_source: ?FrameLocation = null;
-            for (pending.items) |move| switch (move.source) {
-                .frame => |source| {
-                    cycle_source = source;
-                    break;
-                },
-                .cycle_scratch => {},
-            };
-            const source = cycle_source orelse return error.InvalidMetadata;
-            try self.emitFrameLoad(source, guard_scratch);
-            for (pending.items) |*move| switch (move.source) {
-                .frame => |candidate| {
-                    if (frameLocationEql(candidate, source)) {
-                        move.source = .cycle_scratch;
-                    }
-                },
-                .cycle_scratch => {},
-            };
-        }
-    }
-
-    fn emitFrameMove(self: *Compiler, move: FrameMove) !void {
+    fn emitFrameMove(self: *Compiler, move: frame_recovery.Move) !void {
         switch (move.source) {
             .frame => |source| try self.emitFrameLoad(source, lhs_scratch),
             .cycle_scratch => try self.machine.emit(a64.movReg(
@@ -1608,10 +2969,16 @@ const Compiler = struct {
     }
 
     fn guardFor(self: *Compiler, node_id: ir.ValueId) !*Masm.Label {
-        if (node_id >= self.point_for_node.len) return error.InvalidMetadata;
-        const point_index = self.point_for_node[node_id] orelse return error.InvalidMetadata;
+        const point_index = try self.pointIndexForNode(node_id);
         if (point_index >= self.guard_labels.len) return error.InvalidMetadata;
         return &self.guard_labels[point_index];
+    }
+
+    fn pointIndexForNode(self: *const Compiler, node_id: ir.ValueId) !usize {
+        if (node_id >= self.point_for_node.len) return error.InvalidMetadata;
+        const point_index = self.point_for_node[node_id] orelse return error.InvalidMetadata;
+        if (point_index >= self.physical_deopt.points.len) return error.InvalidMetadata;
+        return point_index;
     }
 
     fn valueLocation(self: *const Compiler, value: ir.ValueId) !parallel_moves.Location {
@@ -1686,43 +3053,6 @@ const Compiler = struct {
         return target.start <= source.start;
     }
 };
-
-fn appendFrameMove(
-    pending: *std.ArrayListUnmanaged(FrameMove),
-    allocator: std.mem.Allocator,
-    recovery: deopt_physical.Recovery,
-    destination: FrameLocation,
-) !void {
-    const source = switch (recovery) {
-        .frame_accumulator => FrameLocation.accumulator,
-        .frame_register => |register| FrameLocation{ .register = register },
-        .tagged_stack, .int32_stack, .immediate => return,
-    };
-    if (frameLocationEql(source, destination)) return;
-    try pending.append(allocator, .{
-        .source = .{ .frame = source },
-        .destination = destination,
-    });
-}
-
-fn frameDestinationIsSource(
-    destination: FrameLocation,
-    pending: []const FrameMove,
-) bool {
-    for (pending) |move| switch (move.source) {
-        .frame => |source| if (frameLocationEql(destination, source)) return true,
-        .cycle_scratch => {},
-    };
-    return false;
-}
-
-fn frameLocationEql(lhs: FrameLocation, rhs: FrameLocation) bool {
-    if (std.meta.activeTag(lhs) != std.meta.activeTag(rhs)) return false;
-    return switch (lhs) {
-        .accumulator => true,
-        .register => |register| register == rhs.register,
-    };
-}
 
 fn immediateValue(chunk: *const Chunk, immediate: ir.Immediate) !Value {
     return switch (immediate) {

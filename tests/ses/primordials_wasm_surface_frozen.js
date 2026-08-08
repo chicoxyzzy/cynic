@@ -5,9 +5,9 @@
 // LinkError, RuntimeError) are a distinct frozen surface — none is
 // reached by the other primordials_* fixtures, and the ~100 behaviour
 // tests in src/runtime/wasm_js_test.zig assert API semantics, not the
-// hardened-realm freeze. The surface installs regardless of
-// --allow=wasm (only Module/Instance *construction* is gated), so a
-// guest cannot monkeypatch e.g. WebAssembly.Memory.prototype.grow.
+// hardened-realm freeze. The surface installs regardless of the host's
+// dynamic-byte policy, so a guest cannot monkeypatch e.g.
+// WebAssembly.Memory.prototype.grow.
 
 if (!Object.isFrozen(WebAssembly)) {
   throw new Error("WebAssembly namespace object is not frozen");

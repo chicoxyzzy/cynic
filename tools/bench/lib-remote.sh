@@ -72,6 +72,13 @@ find /tmp/jobs -maxdepth 1 -type d -name 'cynic-*' -mmin +1440 -exec rm -rf {} +
   echo 'git fetch -q --all --prune'
   printf 'git checkout -f -q --detach %q\n' "$REF"
   echo 'git submodule update --init --quiet vendor/test262 2>/dev/null || true'
+  echo 'cynic_use_pinned_zig() {'
+  echo '  local zig_bin'
+  echo '  zig_bin="$(tools/fetch-zig.sh)" || return'
+  echo '  export PATH="$(dirname "$zig_bin"):$PATH"'
+  echo '}'
+  echo 'cynic_use_pinned_zig || exit $?'
+  echo 'echo ">> revision $(git rev-parse --short=12 HEAD), zig $(zig version)"'
   printf '%s\n' "$CMD_B64" | base64 --decode
 } > "$d/job.sh"
 # Detached: setsid + </dev/null + & make it ignore the ssh channel closing

@@ -59,7 +59,7 @@ pub fn main(init: std.process.Init) !void {
 
     const unhardened = parsed.unhardened;
     const allow_eval = parsed.allow_eval;
-    const allow_wasm = parsed.allow_wasm;
+    const allow_wasm_compile = parsed.allow_wasm_compile;
     const jit = parsed.jit;
     const ohaimark = parsed.ohaimark;
     const ohaimark_osr = parsed.ohaimark_osr;
@@ -107,7 +107,7 @@ pub fn main(init: std.process.Init) !void {
             try printUsage(io);
             return error.MissingArgument;
         }
-        try eval_cmd.run(allocator, io, args[0], feature_flags, gc_threshold, unhardened, allow_eval, allow_wasm, jit, ohaimark, ohaimark_osr);
+        try eval_cmd.run(allocator, io, args[0], feature_flags, gc_threshold, unhardened, allow_eval, allow_wasm_compile, jit, ohaimark, ohaimark_osr);
     } else if (std.mem.eql(u8, sub, "run")) {
         // `cynic run a.js b.js c.js` evaluates each file in order
         // against one realm — the same shape every other engine's
@@ -163,7 +163,7 @@ pub fn main(init: std.process.Init) !void {
             ohaimark_stats,
             unhardened,
             allow_eval,
-            allow_wasm,
+            allow_wasm_compile,
             jit,
             ohaimark,
             ohaimark_osr,
@@ -189,7 +189,7 @@ pub fn main(init: std.process.Init) !void {
             try printUsage(io);
             return error.UnexpectedArgument;
         }
-        try repl_cmd.run(allocator, io, feature_flags, gc_threshold, repl_debug_globals, unhardened, allow_eval, allow_wasm, jit, ohaimark, ohaimark_osr);
+        try repl_cmd.run(allocator, io, feature_flags, gc_threshold, repl_debug_globals, unhardened, allow_eval, allow_wasm_compile, jit, ohaimark, ohaimark_osr);
     } else if (std.mem.eql(u8, sub, "help") or std.mem.eql(u8, sub, "--help") or std.mem.eql(u8, sub, "-h")) {
         try printUsage(io);
     } else {
@@ -269,12 +269,6 @@ fn printUsage(io: std.Io) !void {
         \\                                   the realm (§19.2.1 / §20.2.1.1.1); the frozen
         \\                                   primordials still confine it unless paired
         \\                                   with --unhardened (docs/ses-alignment.md).
-        \\  --allow=wasm                     Open the WebAssembly code-construction
-        \\                                   gate (HostEnsureCanCompileWasmBytes).
-        \\                                   By default `new WebAssembly.Module` /
-        \\                                   `Instance` throw; `WebAssembly.validate`
-        \\                                   stays available. Orthogonal to
-        \\                                   --allow=eval (docs/wasm-engine.md §9).
         \\  --no-jit                         Disable the Bistromath baseline JIT
         \\                                   tier (docs/jit.md). The tier is ON
         \\                                   by default: hot functions tier up
@@ -289,9 +283,9 @@ fn printUsage(io: std.Io) !void {
         \\                                   default at its natural production threshold;
         \\                                   --ohaimark is an explicit no-op and --no-jit
         \\                                   remains the master opt-out for both tiers.
-        \\  --ohaimark-osr                   Enable loop-header OSR into Ohaimark
-        \\                                   (default off; validation/bench gate only
-        \\                                   until docs/ohaimark.md §3.17 graduation).
+        \\  --no-ohaimark-osr                Disable loop-header OSR while retaining
+        \\                                   Ohaimark function-entry compilation. OSR is
+        \\                                   otherwise on by default with Ohaimark.
         \\
     );
 }
@@ -327,7 +321,7 @@ fn unknownAllow(io: std.Io, name: []const u8) !void {
     var buf: [256]u8 = undefined;
     const msg = try std.fmt.bufPrint(
         &buf,
-        "error: unknown --allow target '{s}'. Valid relaxations: `--allow=eval`, `--allow=wasm`.\n",
+        "error: unknown --allow target '{s}'. Valid relaxation: `--allow=eval`.\n",
         .{name},
     );
     try std.Io.File.stderr().writeStreamingAll(io, msg);
@@ -452,9 +446,11 @@ pub const ParsedFlags = struct {
     /// by the frozen primordials unless paired with `--unhardened`.
     /// See [docs/ses-alignment.md](../docs/ses-alignment.md).
     allow_eval: bool = false,
-    /// `--allow=wasm` — open the WebAssembly code-construction policy
-    /// gate. When set, `realm.allow_wasm` is flipped to `true`.
-    allow_wasm: bool = false,
+    /// Dynamic WebAssembly byte compilation is enabled by default in the
+    /// production CLI. Direct Realm embedders retain a closed-by-default
+    /// `allow_wasm_compile` host policy. The old `--allow=wasm` spelling
+    /// remains accepted as a compatibility no-op.
+    allow_wasm_compile: bool = true,
     /// Bistromath (docs/jit.md) — ON by default since the §12
     /// step-3 exit (2026-06-11: differential pass-sets held
     /// byte-identical through every increment, gc-stress and bench
@@ -467,12 +463,10 @@ pub const ParsedFlags = struct {
     /// differential, GC-pressure, and fuzz gates passed. `--no-ohaimark`
     /// isolates Bistromath; `--no-jit` remains the master opt-out.
     ohaimark: bool = true,
-    /// Loop-header OSR into Ohaimark (docs/ohaimark.md §3.17). Default-off
-    /// until its own differential and natural-threshold gates pass. Exposed
-    /// as a CLI flag so the OSR rollout benchmark and focused validation can
-    /// flip `Realm.ohaimark_osr_enabled` without a separate test binary; it
-    /// is not a general user-facing production surface while the gate is off.
-    ohaimark_osr: bool = false,
+    /// Loop-header OSR into Ohaimark (docs/ohaimark.md §3.17). It defaults on
+    /// with production T2 after passing its independent validation gates;
+    /// `--no-ohaimark-osr` isolates function-entry compilation when needed.
+    ohaimark_osr: bool = true,
     /// The unconsumed tail of the argv slice (subcommand + its
     /// arguments). Empty when no subcommand was supplied — the
     /// caller prints usage in that case.
@@ -533,16 +527,21 @@ pub fn parseTopLevelFlags(args: []const []const u8) ParsedFlags {
         } else if (std.mem.eql(u8, a, "--ohaimark-osr")) {
             out.ohaimark_osr = true;
             rest = rest[1..];
+        } else if (std.mem.eql(u8, a, "--no-ohaimark-osr")) {
+            out.ohaimark_osr = false;
+            rest = rest[1..];
         } else if (std.mem.startsWith(u8, a, "--allow=")) {
-            // `--allow=<name>` relaxes a default-on restriction
-            // (`eval`, `wasm`). An unknown name is rejected rather than
+            // `--allow=<name>` relaxes a default-on restriction. The
+            // historical `wasm` target remains a compatibility no-op now
+            // that CLI Wasm compilation defaults on. Unknown names are
+            // rejected rather than
             // silently ignored.
             const name = a["--allow=".len..];
             if (std.mem.eql(u8, name, "eval")) {
                 out.allow_eval = true;
                 rest = rest[1..];
             } else if (std.mem.eql(u8, name, "wasm")) {
-                out.allow_wasm = true;
+                out.allow_wasm_compile = true;
                 rest = rest[1..];
             } else {
                 out.err = .unknown_allow;
@@ -622,6 +621,12 @@ test "parseTopLevelFlags: --allow=eval defaults to false when absent" {
     try testing.expect(!parsed.allow_eval);
 }
 
+test "parseTopLevelFlags: WebAssembly compilation defaults to enabled" {
+    const args = [_][]const u8{ "run", "foo.js" };
+    const parsed = parseTopLevelFlags(&args);
+    try testing.expect(parsed.allow_wasm_compile);
+}
+
 test "parseTopLevelFlags: an unknown --allow=<target> is rejected" {
     const args = [_][]const u8{"--allow=bogus"};
     const parsed = parseTopLevelFlags(&args);
@@ -652,10 +657,11 @@ test "parseTopLevelFlags: jit — explicit --jit is still accepted" {
     try testing.expect(parsed.jit);
 }
 
-test "parseTopLevelFlags: Ohaimark defaults on with an independent opt-out" {
+test "parseTopLevelFlags: Ohaimark and OSR default on with independent opt-outs" {
     const baseline_args = [_][]const u8{ "run", "foo.js" };
     const baseline = parseTopLevelFlags(&baseline_args);
     try testing.expect(baseline.ohaimark);
+    try testing.expect(baseline.ohaimark_osr);
 
     const disabled_args = [_][]const u8{ "--no-ohaimark", "run", "foo.js" };
     const disabled = parseTopLevelFlags(&disabled_args);
@@ -669,6 +675,13 @@ test "parseTopLevelFlags: Ohaimark defaults on with an independent opt-out" {
     try testing.expect(optimized.jit);
     try testing.expect(optimized.ohaimark);
     try testing.expectEqualStrings("run", optimized.remaining[0]);
+
+    const osr_disabled_args = [_][]const u8{ "--no-ohaimark-osr", "run", "foo.js" };
+    const osr_disabled = parseTopLevelFlags(&osr_disabled_args);
+    try testing.expectEqual(@as(?FlagError, null), osr_disabled.err);
+    try testing.expect(osr_disabled.ohaimark);
+    try testing.expect(!osr_disabled.ohaimark_osr);
+    try testing.expectEqualStrings("run", osr_disabled.remaining[0]);
 }
 
 test "parseTopLevelFlags: --gc-threshold=0 is rejected" {

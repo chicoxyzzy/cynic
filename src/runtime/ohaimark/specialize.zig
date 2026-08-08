@@ -70,6 +70,9 @@ pub const Lowering = enum {
     strict_eq,
     logical_not,
     checked_boolean_not,
+    checked_int32_to_numeric,
+    checked_string_to_string,
+    require_object_coercible,
     /// Truthiness branch that may deopt when the condition is not a known
     /// int32/bool shape (used for `while (i)` on loop-carried counters).
     checked_branch,
@@ -78,17 +81,47 @@ pub const Lowering = enum {
     load_named_own,
     load_named_prototype,
     load_named_synthetic,
+    store_named_generic,
+    store_named_own,
+    load_computed_generic,
+    load_computed_own,
+    store_computed_generic,
+    store_computed_own,
+    delete_computed_property,
     load_this,
     load_global_generic,
     load_global,
+    store_global,
     load_global_slot,
+    store_global_slot_init,
+    store_global_slot,
     load_environment,
+    allocate_environment,
+    store_environment,
+    pop_environment,
+    create_unmapped_arguments_object,
+    create_ordinary_function,
+    set_home,
+    define_object_method_property,
+    create_object_literal,
+    create_dense_array_literal,
+    create_array_literal,
+    append_dense_array_literal_element,
+    define_template_property,
+    throw_,
+    throw_if_hole,
+    typeof_,
+    direct_call,
+    tail_dispatch,
 };
 
 pub const AssumptionKind = enum {
     load_own,
     load_prototype,
     load_synthetic,
+    store_named_own,
+    load_computed_own,
+    store_computed_own,
     load_global,
 };
 
@@ -183,7 +216,7 @@ pub const Plan = struct {
         var assumptions: std.ArrayListUnmanaged(Assumption) = .empty;
         defer assumptions.deinit(allocator);
         for (graph.nodes, 0..) |node, node_index| {
-            const feedback_index: u16, const decision: LoadDecision = switch (node.kind) {
+            const observed: FeedbackObservation = switch (node.kind) {
                 .load_named => blk: {
                     const site = switch (node.payload) {
                         .named_load => |named| named,
@@ -192,9 +225,72 @@ pub const Plan = struct {
                     if (site.feedback_index >= graph.feedback.loads.len) {
                         return error.MalformedGraph;
                     }
+                    const load = graph.feedback.loads[site.feedback_index];
                     break :blk .{
-                        site.feedback_index,
-                        namedLoadDecision(graph.feedback.loads[site.feedback_index]),
+                        .feedback_index = site.feedback_index,
+                        .decision = namedLoadDecision(load),
+                        .receiver_shape = load.receiver_shape,
+                        .holder_shape = load.holder_shape,
+                        .slot = load.slot,
+                        .revision = load.revision,
+                    };
+                },
+                .load_computed => blk: {
+                    const site = switch (node.payload) {
+                        .computed_load => |computed| computed,
+                        else => return error.MalformedGraph,
+                    };
+                    if (site.feedback_index >= graph.feedback.computed.len) {
+                        return error.MalformedGraph;
+                    }
+                    const computed = graph.feedback.computed[site.feedback_index];
+                    break :blk .{
+                        .feedback_index = site.feedback_index,
+                        .decision = computedLoadDecision(computed),
+                        .receiver_shape = computed.receiver_shape,
+                        .holder_shape = null,
+                        .slot = computed.slot,
+                        .revision = 0,
+                    };
+                },
+                .store_named => blk: {
+                    const site = switch (node.payload) {
+                        .named_store => |named| named,
+                        else => return error.MalformedGraph,
+                    };
+                    if (site.feedback_index >= graph.feedback.stores.len) {
+                        return error.MalformedGraph;
+                    }
+                    const store = graph.feedback.stores[site.feedback_index];
+                    break :blk .{
+                        .feedback_index = site.feedback_index,
+                        .decision = namedStoreDecision(store),
+                        .receiver_shape = store.receiver_shape,
+                        // Same-shape named stores do not depend on any
+                        // prototype state. A prior transition fill can leave
+                        // these fields populated, so do not make them part of
+                        // the immutable assumption.
+                        .holder_shape = null,
+                        .slot = store.slot,
+                        .revision = 0,
+                    };
+                },
+                .store_computed => blk: {
+                    const site = switch (node.payload) {
+                        .computed_store => |computed| computed,
+                        else => return error.MalformedGraph,
+                    };
+                    if (site.feedback_index >= graph.feedback.computed.len) {
+                        return error.MalformedGraph;
+                    }
+                    const computed = graph.feedback.computed[site.feedback_index];
+                    break :blk .{
+                        .feedback_index = site.feedback_index,
+                        .decision = computedStoreDecision(computed),
+                        .receiver_shape = computed.receiver_shape,
+                        .holder_shape = null,
+                        .slot = computed.slot,
+                        .revision = 0,
                     };
                 },
                 .load_global => blk: {
@@ -205,22 +301,30 @@ pub const Plan = struct {
                     if (site.feedback_index >= graph.feedback.loads.len) {
                         return error.MalformedGraph;
                     }
+                    const load = graph.feedback.loads[site.feedback_index];
                     break :blk .{
-                        site.feedback_index,
-                        globalLoadDecision(graph.feedback.loads[site.feedback_index]),
+                        .feedback_index = site.feedback_index,
+                        .decision = globalLoadDecision(load),
+                        .receiver_shape = load.receiver_shape,
+                        .holder_shape = load.holder_shape,
+                        .slot = load.slot,
+                        .revision = load.revision,
                     };
                 },
                 else => continue,
             };
-            const observed = graph.feedback.loads[feedback_index];
-            if (node_info[node_index].result_type.isBottom()) return error.MalformedGraph;
-            node_info[node_index].lowering = decision.lowering;
-            if (decision.kind) |kind| {
+            if (node.kind != .store_named and node.kind != .store_computed and
+                node_info[node_index].result_type.isBottom())
+            {
+                return error.MalformedGraph;
+            }
+            node_info[node_index].lowering = observed.decision.lowering;
+            if (observed.decision.kind) |kind| {
                 if (assumptions.items.len > std.math.maxInt(u32)) return error.GraphTooLarge;
                 const assumption_index: u32 = @intCast(assumptions.items.len);
                 try assumptions.append(allocator, .{
                     .kind = kind,
-                    .feedback_index = feedback_index,
+                    .feedback_index = observed.feedback_index,
                     .receiver_shape = observed.receiver_shape,
                     .holder_shape = observed.holder_shape,
                     .slot = observed.slot,
@@ -263,12 +367,21 @@ pub const Plan = struct {
     }
 };
 
-const LoadDecision = struct {
+const FeedbackDecision = struct {
     lowering: Lowering,
     kind: ?AssumptionKind,
 };
 
-fn namedLoadDecision(observed: feedback.Load) LoadDecision {
+const FeedbackObservation = struct {
+    feedback_index: u16,
+    decision: FeedbackDecision,
+    receiver_shape: ?*Shape,
+    holder_shape: ?*Shape,
+    slot: u32,
+    revision: u64,
+};
+
+fn namedLoadDecision(observed: feedback.Load) FeedbackDecision {
     return switch (observed.mode) {
         .cold => .{ .lowering = .load_named_generic, .kind = null },
         .own_data => .{ .lowering = .load_named_own, .kind = .load_own },
@@ -277,7 +390,32 @@ fn namedLoadDecision(observed: feedback.Load) LoadDecision {
     };
 }
 
-fn globalLoadDecision(observed: feedback.Load) LoadDecision {
+fn namedStoreDecision(observed: feedback.Store) FeedbackDecision {
+    if (observed.mode != .own_data or observed.receiver_shape == null) {
+        return .{ .lowering = .store_named_generic, .kind = null };
+    }
+    return .{ .lowering = .store_named_own, .kind = .store_named_own };
+}
+
+fn computedLoadDecision(observed: feedback.Computed) FeedbackDecision {
+    if (observed.mode != .monomorphic or observed.receiver_shape == null or
+        observed.key_len == 0 or observed.key_len > observed.key_buf.len)
+    {
+        return .{ .lowering = .load_computed_generic, .kind = null };
+    }
+    return .{ .lowering = .load_computed_own, .kind = .load_computed_own };
+}
+
+fn computedStoreDecision(observed: feedback.Computed) FeedbackDecision {
+    if (observed.mode != .monomorphic or observed.receiver_shape == null or
+        observed.key_len == 0 or observed.key_len > observed.key_buf.len)
+    {
+        return .{ .lowering = .store_computed_generic, .kind = null };
+    }
+    return .{ .lowering = .store_computed_own, .kind = .store_computed_own };
+}
+
+fn globalLoadDecision(observed: feedback.Load) FeedbackDecision {
     if (observed.mode != .own_data or observed.receiver_shape == null or
         observed.holder_shape != null)
     {
@@ -301,9 +439,46 @@ fn inferNode(graph: *const ir.Graph, facts: []const NodeInfo, id: ir.ValueId) !N
         .div => inferArithmetic(.div, facts, inputs, try binaryProfile(graph, node)),
         .strict_eq => inferStrictEq(facts, inputs),
         .logical_not => inferLogicalNot(facts, inputs),
+        .to_numeric => if (inputs.len == 1 and !facts[inputs[0]].result_type.isBottom())
+            .{ .result_type = Type.int32, .lowering = .checked_int32_to_numeric }
+        else
+            .{},
+        .to_string => if (inputs.len == 1 and !facts[inputs[0]].result_type.isBottom())
+            .{ .result_type = Type.string, .lowering = .checked_string_to_string }
+        else
+            .{},
+        .require_object_coercible => if (inputs.len == 1 and !facts[inputs[0]].result_type.isBottom())
+            .{ .result_type = Type.any, .lowering = .require_object_coercible }
+        else
+            .{},
         .less_than => inferLessThan(facts, inputs),
         .load_named => if (inputs.len == 1 and !facts[inputs[0]].result_type.isBottom())
             .{ .result_type = Type.any, .lowering = .load_named_generic }
+        else
+            .{},
+        .store_named => if (inputs.len == 2 and
+            !facts[inputs[0]].result_type.isBottom() and
+            !facts[inputs[1]].result_type.isBottom())
+            .{ .lowering = .store_named_generic }
+        else
+            .{},
+        .load_computed => if (inputs.len == 2 and
+            !facts[inputs[0]].result_type.isBottom() and
+            !facts[inputs[1]].result_type.isBottom())
+            .{ .result_type = Type.any, .lowering = .load_computed_generic }
+        else
+            .{},
+        .store_computed => if (inputs.len == 3 and
+            !facts[inputs[0]].result_type.isBottom() and
+            !facts[inputs[1]].result_type.isBottom() and
+            !facts[inputs[2]].result_type.isBottom())
+            .{ .lowering = .store_computed_generic }
+        else
+            .{},
+        .delete_computed_property => if (inputs.len == 2 and
+            !facts[inputs[0]].result_type.isBottom() and
+            !facts[inputs[1]].result_type.isBottom())
+            .{ .result_type = Type.boolean, .lowering = .delete_computed_property }
         else
             .{},
         .load_this => if (inputs.len == 0)
@@ -314,12 +489,102 @@ fn inferNode(graph: *const ir.Graph, facts: []const NodeInfo, id: ir.ValueId) !N
             .{ .result_type = Type.any, .lowering = .load_global_generic }
         else
             .{},
+        .store_global => if (inputs.len == 1 and !facts[inputs[0]].result_type.isBottom())
+            .{ .lowering = .store_global }
+        else
+            .{},
         .load_global_slot => if (inputs.len == 0)
             .{ .result_type = Type.any, .lowering = .load_global_slot }
         else
             .{},
+        .store_global_slot_init => if (inputs.len == 1 and !facts[inputs[0]].result_type.isBottom())
+            .{ .lowering = .store_global_slot_init }
+        else
+            .{},
+        .store_global_slot => if (inputs.len == 1 and !facts[inputs[0]].result_type.isBottom())
+            .{ .lowering = .store_global_slot }
+        else
+            .{},
         .load_environment => if (inputs.len == 0)
             .{ .result_type = Type.any, .lowering = .load_environment }
+        else
+            .{},
+        .allocate_environment => if (inputs.len == 0)
+            .{ .lowering = .allocate_environment }
+        else
+            .{},
+        .store_environment => if (inputs.len == 1 and !facts[inputs[0]].result_type.isBottom())
+            .{ .lowering = .store_environment }
+        else
+            .{},
+        .pop_environment => if (inputs.len == 0)
+            .{ .lowering = .pop_environment }
+        else
+            .{},
+        .create_unmapped_arguments_object => if (inputs.len == 0)
+            .{ .result_type = Type.object, .lowering = .create_unmapped_arguments_object }
+        else
+            .{},
+        .create_ordinary_function => if (inputs.len == 0)
+            .{ .result_type = Type.function, .lowering = .create_ordinary_function }
+        else
+            .{},
+        .set_home => if (inputs.len == 2 and
+            !facts[inputs[0]].result_type.isBottom() and
+            !facts[inputs[1]].result_type.isBottom())
+            .{ .lowering = .set_home }
+        else
+            .{},
+        .define_object_method_property => if (inputs.len == 2 and
+            !facts[inputs[0]].result_type.isBottom() and
+            !facts[inputs[1]].result_type.isBottom())
+            .{ .lowering = .define_object_method_property }
+        else
+            .{},
+        .create_object_literal => if (inputs.len == 0)
+            .{ .result_type = Type.object, .lowering = .create_object_literal }
+        else
+            .{},
+        .create_dense_array_literal => if (inputs.len == 0)
+            .{ .result_type = Type.object, .lowering = .create_dense_array_literal }
+        else
+            .{},
+        .create_array_literal => if (inputs.len == 0)
+            .{ .result_type = Type.object, .lowering = .create_array_literal }
+        else
+            .{},
+        .append_dense_array_literal_element => if (inputs.len == 2 and
+            !facts[inputs[0]].result_type.isBottom() and
+            !facts[inputs[1]].result_type.isBottom())
+            .{ .lowering = .append_dense_array_literal_element }
+        else
+            .{},
+        .define_template_property => if (inputs.len == 2 and
+            !facts[inputs[0]].result_type.isBottom() and
+            !facts[inputs[1]].result_type.isBottom())
+            .{ .lowering = .define_template_property }
+        else
+            .{},
+        .throw_ => if (inputs.len == 0)
+            .{ .lowering = .throw_ }
+        else
+            .{},
+        .throw_if_hole => if (inputs.len == 1 and !facts[inputs[0]].result_type.isBottom())
+            // The successor cannot observe Hole, but retaining `any` keeps
+            // the graph total for an always-throwing constant-Hole input.
+            .{ .result_type = Type.any, .lowering = .throw_if_hole }
+        else
+            .{},
+        .typeof_ => if (inputs.len == 1 and !facts[inputs[0]].result_type.isBottom())
+            .{ .result_type = Type.string, .lowering = .typeof_ }
+        else
+            .{},
+        .direct_call => if (inputs.len == 0)
+            .{ .result_type = Type.any, .lowering = .direct_call }
+        else
+            .{},
+        .tail_dispatch => if (inputs.len == 0)
+            .{ .lowering = .tail_dispatch }
         else
             .{},
         .jump, .return_ => .{},

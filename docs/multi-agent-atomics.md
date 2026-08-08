@@ -1,10 +1,13 @@
-# Multi-agent SAB/Atomics — real-threads substrate (design)
+# Multi-agent SAB/Atomics
 
-The single-agent SharedArrayBuffer + Atomics surface shipped (see
-[sab-atomics.md](sab-atomics.md)). This doc designs the **multi-agent**
-phase — the ~112 `$262.agent` test262 fixtures that need genuinely
-concurrent agents sharing memory, plus cross-thread `Atomics.wait` /
-`notify`.
+Status: **phases A-C ship.** Each test262 agent runs on its own OS thread,
+realm, and heap; agents share only refcounted backing bytes and futex state.
+`$262.agent` supplies the harness channels, and cross-thread `Atomics.wait` /
+`notify` are live. Exact-count FIFO wake behavior and cross-agent `waitAsync`
+timer/microtask refinements remain the main follow-ups.
+
+This document records the accepted real-threads design and its original
+phasing. The single-agent precursor is [sab-atomics.md](sab-atomics.md).
 
 It is a deliberate departure from Cynic's "single-agent-per-isolate"
 default (AGENTS.md), greenlit as a separate initiative. The design's
@@ -26,15 +29,13 @@ This mirrors V8 (one Isolate per agent, a shared `BackingStore`) and is
 what makes the project tractable rather than a full engine
 thread-safety rewrite.
 
-## Engine pieces
+## Engine design
 
 ### 1. `SharedDataBlock` — refcounted, non-GC backing store
 
-Today a SAB's bytes are `JSObject.array_buffer: ?[]u8`, allocated from
-the realm allocator and freed in the object's extension `deinit` (the
-per-realm, GC-swept path). That can't be shared across threads.
-
-Introduce a process-global, refcounted block:
+Before this work, a SAB's bytes used a realm-owned array-buffer slice, which
+could not cross threads. The shipped design introduces a process-global,
+refcounted block:
 
 ```
 const SharedDataBlock = struct {
@@ -115,14 +116,14 @@ unpark and exit.
 
 ## Phasing
 
-- **A — SharedDataBlock substrate (no threads).** Refcounted non-GC
+- **A — SharedDataBlock substrate (shipped).** Refcounted non-GC
   block; SAB points at it; growable grows in place; a SAB can be handed
   to a second Realm *on the same thread* and both views see one block.
   Verifiable with a unit test; single-agent corpus must stay flat.
-- **B — real futex `wait`/`notify` (two threads, unit-tested).** Block
+- **B — real futex `wait`/`notify` (shipped).** Block
   mutex/cond; blocking `wait` with timeout; `notify` wakes by index.
   Cynic unit test spawning two threads sharing a block.
-- **C — `$262.agent` harness hooks.** Thread spawn + broadcast/report
+- **C — `$262.agent` harness hooks (shipped).** Thread spawn + broadcast/report
   channels + child-agent `$262`; wire `atomicsHelper.js`. Land the
   ~112 fixtures. `waitAsync` cross-agent resolution last (cross-thread
   microtask enqueue).
@@ -144,6 +145,5 @@ unpark and exit.
   threads; keep the shared surface to exactly `SharedDataBlock` +
   futex table, nothing else.
 
-Start with **Phase A** — it's the foundational, thread-free engine
-change (decouple SAB backing from the GC heap), low-risk and verifiable
-on its own before any threading lands.
+Future changes should preserve the isolation boundary: realms and GC heaps are
+thread-confined; only `SharedDataBlock` and futex/channel state are shared.

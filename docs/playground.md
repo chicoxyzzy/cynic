@@ -6,10 +6,9 @@ plain-HTML/JS front-end. A visitor types ECMAScript, hits **Run**,
 and the same `Realm.evaluateScript` host path that powers `cynic
 run` executes it in the browser sandbox.
 
-Cynic is strict-only with no `eval` and no `Function(string)`. The
-playground inherits that exactly — there is no path in the WASM
-ABI that constructs code from a string at runtime. That is the
-point of the demo.
+Cynic is strict-only and refuses `eval` / `Function(string)` by default. The
+native CLI can open that capability with `--allow=eval`; the playground does
+not expose the gate or any equivalent WASM ABI path.
 
 ## Layout
 
@@ -185,9 +184,9 @@ a generator, a frozen-object TypeError).
 
 The editor is [CodeMirror 6](https://codemirror.net/), vendored
 **offline** as a single committed bundle,
-`playground/codemirror.bundle.js`. Cynic is SES-aligned ("no eval,
-that's the point") — a runtime CDN import would be supply-chain
-bait, and the playground must work fully offline. The bundle is
+`playground/codemirror.bundle.js`. The playground keeps runtime code
+construction disabled, and a runtime CDN import would add an unnecessary
+supply-chain dependency; it must work fully offline. The bundle is
 treated like a pinned `vendor/` blob: regenerate it, never
 hand-edit it. `playground/codemirror-entry.mjs` is the bundle
 source — it imports the CM6 packages and re-exports exactly the

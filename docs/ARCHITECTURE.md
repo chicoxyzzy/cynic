@@ -1,7 +1,9 @@
 # Cynic — Architecture
 
-Long-running design sketch. Treat anything labelled "TBD" as an open question
-that will be settled with an ADR when the time comes.
+Status: **current high-level architecture reference.** Subsystem documents in
+the [documentation index](README.md) own detailed contracts and rollout
+history. Treat anything labelled "TBD" here as an open question, not a planned
+commitment.
 
 ## Overview
 
@@ -43,7 +45,7 @@ that will be settled with an ADR when the time comes.
         │  hotter
         ▼
    ┌──────────────────┐
-   │  Ohaimark (T2)   │  ◄── default-on checked/IC AArch64 code (M6)
+   │  Ohaimark (T2)   │  ◄── default-on checked/IC AArch64 + x86_64 (M6)
    └──────────────────┘
    data flows T0→T1→T2; deopt can fall all the way back to Lantern (T0)
 
@@ -119,8 +121,9 @@ above: its own decoder, validator (emitting an O(1) branch side-table),
 and threaded dispatch loop in [`src/runtime/wasm/`](../src/runtime/wasm/),
 with the `WebAssembly.*` host API in `runtime/builtins/webassembly.zig`.
 It is 100% conformant on the official spec testsuite and shares the Metla
-heap (an `externref` is a pinned JS value). Its design has its own record
-in [wasm-engine.md](wasm-engine.md).
+heap (an `externref` is a pinned JS value), Realm fuel/interrupt policy, and
+the live-byte ceiling. Its design has its own record in
+[wasm-engine.md](wasm-engine.md).
 
 ## Strict-only
 
@@ -197,13 +200,14 @@ unrelated to a from-scratch interpreter like Lantern.
 
 ## Garbage collection — Metla
 
-**Metla** is Cynic's stop-the-world mark-sweep collector over per-type
-free lists, triggered on allocation pressure. See
+**Metla** is Cynic's non-moving generational mark-sweep collector over per-type
+free lists, triggered on allocation pressure. Minor collections are
+stop-the-world; major marking is incremental and final sweeping is lazy. See
 [src/runtime/heap.zig](../src/runtime/heap.zig) for the collector itself
 (the `Heap` struct holds storage; the `collect*` functions are Metla);
 the trigger and the realm-wide root walker live in
 [src/runtime/realm.zig](../src/runtime/realm.zig) and Lantern's dispatch
-loop in [src/runtime/lantern/lantern.zig](../src/runtime/lantern/lantern.zig). The
+loop in [src/runtime/lantern/interpreter.zig](../src/runtime/lantern/interpreter.zig). The
 operational details — root set, threshold, the `HandleScope` contract
 for natives — are in [docs/handbook/gc.md](handbook/gc.md).
 
@@ -224,14 +228,14 @@ The heap also exposes always-on counters (`bytes_alloc_total`,
 test262 harness surfaces via `--mem-summary`, `--top-alloc=<N>`, and
 the existing `--gc-stats` line.
 
-Reference counting (QuickJS) was rejected: it leaks cycles and bloats
-the runtime API. Generational moving GC (Lieberman / Hewitt 1983,
-Ungar 1984) is the path forward later. Concurrent collection is M5+.
+Reference counting and a wholesale heap-layout rewrite were prototyped or
+measured as no-go paths; the retained design is documented in the GC handbook.
+Parallel or fully concurrent collection remains research-only.
 
 ## Bytecode
 
-Register file + accumulator, Ignition / Hermes style. Decided at
-later; see [src/bytecode/op.zig](../src/bytecode/op.zig).
+Register file + accumulator, Ignition / Hermes style. See
+[src/bytecode/op.zig](../src/bytecode/op.zig).
 
 Per-frame register file; an implicit accumulator threads through
 binary and unary ops to keep Lantern's dispatch loop tight. One-byte
@@ -243,15 +247,20 @@ Load, store, and computed property sites use separate typed IC arrays
 so their layouts and index spaces stay small. Bytecode is the source
 of truth for IR — Bistromath (AArch64 + x86_64 on macOS/Linux,
 default-on since 2026-06; `--no-jit` opts out; other targets interpret)
-and Ohaimark (AArch64-only, default-on at natural thresholds;
+and Ohaimark (AArch64 + x86_64, default-on at natural thresholds;
 `--no-ohaimark` isolates T1, while `--no-jit` disables both). Ohaimark's
 feedback/SSA/specialization/representation/deopt-home front end, differential
 evaluator, checked-int32/Number/property-IC AArch64 subset,
 frame-reconstructing backedge safepoints, transactional chunk-owned code,
-single-predecessor edge coalescing, and one-word completion ABI have landed;
-OSR and rooted helper calls remain future work. Both tiers consume bytecode
-plus warmth/IC data, not the AST. Ohaimark's accepted design and GC-pointer-free
-feedback boundary are in [ohaimark.md](ohaimark.md).
+single-predecessor edge coalescing, one-word completion ABI, loop-header OSR,
+and rooted compact call/construct/property handoff have landed. A qualified
+x86_64 backend shares the recovery, feedback, and rooted-helper policy across
+checked control, named/computed data ICs, lexical/closure/literal operations,
+terminal replay, and call handoff while keeping separate compact-leaf and
+general-CFG emitters. On either qualified ISA, T2 refusal resumes through
+Bistromath when eligible and Lantern otherwise. Both tiers consume bytecode plus warmth/IC data,
+not the AST. Ohaimark's accepted design and GC-pointer-free feedback boundary
+are in [ohaimark.md](ohaimark.md).
 
 An opt-in instrumentation build (`-Dbytecode-stats=true`, then
 `cynic run --bytecode-stats`) reports static encoding widths and

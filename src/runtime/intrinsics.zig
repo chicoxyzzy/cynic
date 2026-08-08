@@ -285,6 +285,19 @@ pub const Intrinsics = struct {
     /// before stepping the backing storage directly.
     array_iterator_next: Value = Value.undefined_,
 
+    /// §13.5.3 result strings. `typeof` is a pure classification
+    /// operation; caching these immutable primitive strings avoids a fresh
+    /// heap allocation for every execution and gives Ohaimark a stable,
+    /// realm-relative result to load directly.
+    typeof_undefined_string: Value = Value.undefined_,
+    typeof_object_string: Value = Value.undefined_,
+    typeof_boolean_string: Value = Value.undefined_,
+    typeof_number_string: Value = Value.undefined_,
+    typeof_string_string: Value = Value.undefined_,
+    typeof_function_string: Value = Value.undefined_,
+    typeof_symbol_string: Value = Value.undefined_,
+    typeof_bigint_string: Value = Value.undefined_,
+
     /// `%StringIteratorPrototype%` (§22.1.5.2). Same shape — chains
     /// to `%IteratorPrototype%`. Lazily allocated alongside
     /// `array_iterator_prototype`.
@@ -620,8 +633,8 @@ pub fn install(realm: *Realm) !void {
     try @import("builtins/json.zig").install(realm);
     // The `WebAssembly` namespace — host surface over Sarcasm. Installed
     // after typed_array so `validate`'s BufferSource handling is in
-    // place; the runnable compile/instantiate surface (gated by
-    // --allow=wasm) lands in a later step.
+    // place. Dynamic byte compilation consults
+    // Realm.allow_wasm_compile; the namespace always installs.
     try @import("builtins/webassembly.zig").install(realm);
     try @import("builtins/iterator.zig").install(realm);
     // §27.3 DisposableStack (ES2026 explicit-resource-management).
@@ -1774,37 +1787,19 @@ pub fn throwReferenceError(realm: *Realm, msg: []const u8) NativeError {
 /// fails. Cheap on the no-op path — one atomic load + one
 /// integer compare.
 pub fn checkInterruptInNative(realm: *Realm) NativeError!void {
-    // Host-termination latch first (docs/resource-metering.md) —
-    // mirrors the dispatch loop's `runSafePoint` ordering so a
-    // pending termination re-signals from native loops too. The
-    // NativeThrew rides `pending_exception` back to the dispatch
-    // loop, where `unwindThrow` sees the latch and skips every
-    // handler.
-    if (realm.termination != null) return raiseTermination(realm);
-    if (realm.interrupt.load(.acquire)) {
-        realm.clearInterrupt();
-        const ex = newRangeError(realm, "execution interrupted") catch return error.OutOfMemory;
-        realm.pending_exception = ex;
-        return error.NativeThrew;
-    }
-    if (realm.step_budget == 0) {
-        // `setFuel` posture latches the uncatchable termination;
-        // the legacy default keeps the catchable RangeError.
-        if (realm.fuel_exhaustion == .terminate) {
-            realm.terminate(.fuel_exhausted);
-            return raiseTermination(realm);
-        }
-        const ex = newRangeError(realm, "interpreter step budget exhausted") catch return error.OutOfMemory;
-        realm.pending_exception = ex;
-        return error.NativeThrew;
-    }
-    // Embedder interrupt hook — same verdict handling as the
-    // dispatch loop's safe point.
-    if (realm.interrupt_hook) |hook| {
-        if (hook(realm.interrupt_hook_ctx) == .interrupt) {
-            realm.terminate(.host_interrupted);
-            return raiseTermination(realm);
-        }
+    switch (realm.pollExecution()) {
+        .proceed => return,
+        .terminated => return raiseTermination(realm),
+        .cooperative_interrupted => {
+            const ex = newRangeError(realm, "execution interrupted") catch return error.OutOfMemory;
+            realm.pending_exception = ex;
+            return error.NativeThrew;
+        },
+        .step_budget_exhausted => {
+            const ex = newRangeError(realm, "interpreter step budget exhausted") catch return error.OutOfMemory;
+            realm.pending_exception = ex;
+            return error.NativeThrew;
+        },
     }
 }
 
@@ -1813,11 +1808,7 @@ pub fn checkInterruptInNative(realm: *Realm) NativeError!void {
 /// `realm.termination` latch that `unwindThrow` honours
 /// (docs/resource-metering.md), not from the value's shape.
 fn raiseTermination(realm: *Realm) NativeError {
-    const msg: []const u8 = if (realm.termination) |reason| switch (reason) {
-        .fuel_exhausted => "execution terminated: fuel exhausted",
-        .host_interrupted => "execution terminated: host interrupt",
-    } else "execution terminated";
-    const ex = newRangeError(realm, msg) catch return error.OutOfMemory;
+    const ex = newRangeError(realm, realm.terminationMessage()) catch return error.OutOfMemory;
     realm.pending_exception = ex;
     return error.NativeThrew;
 }

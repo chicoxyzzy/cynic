@@ -1,6 +1,6 @@
 //! JS-API coverage for `WebAssembly.*` (docs/wasm-engine.md §8) — the
 //! host surface over the Sarcasm engine: `validate`, the `Module` /
-//! `Instance` constructors gated behind `--allow=wasm`, and an
+//! `Instance` constructors, host byte-compilation policy, and an
 //! instance's callable function exports with numeric marshalling.
 //!
 //! Modules are written as raw byte arrays in the JS source (a
@@ -13,12 +13,13 @@ const testing = std.testing;
 const Realm = @import("realm.zig").Realm;
 const lantern = @import("lantern/interpreter.zig");
 const Value = @import("value.zig").Value;
+const wasm = @import("wasm/wasm.zig");
 
 /// Evaluate `source` against a realm with the wasm gate open.
 fn evalWasm(source: []const u8) !Value {
     var realm = Realm.init(testing.allocator);
     defer realm.deinit();
-    realm.allow_wasm = true;
+    realm.allow_wasm_compile = true;
     // The production posture: the JIT is on by default, so instance
     // exports baseline-compile through Spasm (degrading to the
     // interpreter for anything outside its class). Exercising the JS-wasm
@@ -30,19 +31,6 @@ fn evalWasm(source: []const u8) !Value {
         .value, .yielded => |v| v,
         .thrown => error.WasmThrewUnexpectedly,
     };
-}
-
-/// Evaluate `source` with the gate CLOSED and assert it throws.
-fn evalWasmExpectThrow(source: []const u8) !void {
-    var realm = Realm.init(testing.allocator);
-    defer realm.deinit();
-    // allow_wasm stays false (the default).
-    try realm.installBuiltins();
-    const outcome = try lantern.evaluateScript(testing.allocator, &realm, source);
-    switch (outcome) {
-        .thrown => {},
-        else => return error.ExpectedThrow,
-    }
 }
 
 fn expectIntWasm(source: []const u8, want: i32) !void {
@@ -62,7 +50,7 @@ fn expectDoubleWasm(source: []const u8, want: f64) !void {
 fn expectIntWasmAsync(setup: []const u8, want: i32) !void {
     var realm = Realm.init(testing.allocator);
     defer realm.deinit();
-    realm.allow_wasm = true;
+    realm.allow_wasm_compile = true;
     realm.jit_enabled = true; // production posture — Spasm-by-default (see evalWasm)
     realm.hardened = false; // the .then callback writes globalThis.__r
     try realm.installBuiltins();
@@ -84,7 +72,7 @@ fn expectIntWasmAsync(setup: []const u8, want: i32) !void {
 fn evalWasmHardened(source: []const u8) !Value {
     var realm = Realm.init(testing.allocator);
     defer realm.deinit();
-    realm.allow_wasm = true;
+    realm.allow_wasm_compile = true;
     realm.jit_enabled = true; // production posture — Spasm-by-default (see evalWasm)
     realm.hardened = true;
     try realm.installBuiltins();
@@ -99,6 +87,11 @@ fn evalWasmHardened(source: []const u8) !Value {
 // An `(i32,i32)->i32` adder exported as "add".
 const adder_bytes =
     "new Uint8Array([0,97,115,109,1,0,0,0, 1,7,1,96,2,127,127,1,127, 3,2,1,0, 7,7,1,3,97,100,100,0,0, 10,9,1,7,0,32,0,32,1,106,11])";
+
+// `(func (export "spin") (loop br 0))` -- an intentionally unbounded
+// loop used to prove that Realm fuel and interrupt hooks cover Wasm.
+const spin_bytes =
+    "new Uint8Array([0,97,115,109,1,0,0,0, 1,4,1,96,0,0, 3,2,1,0, 7,8,1,4,115,112,105,110,0,0, 10,9,1,7,0,3,64,12,0,11,11])";
 
 // An `(f64,f64)->f64` adder exported as "add".
 const f64_adder_bytes =
@@ -124,7 +117,7 @@ test "WebAssembly instantiates and runs in a hardened realm (playground posture)
     // The browser playground freezes primordials by default; compiling a
     // module, constructing an instance, and calling an export must all
     // still work with the `WebAssembly.*` prototypes frozen. Guards the
-    // `realm.allow_wasm = true` enablement in playground/wasm.zig.
+    // `realm.allow_wasm_compile = true` enablement in playground/wasm.zig.
     const src =
         "const inst = new WebAssembly.Instance(new WebAssembly.Module(" ++ adder_bytes ++ "));" ++
         "inst.exports.add(2, 3)";
@@ -179,11 +172,111 @@ test "the exports object has a null prototype" {
     try expectIntWasm(src, 1);
 }
 
-test "Module / Instance are gated behind --allow=wasm" {
-    try evalWasmExpectThrow("new WebAssembly.Module(" ++ adder_bytes ++ ")");
+test "a closed Wasm compile policy rejects bytes with CompileError" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try realm.installBuiltins();
+
+    const outcome = try lantern.evaluateScript(
+        testing.allocator,
+        &realm,
+        "let result = 0;" ++
+            "try { new WebAssembly.Module(" ++ adder_bytes ++ "); }" ++
+            "catch (e) { result = e instanceof WebAssembly.CompileError ? 1 : -1; }" ++
+            "result",
+    );
+    switch (outcome) {
+        .value => |v| try testing.expectEqual(@as(i32, 1), v.asInt32()),
+        else => return error.Unexpected,
+    }
 }
 
-test "validate stays ungated (no allow=wasm needed)" {
+test "closed Wasm Promise entry points reject dynamic bytes with CompileError" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try realm.installBuiltins();
+
+    _ = try lantern.evaluateScript(
+        testing.allocator,
+        &realm,
+        "let compileRejected = 0, instantiateRejected = 0;" ++
+            "WebAssembly.compile(" ++ adder_bytes ++ ").then(" ++
+            "  () => { compileRejected = -2; }," ++
+            "  e => { compileRejected = e instanceof WebAssembly.CompileError ? 1 : -1; });" ++
+            "WebAssembly.instantiate(" ++ adder_bytes ++ ").then(" ++
+            "  () => { instantiateRejected = -2; }," ++
+            "  e => { instantiateRejected = e instanceof WebAssembly.CompileError ? 1 : -1; });",
+    );
+    try lantern.drainMicrotasks(testing.allocator, &realm);
+    const outcome = try lantern.evaluateScript(
+        testing.allocator,
+        &realm,
+        "compileRejected * 10 + instantiateRejected",
+    );
+    switch (outcome) {
+        .value => |v| try testing.expectEqual(@as(i32, 11), v.asInt32()),
+        else => return error.Unexpected,
+    }
+}
+
+test "a closed Wasm compile policy still permits ordinary constructors" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try realm.installBuiltins();
+
+    const outcome = try lantern.evaluateScript(
+        testing.allocator,
+        &realm,
+        "const g = new WebAssembly.Global({value:'i32'}, 7);" ++
+            "const m = new WebAssembly.Memory({initial:0});" ++
+            "const t = new WebAssembly.Table({element:'externref', initial:0});" ++
+            "const tag = new WebAssembly.Tag({parameters:[]});" ++
+            "const ex = new WebAssembly.Exception(tag, []);" ++
+            "(g.value === 7 && m.buffer.byteLength === 0 && t.length === 0 && ex.is(tag)) ? 1 : 0",
+    );
+    switch (outcome) {
+        .value => |v| try testing.expectEqual(@as(i32, 1), v.asInt32()),
+        else => return error.Unexpected,
+    }
+}
+
+test "a closed Wasm compile policy permits a trusted predecoded module" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.allow_wasm_compile = true;
+    try realm.installBuiltins();
+
+    _ = try lantern.evaluateScript(
+        testing.allocator,
+        &realm,
+        "const trustedModule = new WebAssembly.Module(" ++ adder_bytes ++ "); let promised = 0;",
+    );
+    realm.allow_wasm_compile = false;
+
+    const direct = try lantern.evaluateScript(
+        testing.allocator,
+        &realm,
+        "new WebAssembly.Instance(trustedModule).exports.add(2, 3)",
+    );
+    switch (direct) {
+        .value => |v| try testing.expectEqual(@as(i32, 5), v.asInt32()),
+        else => return error.Unexpected,
+    }
+
+    _ = try lantern.evaluateScript(
+        testing.allocator,
+        &realm,
+        "WebAssembly.instantiate(trustedModule).then(i => { promised = i.exports.add(3, 4); })",
+    );
+    try lantern.drainMicrotasks(testing.allocator, &realm);
+    const promised = try lantern.evaluateScript(testing.allocator, &realm, "promised");
+    switch (promised) {
+        .value => |v| try testing.expectEqual(@as(i32, 7), v.asInt32()),
+        else => return error.Unexpected,
+    }
+}
+
+test "validate stays available when dynamic Wasm compilation is denied" {
     // With the gate closed, validate must still work (it builds nothing).
     var realm = Realm.init(testing.allocator);
     defer realm.deinit();
@@ -860,7 +953,7 @@ test "a v128 Global cannot be constructed from JS" {
 fn expectIntWasmGc(setup: []const u8, want: i32) !void {
     var realm = Realm.init(testing.allocator);
     defer realm.deinit();
-    realm.allow_wasm = true;
+    realm.allow_wasm_compile = true;
     realm.hardened = false; // the script writes globalThis.__r
     try realm.installBuiltins();
     try realm.installTestGlobals();
@@ -1180,11 +1273,6 @@ test "a JS-thrown WebAssembly.Exception is caught by a matching wasm catch \\$ta
     try expectIntWasm(src, 42);
 }
 
-test "WebAssembly.Tag and Exception are gated behind --allow=wasm" {
-    try evalWasmExpectThrow("new WebAssembly.Tag({ parameters: [] })");
-    try evalWasmExpectThrow("new WebAssembly.Exception(null, [])");
-}
-
 test "an exnref returned to JS raises a TypeError" {
     // func "f" (result exnref): ref.null exn -> returning it across the boundary is a TypeError.
     const src =
@@ -1193,6 +1281,140 @@ test "an exnref returned to JS raises a TypeError" {
         "let r = 0; try { inst.exports.f(); } catch (e) { r = (e instanceof TypeError) ? 1 : 0; }" ++
         "r";
     try expectIntWasm(src, 1);
+}
+
+test "Wasm loop backedges consume Realm fuel and terminate uncatchably" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.allow_wasm_compile = true;
+    realm.jit_enabled = true;
+    try realm.installBuiltins();
+
+    _ = try lantern.evaluateScript(
+        testing.allocator,
+        &realm,
+        "const spinning = new WebAssembly.Instance(new WebAssembly.Module(" ++ spin_bytes ++ ")); let wasmCaught = false;",
+    );
+    realm.setFuel(4);
+    const outcome = try lantern.evaluateScript(
+        testing.allocator,
+        &realm,
+        "try { spinning.exports.spin(); } catch (e) { wasmCaught = true; }",
+    );
+    switch (outcome) {
+        .thrown => {},
+        else => return error.ExpectedThrow,
+    }
+    try testing.expectEqual(@as(?Realm.TerminationReason, .fuel_exhausted), realm.terminationReason());
+
+    realm.clearTermination();
+    realm.setFuel(std.math.maxInt(u64));
+    const caught = try lantern.evaluateScript(testing.allocator, &realm, "wasmCaught ? 1 : 0");
+    switch (caught) {
+        .value => |v| try testing.expectEqual(@as(i32, 0), v.asInt32()),
+        else => return error.Unexpected,
+    }
+}
+
+test "Wasm loop backedges poll the Realm interrupt hook" {
+    const InterruptAfter = struct {
+        polls: usize = 0,
+
+        fn poll(ctx: ?*anyopaque) Realm.InterruptAction {
+            const self: *@This() = @ptrCast(@alignCast(ctx.?));
+            self.polls += 1;
+            return if (self.polls >= 3) .interrupt else .proceed;
+        }
+    };
+
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.allow_wasm_compile = true;
+    realm.jit_enabled = true;
+    try realm.installBuiltins();
+    _ = try lantern.evaluateScript(
+        testing.allocator,
+        &realm,
+        "const interruptedSpin = new WebAssembly.Instance(new WebAssembly.Module(" ++ spin_bytes ++ "));",
+    );
+
+    var state: InterruptAfter = .{};
+    realm.setInterruptHook(InterruptAfter.poll, &state);
+    // Prove the Wasm boundary itself suppresses Spasm while metering is
+    // armed, even if an embedder explicitly re-enables the JS JIT.
+    realm.jit_enabled = true;
+    const outcome = try lantern.evaluateScript(testing.allocator, &realm, "interruptedSpin.exports.spin()");
+    switch (outcome) {
+        .thrown => {},
+        else => return error.ExpectedThrow,
+    }
+    try testing.expectEqual(@as(?Realm.TerminationReason, .host_interrupted), realm.terminationReason());
+}
+
+test "Wasm linear memory is charged to the Realm memory ceiling" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try realm.installBuiltins();
+
+    const before = realm.heap.bytes_live;
+    realm.setMemoryLimit(before + 256 * 1024);
+    const outcome = try lantern.evaluateScript(
+        testing.allocator,
+        &realm,
+        "let limited = 0;" ++
+            "try { new WebAssembly.Memory({initial:8}); }" ++
+            "catch (e) { limited = e instanceof RangeError ? 1 : -1; }" ++
+            "limited",
+    );
+    switch (outcome) {
+        .value => |v| try testing.expectEqual(@as(i32, 1), v.asInt32()),
+        else => return error.Unexpected,
+    }
+    try testing.expect(realm.heap.bytes_live < before + 256 * 1024);
+}
+
+test "Wasm memory growth respects the Realm memory ceiling atomically" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try realm.installBuiltins();
+
+    _ = try lantern.evaluateScript(
+        testing.allocator,
+        &realm,
+        "const limitedMemory = new WebAssembly.Memory({initial:1, maximum:32});",
+    );
+    realm.setMemoryLimit(realm.heap.bytes_live + 512 * 1024);
+
+    const outcome = try lantern.evaluateScript(
+        testing.allocator,
+        &realm,
+        "let growLimited = 0;" ++
+            "try { limitedMemory.grow(16); }" ++
+            "catch (e) { growLimited = e instanceof RangeError ? 1 : -1; }" ++
+            "growLimited * 10 + (limitedMemory.buffer.byteLength === 65536 ? 1 : 0)",
+    );
+    switch (outcome) {
+        .value => |v| try testing.expectEqual(@as(i32, 11), v.asInt32()),
+        else => return error.Unexpected,
+    }
+}
+
+test "successful Wasm memory allocation increments Realm live bytes" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try realm.installBuiltins();
+
+    const before = realm.heap.bytes_live;
+    const outcome = try lantern.evaluateScript(
+        testing.allocator,
+        &realm,
+        "new WebAssembly.Memory({initial:1}); 1",
+    );
+    switch (outcome) {
+        .value => |v| try testing.expectEqual(@as(i32, 1), v.asInt32()),
+        else => return error.Unexpected,
+    }
+    try testing.expect(realm.heap.bytes_live >= before + wasm.PAGE_SIZE);
 }
 
 // import "e"."f" (func ()->()); func $tail ()->() does `return_call $f`;
@@ -1332,7 +1554,7 @@ test "captured module disassembles to WAT (playground inspector hook)" {
     // the module as WAT (the structure + disassembly inspector view).
     var realm = Realm.init(testing.allocator);
     defer realm.deinit();
-    realm.allow_wasm = true;
+    realm.allow_wasm_compile = true;
     try realm.installBuiltins();
     _ = try lantern.evaluateScript(testing.allocator, &realm, "new WebAssembly.Module(" ++ adder_bytes ++ "); 0");
     const ptr = realm.last_wasm_module orelse return error.NoModuleCaptured;

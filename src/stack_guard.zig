@@ -82,6 +82,15 @@ threadlocal var stack_fallback_base: usize = 0;
 /// platform without OS introspection doesn't re-probe every call.
 threadlocal var stack_bounds_probed: bool = false;
 
+/// Return the lowest address native code may use for another recursive
+/// entry on this thread. Baseline machine code receives this cutoff as a
+/// hidden ABI argument and compares its real SP directly, so it can retain
+/// the shared stack-safety policy without re-entering Zig at every call.
+pub inline fn nativeStackLimit() usize {
+    var probe: u8 = undefined;
+    return stackLimitFor(@intFromPtr(&probe));
+}
+
 /// True when the native stack is within the red zone — the caller
 /// must throw `RangeError` (or its parse-phase equivalent) rather
 /// than recurse one level deeper. Shared by every recursive-descent
@@ -89,7 +98,11 @@ threadlocal var stack_bounds_probed: bool = false;
 pub inline fn nearLimit() bool {
     var probe: u8 = undefined;
     const sp = @intFromPtr(&probe);
-    if (stack_limit_addr != 0) return sp <= stack_limit_addr;
+    return sp <= stackLimitFor(sp);
+}
+
+fn stackLimitFor(sp: usize) usize {
+    if (stack_limit_addr != 0) return stack_limit_addr;
     if (!stack_bounds_probed) {
         stack_bounds_probed = true;
         if (builtin.os.tag.isDarwin()) {
@@ -98,7 +111,7 @@ pub inline fn nearLimit() bool {
             const size = pthread_get_stacksize_np(self);
             if (size > stack_red_zone and base > size) {
                 stack_limit_addr = base - size + stack_red_zone;
-                return sp <= stack_limit_addr;
+                return stack_limit_addr;
             }
         } else if (builtin.os.tag == .linux and builtin.link_libc) {
             // glibc / musl: `pthread_getattr_np` reports the running
@@ -120,7 +133,7 @@ pub inline fn nearLimit() bool {
                     const low = @intFromPtr(low_ptr);
                     if (size > stack_red_zone and low != 0) {
                         stack_limit_addr = low + stack_red_zone;
-                        return sp <= stack_limit_addr;
+                        return stack_limit_addr;
                     }
                 }
             }
@@ -128,5 +141,5 @@ pub inline fn nearLimit() bool {
     }
     // Portable growth-from-base fallback.
     if (sp > stack_fallback_base) stack_fallback_base = sp;
-    return stack_fallback_base - sp > stack_growth_budget;
+    return stack_fallback_base -| stack_growth_budget;
 }

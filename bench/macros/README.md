@@ -75,11 +75,11 @@ and JIT-enabled (Bistromath, the engine default):
     tools/bench-cross.sh --macros
     tools/bench-cross.sh --macros --tier interp # interpreter tier only
 
-The single-engine `--no-jit` vs default pair is the same comparison
-the micro history records in `bench-results.md` (Lantern vs
-Bistromath); the cross-engine run mirrors `bench-cross.sh`'s default
-two-tier output. The interpreter tier is the fairer from-scratch
-comparison; the full-speed tier shows the gap to production JITs.
+The single-engine `--no-jit` vs default pair remains useful for focused local
+A/B work; historic examples are archived in `bench-results.md`. The
+cross-engine run is the current reviewed matrix and mirrors
+`bench-cross.sh`'s two-tier output. The interpreter tier is the fairer
+from-scratch comparison; the full-speed tier shows the gap to production JITs.
 
 All macro runs pass `--unhardened` to Cynic: the workloads monkey-patch
 primordial prototypes (normal for ES5-era code), which the default

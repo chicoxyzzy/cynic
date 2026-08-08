@@ -33,7 +33,7 @@ pub fn run(
     debug_globals: bool,
     unhardened: bool,
     allow_eval: bool,
-    allow_wasm: bool,
+    allow_wasm_compile: bool,
     jit: bool,
     ohaimark: bool,
     ohaimark_osr: bool,
@@ -50,12 +50,12 @@ pub fn run(
     // `--allow=eval` — open the runtime-code-construction gate. See
     // `Realm.allow_eval`.
     if (allow_eval) realm.allow_eval = true;
-    if (allow_wasm) realm.allow_wasm = true;
+    realm.allow_wasm_compile = allow_wasm_compile;
     // Top-level tier policy: production defaults both JS JITs on; embedders
     // constructing Realm directly retain explicit per-tier opt-in.
     if (jit) realm.jit_enabled = true;
     if (jit and ohaimark) realm.ohaimark_enabled = true;
-    if (jit and ohaimark and ohaimark_osr) realm.ohaimark_osr_enabled = true;
+    realm.ohaimark_osr_enabled = jit and ohaimark and ohaimark_osr;
     if (gc_threshold) |n| realm.heap.setGcThreshold(n);
     try realm.installBuiltins();
     // REPL is a debug / exploration context — install the debug

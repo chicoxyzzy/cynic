@@ -50,15 +50,28 @@ pub fn emitPoll(
     try machine.emit(a64.cmpReg(value_scratch, threshold_scratch));
     try machine.jumpCond(.cs, slow);
 
-    // Calling an embedder hook from optimized code would require a rooted call
-    // safepoint. The v1 policy is to transfer state and let Lantern invoke it.
-    try emitLoadU64(machine, value_scratch, realm_register, layout.realm.interrupt_hook);
-    try machine.jumpCbnz(value_scratch, slow);
-
-    // Match Bistromath: a zero budget exits before decrement; an interrupt is
-    // observed after one successful crossing has consumed one unit.
+    // Match Realm.pollExecution exactly: an exhausted budget wins over an
+    // interrupt, interruption wins over the decrement, and the default maxInt
+    // sentinel remains unchanged. Hooks execute only after Lantern owns the
+    // reconstructed frame.
     try emitLoadU64(machine, value_scratch, realm_register, layout.realm.step_budget);
     try machine.jumpCbz(value_scratch, slow);
+    try emitLoadU8(machine, threshold_scratch, realm_register, layout.realm.interrupt_raw);
+    try machine.jumpCbnz(threshold_scratch, slow);
+    try emitLoadU64(machine, threshold_scratch, realm_register, layout.realm.interrupt_hook);
+    try machine.jumpCbnz(threshold_scratch, slow);
+
+    var consume_budget: Masm.Label = .{};
+    defer consume_budget.deinit(machine.gpa);
+    var done: Masm.Label = .{};
+    defer done.deinit(machine.gpa);
+    try machine.movImm64(threshold_scratch, std.math.maxInt(u64));
+    try machine.emit(a64.cmpReg(value_scratch, threshold_scratch));
+    try machine.jumpCond(.ne, &consume_budget);
+    try emitLoadU8(machine, threshold_scratch, realm_register, layout.realm.fuel_exhaustion);
+    try machine.jumpCbz(threshold_scratch, &done);
+
+    try machine.bind(&consume_budget);
     try machine.emit(a64.subImm(value_scratch, value_scratch, 1, false));
     try emitStoreU64(
         machine,
@@ -67,8 +80,7 @@ pub fn emitPoll(
         layout.realm.step_budget,
         threshold_scratch,
     );
-    try emitLoadU8(machine, value_scratch, realm_register, layout.realm.interrupt_raw);
-    try machine.jumpCbnz(value_scratch, slow);
+    try machine.bind(&done);
 }
 
 fn emitLoadU64(machine: *Masm, destination: a64.Reg, base: a64.Reg, offset: usize) !void {

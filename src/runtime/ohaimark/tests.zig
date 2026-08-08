@@ -10,6 +10,7 @@ const JSObject = @import("../object.zig").JSObject;
 const Realm = @import("../realm.zig").Realm;
 const Shape = @import("../shape.zig").Shape;
 const Value = @import("../value.zig").Value;
+const arith = @import("../lantern/arith.zig");
 const deopt = @import("deopt.zig");
 const deopt_physical = @import("deopt_physical.zig");
 const evaluator = @import("evaluator.zig");
@@ -461,21 +462,274 @@ test "Ohaimark pre-creates live register parameters for loop back-edges" {
     try testing.expect(saw_back_edge);
 }
 
-test "Ohaimark rejects unsupported bytecode without aborting" {
+test "Ohaimark admits static data object literal bytecode" {
     var builder = Builder.init(testing.allocator);
     defer builder.deinit();
+    const object_register = try builder.reserveRegister();
+    // Graph construction needs only the tagged constant-pool invariant; the
+    // executable coverage below supplies a real pinned JSString.
+    const key = try builder.addConstant(Value.fromString(@ptrFromInt(0x1000)));
+    const keys = try testing.allocator.dupe(u16, &.{key});
+    const shape = builder.addLiteralShapeTemplate(keys) catch |err| {
+        testing.allocator.free(keys);
+        return err;
+    };
+
     try builder.emitOp(.make_object, span);
+    try builder.emitStoreReg(span, object_register);
+    try builder.emitOp(.make_object_shape, span);
+    try builder.emitU16(shape);
+    try builder.emitStoreReg(span, object_register);
+    try builder.emitLoadSmi(span, 42);
+    try builder.emitDefTemplateProperty(span, key, object_register, 0);
     var chunk = try finish(&builder);
     defer chunk.deinit(testing.allocator);
+
+    var graph = try ir.Graph.build(testing.allocator, &chunk);
+    defer graph.deinit();
+    // Each allocation and the direct slot write needs a complete pre-op
+    // frame, because allocation pressure can collect between literal steps.
+    try testing.expectEqual(@as(usize, 3), graph.frame_states.len);
+    var saw_plain = false;
+    var saw_shape = false;
+    var saw_property = false;
+    for (graph.nodes, 0..) |node, index| switch (node.kind) {
+        .create_object_literal => {
+            try testing.expectEqual(@as(usize, 0), graph.nodeInputs(@intCast(index)).len);
+            try testing.expect(node.frame_state != null);
+            switch (node.payload.object_literal) {
+                .plain => saw_plain = true,
+                .shape => |template| {
+                    try testing.expectEqual(shape, template);
+                    saw_shape = true;
+                },
+            }
+        },
+        .define_template_property => {
+            try testing.expectEqual(@as(usize, 2), graph.nodeInputs(@intCast(index)).len);
+            try testing.expect(node.frame_state != null);
+            const property = node.payload.template_property;
+            try testing.expectEqual(key, property.key_constant);
+            try testing.expectEqual(object_register, property.object_register);
+            try testing.expectEqual(@as(u16, 0), property.slot);
+            saw_property = true;
+        },
+        else => {},
+    };
+    try testing.expect(saw_plain);
+    try testing.expect(saw_shape);
+    try testing.expect(saw_property);
+}
+
+test "Ohaimark admits ordinary function creation bytecode" {
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    var body_builder = Builder.init(testing.allocator);
+    defer body_builder.deinit();
+    try body_builder.emitLoadSmi(span, 41);
+    try body_builder.emitOp(.return_, span);
+    const body = try body_builder.finish();
+    const template = builder.addFunctionTemplate(.{
+        .chunk = body,
+        .param_count = 0,
+        .name = "inner",
+        .is_arrow = false,
+    }) catch |err| {
+        var owned_body = body;
+        owned_body.deinit(testing.allocator);
+        return err;
+    };
+    try builder.emitOp(.make_function, span);
+    try builder.emitU16(template);
+    var chunk = try finish(&builder);
+    defer chunk.deinit(testing.allocator);
+
+    var graph = try ir.Graph.build(testing.allocator, &chunk);
+    defer graph.deinit();
+    const node_id = findNode(&graph, .create_ordinary_function) orelse
+        return error.TestUnexpectedResult;
+    const node = graph.nodes[node_id];
+    try testing.expectEqual(@as(usize, 0), graph.nodeInputs(node_id).len);
+    try testing.expect(node.frame_state != null);
+    try testing.expectEqual(template, node.payload.function_template.template_index);
+    const frame_state = graph.frame_states[node.frame_state.?];
+    try testing.expectEqual(node.bytecode_offset, frame_state.bytecode_offset);
+}
+
+test "Ohaimark admits ordinary object method home setup bytecode" {
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    var body_builder = Builder.init(testing.allocator);
+    defer body_builder.deinit();
+    try body_builder.emitLoadSmi(span, 42);
+    try body_builder.emitOp(.return_, span);
+    const body = try body_builder.finish();
+    const home_register = try builder.reserveRegister();
+    try builder.emitOp(.make_object, span);
+    try builder.emitStoreReg(span, home_register);
+    const template = builder.addFunctionTemplate(.{
+        .chunk = body,
+        .param_count = 0,
+        .name = "method",
+        .is_arrow = false,
+        .is_method = true,
+    }) catch |err| {
+        var owned_body = body;
+        owned_body.deinit(testing.allocator);
+        return err;
+    };
+    try builder.emitOp(.make_function, span);
+    try builder.emitU16(template);
+    const set_home_offset = builder.here();
+    try builder.emitOp(.set_home, span);
+    try builder.emitU8(home_register);
+    var chunk = try finish(&builder);
+    defer chunk.deinit(testing.allocator);
+
+    var graph = try ir.Graph.build(testing.allocator, &chunk);
+    defer graph.deinit();
+    // Object allocation, closure creation, and the `[[HomeObject]]` write all
+    // stage a precise pre-op frame; the last point must retain r_home.
+    try testing.expectEqual(@as(usize, 3), graph.frame_states.len);
+    const node_id = findNode(&graph, .set_home) orelse return error.TestUnexpectedResult;
+    const node = graph.nodes[node_id];
+    try testing.expectEqual(@as(usize, 2), graph.nodeInputs(node_id).len);
+    try testing.expectEqual(home_register, node.payload.home_object.object_register);
+    const state = graph.frame_states[node.frame_state.?];
+    try testing.expectEqual(@as(u32, @intCast(set_home_offset)), state.bytecode_offset);
+    var saw_home_register = false;
+    for (graph.frameSlots(state)) |slot| {
+        if (slot.register == home_register) saw_home_register = true;
+    }
+    try testing.expect(saw_home_register);
+}
+
+test "Ohaimark admits a static ordinary object method definition" {
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    var body_builder = Builder.init(testing.allocator);
+    defer body_builder.deinit();
+    try body_builder.emitLoadSmi(span, 42);
+    try body_builder.emitOp(.return_, span);
+    const body = try body_builder.finish();
+    const home_register = try builder.reserveRegister();
+    try builder.emitOp(.make_object, span);
+    try builder.emitStoreReg(span, home_register);
+    const template = builder.addFunctionTemplate(.{
+        .chunk = body,
+        .param_count = 0,
+        .name = "method",
+        .is_arrow = false,
+        .is_method = true,
+    }) catch |err| {
+        var owned_body = body;
+        owned_body.deinit(testing.allocator);
+        return err;
+    };
+    try builder.emitOp(.make_function, span);
+    try builder.emitU16(template);
+    try builder.emitOp(.set_home, span);
+    try builder.emitU8(home_register);
+    // Graph construction needs only the tagged string-pool invariant; runtime
+    // coverage below uses a real pinned JSString through the source compiler.
+    const key = try builder.addConstant(Value.fromString(@ptrFromInt(0x1000)));
+    const def_property_offset = builder.here();
+    try builder.emitOp(.def_property, span);
+    try builder.emitU16(key);
+    try builder.emitU8(home_register);
+    var chunk = try finish(&builder);
+    defer chunk.deinit(testing.allocator);
+
+    var graph = try ir.Graph.build(testing.allocator, &chunk);
+    defer graph.deinit();
+    const node_id = findNode(&graph, .define_object_method_property) orelse
+        return error.TestUnexpectedResult;
+    const node = graph.nodes[node_id];
+    try testing.expectEqual(@as(usize, 2), graph.nodeInputs(node_id).len);
+    try testing.expectEqual(key, node.payload.object_method_property.key_constant);
+    try testing.expectEqual(home_register, node.payload.object_method_property.object_register);
+    const state = graph.frame_states[node.frame_state.?];
+    try testing.expectEqual(@as(u32, @intCast(def_property_offset)), state.bytecode_offset);
+}
+
+test "Ohaimark leaves generic object data property definitions in Lantern" {
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    const object_register = try builder.reserveRegister();
+    // The graph rejects before it dereferences the constant; the tagged value
+    // models the bytecode invariant without requiring a test Realm allocation.
+    const key = try builder.addConstant(Value.fromString(@ptrFromInt(0x1000)));
+    try builder.emitOp(.make_object, span);
+    try builder.emitStoreReg(span, object_register);
+    try builder.emitLoadSmi(span, 42);
+    try builder.emitOp(.def_property, span);
+    try builder.emitU16(key);
+    try builder.emitU8(object_register);
+    var chunk = try finish(&builder);
+    defer chunk.deinit(testing.allocator);
+
     var diagnostics: ir.BuildDiagnostics = .{};
     try testing.expectError(
         error.UnsupportedOp,
         ir.Graph.buildWithDiagnostics(testing.allocator, &chunk, &diagnostics),
     );
-    try testing.expectEqual(Op.make_object, diagnostics.unsupported_opcode.?);
+    try testing.expectEqual(Op.def_property, diagnostics.unsupported_opcode.?);
 }
 
-test "Ohaimark defers exception lowering explicitly" {
+test "Ohaimark leaves lexical arrow creation in Lantern" {
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    var body_builder = Builder.init(testing.allocator);
+    defer body_builder.deinit();
+    try body_builder.emitOp(.lda_undefined, span);
+    try body_builder.emitOp(.return_, span);
+    const body = try body_builder.finish();
+    const template = builder.addFunctionTemplate(.{
+        .chunk = body,
+        .param_count = 0,
+        .name = null,
+        .is_arrow = true,
+    }) catch |err| {
+        var owned_body = body;
+        owned_body.deinit(testing.allocator);
+        return err;
+    };
+    try builder.emitOp(.make_function, span);
+    try builder.emitU16(template);
+    var chunk = try finish(&builder);
+    defer chunk.deinit(testing.allocator);
+
+    var diagnostics: ir.BuildDiagnostics = .{};
+    try testing.expectError(
+        error.UnsupportedOp,
+        ir.Graph.buildWithDiagnostics(testing.allocator, &chunk, &diagnostics),
+    );
+    try testing.expectEqual(Op.make_function, diagnostics.unsupported_opcode.?);
+}
+
+test "Ohaimark admits LdaArguments as a frame-staged allocation" {
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    // Incoming argument registers are pinned by the bytecode compiler. Keep
+    // two visible so the graph must preserve an allocation boundary rather
+    // than treating `arguments` as a constant.
+    _ = try builder.reserveRegister();
+    _ = try builder.reserveRegister();
+    try builder.emitOp(.lda_arguments, span);
+    try builder.emitOp(.return_, span);
+    var chunk = try finish(&builder);
+    defer chunk.deinit(testing.allocator);
+
+    var graph = try ir.Graph.build(testing.allocator, &chunk);
+    defer graph.deinit();
+    const node_id = findNode(&graph, .create_unmapped_arguments_object) orelse return error.TestUnexpectedResult;
+    const node = graph.nodes[node_id];
+    try testing.expectEqual(@as(usize, 0), graph.nodeInputs(node_id).len);
+    const frame_state = graph.frame_states[node.frame_state.?];
+    try testing.expectEqual(node.bytecode_offset, frame_state.bytecode_offset);
+}
+
+test "Ohaimark keeps exception-only handler blocks in Lantern" {
     var builder = Builder.init(testing.allocator);
     defer builder.deinit();
     try builder.emitOp(.lda_one, span);
@@ -490,7 +744,16 @@ test "Ohaimark defers exception lowering explicitly" {
     });
     var chunk = try builder.finish();
     defer chunk.deinit(testing.allocator);
-    try testing.expectError(error.UnsupportedExceptionFlow, ir.Graph.build(testing.allocator, &chunk));
+
+    var graph = try ir.Graph.build(testing.allocator, &chunk);
+    defer graph.deinit();
+    var found_handler = false;
+    for (graph.blocks) |block| {
+        if (block.start != handler_pc) continue;
+        found_handler = true;
+        try testing.expect(!block.reachable);
+    }
+    try testing.expect(found_handler);
 }
 
 test "Ohaimark specialization folds semantics-safe int32 constants" {
@@ -859,7 +1122,7 @@ test "Ohaimark physical deopt metadata mixes entry stable and immediate recovery
     defer homes.deinit();
     try homes.verify(&graph, &specialization, &representations, &logical);
     try testing.expectEqual(@as(u32, 0), homes.tagged_slot_count);
-    try testing.expectEqual(@as(u32, 1), homes.int32_slot_count);
+    try testing.expectEqual(@as(u32, 0), homes.int32_slot_count);
 
     var first_logical = try logical.decode(testing.allocator, 0);
     defer first_logical.deinit();
@@ -872,13 +1135,9 @@ test "Ohaimark physical deopt metadata mixes entry stable and immediate recovery
     var second_logical = try logical.decode(testing.allocator, 1);
     defer second_logical.deinit();
     try testing.expectEqual(@as(usize, 1), second_logical.slots.len);
-    const folded_value = switch (second_logical.slots[0].recovery) {
-        .value => |value| value,
-        .immediate => return error.TestUnexpectedResult,
-    };
     try testing.expectEqual(
-        deopt_physical.Home{ .int32_stack = 0 },
-        try homes.homeFor(folded_value),
+        deopt.Recovery{ .immediate = .{ .int32 = 42 } },
+        second_logical.slots[0].recovery,
     );
 
     var physical = try deopt_physical.Metadata.build(
@@ -909,7 +1168,7 @@ test "Ohaimark physical deopt metadata mixes entry stable and immediate recovery
     var second_physical = try physical.decode(testing.allocator, 1);
     defer second_physical.deinit();
     try testing.expectEqual(
-        deopt_physical.Recovery{ .int32_stack = 0 },
+        deopt_physical.Recovery{ .immediate = .{ .int32 = 42 } },
         second_physical.slots[0].recovery,
     );
     try testing.expectEqual(
@@ -1330,6 +1589,179 @@ test "Ohaimark graph evaluator deopt resumes Lantern before overflow" {
     try testing.expectEqual(@as(f64, 2_147_483_648), resumed.asDouble());
 }
 
+test "Ohaimark graph evaluator handles throw_if_hole TDZ guards" {
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    try builder.emitOp(.throw_if_hole, span);
+    var chunk = try finish(&builder);
+    defer chunk.deinit(testing.allocator);
+
+    var graph = try ir.Graph.build(testing.allocator, &chunk);
+    defer graph.deinit();
+    const node_id = findNode(&graph, .throw_if_hole) orelse return error.TestUnexpectedResult;
+    try testing.expect(graph.nodes[node_id].frame_state != null);
+
+    var specialization = try specialize.Plan.build(testing.allocator, &graph);
+    defer specialization.deinit();
+    try testing.expectEqual(
+        specialize.Lowering.throw_if_hole,
+        specialization.node_info[node_id].lowering,
+    );
+    var representations = try representation.Plan.build(
+        testing.allocator,
+        &graph,
+        &specialization,
+    );
+    defer representations.deinit();
+    try testing.expectEqual(representation.Kind.tagged, representations.outputs[node_id]);
+    var logical = try deopt.Metadata.build(testing.allocator, &graph, &specialization);
+    defer logical.deinit();
+    var homes = try deopt_physical.Homes.build(
+        testing.allocator,
+        &graph,
+        &specialization,
+        &representations,
+        &logical,
+    );
+    defer homes.deinit();
+    var physical = try deopt_physical.Metadata.build(
+        testing.allocator,
+        &graph,
+        &specialization,
+        &representations,
+        &logical,
+        &homes,
+    );
+    defer physical.deinit();
+
+    const registers = [_]Value{};
+    var passed = try evaluator.evaluate(
+        testing.allocator,
+        &chunk,
+        &graph,
+        &specialization,
+        &representations,
+        &logical,
+        &homes,
+        &physical,
+        .{
+            .accumulator = Value.fromInt32(42),
+            .registers = &registers,
+            .step_limit = 1_000,
+        },
+    );
+    defer passed.deinit();
+    switch (passed) {
+        .returned => |value| try testing.expectEqual(Value.fromInt32(42).bits, value.bits),
+        .deopt => return error.TestUnexpectedResult,
+    }
+
+    var failed = try evaluator.evaluate(
+        testing.allocator,
+        &chunk,
+        &graph,
+        &specialization,
+        &representations,
+        &logical,
+        &homes,
+        &physical,
+        .{
+            .accumulator = Value.hole_,
+            .registers = &registers,
+            .step_limit = 1_000,
+        },
+    );
+    defer failed.deinit();
+    const recovered = switch (failed) {
+        .returned => return error.TestUnexpectedResult,
+        .deopt => |*state| state,
+    };
+    try testing.expectEqual(node_id, recovered.node);
+    try testing.expectEqual(graph.nodes[node_id].bytecode_offset, recovered.bytecode_offset);
+    try testing.expectEqual(Value.hole_.bits, recovered.accumulator.bits);
+
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = false;
+    switch (try recovered.resumeLantern(testing.allocator, &realm, &chunk)) {
+        .thrown => {},
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "Ohaimark graph evaluator handles typeof with realm-cached strings" {
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    try builder.emitOp(.typeof_, span);
+    var chunk = try finish(&builder);
+    defer chunk.deinit(testing.allocator);
+
+    var graph = try ir.Graph.build(testing.allocator, &chunk);
+    defer graph.deinit();
+    const node_id = findNode(&graph, .typeof_) orelse return error.TestUnexpectedResult;
+    try testing.expect(graph.nodes[node_id].frame_state != null);
+
+    var specialization = try specialize.Plan.build(testing.allocator, &graph);
+    defer specialization.deinit();
+    try testing.expectEqual(
+        specialize.Lowering.typeof_,
+        specialization.node_info[node_id].lowering,
+    );
+    try testing.expect(specialization.node_info[node_id].result_type.eql(specialize.Type.string));
+    var representations = try representation.Plan.build(
+        testing.allocator,
+        &graph,
+        &specialization,
+    );
+    defer representations.deinit();
+    try testing.expectEqual(representation.Kind.tagged, representations.outputs[node_id]);
+    var logical = try deopt.Metadata.build(testing.allocator, &graph, &specialization);
+    defer logical.deinit();
+    var homes = try deopt_physical.Homes.build(
+        testing.allocator,
+        &graph,
+        &specialization,
+        &representations,
+        &logical,
+    );
+    defer homes.deinit();
+    var physical = try deopt_physical.Metadata.build(
+        testing.allocator,
+        &graph,
+        &specialization,
+        &representations,
+        &logical,
+        &homes,
+    );
+    defer physical.deinit();
+
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    const expected = try arith.typeOf(&realm, Value.fromInt32(7));
+    const registers = [_]Value{};
+    var outcome = try evaluator.evaluate(
+        testing.allocator,
+        &chunk,
+        &graph,
+        &specialization,
+        &representations,
+        &logical,
+        &homes,
+        &physical,
+        .{
+            .realm = &realm,
+            .accumulator = Value.fromInt32(7),
+            .registers = &registers,
+            .step_limit = 1_000,
+        },
+    );
+    defer outcome.deinit();
+    switch (outcome) {
+        .returned => |value| try testing.expectEqual(expected.bits, value.bits),
+        .deopt => return error.TestUnexpectedResult,
+    }
+}
+
 test "Ohaimark graph evaluator bounds non-terminating control flow" {
     var builder = Builder.init(testing.allocator);
     defer builder.deinit();
@@ -1389,6 +1821,177 @@ test "Ohaimark graph evaluator bounds non-terminating control flow" {
             },
         ),
     );
+}
+
+test "Ohaimark specialization records computed-own load assumptions" {
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    const receiver = try builder.reserveRegister();
+    try builder.emitLdaComputed(span, receiver);
+    var chunk = try finish(&builder);
+    defer chunk.deinit(testing.allocator);
+
+    const receiver_shape: *Shape = @ptrFromInt(0x6F00);
+    const cell = &chunk.inline_computed_caches[0];
+    cell.shape = receiver_shape;
+    cell.slot = 6;
+    cell.cached_key_len = 1;
+    cell.cached_key_buf[0] = 'x';
+
+    var graph = try ir.Graph.build(testing.allocator, &chunk);
+    defer graph.deinit();
+    const load_id = findNode(&graph, .load_computed).?;
+    const inputs = graph.nodeInputs(load_id);
+    try testing.expectEqual(@as(usize, 2), inputs.len);
+
+    var plan = try specialize.Plan.build(testing.allocator, &graph);
+    defer plan.deinit();
+    const info = plan.node_info[load_id];
+    try testing.expectEqual(specialize.Lowering.load_computed_own, info.lowering);
+    const assumption = plan.assumptions[info.assumption.?];
+    try testing.expectEqual(specialize.AssumptionKind.load_computed_own, assumption.kind);
+    try testing.expectEqual(@as(u16, 0), assumption.feedback_index);
+    try testing.expectEqual(receiver_shape, assumption.receiver_shape);
+    try testing.expectEqual(@as(u32, 6), assumption.slot);
+
+    // A guard exit must replay `obj[key]` with the key still in the
+    // accumulator, not with the speculative load result installed there.
+    var metadata = try deopt.Metadata.build(testing.allocator, &graph, &plan);
+    defer metadata.deinit();
+    var point = try metadata.decode(testing.allocator, 0);
+    defer point.deinit();
+    try testing.expectEqual(deopt.Recovery{ .value = inputs[1] }, point.accumulator);
+
+    cell.* = .{};
+    var cold_graph = try ir.Graph.build(testing.allocator, &chunk);
+    defer cold_graph.deinit();
+    var cold_plan = try specialize.Plan.build(testing.allocator, &cold_graph);
+    defer cold_plan.deinit();
+    const cold_load = findNode(&cold_graph, .load_computed).?;
+    try testing.expectEqual(
+        specialize.Lowering.load_computed_generic,
+        cold_plan.node_info[cold_load].lowering,
+    );
+    try testing.expectEqual(@as(?u32, null), cold_plan.node_info[cold_load].assumption);
+}
+
+test "Ohaimark specialization records computed-own store assumptions" {
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    const receiver = try builder.reserveRegister();
+    const key = try builder.reserveRegister();
+    const value = try builder.reserveRegister();
+    try builder.emitLoadReg(span, value);
+    try builder.emitStaComputed(span, receiver, key);
+    var chunk = try finish(&builder);
+    defer chunk.deinit(testing.allocator);
+
+    const receiver_shape: *Shape = @ptrFromInt(0x6F10);
+    const cell = &chunk.inline_computed_caches[0];
+    cell.shape = receiver_shape;
+    cell.slot = 7;
+    cell.cached_key_len = 1;
+    cell.cached_key_buf[0] = 'x';
+
+    var graph = try ir.Graph.build(testing.allocator, &chunk);
+    defer graph.deinit();
+    const store_id = findNode(&graph, .store_computed).?;
+    const inputs = graph.nodeInputs(store_id);
+    try testing.expectEqual(@as(usize, 3), inputs.len);
+
+    var plan = try specialize.Plan.build(testing.allocator, &graph);
+    defer plan.deinit();
+    const info = plan.node_info[store_id];
+    try testing.expectEqual(specialize.Lowering.store_computed_own, info.lowering);
+    const assumption = plan.assumptions[info.assumption.?];
+    try testing.expectEqual(specialize.AssumptionKind.store_computed_own, assumption.kind);
+    try testing.expectEqual(@as(u16, 0), assumption.feedback_index);
+    try testing.expectEqual(receiver_shape, assumption.receiver_shape);
+    try testing.expectEqual(@as(u32, 7), assumption.slot);
+
+    // A guard exit must replay `obj[key] = value` with the assignment value
+    // still in the accumulator; the key remains in its bytecode register.
+    var metadata = try deopt.Metadata.build(testing.allocator, &graph, &plan);
+    defer metadata.deinit();
+    var point = try metadata.decode(testing.allocator, 0);
+    defer point.deinit();
+    try testing.expectEqual(deopt.Recovery{ .value = inputs[2] }, point.accumulator);
+
+    cell.* = .{};
+    var cold_graph = try ir.Graph.build(testing.allocator, &chunk);
+    defer cold_graph.deinit();
+    var cold_plan = try specialize.Plan.build(testing.allocator, &cold_graph);
+    defer cold_plan.deinit();
+    const cold_store = findNode(&cold_graph, .store_computed).?;
+    try testing.expectEqual(
+        specialize.Lowering.store_computed_generic,
+        cold_plan.node_info[cold_store].lowering,
+    );
+    try testing.expectEqual(@as(?u32, null), cold_plan.node_info[cold_store].assumption);
+}
+
+test "Ohaimark specialization records same-shape named-store assumptions" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    var builder = Builder.init(testing.allocator);
+    defer builder.deinit();
+    const receiver = try builder.reserveRegister();
+    const value = try builder.reserveRegister();
+    const key = try builder.addConstant(Value.fromString(
+        try realm.heap.allocateString("x"),
+    ));
+    try builder.emitLoadReg(span, value);
+    try builder.emitStaProperty(span, key, receiver);
+    var chunk = try finish(&builder);
+    defer chunk.deinit(testing.allocator);
+
+    const receiver_shape: *Shape = @ptrFromInt(0x6F20);
+    chunk.inline_store_caches[0] = .{ .shape = receiver_shape, .slot = 8 };
+
+    var graph = try ir.Graph.build(testing.allocator, &chunk);
+    defer graph.deinit();
+    const store_id = findNode(&graph, .store_named).?;
+    const inputs = graph.nodeInputs(store_id);
+    try testing.expectEqual(@as(usize, 2), inputs.len);
+
+    var plan = try specialize.Plan.build(testing.allocator, &graph);
+    defer plan.deinit();
+    const info = plan.node_info[store_id];
+    try testing.expectEqual(specialize.Lowering.store_named_own, info.lowering);
+    const assumption = plan.assumptions[info.assumption.?];
+    try testing.expectEqual(specialize.AssumptionKind.store_named_own, assumption.kind);
+    try testing.expectEqual(@as(u16, 0), assumption.feedback_index);
+    try testing.expectEqual(receiver_shape, assumption.receiver_shape);
+    try testing.expectEqual(@as(u32, 8), assumption.slot);
+    try testing.expectEqual(@as(?*Shape, null), assumption.holder_shape);
+    try testing.expectEqual(@as(u64, 0), assumption.revision);
+
+    // A StoreIC guard exit must replay the exact assignment bytecode with the
+    // uncommitted value still in the accumulator.
+    var metadata = try deopt.Metadata.build(testing.allocator, &graph, &plan);
+    defer metadata.deinit();
+    var point = try metadata.decode(testing.allocator, 0);
+    defer point.deinit();
+    try testing.expectEqual(deopt.Recovery{ .value = inputs[1] }, point.accumulator);
+
+    // A shape transition can resize slots and has prototype guards, so it is
+    // intentionally left to Lantern rather than sharing the same-shape lane.
+    const post_shape: *Shape = @ptrFromInt(0x6F30);
+    chunk.inline_store_caches[0] = .{
+        .pre_shape = receiver_shape,
+        .post_shape = post_shape,
+        .slot = 8,
+    };
+    var transition_graph = try ir.Graph.build(testing.allocator, &chunk);
+    defer transition_graph.deinit();
+    var transition_plan = try specialize.Plan.build(testing.allocator, &transition_graph);
+    defer transition_plan.deinit();
+    const transition_store = findNode(&transition_graph, .store_named).?;
+    try testing.expectEqual(
+        specialize.Lowering.store_named_generic,
+        transition_plan.node_info[transition_store].lowering,
+    );
+    try testing.expectEqual(@as(?u32, null), transition_plan.node_info[transition_store].assumption);
 }
 
 test "Ohaimark specialization records pointer-free named-load assumptions" {

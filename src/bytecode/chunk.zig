@@ -792,6 +792,10 @@ pub const Chunk = struct {
         /// before the heap unmaps the shared code allocator.
         bistromath: BistromathState = .{},
         ohaimark: TierCode = .{},
+        /// Whether the published T2 entry may cross a generated-code helper
+        /// boundary. Set before the executable becomes visible so the runtime
+        /// can register the active Lantern frame only for code that needs it.
+        ohaimark_requires_frame_scope: bool = false,
         /// Loop-header OSR stubs for T2. `bc → code_off` relative to the
         /// Ohaimark entry, installed in the executable region so teardown
         /// shares the same stable-address contract as Bistromath continuations
@@ -818,6 +822,11 @@ pub const Chunk = struct {
         pub const TierCode = struct {
             tier: Tier = .cold,
             executable: jit_code_alloc.InstalledCode = .{},
+            /// A deferred retry is keyed by the compiler-owned property
+            /// feedback site that caused the refusal. Other tiers leave this
+            /// empty and retain ordinary permanent-refusal semantics.
+            retry_feedback_site: ?u32 = null,
+            retry_feedback_fingerprint: ?u64 = null,
 
             pub fn entry(self: *const TierCode) ?*const anyopaque {
                 return self.executable.entry();
@@ -827,10 +836,48 @@ pub const Chunk = struct {
                 if (self.executable.bytes() != null or executable.bytes() == null) return;
                 self.executable = executable.take();
                 self.tier = .compiled;
+                self.retry_feedback_site = null;
+                self.retry_feedback_fingerprint = null;
             }
 
             pub fn refuse(self: *TierCode) void {
-                if (self.executable.bytes() == null) self.tier = .dont_compile;
+                if (self.executable.bytes() == null) {
+                    self.tier = .dont_compile;
+                    self.retry_feedback_site = null;
+                    self.retry_feedback_fingerprint = null;
+                }
+            }
+
+            pub fn deferForFeedback(self: *TierCode, site: u32, fingerprint: u64) void {
+                if (self.executable.bytes() == null) {
+                    self.tier = .dont_compile;
+                    self.retry_feedback_site = site;
+                    self.retry_feedback_fingerprint = fingerprint;
+                }
+            }
+
+            pub fn retryFeedbackSite(self: *const TierCode) ?u32 {
+                return self.retry_feedback_site;
+            }
+
+            pub fn retryFeedbackFingerprint(self: *const TierCode) ?u64 {
+                return self.retry_feedback_fingerprint;
+            }
+
+            pub fn canRetryForFeedback(self: *const TierCode, fingerprint: u64) bool {
+                return self.tier == .dont_compile and
+                    self.retry_feedback_site != null and
+                    self.retry_feedback_fingerprint != null and
+                    self.retry_feedback_fingerprint.? != fingerprint;
+            }
+
+            pub fn retryForFeedbackIfChanged(self: *TierCode, fingerprint: u64) bool {
+                if (!self.canRetryForFeedback(fingerprint)) return false;
+                std.debug.assert(self.executable.bytes() == null);
+                self.tier = .cold;
+                self.retry_feedback_site = null;
+                self.retry_feedback_fingerprint = null;
+                return true;
             }
 
             fn deinit(self: *TierCode) void {
@@ -927,6 +974,7 @@ pub const Chunk = struct {
             executable: *jit_code_alloc.InstalledCode,
             osr_table: ?*jit_code_alloc.InstalledCode,
             osr_count: u32,
+            requires_frame_scope: bool,
         ) void {
             if (self.ohaimark.entry() != null or executable.bytes() == null) return;
             if (osr_table) |table| {
@@ -936,12 +984,14 @@ pub const Chunk = struct {
                     self.ohaimark_osr_count = @intCast(@min(osr_count, available));
                 }
             }
+            self.ohaimark_requires_frame_scope = requires_frame_scope;
             self.ohaimark.publish(executable);
         }
 
         pub fn deinit(self: *JitState) void {
             self.bistromath.deinit();
             self.ohaimark.deinit();
+            self.ohaimark_requires_frame_scope = false;
             self.ohaimark_osr.deinit();
             self.ohaimark_osr_count = 0;
             self.ohaimark_osr_strikes = 0;
@@ -2474,6 +2524,26 @@ test "Builder: branch relaxation remaps switch table targets" {
     try testing.expectEqual(Op.return_, @as(Op, @enumFromInt(chunk.code[7])));
 }
 
+test "Chunk TierCode retries feedback-deferred refusal only after change" {
+    var tier: Chunk.JitState.TierCode = .{};
+    tier.deferForFeedback(0x0100_0007, 0x1111);
+    try testing.expectEqual(Chunk.JitState.Tier.dont_compile, tier.tier);
+    try testing.expectEqual(@as(?u32, 0x0100_0007), tier.retryFeedbackSite());
+    try testing.expectEqual(@as(?u64, 0x1111), tier.retryFeedbackFingerprint());
+    try testing.expect(!tier.canRetryForFeedback(0x1111));
+    try testing.expect(!tier.retryForFeedbackIfChanged(0x1111));
+    try testing.expectEqual(Chunk.JitState.Tier.dont_compile, tier.tier);
+
+    try testing.expect(tier.canRetryForFeedback(0x2222));
+    try testing.expect(tier.retryForFeedbackIfChanged(0x2222));
+    try testing.expectEqual(Chunk.JitState.Tier.cold, tier.tier);
+    try testing.expectEqual(@as(?u32, null), tier.retryFeedbackSite());
+    try testing.expectEqual(@as(?u64, null), tier.retryFeedbackFingerprint());
+
+    tier.refuse();
+    try testing.expect(!tier.canRetryForFeedback(0x3333));
+}
+
 test "Chunk JIT state releases baseline continuations and optimized code" {
     const code_alloc = @import("../runtime/jit/code_alloc.zig");
     if (comptime !code_alloc.supported) return error.SkipZigTest;
@@ -2503,10 +2573,11 @@ test "Chunk JIT state releases baseline continuations and optimized code" {
 
     const state = chunk.jit_state.?;
     state.bistromath.publish(&baseline, &continuations, 1);
-    state.publishOhaimark(&optimized, null, 0);
+    state.publishOhaimark(&optimized, null, 0, true);
     try testing.expect(baseline.bytes() == null);
     try testing.expect(continuations.bytes() == null);
     try testing.expect(optimized.bytes() == null);
+    try testing.expect(state.ohaimark_requires_frame_scope);
     chunk.deinit(testing.allocator);
     chunk_live = false;
 

@@ -53,12 +53,11 @@ pub const Plan = struct {
             input_requirements,
         );
 
-        var plan: Plan = .{
+        const plan: Plan = .{
             .allocator = allocator,
             .outputs = outputs,
             .input_requirements = input_requirements,
         };
-        errdefer plan.deinit();
         try plan.verify(graph, specialization);
         return plan;
     }
@@ -276,6 +275,18 @@ fn initialOutput(node: ir.Node, info: specialize.NodeInfo) !Kind {
             .constant, .logical_not, .checked_boolean_not => .tagged,
             else => error.MalformedGraph,
         },
+        .to_numeric => if (info.lowering == .checked_int32_to_numeric)
+            .int32
+        else
+            error.MalformedGraph,
+        .to_string => if (info.lowering == .checked_string_to_string)
+            .tagged
+        else
+            error.MalformedGraph,
+        .require_object_coercible => if (info.lowering == .require_object_coercible)
+            .tagged
+        else
+            error.MalformedGraph,
         .less_than => switch (info.lowering) {
             .constant, .less_than => .tagged,
             else => error.MalformedGraph,
@@ -288,17 +299,113 @@ fn initialOutput(node: ir.Node, info: specialize.NodeInfo) !Kind {
             => .tagged,
             else => error.MalformedGraph,
         },
+        .store_named => switch (info.lowering) {
+            .store_named_generic, .store_named_own => .none,
+            else => error.MalformedGraph,
+        },
+        .load_computed => switch (info.lowering) {
+            .load_computed_generic, .load_computed_own => .tagged,
+            else => error.MalformedGraph,
+        },
+        .store_computed => switch (info.lowering) {
+            .store_computed_generic, .store_computed_own => .none,
+            else => error.MalformedGraph,
+        },
+        .delete_computed_property => if (info.lowering == .delete_computed_property)
+            .tagged
+        else
+            error.MalformedGraph,
         .load_this => if (info.lowering == .load_this) .tagged else error.MalformedGraph,
         .load_global => switch (info.lowering) {
             .load_global_generic, .load_global => .tagged,
             else => error.MalformedGraph,
         },
+        .store_global => if (info.lowering == .store_global)
+            .none
+        else
+            error.MalformedGraph,
         .load_global_slot => if (info.lowering == .load_global_slot)
             .tagged
         else
             error.MalformedGraph,
+        .store_global_slot_init => if (info.lowering == .store_global_slot_init)
+            .none
+        else
+            error.MalformedGraph,
+        .store_global_slot => if (info.lowering == .store_global_slot)
+            .none
+        else
+            error.MalformedGraph,
         .load_environment => if (info.lowering == .load_environment)
             .tagged
+        else
+            error.MalformedGraph,
+        .allocate_environment => if (info.lowering == .allocate_environment)
+            .none
+        else
+            error.MalformedGraph,
+        .store_environment => if (info.lowering == .store_environment)
+            .none
+        else
+            error.MalformedGraph,
+        .pop_environment => if (info.lowering == .pop_environment)
+            .none
+        else
+            error.MalformedGraph,
+        .create_unmapped_arguments_object => if (info.lowering == .create_unmapped_arguments_object)
+            .tagged
+        else
+            error.MalformedGraph,
+        .create_ordinary_function => if (info.lowering == .create_ordinary_function)
+            .tagged
+        else
+            error.MalformedGraph,
+        .set_home => if (info.lowering == .set_home)
+            .none
+        else
+            error.MalformedGraph,
+        .define_object_method_property => if (info.lowering == .define_object_method_property)
+            .none
+        else
+            error.MalformedGraph,
+        .create_object_literal => if (info.lowering == .create_object_literal)
+            .tagged
+        else
+            error.MalformedGraph,
+        .create_dense_array_literal => if (info.lowering == .create_dense_array_literal)
+            .tagged
+        else
+            error.MalformedGraph,
+        .create_array_literal => if (info.lowering == .create_array_literal)
+            .tagged
+        else
+            error.MalformedGraph,
+        .append_dense_array_literal_element => if (info.lowering == .append_dense_array_literal_element)
+            .none
+        else
+            error.MalformedGraph,
+        .define_template_property => if (info.lowering == .define_template_property)
+            .none
+        else
+            error.MalformedGraph,
+        .throw_ => if (info.lowering == .throw_)
+            .none
+        else
+            error.MalformedGraph,
+        .throw_if_hole => if (info.lowering == .throw_if_hole)
+            .tagged
+        else
+            error.MalformedGraph,
+        .typeof_ => if (info.lowering == .typeof_)
+            .tagged
+        else
+            error.MalformedGraph,
+        .direct_call => if (info.lowering == .direct_call)
+            .tagged
+        else
+            error.MalformedGraph,
+        .tail_dispatch => if (info.lowering == .tail_dispatch)
+            .none
         else
             error.MalformedGraph,
         .jump, .branch, .return_ => .none,
@@ -340,6 +447,16 @@ fn nodeInputKind(node: ir.Node, info: specialize.NodeInfo) !Kind {
         .load_global,
         .load_global_slot,
         .load_environment,
+        .allocate_environment,
+        .pop_environment,
+        .create_unmapped_arguments_object,
+        .create_ordinary_function,
+        .create_object_literal,
+        .create_dense_array_literal,
+        .create_array_literal,
+        .direct_call,
+        .tail_dispatch,
+        .throw_,
         .jump,
         => .none,
         .add => arithmeticInput(info, .checked_int32_add),
@@ -356,9 +473,21 @@ fn nodeInputKind(node: ir.Node, info: specialize.NodeInfo) !Kind {
             .logical_not, .checked_boolean_not => .tagged,
             else => error.MalformedGraph,
         },
+        .to_numeric => if (info.lowering == .checked_int32_to_numeric)
+            .int32
+        else
+            error.MalformedGraph,
+        .to_string => if (info.lowering == .checked_string_to_string)
+            .tagged
+        else
+            error.MalformedGraph,
+        .require_object_coercible => if (info.lowering == .require_object_coercible)
+            .tagged
+        else
+            error.MalformedGraph,
         .less_than => switch (info.lowering) {
             .constant => .none,
-            .less_than => .tagged,
+            .less_than => .int32,
             else => error.MalformedGraph,
         },
         .load_named => switch (info.lowering) {
@@ -369,6 +498,62 @@ fn nodeInputKind(node: ir.Node, info: specialize.NodeInfo) !Kind {
             => .tagged,
             else => error.MalformedGraph,
         },
+        .store_named => switch (info.lowering) {
+            .store_named_generic, .store_named_own => .tagged,
+            else => error.MalformedGraph,
+        },
+        .load_computed => switch (info.lowering) {
+            .load_computed_generic, .load_computed_own => .tagged,
+            else => error.MalformedGraph,
+        },
+        .store_computed => switch (info.lowering) {
+            .store_computed_generic, .store_computed_own => .tagged,
+            else => error.MalformedGraph,
+        },
+        .store_global => if (info.lowering == .store_global)
+            .tagged
+        else
+            error.MalformedGraph,
+        .delete_computed_property => if (info.lowering == .delete_computed_property)
+            .tagged
+        else
+            error.MalformedGraph,
+        .store_environment => if (info.lowering == .store_environment)
+            .tagged
+        else
+            error.MalformedGraph,
+        .store_global_slot_init => if (info.lowering == .store_global_slot_init)
+            .tagged
+        else
+            error.MalformedGraph,
+        .store_global_slot => if (info.lowering == .store_global_slot)
+            .tagged
+        else
+            error.MalformedGraph,
+        .define_template_property => if (info.lowering == .define_template_property)
+            .tagged
+        else
+            error.MalformedGraph,
+        .set_home => if (info.lowering == .set_home)
+            .tagged
+        else
+            error.MalformedGraph,
+        .define_object_method_property => if (info.lowering == .define_object_method_property)
+            .tagged
+        else
+            error.MalformedGraph,
+        .append_dense_array_literal_element => if (info.lowering == .append_dense_array_literal_element)
+            .tagged
+        else
+            error.MalformedGraph,
+        .throw_if_hole => if (info.lowering == .throw_if_hole)
+            .tagged
+        else
+            error.MalformedGraph,
+        .typeof_ => if (info.lowering == .typeof_)
+            .tagged
+        else
+            error.MalformedGraph,
         .branch, .return_ => .tagged,
     };
 }
@@ -402,9 +587,41 @@ fn nodeInputCount(kind: ir.NodeKind) u16 {
         .load_global,
         .load_global_slot,
         .load_environment,
+        .allocate_environment,
+        .pop_environment,
+        .create_unmapped_arguments_object,
+        .create_ordinary_function,
+        .create_object_literal,
+        .create_dense_array_literal,
+        .create_array_literal,
+        .direct_call,
+        .tail_dispatch,
+        .throw_,
         .jump,
         => 0,
-        .logical_not, .load_named, .branch, .return_ => 1,
+        .logical_not,
+        .to_numeric,
+        .to_string,
+        .require_object_coercible,
+        .load_named,
+        .store_global,
+        .store_global_slot_init,
+        .store_global_slot,
+        .store_environment,
+        .throw_if_hole,
+        .typeof_,
+        .branch,
+        .return_,
+        => 1,
+        .load_computed,
+        .define_template_property,
+        .append_dense_array_literal_element,
+        .delete_computed_property,
+        .store_named,
+        .set_home,
+        .define_object_method_property,
+        => 2,
+        .store_computed => 3,
         .add, .sub, .mul, .div, .strict_eq, .less_than => 2,
     };
 }
@@ -454,13 +671,15 @@ fn isCheckedInt32(kind: ir.NodeKind, lowering: specialize.Lowering) bool {
         .sub => lowering == .checked_int32_sub,
         .mul => lowering == .checked_int32_mul,
         .div => lowering == .checked_int32_div,
+        .to_numeric => lowering == .checked_int32_to_numeric,
         .strict_eq => lowering == .strict_eq,
+        .less_than => lowering == .less_than,
         else => false,
     };
 }
 
 fn validateNodeContract(node: ir.Node, info: specialize.NodeInfo) !void {
-    if (node.kind != .load_named and node.kind != .load_global and
+    if (node.kind != .load_named and node.kind != .store_named and node.kind != .load_computed and node.kind != .store_computed and node.kind != .load_global and
         info.assumption != null)
     {
         return error.MalformedGraph;
@@ -478,12 +697,52 @@ fn validateNodeContract(node: ir.Node, info: specialize.NodeInfo) !void {
                 return error.MalformedGraph;
             }
         },
-        .add, .sub, .strict_eq, .logical_not, .less_than => {
+        .add,
+        .sub,
+        .strict_eq,
+        .logical_not,
+        .to_numeric,
+        .to_string,
+        .require_object_coercible,
+        .less_than,
+        => {
             if (!hasPayload(node.payload, .none)) return error.MalformedGraph;
         },
         .mul, .div => if (!hasPayload(node.payload, .binary_profile)) return error.MalformedGraph,
         .load_named => {
             if (!hasPayload(node.payload, .named_load)) return error.MalformedGraph;
+        },
+        .store_named => {
+            if (!hasPayload(node.payload, .named_store) or
+                (info.lowering != .store_named_generic and info.lowering != .store_named_own) or
+                info.folded != null)
+            {
+                return error.MalformedGraph;
+            }
+        },
+        .load_computed => {
+            if (!hasPayload(node.payload, .computed_load) or
+                (info.lowering != .load_computed_generic and info.lowering != .load_computed_own) or
+                info.folded != null)
+            {
+                return error.MalformedGraph;
+            }
+        },
+        .store_computed => {
+            if (!hasPayload(node.payload, .computed_store) or
+                (info.lowering != .store_computed_generic and info.lowering != .store_computed_own) or
+                info.folded != null)
+            {
+                return error.MalformedGraph;
+            }
+        },
+        .delete_computed_property => {
+            if (!hasPayload(node.payload, .computed_delete) or
+                info.lowering != .delete_computed_property or info.folded != null or
+                info.assumption != null)
+            {
+                return error.MalformedGraph;
+            }
         },
         .load_this => {
             if (!hasPayload(node.payload, .none) or info.lowering != .load_this or
@@ -500,6 +759,14 @@ fn validateNodeContract(node: ir.Node, info: specialize.NodeInfo) !void {
                 return error.MalformedGraph;
             }
         },
+        .store_global => {
+            if (!hasPayload(node.payload, .global_store) or
+                info.lowering != .store_global or info.folded != null or
+                info.assumption != null)
+            {
+                return error.MalformedGraph;
+            }
+        },
         .load_global_slot => {
             if (!hasPayload(node.payload, .global_slot) or
                 info.lowering != .load_global_slot or info.folded != null)
@@ -507,9 +774,144 @@ fn validateNodeContract(node: ir.Node, info: specialize.NodeInfo) !void {
                 return error.MalformedGraph;
             }
         },
+        .store_global_slot_init => {
+            if (!hasPayload(node.payload, .global_slot) or
+                info.lowering != .store_global_slot_init or info.folded != null)
+            {
+                return error.MalformedGraph;
+            }
+        },
+        .store_global_slot => {
+            if (!hasPayload(node.payload, .global_slot) or
+                info.lowering != .store_global_slot or info.folded != null)
+            {
+                return error.MalformedGraph;
+            }
+        },
         .load_environment => {
             if (!hasPayload(node.payload, .environment_load) or
                 info.lowering != .load_environment or info.folded != null)
+            {
+                return error.MalformedGraph;
+            }
+        },
+        .allocate_environment => {
+            if (!hasPayload(node.payload, .environment_allocation) or
+                info.lowering != .allocate_environment or info.folded != null)
+            {
+                return error.MalformedGraph;
+            }
+        },
+        .store_environment => {
+            if (!hasPayload(node.payload, .environment_store) or
+                info.lowering != .store_environment or info.folded != null)
+            {
+                return error.MalformedGraph;
+            }
+        },
+        .pop_environment => {
+            if (!hasPayload(node.payload, .none) or
+                info.lowering != .pop_environment or info.folded != null)
+            {
+                return error.MalformedGraph;
+            }
+        },
+        .create_unmapped_arguments_object => {
+            if (!hasPayload(node.payload, .none) or
+                info.lowering != .create_unmapped_arguments_object or info.folded != null)
+            {
+                return error.MalformedGraph;
+            }
+        },
+        .create_ordinary_function => {
+            if (!hasPayload(node.payload, .function_template) or
+                info.lowering != .create_ordinary_function or info.folded != null)
+            {
+                return error.MalformedGraph;
+            }
+        },
+        .set_home => {
+            if (!hasPayload(node.payload, .home_object) or
+                info.lowering != .set_home or info.folded != null)
+            {
+                return error.MalformedGraph;
+            }
+        },
+        .define_object_method_property => {
+            if (!hasPayload(node.payload, .object_method_property) or
+                info.lowering != .define_object_method_property or info.folded != null)
+            {
+                return error.MalformedGraph;
+            }
+        },
+        .create_object_literal => {
+            if (!hasPayload(node.payload, .object_literal) or
+                info.lowering != .create_object_literal or info.folded != null)
+            {
+                return error.MalformedGraph;
+            }
+        },
+        .create_dense_array_literal => {
+            if (!hasPayload(node.payload, .dense_array_literal) or
+                info.lowering != .create_dense_array_literal or info.folded != null)
+            {
+                return error.MalformedGraph;
+            }
+            const literal = node.payload.dense_array_literal;
+            if (literal.count == 0) return error.MalformedGraph;
+        },
+        .create_array_literal => {
+            if (!hasPayload(node.payload, .none) or
+                info.lowering != .create_array_literal or info.folded != null)
+            {
+                return error.MalformedGraph;
+            }
+        },
+        .append_dense_array_literal_element => {
+            if (!hasPayload(node.payload, .dense_array_append) or
+                info.lowering != .append_dense_array_literal_element or info.folded != null)
+            {
+                return error.MalformedGraph;
+            }
+        },
+        .define_template_property => {
+            if (!hasPayload(node.payload, .template_property) or
+                info.lowering != .define_template_property or info.folded != null)
+            {
+                return error.MalformedGraph;
+            }
+        },
+        .throw_ => {
+            if (!hasPayload(node.payload, .none) or info.lowering != .throw_ or
+                info.folded != null)
+            {
+                return error.MalformedGraph;
+            }
+        },
+        .throw_if_hole => {
+            if (!hasPayload(node.payload, .none) or info.lowering != .throw_if_hole or
+                info.folded != null)
+            {
+                return error.MalformedGraph;
+            }
+        },
+        .typeof_ => {
+            if (!hasPayload(node.payload, .none) or info.lowering != .typeof_ or
+                info.folded != null)
+            {
+                return error.MalformedGraph;
+            }
+        },
+        .direct_call => {
+            if (!hasPayload(node.payload, .direct_call) or info.lowering != .direct_call or
+                info.folded != null or info.assumption != null)
+            {
+                return error.MalformedGraph;
+            }
+        },
+        .tail_dispatch => {
+            if (!hasPayload(node.payload, .none) or info.lowering != .tail_dispatch or
+                info.folded != null or info.assumption != null)
             {
                 return error.MalformedGraph;
             }

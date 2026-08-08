@@ -24,7 +24,101 @@ const shared_data_block = @import("shared_data_block.zig");
 const intrinsics_mod = @import("intrinsics.zig");
 const Intrinsics = intrinsics_mod.Intrinsics;
 const features = @import("features.zig");
+const code_alloc = @import("jit/code_alloc.zig");
 pub const FeatureSet = features.FeatureSet;
+
+/// Allocator adapter that charges non-GC runtime storage to the Heap's
+/// live-byte ceiling. WebAssembly keeps decoded modules and store state in
+/// a realm arena, while invocation stacks are short-lived; both use this
+/// adapter so `setMemoryLimit` governs the whole engine rather than only
+/// GC-managed JavaScript values.
+const WasmQuotaAllocator = struct {
+    backing: std.mem.Allocator,
+    heap: *Heap,
+
+    fn allocator(self: *WasmQuotaAllocator) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    const vtable: std.mem.Allocator.VTable = .{
+        .alloc = alloc,
+        .resize = resize,
+        .remap = remap,
+        .free = free,
+    };
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *WasmQuotaAllocator = @ptrCast(@alignCast(ctx));
+        self.heap.charge(len) catch return null;
+        const ptr = self.backing.rawAlloc(len, alignment, ret_addr) orelse {
+            self.heap.discharge(len);
+            return null;
+        };
+        return ptr;
+    }
+
+    fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const self: *WasmQuotaAllocator = @ptrCast(@alignCast(ctx));
+        if (new_len > memory.len) {
+            const delta = new_len - memory.len;
+            self.heap.charge(delta) catch return false;
+            if (!self.backing.rawResize(memory, alignment, new_len, ret_addr)) {
+                self.heap.discharge(delta);
+                return false;
+            }
+        } else {
+            if (!self.backing.rawResize(memory, alignment, new_len, ret_addr)) return false;
+            self.heap.discharge(memory.len - new_len);
+        }
+        return true;
+    }
+
+    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const self: *WasmQuotaAllocator = @ptrCast(@alignCast(ctx));
+        if (new_len > memory.len) {
+            const delta = new_len - memory.len;
+            self.heap.charge(delta) catch return null;
+            const ptr = self.backing.rawRemap(memory, alignment, new_len, ret_addr) orelse {
+                self.heap.discharge(delta);
+                return null;
+            };
+            return ptr;
+        }
+        const ptr = self.backing.rawRemap(memory, alignment, new_len, ret_addr) orelse return null;
+        self.heap.discharge(memory.len - new_len);
+        return ptr;
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *WasmQuotaAllocator = @ptrCast(@alignCast(ctx));
+        self.backing.rawFree(memory, alignment, ret_addr);
+        self.heap.discharge(memory.len);
+    }
+};
+
+fn chargeWasmCodeLedger(ctx: *anyopaque, bytes: usize) bool {
+    const realm: *Realm = @ptrCast(@alignCast(ctx));
+    realm.heap.charge(bytes) catch return false;
+    realm.wasm_code_bytes_live +|= bytes;
+    realm.wasm_code_reservations_total +|= 1;
+    return true;
+}
+
+fn dischargeWasmCodeLedger(ctx: *anyopaque, bytes: usize) void {
+    const realm: *Realm = @ptrCast(@alignCast(ctx));
+    realm.heap.discharge(bytes);
+    realm.wasm_code_bytes_live -|= bytes;
+}
+
+const WasmExternTableRoot = struct {
+    table: *const @import("wasm/wasm.zig").Table,
+    registrations: usize = 1,
+};
+
+const WasmExternGlobalRoot = struct {
+    cell: *const u128,
+    registrations: usize = 1,
+};
 
 /// One pending microtask. Drained in FIFO order from
 /// `realm.microtask_queue` either at top-level entry boundaries
@@ -1125,13 +1219,11 @@ pub const Realm = struct {
     /// run on a non-blocking agent. The test262 harness flips this off
     /// for `flags: [CanBlockIsFalse]` fixtures.
     agent_can_block: bool = true,
-    /// `--allow=wasm` posture toggle. When `false` (the default) the
-    /// WebAssembly code-construction surface (`compile` / `instantiate`
-    /// / `new Module` / `new Instance`) throws by policy
-    /// (HostEnsureCanCompileWasmBytes; SES-aligned, orthogonal to
-    /// `allow_eval`). `WebAssembly.validate` is ungated — it only
-    /// inspects bytes. Set `true` to open the gate.
-    allow_wasm: bool = false,
+    /// HostEnsureCanCompileWasmBytes policy. When false, dynamic bytes
+    /// cannot become a `WebAssembly.Module`; ordinary Wasm objects and a
+    /// host-provided/predecoded Module remain usable. Direct embedders
+    /// default closed. The production CLI opens this policy by default.
+    allow_wasm_compile: bool = false,
     /// Host policy for native JS tiers (docs/jit.md §10). When `true` the
     /// engine tiers hot chunks up to Bistromath-compiled code; when `false`
     /// everything stays on Lantern and warmth counters merely accumulate.
@@ -1154,15 +1246,29 @@ pub const Realm = struct {
     /// size-scaled policy in runtime/ohaimark/driver.zig.
     ohaimark_threshold_override: ?u32 = null,
     /// Loop-header on-stack replacement into Ohaimark (docs/ohaimark.md §3.17).
-    /// Independently default-off until OSR's own differential and natural-
-    /// threshold performance gates pass. Function-entry T2 does not require
-    /// this flag. Inherited by child realms.
-    ohaimark_osr_enabled: bool = false,
-    /// Lazily-created arena owning every realm-resident WebAssembly
-    /// artifact (decoded modules, instances, their store state). Freed
-    /// wholesale at realm teardown, so wasm objects need no per-object
-    /// cleanup. The realm-owned store of docs/wasm-engine.md §7.
+    /// Default-on after its differential, GC-pressure, fuzz, and natural-
+    /// threshold performance gates passed. Subordinate to the master JIT/T2
+    /// gates and inherited by child realms.
+    ohaimark_osr_enabled: bool = true,
+    /// Lazily-created arena owning immutable realm-resident WebAssembly
+    /// metadata and store headers. Movable memory/table backings use the
+    /// immediate-free quota allocator and are tracked separately below.
+    wasm_quota_allocator: ?WasmQuotaAllocator = null,
     wasm_arena: ?std.heap.ArenaAllocator = null,
+    /// Instances whose Spasm caches may own executable mappings. Persistent
+    /// metadata still dies with `wasm_arena`; mappings require an explicit
+    /// `munmap` before that arena invalidates the instance pointers.
+    wasm_instances: std.ArrayListUnmanaged(*@import("wasm/interpreter.zig").Instance) = .empty,
+    /// Direct JS Memory/Table constructors are not owned by an Instance, so
+    /// track their backings separately. Instance-owned resources are reached
+    /// through `wasm_instances`; shared imports appear in neither direct list.
+    wasm_direct_memories: std.ArrayListUnmanaged(*@import("wasm/interpreter.zig").Memory) = .empty,
+    wasm_direct_tables: std.ArrayListUnmanaged(*@import("wasm/interpreter.zig").Table) = .empty,
+    /// Exact live/total counters for Realm-backed executable reservations.
+    /// They make code-ledger rollback observable independently of arena/store
+    /// allocations and also support future memory diagnostics.
+    wasm_code_bytes_live: usize = 0,
+    wasm_code_reservations_total: u64 = 0,
     /// The most recently decoded `WebAssembly.Module` in this realm — a
     /// non-owning pointer into `wasm_arena`, so it needs no teardown. The
     /// playground's `cynic_wasm_inspect` reads it to disassemble (to WAT)
@@ -1213,10 +1319,11 @@ pub const Realm = struct {
     /// set is cleared when this returns to 0.
     wasm_call_depth: u32 = 0,
     /// Registered `externref` tables / global cells, walked each GC so
-    /// their live JS values survive. The lists grow with the number of
-    /// such containers (bounded), not the number of values.
-    wasm_extern_tables: std.ArrayListUnmanaged(*const @import("wasm/wasm.zig").Table) = .empty,
-    wasm_extern_global_cells: std.ArrayListUnmanaged(*const u128) = .empty,
+    /// their live JS values survive. Shared imports increment the matching
+    /// entry's count, which makes a failed re-entrant population rollback
+    /// independent of registration order.
+    wasm_extern_tables: std.ArrayListUnmanaged(WasmExternTableRoot) = .empty,
+    wasm_extern_global_cells: std.ArrayListUnmanaged(WasmExternGlobalRoot) = .empty,
     /// Phase 3 SES override-mistake fix — `freezePrimordials`
     /// installs a `SyntheticAccessor` pair (getter + setter
     /// JSFunctions sharing one capture cell) for every data
@@ -1317,6 +1424,10 @@ pub const Realm = struct {
             // cross-realm `new other.Function(src)` is gated the same
             // way as a same-realm one.
             .allow_eval = parent.allow_eval,
+            // Host code-compilation policy is agent-wide too: a child
+            // realm must not reopen dynamic Wasm bytes that its parent
+            // refused (or close a policy the host explicitly opened).
+            .allow_wasm_compile = parent.allow_wasm_compile,
             // Children inherit the host module loader so a child
             // realm can resolve module specifiers — required by
             // `ShadowRealm.prototype.importValue`, which loads a
@@ -1467,6 +1578,26 @@ pub const Realm = struct {
             self.allocator.destroy(child);
         }
         self.child_realms.deinit(self.allocator);
+        // Release OS mappings and immediate-free mutable store backings while
+        // their arena-backed headers and the shared Heap ledger are live.
+        for (self.wasm_instances.items) |instance| {
+            instance.releaseExecutableCode();
+            instance.releaseOwnedStoreBackings();
+        }
+        for (self.wasm_direct_memories.items) |memory| memory.releaseBacking(self.allocator);
+        for (self.wasm_direct_tables.items) |table| table.releaseBacking(self.allocator);
+        if (self.wasm_quota_allocator) |*quota| {
+            const allocator = quota.allocator();
+            self.wasm_instances.deinit(allocator);
+            self.wasm_direct_memories.deinit(allocator);
+            self.wasm_direct_tables.deinit(allocator);
+            self.wasm_extern_roots.deinit(allocator);
+            self.wasm_extern_tables.deinit(allocator);
+            self.wasm_extern_global_cells.deinit(allocator);
+        }
+        // The Wasm arena is backed by `wasm_quota_allocator`, whose free path
+        // discharges its immutable metadata. Tear it down while the heap lives.
+        if (self.wasm_arena) |*a| a.deinit();
         // Only the Realm that allocated the heap frees it; child
         // realms borrow and exit cleanly.
         if (self.owns_heap) {
@@ -1474,10 +1605,6 @@ pub const Realm = struct {
             self.allocator.destroy(self.heap);
         }
         if (self.class_arena) |*a| a.deinit();
-        if (self.wasm_arena) |*a| a.deinit();
-        self.wasm_extern_roots.deinit(self.allocator);
-        self.wasm_extern_tables.deinit(self.allocator);
-        self.wasm_extern_global_cells.deinit(self.allocator);
         // CYSN restore key blob — freed after the heap teardown
         // above, since property maps borrowed key slices from it.
         if (self.snapshot_key_bytes) |b| self.allocator.free(b);
@@ -1497,6 +1624,14 @@ pub const Realm = struct {
         self.interrupt.store(false, .release);
     }
 
+    /// Atomic wake byte used by native execution tiers. The tier performs an
+    /// acquire load and then calls `pollExecution` for the authoritative
+    /// state transition; hosts continue to mutate it through
+    /// `requestInterrupt` / `terminate` only.
+    pub fn executionWakeFlag(self: *const Realm) *const std.atomic.Value(bool) {
+        return &self.interrupt;
+    }
+
     // ── Embedder resource metering — docs/resource-metering.md ──────
 
     /// Why a host termination fired. Readable via
@@ -1509,6 +1644,17 @@ pub const Realm = struct {
     /// Surface of a spent `step_budget` — see the `fuel_exhaustion`
     /// field.
     pub const FuelExhaustion = enum { throw_range_error, terminate };
+
+    /// Shared execution-safe-point result used by Lantern, Sarcasm, and
+    /// native builtins. Keeping the state transition here prevents each
+    /// execution tier from inventing subtly different fuel/interrupt
+    /// semantics.
+    pub const ExecutionPoll = enum {
+        proceed,
+        step_budget_exhausted,
+        cooperative_interrupted,
+        terminated,
+    };
 
     /// Embedder interrupt hook — polled on the running thread at the
     /// interpreter's safe points. Must be cheap (it runs once per
@@ -1527,6 +1673,49 @@ pub const Realm = struct {
     pub fn setFuel(self: *Realm, units: u64) void {
         self.step_budget = units;
         self.fuel_exhaustion = .terminate;
+    }
+
+    /// Whether a native tier must route through an execution path with
+    /// safe-point polls. A finite legacy step budget matters as much as
+    /// `setFuel`; the latter is distinguished by `fuel_exhaustion`.
+    pub fn executionMeteringArmed(self: *const Realm) bool {
+        return self.termination != null or
+            self.step_budget != std.math.maxInt(u64) or
+            self.fuel_exhaustion == .terminate or
+            self.interrupt.load(.acquire) or
+            self.interrupt_hook != null;
+    }
+
+    /// Consume one shared execution safe point. The caller turns the
+    /// structural result into its own error/value representation.
+    pub fn pollExecution(self: *Realm) ExecutionPoll {
+        if (self.termination != null) return .terminated;
+        // maxInt with the legacy exhaustion mode is the disabled sentinel.
+        // Do not decrement it: doing so would make the second safe point look
+        // like a host-armed finite budget and unnecessarily tier Wasm down.
+        const budget_armed = self.step_budget != std.math.maxInt(u64) or
+            self.fuel_exhaustion == .terminate;
+        if (budget_armed) {
+            if (self.step_budget == 0) {
+                if (self.fuel_exhaustion == .terminate) {
+                    self.terminate(.fuel_exhausted);
+                    return .terminated;
+                }
+                return .step_budget_exhausted;
+            }
+        }
+        if (self.interrupt.load(.acquire)) {
+            self.clearInterrupt();
+            return .cooperative_interrupted;
+        }
+        if (self.interrupt_hook) |hook| {
+            if (hook(self.interrupt_hook_ctx) == .interrupt) {
+                self.terminate(.host_interrupted);
+                return .terminated;
+            }
+        }
+        if (budget_armed) self.step_budget -|= 1;
+        return .proceed;
     }
 
     /// Remaining fuel (= the step budget). Meaningful after `setFuel`.
@@ -1596,6 +1785,13 @@ pub const Realm = struct {
     /// `IsExecutionTerminating`).
     pub fn terminationReason(self: *const Realm) ?TerminationReason {
         return self.termination;
+    }
+
+    pub fn terminationMessage(self: *const Realm) []const u8 {
+        return if (self.termination) |reason| switch (reason) {
+            .fuel_exhausted => "execution terminated: fuel exhausted",
+            .host_interrupted => "execution terminated: host interrupt",
+        } else "execution terminated";
     }
 
     /// Host-side reset after a termination has unwound. Clears the
@@ -1798,14 +1994,67 @@ pub const Realm = struct {
         return self.class_arena.?.allocator();
     }
 
-    /// Lazily-initialised allocator owning every realm-resident
-    /// WebAssembly artifact (decoded modules, instances, store state).
+    /// Lazily-initialised arena for realm-resident WebAssembly metadata and
+    /// store headers. Movable Memory/Table backings use `wasmStoreAllocator`.
     /// Lives until `realm.deinit`. See docs/wasm-engine.md §7.
     pub fn wasmAllocator(self: *Realm) std.mem.Allocator {
+        if (self.wasm_quota_allocator == null) {
+            self.wasm_quota_allocator = .{ .backing = self.allocator, .heap = self.heap };
+        }
         if (self.wasm_arena == null) {
-            self.wasm_arena = std.heap.ArenaAllocator.init(self.allocator);
+            self.wasm_arena = std.heap.ArenaAllocator.init(self.wasm_quota_allocator.?.allocator());
         }
         return self.wasm_arena.?.allocator();
+    }
+
+    /// Immediate-free Wasm storage under the shared Heap quota. Used by
+    /// invocation stacks and movable Memory/Table backings.
+    pub fn wasmStoreAllocator(self: *Realm) std.mem.Allocator {
+        if (self.wasm_quota_allocator == null) {
+            self.wasm_quota_allocator = .{ .backing = self.allocator, .heap = self.heap };
+        }
+        return self.wasm_quota_allocator.?.allocator();
+    }
+
+    pub fn wasmInvocationAllocator(self: *Realm) std.mem.Allocator {
+        return self.wasmStoreAllocator();
+    }
+
+    /// Account OS-backed Spasm mappings against the Realm live-byte ceiling.
+    /// The ledger borrows the heap, which outlives every registered instance.
+    pub fn wasmCodeMemoryLedger(self: *Realm) code_alloc.MemoryLedger {
+        return .{
+            .ctx = self,
+            .charge_fn = chargeWasmCodeLedger,
+            .discharge_fn = dischargeWasmCodeLedger,
+        };
+    }
+
+    /// Track a realm-backed instance before a start function can compile.
+    /// Its owned Memory/Table slices remain reachable through this one entry.
+    pub fn registerWasmInstance(self: *Realm, instance: *@import("wasm/interpreter.zig").Instance) error{OutOfMemory}!void {
+        try self.wasm_instances.append(self.wasmStoreAllocator(), instance);
+    }
+
+    /// Remove one failed population transaction and reclaim its native/store
+    /// resources immediately. Nested instances created by a start import are
+    /// separate pointers and remain registered.
+    pub fn unregisterWasmInstance(self: *Realm, instance: *@import("wasm/interpreter.zig").Instance) void {
+        for (self.wasm_instances.items, 0..) |candidate, index| {
+            if (candidate != instance) continue;
+            _ = self.wasm_instances.swapRemove(index);
+            instance.releaseExecutableCode();
+            instance.releaseOwnedStoreBackings();
+            return;
+        }
+    }
+
+    pub fn registerWasmMemory(self: *Realm, memory: *@import("wasm/interpreter.zig").Memory) error{OutOfMemory}!void {
+        try self.wasm_direct_memories.append(self.wasmStoreAllocator(), memory);
+    }
+
+    pub fn registerWasmTable(self: *Realm, table: *@import("wasm/interpreter.zig").Table) error{OutOfMemory}!void {
+        try self.wasm_direct_tables.append(self.wasmStoreAllocator(), table);
     }
 
     /// Pin a JS value as a *transient* wasm `externref` GC root (deduped),
@@ -1813,7 +2062,7 @@ pub const Realm = struct {
     /// values) are skipped — the collector never touches them.
     pub fn pinExternRefTransient(self: *Realm, v: Value) !void {
         if (!v.isHeapValue()) return;
-        try self.wasm_extern_roots.put(self.allocator, v.bits, {});
+        try self.wasm_extern_roots.put(self.wasmStoreAllocator(), v.bits, {});
     }
 
     /// Enter / leave a JS→wasm call (the export trampoline). On the
@@ -1830,10 +2079,44 @@ pub const Realm = struct {
     /// Register an externref table / global cell so its live JS values are
     /// marked each GC (precise: an overwritten or dropped slot is freed).
     pub fn registerExternTable(self: *Realm, t: *const @import("wasm/wasm.zig").Table) !void {
-        try self.wasm_extern_tables.append(self.allocator, t);
+        for (self.wasm_extern_tables.items) |*root| {
+            if (root.table != t) continue;
+            root.registrations = std.math.add(usize, root.registrations, 1) catch return error.OutOfMemory;
+            return;
+        }
+        try self.wasm_extern_tables.append(self.wasmStoreAllocator(), .{ .table = t });
     }
     pub fn registerExternGlobalCell(self: *Realm, cell: *const u128) !void {
-        try self.wasm_extern_global_cells.append(self.allocator, cell);
+        for (self.wasm_extern_global_cells.items) |*root| {
+            if (root.cell != cell) continue;
+            root.registrations = std.math.add(usize, root.registrations, 1) catch return error.OutOfMemory;
+            return;
+        }
+        try self.wasm_extern_global_cells.append(self.wasmStoreAllocator(), .{ .cell = cell });
+    }
+
+    pub fn unregisterExternTable(self: *Realm, table: *const @import("wasm/wasm.zig").Table) void {
+        for (self.wasm_extern_tables.items, 0..) |*root, index| {
+            if (root.table != table) continue;
+            if (root.registrations > 1) {
+                root.registrations -= 1;
+            } else {
+                _ = self.wasm_extern_tables.swapRemove(index);
+            }
+            return;
+        }
+    }
+
+    pub fn unregisterExternGlobalCell(self: *Realm, cell: *const u128) void {
+        for (self.wasm_extern_global_cells.items, 0..) |*root, index| {
+            if (root.cell != cell) continue;
+            if (root.registrations > 1) {
+                root.registrations -= 1;
+            } else {
+                _ = self.wasm_extern_global_cells.swapRemove(index);
+            }
+            return;
+        }
     }
 
     /// Run a stop-the-world mark-sweep cycle. Roots:
@@ -2054,7 +2337,8 @@ pub const Realm = struct {
         while (dit.next()) |e| self.heap.markValue(e.value_ptr.*);
 
         // Intrinsics — the struct is a flat list of optional
-        // `*JSObject` / `*JSFunction` pointers; iterate fields
+        // `*JSObject` / `*JSFunction` pointers and a small number of
+        // cached `Value`s; iterate fields
         // with comptime reflection so adding a new intrinsic
         // doesn't silently break GC roots.
         inline for (@typeInfo(Intrinsics).@"struct".field_names) |field_name| {
@@ -2064,6 +2348,8 @@ pub const Realm = struct {
                 if (v) |o| self.heap.markValue(heap_mod.taggedObject(o));
             } else if (T == ?*JSFunction) {
                 if (v) |fp| self.heap.markValue(heap_mod.taggedFunction(fp));
+            } else if (T == Value) {
+                self.heap.markValue(v);
             }
         }
 
@@ -2099,13 +2385,32 @@ pub const Realm = struct {
         // marks as a no-op.)
         for (self.wasm_extern_roots.keys()) |bits| self.heap.markValue(Value{ .bits = bits });
         const ref_null = std.math.maxInt(u128);
-        for (self.wasm_extern_tables.items) |t| {
-            for (t.elems) |cell| {
+        for (self.wasm_extern_tables.items) |root| {
+            for (root.table.elems) |cell| {
                 if (cell != ref_null) self.heap.markValue(Value{ .bits = @truncate(cell) });
             }
         }
-        for (self.wasm_extern_global_cells.items) |c| {
-            if (c.* != ref_null) self.heap.markValue(Value{ .bits = @truncate(c.*) });
+        for (self.wasm_extern_global_cells.items) |root| {
+            if (root.cell.* != ref_null) self.heap.markValue(Value{ .bits = @truncate(root.cell.*) });
+        }
+        // A WebAssembly.Memory owns the identity of every materialized
+        // `.buffer` until the next non-shared grow detaches it. The host-view
+        // registry is outside the JS property graph, so mark those buffers
+        // explicitly; otherwise MemoryState's cached pointer could dangle
+        // after a collection.
+        for (self.wasm_instances.items) |instance| {
+            for (instance.owned_memories) |*memory| {
+                for (memory.host_views.items) |view| {
+                    const object: *@import("object.zig").JSObject = @ptrCast(@alignCast(view.object));
+                    self.heap.markValue(heap_mod.taggedObject(object));
+                }
+            }
+        }
+        for (self.wasm_direct_memories.items) |memory| {
+            for (memory.host_views.items) |view| {
+                const object: *@import("object.zig").JSObject = @ptrCast(@alignCast(view.object));
+                self.heap.markValue(heap_mod.taggedObject(object));
+            }
         }
 
         // Modules — each `ModuleRecord.exports` is a plain
@@ -2388,6 +2693,52 @@ test "Realm: deinit frees heap-allocated strings" {
     var realm = Realm.init(testing.allocator);
     _ = try realm.heap.allocateString("leakable");
     realm.deinit();
+}
+
+test "WasmQuotaAllocator checks the Realm ceiling before backing allocation" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+    heap.max_bytes = 0;
+
+    var backing = std.testing.FailingAllocator.init(testing.allocator, .{});
+    var quota: WasmQuotaAllocator = .{
+        .backing = backing.allocator(),
+        .heap = &heap,
+    };
+
+    try testing.expectError(error.OutOfMemory, quota.allocator().alloc(u8, 1));
+    try testing.expectEqual(@as(usize, 0), backing.alloc_index);
+}
+
+test "Wasm extern roots reference-count shared containers" {
+    const wasm = @import("wasm/wasm.zig");
+
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+
+    var elems = [_]u128{wasm.REF_NULL};
+    var table: wasm.Table = .{ .elems = &elems, .max = null, .is_64 = false };
+    var global = wasm.REF_NULL;
+
+    try realm.registerExternTable(&table);
+    try realm.registerExternTable(&table);
+    try testing.expectEqual(@as(usize, 1), realm.wasm_extern_tables.items.len);
+    try testing.expectEqual(@as(usize, 2), realm.wasm_extern_tables.items[0].registrations);
+    realm.unregisterExternTable(&table);
+    try testing.expectEqual(@as(usize, 1), realm.wasm_extern_tables.items.len);
+    try testing.expectEqual(@as(usize, 1), realm.wasm_extern_tables.items[0].registrations);
+    realm.unregisterExternTable(&table);
+    try testing.expectEqual(@as(usize, 0), realm.wasm_extern_tables.items.len);
+
+    try realm.registerExternGlobalCell(&global);
+    try realm.registerExternGlobalCell(&global);
+    try testing.expectEqual(@as(usize, 1), realm.wasm_extern_global_cells.items.len);
+    try testing.expectEqual(@as(usize, 2), realm.wasm_extern_global_cells.items[0].registrations);
+    realm.unregisterExternGlobalCell(&global);
+    try testing.expectEqual(@as(usize, 1), realm.wasm_extern_global_cells.items.len);
+    try testing.expectEqual(@as(usize, 1), realm.wasm_extern_global_cells.items[0].registrations);
+    realm.unregisterExternGlobalCell(&global);
+    try testing.expectEqual(@as(usize, 0), realm.wasm_extern_global_cells.items.len);
 }
 
 // FramePool — sized free-list of `[]Value` register files. The pool

@@ -29,11 +29,11 @@ If you set up a remote, the laptop only orchestrates over SSH:
 `remote-bench.sh` runs an **interleaved A/B** (a ref and a baseline measured
 back-to-back per iteration, so the ratio cancels host drift) and renders the
 report on your laptop. Timed children are pinned to CPU 1 by default (override
-with `--cpu N`), and the job refuses to compare a ref whose Zig pin differs
-from the provisioned toolchain. An unavailable CPU or missing `taskset` aborts
-the job instead of silently producing an unpinned comparison. `remote-run.sh`
-runs an arbitrary command (a build, a test sweep) against a ref. `--cross`
-adds the cross-engine table.
+with `--cpu N`), and each checked-out ref resolves and verifies its own
+`build.zig.zon` pin. An unavailable CPU, missing `taskset`, or mismatched
+resolved Zig aborts the job instead of silently contaminating the comparison.
+`remote-run.sh` runs an arbitrary command (a build, a test sweep) against a
+ref. `--cross` adds the cross-engine table.
 
 **Detached jobs (survive a local restart).** Both submit the work as a
 detached job on the box (under `setsid`+`flock`) and return a `JOB_ID`
@@ -65,7 +65,10 @@ would contend for CPU and ruin bench numbers); a second caller queues. The
 remote does `git checkout` and **never `git clean`**, so its warm
 `zig-cache` (and the test262 `--only-failing` pass-cache) survive between
 runs — each ref's build is *incremental*, so the serialised queue stays
-fast even when several agents use it.
+fast even when several agents use it. After every checkout, the job resolves
+the ref's `build.zig.zon` pin through `tools/fetch-zig.sh` and prints both the
+revision and Zig version. A/B jobs repeat that step for each ref, so a stale
+one-time provision or a pin difference cannot contaminate the comparison.
 
 So: **benches** want the serialised remote (clean numbers); **correctness
 tests** can run there too (incremental + cached), or in parallel via CI.
@@ -76,16 +79,17 @@ A shared-vCPU remote has a same-code A/B noise floor of ~7% (up to ~18% on
 `promise_chain`) that does *not* shrink with more runs — it's neighbour
 jitter between the two A/B halves, not sample noise. So it reliably catches
 **large** regressions (>10%); re-run a flagged fixture to confirm. To
-tighten: interleave the base/head measurements (cancels the drift, no extra
-cost), or use a dedicated (non-shared) host.
+tighten further, use a quiet dedicated host and repeat the complete
+interleaved comparison.
 
 ### Notes
 
 - The ref/baseline you compare must be pushed to `origin` (the remote
   fetches from GitHub).
-- `provision-remote.sh` fetches the exact pinned Zig from `build.zig.zon`
-  and installs peers via jsvu (v8, sm, qjs, hermes, xs; `jsc` has no
-  reliable Linux jsvu build and drops out of the table). x86 by default;
-  set `CYNIC_REMOTE_ARCH=aarch64` for arm64.
+- `provision-remote.sh` initially fetches the exact pinned Zig from
+  `build.zig.zon` and installs peers via jsvu (v8, sm, qjs, hermes, xs; `jsc`
+  has no reliable Linux jsvu build and drops out of the table). Every job also
+  resolves its checked-out ref's pin, so reprovisioning is not required after
+  a bump. x86 by default; set `CYNIC_REMOTE_ARCH=aarch64` for arm64.
 - The report renders on your laptop (Node ≥ 23), so the remote needs no
   Python or TS toolchain.
