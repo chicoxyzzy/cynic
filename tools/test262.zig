@@ -89,6 +89,10 @@
 //!
 //! Tier differentials:
 //!   --jit                   Force Bistromath T1 at threshold 1.
+//!   --require-bistromath-entry
+//!                           Fail with exit code 2 unless the sweep actually
+//!                           crosses at least one generated T1 entry. Requires
+//!                           `--jit`; works with the worker pool.
 //!   --ohaimark              Force Ohaimark T2 before T1, both at threshold 1.
 //!                           Production CLI T2 remains at its natural threshold.
 //!   --ohaimark-osr          Also enable default-off loop-header OSR (requires
@@ -424,6 +428,9 @@ const max_agents = 16;
 /// surface; the realm it runs in is the worker's, never touched here.
 const AgentThreadState = struct {
     group: *AgentGroup,
+    /// Sweep-wide native-entry witness inherited from the parent fixture.
+    /// `reapAgents` guarantees the sink outlives this task.
+    bistromath_entries: ?*std.atomic.Value(u64) = null,
     /// parent → agent: the broadcast block (set by `$262.agent.broadcast`).
     bcast: std.atomic.Value(?*AgentSDB) = std.atomic.Value(?*AgentSDB).init(null),
     /// owned copy of the agent source (page_allocator). The compiled
@@ -469,7 +476,7 @@ threadlocal var reap_group: ?*AgentGroup = null;
 /// worker lives on, reset, for the next task); a private fallback
 /// thread is joined. The agent's source stays owned by its runner
 /// (the pool worker, or the private thread) — never freed here.
-fn reapAgents(group: *AgentGroup) void {
+fn drainAgentGroup(group: *AgentGroup, reusable: bool) void {
     group.should_exit.store(true, .release);
     for (group.states[0..group.count]) |maybe| {
         if (maybe) |st| {
@@ -482,7 +489,15 @@ fn reapAgents(group: *AgentGroup) void {
             std.heap.page_allocator.destroy(st);
         }
     }
+    group.states = @splat(null);
+    group.count = 0;
     for (group.reports.items) |m| std.heap.page_allocator.free(m);
+    group.reports.clearRetainingCapacity();
+    if (reusable) group.should_exit.store(false, .release);
+}
+
+fn reapAgents(group: *AgentGroup) void {
+    drainAgentGroup(group, false);
     group.reports.deinit(std.heap.page_allocator);
     std.heap.page_allocator.destroy(group);
 }
@@ -762,8 +777,19 @@ fn poolWorkerMain(slot: *PoolWorker) void {
         // Take ownership of the source for this realm's lifetime.
         owned_srcs.append(realm.allocator, state.src) catch {};
         current_agent = state;
+        realm.heap.bistromath_stats = .{
+            .enabled = state.bistromath_entries != null,
+            .shared_entries = state.bistromath_entries,
+        };
         runAgentTask(&realm, state);
         resetRealm(&realm, &snapshot, &scratch);
+        // This agent realm may itself have called `$262.agent.start`.
+        // Realm reset drains pending microtasks, which can start another
+        // agent, so drain the reusable group only after reset and before
+        // publishing `state.done`. Otherwise a nested task could retain the
+        // parent sweep's witness pointer after its stack-owned atomic returns.
+        if (own_group) |group| drainAgentGroup(group, true);
+        realm.heap.bistromath_stats = .{};
         current_agent = null;
         // Signal completion (so `reapAgents` can free the task), THEN
         // release the slot for reuse. After `done` the task may be freed,
@@ -778,6 +804,10 @@ fn poolWorkerMain(slot: *PoolWorker) void {
 /// concurrency, so its create/destroy cost doesn't matter.
 fn agentMainPrivate(state: *AgentThreadState) void {
     var realm = cynic.runtime.Realm.init(std.heap.c_allocator);
+    realm.heap.bistromath_stats = .{
+        .enabled = state.bistromath_entries != null,
+        .shared_entries = state.bistromath_entries,
+    };
     realm.hardened = false;
     realm.allow_eval = true;
     configureForcedJit(&realm);
@@ -808,7 +838,6 @@ fn agentMainPrivate(state: *AgentThreadState) void {
 }
 
 fn agentStart(realm: *cynic.runtime.Realm, this_value: AgentVal, args: []const AgentVal) cynic.runtime.function.NativeError!AgentVal {
-    _ = realm;
     const group = agentGroupOf(this_value) orelse return AgentVal.undefined_;
     if (args.len == 0 or !args[0].isString()) return AgentVal.undefined_;
     const s: *cynic.runtime.JSString = @ptrCast(@alignCast(args[0].asString()));
@@ -817,7 +846,11 @@ fn agentStart(realm: *cynic.runtime.Realm, this_value: AgentVal, args: []const A
         std.heap.page_allocator.free(src_copy);
         return error.OutOfMemory;
     };
-    state.* = .{ .group = group, .src = src_copy };
+    state.* = .{
+        .group = group,
+        .bistromath_entries = realm.heap.bistromath_stats.shared_entries,
+        .src = src_copy,
+    };
 
     // Register the task with the fixture's group (under the lock) so
     // `reapAgents` waits on it, BEFORE dispatching it to run.
@@ -1031,6 +1064,26 @@ fn evalAgentInt(realm: *cynic.runtime.Realm, src: []const u8) ?i32 {
         .value, .yielded => |v| if (v.isInt32()) v.asInt32() else if (v.isDouble()) @intFromFloat(v.asDouble()) else null,
         .thrown => null,
     };
+}
+
+test "agent pool: reusable nested-agent groups drain between tasks" {
+    var group: AgentGroup = .{};
+    defer group.reports.deinit(std.heap.page_allocator);
+
+    const report = try std.heap.page_allocator.dupe(u8, "nested");
+    try group.reports.append(std.heap.page_allocator, report);
+    drainAgentGroup(&group, true);
+
+    try std.testing.expectEqual(@as(usize, 0), group.count);
+    try std.testing.expectEqual(@as(usize, 0), group.reports.items.len);
+    try std.testing.expect(!group.should_exit.load(.acquire));
+
+    // The same host object remains valid for the next pooled task.
+    const next_report = try std.heap.page_allocator.dupe(u8, "next");
+    try group.reports.append(std.heap.page_allocator, next_report);
+    drainAgentGroup(&group, true);
+    try std.testing.expectEqual(@as(usize, 0), group.reports.items.len);
+    try std.testing.expect(!group.should_exit.load(.acquire));
 }
 
 test "agent realm reset: a reused realm isolates one agent from the next" {
@@ -1303,6 +1356,10 @@ const Options = struct {
     /// finding leaks or oversized roots; pair with `--filter`
     /// to keep the output sane.
     gc_stats: bool = false,
+    /// Fail closed unless the main sweep actually crosses at least one
+    /// published Bistromath entry. `--jit` alone only forces the tier-up
+    /// threshold and cannot prove dispatch reached generated code.
+    require_bistromath_entry: bool = false,
     /// Aggregate opt-in Ohaimark counters and refusal histograms across
     /// fixture heaps and worker threads, then print one rollout summary after
     /// the main phase. Requires `--ohaimark`; unlike memory diagnostics this
@@ -2096,6 +2153,7 @@ fn runSweep(
         gc_time_list.deinit(gpa);
     }
     var mem_agg: MemAggregate = .{};
+    var bistromath_entries = std.atomic.Value(u64).init(0);
     var ohaimark_agg: OhaimarkStats = .{};
 
     // `--only-failing` shortcut: only the main phase consults the
@@ -2225,6 +2283,7 @@ fn runSweep(
                 opts.gc_threshold,
                 opts.gc_stats,
                 if (need_mem) &fx_mem else null,
+                if (opts.require_bistromath_entry) &bistromath_entries else null,
                 if (opts.ohaimark_stats) &fx_ohaimark else null,
                 phase,
             );
@@ -2282,6 +2341,7 @@ fn runSweep(
     } else {
         // Parallel path.
         var index: std.atomic.Value(usize) = .init(0);
+        var worker_failed: std.atomic.Value(bool) = .init(false);
         var merge_mu: std.Io.Mutex = .init;
 
         const current_paths = try gpa.alloc(std.atomic.Value(usize), thread_count);
@@ -2318,6 +2378,8 @@ fn runSweep(
                 .global_slow = &slow,
                 .global_heavy = &heavy,
                 .global_ohaimark = &ohaimark_agg,
+                .bistromath_entries = if (opts.require_bistromath_entry) &bistromath_entries else null,
+                .worker_failed = &worker_failed,
                 .is_full_run = is_full_run,
                 .phase = phase,
                 .worker_id = wid,
@@ -2348,6 +2410,21 @@ fn runSweep(
 
         monitor_done.store(true, .release);
         monitor_thread.join();
+
+        // A differential artifact is valid only if every worker completed.
+        // The ordinary harness historically treated a worker-local OOM/IO
+        // failure as best-effort, but silently omitting a fixture can make two
+        // pass lists compare equal. Fail closed for explicit pass-list or
+        // generated-entry evidence.
+        if ((opts.pass_list_out != null or opts.require_bistromath_entry) and
+            worker_failed.load(.acquire))
+        {
+            std.debug.print(
+                "test262: worker failed before completing the sweep; refusing differential evidence\n",
+                .{},
+            );
+            std.process.exit(2);
+        }
     }
 
     const elapsed = start_ts.untilNow(io, .awake).toMilliseconds();
@@ -2396,6 +2473,20 @@ fn runSweep(
         }
         if (opts.ohaimark_stats) {
             try printOhaimarkSummary(io, &ohaimark_agg);
+        }
+        if (opts.require_bistromath_entry) {
+            const executed_entries = bistromath_entries.load(.acquire);
+            std.debug.print(
+                "Bistromath generated entries executed: {d}\n",
+                .{executed_entries},
+            );
+            if (executed_entries == 0) {
+                std.debug.print(
+                    "test262: --require-bistromath-entry failed — no generated T1 entry executed\n",
+                    .{},
+                );
+                std.process.exit(2);
+            }
         }
     }
 
@@ -2672,6 +2763,12 @@ const WorkerCtx = struct {
     global_slow: *std.ArrayListUnmanaged(SlowEntry),
     global_heavy: *std.ArrayListUnmanaged(HeavyEntry),
     global_ohaimark: *OhaimarkStats,
+    /// Sweep-wide cross-heap T1 witness. Agent realms receive this same sink
+    /// through `AgentThreadState`.
+    bistromath_entries: ?*std.atomic.Value(u64),
+    /// Set when `workerLoop` returns a fatal error instead of draining its
+    /// assigned paths. Differential evidence refuses such a partial sweep.
+    worker_failed: *std.atomic.Value(bool),
     is_full_run: bool,
     /// Sweep phase selector. Forwarded to `classifyAndRun` so each
     /// worker filters fixtures the same way the orchestrator picked.
@@ -2731,19 +2828,25 @@ fn worker(ctx: WorkerCtx) void {
     var local_ohaimark: OhaimarkStats = .{};
 
     workerLoop(ctx, &local_arena, &local_stats, &local_buckets, &local_failures, &local_pass_paths, &local_slow, &local_heavy, &local_ohaimark) catch {
-        // Best-effort: skip merging silently on OOM / IO blow-up.
-        // The rolled-up totals will be slightly low, but the run
-        // doesn't deadlock and the surviving workers still merge.
+        // Let surviving workers finish and merge, but remember that this
+        // worker did not drain its paths. Explicit differential evidence
+        // fails closed after the joins instead of accepting partial totals.
+        ctx.worker_failed.store(true, .release);
     };
 
     ctx.merge_mu.lockUncancelable(ctx.io);
     defer ctx.merge_mu.unlock(ctx.io);
     mergeStats(ctx.global_stats, &local_stats);
-    mergeBuckets(ctx.global_buckets, &local_buckets) catch {};
-    ctx.global_failures.appendSlice(ctx.gpa, local_failures.items) catch {};
-    ctx.global_pass_paths.appendSlice(ctx.gpa, local_pass_paths.items) catch {};
-    ctx.global_slow.appendSlice(ctx.gpa, local_slow.items) catch {};
-    ctx.global_heavy.appendSlice(ctx.gpa, local_heavy.items) catch {};
+    mergeBuckets(ctx.global_buckets, &local_buckets) catch
+        ctx.worker_failed.store(true, .release);
+    ctx.global_failures.appendSlice(ctx.gpa, local_failures.items) catch
+        ctx.worker_failed.store(true, .release);
+    ctx.global_pass_paths.appendSlice(ctx.gpa, local_pass_paths.items) catch
+        ctx.worker_failed.store(true, .release);
+    ctx.global_slow.appendSlice(ctx.gpa, local_slow.items) catch
+        ctx.worker_failed.store(true, .release);
+    ctx.global_heavy.appendSlice(ctx.gpa, local_heavy.items) catch
+        ctx.worker_failed.store(true, .release);
     ctx.global_ohaimark.merge(local_ohaimark);
 
     // The merged-out arrays own their inner strings; we transferred
@@ -2815,6 +2918,7 @@ fn workerLoop(
             ctx.opts.gc_threshold,
             ctx.opts.gc_stats,
             null,
+            ctx.bistromath_entries,
             if (ctx.opts.ohaimark_stats) &fx_ohaimark else null,
             ctx.phase,
         ) catch |err| {
@@ -2889,6 +2993,7 @@ fn classifyAndRun(
     gc_threshold: u32,
     gc_stats: bool,
     mem_out: ?*FixtureMem,
+    bistromath_entries: ?*std.atomic.Value(u64),
     ohaimark_out: ?*OhaimarkStats,
     phase: Phase,
 ) !RunResult {
@@ -2902,6 +3007,7 @@ fn classifyAndRun(
         gc_threshold,
         gc_stats,
         mem_out,
+        bistromath_entries,
         ohaimark_out,
         phase,
     );
@@ -2934,6 +3040,10 @@ fn classifyAndRunInner(
     /// Optional out-param. Filled with the fixture's heap counters
     /// via a `defer` so every return point is covered.
     mem_out: ?*FixtureMem,
+    /// Optional sweep-wide T1 native-entry witness. Child realms share this
+    /// heap; independent agent realms receive the same atomic through their
+    /// task state.
+    bistromath_entries: ?*std.atomic.Value(u64),
     /// Optional T2 telemetry snapshot. A non-null pointer enables collection
     /// for this heap; child realms share it. Independent agent heaps are not
     /// included in the fixture-local snapshot.
@@ -3067,6 +3177,8 @@ fn classifyAndRunInner(
 
     var realm = cynic.runtime.Realm.initWithBytesAllocator(std.heap.c_allocator, bytes_allocator);
     defer realm.deinit();
+    realm.heap.bistromath_stats.enabled = bistromath_entries != null;
+    realm.heap.bistromath_stats.shared_entries = bistromath_entries;
     realm.heap.ohaimark_stats.enabled = ohaimark_out != null;
     // Wire the watchdog through the metering interrupt hook
     // (docs/resource-metering.md): past `--timeout`, `monitorLoop`
@@ -4872,6 +4984,8 @@ fn parseArgs(gpa: std.mem.Allocator, args: std.process.Args) !Options {
             opts.timeout_s = std.fmt.parseInt(u32, arg["--timeout=".len..], 10) catch 60;
         } else if (std.mem.eql(u8, arg, "--jit")) {
             g_jit_force = true;
+        } else if (std.mem.eql(u8, arg, "--require-bistromath-entry")) {
+            opts.require_bistromath_entry = true;
         } else if (std.mem.eql(u8, arg, "--ohaimark")) {
             g_ohaimark_force = true;
         } else if (std.mem.eql(u8, arg, "--ohaimark-osr")) {
@@ -4922,6 +5036,22 @@ fn parseArgs(gpa: std.mem.Allocator, args: std.process.Args) !Options {
 
     opts.exclude = try exclude_list.toOwnedSlice(gpa);
 
+    if (opts.require_bistromath_entry and !g_jit_force) {
+        std.debug.print("error: --require-bistromath-entry requires --jit\n", .{});
+        std.process.exit(1);
+    }
+    if (opts.require_bistromath_entry) {
+        if (opts.phase) |phase| switch (phase) {
+            .main => {},
+            .feature => {
+                std.debug.print(
+                    "error: --require-bistromath-entry requires a main-phase sweep\n",
+                    .{},
+                );
+                std.process.exit(1);
+            },
+        };
+    }
     if (opts.ohaimark_stats and !g_ohaimark_force) {
         std.debug.print("error: --ohaimark-stats requires --ohaimark\n", .{});
         std.process.exit(1);
