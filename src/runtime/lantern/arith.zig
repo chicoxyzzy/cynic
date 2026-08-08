@@ -272,7 +272,7 @@ pub fn toNumericPrimitive(realm: *Realm, value: Value) RunError!?Value {
 /// starts coercing either one. The first coercion can return a fresh heap
 /// primitive, and the second can re-enter JavaScript and trigger GC. Primitive
 /// pairs cannot re-enter, so keep those hot paths allocation-free.
-pub fn openBinaryCoercionScope(realm: *Realm, lhs: Value, rhs: Value) error{OutOfMemory}!?*heap_mod.HandleScope {
+pub fn openBinaryCoercionScope(realm: *Realm, lhs: Value, rhs: Value) align(256) error{OutOfMemory}!?*heap_mod.HandleScope {
     if (!heap_mod.isJSObject(lhs) and !heap_mod.isJSObject(rhs)) return null;
     const scope = realm.heap.openScope() catch return error.OutOfMemory;
     errdefer scope.close();
