@@ -785,6 +785,56 @@ test "interpreter: fused relational branches preserve mixed primitive lanes" {
     try expectInt("(function(a,b){ if (a>=b) return 1; return 2; })(18446744073709551616n, 18446744073709551616n);", 1);
 }
 
+test "interpreter: fused relational primitive BigInts do not allocate" {
+    const heap_mod = @import("../heap.zig");
+    const Op = op_mod.Op;
+
+    var failing = std.testing.FailingAllocator.init(testing.allocator, .{});
+    var realm = Realm.init(failing.allocator());
+    defer {
+        failing.fail_index = std.math.maxInt(usize);
+        realm.deinit();
+    }
+
+    const lhs = heap_mod.taggedBigInt(try realm.heap.allocateBigInt(1));
+    const rhs = heap_mod.taggedBigInt(try realm.heap.allocateBigInt(2));
+    const constants = [_]Value{ lhs, rhs };
+    const code = [_]u8{
+        @intFromEnum(Op.lda_constant), 0, 0, // lhs
+        @intFromEnum(Op.star), 0, // r0 = lhs
+        @intFromEnum(Op.lda_constant),  1, 0, // rhs
+        @intFromEnum(Op.jmp_if_not_lt),
+        0, // compare r0 with the accumulator
+        2, 0, // if (!(r0 < rhs)) → false
+        @intFromEnum(Op.lda_one), // true result
+        @intFromEnum(Op.return_), // return true
+        @intFromEnum(Op.lda_zero), // false result
+        @intFromEnum(Op.return_), // return false
+    };
+    const chunk: chunk_mod.Chunk = .{
+        .code = &code,
+        .constants = &constants,
+        .source_positions = &.{},
+        .handlers = &.{},
+        .function_templates = &.{},
+        .class_templates = &.{},
+        .register_count = 1,
+    };
+
+    // Warm the reusable frame stack, then deny every realm allocation.
+    _ = try run(testing.allocator, &realm, &chunk);
+    failing.fail_index = failing.alloc_index;
+
+    const result = try run(testing.allocator, &realm, &chunk);
+    try testing.expect(!failing.has_induced_failure);
+    const value = switch (result) {
+        .value, .yielded => |v| v,
+        .thrown => return error.UncaughtException,
+    };
+    try testing.expect(value.isInt32());
+    try testing.expectEqual(@as(i32, 1), value.asInt32());
+}
+
 test "interpreter: fused relational branches use the number hint for callable objects" {
     try expectScriptStringWithBuiltins(
         \\function lt(a, b) { if (a < b) return true; return false; }

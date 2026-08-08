@@ -14099,6 +14099,10 @@ fn coerceForCompare(
     hint: intrinsics_mod.ToPrimitiveHint,
 ) RunError!CompareOutcome {
     if (!value.isObject()) return .{ .ok = value };
+    // Symbol and BigInt share the broad heap tag used by `isObject`, but
+    // §7.1.1 step 1 returns both primitive types unchanged. Object and
+    // Function kinds leave this bit clear and still take ToPrimitive.
+    if ((value.bits & heap_mod.kind_symbol) != 0) return .{ .ok = value };
     const prim = intrinsics_mod.toPrimitive(realm, value, hint) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.NativeThrew => {
