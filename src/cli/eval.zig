@@ -18,7 +18,7 @@ pub fn run(
     gc_threshold: ?u32,
     unhardened: bool,
     allow_eval: bool,
-    allow_wasm: bool,
+    allow_wasm_compile: bool,
     jit: bool,
     ohaimark: bool,
     ohaimark_osr: bool,
@@ -54,12 +54,12 @@ pub fn run(
     // (§19.2.1.2 EvalError); with it the eval engine runs source in the
     // realm (§19.2.1 / §20.2.1.1.1). See `Realm.allow_eval`.
     if (allow_eval) realm.allow_eval = true;
-    if (allow_wasm) realm.allow_wasm = true;
+    realm.allow_wasm_compile = allow_wasm_compile;
     // Top-level tier policy: production defaults both JS JITs on; embedders
     // constructing Realm directly retain explicit per-tier opt-in.
     if (jit) realm.jit_enabled = true;
     if (jit and ohaimark) realm.ohaimark_enabled = true;
-    if (jit and ohaimark and ohaimark_osr) realm.ohaimark_osr_enabled = true;
+    realm.ohaimark_osr_enabled = jit and ohaimark and ohaimark_osr;
     if (gc_threshold) |n| realm.heap.setGcThreshold(n);
     try realm.installBuiltins();
 

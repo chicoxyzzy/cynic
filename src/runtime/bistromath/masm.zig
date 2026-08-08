@@ -12,6 +12,8 @@ const builtin = @import("builtin");
 const a64 = @import("../jit/asm_aarch64.zig");
 const a64_masm = @import("../jit/masm.zig");
 const x64 = @import("../jit/asm_x86_64.zig");
+const safepoint_a64 = @import("../ohaimark/safepoint_codegen_aarch64.zig");
+const safepoint_x64 = @import("../ohaimark/safepoint_codegen_x86_64.zig");
 
 const use_x64 = builtin.cpu.arch == .x86_64;
 const BackendMasm = if (use_x64) x64.Masm else a64_masm.Masm;
@@ -387,6 +389,20 @@ pub const Masm = struct {
             try self.backend.callReg(target_reg);
         } else {
             try self.backend.callAbs(areg(scratch), target);
+        }
+    }
+
+    /// Emit the helper-free half of Lantern's GC/fuel/interrupt backedge
+    /// contract through the selected native backend.
+    pub fn emitSafePointPoll(
+        self: *Masm,
+        realm_register: Reg,
+        slow: *Label,
+    ) !void {
+        if (comptime use_x64) {
+            try safepoint_x64.emitPoll(&self.backend, xreg(realm_register), slow);
+        } else {
+            try safepoint_a64.emitPoll(&self.backend, areg(realm_register), slow);
         }
     }
 

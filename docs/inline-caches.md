@@ -22,13 +22,11 @@ Two pieces, in order:
    the read becomes `if obj.shape == cell.shape: load
    slots[cell.slot]`.
 
-Target model was **Hermes**: shapes + a monomorphic interpreter
-IC. Bistromath — the baseline JIT, behind `--jit` — now reads the
-same cells as data (the docs/jit.md §4.4 design), so one IC
-substrate serves both tiers unchanged. Polymorphic ICs stay
-deliberately out of scope: their consumer is Ohaimark-tier
-speculation (docs/jit.md §5); revisit when that ADR lands or when
-profiling shows polymorphic callsites dominating.
+Target model was **Hermes**: shapes + a monomorphic interpreter IC.
+Bistromath, the default-on baseline JIT where qualified, reads the same cells
+as data ([jit.md](jit.md) §4.4), so one IC substrate serves both tiers.
+Ohaimark snapshots the same feedback for speculative specialization; broader
+polymorphic ICs remain measurement-driven future work.
 
 ## Shipped
 
@@ -663,8 +661,9 @@ prototypes) are a separate, still-open target.
 - `prop_access` / `prop_write` micro-benches — headline numbers
   for the read/write ICs. Targets met
   (-66 % / -63 % vs pre-IC baseline).
-- `bench-results.md` records per-commit deltas.
-- Cross-engine comparison via `tools/bench-cross.sh` per
+- `bench-results.md` preserves the historic same-machine A/B deltas that
+  established these wins; it is now an archive rather than a routine report.
+- Current cross-engine comparison uses `tools/bench-cross.sh` per
   [docs/benchmarking.md](benchmarking.md).
 - test262 runtime gate every new IC chunk — pass / fail counts must
   match the row recorded in

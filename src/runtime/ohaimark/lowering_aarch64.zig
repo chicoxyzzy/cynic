@@ -17,10 +17,13 @@ const parallel_moves = @import("parallel_moves.zig");
 const representation = @import("representation.zig");
 const specialize = @import("specialize.zig");
 
-/// The executable subset makes no helper call. Preserve the AAPCS64 incoming
-/// arguments in place and use only caller-saved registers, leaving FP/LR and
-/// x19-x28 untouched. A rooted helper-call lowering must introduce an explicit
-/// call-aware ABI before changing this invariant.
+/// Generic JS-reentrant helper calls remain unsupported. Preserve the AAPCS64
+/// incoming arguments in place and use only caller-saved registers, leaving
+/// FP/LR and x19-x28 untouched. Codegen owns narrow rooted helper boundaries
+/// for lexical-environment work and monomorphic compact direct-call frame
+/// handoff; the latter returns to Lantern after pushing a callee, rather than
+/// resuming generated code. Broader lowering still needs native continuation
+/// support.
 pub const helper_calls_supported = false;
 pub const realm_register: a64.Reg = .x0;
 pub const lantern_frame_register: a64.Reg = .x1;

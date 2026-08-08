@@ -225,7 +225,7 @@ fn emitPrototypeGuards(
     try jumpToGuardIf(allocator, machine, .ne, guard);
 }
 
-fn emitPlainObject(
+pub fn emitPlainObject(
     allocator: std.mem.Allocator,
     machine: *Masm,
     source: a64.Reg,
@@ -285,6 +285,49 @@ pub fn emitSlotRead(
     try machine.emit(a64.lslImm(slot, slot, 3));
     try machine.emit(a64.addReg(destination, destination, slot));
     try machine.emit(a64.ldrImm(destination, destination, 0));
+    try machine.bind(&done);
+}
+
+/// Write a shape slot through the shared inline/overflow layout. `slot` is
+/// clobbered on the overflow path; all four registers must be distinct.
+pub fn emitSlotWrite(
+    allocator: std.mem.Allocator,
+    machine: *Masm,
+    source: a64.Reg,
+    object: a64.Reg,
+    slot: a64.Reg,
+    scratch: a64.Reg,
+) !void {
+    if (source == object or source == slot or source == scratch or
+        object == slot or object == scratch or slot == scratch)
+    {
+        return error.InvalidRegister;
+    }
+    var overflow: Masm.Label = .{};
+    defer overflow.deinit(allocator);
+    var done: Masm.Label = .{};
+    defer done.deinit(allocator);
+    try machine.emit(a64.cmpImm(
+        slot,
+        @intCast(layout.object.inline_slot_cap),
+        false,
+    ));
+    try machine.jumpCond(.cs, &overflow);
+    try machine.emit(a64.lslImm(scratch, slot, 3));
+    try machine.emit(a64.addReg(scratch, scratch, object));
+    try machine.emit(a64.strImm(source, scratch, layout.object.inline_slots));
+    try machine.jump(&done);
+    try machine.bind(&overflow);
+    try machine.emit(a64.ldrImm(scratch, object, layout.object.overflow_items_ptr));
+    try machine.emit(a64.subImm(
+        slot,
+        slot,
+        @intCast(layout.object.inline_slot_cap),
+        false,
+    ));
+    try machine.emit(a64.lslImm(slot, slot, 3));
+    try machine.emit(a64.addReg(scratch, scratch, slot));
+    try machine.emit(a64.strImm(source, scratch, 0));
     try machine.bind(&done);
 }
 

@@ -23,3 +23,13 @@ if [ "$affinity_actual" != "$affinity_expected" ]; then
   printf 'actual:   %s\n' "$affinity_actual" >&2
   exit 1
 fi
+
+note_actual="$(CYNIC_BENCH_CPU=7 "$ROOT/tools/bench-cross.sh" --self-test-affinity-note)"
+note_expected='Timed runs are pinned to CPU 7 with taskset.'
+
+if [ "$note_actual" != "$note_expected" ]; then
+  echo "unexpected CPU-affinity report note" >&2
+  printf 'expected: %s\n' "$note_expected" >&2
+  printf 'actual:   %s\n' "$note_actual" >&2
+  exit 1
+fi

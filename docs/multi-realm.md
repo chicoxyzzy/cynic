@@ -1,19 +1,17 @@
-# Multi-realm — design & phased plan
+# Multi-realm
 
-Goal: Cynic supports **multiple coexisting `Realm` instances per
-engine process**, with disciplined sharing of intrinsics, isolated
-mutable state, and a typed `Compartment` API on top. Every phase
-lands TDD-first — failing tests pinning the contract before any
-production code goes in.
+Status: **the multi-realm substrate ships**: coexisting realms, per-realm
+intrinsics and globals, realm-aware function execution, a real
+`$262.createRealm()` host hook, `ShadowRealm`, and per-realm teardown.
+`Compartment` remains deferred while its TC39 proposal is pre-Stage-4.
 
-Sister doc to [ses-alignment.md](ses-alignment.md) (Compartments
-sit on top of this), [handbook/environments.md](handbook/environments.md)
-(the GlobalEnvironmentRecord split becomes per-realm), and
-[handbook/gc.md](handbook/gc.md) (Metla roots become per-realm).
-This doc is the durable plan — a fresh session should be able to
-pick up the next phase from here without re-deriving the design.
+This document preserves the accepted design and phased delivery history; the
+Compartment sections are a deferred proposal, not a committed API. Sister docs:
+[ses-alignment.md](ses-alignment.md),
+[handbook/environments.md](handbook/environments.md), and
+[handbook/gc.md](handbook/gc.md).
 
-## Current state (snapshot 2026-05-31)
+## Current state
 
 | Phase | State | Landing commits |
 |---|---|---|
@@ -26,13 +24,15 @@ pick up the next phase from here without re-deriving the design.
 | 5 — Compartments | ⏸️ postponed — the `Compartment` API is TC39 **Stage 1** ([tc39/proposal-compartments](https://github.com/tc39/proposal-compartments)); its shape (constructor options, module descriptors, `import` hook) is still in flux, so it's not worth baking into the confinement boundary until it advances. Substrate (per-realm intrinsics/globals, realm-aware resolution, ShadowRealm + teardown) already ships; see ses-alignment.md "Compartments — why deferred". | — |
 | 6 — per-realm teardown (memory lifecycle) | ✅ shipped — `Heap.realms` + `markAllSharingRealmRoots` (the global GC marks every sharing realm's roots; also a latent cross-realm UAF fix) + a ShadowRealm `HandleScope` fix, then the teardown finalizer: a collected `ShadowRealm` wrapper queues its child realm on `Heap.pending_realm_teardown` during the sweep and `Realm.drainRealmTeardown` frees it afterward (deferred; `created_by` back-link unlinks it from the owner's `child_realms`). Clean under `test262-safe --gc-threshold=1`. Compartments remain the only deferred piece. | (multi-realm teardown effort) |
 
-The cross-realm-error commit `b95694b` reaches partway into D2 — `callee.realm` is already consumed for error attribution and native-callback realm tracking — but `JSFunction.realm` itself remains `null` at every allocation site because `Heap.allocateFunction*` doesn't take a realm parameter. Phase 3 closes that gap.
+Phase 3 closed the earlier D2 gap: function allocation now records `[[Realm]]`,
+and call frames consume it for global resolution, intrinsic selection, and
+cross-realm error attribution.
 
-## Why now — the position statement
+## Historical motivation
 
-Cynic today exposes a single user-visible `Realm` per engine
-process. The single-realm assumption is wired through dozens of
-sites: every `builtin.install(realm)` call, the test262 harness's
+Cynic originally exposed a single user-visible `Realm` per engine
+process. That assumption was wired through dozens of sites: every
+`builtin.install(realm)` call, the test262 harness's
 `new Realm` ceremony, `intrinsics.install` (which freezes one set
 of primordials), the GC's root walker (which knows about *the*
 microtask queue), and the module cache (one map per process).
@@ -46,11 +46,12 @@ plumbing) bias differently for different users — high-integrity
 computation (Agoric-style), per-tenant host embedding, or a
 hardened plugin system would each push the boundary in different
 directions, and the phase plan below assumes a host-embedding
-shape (per-tenant realms, identity-preserved interop, shared
-intrinsics where memory-safe to share).
+shape (per-tenant realms, identity-preserved interop, and shared heap/shape
+infrastructure without shared mutable primordials).
 
-If a different concrete user pulls on this before the plan ships,
-revisit § *Decisions up front* before phase 0 begins.
+The implementation retained the host-embedding shape: per-tenant realms,
+identity-preserved interop, and shared heap infrastructure with per-realm
+intrinsics and mutable state.
 
 ## Position relative to ses-alignment.md
 
@@ -68,19 +69,16 @@ revisit § *Decisions up front* before phase 0 begins.
                                            ───►  Phase 5 (test262 realm fixtures)
 ```
 
-`ses-alignment.md`'s deferred Phase 7 (`Compartment` class) maps to
-Phase 4 here — i.e. Compartments are this plan's *result*, not its
-goal. The plan's goal is the substrate Compartments stand on. SES
-Phase 8 (taming ambient state) lights up trivially once Phase 4
-ships, because Compartments are the unit you tame against.
+`ses-alignment.md`'s deferred `Compartment` work maps to Phase 4 below.
+The substrate phases shipped independently; Phase 4 and its ambient-state
+follow-ups remain archived here until the proposal advances.
 
 ## What "multi-realm" means concretely
 
 Three observable properties, in priority order:
 
 1. **N user-visible `Realm` instances per engine process.** Each
-   has its own `globalThis`, own `intrinsics` (potentially
-   shared — see § Decisions), own module graph, own microtask
+   has its own `globalThis`, own intrinsics, own module graph, own microtask
    queue, own per-realm SES posture flag, own `[[VarNames]]` set,
    own `print` / `console.log` output buffer.
 2. **Spec-faithful cross-realm identity.** A function created in
@@ -96,9 +94,9 @@ Three observable properties, in priority order:
 
 Non-goals for this plan:
 
-- **Per-realm JIT compilation scope.** Bistromath ships behind
-  `--jit` with chunk-owned code in the heap's engine-wide region
-  (docs/jit.md §8); the per-realm scoping decision stays its own
+- **Per-realm JIT compilation scope.** Qualified Bistromath and Ohaimark paths
+  ship by default with chunk-owned code in the heap's engine-wide region
+  ([jit.md](jit.md) §8); the per-realm scoping decision stays its own
   design doc. Nothing in this plan depends on the tier — compiled
   frames are Lantern frames (docs/jit.md §4.2).
 - **Concurrent execution across realms.** Realms coexist; only
@@ -903,7 +901,7 @@ single-realm generators have `gen.realm == active realm`, so
 resolution there is unchanged. Covered by a unit test plus the two
 fixtures above.
 
-## Phase 4 — Compartment constructor (the SES API)
+## Phase 4 — Compartment constructor (deferred)
 
 **Goal.** A user-visible `Compartment` constructor that wraps
 phases 0-3 into the API shape SES users expect:
@@ -993,51 +991,25 @@ under `built-ins/Compartment` (when test262 ships them) score
 nonzero under the binary pass/fail test262 model (see
 `test262-results.md`).
 
-## Phase 5 — test262 realm-related fixtures back in scope
+## Phase 5 — test262 realm fixtures
 
-**Goal.** Reactivate the test262 fixtures Cynic skips today
-because it can't synthesize a cross-realm scenario.
-
-**Skiplist removals** (these come out of `tools/test262/skip.zig`
-once phases 0-4 ship — one removal per phase):
-
-```zig
-// Phase 0+1: prove the `proto-from-ctor-realm*` family compiles
-// and runs even though the harness's `$262.createRealm` is still
-// a stub — at this point Cynic has the *capability*, just not the
-// host hook.
-
-// Phase 3: $262.createRealm gets a real implementation. The full
-// `single_realm_path_contains` list comes out.
-//   - "proto-from-ctor-realm-"
-//   - "cross-realm-"
-//   - "SharedArrayBuffer/cross-realm"
-//   - the §23.1.3.34 species-across-realms cluster
-
-// Phase 4: ShadowRealm gating relaxes from --enable to default-on
-// (matches the published spec edition). The shadow_realm
-// `FeatureFlag` variant is removed from `src/runtime/features.zig`.
-```
-
-**Tests as score-row contracts.** Each phase exit, the test262
-sweep row in `test262-results.md` must show a Δ pass ≥ the
-fixture count that came out of the skiplist. Negative Δ means a
-regression — block the phase.
-
-**Exit criteria.** Skiplist's `single_realm_path_contains` is
-empty. `ShadowRealm` removed from `FeatureFlag`. The runtime
-sweep gains ~N fixtures (count TBD per submodule version).
+**Status: shipped for current in-scope surfaces.** The test262 harness installs
+a real `$262.createRealm()` backed by `Realm.initChild`, so cross-realm identity,
+species, globals, errors, and well-known-symbol behavior run rather than skip.
+`ShadowRealm` remains behind its dedicated feature sweep because it is still a
+pre-Stage-4 proposal. Future `Compartment` fixtures remain deferred with the
+API itself.
 
 ## Out of scope (deferred or rejected)
 
 | | Why |
 |---|---|
-| **Per-realm JIT scope** (Bistromath / Ohaimark) | Bistromath ships behind `--jit` on the heap's engine-wide code region (docs/jit.md §8); the scoping ADR stays deferred — nothing in the current shape forecloses either answer. |
+| **Per-realm JIT scope** (Bistromath / Ohaimark) | Qualified JIT paths ship by default on the heap's engine-wide code region ([jit.md](jit.md) §8); finer per-realm cache scoping remains deferred. |
 | **Concurrent execution across realms** | Realms coexist; only one runs at a time per OS thread. Multi-threaded JS is its own design. |
 | **Cross-process realms** | Process boundary is the embedder's job (Worker per process, etc.). |
 | **Per-realm GC** (separate heaps) | Single heap, multiple roots — what we already have, scaled. Per-realm heaps would be a Mark IV change. |
 | **Realm-scoped intrinsic mutation under hardened** | D1 forbids it (sharing requires immutability). An embedder that wants per-realm intrinsic patches uses unhardened realms. |
-| **The full eval-implementation work** for `--allow=eval` | Independent track ([ses-alignment.md](ses-alignment.md) calls this out). Compartments don't require eval. |
+| **Compartment confinement for eval** | `--allow=eval` itself ships independently; endowment-only confinement remains deferred with Compartments ([ses-alignment.md](ses-alignment.md)). |
 
 ## Sister docs
 

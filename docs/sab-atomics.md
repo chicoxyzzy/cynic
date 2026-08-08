@@ -1,17 +1,19 @@
-# SharedArrayBuffer + Atomics — design & plan
+# SharedArrayBuffer + Atomics
 
-Goal: ship `SharedArrayBuffer` (§25.2) and `Atomics` (§25.4) far
-enough to clear the **single-agent** slice of the test262 corpus
-(~500 fixtures), and lay the substrate for the cross-agent phase
-without committing to real OS threads up front.
+Status: **the single-agent surface and real cross-agent substrate ship.**
+`SharedArrayBuffer` uses a refcounted shared backing block; `$262.agent` runs
+agents on isolated OS-thread realms; `Atomics.wait` / `notify` coordinate over
+the shared store. Exact-count FIFO wake ordering and timer/microtask refinements
+remain follow-up work.
 
-This doc is the durable plan — a fresh session should be able to pick
-up the next phase from here. Sister docs:
+This document preserves the original scoping and phased design; estimates and
+future tense below describe the pre-implementation plan. Current aggregate
+status lives in [ROADMAP.md](ROADMAP.md). Sister docs:
 [multi-realm.md](multi-realm.md) (per-realm intrinsics — the same
 install plumbing SAB/Atomics use) and
-[ses-alignment.md](ses-alignment.md).
+[multi-agent-atomics.md](multi-agent-atomics.md).
 
-## Why now — the scoping insight
+## Historical motivation and scoping
 
 `SharedArrayBuffer` / `Atomics` is the single largest engine-true gap
 in the binary-scored corpus: ~382 `built-ins/Atomics` + 104
@@ -61,7 +63,7 @@ Spec: §25.2 SharedArrayBuffer, §25.4 Atomics, §9.7 Agents +
 ValidateAtomicAccess), §25.4.{11,12} wait/notify, §25.1.3
 (shared vs non-shared ArrayBuffer abstract ops).
 
-## Engine starting point
+## Historical engine starting point
 
 - `ArrayBuffer` is fully implemented in
   `src/runtime/builtins/typed_array.zig` (constructor, `byteLength`,
@@ -152,10 +154,11 @@ Yield estimate: ~270 single-agent Atomics fixtures (213 landed).
 - `Atomics.store` return value is `ToIntegerOrInfinity` (normalizes
   `-0` → `+0`).
 
-**Still deferred** (tied to the multi-agent phase):
+**Deferred at the end of the single-agent phase:**
 
 - `wait` / `waitAsync` cross-agent resolution + the memory-model litmus
-  tests (~112 `$262.agent` fixtures).
+  tests (~112 `$262.agent` fixtures). The real-agent follow-up subsequently
+  shipped; see [multi-agent-atomics.md](multi-agent-atomics.md).
 - `wait` with `[[CanBlock]] = false` (browser-main-thread semantics) —
   2 fixtures; needs an agent CanBlock model.
 
@@ -163,18 +166,11 @@ Yield estimate: ~270 single-agent Atomics fixtures (213 landed).
 
 ## Phase 3 — multi-agent (real threads)
 
-> Greenlit as a separate initiative — full design in
-> [multi-agent-atomics.md](multi-agent-atomics.md). Summary below.
-
-
-The ~112 `$262.agent`-using Atomics fixtures + the memory-model litmus
-tests need a real agent cluster: `$262.agent.start/broadcast/sleep/
-report/getReport/leaving/monotonicNow`, a shared store handed across
-agents, and cross-agent `wait`/`notify` with a futex table. This is the
-genuine concurrency surface and a separate project (likely real OS
-threads or a cooperative agent scheduler). Out of scope for the first
-landing; revisit once phases 1–2 ship and the multi-realm substrate
-(see [multi-realm.md](multi-realm.md)) is exercised.
+**Shipped.** Each agent has its own realm and heap on an OS thread; agents share
+only a refcounted data block and futex state. The test262-only `$262.agent`
+host hooks provide start, broadcast, report, sleep, and lifecycle operations.
+The accepted design and residual work are in
+[multi-agent-atomics.md](multi-agent-atomics.md).
 
 ## SES / hardening notes
 
@@ -189,15 +185,15 @@ landing; revisit once phases 1–2 ship and the multi-realm substrate
   shared store interacts with per-realm teardown
   (`Heap.pending_realm_teardown`).
 
-## Verification plan
+## Verification
 
-- TDD per phase: unit tests in `atomics_test.zig` /
-  `shared_array_buffer_test.zig` before the builtins.
-- `zig build test262 -- --filter=built-ins/SharedArrayBuffer` and
-  `--filter=built-ins/Atomics` after each phase; compare pass counts to
-  the table above (watch for the `$262.agent` fixtures staying failed —
-  that's expected until phase 3).
+- Unit tests live in `atomics_test.zig` and
+  `shared_array_buffer_test.zig`.
+- Run `zig build test262 -- --filter=built-ins/SharedArrayBuffer` and
+  `zig build test262 -- --filter=built-ins/Atomics` after shared-memory
+  changes.
 - `--filter=built-ins/DataView` / `ArrayBuffer` to confirm the
   SAB-backed + `this-is-sharedarraybuffer` flips land.
 - `test262-safe --gc-threshold=1` on the SAB tree (new heap-slot usage).
-- Session-end full sweep + `--write-results`; expect ~+500 on phases 1–2.
+- Use `test262-results.md` for current counts; the estimates above are
+  historical.

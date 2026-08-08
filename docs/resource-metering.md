@@ -5,7 +5,9 @@ CLI verb. Three mechanisms: an instruction budget ("fuel"), a memory
 ceiling, and an embedder interrupt hook. Fuel exhaustion and an
 interrupt-hook verdict end execution with an **uncatchable host
 termination**; the memory ceiling stays on the existing catchable-OOM
-contract. This document is the durable output of the prior-art survey
+contract. The same policy spans ECMAScript, long-running native builtins,
+and WebAssembly execution/storage. This document is the durable output of
+the prior-art survey
 (per [handbook/prior-art.md](handbook/prior-art.md)) and records the
 three design decisions an embedder needs to trust: why the
 termination is uncatchable and how, why the memory surface is not a
@@ -184,11 +186,21 @@ Scope note: the ceiling lives on the `Heap`, and child realms
 (`Realm.initChild` — `$262.createRealm`, ShadowRealm) share the
 parent's heap, so the budget bounds the whole agent — the right
 containment boundary, since a child can pass values to its parent.
-`charge` is coarse by design (string bytes, ArrayBuffer slabs,
-register files — the dominant payloads; small headers are
-approximate), and the check does not force a GC before failing — a
-limit sized with a comfortable margin over the real working set is
-the intended use, same as V8's `--max-old-space-size`.
+The realm's Wasm arena, immediate-free store/invocation allocator, and native
+code ledger all use `Heap.charge` / `discharge`. Decoded modules, instance
+metadata, live table/linear-memory backings, Sarcasm operand/frame stacks, and
+Spasm executable mappings therefore count against the same ceiling. The
+instance/direct-resource ownership registries and reference-counted externref
+root registries use that allocator too, so publishing a resource can fail
+transactionally before unmetered native capacity escapes the limit. Memory and
+table growth reallocates through the owning store allocator, so obsolete
+buffers discharge immediately (`grow(0)` is quota-neutral); Spasm charges its
+page-aligned reservation before `mmap`, rolls back a failed map, and discharges
+after `munmap`. `charge` remains coarse by design (dominant payloads and native
+registry storage are exact; small headers are approximate), and the check does
+not force a GC before failing — a limit sized with a comfortable margin over
+the real working set is the intended use, same as V8's
+`--max-old-space-size`.
 
 ## 5. Interrupt hook — and the test262 watchdog as first user
 
@@ -235,17 +247,17 @@ decrement, so an *armed* fuel budget costs nothing beyond the
 default path. The new fields sit next to `step_budget` /
 `interrupt` on `Realm` for locality.
 
-> **Unverified locally:** this change was authored in an environment
-> with no Zig toolchain reachable (network policy), so the
-> `zig build bench` before/after comparison on ReleaseFast could not
-> be run. The design keeps the checks off the per-opcode path
-> precisely so the residual risk is two predictable branches on the
-> back-edge path; CI (`test-fast`, test262, the JIT differential)
-> and a bench run on a dev machine must confirm before this is
-> trusted as noise-level. If `arith_loop`-class fixtures regress,
-> the known remedy is folding the two null checks into a single
-> "metering armed" bit (or batching hook polls behind a small
-> counter), both compatible with this API.
+Local ReleaseFast validation on 2026-08-07 completed the full
+`zig build bench` suite; `arith_loop` measured 26.56 ms p50
+(22.84-28.94 ms). After native Spasm polls landed on 2026-08-08, the
+benchmark gained paired bare/wake modes in ABBA order. Three final samples kept
+every workload native with matching checksums and `helper 0/0`. The tight loop
+was flat within noise (`0.963-1.033x` wake/bare); self-recursive code measured
+`1.047-1.079x`, and cross-recursive code `1.036-1.153x`, exposing the expected
+extra probe at function-heavy entry boundaries. The configured remote host is
+x86_64 and cannot run AArch64-only Spasm, so the paired raw samples and host
+caveat are recorded in
+[`wasm-bench-results.md`](../wasm-bench-results.md).
 
 ## 7. JIT interaction
 
@@ -262,8 +274,9 @@ and tiers down to a Lantern safe point when either trips. Hence:
   cooperative interrupt (the byte is cleared by
   `clearTermination`, so it never leaks as a catchable
   RangeError while a termination is pending).
-- **The hook cannot be polled from compiled code** (it's a call
-  out per back-edge — exactly the cost the tier exists to remove).
+- **The JS JITs do not call the hook directly** (their optimized-only
+  roots require a frame handoff, and a host call on every backedge is
+  exactly the cost those tiers exist to remove).
   **v1 rule: arming a hook disables `jit_enabled` for the realm.**
   `clearInterruptHook` does not silently re-enable it; the embedder
   opts back in. An embedder that re-enables `jit_enabled` with a
@@ -275,23 +288,49 @@ and tiers down to a Lantern safe point when either trips. Hence:
   owner flips — is recorded as the v2 candidate if an embedder
   needs hooks and tier-up simultaneously.
 
-Ohaimark's test-only backedge poll extends that contract: a non-null hook
+Spasm is the deliberate exception to that JS-frame rule: its typed operand
+bank and raw boundary registers have explicit spill homes, so the armed slow
+path can call the shared hook safely. A bare embedding retains the null-branch
+path; a Realm-backed unarmed call performs only the atomic wake probe described
+below.
+
+Ohaimark's backedge poll extends that contract: a non-null hook
 pointer is itself a slow condition. The optimized frame transfers its exact
 loop-header state to Lantern, which invokes the hook from the ordinary safe
 point; generated code never calls host code with optimized-only roots. Realm
 policy still disables `jit_enabled` when a hook is armed, but an explicit
-embedder re-enable remains correct for Ohaimark once runtime tier-up lands.
+embedder re-enable remains correct for the default-on runtime tier.
 
 The JIT differential gate (docs/jit.md §10) is unaffected: metering
 is off in the scored posture, and the harness's hook wiring happens
 before the `--jit` override re-enables tier-up, so the `--jit` and
 no-jit sweeps see identical realm behavior.
 
-Sarcasm/Spasm (wasm) is out of scope for v1: the wasm interpreter
-has its own dispatch and does not poll `step_budget` today. A wasm
-hot loop invoked from metered JS escapes the fuel meter until it
-returns; `--allow=wasm` embedders should account for that (recorded
-as follow-up work).
+Sarcasm uses the same `Realm.pollExecution` state machine as Lantern and
+long-running native builtins. It polls at invocation entry, every taken
+backward branch (`br`, `br_if`, `br_table`, and the reference branch
+forms), and proper-tail-call frame replacement. The bare Wasm embedding
+leaves `Instance.execution_control` null and keeps its standalone API
+unchanged.
+
+Spasm uses the same controller while retaining its compiled path. Its native
+entry ABI carries an optional controller pointer through direct self-links,
+warm and cold same-instance call gates, generic imported calls, and indirect
+dispatch. Generated code tests that pointer at function entry and every taken
+structured-loop backedge. A bare Wasm embedding leaves the pointer null and
+pays one predictable branch. A Realm-backed unmetered call parks a controller
+whose first field points at `realm.interrupt`; generated code acquire-loads
+that byte and skips all spills and host calls while it remains clear. An armed
+fuel budget or hook uses an always-set wake byte, spills only the live
+boundary/operand registers, calls the shared poll, and propagates fuel or
+interrupt termination through Spasm's existing trap-status epilogue. Bodies
+outside Spasm's supported class still fall back to metered Sarcasm.
+
+Because `requestInterrupt()` release-stores the same byte from any thread, a
+request raised after native entry is observed at the next function entry or
+taken structured-loop backedge. The outlined poll performs the authoritative
+state transition and clears a cooperative request exactly as Sarcasm and
+Lantern do.
 
 ## 8. What is deliberately NOT here
 

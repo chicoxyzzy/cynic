@@ -43,21 +43,21 @@ harness does the timing and resource accounting.
 ## Architecture
 
 ```
-tools/bench.zig                  Zig driver — spawn, time, aggregate
-  ├─ wraps `eshost-cli --host=<E> --raw <script>` per (suite, subtest, engine)
-  ├─ captures rusage (user/sys CPU, peak RSS, page faults) on return
-  ├─ parses stdout for in-script timings + engine-reported heap stats
-  └─ writes bench-results.md (date-keyed, like test262-results.md)
+tools/bench.zig                  Cynic-only ReleaseFast runner for focused A/B work
+tools/wasm_bench.zig             Sarcasm vs Spasm bare/wake paired runner
+tools/bench-cross.sh             Cross-engine runner; writes a host-local peer matrix
+  ├─ invokes engine binaries directly (eshost agent flags drift)
+  ├─ keeps JIT-off and production-tier comparisons separate
+  └─ reports wall time, spread, and peak RSS
 
-bench/prologue.js                Shared per-engine probe shim
-  ├─ exposes __perfNow()           — performance.now() with fallback
-  ├─ exposes __heapUsed()          — per-engine heap-bytes lookup
-  └─ exposes __gcCollect()         — per-engine forced-GC hook (where available)
-
-bench/jetstream2/                JetStream 2.0 (submodule of WebKit/PerformanceTests)
-bench/octane/                    Octane archive (V8 retired suite, still tracked)
 bench/micros/                    Cynic-specific microbenchmarks
+bench/macros/                    Vendored Octane compute-six
 bench/ohaimark/                  Natural-threshold T1/T2 rollout fixtures
+bench/ohaimark_osr/              Loop-header OSR rollout fixtures
+
+bench-cross-results.md           Current reviewed cross-engine snapshot
+bench-results.md                 Archived same-machine A/B evidence
+wasm-bench-results.md            Sarcasm/Spasm bare-vs-Realm-wake history
 ```
 
 ### Suite selection
@@ -119,6 +119,7 @@ Run one fixture with `zig build bench -- --filter=<name>`; combine it with
 | `computed_prop_access` | 3,000,000 | Monomorphic computed-string reads through a function-parameter key — `lda_computed` string-IC hit-rate. Controls changes that route other key types around the computed-key side table without conflating them with the named-property opcode. |
 | `prop_write` | 500,000 | Hot named-property writes on a same-shape object — `sta_property` IC + shape-shadow update + property-bag put. The mirror of `prop_access`. Post-IC (7bad504): −63 % on Cynic. |
 | `array_iter` | 10,000×100 passes | `for-of` over a packed Array — iterator protocol + indexed reads on §10.4.2 Array exotic. The env-hoist (`f719ae3`) was measured here at −69.6 %. |
+| `array_literal_loop` | 3,000,000 | Dense three-element array creation plus indexed reads in a hot loop. Exercises fused `make_array_n` allocation and int32-keyed `lda_computed`; unlike constructor fixtures, the whole loop is eligible for Bistromath/Ohaimark compilation. |
 | `string_concat` | 300,000 | `s = s + chunk` loop — JSString allocation churn, GC byte-trigger, and the ConsString rope path (`min_cons_byte_len` + depth cap). Iteration count picked to balance Cynic ~70 ms against keeping QuickJS-NG under ~50 ms. |
 | `shallow_cons_hit` | 500,000 | Repeats the exact two-pair `(prefix + tag) + suffix` shape used by every Splay payload leaf. Pins the bounded shallow-ConsString memo hit path independently of Splay's much larger object/GC workload. |
 | `shallow_cons_miss` | 500,000 | Concatenates one stable prefix with a freshly allocated numeric string each iteration. Every result is shallow and ≤64 bytes but has a distinct right-operand pointer, isolating the two-entry memo's adaptive miss/backoff path and guarding against probe churn. |
@@ -126,6 +127,8 @@ Run one fixture with `zig build bench -- --filter=<name>`; combine it with
 | `object_alloc` | 400,000 | Fresh-object allocation churn — every iteration produces a new `JSObject` + two string-keyed properties. Heap alloc + GC frequency + property-bag write path. The leanness target for the packed-`JSArray` work (perf roadmap item 2). |
 | `method_call` | 500,000 | Hot method dispatch on `obj.method()`. Exercises both the `call_method` IC (callee cache) and the proto-load IC (the method lives on the prototype, not the instance). Warm-IC fast path is shape pointer compare + slot load + direct `callJSFunction`; cold or invalidated falls back to the chain walk + exotic-callee checks. |
 | `class_instantiate` | 400,000 | `new Class(args)` allocation churn — `OrdinaryCreateFromConstructor` (proto lookup + fresh `JSObject` + prototype wire), constructor body (`this.x = …` writes through the `sta_property` IC), frame setup, and the literal-shape template cache. Companion to `object_alloc` for class-based allocation. Real-world equivalents: React `createElement`, `new Date()` in formatting loops, `new URL()` parsers. |
+| `construct_loop` | 1,500,000 | Hot `new Point` inside a function followed by property reads and integer arithmetic. It is the focused gate for `new_call` compilation and in-place frame re-entry; today constructor-bearing functions remain interpreted because helper-based and construct-IC prototypes regressed this workload. |
+| `ctor_array_build` | 1,500,000 | Constructor property writes followed by dense array construction in the same loop. Guards the transition-write IC against false invalidation by array-literal `length` installation and covers a common object-to-tuple packing shape. |
 | `json_stringify` | 25,000 | `JSON.stringify` hot loop — exercises own-property enumeration (the §25.5.2 EnumerableOwnProperties walk), recursive value serialization, and string concatenation. Different shape from the synthetic micros: tests the property *walk* path rather than read/write specifically. Useful proxy for any workload that touches `Object.keys(o).map(…)` or a serialization path. |
 | `tail_recursion` | 1,000,000 deep | §15.10 PTC frame-reuse on the `tail_call` opcode. Workload sized so the recursion would trivially blow the 1024-frame stack ceiling without PTC; with PTC the same call site runs in one frame and the iteration count dominates the timing. Mandatory `"use strict"` because spec PTC only fires in strict mode (JSC, the only other PTC-shipping engine, follows the letter); Cynic is always strict so the directive is a no-op here but keeps the fixture cross-engine portable. |
 
@@ -143,6 +146,11 @@ Bistromath alone (`--jit --no-ohaimark`) and Bistromath plus Ohaimark
 gets one discarded warmup per posture, then alternating T1/T2 and T2/T1 process
 pairs so slow host drift does not consistently favor one tier. T2 compilation
 remains inside the timed child lifetime.
+
+On a target without a Bistromath backend, currently x86_64, the
+`--jit --no-ohaimark` control naturally resolves to Lantern. The report keeps
+its historical `t1_ms` column name, but on that target it means the available
+lower-tier baseline rather than native T1.
 
 The report uses the median paired `T2 / T1` ratio (`<1` is faster), with `iqr%`
 showing the middle 50% of those ratios. It also prints the geometric mean and
@@ -162,19 +170,19 @@ T1 benchmarks and are the shape the **OSR rollout** suite targets.
 
 `zig build bench -- --ohaimark-osr-rollout` selects `bench/ohaimark_osr/*.js`:
 single-call hot loops that only OSR can promote to T2. It compares explicit T1
-(`--jit --no-ohaimark`) against T1+T2 with OSR (`--jit --ohaimark --ohaimark-osr`)
-in the same ReleaseFast binary with interleaved process pairs. The
-`--ohaimark-osr` CLI flag exists solely so this harness (and focused validation)
-can flip `Realm.ohaimark_osr_enabled` without a separate binary; OSR remains
-default-off in production until the §3.17 graduation criteria pass
-([ohaimark.md](ohaimark.md)). Report columns match the function-entry rollout:
+(`--jit --no-ohaimark`) against the default T2+OSR posture (`--jit --ohaimark`)
+in the same ReleaseFast binary with interleaved process pairs. The rollout
+driver still passes `--ohaimark-osr` explicitly as a compatibility assertion;
+`--no-ohaimark-osr` is the entry-only diagnostic posture. Report columns match
+the function-entry rollout:
 compile attempts/publications, compile time, code size, entries, exits,
 geometric mean, and worst fixture.
 
     zig build bench -- --ohaimark-osr-rollout --runs=30
 
-Do **not** default OSR on unless geometric mean T2/T1 is `≤ 1.000×` and no
-stable fixture exceeds `1.050×`, with clean differential/GC/fuzz gates.
+The 2026-07-19 graduation repeat measured `0.122x` geometric mean and `0.140x`
+worst fixture, with exact differential, GC-pressure, and fuzz gates clean.
+The suite remains the regression guard for the default posture.
 
 The ordinary function-entry rollout fixtures repeatedly call small leaf
 functions instead, covering tagged Number multiplication/division, monomorphic
@@ -269,77 +277,55 @@ stays 10 so single-engine and cross-engine numbers share a sample
 budget (see above); use a wider budget only when you specifically
 want tail-latency resolution.
 
-## Cadence — when to update each results file
+## Results artifacts
 
-The two on-disk artifacts answer different questions and update
-at different rhythms:
+The active reports have deliberately separate ownership. This avoids carrying
+one single-engine table plus a cross-engine copy of the same measurements.
 
 | File | Question answered | Update trigger |
 |---|---|---|
-| [`bench-results.md`](../bench-results.md) | "How does Cynic's perf and RSS look right now?" | After every perf-shaped commit (or batch). `/perf` re-runs the suite; append a new row when something moved ≥5%. |
-| [`bench-cross-results.md`](../bench-cross-results.md) | "Where does Cynic sit vs production engines?" | After meaningful relative-position changes — when Cynic moves past (or behind) a peer on a fixture, or after a multi-commit perf batch. Not per-commit. |
+| [`bench-cross-results.md`](../bench-cross-results.md) | "Where does Cynic sit against its peers on this host?" | After a meaningful runtime/JIT batch or a changed fixture/peer set. Replace the snapshot; do not compare rows across hosts. |
+| [`docs/ohaimark.md`](ohaimark.md) | "Does production T2 or OSR meet its rollout gate?" | After a T2/OSR/runtime change that could affect the gate. Record the paired rollout result beside the decision. |
+| [`wasm-bench-results.md`](../wasm-bench-results.md) | "How do Sarcasm, bare Spasm, and Realm-wake Spasm behave on fixed Wasm loops?" | After a Wasm dispatch, compiler, metering, or call-boundary change. |
+| [`bench-results.md`](../bench-results.md) | "What did historic same-machine A/B decisions show?" | Archive only. Preserve existing evidence; do not append routine snapshots. |
 
-Skip cross-engine on a routine `/perf` run unless you've changed
-something likely to shift the position-vs-peers ranking.
-`/checkpoint` runs the cross-engine sweep gated on bench
-movement (skipped when nothing moved ≥5%).
+Run `zig build bench` for a focused local A/B when diagnosing a hotspot, but
+record only decision-relevant summaries in the owning design document. Run the
+cross matrix when its peer-facing signal could have changed.
 
 ### Metrics captured per run
 
-Cross-engine (works for everything jsvu installs):
+The cross runner deliberately keeps the portable metric set small:
 
 | Metric | Source |
 |---|---|
-| Wall clock (ms) | `__perfNow()` deltas inside the script + rusage realtime outside |
-| User CPU (ms) | `getrusage(RUSAGE_CHILDREN).ru_utime` after the spawn |
-| System CPU (ms) | `ru_stime` after the spawn |
-| Peak RSS (KB) | `ru_maxrss` (bytes on macOS, KB on Linux — normalized to KB) |
-| Page faults | `ru_minflt + ru_majflt` — early signal for alloc-pressure regressions |
+| Wall clock (ms) | Monotonic time around one fresh engine subprocess |
+| Peak RSS (KiB) | Child resource accounting (`getrusage` on macOS, `/usr/bin/time` on Linux), normalized because macOS reports bytes and Linux reports KiB |
+| Spread flag | Winsorised max/min spread of the timed samples; never silently discarded |
 
-Engine-specific (probed by `bench/prologue.js`):
-
-| Engine | Heap probe | GC trigger |
-|---|---|---|
-| Cynic | `$bench.heapUsed()` | `$bench.collectGarbage()` |
-| Node / V8 | `process.memoryUsage().heapUsed` | `globalThis.gc()` (requires `--expose-gc`) |
-| JSC | `gcHeapSize()` | `fullGC()` |
-| SpiderMonkey | `gcparam("gcBytes")` | `gc()` |
-| QuickJS | n/a | `__qjs_gc()` (build-dependent) |
-
-Cynic-only deep stats (for our regression dashboard, not cross-engine
-comparison):
-
-- GC cycles run during the test
-- Sum of GC pause times, max GC pause
-- Allocations since test start
-- Per-pool live-object counts (objects / strings / generators / …)
-
-These come from `realm.heap` counters, exposed via the `$bench` host
-builtin installed only when `cynic` is launched via the bench harness.
+It does not currently report engine-private heap counters, CPU splits, or page
+faults. Add a metric only when every supported host can collect it without
+distorting the timed process.
 
 ## Interpreter-tier cross-engine runs
 
-`zig build bench` is single-engine — it tracks Cynic against its own
-history. To put Cynic next to other engines on the same fixtures,
+`zig build bench` is the Cynic-only local A/B runner. To put Cynic next to
+other engines on the same fixtures,
 `tools/bench-cross.sh` runs the `bench/micros/*.js` suite under every
 engine present and prints a comparison table.
 
-**This is an internal regression compass, not a public scoreboard.**
-The output never goes to the website or `bench-results.md`. Its only
-job is to answer "did a runtime change move Cynic relative to the
-field" for the developer running it.
+**This is an internal regression compass, not a public scoreboard.** Its job
+is to answer "did a runtime change move Cynic relative to the field" for the
+developer running it. A reviewed milestone snapshot belongs in
+`bench-cross-results.md`.
 
-### Interpreter tier only — the hard rule
+### Separate tier tables — the hard rule
 
-Comparing a JIT-warm engine against an interpreter measures
-nothing useful: the JIT engine wins by an order of magnitude and
-the number says only "JIT beats interpreter," which we already
-know. So **every engine is run interpreter-tier** — each JIT peer
-with its JIT disabled, and Cynic with `--no-jit` (Bistromath has
-been on by default since docs/jit.md §12's step-3 exit). A
-baseline-tier table (default Cynic vs Sparkplug-class peer
-configs) is now unlockable per docs/jit.md §10.6 and gets added
-when the wasm/Spasm work settles, not piecemeal:
+Never merge interpreter-tier and full-speed results into one table. The runner
+emits two explicitly separate comparisons: an **interpreter-tier table** with
+every JIT disabled, and a **full-speed table** with each engine in its normal
+production posture. They answer different questions and their rows must not
+be merged. The interpreter invocations are:
 
 | Engine | No-JIT invocation | Notes |
 |---|---|---|
@@ -349,7 +335,7 @@ when the wasm/Spasm work settles, not piecemeal:
 | QuickJS-NG (`qjs`) | none needed | non-JIT C interpreter |
 | Hermes (`hermes`) | none needed | natively interpreter-only |
 | XS (`xst`) | none needed | natively interpreter-only |
-| Cynic | `--no-jit` | pins Lantern; Bistromath is the default tier since the step-3 exit |
+| Cynic | `--no-jit` | pins Lantern; the production default enables Bistromath and Ohaimark |
 
 The headline peer is **QuickJS-NG** — a non-JIT C interpreter, the
 fairest comparison point for the Lantern tier.
@@ -364,14 +350,15 @@ Sparkplug-class. The peer configs:
 | V8 (`d8`) | `--no-opt --no-maglev` | Ignition + Sparkplug |
 | SpiderMonkey (`sm`) | `--no-ion` | interpreter + Baseline |
 | JavaScriptCore (`jsc`) | env `JSC_useDFGJIT=0 JSC_useFTLJIT=0` | LLInt + Baseline |
-| Cynic | default | Lantern + Bistromath |
+| Cynic | default | Lantern + Bistromath + Ohaimark |
 
 This answers "is Bistromath in the right ballpark against peer
 baselines" rather than against full optimizing stacks. Not wired
 into `tools/bench-cross.sh` yet — when it lands it becomes a
 `--tier baseline` third section, same never-merge rule.
 
-The full-speed table — Cynic's default posture (Bistromath)
+The full-speed table — Cynic's production posture (Bistromath plus
+Ohaimark at natural thresholds)
 against the peers with their JITs enabled — lives in the same
 artifact as a second, separately-headed section
 (`tools/bench-cross.sh` runs both tiers by default; `--tier
@@ -418,38 +405,23 @@ The runner builds Cynic `ReleaseFast` itself before timing — a Debug
 against the optimized peer binaries.
 
 The runner follows the [measurement protocol](#measurement-protocol)
-above: 1 discarded warmup, 5 timed subprocess runs, report the
+above: 1 discarded warmup, 10 timed subprocess runs by default, report the
 median, flag (`*`) any fixture whose max-min spread tops 10%. It
 **degrades gracefully** — any engine whose binary is absent is
 skipped with a note rather than failing the run, so it works against
 Cynic alone if no peers are installed.
 
-The table prints to stdout (or the `-o` file). It is deliberately
-**not** appended to `bench-results.md` — that file is the
-single-engine `zig build bench` artifact and stays that way.
-
-## Output format
-
-`bench-results.md`, dated rows mirroring `test262-results.md`:
-
-```
-### 2026-MM-DD — cynic <commit>, jetstream2 <rev>
-
-| suite / subtest      | engine  | wall_ms | user_ms | rss_kb | heap_kb | gc_max_ms |
-|---|---:|---:|---:|---:|---:|---:|
-| JetStream2/3d-cube   | cynic   |   412.3 |   408.7 |  18432 |   11264 |       3.2 |
-| JetStream2/3d-cube   | v8      |    28.1 |    25.9 |  52736 |    8192 |       0.6 |
-| JetStream2/3d-cube   | qjs     |   186.4 |   184.2 |   4608 |       — |         — |
-```
-
-Δ vs prior row inline. Regression alert when Cynic loses > 5% on
-any subtest vs the prior baseline.
+The table prints to stdout (or the `-o` file). Review a complete run and then
+replace `bench-cross-results.md` as one self-contained snapshot: date,
+worktree provenance, host, engine versions, sample count, timings, noise, and
+RSS all stay together. The archived `bench-results.md` remains available for
+the historical A/B reasoning that led to past architecture decisions.
 
 ## Stability hardening
 
 To make numbers reproducible across runs:
 
-1. Fixed CPU affinity on Linux (`taskset -c 0`).
+1. When available, pin Linux benchmark children with `taskset -c 1`.
 2. Disable thermal throttling on macOS bench hosts
    (`sudo pmset -a sleep 0 disablesleep 1`).
 3. `--gc-threshold` pinned for Cynic across runs.
@@ -458,30 +430,22 @@ To make numbers reproducible across runs:
 
 ## Implementation phases
 
-1. **Phase 1** — `tools/bench.zig` + `bench/prologue.js` + the
-   `$bench` host builtin. One subtest from JetStream 2 end-to-end
-   against Cynic, V8, QuickJS. Validates the protocol.
-2. **Phase 2** — Vendor full JetStream 2 + Octane. Full matrix
-   captured in `bench-results.md`.
-3. **Phase 3** — Cynic-specific micros under `bench/micros/`,
-   focused on opcodes / GC / regex / generators.
-4. **Phase 4** — CI integration. Gate PRs on >5% regression
-   against a recorded baseline.
+1. **Custom micros** — the fast regression compass for runtime and JIT work.
+2. **Octane compute-six** — whole-program throughput and allocation coverage,
+   retained as a relative tracker rather than a headline score.
+3. **Ohaimark rollouts** — paired production T1/T2 and T2+OSR gates.
+4. **Sarcasm micro-bench** — fixed Wasm interpreter/Spasm workloads.
 
-Phases 1-3 are local-developer-driven; phase 4 needs a stable bench
-host (separate from the GitHub-Actions runners, which vary in CPU).
+JetStream's browser-facing harness and Web Tooling Benchmark remain deferred;
+they need platform surfaces Cynic intentionally does not provide.
 
 ## What's NOT in scope
 
 - DOM benchmarks (Cynic doesn't target browsers).
-- JIT-warm comparison. The cross-engine runner
-  (`tools/bench-cross.sh`) pins every JIT peer to its no-JIT flags
-  AND pins Cynic with `--no-jit` (the tier defaults on since the
-  step-3 exit), so the comparison stays interpreter-tier vs
-  interpreter-tier. A JIT-warm peer number against Lantern is
-  meaningless and is never recorded or published; the
-  baseline-tier table (docs/jit.md §10.6) is tracked separately —
-  see "Interpreter-tier cross-engine runs" above.
+- Mixed-tier scoreboards. The runner records interpreter-only and full-speed
+  results in separate tables; a JIT-enabled peer number against Lantern is
+  meaningless. A future baseline-tier table (docs/jit.md §10.6) remains a
+  third, separately labelled comparison.
 - Microbenchmarking individual opcodes from outside the engine —
   see `src/bytecode/op.zig`'s in-tree perf tests instead.
 - Multi-isolate or multi-thread workloads — single-agent-per-isolate

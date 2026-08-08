@@ -16,9 +16,10 @@
 //! mutation — can get its own host entry later if it's worth the
 //! reduced reachable behavior.
 //!
-//! Four argv flags layer on top for native differential fuzzing
+//! Five argv flags layer on top for native differential fuzzing
 //! (docs/fuzz-differential.md), parsed in `fuzz_main`: `--jit` tiers
 //! the run up to Bistromath, `--ohaimark` attempts T2 before T1,
+//! `--no-ohaimark-osr` disables the default-on loop-header OSR,
 //! `--diff` writes a completion-value digest to fd 103 after each sample,
 //! and `--diff-self-test` perturbs that digest to validate the parent's
 //! oracle. The plain crash-finding profile passes none of them and is
@@ -75,6 +76,9 @@ pub const Options = struct {
     /// and attempt Ohaimark before Bistromath. This is independent from the
     /// T1-only `--jit` differential posture so a campaign can isolate T2.
     ohaimark: bool = false,
+    /// Loop-header OSR is part of the forced-Ohaimark default. The
+    /// `--no-ohaimark-osr` diagnostic switch isolates function-entry T2.
+    ohaimark_osr: bool = true,
     /// `--diff`: after each sample, write a canonical digest of the
     /// completion outcome to fd 103 (Fuzzilli's differential sink) so
     /// the parent's fuzzout oracle can compare the two runs. Off for
@@ -87,6 +91,23 @@ pub const Options = struct {
     /// end-to-end without needing a real JIT miscompile. Never set in
     /// a real fuzzing run.
     self_test: bool = false,
+
+    pub fn applyArgument(self: *Options, arg: []const u8) void {
+        if (std.mem.eql(u8, arg, "--jit")) {
+            self.jit = true;
+        } else if (std.mem.eql(u8, arg, "--ohaimark")) {
+            self.ohaimark = true;
+        } else if (std.mem.eql(u8, arg, "--ohaimark-osr")) {
+            self.ohaimark_osr = true;
+        } else if (std.mem.eql(u8, arg, "--no-ohaimark-osr")) {
+            self.ohaimark_osr = false;
+        } else if (std.mem.eql(u8, arg, "--diff")) {
+            self.emit_digest = true;
+        } else if (std.mem.eql(u8, arg, "--diff-self-test")) {
+            self.emit_digest = true;
+            self.self_test = true;
+        }
+    }
 };
 
 /// Control / data file descriptor numbers Fuzzilli pre-opens
@@ -112,6 +133,39 @@ pub const HELO: [4]u8 = .{ 'H', 'E', 'L', 'O' };
 /// hand us an arbitrary `size_t` and we'd otherwise try to allocate
 /// it. 16 MiB is well above any real Fuzzilli sample.
 pub const MAX_SCRIPT_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Differential runs need deterministic host-observable time and random
+/// values because their target and reference execute sequentially in fresh
+/// processes. `Date.now` alone is not sufficient: §21.4.2.1's zero-argument
+/// constructor reads the host clock directly. This is intentionally an IIFE
+/// so the generated sample sees only the standard global mutations.
+///
+/// The V8 Dumpling profile uses the same Proxy shape. Do not write
+/// `Date.prototype` through the Proxy here: its ordinary target already
+/// supplies that property, and a proxy [[Set]] would only add an unrelated
+/// trap path to the prelude.
+const differential_determinism_prelude =
+    \\(function () {
+    \\    var originalDate = Date;
+    \\    var FIXED = 1767225600000;
+    \\    var FIXED_STRING = new originalDate(FIXED).toString();
+    \\
+    \\    Date.now = function () { return FIXED; };
+    \\    globalThis.Date = new Proxy(originalDate, {
+    \\        construct(target, args) {
+    \\            if (args.length === 0) return new target(FIXED);
+    \\            return new target(...args);
+    \\        },
+    \\        apply(target, thisArg, args) { return FIXED_STRING; }
+    \\    });
+    \\
+    \\    var s = 305419896;
+    \\    Math.random = function () {
+    \\        s ^= s << 13; s ^= s >> 17; s ^= s << 5;
+    \\        return (s >>> 0) / 4294967296;
+    \\    };
+    \\})();
+;
 
 pub const ProtocolError = error{
     HandshakeFailed,
@@ -255,6 +309,7 @@ fn executeOne(allocator: std.mem.Allocator, source: []const u8, options: Options
     if (options.ohaimark) {
         realm.ohaimark_enabled = true;
         realm.ohaimark_threshold_override = 1;
+        realm.ohaimark_osr_enabled = options.ohaimark_osr;
     }
     if (options.gc_threshold) |n| realm.heap.setGcThreshold(n);
     // Sweep-quarantine: hold each swept slab header poisoned out of its
@@ -267,6 +322,22 @@ fn executeOne(allocator: std.mem.Allocator, source: []const u8, options: Options
     // `fuzzilli(op, arg)` lives here — same install path as the
     // other host-only debug hooks. See `installTestGlobals`.
     realm.installTestGlobals() catch return 1;
+
+    // Fuzzilli's target and reference are distinct fresh processes.
+    // Install the shared deterministic prelude inside this host rather
+    // than relying on one particular Swift profile to concatenate it.
+    // This keeps every `--diff` invocation noise-free, including a
+    // manually assembled REPRL pair.
+    if (options.emit_digest) {
+        const prelude_outcome = cynic.runtime.evaluateScript(allocator, &realm, differential_determinism_prelude) catch return 1;
+        switch (prelude_outcome) {
+            .value, .yielded => {},
+            .thrown => {
+                emitDigest(prelude_outcome, options.self_test);
+                return outcomeToExitCode(prelude_outcome);
+            },
+        }
+    }
 
     const outcome = cynic.runtime.evaluateScript(allocator, &realm, source);
     // §9.4 — drain microtasks before reporting completion so a
@@ -511,9 +582,51 @@ test "fuzz_reprl: executeOne agrees under both JIT tiers and interpreter on beni
         const interp = executeOne(testing.allocator, src, .{});
         const jit = executeOne(testing.allocator, src, .{ .jit = true });
         const ohaimark = executeOne(testing.allocator, src, .{ .ohaimark = true });
+        const ohaimark_osr = executeOne(testing.allocator, src, .{
+            .ohaimark = true,
+            .ohaimark_osr = true,
+        });
         try testing.expectEqual(interp, jit);
         try testing.expectEqual(interp, ohaimark);
+        try testing.expectEqual(interp, ohaimark_osr);
     }
+}
+
+test "fuzz_reprl: differential prelude fixes zero-argument Date construction" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.hardened = false;
+    realm.allow_eval = true;
+    try realm.installBuiltins();
+    try realm.installTestGlobals();
+
+    const prelude = try cynic.runtime.evaluateScript(testing.allocator, &realm, differential_determinism_prelude);
+    switch (prelude) {
+        .value, .yielded => {},
+        .thrown => return error.TestUnexpectedResult,
+    }
+
+    const outcome = try cynic.runtime.evaluateScript(testing.allocator, &realm,
+        \\let v = new Date();
+        \\v++;
+    );
+    switch (outcome) {
+        .value => |value| {
+            try testing.expect(value.isDouble());
+            try testing.expectEqual(@as(f64, 1_767_225_600_000), value.asDouble());
+        },
+        .thrown, .yielded => return error.TestUnexpectedResult,
+    }
+}
+
+test "fuzz_reprl: Ohaimark OSR defaults on with an independent opt-out" {
+    var options: Options = .{};
+    try testing.expect(options.ohaimark_osr);
+    options.applyArgument("--ohaimark-osr");
+    try testing.expect(options.ohaimark_osr);
+    try testing.expect(!options.ohaimark);
+    options.applyArgument("--no-ohaimark-osr");
+    try testing.expect(!options.ohaimark_osr);
 }
 
 test "fuzz_reprl: fnv1a is stable and content-sensitive" {

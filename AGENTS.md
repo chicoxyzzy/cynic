@@ -139,6 +139,23 @@ These are project rules — they apply to everyone.
     the global is non-extensible or the name is a non-configurable
     property). Full SES Compartment confinement is deferred. See
     [docs/ses-alignment.md](docs/ses-alignment.md) "The eval engine".
+- **WebAssembly is on in the CLI; byte compilation remains host policy.**
+  `new WebAssembly.Module(bytes)`, `WebAssembly.compile(bytes)`, and the
+  BufferSource overload of `WebAssembly.instantiate` are enabled by default
+  for `cynic eval` / `run` / `repl`. Direct `Realm` embedders start with
+  `allow_wasm_compile = false` and may opt in explicitly. The policy is
+  HostEnsureCanCompileWasmBytes, not a master Wasm switch: it never blocks
+  `validate`, `Memory`, `Table`, `Global`, `Tag`, `Exception`,
+  `new Instance(predecodedModule)`, or `instantiate(predecodedModule)`. A
+  refusal is a `WebAssembly.CompileError`. Realm fuel, interrupt hooks, and
+  memory ceilings cover Sarcasm, Spasm, growable store backings, and native
+  executable mappings. Spasm parks an
+  optional execution controller in its native frame and polls it at function
+  entry and taken structured-loop backedges. A bare embedding pays one null
+  branch; a Realm-backed unmetered call acquire-probes the asynchronous
+  interrupt byte and makes no host call while it remains clear. See
+  [docs/wasm-engine.md](docs/wasm-engine.md) §9 and
+  [docs/resource-metering.md](docs/resource-metering.md).
 - **SES-aligned by default; `--unhardened` opts out.** Cynic
   isn't just "SES-friendly" (every modern JS runtime is that);
   Cynic ships **hardened by default**:
@@ -316,6 +333,7 @@ These are project rules — they apply to everyone.
 
 | Goal | Read |
 |---|---|
+| Find the source of truth for a topic | [docs/README.md](docs/README.md) |
 | Understand the architecture | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
 | See what's planned and what's done | [docs/ROADMAP.md](docs/ROADMAP.md) |
 | Decide between two designs | [docs/handbook/prior-art.md](docs/handbook/prior-art.md) |
@@ -325,11 +343,11 @@ These are project rules — they apply to everyone.
 | Touch binding / scope / top-level resolution | [docs/handbook/environments.md](docs/handbook/environments.md) (GlobalEnvironmentRecord split, named-fn-expr wrapper, module env-record, top-level write opcodes) |
 | Touch the property-storage layout (bag / shape / slots) | [docs/inline-caches.md](docs/inline-caches.md) (shape substrate + read/write IC); [docs/lazy-property-bag.md](docs/lazy-property-bag.md) (Phase 3 shipped — shape-mode writes skip the bag mirror entirely) |
 | Touch realm setup / intrinsic install / hardening | [docs/ses-alignment.md](docs/ses-alignment.md) (SES-by-default position, frozen primordials, `harden()`, override-mistake fix, the `--unhardened` opt-out + the separate `--allow=eval`) |
-| Meter or cancel untrusted code from an embedder (fuel budget, memory ceiling, interrupt hook) | [docs/resource-metering.md](docs/resource-metering.md) (the `Realm.setFuel` / `setMemoryLimit` / `setInterruptHook` API, the V8/JSC/QuickJS/wasmtime survey, the uncatchable-termination + finally-skipping decisions, the hook-vs-JIT tier-up rule) |
+| Meter or cancel untrusted code from an embedder (fuel budget, memory ceiling, interrupt hook) | [docs/resource-metering.md](docs/resource-metering.md) (the `Realm.setFuel` / `setMemoryLimit` / `setInterruptHook` API, the V8/JSC/QuickJS/wasmtime survey, JS + Wasm coverage, uncatchable termination, and tier fallback rules) |
 | Touch ECMA-402 / `Intl` / Temporal intl extras | `-Dintl=off\|stub\|full` ([ROADMAP.md](docs/ROADMAP.md)); `src/runtime/intl_config.zig`, `intl.zig`, `builtins/intl.zig`; Temporal calendar/IANA gates in `temporal.zig` / `builtins/temporal/shared.zig` |
 | Verify a shared-machinery change without missing regressions | [docs/handbook/agent-checks.md](docs/handbook/agent-checks.md) (the `--only-failing` trap, per-touch bucket filters, harness threading invariant) |
 | Look up a Zig idiom Cynic uses | [docs/handbook/zig.md](docs/handbook/zig.md) |
-| Touch the WebAssembly engine (Sarcasm) or its JS API | [docs/wasm-engine.md](docs/wasm-engine.md) (in-place interpreter + side-table, the reference encoding + externref pin set, `WebAssembly.*` surface, `--allow=wasm`); score in [wasm-results.md](wasm-results.md); perf baselines in [wasm-bench-results.md](wasm-bench-results.md) |
+| Touch the WebAssembly engine (Sarcasm) or its JS API | [docs/wasm-engine.md](docs/wasm-engine.md) (in-place interpreter + side-table, reference encoding + externref roots, `WebAssembly.*`, `allow_wasm_compile`, and metering); score in [wasm-results.md](wasm-results.md); perf baselines in [wasm-bench-results.md](wasm-bench-results.md) |
 | Touch the JIT tiers (Bistromath / Ohaimark / Spasm) or the codegen substrate | [docs/jit.md](docs/jit.md) (tier architecture, the frame-identity rule, data-driven ICs, shared `src/runtime/jit/` substrate + the JS/wasm reuse boundary, the JS↔wasm call-boundary thunks (jit.md §7.1), executable-memory mechanics, differential verification gates) |
 | Fuzz the engine, triage a fuzz crash, or maintain the nightly fuzz gate | [docs/fuzzing.md](docs/fuzzing.md) (Fuzzilli setup, `triage-crashes.sh`, the [carve-out registry](docs/fuzz-carveouts.md), and the nightly CI gate + how to update [`tools/fuzz/crash-baseline.txt`](tools/fuzz/crash-baseline.txt)); OSS-Fuzz fit in [docs/fuzz-ossfuzz-assessment.md](docs/fuzz-ossfuzz-assessment.md) |
 | Score current conformance | `zig build test262 -- --quiet`; history in [test262-results.md](test262-results.md) |
@@ -437,9 +455,10 @@ actually executes. CI gates both native architectures. The harness
 flag is independent of the `cynic` CLI, where
 the tier is on by default at natural thresholds and `--no-jit`
 opts out),
-`--ohaimark` (force the default-on Ohaimark tier before Bistromath and
-set both thresholds to 1. This is the T2 differential posture; it
-remains separate from the established T1-only `--jit` pass set),
+`--ohaimark` (force the default-on Ohaimark tier, including loop-header
+OSR, before Bistromath and set both thresholds to 1. This is the T2
+differential posture; `--no-ohaimark-osr` isolates function-entry T2,
+and it remains separate from the established T1-only `--jit` pass set),
 `--ohaimark-stats` (requires `--ohaimark`; print heap-scoped T2 compile,
 code-size, entry, completion, guard-exit, refusal-stage, and top unsupported-
 opcode counters aggregated across fixtures and harness workers),
@@ -701,8 +720,9 @@ reviewed in PRs against `test262-results.md`.
                           numeric ISA (i32/i64/f32/f64 arithmetic,
                           comparison, and every conversion), globals,
                           bulk-memory fill/copy/size, and structured
-                          control flow, and degrading to the interpreter
-                          for calls, tables, and SIMD.
+                          control flow, same-module calls, the table/reference
+                          family, and the first SIMD data path; unsupported
+                          bodies still degrade to the interpreter.
                           Passes 100% of the
                           spec-testsuite commands it scores
                           (wasm-results.md — the scored set excludes

@@ -1,9 +1,8 @@
 //! Small x86_64 machine-code writer for the shared JIT substrate.
 //!
 //! This is intentionally a byte-oriented counterpart to `asm_aarch64.zig`.
-//! Bistromath's target-selecting facade uses it for SysV ABI entries, labels,
-//! guard branches, and indirect helper calls. Ohaimark remains AArch64-only;
-//! higher-level T1 call policy stays in Bistromath's shared compiler.
+//! Bistromath and Ohaimark use it for SysV ABI entries, labels, guard branches,
+//! and indirect helper calls. Higher-level tier policy stays in each compiler.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -309,9 +308,8 @@ pub const Masm = struct {
 
     /// `mov destination, qword ptr [base + displacement]`.
     ///
-    /// Bistromath's entry ABI passes `CallFrame*` in `rsi` and the raw Lantern
-    /// register file in `rdx`; accepting any GPR here keeps the encoder useful
-    /// as its non-leaf lowering grows without duplicating ModRM mechanics.
+    /// The tier entry ABIs pass `CallFrame*` and the raw Lantern register file
+    /// in GPRs; accepting any GPR here avoids duplicating ModRM mechanics.
     pub fn load64Disp32(
         self: *Masm,
         destination: Reg,
@@ -643,4 +641,117 @@ fn isExtendedXmm(register: Xmm) bool {
 
 fn lowBitsXmm(register: Xmm) u8 {
     return @intFromEnum(register) & 7;
+}
+test "jit asm_x86_64: emits a native immediate return" {
+    if (comptime !native_x86_64) return error.SkipZigTest;
+    var machine = Masm.init(std.testing.allocator);
+    defer machine.deinit();
+    try machine.movImm64(.rax, 42);
+    try machine.ret();
+
+    var executable = try code_alloc.CodeAllocator.init(std.testing.allocator, 64 * 1024);
+    defer executable.deinit();
+    const entry = code_alloc.asFn(
+        *const fn () callconv(.c) u64,
+        try machine.install(&executable),
+    );
+    try std.testing.expectEqual(@as(u64, 42), entry());
+}
+
+test "jit asm_x86_64: encodes property-load integer primitives" {
+    var machine = Masm.init(std.testing.allocator);
+    defer machine.deinit();
+    try machine.andReg64(.r8, .r11);
+    try machine.xorReg64(.r10, .r11);
+    try machine.testReg64(.r10, .r11);
+    try machine.load32Disp32(.r10, .r9, 0x1234);
+    try machine.load8Disp32(.r10, .r9, 0x5678);
+    try machine.cmp64Disp32Reg(.r9, 0x1234, .r10);
+    try machine.cmp32Disp32Imm32(.r9, 0x1234, 0x7654_3210);
+    try machine.cmp64Disp32Imm8(.r9, 0x1234, 0);
+    try machine.cmp8Disp32Imm8(.r9, 0x1234, 1);
+    try std.testing.expectEqualSlices(u8, &.{
+        0x4D, 0x21, 0xD8,
+        0x4D, 0x31, 0xDA,
+        0x4D, 0x85, 0xDA,
+        0x45, 0x8B, 0x91,
+        0x34, 0x12, 0x00,
+        0x00, 0x45, 0x0F,
+        0xB6, 0x91, 0x78,
+        0x56, 0x00, 0x00,
+        0x4D, 0x39, 0x91,
+        0x34, 0x12, 0x00,
+        0x00, 0x41, 0x81,
+        0xB9, 0x34, 0x12,
+        0x00, 0x00, 0x10,
+        0x32, 0x54, 0x76,
+        0x49, 0x83, 0xB9,
+        0x34, 0x12, 0x00,
+        0x00, 0x00, 0x41,
+        0x80, 0xB9, 0x34,
+        0x12, 0x00, 0x00,
+        0x01,
+    }, machine.code.items);
+}
+
+test "jit asm_x86_64: encodes checked loop arithmetic and spill primitives" {
+    var machine = Masm.init(std.testing.allocator);
+    defer machine.deinit();
+    try machine.movReg32(.r11, .r8);
+    try machine.addReg32(.r8, .r9);
+    try machine.subReg32(.r10, .r8);
+    try machine.imulReg32(.r9, .r10);
+    try machine.xorReg32(.r11, .r9);
+    try machine.cmpReg32(.r8, .r10);
+    try machine.cmpRegImm32(.r11, 0x7FF9);
+    try machine.testReg32Imm32(.r10, 0x8000_0000);
+    try machine.orReg64(.r8, .r9);
+    try machine.store32Disp32(.rsi, 0x1234, .r9);
+    try machine.subRegImm32(.rsp, 32);
+    try machine.addRegImm32(.rsp, 32);
+    try std.testing.expectEqualSlices(u8, &.{
+        0x45, 0x89, 0xC3,
+        0x45, 0x01, 0xC8,
+        0x45, 0x29, 0xC2,
+        0x45, 0x0F, 0xAF,
+        0xCA, 0x45, 0x31,
+        0xCB, 0x45, 0x39,
+        0xD0, 0x49, 0x81,
+        0xFB, 0xF9, 0x7F,
+        0x00, 0x00, 0x41,
+        0xF7, 0xC2, 0x00,
+        0x00, 0x00, 0x80,
+        0x4D, 0x09, 0xC8,
+        0x44, 0x89, 0x8E,
+        0x34, 0x12, 0x00,
+        0x00, 0x48, 0x81,
+        0xEC, 0x20, 0x00,
+        0x00, 0x00, 0x48,
+        0x81, 0xC4, 0x20,
+        0x00, 0x00, 0x00,
+    }, machine.code.items);
+}
+
+test "jit asm_x86_64: encodes a SysV helper call with frame preservation" {
+    var machine = Masm.init(std.testing.allocator);
+    defer machine.deinit();
+
+    // A generated entry starts with rsp % 16 == 8. Reserve one word before
+    // `call` both to align the helper boundary and preserve CallFrame* in rsi.
+    try machine.subRegImm32(.rsp, 8);
+    try machine.store64Disp32(.rsp, 0, .rsi);
+    try machine.movImm64(.r11, 0x1122_3344_5566_7788);
+    try machine.callReg(.r11);
+    try machine.load64Disp32(.rsi, .rsp, 0);
+    try machine.addRegImm32(.rsp, 8);
+
+    try std.testing.expectEqualSlices(u8, &.{
+        0x48, 0x81, 0xEC, 0x08, 0x00, 0x00, 0x00,
+        0x48, 0x89, 0xB4, 0x24, 0x00, 0x00, 0x00,
+        0x00, 0x49, 0xBB, 0x88, 0x77, 0x66, 0x55,
+        0x44, 0x33, 0x22, 0x11, 0x41, 0xFF, 0xD3,
+        0x48, 0x8B, 0xB4, 0x24, 0x00, 0x00, 0x00,
+        0x00, 0x48, 0x81, 0xC4, 0x08, 0x00, 0x00,
+        0x00,
+    }, machine.code.items);
 }

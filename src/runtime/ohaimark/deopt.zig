@@ -2,10 +2,10 @@
 //!
 //! Graph nodes that may speculate carry the pre-operation Lantern state as
 //! SSA ValueIds. This module serializes only guarded nodes selected by the
-//! specialization plan. Constants are embedded directly; non-constant values
-//! remain SSA references until register allocation assigns physical recovery
-//! locations. Runtime reconstruction is deliberately deferred until that
-//! location map exists.
+//! specialization plan. Constants and specialization-folded values are
+//! embedded directly; remaining values stay as SSA references until register
+//! allocation assigns physical recovery locations. Runtime reconstruction is
+//! deliberately deferred until that location map exists.
 
 const std = @import("std");
 
@@ -71,7 +71,7 @@ pub const Metadata = struct {
             try appendRecovery(
                 &stream,
                 allocator,
-                try recoveryFor(graph, state.accumulator),
+                try recoveryFor(graph, plan, state.accumulator),
             );
             try codec.appendU16(&stream, allocator, state.slot_count);
             for (slots) |slot| {
@@ -79,7 +79,7 @@ pub const Metadata = struct {
                 try appendRecovery(
                     &stream,
                     allocator,
-                    try recoveryFor(graph, slot.value),
+                    try recoveryFor(graph, plan, slot.value),
                 );
             }
             const stream_len = try codec.indexU32(stream.items.len - stream_offset);
@@ -133,7 +133,7 @@ pub const Metadata = struct {
                 return error.InvalidMetadata;
             }
             const bytes = try pointBytes(self, point);
-            try verifyPoint(bytes, graph, node_id);
+            try verifyPoint(bytes, graph, plan, node_id);
             expected_stream_offset += bytes.len;
             point_index += 1;
         }
@@ -182,18 +182,45 @@ pub fn requiresDeopt(lowering: specialize.Lowering) bool {
         .checked_int32_sub,
         .checked_int32_mul,
         .checked_int32_div,
+        .checked_int32_to_numeric,
+        .checked_string_to_string,
+        .require_object_coercible,
         .number_mul,
         .number_div,
         .strict_eq,
+        .less_than,
         .checked_boolean_not,
         .checked_branch,
         .load_named_own,
         .load_named_prototype,
         .load_named_synthetic,
+        .store_named_own,
+        .load_computed_own,
+        .store_computed_own,
+        .delete_computed_property,
         .load_this,
         .load_global,
+        .store_global,
         .load_global_slot,
+        .store_global_slot_init,
+        .store_global_slot,
         .load_environment,
+        .allocate_environment,
+        .store_environment,
+        .create_unmapped_arguments_object,
+        .create_ordinary_function,
+        .set_home,
+        .define_object_method_property,
+        .create_object_literal,
+        .create_dense_array_literal,
+        .create_array_literal,
+        .append_dense_array_literal_element,
+        .define_template_property,
+        .throw_,
+        .throw_if_hole,
+        .typeof_,
+        .direct_call,
+        .tail_dispatch,
         => true,
         else => false,
     };
@@ -214,18 +241,45 @@ fn validateGuardedNode(
         .checked_int32_sub => node.kind == .sub,
         .checked_int32_mul => node.kind == .mul,
         .checked_int32_div => node.kind == .div,
+        .checked_int32_to_numeric => node.kind == .to_numeric,
+        .checked_string_to_string => node.kind == .to_string,
+        .require_object_coercible => node.kind == .require_object_coercible,
         .number_mul => node.kind == .mul,
         .number_div => node.kind == .div,
         .strict_eq => node.kind == .strict_eq,
+        .less_than => node.kind == .less_than,
         .checked_boolean_not => node.kind == .logical_not,
         .checked_branch => node.kind == .branch and info.assumption == null,
         .load_named_own => try hasAssumption(plan, info, .load_own) and node.kind == .load_named,
         .load_named_prototype => try hasAssumption(plan, info, .load_prototype) and node.kind == .load_named,
         .load_named_synthetic => try hasAssumption(plan, info, .load_synthetic) and node.kind == .load_named,
+        .store_named_own => try hasAssumption(plan, info, .store_named_own) and node.kind == .store_named,
+        .load_computed_own => try hasAssumption(plan, info, .load_computed_own) and node.kind == .load_computed,
+        .store_computed_own => try hasAssumption(plan, info, .store_computed_own) and node.kind == .store_computed,
+        .delete_computed_property => node.kind == .delete_computed_property and info.assumption == null,
         .load_this => node.kind == .load_this and info.assumption == null,
         .load_global => try hasAssumption(plan, info, .load_global) and node.kind == .load_global,
+        .store_global => node.kind == .store_global and info.assumption == null,
         .load_global_slot => node.kind == .load_global_slot and info.assumption == null,
+        .store_global_slot_init => node.kind == .store_global_slot_init and info.assumption == null,
+        .store_global_slot => node.kind == .store_global_slot and info.assumption == null,
         .load_environment => node.kind == .load_environment and info.assumption == null,
+        .allocate_environment => node.kind == .allocate_environment and info.assumption == null,
+        .store_environment => node.kind == .store_environment and info.assumption == null,
+        .create_unmapped_arguments_object => node.kind == .create_unmapped_arguments_object and info.assumption == null,
+        .create_ordinary_function => node.kind == .create_ordinary_function and info.assumption == null,
+        .set_home => node.kind == .set_home and info.assumption == null,
+        .define_object_method_property => node.kind == .define_object_method_property and info.assumption == null,
+        .create_object_literal => node.kind == .create_object_literal and info.assumption == null,
+        .create_dense_array_literal => node.kind == .create_dense_array_literal and info.assumption == null,
+        .create_array_literal => node.kind == .create_array_literal and info.assumption == null,
+        .append_dense_array_literal_element => node.kind == .append_dense_array_literal_element and info.assumption == null,
+        .define_template_property => node.kind == .define_template_property and info.assumption == null,
+        .throw_ => node.kind == .throw_ and info.assumption == null,
+        .throw_if_hole => node.kind == .throw_if_hole and info.assumption == null,
+        .typeof_ => node.kind == .typeof_ and info.assumption == null,
+        .direct_call => node.kind == .direct_call and info.assumption == null,
+        .tail_dispatch => node.kind == .tail_dispatch and info.assumption == null,
         else => false,
     };
     if (!valid or node.frame_state == null) return error.MalformedGraph;
@@ -326,8 +380,17 @@ fn valueAvailable(
     return false;
 }
 
-fn recoveryFor(graph: *const ir.Graph, value: ir.ValueId) !Recovery {
-    if (value >= graph.nodes.len) return error.MalformedGraph;
+fn recoveryFor(
+    graph: *const ir.Graph,
+    plan: *const specialize.Plan,
+    value: ir.ValueId,
+) !Recovery {
+    if (value >= graph.nodes.len or value >= plan.node_info.len) {
+        return error.MalformedGraph;
+    }
+    if (plan.node_info[value].folded) |immediate| {
+        return .{ .immediate = immediate };
+    }
     const node = graph.nodes[value];
     if (node.kind != .constant) return .{ .value = value };
     return switch (node.payload) {
@@ -336,18 +399,29 @@ fn recoveryFor(graph: *const ir.Graph, value: ir.ValueId) !Recovery {
     };
 }
 
-fn verifyPoint(bytes: []const u8, graph: *const ir.Graph, node_id: ir.ValueId) !void {
+fn verifyPoint(
+    bytes: []const u8,
+    graph: *const ir.Graph,
+    plan: *const specialize.Plan,
+    node_id: ir.ValueId,
+) !void {
     const state = try checkedState(graph, node_id);
     const slots = try checkedSlots(graph, node_id, state);
     var cursor: codec.Cursor = .{ .bytes = bytes };
     if (try cursor.readU32() != state.bytecode_offset) return error.InvalidMetadata;
-    if (!recoveryEql(try readRecovery(&cursor), try recoveryFor(graph, state.accumulator))) {
+    if (!recoveryEql(
+        try readRecovery(&cursor),
+        try recoveryFor(graph, plan, state.accumulator),
+    )) {
         return error.InvalidMetadata;
     }
     if (try cursor.readU16() != slots.len) return error.InvalidMetadata;
     for (slots) |slot| {
         if (try cursor.readByte() != slot.register) return error.InvalidMetadata;
-        if (!recoveryEql(try readRecovery(&cursor), try recoveryFor(graph, slot.value))) {
+        if (!recoveryEql(
+            try readRecovery(&cursor),
+            try recoveryFor(graph, plan, slot.value),
+        )) {
             return error.InvalidMetadata;
         }
     }

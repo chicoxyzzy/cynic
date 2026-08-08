@@ -324,41 +324,41 @@ micro-optimization. See §5.
 
 ## 7. Runtime data structures
 
-**Today: a standalone `Instance`.** Instantiation lays out runtime state
+**Standalone and Realm-backed `Instance`.** Instantiation lays out runtime state
 into a caller-provided `Instance` (`interpreter.zig`) — validated
-function bodies, a global array (imports then defined), the single
-linear memory, and the table index space. The function / table / global
+function bodies, a global array (imports then defined), linear memories,
+and the table index space. The function / table / global
 index spaces place **imports first** so cross-module linking resolves by
 index; tables are held by pointer (`[]*Table`) so an imported table is
 genuinely shared — a write through one instance is visible to the other.
-Memory is a plain owned `[]u8`; bounds are checked on every access.
+Memories are likewise held by pointer, so a JS import aliases the provider's
+`Memory` record and observes writes and growth. Bounds are checked on every
+access.
 
-**Planned: a realm-owned store.** Today the JS-API records live in the
-realm's `wasm_arena` (§8); a future refactor makes the §4.2.1 store
-realm-scoped and lazily created, so non-wasm programs pay nothing:
+**Realm ownership is split by lifetime.** The JS API lazily creates
+`wasm_arena` for immutable decoded metadata, instance records, and store
+headers. Mutable Memory/Table backing buffers use `wasmStoreAllocator`, an
+immediate-free quota allocator: `grow` reallocates the live backing instead of
+leaving obsolete buffers in the arena, and `grow(0)` does not consume quota.
+Each owned record carries its backing allocator; shared imports retain the
+provider's allocator and identity. One quota-backed Realm registry tracks
+instances and reaches their owned records; two smaller registries cover direct
+JS `Memory` / `Table` constructors. Teardown releases those backings before the
+arena invalidates their headers. A failed population transaction removes its
+exact instance and decrements its reference-counted externref roots before
+releasing code and store resources, including when a start function re-enters
+JS and creates another instance. The bare embedding defaults the backing
+allocator to the allocator passed to `instantiate` and releases it from
+`Instance.deinit`.
 
-```zig
-// realm.zig (planned — not yet built)
-wasm_store: ?*WasmStore = null,   // allocated on first wasm use
-
-const WasmStore = struct {
-    memories: ArrayListUnmanaged(*WasmMemory),
-    tables:   ArrayListUnmanaged(*WasmTable),   // ref elements → GC roots
-    globals:  ArrayListUnmanaged(*WasmGlobal),  // ref-typed → GC roots
-    funcs:    ArrayListUnmanaged(WasmFuncInst), // wasm body OR host JS callable
-};
-```
-
-**Planned: linear memory as an `ArrayBuffer`.**
-`WebAssembly.Memory.prototype.buffer` must return a real `ArrayBuffer`
-aliasing the linear bytes, so `WasmMemory` will back onto the *same*
-backing-store abstraction `shared_data_block.zig` and the ArrayBuffer
-machinery already use — not a private buffer. `memory.grow` reallocates
-and **detaches** the prior buffer (observable, spec-required); reuse
-Cynic's existing detach path. Shared memory (threads, later) backs onto
-a SharedArrayBuffer data block so `Atomics` work unchanged. The
-interpreter's current plain-buffer memory is the placeholder this
-replaces.
+**Linear memory and JS views.** `Memory.prototype.buffer` returns a real,
+non-owning `ArrayBuffer` view over the live bytes. `memory.grow` reallocates
+the backing and **detaches** the prior buffer (observable and spec-required),
+then the next `.buffer` access materializes a fresh view. Ordinary imported
+instances share the same `Memory` header, so a grow updates every importer.
+The threads proposal remains out of scope; shared memories retain their
+provisional arena backing until they move to `SharedDataBlock` for non-moving,
+in-place growth.
 
 ## 8. The JS boundary
 
@@ -415,7 +415,9 @@ All engine state lives in **typed internal slots** on `JSObject` /
 `JSFunction`, never `__cynic_*` property keys (AGENTS.md "no engine
 state on user-visible objects"), the same pattern as `iter_helper` /
 `capability_record`. The records are opaque pointers into the realm's
-`wasm_arena` (realm-lifetime, so no GC marking or cleanup):
+`wasm_arena`; mutable Memory/Table buffers and executable mappings have
+explicit teardown because their lifetime and accounting differ from arena
+metadata:
 
 ```
 WebAssembly.Module   → wasm_module slot → *ModuleState   (decoded module)
@@ -427,17 +429,22 @@ WebAssembly.Global   → wasm_global slot → *GlobalState
 exported function    → wasm_export slot → *ExportRecord (instance, index)
 ```
 
-`Memory.buffer` is a non-owning `ArrayBuffer` view over the arena bytes
+`Memory.buffer` is a non-owning `ArrayBuffer` view over the live store backing
 (an `array_buffer_external` flag keeps `deinit` from freeing them);
-`grow` detaches the old buffer and re-materializes a fresh one. An
+each `Memory` registers and roots its materialized host views outside the JS
+property graph. Root traversal reaches instance-owned memories through the
+instance registry and direct-constructor memories through their dedicated
+registry. A successful non-shared grow detaches every registered view before
+execution can re-enter JS, then re-materializes a fresh one on demand; this
+keeps Wasm-instruction growth from leaving an ArrayBuffer pointed at a freed
+backing. An
 imported memory shares the provider's bytes (`Imports.share_memory`), so
 writes propagate both ways; the spectest harness keeps the snapshot
 (dupe) default. `externref` tables / globals and reference round-trips
-through host calls work, GC-reclaimed precisely per §5. Two deliberate
-limitations: a JS-side `grow` of an imported memory isn't observed by the
-importer (the aliased slice header goes stale; propagating it would cost
-a load/store indirection for a rare case), and `v128` is spec-rejected at
-the boundary (a TypeError, §ToJSValue / §ToWebAssemblyValue).
+through host calls work, GC-reclaimed precisely per §5. A JS-side `grow`
+updates the shared `Memory` record and is visible to importing instances.
+`v128` remains spec-rejected at the JS boundary (a TypeError,
+§ToJSValue / §ToWebAssemblyValue).
 
 ## 9. SES / hardening
 
@@ -447,14 +454,39 @@ ordinary hardenable objects with typed slots (no observable engine
 keys). `Memory.buffer` detaching on `memory.grow` stays observable —
 spec-conformant and SES-fine.
 
-The code-constructing surface — `WebAssembly.compile` / `instantiate` /
-`new Module` / `new Instance` — is **gated behind `--allow=wasm`**, the
-WASM analogue of `--allow=eval` (HostEnsureCanCompileWasmBytes); a closed
-gate throws `EvalError`. The two gates are orthogonal: a build can allow
-eval but not wasm, or vice versa. Default-off matches the SES posture of
-refusing runtime code construction unless opted in. `WebAssembly.validate`,
-which only inspects bytes and constructs nothing runnable, is installed
-ungated. See [ses-alignment.md](ses-alignment.md).
+The Cynic CLI enables WebAssembly byte compilation by default. Direct
+embedders retain the narrower HostEnsureCanCompileWasmBytes policy through
+`Realm.allow_wasm_compile`, which defaults to `false`: it guards
+`new WebAssembly.Module(bytes)`, `WebAssembly.compile(bytes)`, and the
+BufferSource overload of `WebAssembly.instantiate`. A refusal is a
+`WebAssembly.CompileError`, matching the
+[WebAssembly JS API hook](https://webassembly.github.io/spec/js-api/#hostensurecancompilewasmbytes)
+and [CSP's Wasm integration](https://www.w3.org/TR/CSP3/#can-compile-wasm-bytes).
+
+The policy does not disable the Wasm object model. `validate`, `Memory`,
+`Table`, `Global`, `Tag`, `Exception`, `new Instance(module)`, and
+`instantiate(module)` remain available when byte compilation is denied. This
+is the same useful split exposed by hosts such as
+[Cloudflare Workers](https://developers.cloudflare.com/workers/runtime-apis/webassembly/):
+dynamic bytes may be refused while trusted/precompiled modules still run.
+It is orthogonal to `allow_eval` and to hardened primordials. The historical
+CLI spelling `--allow=wasm` remains accepted as a compatibility no-op.
+
+Realm resource policy crosses the JS/Wasm boundary. Sarcasm polls the shared
+execution controller at function entry, taken loop backedges, and proper tail
+calls. Spasm carries the same optional controller through its native entry ABI,
+direct links, cold call gates, imported calls, and indirect dispatch, polling
+at function entry and taken structured-loop backedges. A bare embedding takes
+one predictable null branch; a Realm-backed unmetered entry acquire-probes the
+cooperative-interrupt byte and never calls the host while it remains clear.
+Fuel exhaustion and interrupt-hook verdicts flow through the native trap
+channel and latch the same uncatchable termination as Lantern. Wasm arena
+metadata, transient invocation stacks, live Memory/Table backings, and Spasm's
+OS-backed executable reservations are charged through `Heap.charge`, so
+`setMemoryLimit` bounds both store and native-code memory as part of the
+realm/agent budget. Obsolete growth buffers discharge immediately and native
+code discharges after `munmap`. See
+[resource-metering.md](resource-metering.md).
 
 ## 10. Performance posture
 
@@ -466,8 +498,9 @@ the measured design space:
   **best-in-class startup and memory** — the metrics Cynic's edge
   target actually rewards. Threaded dispatch is now in (§3 Decision 3);
   `zig build wasm-bench` is a standalone ReleaseFast harness for the
-  dispatch-bound loop and recursive `fib` so future hot-loop changes
-  stay measured; recorded baselines live in
+  dispatch-bound loop and recursive `fib`; it pairs bare Spasm with the
+  Realm-like clear-wake-byte path in ABBA order so future hot-loop and
+  metering changes stay measured. Recorded baselines live in
   [`wasm-bench-results.md`](../wasm-bench-results.md).
 - Honest trade: `wasm3` is ~2–3× faster as an interpreter via a
   register rewrite + stack caching, paying 2–4× memory and a compile
@@ -486,8 +519,14 @@ the measured design space:
   covers the complete scalar numeric ISA — i32/i64 and f32/f64 ALU,
   comparisons, div/rem with catchable traps, the memory family (incl.
   bulk-memory fill/copy/size), and every int↔float conversion (trapping
-  and saturating) — plus globals and structured control flow, degrading
-  to the interpreter for calls, tables, and SIMD. Pinned in [jit.md](jit.md) §6, with the JS↔wasm
+  and saturating) — plus globals, structured control flow, and same-module
+  calls. Every defined function has a stable per-instance call gate: after
+  lazy compilation a scalar cross-function call tail-enters the target native
+  entry without a helper or code patch; cold or refused targets retain the
+  checked helper boundary. Scalar self-recursion with no declared locals keeps
+  its smaller local link. Imported, indirect, and cross-instance targets retain
+  the checked generic dispatch and its interpreter fallback. Pinned in
+  [jit.md](jit.md) §6, with the JS↔wasm
   call-boundary fast path (per-signature thunks, IC-integrated dispatch)
   in jit.md §7.1 (still deferred).
 - **Narrowing the operand cell was measured and declined** (2026-06).
@@ -515,7 +554,7 @@ the measured design space:
 | Floats / SIMD | float ops, sign-ext, non-trapping float→int, multi-value, v128, relaxed-SIMD — **done** |
 | Cross-module linking | imported funcs/globals/tables/memories, shared tables, cross-instance funcrefs, host functions, start functions — **done** |
 | Conformance | the WebAssembly spec testsuite harness → `wasm-results.md` — **done — 100% of the commands it scores** (the scored set excludes tests for unimplemented proposals) |
-| JS API | `WebAssembly.*` typed-slot objects (`Module`/`Instance`/`Memory`/`Table`/`Global`/`Tag`/`Exception`), `compile`/`instantiate` Promises, imports incl. host functions, error types, i32/i64/f32/f64 marshalling, `--allow=wasm` — **done** (§8), incl. externref-across-JS (tables / globals / host round-trips), precisely GC-reclaimed (§5); v128 is spec-rejected at the boundary |
+| JS API | `WebAssembly.*` typed-slot objects (`Module`/`Instance`/`Memory`/`Table`/`Global`/`Tag`/`Exception`), `compile`/`instantiate` Promises, imports incl. host functions, error types, i32/i64/f32/f64 marshalling, host byte-compilation policy — **done** (§8-9), incl. externref-across-JS (tables / globals / host round-trips), precisely GC-reclaimed (§5); v128 is spec-rejected at the boundary |
 | Exception handling | tag section, `throw` / `throw_ref` / `try_table` (every catch form), `exnref`, cross-frame unwind + precise handler scoping — **done**; JS API `Tag` / `Exception` (`.is` / `.getArg`), tag imports/exports, uncaught wasm → JS `Exception`, GC-rooted reference payloads — **done** (§1, §8); a JS host exception caught by a wasm `try_table` (the JS→wasm direction), with identity-preserving re-raise — **done** (via an instance-set bridge over `call` / `call_indirect` / `return_call` / `return_call_indirect`; PTC semantics honoured — the caller's `try_table` is gone with its frame before the host runs, so a host throw is caught by the grandparent's `try_table`, not bogusly by the popped frame's) |
 
 Conformance is scored against the official WebAssembly spec testsuite

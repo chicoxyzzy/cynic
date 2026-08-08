@@ -66,10 +66,105 @@ pub const Cell = u128;
 /// trapping op reuses — divide-by-zero and memory bounds today.
 ///
 /// `instance` (x5 on entry) is the opaque `*Instance` the compiled body
-/// passes to the call helper when it emits a `call` (§5.4.1); a leaf body
-/// never touches it. It is the 6th argument so the boundary stays
-/// append-only across increments.
-pub const EntryFn = *const fn (locals: [*]Cell, results: [*]Cell, mem_base: [*]u8, mem_len: u64, globals: [*]const *anyopaque, instance: *anyopaque) callconv(.c) u32;
+/// passes to the call helper when it emits a `call` (§5.4.1). `stack_limit`
+/// (x6) is the current thread's native-stack cutoff; the prologue parks it
+/// in x20 so any helper-free same-instance link can compare projected SP
+/// without re-entering Zig. `execution_control` (x7) is null on the ordinary
+/// unmetered path; otherwise it points at the embedding's shared execution
+/// controller and the prologue parks it in x21. All three are append-only
+/// boundary arguments.
+pub const EntryFn = *const fn (
+    locals: [*]Cell,
+    results: [*]Cell,
+    mem_base: [*]u8,
+    mem_len: u64,
+    globals: [*]const *anyopaque,
+    instance: *anyopaque,
+    stack_limit: usize,
+    execution_control: ?*anyopaque,
+) callconv(.c) u32;
+
+/// Stable, per-instance target state for a same-module `call` gate. Generated
+/// callers embed only this heap address, never a lazily-installed code address:
+/// the gate stub loads `entry` on every call and tail-branches when it is hot.
+/// `entry` must stay first because the stub's load is intentionally a fixed
+/// zero-offset AArch64 instruction.
+pub const CallGate = extern struct {
+    entry: ?EntryFn,
+    instance: *anyopaque,
+    func_index: u32,
+    /// Native `Cell` capacity required by this function's locals and operand
+    /// scratch. The cold helper forwards it to the existing checked boundary.
+    frame_cells: u32,
+};
+
+comptime {
+    if (@offsetOf(CallGate, "entry") != 0) @compileError("Spasm CallGate.entry must stay at offset zero");
+}
+
+/// The generated gate accepts the EntryFn ABI. Generated callers additionally
+/// carry the stable gate record in x8, an internal extension beyond the C ABI.
+/// On the hot path it tail-branches to `CallGate.entry`, which receives x0..x7
+/// unchanged and returns directly to the compiled caller.
+pub const CallGateStubFn = *const fn (
+    locals: [*]Cell,
+    results: [*]Cell,
+    mem_base: [*]u8,
+    mem_len: u64,
+    globals: [*]const *anyopaque,
+    instance: *anyopaque,
+    stack_limit: usize,
+    execution_control: ?*anyopaque,
+) callconv(.c) u32;
+
+/// The cold half of `CallGateStubFn`: it retains the existing resolve, stack
+/// guard, local-initialization, lazy-compilation, and fallback semantics until
+/// a target entry becomes available. Kept runtime-wired to avoid an import
+/// cycle from Spasm back into the interpreter.
+pub const CallGateSlowHelperFn = *const fn (
+    buf: [*]Cell,
+    gate: *const CallGate,
+    execution_control: ?*anyopaque,
+) callconv(.c) u32;
+
+const call_gate_entry_offset: u15 = @intCast(@offsetOf(CallGate, "entry"));
+
+/// Install one shared per-instance call gate in the same W^X allocator as the
+/// function bodies. The stub never needs code patching: publishing an EntryFn
+/// is a regular data write to `CallGate.entry`, preserving the allocator's
+/// install-only executable-code discipline.
+pub fn compileCallGateStub(
+    gpa: std.mem.Allocator,
+    ca: *code_alloc.CodeAllocator,
+    slow: CallGateSlowHelperFn,
+) ?CallGateStubFn {
+    if (comptime !supported) return null;
+
+    var m = masm_mod.Masm.init(gpa);
+    defer m.deinit();
+    var cold: masm_mod.Masm.Label = .{};
+    defer cold.deinit(gpa);
+
+    // x7 is the EntryFn execution-controller argument; x8 is the stable
+    // `*const CallGate` supplied by the generated caller. x16 is scratch.
+    // Hot: BR preserves the caller's LR from its BLR into this stub, so the
+    // EntryFn returns directly to that caller with x7 still intact.
+    m.emit(a64.ldrImm(.x16, .x8, call_gate_entry_offset)) catch return null;
+    m.jumpCbz(.x16, &cold) catch return null;
+    m.emit(a64.br(.x16)) catch return null;
+
+    m.bind(&cold) catch return null;
+    // Cold helper ABI: x0 is already the Cell buffer; pass the gate in x1
+    // and the EntryFn controller in x2. Tail-branch so its normal C return
+    // also reaches the compiled caller.
+    m.emit(a64.movReg(.x1, .x8)) catch return null;
+    m.emit(a64.movReg(.x2, .x7)) catch return null;
+    m.movImm64(.x16, @intFromPtr(slow)) catch return null;
+    m.emit(a64.br(.x16)) catch return null;
+
+    const installed = m.install(ca) catch return null;
+    return code_alloc.asFn(CallGateStubFn, installed);
+}
 
 /// Trap status codes returned in w0 (see `EntryFn`). Kept in lockstep
 /// with the `w0` immediates the epilogue's trap exits emit.
@@ -83,6 +178,13 @@ pub const trap_invalid_conversion: u32 = 4;
 /// instance and returned this status so `spasmRun` re-raises it without
 /// the channel having to enumerate each variant.
 pub const trap_pending: u32 = 5;
+/// A helper-free native self-call reached the shared native-stack cutoff.
+/// Unlike `trap_pending`, this is a fixed engine trap and needs no instance
+/// side channel to preserve its concrete error.
+pub const trap_call_stack_exhausted: u32 = 6;
+pub const trap_step_budget_exhausted: u32 = 7;
+pub const trap_execution_interrupted: u32 = 8;
+pub const trap_execution_terminated: u32 = 9;
 
 pub const CompileError = error{
     OutOfMemory,
@@ -92,23 +194,51 @@ pub const CompileError = error{
     BranchOutOfRange,
 };
 
+/// Outlined execution poll called only when EntryFn's x21 controller pointer
+/// is non-null. It returns one of the trap statuses above, keeping policy and
+/// error construction in the embedding while generated code owns state
+/// preservation and propagation through its existing status channel.
+pub const ExecutionPollHelperFn = *const fn (execution_control: *anyopaque) callconv(.c) u32;
+
+/// Stable native view parked in EntryFn's x21. The wake flag is first so the
+/// fast path can acquire-load it with one pointer load; the opaque context is
+/// consumed only by the outlined poll helper.
+pub const NativeExecutionControl = struct {
+    wake_flag: *const std.atomic.Value(bool),
+    poll_context: *anyopaque,
+};
+
 /// The native call helper a compiled `call` (§5.4.1) branches to:
-/// `(instance, func_index, buf) -> status`. It marshals the args staged
-/// in `buf` into a nested `invoke` and writes the results back over
-/// `buf`, returning `trap_ok` or `trap_pending` (the concrete error is
-/// stashed on the instance — see `EntryFn`). The interpreter owns the
-/// body (it re-enters `invoke`); spasm.zig only emits the `blr` to it, so
-/// the address is injected here at startup to keep the module dependency
-/// one-directional (interpreter imports spasm, never the reverse).
-pub const CallHelperFn = *const fn (instance: *anyopaque, func_index: u32, buf: [*]Cell) callconv(.c) u32;
-pub var call_helper: ?CallHelperFn = null;
+/// `(instance, func_index, buf, buf_cells, execution_control) -> status`.
+/// The compiler stages args in `buf`; for a same-module defined callee it
+/// also reserves enough cells for that callee's locals and operand scratch
+/// slots. The helper can then invoke the cached `EntryFn` directly and write
+/// results over `buf` without dropping the caller's effective controller.
+/// Imports and non-emittable callees retain the `invoke` fallback. It returns
+/// `trap_ok` or `trap_pending` (the concrete error is stashed on the instance
+/// — see `EntryFn`). The interpreter owns the dispatch policy, so spasm.zig
+/// only emits the `blr`; the address is injected at startup to keep the module
+/// dependency one-directional (interpreter imports spasm, never the reverse).
+pub const CallHelperFn = *const fn (
+    instance: *anyopaque,
+    func_index: u32,
+    buf: [*]Cell,
+    buf_cells: u32,
+    execution_control: ?*anyopaque,
+) callconv(.c) u32;
 
 /// The native helper a Spasm-compiled `call_indirect` branches to. Takes
 /// the declared type index, the table index, and the runtime element index
 /// (popped from the operand stack); resolves + type-checks the element,
 /// then dispatches like a direct call. Same trap channel as `CallHelperFn`.
-pub const CallIndirectHelperFn = *const fn (instance: *anyopaque, type_index: u32, table_index: u32, elem_index: u32, buf: [*]Cell) callconv(.c) u32;
-pub var call_indirect_helper: ?CallIndirectHelperFn = null;
+pub const CallIndirectHelperFn = *const fn (
+    instance: *anyopaque,
+    type_index: u32,
+    table_index: u32,
+    elem_index: u32,
+    buf: [*]Cell,
+    execution_control: ?*anyopaque,
+) callconv(.c) u32;
 
 /// The native helper a Spasm-compiled `memory.grow` (§4.4.7) branches to:
 /// `(instance, mem_index, delta_pages, out_baselen) -> old_pages`. It grows
@@ -121,7 +251,6 @@ pub var call_indirect_helper: ?CallIndirectHelperFn = null;
 /// module dependency one-directional (interpreter imports spasm, never the
 /// reverse).
 pub const MemGrowHelperFn = *const fn (instance: *anyopaque, mem_index: u32, delta_pages: u64, out_baselen: [*]u64) callconv(.c) i64;
-pub var mem_grow_helper: ?MemGrowHelperFn = null;
 
 /// The native helper a Spasm-compiled `memory.init` (§4.4.7) branches to:
 /// `(instance, data_index, mem_index, dst, src, len) -> status`. It copies
@@ -135,21 +264,18 @@ pub var mem_grow_helper: ?MemGrowHelperFn = null;
 /// `blr`, so the address is injected at startup to keep the module dependency
 /// one-directional (interpreter imports spasm, never the reverse).
 pub const MemInitHelperFn = *const fn (instance: *anyopaque, data_index: u32, mem_index: u32, dst: u32, src: u32, len: u32) callconv(.c) u32;
-pub var mem_init_helper: ?MemInitHelperFn = null;
 
 /// The native helper a Spasm-compiled `data.drop` (§4.4.7) branches to:
 /// `(instance, data_index) -> void`. It marks the passive data segment dropped
 /// and clears its bytes, mirroring the interpreter's sub-9 arm. It cannot trap.
 /// Injected at startup like the other helpers (one-directional import).
 pub const DataDropHelperFn = *const fn (instance: *anyopaque, data_index: u32) callconv(.c) void;
-pub var data_drop_helper: ?DataDropHelperFn = null;
 
 /// The native helper a Spasm-compiled `table.size` (§4.4.x) branches to:
 /// `(instance, table_index) -> elem_count`. It returns the current element
 /// count of the table — the i32 the op pushes; no reference crosses the
 /// operand stack. It cannot trap. Injected at startup like the other helpers.
 pub const TableSizeHelperFn = *const fn (instance: *anyopaque, table_index: u32) callconv(.c) u32;
-pub var table_size_helper: ?TableSizeHelperFn = null;
 
 /// The native helper a Spasm-compiled `table.copy` (§4.4.x) branches to:
 /// `(instance, dst_table, src_table, dst, src, len) -> status`. It copies
@@ -161,7 +287,6 @@ pub var table_size_helper: ?TableSizeHelperFn = null;
 /// out-of-bounds access (the concrete `OutOfBoundsTableAccess` is stashed on
 /// the instance — see `EntryFn`). Injected at startup (one-directional import).
 pub const TableCopyHelperFn = *const fn (instance: *anyopaque, dst_table: u32, src_table: u32, dst: u32, src: u32, len: u32) callconv(.c) u32;
-pub var table_copy_helper: ?TableCopyHelperFn = null;
 
 /// The native helper a Spasm-compiled `table.init` (§4.4.x) branches to:
 /// `(instance, elem_index, table_index, dst, src, len) -> status`. It copies
@@ -172,14 +297,12 @@ pub var table_copy_helper: ?TableCopyHelperFn = null;
 /// `OutOfBoundsTableAccess` is stashed on the instance — see `EntryFn`).
 /// Injected at startup (one-directional import).
 pub const TableInitHelperFn = *const fn (instance: *anyopaque, elem_index: u32, table_index: u32, dst: u32, src: u32, len: u32) callconv(.c) u32;
-pub var table_init_helper: ?TableInitHelperFn = null;
 
 /// The native helper a Spasm-compiled `elem.drop` (§4.4.x) branches to:
 /// `(instance, elem_index) -> void`. It marks the passive element segment
 /// dropped and clears its values, mirroring the interpreter's sub-13 arm. It
 /// cannot trap. Injected at startup like the other helpers.
 pub const ElemDropHelperFn = *const fn (instance: *anyopaque, elem_index: u32) callconv(.c) void;
-pub var elem_drop_helper: ?ElemDropHelperFn = null;
 
 /// The native helper a Spasm-compiled `table.get` (§4.4.x, opcode 0x25)
 /// branches to: `(instance, table_index, index, out_cell) -> status`. It
@@ -191,7 +314,6 @@ pub var elem_drop_helper: ?ElemDropHelperFn = null;
 /// the operand stack at runtime, so it travels through `out_cell` rather than
 /// a GP register. Injected at startup (one-directional import).
 pub const TableGetHelperFn = *const fn (instance: *anyopaque, table_index: u32, index: u32, out_cell: [*]u128) callconv(.c) u32;
-pub var table_get_helper: ?TableGetHelperFn = null;
 
 /// The native helper a Spasm-compiled `table.set` (§4.4.x, opcode 0x26)
 /// branches to: `(instance, table_index, index, ref_slot) -> status`. It
@@ -204,7 +326,6 @@ pub var table_get_helper: ?TableGetHelperFn = null;
 /// register, just like `table.get`'s `out_cell`. Injected at startup
 /// (one-directional import).
 pub const TableSetHelperFn = *const fn (instance: *anyopaque, table_index: u32, index: u32, ref_slot: [*]const u128) callconv(.c) u32;
-pub var table_set_helper: ?TableSetHelperFn = null;
 
 /// The native helper a Spasm-compiled `table.grow` (§4.4.x, 0xFC sub 15)
 /// branches to: `(instance, table_index, init_slot, delta) -> old_size`. It
@@ -218,7 +339,6 @@ pub var table_set_helper: ?TableSetHelperFn = null;
 /// compile-time `ref.func`/`ref.null`). Injected at startup (one-directional
 /// import).
 pub const TableGrowHelperFn = *const fn (instance: *anyopaque, table_index: u32, init_slot: [*]const u128, delta: u32) callconv(.c) i64;
-pub var table_grow_helper: ?TableGrowHelperFn = null;
 
 /// The native helper a Spasm-compiled `table.fill` (§4.4.x, 0xFC sub 17)
 /// branches to: `(instance, table_index, index, val_slot, count) -> status`. It
@@ -230,7 +350,25 @@ pub var table_grow_helper: ?TableGrowHelperFn = null;
 /// cross the operand stack directly. Injected at startup (one-directional
 /// import).
 pub const TableFillHelperFn = *const fn (instance: *anyopaque, table_index: u32, index: u32, val_slot: [*]const u128, count: u32) callconv(.c) u32;
-pub var table_fill_helper: ?TableFillHelperFn = null;
+
+/// Native boundaries embedded into one compiled body. Passed by value so
+/// concurrent realms never race on process-global helper slots while lazily
+/// compiling different instances.
+pub const Helpers = struct {
+    call: ?CallHelperFn = null,
+    call_indirect: ?CallIndirectHelperFn = null,
+    mem_grow: ?MemGrowHelperFn = null,
+    mem_init: ?MemInitHelperFn = null,
+    data_drop: ?DataDropHelperFn = null,
+    table_size: ?TableSizeHelperFn = null,
+    table_copy: ?TableCopyHelperFn = null,
+    table_init: ?TableInitHelperFn = null,
+    elem_drop: ?ElemDropHelperFn = null,
+    table_get: ?TableGetHelperFn = null,
+    table_set: ?TableSetHelperFn = null,
+    table_grow: ?TableGrowHelperFn = null,
+    table_fill: ?TableFillHelperFn = null,
+};
 
 // ── wasm opcodes this increment understands ─────────────────────────
 const op_end: u8 = 0x0b;
@@ -503,6 +641,15 @@ const Loc = union(enum) {
 /// (§5.4.2 — the `.ref` Loc; see `refSlotOff`). The operand stack is at most
 /// this deep, so at most this many references are simultaneously live.
 pub const operand_reg_count = 7;
+
+/// Cells a native `EntryFn` needs for its locals and depth-keyed reference / SIMD
+/// scratch slots, or null if the count overflows. `results` may alias this
+/// buffer: compiled bodies materialize results only after consuming locals.
+pub fn nativeFrameCellCount(func: *const CompiledFunc, ftype: *const FuncType) ?usize {
+    const locals_and_scratch = std.math.add(usize, func.local_types.len, operand_reg_count) catch return null;
+    return @max(locals_and_scratch, ftype.results.len);
+}
+
 fn regForDepth(d: usize) a64.Reg {
     return @enumFromInt(@as(u5, @intCast(9 + d)));
 }
@@ -560,6 +707,84 @@ const Ctrl = struct {
 /// shallower than this.
 const max_ctrl_depth = 64;
 
+/// AArch64 `BL` carries a signed imm26 word displacement: a local backward
+/// call can reach at most 2^25 instruction words. Oversized user-supplied
+/// bodies tier down rather than relying on a narrowing cast in the assembler.
+const max_local_call_distance_bytes: usize = (@as(usize, 1) << 25) * @sizeOf(u32);
+
+/// Every EntryFn pushes x21, x20, and the x19/LR pair before executing its body.
+/// A native link's stack check includes this target-side fixed prologue as well
+/// as the caller's staging frame.
+const native_entry_prologue_bytes: u12 = 48;
+
+/// Emit the common Spasm execution safe point. A bare embedding keeps x21
+/// null and pays one predictable branch. A Realm-backed unarmed controller
+/// additionally acquire-loads its wake byte; the armed path spills the five
+/// persistent caller-saved boundary registers and only the operand-bank
+/// registers that are live at this program point, calls the embedding's
+/// shared poll, and restores on success. A non-zero status releases the
+/// temporary spill frame and flows through the ordinary EntryFn epilogue.
+fn emitExecutionPoll(
+    m: *masm_mod.Masm,
+    gpa: std.mem.Allocator,
+    stack: []const Loc,
+    epilogue: *masm_mod.Masm.Label,
+    poll_helper: ExecutionPollHelperFn,
+) CompileError!void {
+    var done: masm_mod.Masm.Label = .{};
+    var poll_ok: masm_mod.Masm.Label = .{};
+    defer done.deinit(gpa);
+    defer poll_ok.deinit(gpa);
+
+    try m.jumpCbz(.x21, &done);
+    try m.emit(a64.ldrImm(
+        .x16,
+        .x21,
+        @intCast(@offsetOf(NativeExecutionControl, "wake_flag")),
+    ));
+    try m.emit(a64.ldarb(.x16, .x16));
+    try m.jumpCbz(.x16, &done);
+
+    const spill_off: u15 = 0;
+    const op_spill_off: u15 = spill_off + 40;
+    const raw_frame = @as(usize, op_spill_off) + stack.len * 8;
+    const framebytes: u12 = @intCast((raw_frame + 15) & ~@as(usize, 15));
+
+    try m.emit(a64.subSpImm(framebytes));
+    try m.emit(a64.addRegSp(.x6, 0));
+    try m.emit(a64.strImm(.x0, .x6, spill_off));
+    try m.emit(a64.strImm(.x1, .x6, spill_off + 8));
+    try m.emit(a64.strImm(.x2, .x6, spill_off + 16));
+    try m.emit(a64.strImm(.x3, .x6, spill_off + 24));
+    try m.emit(a64.strImm(.x4, .x6, spill_off + 32));
+    for (stack, 0..) |loc, d| {
+        if (loc != .reg) continue;
+        const off: u15 = @intCast(op_spill_off + d * 8);
+        try m.emit(a64.strImm(regForDepth(d), .x6, off));
+    }
+
+    try m.emit(a64.movReg(.x0, .x21));
+    try m.callAbs(.x16, @intFromPtr(poll_helper));
+    try m.jumpCbz(.x0, &poll_ok);
+    try m.emit(a64.addSpImm(framebytes));
+    try m.jump(epilogue);
+
+    try m.bind(&poll_ok);
+    try m.emit(a64.addRegSp(.x6, 0));
+    try m.emit(a64.ldrImm(.x0, .x6, spill_off));
+    try m.emit(a64.ldrImm(.x1, .x6, spill_off + 8));
+    try m.emit(a64.ldrImm(.x2, .x6, spill_off + 16));
+    try m.emit(a64.ldrImm(.x3, .x6, spill_off + 24));
+    try m.emit(a64.ldrImm(.x4, .x6, spill_off + 32));
+    for (stack, 0..) |loc, d| {
+        if (loc != .reg) continue;
+        const off: u15 = @intCast(op_spill_off + d * 8);
+        try m.emit(a64.ldrImm(regForDepth(d), .x6, off));
+    }
+    try m.emit(a64.addSpImm(framebytes));
+    try m.bind(&done);
+}
+
 /// Compile `func` to native code, or return `null` when the body uses
 /// anything this increment can't emit yet — exactly Bistromath's
 /// `dont_compile` contract: degrading to the interpreter is always
@@ -571,6 +796,12 @@ pub fn compile(
     func: *const CompiledFunc,
     ftype: *const FuncType,
     module: *const Module,
+    funcs: []const CompiledFunc,
+    func_index: u32,
+    call_gates: []const CallGate,
+    call_gate_stub: ?CallGateStubFn,
+    helpers: Helpers,
+    execution_poll_helper: ExecutionPollHelperFn,
 ) CompileError!?EntryFn {
     if (comptime !supported) return null;
     // The operand-stack bank is fixed (regForDepth); a deeper body
@@ -592,16 +823,27 @@ pub fn compile(
     var m = masm_mod.Masm.init(gpa);
     defer m.deinit();
 
+    // A locally linked self-call branches back here with `BL`. Non-self calls
+    // use the separately installed stable gate stub below, so no function body
+    // embeds another lazily-installed code address.
+    var entry: masm_mod.Masm.Label = .{};
+    defer entry.deinit(gpa);
+    try m.bind(&entry);
+
     // Non-leaf prologue (§5.4.1 — Spasm now emits `call`). A compiled body
-    // may `blr` the call helper, which clobbers the link register x30, so
-    // save it; and x5 carries the `*Instance` argument the helper needs,
-    // which a `blr` also clobbers, so move it into the callee-saved x19
-    // and keep it live for the body's duration. The pair push keeps SP
-    // 16-byte aligned (AAPCS64). Every return path — the normal epilogue
-    // and each trap exit — pops this frame before `ret`. Gating the
-    // prologue on whether the body actually contains a `call` is a
-    // follow-up optimization; emitting it always is correct (a leaf body
-    // just pushes/pops a pair it never reads).
+    // may `blr` the call helper or `bl` its local entry, which clobbers the
+    // link register x30. x5 carries the `*Instance` argument, while x6 holds
+    // the host-derived stack cutoff for a linked self-call; park both in
+    // callee-saved x19/x20. x7 carries the optional execution controller and
+    // is parked in callee-saved x21. Each 16-byte push keeps SP
+    // AAPCS64-aligned. Every return path pops all three frames before `ret`.
+    // Gating this on the
+    // body's calls is a later size optimization; emitting it uniformly keeps
+    // the ABI simple and correct.
+    try m.emit(a64.strPreIdxSp(.x21, -16));
+    try m.emit(a64.movReg(.x21, .x7));
+    try m.emit(a64.strPreIdxSp(.x20, -16));
+    try m.emit(a64.movReg(.x20, .x6));
     try m.emit(a64.stpPreIdxSp(.x19, .lr, -16));
     try m.emit(a64.movReg(.x19, .x5));
 
@@ -609,7 +851,8 @@ pub fn compile(
     // depth's register on demand. The boundary args: x0 = locals
     // (param+local cells), x1 = results, x2 = mem_base, x3 = mem_len,
     // x4 = globals base (an array of *Global). All five stay live across
-    // the body; codegen scratch is x5/x16/x17.
+    // the body; x19/x20 retain the instance/stack-limit boundary values and
+    // codegen scratch is x5/x6/x16/x17.
     var stack: [operand_reg_count]Loc = undefined;
     var sp: usize = 0;
 
@@ -633,6 +876,7 @@ pub fn compile(
     var trap_overflow: masm_mod.Masm.Label = .{};
     var trap_oob: masm_mod.Masm.Label = .{};
     var trap_invalid: masm_mod.Masm.Label = .{};
+    var trap_stack_exhausted: masm_mod.Masm.Label = .{};
     // §5.4.1 — the shared epilogue every return path jumps to. It pops
     // the non-leaf frame (the prologue's `stp`) and `ret`s, returning w0
     // unchanged. A trapping `call` lands here too — after the call arm
@@ -643,11 +887,17 @@ pub fn compile(
     defer trap_overflow.deinit(gpa);
     defer trap_oob.deinit(gpa);
     defer trap_invalid.deinit(gpa);
+    defer trap_stack_exhausted.deinit(gpa);
     defer epilogue.deinit(gpa);
     var trap_div0_used = false;
     var trap_overflow_used = false;
     var trap_oob_used = false;
     var trap_invalid_used = false;
+    var trap_stack_exhausted_used = false;
+
+    // Function-entry safe point. No operand is live yet, so the armed path
+    // only preserves the persistent EntryFn boundary registers.
+    try emitExecutionPoll(&m, gpa, stack[0..sp], &epilogue, execution_poll_helper);
 
     const body = func.body;
     var i: usize = 0;
@@ -826,7 +1076,7 @@ pub fn compile(
                 // then reload. The out-cell pointer must be computed from x0
                 // (the live locals base) BEFORE x0 is overwritten with the
                 // instance, so it is materialized into x3 just before the call.
-                if (table_get_helper == null) return null; // helper not wired
+                if (helpers.table_get == null) return null; // helper not wired
                 const table_idx = readUleb32(body, &i) orelse return null;
                 if (sp < 1) return null;
                 const below = sp - 1; // operands beneath the index
@@ -886,7 +1136,7 @@ pub fn compile(
                 try m.emit(a64.movReg(.x2, idx_reg));
                 try m.emit(a64.movReg(.x0, .x19));
                 try m.movImm64(.x1, table_idx);
-                try m.callAbs(.x16, @intFromPtr(table_get_helper.?));
+                try m.callAbs(.x16, @intFromPtr(helpers.table_get.?));
 
                 // Trap status in w0; an OOB releases the frame and falls into
                 // the shared epilogue (which pops the prologue frame and
@@ -940,7 +1190,7 @@ pub fn compile(
                 // callconv(.c) helper clobbers x0..x18 + x6, so spill the
                 // boundary registers + the live register below-operands, call,
                 // then reload.
-                if (table_set_helper == null) return null; // helper not wired
+                if (helpers.table_set == null) return null; // helper not wired
                 const table_idx = readUleb32(body, &i) orelse return null;
                 if (sp < 2) return null;
                 const below = sp - 2; // operands beneath the index
@@ -1006,7 +1256,7 @@ pub fn compile(
                 try m.emit(a64.movReg(.x2, idx_reg));
                 try m.emit(a64.movReg(.x0, .x19));
                 try m.movImm64(.x1, table_idx);
-                try m.callAbs(.x16, @intFromPtr(table_set_helper.?));
+                try m.callAbs(.x16, @intFromPtr(helpers.table_set.?));
 
                 // Trap status in w0; an OOB releases the frame and falls into
                 // the shared epilogue (which pops the prologue frame and
@@ -2033,7 +2283,7 @@ pub fn compile(
                 // this arm produces) — degrade rather than special-case it.
                 if (mem_idx >= module.mems.len) return null;
                 if (module.mems[mem_idx].limits.is_64) return null;
-                if (mem_grow_helper == null) return null; // helper not wired
+                if (helpers.mem_grow == null) return null; // helper not wired
                 if (sp < 1) return null; // need the delta operand
                 // `delta` is the top (and only) arg; operands beneath survive.
                 const below = sp - 1;
@@ -2086,7 +2336,7 @@ pub fn compile(
                 try m.movImm64(.x1, mem_idx);
                 try m.emit(a64.movReg(.x2, delta_reg));
                 try m.emit(a64.addRegSp(.x3, out_off)); // x3 = SP + 0
-                try m.callAbs(.x16, @intFromPtr(mem_grow_helper.?));
+                try m.callAbs(.x16, @intFromPtr(helpers.mem_grow.?));
 
                 // x0 now holds old_pages (i64), x6 is clobbered. Capture the
                 // result FIRST: a 32-bit move zero-extends the i32 (or the
@@ -2240,7 +2490,7 @@ pub fn compile(
                     // x6, so spill the boundary registers + the live register
                     // below-operands, call, then reload. memory.init never
                     // resizes memory, so the reloaded x2/x3 are unchanged.
-                    if (mem_init_helper == null) return null; // helper not wired
+                    if (helpers.mem_init == null) return null; // helper not wired
                     const data_idx = readUleb32(body, &i) orelse return null;
                     const mem_idx = readUleb32(body, &i) orelse return null;
                     if (mem_idx != 0) return null; // single memory only
@@ -2299,7 +2549,7 @@ pub fn compile(
                     try m.emit(a64.movReg(.x0, .x19));
                     try m.movImm64(.x1, data_idx);
                     try m.movImm64(.x2, mem_idx);
-                    try m.callAbs(.x16, @intFromPtr(mem_init_helper.?));
+                    try m.callAbs(.x16, @intFromPtr(helpers.mem_init.?));
 
                     // Trap status in w0; an OOB releases the frame and falls
                     // into the shared epilogue (which pops the prologue frame
@@ -2337,7 +2587,7 @@ pub fn compile(
                     // trap. Every live operand (depths 0..sp) must survive the
                     // callconv(.c) helper, so below == sp: spill the register
                     // ones plus the boundary regs x0..x4, call, reload.
-                    if (data_drop_helper == null) return null; // helper not wired
+                    if (helpers.data_drop == null) return null; // helper not wired
                     const data_idx = readUleb32(body, &i) orelse return null;
                     const below = sp;
                     if (below > operand_reg_count) return null;
@@ -2368,7 +2618,7 @@ pub fn compile(
                     // helper returns void and cannot trap, so no status check.
                     try m.emit(a64.movReg(.x0, .x19));
                     try m.movImm64(.x1, data_idx);
-                    try m.callAbs(.x16, @intFromPtr(data_drop_helper.?));
+                    try m.callAbs(.x16, @intFromPtr(helpers.data_drop.?));
 
                     try m.emit(a64.addRegSp(.x6, 0));
                     try m.emit(a64.ldrImm(.x0, .x6, spill_off));
@@ -2395,7 +2645,7 @@ pub fn compile(
                     // callconv(.c) helper clobbers x0..x18 + x6, so spill the
                     // boundary registers + the live register below-operands,
                     // call, capture w0 into the result slot, then reload.
-                    if (table_size_helper == null) return null; // helper not wired
+                    if (helpers.table_size == null) return null; // helper not wired
                     const table_idx = readUleb32(body, &i) orelse return null;
                     // Pushes a result, consumes nothing.
                     const below = sp;
@@ -2434,7 +2684,7 @@ pub fn compile(
                     // Helper ABI: x0 = instance (x19), x1 = table index.
                     try m.emit(a64.movReg(.x0, .x19));
                     try m.movImm64(.x1, table_idx);
-                    try m.callAbs(.x16, @intFromPtr(table_size_helper.?));
+                    try m.callAbs(.x16, @intFromPtr(helpers.table_size.?));
 
                     // x0 holds the element count (u32), x6 is clobbered.
                     // Capture the result FIRST: a 32-bit move zero-extends the
@@ -2470,7 +2720,7 @@ pub fn compile(
                     // x6, so spill the boundary registers + the live register
                     // below-operands, call, then reload. table.copy never
                     // resizes memory, so the reloaded x2/x3 are unchanged.
-                    if (table_copy_helper == null) return null; // helper not wired
+                    if (helpers.table_copy == null) return null; // helper not wired
                     const dst_t = readUleb32(body, &i) orelse return null;
                     const src_t = readUleb32(body, &i) orelse return null;
                     if (sp < 3) return null;
@@ -2517,7 +2767,7 @@ pub fn compile(
                     try m.emit(a64.movReg(.x0, .x19));
                     try m.movImm64(.x1, dst_t);
                     try m.movImm64(.x2, src_t);
-                    try m.callAbs(.x16, @intFromPtr(table_copy_helper.?));
+                    try m.callAbs(.x16, @intFromPtr(helpers.table_copy.?));
 
                     // Trap status in w0; an OOB releases the frame and falls
                     // into the shared epilogue (which pops the prologue frame
@@ -2553,7 +2803,7 @@ pub fn compile(
                     // `tableInit` bounds-check + copy and traps OOB through the
                     // shared channel. No reference crosses the operand stack.
                     // The frame shuffle mirrors `memory.init` exactly.
-                    if (table_init_helper == null) return null; // helper not wired
+                    if (helpers.table_init == null) return null; // helper not wired
                     const elem_idx = readUleb32(body, &i) orelse return null;
                     const table_idx = readUleb32(body, &i) orelse return null;
                     if (sp < 3) return null;
@@ -2597,7 +2847,7 @@ pub fn compile(
                     try m.emit(a64.movReg(.x0, .x19));
                     try m.movImm64(.x1, elem_idx);
                     try m.movImm64(.x2, table_idx);
-                    try m.callAbs(.x16, @intFromPtr(table_init_helper.?));
+                    try m.callAbs(.x16, @intFromPtr(helpers.table_init.?));
 
                     var init_ok: masm_mod.Masm.Label = .{};
                     defer init_ok.deinit(gpa);
@@ -2629,7 +2879,7 @@ pub fn compile(
                     // trap. Every live operand (depths 0..sp) must survive the
                     // callconv(.c) helper, so below == sp: spill the register
                     // ones plus the boundary regs x0..x4, call, reload.
-                    if (elem_drop_helper == null) return null; // helper not wired
+                    if (helpers.elem_drop == null) return null; // helper not wired
                     const elem_idx = readUleb32(body, &i) orelse return null;
                     const below = sp;
                     if (below > operand_reg_count) return null;
@@ -2661,7 +2911,7 @@ pub fn compile(
                     // status check.
                     try m.emit(a64.movReg(.x0, .x19));
                     try m.movImm64(.x1, elem_idx);
-                    try m.callAbs(.x16, @intFromPtr(elem_drop_helper.?));
+                    try m.callAbs(.x16, @intFromPtr(helpers.elem_drop.?));
 
                     try m.emit(a64.addRegSp(.x6, 0));
                     try m.emit(a64.ldrImm(.x0, .x6, spill_off));
@@ -2695,7 +2945,7 @@ pub fn compile(
                     // `memory.grow`'s result-capture form: a callconv(.c) helper
                     // clobbers x0..x18 + x6, so spill the boundary registers +
                     // the live register below-operands, call, capture w0, reload.
-                    if (table_grow_helper == null) return null; // helper not wired
+                    if (helpers.table_grow == null) return null; // helper not wired
                     const table_idx = readUleb32(body, &i) orelse return null;
                     // A table64's result is i64, not i32 (a different width than
                     // this arm produces) — degrade rather than special-case it,
@@ -2754,7 +3004,7 @@ pub fn compile(
                     try m.emit(a64.movReg(.x3, delta_reg));
                     try m.emit(a64.movReg(.x0, .x19));
                     try m.movImm64(.x1, table_idx);
-                    try m.callAbs(.x16, @intFromPtr(table_grow_helper.?));
+                    try m.callAbs(.x16, @intFromPtr(helpers.table_grow.?));
 
                     // x0 holds old_size (i64), or -1 (0xFFFF_FFFF_FFFF_FFFF) on
                     // failure; x6 is clobbered. Capture the result FIRST: a
@@ -2795,7 +3045,7 @@ pub fn compile(
                     // a callconv(.c) helper clobbers x0..x18 + x6, so spill the
                     // boundary registers + the live register below-operands,
                     // call, reload. table.fill never resizes memory.
-                    if (table_fill_helper == null) return null; // helper not wired
+                    if (helpers.table_fill == null) return null; // helper not wired
                     const table_idx = readUleb32(body, &i) orelse return null;
                     if (sp < 3) return null;
                     const below = sp - 3; // operands beneath index/val/count
@@ -2850,7 +3100,7 @@ pub fn compile(
                     try m.emit(a64.movReg(.x4, cnt_reg));
                     try m.emit(a64.movReg(.x0, .x19));
                     try m.movImm64(.x1, table_idx);
-                    try m.callAbs(.x16, @intFromPtr(table_fill_helper.?));
+                    try m.callAbs(.x16, @intFromPtr(helpers.table_fill.?));
 
                     // Trap status in w0; an OOB releases the frame and falls into
                     // the shared epilogue.
@@ -3058,6 +3308,9 @@ pub fn compile(
                     const r = try materialize(&m, stack[d], d);
                     stack[d] = .{ .reg = r };
                 }
+                if (target.kind == .loop) {
+                    try emitExecutionPoll(&m, gpa, stack[0..sp], &epilogue, execution_poll_helper);
+                }
                 try m.jump(&target.label);
                 // The rest of the current frame is dead (§3.3 — code
                 // after an unconditional branch is unreachable until the
@@ -3118,7 +3371,18 @@ pub fn compile(
                 // The condition lands in its own register, disjoint and
                 // above the carried set; branch when non-zero.
                 const rc = try materialize(&m, cond, sp);
-                try m.jumpCbnz(rc, &target.label);
+                if (target.kind == .loop) {
+                    // Poll only on the taken backedge. The false path skips
+                    // both the outlined helper and the unconditional jump.
+                    var not_taken: masm_mod.Masm.Label = .{};
+                    defer not_taken.deinit(gpa);
+                    try m.jumpCbz(rc, &not_taken);
+                    try emitExecutionPoll(&m, gpa, stack[0..sp], &epilogue, execution_poll_helper);
+                    try m.jump(&target.label);
+                    try m.bind(&not_taken);
+                } else {
+                    try m.jumpCbnz(rc, &target.label);
+                }
             },
             op_br_table => {
                 // §3.3.8 — pop the index and dispatch: a linear compare
@@ -3139,12 +3403,24 @@ pub fn compile(
                     if (t.branch_arity != 0) return null;
                     if (j > std.math.maxInt(u12)) return null; // cmpImm imm12 ceiling
                     try m.emit(a64.cmpImm(index_reg, @intCast(j), false));
-                    try m.jumpCond(.eq, &t.label);
+                    if (t.kind == .loop) {
+                        var next_case: masm_mod.Masm.Label = .{};
+                        defer next_case.deinit(gpa);
+                        try m.jumpCond(.ne, &next_case);
+                        try emitExecutionPoll(&m, gpa, stack[0..sp], &epilogue, execution_poll_helper);
+                        try m.jump(&t.label);
+                        try m.bind(&next_case);
+                    } else {
+                        try m.jumpCond(.eq, &t.label);
+                    }
                 }
                 const def = readUleb32(body, &i) orelse return null;
                 if (def >= ctrl_len) return null;
                 const dt = &ctrl[ctrl_len - 1 - def];
                 if (dt.branch_arity != 0) return null;
+                if (dt.kind == .loop) {
+                    try emitExecutionPoll(&m, gpa, stack[0..sp], &epilogue, execution_poll_helper);
+                }
                 try m.jump(&dt.label);
                 // An unconditional multi-branch — the rest of the current
                 // frame is unreachable. Close it exactly as `br` does.
@@ -3162,14 +3438,13 @@ pub fn compile(
                 ctrl_len -= 1;
             },
             op_call => {
-                // §5.4.1 call — the first non-leaf Spasm op. Read the
-                // callee index and its signature, marshal the top
-                // `nparams` operand-stack values into a per-frame buffer,
-                // `blr` the native call helper (which re-enters `invoke`),
-                // then load the `nresults` result cells back onto the
-                // operand stack. A non-zero status from the helper (a
-                // nested trap) is propagated through the shared epilogue.
-                if (call_helper == null) return null; // helper not wired
+                // §5.4.1 call — read the callee index and its signature,
+                // marshal the top `nparams` operand-stack values into a
+                // per-frame buffer, then enter either a same-instance native
+                // gate or the checked call helper. A defined callee gets a
+                // buffer large enough for its native locals/scratch frame;
+                // imports and refused bodies retain `invoke`. A non-zero
+                // status (a nested trap) flows through the shared epilogue.
                 const fidx = readUleb32(body, &i) orelse return null;
                 const callee = calleeFuncType(module, fidx) orelse return null;
                 const nparams: usize = callee.params.len;
@@ -3179,6 +3454,8 @@ pub fn compile(
                 // is zero-extended). A v128/ref operand degrades.
                 for (callee.params) |t| if (t != .i32 and t != .i64 and t != .f32 and t != .f64) return null;
                 for (callee.results) |t| if (t != .i32 and t != .i64 and t != .f32 and t != .f64) return null;
+                const direct_self = directSelfCallEligible(func_index, fidx, func, ftype);
+                const static_callee = definedCallee(module, funcs, fidx);
                 // Operands live *below* the args (a call whose result feeds
                 // a pending operand) must survive the helper call: its
                 // callconv(.c) clobbers the whole operand bank (x9..x15) and
@@ -3194,18 +3471,51 @@ pub fn compile(
                 if (below + nresults > operand_reg_count) return null;
 
                 // Per-frame buffer, three regions:
-                //   [0 .. bufcells*16)         args-in / results-out cells
+                //   [0 .. bufcells*16)         args-in / results-out cells,
+                //                               and, for a defined callee,
+                //                               its native locals/scratch
                 //   [spill_off .. +40)         the five caller-saved boundary
                 //                              registers x0..x4
                 //   [op_spill_off .. +below*8) the live operands below the
                 //                              args, one 8-byte slot each
                 // Round the whole reservation up to a 16-byte multiple
                 // (AAPCS64 SP alignment).
-                const bufcells = @max(nparams, nresults);
+                const base_bufcells = @max(nparams, nresults);
+                // A direct same-module callee can reuse this native-stack
+                // buffer as both its locals and results. An import has no
+                // local layout visible at compile time, so it deliberately
+                // keeps the compact generic buffer and the helper falls back
+                // to `invoke`.
+                var bufcells = base_bufcells;
+                var direct_self_link = false;
+                var direct_gate: ?DirectCallGate = null;
+                if (static_callee) |candidate_callee| {
+                    const candidate = @max(base_bufcells, candidate_callee.frame_cells);
+                    if (callFrameBytes(candidate, below)) |_| {
+                        bufcells = candidate;
+                        if (direct_self) {
+                            direct_self_link = true;
+                        } else if (call_gate_stub != null) {
+                            if (callGateFor(call_gates, candidate_callee)) |gate| {
+                                direct_gate = .{ .gate = gate, .callee = candidate_callee };
+                            }
+                        }
+                    }
+                }
+                const framebytes = callFrameBytes(bufcells, below) orelse return null;
+                var native_link = direct_self_link or direct_gate != null;
+                const native_stack_bytes: ?u12 = if (native_link) nativeLinkStackBytes(framebytes) else null;
+                if (native_link and native_stack_bytes == null) {
+                    // The planned frame is too large to represent in the
+                    // single-instruction projected-SP check. Preserve safety
+                    // by retaining the existing checked helper boundary.
+                    direct_self_link = false;
+                    direct_gate = null;
+                    native_link = false;
+                }
+                if (!native_link and helpers.call == null) return null; // no checked fallback wired
                 const spill_off: u15 = @intCast(bufcells * @sizeOf(Cell));
                 const op_spill_off: u15 = spill_off + 40;
-                const raw_frame = @as(usize, bufcells) * @sizeOf(Cell) + 40 + below * 8;
-                const framebytes: u12 = @intCast((raw_frame + 15) & ~@as(usize, 15));
 
                 // Materialize the args into their slot registers (a
                 // `.const_i32` arg becomes regForDepth(below+k); a `.reg` arg
@@ -3216,6 +3526,19 @@ pub fn compile(
                 {
                     var k: usize = 0;
                     while (k < nparams) : (k += 1) _ = try materialize(&m, stack[below + k], below + k);
+                }
+
+                // Every native link must enforce the same stack-safety
+                // contract as `spasmCall` before reserving another native
+                // frame. x20 holds the per-entry cutoff passed by
+                // `runSpasmEntry`; SP grows down, so SP <= cutoff traps.
+                if (native_link) {
+                    const projected_stack = native_stack_bytes orelse return null;
+                    trap_stack_exhausted_used = true;
+                    try m.emit(a64.addRegSp(.x16, 0));
+                    try m.emit(a64.subImm(.x16, .x16, projected_stack, false));
+                    try m.emit(a64.cmpReg(.x16, .x20));
+                    try m.jumpCond(.ls, &trap_stack_exhausted);
                 }
 
                 // Reserve the frame and take its base in x6 (a free
@@ -3260,13 +3583,46 @@ pub fn compile(
                     try m.emit(a64.strZeroImm(.x6, cell_off + 8));
                 }
 
-                // Helper ABI: x0 = instance (callee-saved x19), x1 = func
-                // index, x2 = buffer pointer. Setting x2 destroys mem_base,
-                // but it is already spilled (and reloaded after the call).
-                try m.emit(a64.movReg(.x0, .x19));
-                try m.movImm64(.x1, fidx);
-                try m.emit(a64.movReg(.x2, .x6));
-                try m.callAbs(.x16, @intFromPtr(call_helper.?));
+                if (direct_self_link) {
+                    // The callee reuses the staged Cell buffer for both its
+                    // locals and results. x2..x4 remain valid until the
+                    // child itself invokes a helper; the caller reloads its
+                    // full boundary after the BL either way. Re-seed x5/x6
+                    // because they are caller-saved across earlier helpers.
+                    try m.emit(a64.movReg(.x0, .x6));
+                    try m.emit(a64.movReg(.x1, .x6));
+                    try m.emit(a64.movReg(.x5, .x19));
+                    try m.emit(a64.movReg(.x6, .x20));
+                    try m.emit(a64.movReg(.x7, .x21));
+                    if (m.offset() > max_local_call_distance_bytes) return null;
+                    try m.call(&entry);
+                } else if (direct_gate) |link| {
+                    // The hot gate tail-branches directly into the target
+                    // EntryFn, bypassing the C helper. Recreate §4.6.5's
+                    // declared-local defaults first: the native stack frame
+                    // is fresh, unlike the helper path that initializes it in
+                    // `trySpasmDirectCall`.
+                    if (!(try emitDirectCalleeLocalDefaults(&m, link.callee.func, link.callee.ftype, .x6))) return null;
+                    try m.emit(a64.movReg(.x0, .x6));
+                    try m.emit(a64.movReg(.x1, .x6));
+                    try m.emit(a64.movReg(.x5, .x19));
+                    try m.emit(a64.movReg(.x6, .x20));
+                    try m.emit(a64.movReg(.x7, .x21));
+                    try m.movImm64(.x8, @intFromPtr(link.gate));
+                    try m.callAbs(.x16, @intFromPtr(call_gate_stub.?));
+                } else {
+                    // Helper ABI: x0 = instance (callee-saved x19), x1 =
+                    // func index, x2 = buffer pointer, x3 = buffer cell
+                    // capacity, x4 = the effective execution controller.
+                    // Setting x2..x4 destroys mem_base/mem_len/globals, but
+                    // all three are already spilled (and reloaded after).
+                    try m.emit(a64.movReg(.x0, .x19));
+                    try m.movImm64(.x1, fidx);
+                    try m.emit(a64.movReg(.x2, .x6));
+                    try m.movImm64(.x3, bufcells);
+                    try m.emit(a64.movReg(.x4, .x21));
+                    try m.callAbs(.x16, @intFromPtr(helpers.call.?));
+                }
 
                 // The helper returns the trap status in w0. On a nested
                 // trap, release this frame's reservation and fall into the
@@ -3319,7 +3675,7 @@ pub fn compile(
                 // beneath them survives the call. A native helper resolves +
                 // type-checks the table element and dispatches like a direct
                 // call; its trap status flows through the shared epilogue.
-                if (call_indirect_helper == null) return null; // helper not wired
+                if (helpers.call_indirect == null) return null; // helper not wired
                 const type_idx = readUleb32(body, &i) orelse return null;
                 const table_idx = readUleb32(body, &i) orelse return null;
                 if (type_idx >= module.types.len) return null;
@@ -3385,13 +3741,14 @@ pub fn compile(
 
                 // Helper ABI: x0 = instance (x19), x1 = type index, x2 =
                 // table index, x3 = element index (the popped top operand),
-                // x4 = buffer pointer.
+                // x4 = buffer pointer, x5 = effective execution controller.
                 try m.emit(a64.movReg(.x0, .x19));
                 try m.movImm64(.x1, type_idx);
                 try m.movImm64(.x2, table_idx);
                 try m.emit(a64.movReg(.x3, idx_reg));
                 try m.emit(a64.movReg(.x4, .x6));
-                try m.callAbs(.x16, @intFromPtr(call_indirect_helper.?));
+                try m.emit(a64.movReg(.x5, .x21));
+                try m.callAbs(.x16, @intFromPtr(helpers.call_indirect.?));
 
                 // Trap status in w0; a nested trap (or a resolve/type-check
                 // failure) releases the frame and falls into the epilogue.
@@ -3521,9 +3878,12 @@ pub fn compile(
     // The shared epilogue: every return path lands here with w0 set, so
     // the frame teardown (the non-leaf prologue's pop) is emitted once.
     // The normal return falls in; each trap exit jumps in after loading
-    // its status. Pop x19 + the link register, then `ret`.
+    // its status. Pop x19 + the link register, restore x20/x21's caller
+    // values, then `ret`.
     try m.bind(&epilogue);
     try m.emit(a64.ldpPostIdxSp(.x19, .lr, 16));
+    try m.emit(a64.ldrPostIdxSp(.x20, 16));
+    try m.emit(a64.ldrPostIdxSp(.x21, 16));
     try m.emit(a64.ret());
 
     // Out-of-line trap exits, bound only if some op forward-branched to
@@ -3548,6 +3908,11 @@ pub fn compile(
     if (trap_invalid_used) {
         try m.bind(&trap_invalid);
         try m.movImm64(.x0, trap_invalid_conversion);
+        try m.jump(&epilogue);
+    }
+    if (trap_stack_exhausted_used) {
+        try m.bind(&trap_stack_exhausted);
+        try m.movImm64(.x0, trap_call_stack_exhausted);
         try m.jump(&epilogue);
     }
 
@@ -3577,6 +3942,118 @@ fn calleeFuncType(module: *const Module, fidx: u32) ?*const FuncType {
     const ti = module.funcs[local];
     if (ti >= module.types.len) return null;
     return &module.types[ti];
+}
+
+/// Compile-time metadata for a statically defined direct callee. Imported
+/// functions intentionally return null: their implementation may live in
+/// another instance with an unrelated local layout, so the checked helper uses
+/// its generic `invoke` fallback instead.
+const DefinedCallee = struct {
+    func: *const CompiledFunc,
+    ftype: *const FuncType,
+    func_index: u32,
+    local_index: usize,
+    frame_cells: usize,
+};
+
+/// A statically resolved direct target plus the stable per-instance gate whose
+/// address the generated caller may embed.
+const DirectCallGate = struct {
+    gate: *const CallGate,
+    callee: DefinedCallee,
+};
+
+fn definedCallee(module: *const Module, funcs: []const CompiledFunc, fidx: u32) ?DefinedCallee {
+    var imported: u32 = 0;
+    for (module.imports) |imp| {
+        if (imp.desc == .func) imported += 1;
+    }
+    if (fidx < imported) return null;
+    const local: usize = @intCast(fidx - imported);
+    if (local >= funcs.len) return null;
+    const callee = &funcs[local];
+    if (callee.type_index >= module.types.len) return null;
+    const ftype = &module.types[callee.type_index];
+    const frame_cells = nativeFrameCellCount(callee, ftype) orelse return null;
+    if (ftype.params.len > callee.local_types.len) return null;
+    return .{
+        .func = callee,
+        .ftype = ftype,
+        .func_index = fidx,
+        .local_index = local,
+        .frame_cells = frame_cells,
+    };
+}
+
+/// A native gate is usable only when it describes exactly this function and
+/// its complete Cell frame. Mismatched or overflowed cache metadata keeps the
+/// call on the checked helper path rather than entering a stale target.
+fn callGateFor(call_gates: []const CallGate, callee: DefinedCallee) ?*const CallGate {
+    if (callee.local_index >= call_gates.len) return null;
+    const gate = &call_gates[callee.local_index];
+    const frame_cells = std.math.cast(u32, callee.frame_cells) orelse return null;
+    if (gate.func_index != callee.func_index or gate.frame_cells != frame_cells) return null;
+    return gate;
+}
+
+/// §4.6.5's default local values for a target entered through the hot gate.
+/// The helper path executes the equivalent loop in `trySpasmDirectCall`; native
+/// callers own fresh stack cells, so they emit it here before tail-entering the
+/// target. Numeric and v128 locals default to zero; reference locals use the
+/// interpreter's all-ones `REF_NULL` representation.
+fn emitDirectCalleeLocalDefaults(
+    m: *masm_mod.Masm,
+    callee: *const CompiledFunc,
+    callee_type: *const FuncType,
+    base: a64.Reg,
+) error{OutOfMemory}!bool {
+    if (callee_type.params.len > callee.local_types.len) return false;
+    var local_index = callee_type.params.len;
+    while (local_index < callee.local_types.len) : (local_index += 1) {
+        const cell_offset = std.math.mul(usize, local_index, @sizeOf(Cell)) catch return false;
+        if (cell_offset > 32752) return false; // both 64-bit halves must fit
+        const low_off = std.math.cast(u15, cell_offset) orelse return false;
+        const high_off = std.math.add(u15, low_off, 8) catch return false;
+        if (callee.local_types[local_index].isRef()) {
+            try m.movImm64(.x16, std.math.maxInt(u64));
+            try m.emit(a64.strImm(.x16, base, low_off));
+            try m.emit(a64.strImm(.x16, base, high_off));
+        } else {
+            try m.emit(a64.strZeroImm(base, low_off));
+            try m.emit(a64.strZeroImm(base, high_off));
+        }
+    }
+    return true;
+}
+
+/// A local `BL` can only target this one function's entry buffer. The
+/// no-declared-locals restriction avoids having native code reproduce
+/// §4.6.5's default-initialization loop; the helper handles every wider
+/// self-call shape until linked stubs grow that frame setup.
+fn directSelfCallEligible(func_index: u32, fidx: u32, func: *const CompiledFunc, ftype: *const FuncType) bool {
+    return fidx == func_index and func.local_types.len == ftype.params.len;
+}
+
+/// Bytes for a direct-call staging frame, rounded for AAPCS64 stack
+/// alignment. Returning null keeps an oversized callee on the existing
+/// generic path rather than letting a user-sized local declaration overflow an
+/// encoder immediate or native stack reservation.
+fn callFrameBytes(bufcells: usize, below: usize) ?u12 {
+    const cell_bytes = std.math.mul(usize, bufcells, @sizeOf(Cell)) catch return null;
+    const with_boundary = std.math.add(usize, cell_bytes, 40) catch return null;
+    const raw = std.math.add(usize, with_boundary, std.math.mul(usize, below, 8) catch return null) catch return null;
+    const rounded_input = std.math.add(usize, raw, 15) catch return null;
+    const rounded = rounded_input & ~@as(usize, 15);
+    if (rounded > std.math.maxInt(u12)) return null;
+    return @intCast(rounded);
+}
+
+/// Project the lowest SP a native link will use before its target can enforce
+/// the next recursive check: the caller's staging frame plus the target
+/// EntryFn's fixed callee-saved prologue. Returning null leaves that call on
+/// the checked helper path rather than narrowing an AArch64 immediate.
+fn nativeLinkStackBytes(framebytes: u12) ?u12 {
+    return std.math.add(u12, framebytes, native_entry_prologue_bytes) catch null;
 }
 
 /// Resolve a global's value type (§4.4.5/§4.4.6) by walking the global
@@ -4087,20 +4564,49 @@ fn readV128Bytes(body: []const u8, i: *usize) ?struct { lo: u64, hi: u64 } {
 
 const testing = std.testing;
 
-/// Compile `func` against a throwaway single-type module — the unit tests
-/// here build a `CompiledFunc`/`FuncType` directly and never emit a
-/// `call`, so `compile` only dereferences the module inside the (unused)
-/// call arm; a one-type module satisfies its pointer parameter. The
-/// module borrows `ftype`, so the caller must keep it alive across the
+fn testExecutionPoll(_: *anyopaque) callconv(.c) u32 {
+    return trap_ok;
+}
+
+const TestExecutionPoll = struct {
+    calls: u32 = 0,
+    stop_after: ?u32 = null,
+    stop_status: u32 = trap_execution_interrupted,
+
+    fn poll(ctx: *anyopaque) callconv(.c) u32 {
+        const native: *const NativeExecutionControl = @ptrCast(@alignCast(ctx));
+        const self: *TestExecutionPoll = @ptrCast(@alignCast(native.poll_context));
+        self.calls +%= 1;
+        if (self.stop_after) |limit| {
+            if (self.calls >= limit) return self.stop_status;
+        }
+        return trap_ok;
+    }
+};
+
+/// Compile `func` against a throwaway single-function module — the unit tests
+/// here build a `CompiledFunc`/`FuncType` directly and never emit a `call`, so
+/// the one-function metadata only satisfies compile's direct-callee lookup.
+/// The module borrows `ftype`, so the caller must keep it alive across the
 /// call (every site does — it is a local that outlives `compile`).
 fn compileT(
     ca: *code_alloc.CodeAllocator,
     func: *const CompiledFunc,
     ftype: *const FuncType,
 ) CompileError!?EntryFn {
+    return compileWithPollT(ca, func, ftype, testExecutionPoll);
+}
+
+fn compileWithPollT(
+    ca: *code_alloc.CodeAllocator,
+    func: *const CompiledFunc,
+    ftype: *const FuncType,
+    poll_helper: ExecutionPollHelperFn,
+) CompileError!?EntryFn {
     const types_arr = [_]FuncType{ftype.*};
+    const funcs_arr = [_]CompiledFunc{func.*};
     const module: Module = .{ .types = &types_arr, .funcs = &.{0} };
-    return compile(testing.allocator, ca, func, ftype, &module);
+    return compile(testing.allocator, ca, func, ftype, &module, &funcs_arr, 0, &.{}, null, .{}, poll_helper);
 }
 
 test "spasm: a const-return function compiles and returns its constant" {
@@ -4126,7 +4632,7 @@ test "spasm: a const-return function compiles and returns its constant" {
 
     var results: [1]Cell = .{0};
     var locals: [1]Cell = .{0};
-    _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals));
+    _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals), 0, null);
     try testing.expectEqual(@as(u32, 42), @as(u32, @truncate(results[0])));
 }
 
@@ -4151,7 +4657,7 @@ test "spasm: a negative constant sign-extends through the LEB path" {
         return error.SpasmRefusedTrivialFunction;
     var results: [1]Cell = .{0};
     var locals: [1]Cell = .{0};
-    _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals));
+    _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals), 0, null);
     try testing.expectEqual(@as(i32, -7), @as(i32, @bitCast(@as(u32, @truncate(results[0])))));
 }
 
@@ -4166,7 +4672,7 @@ test "spasm: i32 add of two params compiles and computes" {
     const entry = (try compileT(&ca, &func, &ftype)) orelse return error.SpasmRefused;
     var locals: [2]Cell = .{ 7, 35 };
     var results: [1]Cell = .{0};
-    _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals));
+    _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals), 0, null);
     try testing.expectEqual(@as(u32, 42), @as(u32, @truncate(results[0])));
 }
 
@@ -4182,7 +4688,7 @@ test "spasm: i32 sub and mul of params compute" {
         const entry = (try compileT(&ca, &func, &ftype)) orelse return error.SpasmRefused;
         var locals: [2]Cell = .{ 50, 8 };
         var results: [1]Cell = .{0};
-        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals));
+        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals), 0, null);
         try testing.expectEqual(@as(u32, 42), @as(u32, @truncate(results[0])));
     }
     // mul: 6 * 7 = 42 (and the low-32 truncation is clean)
@@ -4192,7 +4698,7 @@ test "spasm: i32 sub and mul of params compute" {
         const entry = (try compileT(&ca, &func, &ftype)) orelse return error.SpasmRefused;
         var locals: [2]Cell = .{ 6, 7 };
         var results: [1]Cell = .{0};
-        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals));
+        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals), 0, null);
         try testing.expectEqual(@as(u32, 42), @as(u32, @truncate(results[0])));
     }
 }
@@ -4208,7 +4714,7 @@ test "spasm: i32 arithmetic folds two constants at compile time" {
     const entry = (try compileT(&ca, &func, &ftype)) orelse return error.SpasmRefused;
     var locals: [1]Cell = .{0};
     var results: [1]Cell = .{0};
-    _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals));
+    _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals), 0, null);
     try testing.expectEqual(@as(u32, 42), @as(u32, @truncate(results[0])));
 }
 
@@ -4224,7 +4730,7 @@ test "spasm: i32 bitwise and/or/xor compute and fold" {
         const entry = (try compileT(&ca, &func, &ftype)) orelse return error.SpasmRefused;
         var locals: [2]Cell = .{ 0b1110, 0b1011 };
         var results: [1]Cell = .{0};
-        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals));
+        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals), 0, null);
         try testing.expectEqual(@as(u32, 0b1010), @as(u32, @truncate(results[0])));
     }
     // or | xor folded: (5 | 2) ^ 3 = 7 ^ 3 = 4, all constant
@@ -4235,7 +4741,7 @@ test "spasm: i32 bitwise and/or/xor compute and fold" {
         const entry = (try compileT(&ca, &func, &fty)) orelse return error.SpasmRefused;
         var locals: [1]Cell = .{0};
         var results: [1]Cell = .{0};
-        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals));
+        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals), 0, null);
         try testing.expectEqual(@as(u32, 4), @as(u32, @truncate(results[0])));
     }
 }
@@ -4251,7 +4757,7 @@ test "spasm: local.set writes a local that local.get reads back" {
     const entry = (try compileT(&ca, &func, &ftype)) orelse return error.SpasmRefused;
     var locals: [1]Cell = .{99}; // overwritten by local.set
     var results: [1]Cell = .{0};
-    _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals));
+    _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals), 0, null);
     try testing.expectEqual(@as(u32, 5), @as(u32, @truncate(results[0])));
 }
 
@@ -4266,7 +4772,7 @@ test "spasm: local.tee stores and leaves the value on the stack" {
     const entry = (try compileT(&ca, &func, &ftype)) orelse return error.SpasmRefused;
     var locals: [1]Cell = .{99};
     var results: [1]Cell = .{0};
-    _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals));
+    _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals), 0, null);
     try testing.expectEqual(@as(u32, 14), @as(u32, @truncate(results[0])));
 }
 
@@ -4291,7 +4797,7 @@ test "spasm: i32 comparisons distinguish signed from unsigned" {
         const entry = (try compileT(&ca, &func, &ftype)) orelse return error.SpasmRefused;
         var locals: [2]Cell = .{ @as(u32, @bitCast(c.a)), @as(u32, @bitCast(c.b)) };
         var results: [1]Cell = .{0};
-        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals));
+        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals), 0, null);
         try testing.expectEqual(c.want, @as(u32, @truncate(results[0])));
     }
 }
@@ -4307,7 +4813,7 @@ test "spasm: i32.eqz computes and folds" {
         const entry = (try compileT(&ca, &func, &ftype)) orelse return error.SpasmRefused;
         var locals: [1]Cell = .{pair[0]};
         var results: [1]Cell = .{0};
-        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals));
+        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals), 0, null);
         try testing.expectEqual(@as(u32, pair[1]), @as(u32, @truncate(results[0])));
     }
     // folded: i32.const 0; i32.eqz -> 1
@@ -4317,7 +4823,7 @@ test "spasm: i32.eqz computes and folds" {
     const entry = (try compileT(&ca, &func, &fty)) orelse return error.SpasmRefused;
     var locals: [1]Cell = .{0};
     var results: [1]Cell = .{0};
-    _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals));
+    _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals), 0, null);
     try testing.expectEqual(@as(u32, 1), @as(u32, @truncate(results[0])));
 }
 
@@ -4339,7 +4845,7 @@ test "spasm: i32 shifts (shl, shr_s, shr_u) with count mod 32 and folding" {
         const entry = (try compileT(&ca, &func, &ftype)) orelse return error.SpasmRefused;
         var locals: [2]Cell = .{ @as(u32, @bitCast(c.a)), @as(u32, @bitCast(c.b)) };
         var results: [1]Cell = .{0};
-        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals));
+        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals), 0, null);
         try testing.expectEqual(c.want, @as(u32, @truncate(results[0])));
     }
     // folded: i32.const 3; i32.const 2; i32.shl -> 12
@@ -4349,7 +4855,7 @@ test "spasm: i32 shifts (shl, shr_s, shr_u) with count mod 32 and folding" {
     const entry = (try compileT(&ca, &func, &fty)) orelse return error.SpasmRefused;
     var locals: [1]Cell = .{0};
     var results: [1]Cell = .{0};
-    _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals));
+    _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals), 0, null);
     try testing.expectEqual(@as(u32, 12), @as(u32, @truncate(results[0])));
 }
 
@@ -4368,7 +4874,7 @@ test "spasm: select picks an operand by the condition (branchless)" {
     inline for (.{ .{ 1, 10 }, .{ 0, 20 } }) |pair| {
         var locals: [3]Cell = .{ 10, 20, pair[0] };
         var results: [1]Cell = .{0};
-        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals));
+        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals), 0, null);
         try testing.expectEqual(@as(u32, pair[1]), @as(u32, @truncate(results[0])));
     }
 }
@@ -4386,7 +4892,7 @@ test "spasm: drop pops a value; nop is a no-op" {
     const entry = (try compileT(&ca, &func, &ftype)) orelse return error.SpasmRefused;
     var locals: [2]Cell = .{ 42, 99 };
     var results: [1]Cell = .{0};
-    _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals));
+    _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals), 0, null);
     try testing.expectEqual(@as(u32, 42), @as(u32, @truncate(results[0])));
 }
 
@@ -4420,7 +4926,7 @@ test "spasm: block with br_if picks a result by condition (forward branch)" {
     inline for (.{ .{ 1, 10 }, .{ 0, 20 } }) |pair| {
         var locals: [1]Cell = .{pair[0]};
         var results: [1]Cell = .{0};
-        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals));
+        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals), 0, null);
         try testing.expectEqual(@as(u32, pair[1]), @as(u32, @truncate(results[0])));
     }
 }
@@ -4453,7 +4959,7 @@ test "spasm: empty block with br_if as an early break (arity 0)" {
     inline for (.{ .{ 1, 42 }, .{ 0, 99 } }) |pair| {
         var locals: [2]Cell = .{ pair[0], 0 };
         var results: [1]Cell = .{0};
-        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals));
+        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals), 0, null);
         try testing.expectEqual(@as(u32, pair[1]), @as(u32, @truncate(results[0])));
     }
 }
@@ -4489,7 +4995,7 @@ test "spasm: nested block, br_if 1 exits two levels carrying a result" {
     inline for (.{ .{ 1, 10 }, .{ 0, 20 } }) |pair| {
         var locals: [1]Cell = .{pair[0]};
         var results: [1]Cell = .{0};
-        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals));
+        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals), 0, null);
         try testing.expectEqual(@as(u32, pair[1]), @as(u32, @truncate(results[0])));
     }
 }
@@ -4522,9 +5028,63 @@ test "spasm: loop with backward br_if accumulates (do-while)" {
     inline for (.{ .{ 1, 1 }, .{ 3, 6 }, .{ 5, 15 }, .{ 10, 55 } }) |pair| {
         var locals: [2]Cell = .{ pair[0], 0 };
         var results: [1]Cell = .{0};
-        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals));
+        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals), 0, null);
         try testing.expectEqual(@as(u32, pair[1]), @as(u32, @truncate(results[0])));
     }
+}
+
+test "spasm: execution polls preserve live operands and propagate termination" {
+    if (comptime !supported) return error.SkipZigTest;
+    var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
+    defer ca.deinit();
+
+    // Keep param 1 live in x9 beneath the loop while param 0 counts down and
+    // local 2 accumulates. Entry and each taken backedge poll through a Zig
+    // helper; the final add proves x9 survived every helper call.
+    const body = [_]u8{
+        0x20, 0x01, // local.get 1 -- live beneath the loop
+        0x03, 0x40, // loop (empty)
+        0x20, 0x02, 0x20, 0x00, 0x6a, 0x21, 0x02, // sum += n
+        0x20, 0x00, 0x41, 0x01, 0x6b, 0x21, 0x00, // n -= 1
+        0x20,   0x00, 0x0d, 0x00, // repeat while n != 0
+        op_end,
+        0x20,   0x02, 0x6a, // carried value + sum
+        op_end,
+    };
+    const side: []const @import("code.zig").BranchEntry = &.{
+        .{ .delta_ip = 0, .delta_stp = 0, .val_count = 0, .pop_count = 0 },
+    };
+    const func: CompiledFunc = .{
+        .type_index = 0,
+        .local_types = &.{ .i32, .i32, .i32 },
+        .body = &body,
+        .side_table = side,
+        .max_stack = 3,
+    };
+    const ftype: FuncType = .{ .params = &.{ .i32, .i32 }, .results = &.{.i32} };
+    const entry = (try compileWithPollT(&ca, &func, &ftype, TestExecutionPoll.poll)) orelse
+        return error.SpasmRefused;
+
+    var poll: TestExecutionPoll = .{};
+    const wake = std.atomic.Value(bool).init(true);
+    var native_control: NativeExecutionControl = .{
+        .wake_flag = &wake,
+        .poll_context = &poll,
+    };
+    var locals: [3]Cell = .{ 5, 100, 0 };
+    var results: [1]Cell = .{0};
+    const status = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals), 0, @ptrCast(&native_control));
+    try testing.expectEqual(trap_ok, status);
+    try testing.expectEqual(@as(u32, 5), poll.calls); // entry + four taken backedges
+    try testing.expectEqual(@as(u32, 115), @as(u32, @truncate(results[0])));
+
+    poll = .{ .stop_after = 3 };
+    locals = .{ 5, 100, 0 };
+    results = .{0xfeed};
+    const stopped = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals), 0, @ptrCast(&native_control));
+    try testing.expectEqual(trap_execution_interrupted, stopped);
+    try testing.expectEqual(@as(u32, 3), poll.calls);
+    try testing.expectEqual(@as(Cell, 0xfeed), results[0]);
 }
 
 test "spasm: loop (result i32) iterates then yields its result" {
@@ -4555,7 +5115,7 @@ test "spasm: loop (result i32) iterates then yields its result" {
     inline for (.{ .{ 4, 10 }, .{ 6, 21 } }) |pair| {
         var locals: [2]Cell = .{ pair[0], 0 };
         var results: [1]Cell = .{0};
-        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals));
+        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals), 0, null);
         try testing.expectEqual(@as(u32, pair[1]), @as(u32, @truncate(results[0])));
     }
 }
@@ -4594,7 +5154,7 @@ test "spasm: while loop — br as continue, br_if as break" {
     inline for (.{ .{ 0, 0 }, .{ 1, 1 }, .{ 5, 15 }, .{ 6, 21 } }) |pair| {
         var locals: [2]Cell = .{ pair[0], 0 };
         var results: [1]Cell = .{0};
-        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals));
+        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals), 0, null);
         try testing.expectEqual(@as(u32, pair[1]), @as(u32, @truncate(results[0])));
     }
 }
@@ -4625,7 +5185,7 @@ test "spasm: br exits a block forward; dead code (nested block) is skipped" {
     const entry = (try compileT(&ca, &func, &ftype)) orelse return error.SpasmRefused;
     var locals: [1]Cell = .{0};
     var results: [1]Cell = .{0};
-    _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals));
+    _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals), 0, null);
     try testing.expectEqual(@as(u32, 42), @as(u32, @truncate(results[0])));
 }
 
@@ -4656,7 +5216,7 @@ test "spasm: if/else picks a result arm by the condition" {
     inline for (.{ .{ 1, 10 }, .{ 0, 20 } }) |pair| {
         var locals: [1]Cell = .{pair[0]};
         var results: [1]Cell = .{0};
-        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals));
+        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals), 0, null);
         try testing.expectEqual(@as(u32, pair[1]), @as(u32, @truncate(results[0])));
     }
 }
@@ -4687,7 +5247,7 @@ test "spasm: if without else conditionally overwrites a local" {
     inline for (.{ .{ 1, 9 }, .{ 0, 5 } }) |pair| {
         var locals: [2]Cell = .{ pair[0], 0 };
         var results: [1]Cell = .{0};
-        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals));
+        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals), 0, null);
         try testing.expectEqual(@as(u32, pair[1]), @as(u32, @truncate(results[0])));
     }
 }
@@ -4726,7 +5286,7 @@ test "spasm: br_table dispatches by index to distinct block ends" {
     inline for (.{ .{ 0, 10 }, .{ 1, 7 }, .{ 3, 7 } }) |pair| {
         var locals: [2]Cell = .{ pair[0], 0 };
         var results: [1]Cell = .{0};
-        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals));
+        _ = entry(&locals, &results, @ptrCast(&locals), 0, @ptrCast(&locals), @ptrCast(&locals), 0, null);
         try testing.expectEqual(@as(u32, pair[1]), @as(u32, @truncate(results[0])));
     }
 }

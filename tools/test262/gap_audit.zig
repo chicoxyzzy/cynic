@@ -180,7 +180,7 @@ test "gap_audit: registered paths resolve, unregistered do not" {
     try std.testing.expectEqual(Reason.stale_fixture, lookup("intl402/DateTimeFormat/prototype/format/numbering-system.js").?);
     try std.testing.expectEqual(Reason.sloppy_body, lookup("language/comments/hashbang/use-strict.js").?);
     try std.testing.expectEqual(Reason.annex_b_body, lookup("built-ins/TypedArrayConstructors/ctors/no-species.js").?);
-    // A real bug is intentionally NOT registered — it stays an engine gap.
-    // (checking-by-using-eval hits a genuine global-identifier-resolution bug.)
+    // A passing fixture must stay unregistered so a future regression surfaces
+    // as an engine gap instead of being silently classified as policy.
     try std.testing.expect(lookup("built-ins/String/prototype/split/checking-by-using-eval.js") == null);
 }

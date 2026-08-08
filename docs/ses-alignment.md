@@ -1,26 +1,22 @@
-# SES alignment — design & plan
+# SES alignment
 
-Goal: Cynic ships **hardened by default** — frozen primordials, a
-`harden()` global, and the SES override-mistake fix at every realm
-init. No `lockdown()` step required, no `@endo/ses` import. Code
-that needs the legacy "mutable primordials" world opts out with a
-single `--unhardened` switch (the whole SES package toggles
-atomically — see Phase 4).
+Status: **the hardened-default baseline ships.** Every realm starts with frozen
+primordials, `harden()`, and the override-mistake fix; `--unhardened` opts out
+atomically. Runtime code construction is a separate, shipped capability gate
+(`--allow=eval`). Compartments and ambient-state taming remain deferred.
 
-Sister doc to [inline-caches.md](inline-caches.md) and
-[lazy-property-bag.md](lazy-property-bag.md). This doc is the durable
-plan — a fresh session should be able to pick up the next phase from
-here without re-deriving the design.
+This is the current policy reference and the durable delivery record. Read the
+opening status and the checklist for current behavior; the migration phases
+preserve how that behavior landed. Sister docs:
+[multi-realm.md](multi-realm.md), [inline-caches.md](inline-caches.md), and
+[lazy-property-bag.md](lazy-property-bag.md).
 
 ## Why now — the position statement
 
-Cynic was always strict-only, eval-banned, Annex-B-rejected — the
-SES-friendly baseline. But "SES-friendly" is what every modern edge
-runtime claims (Workers, Deno, Bun all ban `eval` at the runtime
-boundary). What distinguishes a Cynic realm from a Workers isolate
-today is roughly nothing visible — both refuse dynamic code, both
-ship spec-compliant intrinsics, both are V8-shaped or
-interpreter-shaped at the user's discretion.
+Cynic began strict-only, eval-off by default, and Annex-B-rejected: a
+SES-friendly baseline. That baseline alone is not distinctive; modern edge
+hosts can also refuse dynamic code. The material policy difference is that a
+Cynic realm is already hardened when user code starts.
 
 **Frozen primordials by default** turns SES-friendly into
 **SES-native**. The competitor on this axis isn't Workers — it's
@@ -34,44 +30,25 @@ the box**. Code that polyfills `Array.prototype.flat`, stubs
 default. Users who actually need that flip `--unhardened` to
 disable the whole SES posture.
 
-## Positioning — hardened-by-default, WASM stacked (not flipped)
+## Positioning — hardened by default, WebAssembly stacked
 
-A recurring question is whether to **flip** the posture — make Cynic
-mutable-by-default like XS and every production engine, with the
-`--allow=eval` / `--allow=wasm` gates default-on — and reposition it as
-a general-purpose JS+WASM engine.
+WebAssembly being available by default in the CLI does not relax the SES
+posture. The relevant boundaries are different:
 
-**Decision: don't flip (yet). Stack instead.**
+- `eval` and dynamic Function constructors compile source strings directly
+  into the JavaScript realm, so the CLI still requires `--allow=eval`.
+- Wasm bytes pass a typed validator and execute in Sarcasm/Spasm. Realm fuel,
+  interrupt hooks, and memory ceilings now cover that execution and its
+  storage, so the standard `WebAssembly.*` surface is enabled in the CLI.
+- A direct embedder can still deny dynamic Wasm bytes with
+  `Realm.allow_wasm_compile = false` (the default for `Realm.init`). That
+  HostEnsureCanCompileWasmBytes policy leaves trusted/predecoded modules and
+  ordinary `Memory` / `Table` / `Global` / `Tag` / `Exception` construction
+  available.
 
-- Hardened-by-default is Cynic's one *unoccupied* niche. XS is
-  hardened-*ready* (mutable default, opt in via `lockdown`); the
-  `@endo/ses` shim is slow JS-on-top. "Ships hardened so you never call
-  `lockdown()`," on an edge-shaped runtime, is small but real and
-  unclaimed.
-- Flipping drops Cynic into the crowded general-purpose embeddable tier
-  (QuickJS-ng, XS, Hermes, Boa, Kiesel, engine262, Porffor), where it
-  leads on no axis and the frame foregrounds its two soft spots:
-  **capped speed** (Bistromath and the initial Ohaimark subset run by default,
-  but both still cover less bytecode than mature production JITs —
-  docs/jit.md §12) and **pre-alpha maturity**.
-- The from-scratch WebAssembly engine (Sarcasm — 100 % on the spec
-  testsuite) is *additive*: a second differentiator stacked on the
-  niche, not a reason to flip. `--allow=wasm` default-off stays
-  consistent with the hardened posture and costs no conformance score
-  (the wasm-testsuite self-enables, as the test262 harness self-enables
-  eval).
-
-**Revisit trigger.** The flip is premature *because* of those two soft
-spots — and they aren't permanent. Reconsider repositioning as a
-general-purpose engine **once the JIT tiers ship and Cynic is past
-pre-alpha**; at that point the generic frame no longer spotlights the
-weak axes, and the flip becomes optional upside *from strength* rather
-than a moat spent from a gap. Not before.
-
-The flags follow the posture, never the reverse: `--allow=eval` /
-`--allow=wasm` (and the SES default itself) are *expressions* of
-hardened-by-default. If the posture is ever flipped, the gates flip
-with it; until then they stay opt-in.
+Frozen primordials, `harden()`, the override-mistake fix, and
+`--unhardened` are unchanged. WebAssembly remains an additive execution
+surface rather than a switch to mutable, general-purpose JavaScript defaults.
 
 ## What SES `lockdown()` does (the full checklist)
 
@@ -280,8 +257,8 @@ poisoning globalThis by assignment.
 `--unhardened` flips `realm.hardened` to `false` before
 `installBuiltins`; the freeze pass is then a no-op and the
 intrinsic graph stays mutable. Test262 verification:
-`zig build test262 -- --phase=unhardened` runs the main-phase
-fixture set with the freeze skipped.
+The main test262 phase runs with `--unhardened --allow=eval`, so fixtures that
+need mutable primordials are scored with the freeze skipped.
 
 Acknowledged gaps (inherited from `hardenWalk`):
 - Array-exotic indexed slots aren't lowered into the property
@@ -294,8 +271,8 @@ Acknowledged gaps (inherited from `hardenWalk`):
 
 **Test262 risk:** observed — handful of fixtures (those that
 monkey-patch intrinsics) regress in the default hardened sweep;
-the `--phase=unhardened` sweep confirms each comes back when
-the freeze is skipped.
+the scored main sweep runs `--unhardened --allow=eval` and confirms those
+fixtures pass when the freeze is skipped.
 
 ### Phase 2 — `harden()` global — **shipped**
 
@@ -315,8 +292,9 @@ Known acknowledged gaps (acceptable for the MVP):
     §9.4.6.6; skipped rather than throw.
   - Proxy receivers freeze via direct slot mutation here, not
     through the `preventExtensions` trap.
-  - Recursion uses the Zig stack; pathological depth would
-    overflow. Real-world capability graphs are shallow.
+  - The walk is recursive, but every recursive entry checks the native
+    stack guard; pathological depth throws a catchable `RangeError` rather
+    than aborting the host.
 
 When Phase 1 ships, the primordial freeze runs first, so
 `harden(globalThis)` becomes mostly a no-op walk over already-
@@ -371,13 +349,13 @@ non-configurable. These are the dominant cluster of regressions
 under the `hardened` score row; the `unhardened` row
 recovers them in full.
 
-### Phase 4 — `--unhardened` flag wiring
+### Phase 4 — `--unhardened` flag wiring — **shipped**
 
 Trivial — collect the gates (Phase 1 freeze, Phase 2 harden
 install, Phase 3 override fix) and skip them all when
 `realm.hardened == false`. Single CLI parser change + docs +
-one struct field on Realm. `--allow=eval` is independent and
-landed separately when eval ships.
+one struct field on Realm. `--allow=eval` is independent and shipped
+separately.
 
 ### Phase 5 — measurement, doc updates, gh-pages
 
@@ -506,35 +484,22 @@ open the following run for real:
   expression with the kind's prefix and run through `evaluateEval`, so
   the new function's scope is the global environment per spec.
 
-**Strict-only — conformant for direct eval, a deliberate divergence
-for indirect.** Cynic parses all source as strict, so it runs *every*
-eval as strict code. For **direct** eval this is spec-conformant:
-§19.2.1.1 PerformEval sets `strictEval = strictCaller OR IsStrict(body)`,
-and every Cynic caller is strict, so `strictCaller` (hence `strictEval`)
-is always true. For **indirect** eval it is a divergence: there
-`strictCaller` is false (§19.2.1.1 step 1), so `strictEval = IsStrict(body)`
-— a source with no `"use strict"` directive is *sloppy*, and engine262
-(the reference) plus every shipping engine (V8 / JSC / SpiderMonkey /
-QuickJS) run it sloppy. Cynic has no sloppy parser, so it runs indirect
-eval strict like all its other code: strict-compatible source evaluates
-correctly, while sloppy-only behaviour — `with`, `delete unqualifiedName`,
-an undeclared assignment creating a global — is rejected or runs strict,
-the same strict-only divergence Cynic carries for any script. (Nearest
-prior art: Hermes also rejects `with` in eval'd source, though it keeps
-other sloppy semantics. No shipping engine runs indirect eval strict —
-that posture is unique to a strict-only engine.)
+**Strict-only parsing; spec-faithful variable-environment selection.** Cynic
+parses every eval source with its strict-only grammar. For **direct** eval,
+§19.2.1.1 sets `strictEval = strictCaller OR IsStrict(body)`; every Cynic caller
+is strict, so top-level `var` and function declarations stay eval-local while
+free identifiers can read the caller's scope.
 
-Either way the eval body gets its own variable environment (§19.2.1.3),
-so top-level `var` / function declarations bind eval-locally and never
-leak to the global env (indirect eval) or the caller's scope (direct
-eval). Direct eval still *reads* the caller's scope for free
-identifiers. Implemented via the compiler's `eval_local` mode, which
-routes the eval body's top-level bindings through the same non-global
-path module bodies use; `ShadowRealm.prototype.evaluate` stays on Script
-evaluation (var → the shadow realm's global env, §3.8.3.7) and is
-unaffected. Corollary: test262 fixtures asserting *indirect* eval runs
-as sloppy can never pass and stay permanently out of scope
-(`strict_only_exact_paths` in `tools/test262/skip.zig`).
+For **indirect** eval, `strictEval` follows the body's Use Strict Directive for
+the §19.2.1.3 declaration target even though the parser still accepts only
+strict-compatible syntax. A body without `"use strict"` binds top-level `var`
+and function declarations on the realm's global environment, with
+§9.1.1.4.15/.16 `CanDeclareGlobalVar` / `CanDeclareGlobalFunction` checks and
+deletable eval declarations. A body with `"use strict"` keeps those bindings
+eval-local. Sloppy-only syntax and behavior (`with`, legacy delete semantics,
+and undeclared assignment creating a global) remain deliberate strict-only
+divergences. `ShadowRealm.prototype.evaluate` uses Script evaluation and is
+unaffected.
 
 **Posture interaction.** The eval engine is posture-agnostic; the
 realm's existing freeze state does the confinement. Under the hardened
@@ -583,22 +548,18 @@ pass `--allow=eval`; everyone else gets the hardened posture.
 
 ## Verification
 
-- `zig build test` after each phase
-- `zig build test262 -- --quiet` runtime sweep after each phase —
-  measure the regression (expected: tens of fixtures in default
-  mode that monkey-patch intrinsics)
-- `zig build test262 -- --quiet --phase=feature:unhardened` —
-  confirms the opt-out path restores fixtures that monkey-patch
-  primordials
-- `zig build bench` after Phase 3 — perf check on the override-
-  mistake accessor pair (the headline risk)
+- `zig build test` for the full unit suite.
+- `zig build test-ses` for hardened-default positive coverage.
+- `zig build test262 -- --quiet` for the scored unhardened/eval-enabled
+  conformance posture.
+- `zig build bench` after primordial or synthetic-accessor changes.
 - New unit tests pinning:
   - `Object.freeze` semantics on intrinsics (Phase 1)
   - `harden()` on cyclic and deep structures (Phase 2 — shipped)
   - Override shadowing via assignment + Reflect.set + spread (Phase 3)
   - `--unhardened` actually disables every gated piece (Phase 4)
-- Manual smoke test: import an SES-using package (`@endo/marshal`,
-  the canonical one) and confirm it runs without `lockdown()`
+- Manual smoke tests should cover both default-hardened behavior and the
+  `--unhardened` opt-out.
 
 ## Abort criteria
 

@@ -446,6 +446,466 @@ fn buildUnmappedArgumentsObject(
     return obj;
 }
 
+/// Result of materialising §10.4.4 from a live CallFrame. This is deliberately
+/// non-reentrant: it only allocates ordinary heap data and never invokes
+/// JavaScript, so Ohaimark may call it after publishing the caller's complete
+/// pre-operation frame state as GC roots.
+pub const UnmappedArgumentsObjectResult = union(enum) {
+    value: Value,
+    out_of_memory,
+    invalid_frame,
+};
+
+/// §10.4.4 CreateUnmappedArgumentsObject over a frame's pinned incoming
+/// caller-argument window. The interpreter and Ohaimark share this operation
+/// so cross-realm intrinsics, indexed properties, and the strict `callee`
+/// accessor cannot drift between tiers.
+pub fn createUnmappedArgumentsObjectForFrame(
+    realm: *Realm,
+    allocator: std.mem.Allocator,
+    frame: *const CallFrame,
+) UnmappedArgumentsObjectResult {
+    const argc = std.math.cast(usize, frame.argc) orelse return .invalid_frame;
+    if (argc > frame.registers.len) return .invalid_frame;
+    const arg_realm = frame.running_realm orelse realm;
+    const obj = buildUnmappedArgumentsObject(
+        realm,
+        allocator,
+        arg_realm,
+        frame.registers[0..argc],
+    ) catch return .out_of_memory;
+    return .{ .value = heap_mod.taggedObject(obj) };
+}
+
+/// Result of materialising the ordinary synchronous `make_function` subset
+/// from a rooted frame. Arrow, generator, and async templates deliberately
+/// stay in the full interpreter path because they capture additional execution
+/// state or need different prototype construction.
+pub const OrdinaryFunctionResult = union(enum) {
+    value: Value,
+    out_of_memory,
+    invalid_frame,
+    unsupported_template,
+};
+
+/// §10.2.3 OrdinaryFunctionCreate for a plain function template. This helper
+/// is non-reentrant: it allocates only engine-owned function/prototype state,
+/// never invokes JavaScript, and returns its tagged result to the caller for
+/// publication in the authoritative Lantern frame.
+pub fn createOrdinaryFunctionForFrame(
+    realm: *Realm,
+    allocator: std.mem.Allocator,
+    frame: *const CallFrame,
+    template_index: u16,
+) OrdinaryFunctionResult {
+    if (template_index >= frame.chunk.function_templates.len) return .invalid_frame;
+    const template = &frame.chunk.function_templates[template_index];
+    if (template.is_arrow or template.is_generator or template.is_async) {
+        return .unsupported_template;
+    }
+
+    const function = realm.heap.allocateFunction(
+        &template.chunk,
+        template.param_count,
+        template.name,
+        false,
+        frame.env,
+    ) catch return .out_of_memory;
+    function.owning_module = realm.current_module;
+    function.realm = frame.running_realm orelse realm;
+    if (template.spec_length != template.param_count) {
+        function.properties.put(
+            allocator,
+            "length",
+            Value.fromInt32(template.spec_length),
+        ) catch return .out_of_memory;
+    }
+    if (function.prototype) |prototype| {
+        // `allocateFunction` cannot see the realm's intrinsic prototype. The
+        // regular interpreter performs this same post-allocation wiring.
+        if (prototype.prototype == null) {
+            realm.heap.setObjectPrototype(prototype, realm.intrinsics.object_prototype);
+        }
+    }
+    function.source = template.source;
+    function.proto = realm.intrinsics.function_prototype;
+    return .{ .value = heap_mod.taggedFunction(function) };
+}
+
+/// Result of applying §10.2.5's method-only internal-slot setup to the
+/// function in a rooted frame accumulator. This never invokes JavaScript;
+/// its only heap edge is routed through the regular write barrier.
+pub const SetHomeObjectResult = enum {
+    ok,
+    invalid_frame,
+};
+
+/// Shared `set_home` operation for Lantern and frame-staged native code.
+/// Object-literal method creation has already materialized the function in the
+/// accumulator; this attaches its `[[HomeObject]]`, removes [[Construct]],
+/// and drops the ordinary prototype property where the specification requires.
+pub fn setHomeObjectForFrame(
+    realm: *Realm,
+    frame: *const CallFrame,
+    accumulator: Value,
+    object_register: u8,
+) SetHomeObjectResult {
+    const register: usize = object_register;
+    if (register >= frame.registers.len) return .invalid_frame;
+    if (heap_mod.valueAsFunction(accumulator)) |fn_obj| {
+        if (heap_mod.valueAsPlainObject(frame.registers[register])) |home| {
+            realm.heap.setHomeObject(fn_obj, home);
+        }
+        fn_obj.has_construct = false;
+        // §15.4.4 / §15.5.6 step 2 — MethodDefinitions (concise methods,
+        // getters, setters, generators, async methods) are non-constructors.
+        // The generic allocator gives ordinary functions a `.prototype`; the
+        // method setup removes it for non-generator/non-async functions.
+        if (!fn_obj.is_generator and !fn_obj.is_async) {
+            realm.heap.setFunctionPrototype(fn_obj, null);
+        }
+    }
+    return .ok;
+}
+
+/// Result of the static object-method definition subset of §7.3.7. A guard
+/// miss has not modified the object, so Lantern can replay the full generic
+/// operation and own any observable completion.
+pub const ObjectMethodPropertyResult = enum {
+    ok,
+    out_of_memory,
+    invalid_frame,
+    tier_down,
+};
+
+/// §13.2.5 PropertyDefinitionEvaluation for the narrowly proven static
+/// object-method sequence. The graph only reaches this helper after
+/// `make_object`, ordinary `make_function`, and `set_home` on the same frame
+/// values. Keep runtime guards nevertheless: malformed bytecode, a future
+/// graph rewrite, or an unexpected exotic receiver must replay Lantern before
+/// the raw own-data write changes state.
+pub fn defineObjectMethodPropertyForFrame(
+    realm: *Realm,
+    allocator: std.mem.Allocator,
+    frame: *const CallFrame,
+    value: Value,
+    key_constant: u16,
+    object_register: u8,
+) ObjectMethodPropertyResult {
+    if (key_constant >= frame.chunk.constants.len or object_register >= frame.registers.len) {
+        return .invalid_frame;
+    }
+    const key = frame.chunk.constants[key_constant];
+    if (!key.isString()) return .invalid_frame;
+    const method = heap_mod.valueAsFunction(value) orelse return .tier_down;
+    const object = heap_mod.valueAsPlainObject(frame.registers[object_register]) orelse
+        return .tier_down;
+
+    // The graph proof establishes these invariants. They also keep this raw
+    // store out of user-controlled or exotic objects if a future producer
+    // reaches the helper without that proof.
+    if (method.home_object != object or method.has_construct or method.prototype != null or
+        object.prototype != realm.intrinsics.object_prototype or object.prototype_fn != null or
+        object.brand.is_proxy or object.brand.is_module_namespace or
+        object.brand.is_array_exotic or object.brand.is_arguments_exotic or
+        object.brand.has_array_buffer_data or object.brand.is_shadow_realm or
+        object.brand.is_raw_json or object.brand.is_weak_ref or
+        object.brand.promise_state != .none or object.getTypedView() != null or
+        object.getDataView() != null or object.getBoxedPrimitive() != null or
+        object.getBoxedString() != null)
+    {
+        return .tier_down;
+    }
+
+    const key_string: *JSString = @ptrCast(@alignCast(key.asString()));
+    const key_bytes = key_string.flatBytes();
+    const had_own = object.hasOwn(key_bytes);
+    if ((!had_own and !object.brand.extensible) or
+        (had_own and (object.hasAccessor(key_bytes) or !object.flagsFor(key_bytes).configurable)))
+    {
+        return .tier_down;
+    }
+
+    realm.heap.storePropertyWithFlags(
+        object,
+        allocator,
+        key_bytes,
+        value,
+        object_mod.PropertyFlags.default,
+    ) catch return .out_of_memory;
+    return .ok;
+}
+
+/// §13.2.5 ObjectLiteral allocation shape. The shaped form refers to the
+/// chunk-owned key template emitted for a static data-property literal.
+/// Neither form can invoke JavaScript, so an optimized tier may call this
+/// after publishing the complete pre-operation Lantern frame as GC roots.
+pub const ObjectLiteralKind = union(enum) {
+    plain,
+    shape: u16,
+};
+
+/// Result of allocating an empty Array exotic for the general Array literal
+/// path. The non-empty fused form uses `DenseArrayLiteralResult` below.
+pub const ArrayLiteralResult = union(enum) {
+    value: Value,
+    out_of_memory,
+};
+
+/// §13.2.4.2's initial ArrayCreate(0), shared by Lantern and Ohaimark. The
+/// caller publishes the frame before invoking this allocation boundary; the
+/// fresh Array remains unreachable until its tagged result is installed in the
+/// authoritative accumulator.
+pub fn createArrayLiteralForFrame(
+    realm: *Realm,
+    _: *const CallFrame,
+) ArrayLiteralResult {
+    const array = realm.heap.allocateObject() catch return .out_of_memory;
+    realm.heap.setObjectPrototype(array, realm.intrinsics.array_prototype);
+    array.markAsArrayExotic(realm.allocator) catch return .out_of_memory;
+    return .{ .value = heap_mod.taggedObject(array) };
+}
+
+/// Result of allocating one fused, hole-free dense Array literal from a live
+/// frame. The element window is validated before slicing so an invalid bytecode
+/// operand cannot turn into a host bounds trap in either JIT tier.
+pub const DenseArrayLiteralResult = union(enum) {
+    value: Value,
+    out_of_memory,
+    invalid_frame,
+};
+
+/// §13.2.4.1 fused dense Array literal allocation, shared by Lantern and both
+/// native tiers. The compiler has already evaluated elements left-to-right and
+/// staged them in consecutive frame registers; the frame is the GC root set
+/// across `makeDenseArray`'s allocation boundary.
+pub fn createDenseArrayLiteralForFrame(
+    realm: *Realm,
+    frame: *const CallFrame,
+    base: u8,
+    count: u8,
+) DenseArrayLiteralResult {
+    const base_index: usize = base;
+    const count_index: usize = count;
+    if (count == 0 or
+        count_index > heap_mod.Heap.element_buf_cap or
+        base_index > frame.registers.len or
+        count_index > frame.registers.len - base_index)
+    {
+        return .invalid_frame;
+    }
+    const array = realm.heap.makeDenseArray(
+        realm.intrinsics.array_prototype,
+        frame.registers[base_index .. base_index + count_index],
+    ) catch return .out_of_memory;
+    return .{ .value = heap_mod.taggedObject(array) };
+}
+
+/// Result of appending one static Array-literal element. The guarded helper is
+/// intentionally narrower than §7.3.7: non-Array, non-index, and nonsequential
+/// cases have not changed state and return to Lantern's full generic path.
+pub const DenseArrayAppendResult = enum {
+    ok,
+    out_of_memory,
+    invalid_frame,
+    tier_down,
+};
+
+/// §13.2.4.1's sequential CreateDataPropertyOrThrow fast path. The Array was
+/// just allocated by `createArrayLiteralForFrame`; a hit exactly performs the
+/// spec-visible own data property creation without consulting inherited
+/// setters. The fully generic `def_property` arm retains every other case.
+pub fn appendDenseArrayLiteralElementForFrame(
+    _: *Realm,
+    allocator: std.mem.Allocator,
+    frame: *const CallFrame,
+    value: Value,
+    key_constant: u16,
+    object_register: u8,
+) DenseArrayAppendResult {
+    if (key_constant >= frame.chunk.constants.len or object_register >= frame.registers.len) {
+        return .invalid_frame;
+    }
+    const key = frame.chunk.constants[key_constant];
+    if (!key.isString()) return .invalid_frame;
+    const object = heap_mod.valueAsPlainObject(frame.registers[object_register]) orelse
+        return .tier_down;
+    if (!object.brand.is_array_exotic) return .tier_down;
+    const key_string: *JSString = @ptrCast(@alignCast(key.asString()));
+    const index = object_mod.JSObject.canonicalIntegerIndex(key_string.flatBytes()) orelse
+        return .tier_down;
+    if (object.appendDenseSequential(allocator, index, value) catch return .out_of_memory) {
+        return .ok;
+    }
+    return .tier_down;
+}
+
+/// Result of a non-reentrant `delete receiver[key]` fast path. The helper
+/// admits only the OrdinaryDelete subset that cannot invoke JavaScript; every
+/// proxy, exotic receiver, coercible key, and strict-mode failure leaves the
+/// staged frame untouched for Lantern to replay.
+pub const ComputedDeleteResult = enum {
+    ok,
+    out_of_memory,
+    tier_down,
+};
+
+/// §13.5.1.2 `delete receiver[key]` for ordinary plain objects with an
+/// already-primitive key. `deleteOwnProperty` can demote shape storage, so the
+/// caller must publish `frame` as roots before crossing this allocation
+/// boundary. A non-configurable descriptor is declined before demotion so
+/// Lantern owns the strict-mode TypeError completion.
+pub fn deleteComputedPropertyForFrame(
+    realm: *Realm,
+    frame: *CallFrame,
+    object_register: u8,
+    key_register: u8,
+) ComputedDeleteResult {
+    const object_index: usize = object_register;
+    const key_index: usize = key_register;
+    if (object_index >= frame.registers.len or key_index >= frame.registers.len) {
+        return .tier_down;
+    }
+
+    const receiver = frame.registers[object_index];
+    const object = heap_mod.valueAsPlainObject(receiver) orelse return .tier_down;
+    if (object.brand.is_proxy or
+        object.brand.is_module_namespace or
+        object.brand.is_array_exotic or
+        object.brand.is_arguments_exotic or
+        object.brand.has_array_buffer_data or
+        object.getTypedView() != null or
+        object.getDataView() != null or
+        object.getBoxedPrimitive() != null or
+        object.getBoxedString() != null)
+    {
+        return .tier_down;
+    }
+
+    const key_value = frame.registers[key_index];
+    if (heap_mod.valueAsPlainObject(key_value) != null or
+        heap_mod.valueAsFunction(key_value) != null)
+    {
+        // §7.1.19 can invoke user code through ToPrimitive.
+        return .tier_down;
+    }
+    var key_buf: [64]u8 = undefined;
+    const key = computedKeyToString(key_value, &key_buf);
+
+    // OrdinaryDelete is a no-op success for an absent own key. Avoid the
+    // shape-to-dictionary demotion that the generic helper needs for removals.
+    if (object.hasAccessor(key)) {
+        if (!object.flagsFor(key).configurable) return .tier_down;
+    } else if (object.ownDataContains(key)) {
+        if (!object.flagsFor(key).configurable) return .tier_down;
+    } else {
+        frame.accumulator = Value.true_;
+        return .ok;
+    }
+
+    const result = deleteOwnProperty(realm, receiver, key) catch return .out_of_memory;
+    switch (result) {
+        .ok => |deleted| {
+            if (!deleted) return .tier_down;
+            frame.accumulator = Value.true_;
+            return .ok;
+        },
+        .throw_typeerror => return .tier_down,
+    }
+}
+
+/// Result of allocating one plain or shape-stamped object literal from a live
+/// frame. `invalid_frame` means malformed bytecode/template metadata and must
+/// replay the canonical Lantern opcode rather than expose a partial object.
+pub const ObjectLiteralResult = union(enum) {
+    value: Value,
+    out_of_memory,
+    invalid_frame,
+};
+
+/// §13.2.5 ObjectLiteral allocation, shared by Lantern and Ohaimark. The
+/// shape path exactly mirrors `make_object_shape`: build/cache the transition
+/// chain, allocate the object, stamp the shape, and initialize every slot to
+/// `undefined` before a GC can observe the unfinished literal.
+pub fn createObjectLiteralForFrame(
+    realm: *Realm,
+    allocator: std.mem.Allocator,
+    frame: *const CallFrame,
+    kind: ObjectLiteralKind,
+) ObjectLiteralResult {
+    var literal_shape: ?*@import("../shape.zig").Shape = null;
+    switch (kind) {
+        .plain => {},
+        .shape => |template_index| {
+            if (template_index >= frame.chunk.literal_shape_templates.len) return .invalid_frame;
+            const template = &frame.chunk.literal_shape_templates[template_index];
+            literal_shape = if (template.cached_shape) |shape| shape else blk: {
+                var current = realm.heap.shapes.root;
+                for (template.keys) |key_index| {
+                    if (key_index >= frame.chunk.constants.len) return .invalid_frame;
+                    const key = frame.chunk.constants[key_index];
+                    if (!key.isString()) return .invalid_frame;
+                    const key_string: *JSString = @ptrCast(@alignCast(key.asString()));
+                    current = realm.heap.shapes.transition(
+                        current,
+                        key_string.flatBytes(),
+                        object_mod.PropertyFlags.default,
+                        .data,
+                    ) catch return .out_of_memory;
+                }
+                @constCast(template).cached_shape = current;
+                break :blk current;
+            };
+        },
+    }
+
+    const object = realm.heap.allocateObject() catch return .out_of_memory;
+    realm.heap.setObjectPrototype(object, realm.intrinsics.object_prototype);
+    if (literal_shape) |shape| {
+        object.shape = shape;
+        object.resizeSlots(allocator, shape.property_count) catch return .out_of_memory;
+        // `ArrayList.resize` leaves new entries undefined. The collector can
+        // run before the downstream `def_template_property` writes, so every
+        // visible slot must already hold a valid tagged Value.
+        var slot: usize = 0;
+        while (slot < object.slotCount()) : (slot += 1) {
+            object.slotPtr(slot).* = Value.undefined_;
+        }
+    }
+    return .{ .value = heap_mod.taggedObject(object) };
+}
+
+/// Result of the static data-property write paired with a shape-stamped
+/// literal. A failed guard intentionally carries no JavaScript completion:
+/// Ohaimark reconstructs the pre-op frame and lets Lantern run the generic
+/// §7.3.7 fallback.
+pub const TemplatePropertyResult = enum {
+    ok,
+    invalid_frame,
+};
+
+/// §7.3.7 CreateDataPropertyOrThrow's shape-template fast path. The compiler
+/// only emits this for a private literal register whose preceding
+/// `make_object_shape` gave it the matching layout. Keep the guard anyway so
+/// malformed bytecode or a future object demotion always replays Lantern.
+pub fn defineTemplatePropertyForFrame(
+    realm: *Realm,
+    frame: *const CallFrame,
+    value: Value,
+    object_register: u8,
+    slot: u16,
+) TemplatePropertyResult {
+    const register_index: usize = object_register;
+    if (register_index >= frame.registers.len) return .invalid_frame;
+    const object = heap_mod.valueAsPlainObject(frame.registers[register_index]) orelse
+        return .invalid_frame;
+    const slot_index: usize = slot;
+    if (object.shape == null or slot_index >= object.slotCount()) return .invalid_frame;
+    object.setSlot(slot_index, value);
+    realm.heap.writeBarrier(.{ .object = object }, value);
+    return .ok;
+}
+
 pub const RunError = error{
     OutOfMemory,
     /// An opcode byte didn't match any known variant. Indicates a
@@ -479,11 +939,25 @@ pub const RunResult = union(enum) {
 /// the frame untouched and falls through to Bistromath. A T2 guard exit has
 /// already reconstructed the frame, so it resumes Lantern directly instead
 /// of restarting the activation in T1.
+pub const FreshJitOutcome = union(enum) {
+    not_entered,
+    completed: Value,
+    threw: Value,
+};
+
+inline fn finishFreshJitSafePoint(realm: *Realm) RunError!FreshJitOutcome {
+    if (try runSafePoint(realm)) |result| return switch (result) {
+        .thrown => |exception| .{ .threw = exception },
+        .value, .yielded => error.InvalidOpcode,
+    };
+    return .not_entered;
+}
+
 pub fn tryEnterFreshJitFrame(
     allocator: std.mem.Allocator,
     realm: *Realm,
     frames: *std.ArrayListUnmanaged(CallFrame),
-) RunError!bistromath.EnterOutcome {
+) RunError!FreshJitOutcome {
     // Lantern-only realms still heat chunks so an embedder can enable the
     // tiers later, but they need not enter both tier drivers merely to
     // rediscover the master switch is off. Keep this increment identical to
@@ -499,8 +973,15 @@ pub fn tryEnterFreshJitFrame(
         return .not_entered;
     }
     switch (try tryEnterOhaimarkTop(allocator, realm, frames)) {
-        .not_entered => return bistromath.tryEnterTop(allocator, realm, frames),
+        .not_entered => return switch (try bistromath.tryEnterTop(allocator, realm, frames)) {
+            .not_entered => .not_entered,
+            .safe_point => try finishFreshJitSafePoint(realm),
+            .completed => |value| .{ .completed = value },
+            .threw => |exception| .{ .threw = exception },
+        },
         .resumed => return .not_entered,
+        .safe_point => return finishFreshJitSafePoint(realm),
+        .handed_off => return .not_entered,
         .completed => |value| return .{ .completed = value },
     }
 }
@@ -1186,45 +1667,19 @@ inline fn runSafePoint(realm: *Realm) RunError!?RunResult {
             realm.collectGarbageYoung();
         }
     }
-    // Host-termination latch (docs/resource-metering.md) — checked
-    // FIRST, before the budget and the cooperative interrupt, so a
-    // pending termination re-signals at every crossing no matter
-    // what a native path did with the previous surface (the sticky
-    // re-termination V8's TerminateExecution and QuickJS's
-    // interrupt handler both rely on). One load + one
-    // never-taken-predicted branch on the unmetered path.
-    if (realm.termination != null) {
-        return RunResult{ .thrown = try makeTerminationValue(realm) };
-    }
-    if (realm.step_budget == 0) {
-        // `setFuel` posture: latch the uncatchable termination.
-        // Legacy posture (`.throw_range_error`, the default — the
-        // test262 harness's 50M backstop): the historical
-        // cooperative RangeError.
-        if (realm.fuel_exhaustion == .terminate) {
-            realm.terminate(.fuel_exhausted);
-            return RunResult{ .thrown = try makeTerminationValue(realm) };
-        }
-        const ex = try makeRangeError(realm, "interpreter step budget exhausted");
-        return RunResult{ .thrown = ex };
-    }
-    if (realm.interrupt.load(.acquire)) {
-        realm.clearInterrupt();
-        const ex = try makeRangeError(realm, "execution interrupted");
-        return RunResult{ .thrown = ex };
-    }
-    // Embedder interrupt hook (docs/resource-metering.md) — one
-    // null-check branch when no hook is armed. A `.interrupt`
-    // verdict latches the same uncatchable termination as fuel
-    // exhaustion.
-    if (realm.interrupt_hook) |hook| {
-        if (hook(realm.interrupt_hook_ctx) == .interrupt) {
-            realm.terminate(.host_interrupted);
-            return RunResult{ .thrown = try makeTerminationValue(realm) };
-        }
-    }
-    realm.step_budget -|= 1;
-    return null;
+    // Fuel + interrupt state transitions live on Realm so Lantern and
+    // the Wasm tiers cannot drift apart. Lantern only maps that shared
+    // structural result to JavaScript exception values.
+    return switch (realm.pollExecution()) {
+        .proceed => null,
+        .step_budget_exhausted => RunResult{
+            .thrown = try makeRangeError(realm, "interpreter step budget exhausted"),
+        },
+        .cooperative_interrupted => RunResult{
+            .thrown = try makeRangeError(realm, "execution interrupted"),
+        },
+        .terminated => RunResult{ .thrown = try makeTerminationValue(realm) },
+    };
 }
 
 /// The synthetic value surfaced while a host termination is pending
@@ -1233,11 +1688,7 @@ inline fn runSafePoint(realm: *Realm) RunError!?RunResult {
 /// latch that `unwindThrow` honours, not from the value's shape —
 /// so a host that prints an uncaught result gets a readable message.
 fn makeTerminationValue(realm: *Realm) RunError!Value {
-    const msg: []const u8 = if (realm.termination) |reason| switch (reason) {
-        .fuel_exhausted => "execution terminated: fuel exhausted",
-        .host_interrupted => "execution terminated: host interrupt",
-    } else "execution terminated";
-    return makeRangeError(realm, msg);
+    return makeRangeError(realm, realm.terminationMessage());
 }
 
 /// Loop back-edge safe point. A *taken* jump with a negative offset
@@ -1278,6 +1729,14 @@ const BackedgeOsr = union(enum) {
     threw: Value,
 };
 
+inline fn finishBackedgeJitSafePoint(realm: *Realm) RunError!BackedgeOsr {
+    if (try runSafePoint(realm)) |result| return switch (result) {
+        .thrown => |exception| .{ .threw = exception },
+        .value, .yielded => error.InvalidOpcode,
+    };
+    return .resumed;
+}
+
 inline fn tryBackedgeOsr(
     allocator: std.mem.Allocator,
     realm: *Realm,
@@ -1292,6 +1751,8 @@ inline fn tryBackedgeOsr(
         switch (try ohaimark_driver.tryOsrEnterTop(allocator, realm, frames)) {
             .not_entered => {},
             .resumed => return .resumed,
+            .safe_point => return finishBackedgeJitSafePoint(realm),
+            .handed_off => return .resumed,
             .completed => |v| return .{ .completed = v },
         }
     }
@@ -1299,6 +1760,7 @@ inline fn tryBackedgeOsr(
         switch (try bistromath.tryOsrEnterTop(allocator, realm, frames)) {
             .not_entered => {},
             .resumed => return .resumed,
+            .safe_point => return finishBackedgeJitSafePoint(realm),
             .completed => |v| return .{ .completed = v },
             .threw => |ex| return .{ .threw = ex },
         }
@@ -2797,6 +3259,17 @@ pub fn runFrames(
             ip += 2;
             if (k >= local_chunk.function_templates.len) return error.InvalidOpcode;
             const tmpl = &local_chunk.function_templates[k];
+            if (op_tag == .make_function) {
+                switch (createOrdinaryFunctionForFrame(realm, allocator, f, k)) {
+                    .value => |value| {
+                        acc = value;
+                        continue :dispatch try decodeNext(code, &ip, &committed);
+                    },
+                    .out_of_memory => return error.OutOfMemory,
+                    .invalid_frame => return error.InvalidOpcode,
+                    .unsupported_template => {},
+                }
+            }
             // §15.6.5 InstantiateOrdinaryFunctionExpression for a
             // NAMED function expression: allocate a 1-slot wrapper
             // env, instantiate the function capturing it, seed slot
@@ -8483,9 +8956,11 @@ pub fn runFrames(
             // `other.fn()` uses the callee's home realm), so the
             // %Object.prototype% / %ThrowTypeError% / %Array.prototype.
             // values% come from there. See buildUnmappedArgumentsObject.
-            const arg_realm = f.running_realm orelse realm;
-            const obj = buildUnmappedArgumentsObject(realm, allocator, arg_realm, registers[0..f.argc]) catch return error.OutOfMemory;
-            acc = heap_mod.taggedObject(obj);
+            acc = switch (createUnmappedArgumentsObjectForFrame(realm, allocator, f)) {
+                .value => |value| value,
+                .out_of_memory => return error.OutOfMemory,
+                .invalid_frame => return error.InvalidOpcode,
+            };
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
 
@@ -8681,33 +9156,11 @@ pub fn runFrames(
             // walks `home_object.[[Prototype]]` so this is what
             // makes `super.x()` from inside `{ method(){} }`
             // resolve against `Object.getPrototypeOf(obj)`.
-            //
-            // §15.4.4 / §15.5 — MethodDefinitions (concise
-            // methods, getters, setters, generators, async
-            // methods) have no [[Construct]] slot. `new obj.m()`
-            // must throw TypeError. Stamp `has_construct = false`
-            // here so the `new_call` opcode rejects them.
             const r_obj = code[ip];
             ip += 1;
-            if (heap_mod.valueAsFunction(acc)) |fn_obj| {
-                if (heap_mod.valueAsPlainObject(registers[r_obj])) |home| {
-                    realm.heap.setHomeObject(fn_obj, home);
-                }
-                fn_obj.has_construct = false;
-                // §15.4.4 / §15.5.6 step 2 — MethodDefinitions
-                // (concise methods, getters, setters, generators,
-                // async methods) are non-constructors and do
-                // NOT install a `prototype` data property. The
-                // generic `allocateFunction` path auto-creates
-                // one for every non-arrow function; drop it here
-                // so `hasOwnProperty.call(method, 'prototype')`
-                // returns false. Generator and async-generator
-                // method shapes get their `prototype` re-installed
-                // by the dedicated paths above before this fires
-                // — that branch handles them.
-                if (!fn_obj.is_generator and !fn_obj.is_async) {
-                    realm.heap.setFunctionPrototype(fn_obj, null);
-                }
+            switch (setHomeObjectForFrame(realm, f, acc, r_obj)) {
+                .ok => {},
+                .invalid_frame => return error.InvalidOpcode,
             }
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
@@ -9579,80 +10032,28 @@ pub fn runFrames(
 
         // ── Objects / properties ────────────────────────────────────
         .make_object => {
-            const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
-            realm.heap.setObjectPrototype(obj, realm.intrinsics.object_prototype);
-            acc = heap_mod.taggedObject(obj);
+            acc = switch (createObjectLiteralForFrame(realm, allocator, f, .plain)) {
+                .value => |value| value,
+                .out_of_memory => return error.OutOfMemory,
+                .invalid_frame => return error.InvalidOpcode,
+            };
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
         .make_object_shape => {
-            // Literal-shape boilerplate. The compiler captured
-            // the literal's static key list in
-            // `Chunk.literal_shape_templates[k]`; first hit
-            // builds the shape by walking
-            // `ShapeTree.transition` from the root, caches it
-            // on the template, and pre-sizes `slots`. Hits on
-            // a populated cache stamp the shape directly.
             const k = readU16(code, ip);
             ip += 2;
-            if (k >= local_chunk.literal_shape_templates.len) return error.InvalidOpcode;
-            const tmpl = &local_chunk.literal_shape_templates[k];
-            const shape = blk: {
-                if (tmpl.cached_shape) |s| break :blk s;
-                // Cold cache — build the shape.
-                var cur = realm.heap.shapes.root;
-                for (tmpl.keys) |key_idx| {
-                    if (key_idx >= local_chunk.constants.len) return error.InvalidOpcode;
-                    const key_v = local_chunk.constants[key_idx];
-                    if (!key_v.isString()) return error.InvalidOpcode;
-                    const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
-                    cur = realm.heap.shapes.transition(
-                        cur,
-                        key_s.flatBytes(),
-                        @import("../object.zig").PropertyFlags.default,
-                        .data,
-                    ) catch return error.OutOfMemory;
-                }
-                @constCast(tmpl).cached_shape = cur;
-                break :blk cur;
+            acc = switch (createObjectLiteralForFrame(realm, allocator, f, .{ .shape = k })) {
+                .value => |value| value,
+                .out_of_memory => return error.OutOfMemory,
+                .invalid_frame => return error.InvalidOpcode,
             };
-            const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
-            realm.heap.setObjectPrototype(obj, realm.intrinsics.object_prototype);
-            obj.shape = shape;
-            obj.resizeSlots(allocator, shape.property_count) catch return error.OutOfMemory;
-            // `ArrayList.resize` doesn't zero-fill. Initialise
-            // every slot to `undefined` so a GC trigger between
-            // `make_object_shape` and the downstream property
-            // writes finds a valid Value (the slot won't have its
-            // real entry yet — that's the `def_template_property` /
-            // `def_property` job).
-            {
-                var us_i: usize = 0;
-                while (us_i < obj.slotCount()) : (us_i += 1) obj.slotPtr(us_i).* = Value.undefined_;
-            }
-            // §10.1.11 OrdinaryOwnPropertyKeys insertion order is
-            // implicit in the cached shape's transition chain
-            // (root→leaf = insertion order); the read paths
-            // (Object.keys / Reflect.ownKeys / for-in) walk the
-            // shape chain when `own_key_order` is empty. Skipping
-            // the eager materialization here keeps the literal
-            // instance `is_pristine` so its death takes the
-            // `deinitFields` fast-return — the architectural win
-            // the `bench/micros/object_alloc.js` /
-            // `ctor_array_build.js` foundation could not yet close.
-            _ = tmpl.keys;
-            acc = heap_mod.taggedObject(obj);
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
         .make_array => {
-            const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
-            realm.heap.setObjectPrototype(obj, realm.intrinsics.array_prototype);
-            // `markAsArrayExotic` installs the §23.1.4 `length` slot
-            // (non-enumerable, non-configurable) — no separate write
-            // needed. It deliberately avoids bumping the proto-struct
-            // epoch so a constructor's transition write IC survives an
-            // array literal built in the same hot loop.
-            obj.markAsArrayExotic(allocator) catch return error.OutOfMemory;
-            acc = heap_mod.taggedObject(obj);
+            acc = switch (createArrayLiteralForFrame(realm, f)) {
+                .value => |value| value,
+                .out_of_memory => return error.OutOfMemory,
+            };
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
         .make_array_n => {
@@ -9677,8 +10078,11 @@ pub fn runFrames(
             // The n element values sit in consecutive GC-rooted
             // frame registers, so the allocation inside can collect
             // safely.
-            const obj = realm.heap.makeDenseArray(realm.intrinsics.array_prototype, registers[r_base .. @as(usize, r_base) + n]) catch return error.OutOfMemory;
-            acc = heap_mod.taggedObject(obj);
+            acc = switch (createDenseArrayLiteralForFrame(realm, f, r_base, n)) {
+                .value => |value| value,
+                .out_of_memory => return error.OutOfMemory,
+                .invalid_frame => return error.InvalidOpcode,
+            };
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
         .array_spread => {
@@ -10654,30 +11058,24 @@ pub fn runFrames(
             const k = readU16(code, ip);
             const r_obj = code[ip + 2];
             ip += 3;
+            switch (appendDenseArrayLiteralElementForFrame(realm, allocator, f, acc, k, r_obj)) {
+                .ok => continue :dispatch try decodeNext(code, &ip, &committed),
+                .out_of_memory => return error.OutOfMemory,
+                .invalid_frame => return error.InvalidOpcode,
+                .tier_down => {},
+            }
+            switch (defineObjectMethodPropertyForFrame(realm, allocator, f, acc, k, r_obj)) {
+                .ok => continue :dispatch try decodeNext(code, &ip, &committed),
+                .out_of_memory => return error.OutOfMemory,
+                .invalid_frame => return error.InvalidOpcode,
+                .tier_down => {},
+            }
             if (k >= local_chunk.constants.len) return error.InvalidOpcode;
             const key_v = local_chunk.constants[k];
             if (!key_v.isString()) return error.InvalidOpcode;
             const key_s: *JSString = @ptrCast(@alignCast(key_v.asString()));
             const recv = registers[r_obj];
             const obj = heap_mod.valueAsPlainObject(recv) orelse return error.InvalidOpcode;
-            // §13.2.4.1 ArrayAccumulation fast path — an array literal
-            // `[a, b, c]` emits one CreateDataProperty per element with
-            // the next canonical index ("0", "1", "2") onto a freshly
-            // made dense Array exotic. A sequential dense append produces
-            // exactly CreateDataProperty's effect (`elements[idx] = v`,
-            // `length = idx + 1`, implicit `{w,e,c} = true`) while skipping
-            // the `hasOwn` precheck (a fresh append is never a preexisting
-            // own slot), the second `canonicalIntegerIndex` re-parse inside
-            // `setWithFlags`, and `setIndexed`'s redundant hole-fill +
-            // duplicate write barrier. Falls through for sparse arrays or
-            // out-of-order / overwriting indices.
-            if (obj.brand.is_array_exotic) {
-                if (object_mod.JSObject.canonicalIntegerIndex(key_s.flatBytes())) |idx| {
-                    if (obj.appendDenseSequential(allocator, idx, acc) catch return error.OutOfMemory) {
-                        continue :dispatch try decodeNext(code, &ip, &committed);
-                    }
-                }
-            }
             const had_own = obj.hasOwn(key_s.flatBytes());
             if (!had_own and !obj.brand.extensible) {
                 const ex = try makeTypeError(realm, "Cannot define property on non-extensible object");
@@ -10732,23 +11130,21 @@ pub fn runFrames(
             const r_obj = code[ip + 2];
             const slot = readU16(code, ip + 3);
             ip += 5;
-            const recv = registers[r_obj];
-            const obj = heap_mod.valueAsPlainObject(recv) orelse return error.InvalidOpcode;
             // Fast path: the templatized shape is still in place,
             // the pre-sized slots vector still covers `slot`, and
             // the object hasn't been demoted (e.g. by a user-code
             // `Object.defineProperty` between `make_object_shape`
             // and this write, which can't happen for a literal in
             // a temp register but is checked for safety).
-            if (obj.shape != null and slot < obj.slotCount()) {
-                obj.setSlot(slot, acc);
-                realm.heap.writeBarrier(.{ .object = obj }, acc);
+            if (defineTemplatePropertyForFrame(realm, f, acc, r_obj, slot) == .ok) {
                 continue :dispatch try decodeNext(code, &ip, &committed);
             }
             // Deopt — fall through to the regular def_property
             // semantics so any unexpected shape demote (a future
             // path, a debugger-injected mutation, etc.) keeps
             // CreateDataPropertyOrThrow's spec contract.
+            const recv = registers[r_obj];
+            const obj = heap_mod.valueAsPlainObject(recv) orelse return error.InvalidOpcode;
             if (k >= local_chunk.constants.len) return error.InvalidOpcode;
             const key_v = local_chunk.constants[k];
             if (!key_v.isString()) return error.InvalidOpcode;
@@ -11950,6 +12346,9 @@ pub fn runFrames(
             // Lantern.
             switch (try bistromath.tryResumeTop(allocator, realm, frames)) {
                 .not_entered => {},
+                .safe_point => {
+                    if (try runSafePoint(realm)) |result| return result;
+                },
                 .completed => |jit_ret| {
                     if (frames.items.len == 0) return .{ .value = jit_ret };
                     frames.items[frames.items.len - 1].accumulator = jit_ret;

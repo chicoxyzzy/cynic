@@ -449,6 +449,13 @@ pub fn ldrbImm(rt: Reg, rn: Reg, imm12: u12) u32 {
     return 0x39400000 | (@as(u32, imm12) << 10) | (r(rn) << 5) | r(rt);
 }
 
+/// LDARB Wt, [Xn] — acquire-load one byte from an atomic flag. The acquire
+/// pairs with a host thread's release-store before generated code calls the
+/// embedding's full execution poll.
+pub fn ldarb(rt: Reg, rn: Reg) u32 {
+    return 0x08DFFC00 | (r(rn) << 5) | r(rt);
+}
+
 /// LDR Wt, [Xn, Xm] — 32-bit load from base Xn + register offset Xm
 /// (no scaling, LSL #0), zero-extended into Wt. The wasm memory load:
 /// Xn is the memory base, Xm the bounds-checked effective address.
@@ -994,6 +1001,7 @@ test "jit asm_aarch64: golden encodings" {
     try expectEqual(@as(u32, 0x6B020020), subsRegW(.x0, .x1, .x2)); // subs w0, w1, w2
     try expectEqual(@as(u32, 0x2A0103E0), movRegW(.x0, .x1)); // mov w0, w1
     try expectEqual(@as(u32, 0x39400020), ldrbImm(.x0, .x1, 0)); // ldrb w0, [x1]
+    try expectEqual(@as(u32, 0x08DFFC20), ldarb(.x0, .x1)); // ldarb w0, [x1]
     try expectEqual(@as(u32, 0x36000040), tbz(.x0, 0, 2)); // tbz x0, #0, .+8
     try expectEqual(@as(u32, 0x37000041), tbnz(.x1, 0, 2)); // tbnz x1, #0, .+8
     try expectEqual(@as(u32, 0x14000001), b(1)); // b .+4

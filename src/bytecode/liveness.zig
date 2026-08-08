@@ -194,7 +194,7 @@ pub fn effectOf(op: Op, code: []const u8, i: usize) Effect {
         .lda_computed, .lda_computed8 => Effect.read1(code[i + 1]),
         .switch_smi => Effect.read1(code[i + 1]),
         // `[op][k:u16][r_obj:u8]…` — receiver register at i+3.
-        .lda_property_reg, .sta_property, .def_property => Effect.read1(code[i + 3]),
+        .lda_property_reg, .sta_property, .def_property, .def_template_property => Effect.read1(code[i + 3]),
         .lda_property_reg8, .sta_property8 => Effect.read1(code[i + 2]),
         .sta_computed, .sta_computed8, .def_computed => Effect.read2(code[i + 1], code[i + 2]),
 
@@ -381,6 +381,30 @@ pub const Analysis = struct {
         return lo;
     }
 
+    /// Reachability over ordinary bytecode successors only. Exceptional edges
+    /// deliberately stay out: handler entry receives state from the unwinder,
+    /// not from an ordinary predecessor. Optimizing tiers can use this to
+    /// compile normal paths while replaying throws through the interpreter.
+    /// Caller owns the returned set.
+    pub fn normalReachability(self: *const Analysis) !std.DynamicBitSet {
+        var reachable = try std.DynamicBitSet.initEmpty(self.allocator, self.blockCount());
+        errdefer reachable.deinit();
+        if (self.blockCount() == 0) return reachable;
+
+        var stack: std.ArrayListUnmanaged(usize) = .empty;
+        defer stack.deinit(self.allocator);
+        try stack.append(self.allocator, 0);
+        reachable.set(0);
+        while (stack.pop()) |block| {
+            for (self.succs[block].items) |successor| {
+                if (reachable.isSet(successor)) continue;
+                reachable.set(successor);
+                try stack.append(self.allocator, successor);
+            }
+        }
+        return reachable;
+    }
+
     /// Registers live at the program point immediately AFTER the
     /// instruction at `off` (i.e. live-in of the next instruction).
     /// Caller owns the returned set. Used to detect dead stores
@@ -432,9 +456,9 @@ pub const ExceptionEdge = struct {
 };
 
 /// Compute the block/liveness analysis for `code`. `handlers` supplies
-/// try/catch/finally entry offsets (each is a block leader and an
-/// implicit successor of every block in its protected range). Caller
-/// owns the returned `Analysis` (`deinit`).
+/// try/catch/finally protected ranges. Their entry and range boundaries are
+/// block leaders, so every protected block has an exact exceptional successor.
+/// Caller owns the returned `Analysis` (`deinit`).
 pub fn analyze(
     allocator: std.mem.Allocator,
     code: []const u8,
@@ -448,7 +472,15 @@ pub fn analyze(
     var leader_set: std.AutoHashMapUnmanaged(u32, void) = .empty;
     defer leader_set.deinit(allocator);
     try leader_set.put(allocator, 0, {});
-    for (handlers) |h| try leader_set.put(allocator, h.handler_pc, {});
+    const code_len_u32 = std.math.cast(u32, code.len) orelse std.math.maxInt(u32);
+    for (handlers) |h| {
+        // A handler can begin or end inside an otherwise straight-line block.
+        // Split there so liveness attaches its exceptional edge to precisely the
+        // instructions covered by the protected range.
+        try leader_set.put(allocator, h.handler_pc, {});
+        if (h.start_pc < code_len_u32) try leader_set.put(allocator, h.start_pc, {});
+        if (h.end_pc < code_len_u32) try leader_set.put(allocator, h.end_pc, {});
+    }
 
     var offsets: std.ArrayListUnmanaged(u32) = .empty;
     defer offsets.deinit(allocator);
@@ -976,4 +1008,33 @@ test "liveness: exceptional control-flow edges remain observable" {
     try testing.expectEqual(@as(usize, 1), a.exception_edges.len);
     try testing.expectEqual(a.blockOf(0), a.exception_edges[0].from);
     try testing.expectEqual(a.blockOf(2), a.exception_edges[0].to);
+}
+
+test "liveness: protected-range boundaries preserve exceptional register liveness" {
+    // `r0` is initialized before the try range, then read only by the catch
+    // landing. The protected range starts mid-block unless liveness installs a
+    // leader at its start, which would drop the exceptional edge and let a JIT
+    // replay the throw with stale frame state.
+    var code = [_]u8{
+        byteOf(.lda_one),
+        byteOf(.star_0),
+        byteOf(.lda_zero),
+        byteOf(.throw_),
+        byteOf(.ldar_0),
+        byteOf(.return_),
+    };
+    const handlers = [_]Handler{.{
+        .start_pc = 2,
+        .end_pc = 4,
+        .handler_pc = 4,
+        .catch_register = null,
+    }};
+    var a = try analyze(testing.allocator, &code, 1, &handlers, &.{});
+    defer a.deinit();
+
+    const protected = a.blockOf(2);
+    try testing.expect(protected != a.blockOf(0));
+    try testing.expectEqual(@as(usize, 1), a.exception_edges.len);
+    try testing.expectEqual(protected, a.exception_edges[0].from);
+    try testing.expect(a.live_out[protected].isSet(0));
 }

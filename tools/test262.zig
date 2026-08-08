@@ -95,8 +95,9 @@
 //!                           `--jit`; works with the worker pool.
 //!   --ohaimark              Force Ohaimark T2 before T1, both at threshold 1.
 //!                           Production CLI T2 remains at its natural threshold.
-//!   --ohaimark-osr          Also enable default-off loop-header OSR (requires
-//!                           `--ohaimark`). Differential gate for OSR graduation.
+//!   --ohaimark-osr          Explicitly retain default-on loop-header OSR.
+//!   --no-ohaimark-osr       Disable loop-header OSR while forcing Ohaimark;
+//!                           isolates function-entry T2 for diagnosis.
 //!   --ohaimark-stats        Print aggregate T2 compile/entry/exit telemetry,
 //!                           refusal stages, and top unsupported opcodes.
 //!                           Requires `--ohaimark`; works with the worker pool.
@@ -230,10 +231,9 @@ fn test262Done(
 // • `$262.detachArrayBuffer(buf)` — frees the underlying byte
 // storage of an ArrayBuffer; subsequent typed-array reads
 // throw "TypedArray detached" via the existing path.
-// • `$262.createRealm()` — throws TypeError. Real cross-realm
-// evaluation needs a fresh-intrinsics-shared-heap rebuild
-// that's out of scope for this shim; tests gated on it skip
-// via the `cross-realm` feature filter.
+// • `$262.createRealm()` — creates a child realm with fresh
+// intrinsics/globals on the shared heap and returns its `$262`
+// wrapper.
 
 fn test262EvalScript(
     realm: *cynic.runtime.Realm,
@@ -1225,10 +1225,9 @@ var g_jit_force: bool = false;
 /// Bistromath differential pass set remains a stable gate of its own.
 var g_ohaimark_force: bool = false;
 
-/// `--ohaimark-osr` — enable default-off loop-header OSR on every realm.
-/// Requires `--ohaimark` (OSR publishes from T2 compile). Used only for the
-/// OSR graduation differential; does not change production defaults.
-var g_ohaimark_osr_force: bool = false;
+/// `--no-ohaimark-osr` — isolate function-entry Ohaimark by disabling the
+/// default-on loop-header OSR policy on every forced-T2 realm.
+var g_ohaimark_osr_disabled: bool = false;
 
 fn configureForcedJit(realm: *cynic.runtime.Realm) void {
     if (!g_jit_force and !g_ohaimark_force) return;
@@ -1237,25 +1236,23 @@ fn configureForcedJit(realm: *cynic.runtime.Realm) void {
     if (g_ohaimark_force) {
         realm.ohaimark_enabled = true;
         realm.ohaimark_threshold_override = 1;
-        if (g_ohaimark_osr_force) {
-            realm.ohaimark_osr_enabled = true;
-        }
+        realm.ohaimark_osr_enabled = !g_ohaimark_osr_disabled;
     }
 }
 
 test "test262 tier force keeps Bistromath and Ohaimark postures distinct" {
     const saved_jit = g_jit_force;
     const saved_ohaimark = g_ohaimark_force;
-    const saved_osr = g_ohaimark_osr_force;
+    const saved_osr_disabled = g_ohaimark_osr_disabled;
     defer {
         g_jit_force = saved_jit;
         g_ohaimark_force = saved_ohaimark;
-        g_ohaimark_osr_force = saved_osr;
+        g_ohaimark_osr_disabled = saved_osr_disabled;
     }
 
     g_jit_force = true;
     g_ohaimark_force = false;
-    g_ohaimark_osr_force = false;
+    g_ohaimark_osr_disabled = false;
     var baseline = cynic.runtime.Realm.init(std.testing.allocator);
     defer baseline.deinit();
     configureForcedJit(&baseline);
@@ -1263,11 +1260,11 @@ test "test262 tier force keeps Bistromath and Ohaimark postures distinct" {
     try std.testing.expectEqual(@as(?u32, 1), baseline.jit_threshold_override);
     try std.testing.expect(!baseline.ohaimark_enabled);
     try std.testing.expectEqual(@as(?u32, null), baseline.ohaimark_threshold_override);
-    try std.testing.expect(!baseline.ohaimark_osr_enabled);
+    try std.testing.expect(baseline.ohaimark_osr_enabled);
 
     g_jit_force = false;
     g_ohaimark_force = true;
-    g_ohaimark_osr_force = false;
+    g_ohaimark_osr_disabled = false;
     var optimized = cynic.runtime.Realm.init(std.testing.allocator);
     defer optimized.deinit();
     configureForcedJit(&optimized);
@@ -1275,14 +1272,14 @@ test "test262 tier force keeps Bistromath and Ohaimark postures distinct" {
     try std.testing.expectEqual(@as(?u32, 1), optimized.jit_threshold_override);
     try std.testing.expect(optimized.ohaimark_enabled);
     try std.testing.expectEqual(@as(?u32, 1), optimized.ohaimark_threshold_override);
-    try std.testing.expect(!optimized.ohaimark_osr_enabled);
+    try std.testing.expect(optimized.ohaimark_osr_enabled);
 
-    g_ohaimark_osr_force = true;
-    var with_osr = cynic.runtime.Realm.init(std.testing.allocator);
-    defer with_osr.deinit();
-    configureForcedJit(&with_osr);
-    try std.testing.expect(with_osr.ohaimark_enabled);
-    try std.testing.expect(with_osr.ohaimark_osr_enabled);
+    g_ohaimark_osr_disabled = true;
+    var without_osr = cynic.runtime.Realm.init(std.testing.allocator);
+    defer without_osr.deinit();
+    configureForcedJit(&without_osr);
+    try std.testing.expect(without_osr.ohaimark_enabled);
+    try std.testing.expect(!without_osr.ohaimark_osr_enabled);
 }
 
 const Options = struct {
@@ -1593,6 +1590,26 @@ test "failClassOf: intl-normative-optional is a by-design decline, not an engine
         FailClass.gap,
         failClassOf("intl402/NumberFormat/format-en-US.js", .{}, &.{}),
     );
+}
+
+test "writeNotPassing renders zero engine gaps explicitly" {
+    var buckets = BucketMap.init(std.testing.allocator);
+    defer buckets.deinit();
+    try buckets.bump("built-ins/Example", .fail);
+
+    var stats: Stats = .{};
+    stats.fail_reject = 1;
+    stats.fail_by_class[@intFromEnum(FailClass.annex_b)] = 1;
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(std.testing.allocator);
+    try writeNotPassing(std.testing.allocator, &out, &buckets, &stats);
+
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        out.items,
+        "| **engine gaps** | 0 |",
+    ) != null);
 }
 
 /// Bucket the relative test path on its first two components
@@ -2116,10 +2133,10 @@ fn runSweep(
     opts: *const Options,
     phase: Phase,
 ) !PhaseResult {
-    // Cynic-scoped tally. Paths Cynic considers out of scope
-    // (Annex B language extensions, browser-era built-ins) are
-    // dropped from the denominator entirely — spec% means
-    // "fraction of Cynic-targeted tests that pass."
+    // Binary tally for this phase. `shouldSkip` excludes harness/staging,
+    // Annex B paths, unrelated proposal phases, malformed frontmatter, and
+    // other structurally unrunnable fixtures; every selected fixture is a
+    // plain pass or fail.
     var stats: Stats = .{};
     var failures: std.ArrayListUnmanaged(Failure) = .empty;
     errdefer {
@@ -4691,7 +4708,12 @@ fn writeNotPassing(
 
     var buf: [1024]u8 = undefined; // detail cells are long-form prose — headroom over 512
     const cls = stats.fail_by_class;
-    const class_rows = [_]struct { idx: FailClass, label: []const u8, detail: []const u8 }{
+    const class_rows = [_]struct {
+        idx: FailClass,
+        label: []const u8,
+        detail: []const u8,
+        show_when_zero: bool = false,
+    }{
         .{ .idx = .no_strict, .label = "sloppy-mode-only fixtures", .detail = "`flags: [noStrict]` — Cynic is strict-only by design (`with`, sloppy direct-eval `arguments` bindings, legacy S11-era semantics, ...)" },
         .{ .idx = .annex_b, .label = "Annex B builtins", .detail = "`__proto__` accessor + `__define`/`__lookup{Getter,Setter}__` are not shipped by design" },
         .{ .idx = .can_block, .label = "cannot-block agent semantics", .detail = "`flags: [CanBlockIsFalse]` — fixtures requiring `Atomics.wait` to throw on a non-blocking agent" },
@@ -4699,11 +4721,11 @@ fn writeNotPassing(
         .{ .idx = .sloppy_body, .label = "sloppy-mode (body-audited)", .detail = "sloppy-mode semantics the classifier can't see from frontmatter — a `Function(...)` / `eval(...)` body that runs as non-strict code, a `-non-strict` fixture, an in-body `with`. Cynic is strict-only by design. Attributed per fixture by the body-audit registry (`tools/test262/gap_audit.zig`)" },
         .{ .idx = .annex_b_body, .label = "Annex B (body-audited)", .detail = "an Annex-B surface used inside the fixture body — an Annex-B regex form, a legacy `String.prototype.substr`, an `__proto__` / `__lookup*` poke in the test logic. Cynic ships no Annex B. Registry-attributed, same source as above" },
         .{ .idx = .stale_fixture, .label = "outdated fixture", .detail = "an upstream fixture that predates a spec / data bump Cynic tracks (e.g. a CLDR version) — Cynic is spec-correct, the fixture should be refreshed upstream. Not a Cynic decline. Registry-attributed" },
-        .{ .idx = .gap, .label = "**engine gaps**", .detail = "the real engine work list: failures NOT explained by a policy class OR the body-audit registry. Each is either a genuine engine bug or a NEW by-design fixture not yet audited — triage the body (`--list-gaps` prints them), then fix the engine or add a line to `tools/test262/gap_audit.zig`. Includes any genuinely-unimplemented in-scope surface (e.g. `intl402/` at `-Dintl=full`)" },
+        .{ .idx = .gap, .label = "**engine gaps**", .detail = "the real engine work list: failures NOT explained by a policy class OR the body-audit registry. Each is either a genuine engine bug or a NEW by-design fixture not yet audited — triage the body (`--list-gaps` prints them), then fix the engine or add a line to `tools/test262/gap_audit.zig`. Includes any genuinely-unimplemented in-scope surface (e.g. `intl402/` at `-Dintl=full`)", .show_when_zero = true },
     };
     for (class_rows) |row| {
         const n = cls[@intFromEnum(row.idx)];
-        if (n == 0) continue;
+        if (n == 0 and !row.show_when_zero) continue;
         const line = try std.fmt.bufPrint(&buf, "| {s} | {d} | {s} |\n", .{ row.label, n, row.detail });
         try out.appendSlice(gpa, line);
     }
@@ -4990,7 +5012,9 @@ fn parseArgs(gpa: std.mem.Allocator, args: std.process.Args) !Options {
         } else if (std.mem.eql(u8, arg, "--ohaimark")) {
             g_ohaimark_force = true;
         } else if (std.mem.eql(u8, arg, "--ohaimark-osr")) {
-            g_ohaimark_osr_force = true;
+            g_ohaimark_osr_disabled = false;
+        } else if (std.mem.eql(u8, arg, "--no-ohaimark-osr")) {
+            g_ohaimark_osr_disabled = true;
         } else if (std.mem.eql(u8, arg, "--ohaimark-stats")) {
             opts.ohaimark_stats = true;
         } else if (std.mem.startsWith(u8, arg, "--gc-threshold=")) {
@@ -5057,8 +5081,8 @@ fn parseArgs(gpa: std.mem.Allocator, args: std.process.Args) !Options {
         std.debug.print("error: --ohaimark-stats requires --ohaimark\n", .{});
         std.process.exit(1);
     }
-    if (g_ohaimark_osr_force and !g_ohaimark_force) {
-        std.debug.print("error: --ohaimark-osr requires --ohaimark\n", .{});
+    if (g_ohaimark_osr_disabled and !g_ohaimark_force) {
+        std.debug.print("error: --no-ohaimark-osr requires --ohaimark\n", .{});
         std.process.exit(1);
     }
 

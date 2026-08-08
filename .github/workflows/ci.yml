@@ -101,6 +101,12 @@ jobs:
       - name: Build
         run: zig build
 
+      - name: CLI WebAssembly compilation is enabled by default
+        if: runner.os == 'Linux'
+        # Binary-level policy witness: no retired `--allow=wasm` flag. The
+        # default CLI realm must compile bytes, instantiate, and call an export.
+        run: ./zig-out/bin/cynic run tests/cli/wasm-default.js
+
       - name: Unit tests
         # `test-fast` builds the unit-test binaries ReleaseSafe rather
         # than Debug. Most tests eval JS through the engine, where Debug
@@ -273,6 +279,41 @@ jobs:
         run: |
           zig build wasm-testsuite -Dwasm-corpus=vendor/wasm-testsuite -- \
             --quiet --min-pass-pct=100
+
+  wasm-testsuite-spasm:
+    name: WASM spec testsuite (Spasm, AArch64)
+    runs-on: macos-latest
+    timeout-minutes: 25
+    needs: build-and-test
+    # Spasm emits AArch64 machine code, so the Ubuntu Sarcasm gate above
+    # cannot exercise it. Force the tier over the same full corpus and keep
+    # the 100%-of-scored-commands floor: compilable functions run native and
+    # unsupported functions must degrade to Sarcasm without changing results.
+    steps:
+      - name: Audit egress (advisory)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411  # v2
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - name: Fetch the wasm-testsuite corpus
+        run: git submodule update --init --depth 1 vendor/wasm-testsuite
+
+      - name: Install wabt (wast2json)
+        run: brew install wabt
+
+      - name: Set up Zig
+        uses: xyzzylabs/setup-zig@09d85d9dbb73308882e7a26e61a8f706eed40df1  # v1.0.2
+        with:
+          cache-key: wasm-testsuite-spasm
+
+      - name: Score the spec testsuite through Spasm (gating)
+        timeout-minutes: 15
+        run: |
+          zig build wasm-testsuite -Dwasm-corpus=vendor/wasm-testsuite -- \
+            --quiet --spasm --min-pass-pct=100
 
   cross-build:
     name: Cross-build (${{ matrix.target }})
@@ -453,8 +494,8 @@ jobs:
     #
     # The macOS lane qualifies Bistromath's AArch64 backend. A separate
     # native Ubuntu lane below runs the same fail-closed comparison for
-    # x86_64; keeping the jobs separate lets this one also qualify the
-    # AArch64-only Ohaimark tier.
+    # x86_64; keeping the jobs separate gives each native ISA an explicit
+    # generated-entry witness.
     #
     # GATING since the 2026-06-11 default-on decision (docs/jit.md
     # §10.5): the tier ships on by default, so a pass-set
@@ -526,19 +567,56 @@ jobs:
           diff -u /tmp/pass-interp.txt /tmp/pass-jit.txt
           echo "pass-sets identical: $(wc -l < /tmp/pass-interp.txt) fixtures (Atomics wait/notify + copyWithin coerced-detached excluded from the differential)"
 
-      - name: Ohaimark differential + telemetry (gating)
+      - name: Ohaimark + OSR differential + telemetry (gating)
         timeout-minutes: 20
         run: |
           set -euo pipefail
           # Reuse the completed interpreter pass set, then force default-on T2
-          # before T1. Ohaimark has graduated, so any pass-set divergence now
-          # fails the same job as the established Bistromath differential.
+          # plus loop-header OSR before T1. Both are production defaults, so
+          # any pass-set divergence fails the same job as the established
+          # Bistromath differential.
           test -s /tmp/pass-interp.txt
           EXCLUDES=(--exclude=built-ins/Atomics/wait/ --exclude=built-ins/Atomics/notify/ --exclude=built-ins/TypedArray/prototype/copyWithin/coerced)
           zig build test262 -- --quiet --threads=0 --ohaimark --ohaimark-stats "${EXCLUDES[@]}" --pass-list-out=/tmp/pass-ohaimark.txt
           test -s /tmp/pass-ohaimark.txt
           diff -u /tmp/pass-interp.txt /tmp/pass-ohaimark.txt
-          echo "Ohaimark pass-set identical: $(wc -l < /tmp/pass-ohaimark.txt) fixtures"
+          echo "Ohaimark+OSR pass-set identical: $(wc -l < /tmp/pass-ohaimark.txt) fixtures"
+
+  test262-ohaimark-x86-differential:
+    name: test262 Ohaimark x86_64 differential
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    needs: build-and-test
+    # Ohaimark now ships on x86_64 as well as AArch64. The macOS differential
+    # above cannot qualify the second emitter, so force T2 + loop-header OSR
+    # on Linux and compare exact fixture identities against Lantern.
+    steps:
+      - name: Audit egress (advisory)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411  # v2
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          submodules: recursive
+
+      - name: Set up Zig
+        uses: xyzzylabs/setup-zig@09d85d9dbb73308882e7a26e61a8f706eed40df1  # v1.0.2
+        with:
+          cache-key: ohaimark-x86-differential
+
+      - name: Differential sweep (Lantern vs Ohaimark + OSR)
+        timeout-minutes: 45
+        run: |
+          set -euo pipefail
+          EXCLUDES=(--exclude=built-ins/Atomics/wait/ --exclude=built-ins/Atomics/notify/ --exclude=built-ins/TypedArray/prototype/copyWithin/coerced)
+          zig build test262 -- --quiet --threads=0 "${EXCLUDES[@]}" --pass-list-out=/tmp/pass-interp.txt
+          zig build test262 -- --quiet --threads=0 --ohaimark --ohaimark-stats "${EXCLUDES[@]}" --pass-list-out=/tmp/pass-ohaimark-x86.txt
+          test -s /tmp/pass-interp.txt
+          test -s /tmp/pass-ohaimark-x86.txt
+          diff -u /tmp/pass-interp.txt /tmp/pass-ohaimark-x86.txt
+          echo "Ohaimark x86_64 pass-set identical: $(wc -l < /tmp/pass-ohaimark-x86.txt) fixtures"
 
   test262-jit-differential-x86-64:
     name: test262 JIT differential (x86_64)
@@ -586,9 +664,9 @@ jobs:
     # so a compiled property write whose barrier mirror drifted
     # from the interpreter's (the §9 rule) trips the verifier with
     # the offending (container, field, target) instead of slipping
-    # through as a rare flake. This mixed T1/T2 matrix stays on macOS
-    # because Ohaimark is AArch64-only; native x86_64 Bistromath is gated
-    # by the differential job above and Ubuntu's full ReleaseSafe unit run.
+    # through as a rare flake. This mixed T1/T2 matrix stays on macOS; native
+    # x86_64 differential jobs independently gate both Bistromath and Ohaimark,
+    # while Ubuntu's full ReleaseSafe unit run covers the Linux host surface.
     # Buckets are the property-write-heavy surfaces; advisory like its
     # sibling gc-stress job. T2 rows also print Ohaimark rollout telemetry.
     runs-on: macos-latest

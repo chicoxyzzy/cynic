@@ -1,16 +1,14 @@
 #!/usr/bin/env bash
 #
-# bench-cross.sh — interpreter-tier cross-engine micro-bench runner.
+# bench-cross.sh — cross-engine benchmark runner.
 #
 # Runs every bench/micros/*.js fixture under each available engine,
 # times the subprocess wall-clock (spawn-to-exit), and prints a
-# markdown table (engine x fixture, median ms) in the bench-results.md
-# row style.
+# self-contained markdown matrix (engine x fixture, median ms).
 #
 # This is an INTERNAL regression compass, not a public scoreboard.
-# Numbers never go to the website. Cynic is a pure bytecode
-# interpreter with no JIT, so this harness compares interpreter tiers
-# only: every JIT engine runs with its JIT disabled.
+# The interpreter-tier section disables every JIT; the full-speed section
+# compares Cynic's production T1+T2 posture against peers with their JITs on.
 #
 #   v8 (d8)       --jitless
 #   spidermonkey  --no-baseline --no-ion
@@ -35,7 +33,7 @@
 #   tools/bench-cross.sh                 # BOTH tiers (two separate tables)
 #   tools/bench-cross.sh --tier interp   # interpreter tier only
 #   tools/bench-cross.sh --tier jit      # full-speed tier only: Cynic
-#                                        # default (Bistromath) vs peers
+#                                        # production T1+T2 default vs peers
 #                                        # with their JITs ENABLED. The two
 #                                        # tiers are different fairness
 #                                        # baselines — always separate
@@ -46,8 +44,8 @@
 #                                        # instead of the micros; Cynic
 #                                        # pinned --unhardened
 #
-# Does NOT touch bench-results.md (that file is the single-engine
-# `zig build bench` artifact). Output goes to stdout / the -o file.
+# Output goes to stdout or the requested `-o` file. Curate a reviewed
+# snapshot into bench-cross-results.md after a meaningful perf change.
 
 set -u
 
@@ -72,6 +70,7 @@ TIER="both"
 MACROS=0          # --macros: run bench/macros/ (Octane) instead of micros
 SELF_TEST_RSS_MEDALS=0
 SELF_TEST_PYTHON_AFFINITY=0
+SELF_TEST_AFFINITY_NOTE=0
 
 # Emit one Peak-RSS row with the same distinct-value podium semantics as
 # the timing table: the three smallest measured footprints take gold,
@@ -122,6 +121,14 @@ python_timed_argv() {
   fi
 }
 
+cpu_affinity_note() {
+  if [ -n "${TASKSET:-}" ]; then
+    printf 'Timed runs are pinned to CPU %s with taskset.' "$BENCH_CPU"
+  else
+    printf 'This host has no CPU-affinity pin; treat spread flags as authoritative.'
+  fi
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
     -o|--out)   OUT_FILE="$2"; shift 2 ;;
@@ -130,6 +137,7 @@ while [ $# -gt 0 ]; do
     --macros)   MACROS=1; shift ;;
     --self-test-rss-medals) SELF_TEST_RSS_MEDALS=1; shift ;;
     --self-test-python-affinity) SELF_TEST_PYTHON_AFFINITY=1; shift ;;
+    --self-test-affinity-note) SELF_TEST_AFFINITY_NOTE=1; shift ;;
     -h|--help)
       sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
       exit 0 ;;
@@ -153,6 +161,13 @@ if [ "$SELF_TEST_PYTHON_AFFINITY" = "1" ]; then
   TASKSET="taskset -c 7"
   python_timed_argv - engine fixture.js
   python_timed_argv FLAG=1 engine fixture.js
+  exit 0
+fi
+
+if [ "$SELF_TEST_AFFINITY_NOTE" = "1" ]; then
+  BENCH_CPU="${CYNIC_BENCH_CPU:-7}"
+  TASKSET="taskset -c $BENCH_CPU"
+  cpu_affinity_note
   exit 0
 fi
 
@@ -252,7 +267,7 @@ if [ "$TIER" = "jit" ]; then
   register sm - "$JSVU_BIN/sm"
 else
   # Interpreter tier — the headline. Cynic pinned with `--no-jit`
-  # (Bistromath is the engine default), every JIT peer pinned with
+  # (the production default otherwise enables T1 and T2), every JIT peer pinned with
   # its no-JIT flags, so the comparison stays interpreter-tier vs
   # interpreter-tier.
   register cynic - "$CYNIC_BIN" --no-jit $CYNIC_EXTRA run
@@ -515,8 +530,7 @@ EOF
 done
 
 # ---------------------------------------------------------------------
-# Emit the markdown table. Rows = fixtures, columns = engines —
-# mirrors the bench-results.md per-fixture row style.
+# Emit the markdown table. Rows = fixtures, columns = engines.
 # ---------------------------------------------------------------------
 # Engine version strings for the table header. jsvu writes the
 # versions it installed into ~/.jsvu/status.json; engines outside
@@ -528,7 +542,18 @@ jsvu_ver() {
 engine_version() {
   local name="$1" bin="$2" v=""
   case "$name" in
-    cynic)  v="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null)" ;;
+    cynic)
+      v="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null)"
+      # Report tracked deviations plus untracked source/fixture inputs. Remote
+      # boxes intentionally retain unrelated pass lists and caches; those must
+      # not turn an exact-revision measurement into `+worktree`.
+      if ! git -C "$REPO_ROOT" diff --quiet HEAD -- 2>/dev/null ||
+        [ -n "$(git -C "$REPO_ROOT" ls-files --others --exclude-standard -- \
+          src bench build.zig build.zig.zon tools/bench.zig \
+          tools/bench-cross.sh tools/wasm_bench.zig 2>/dev/null)" ]; then
+        v="${v}+worktree"
+      fi
+      ;;
     sm)     v="$("$bin" --version 2>/dev/null | head -1)" ;;
     v8)     v="$(jsvu_ver v8)"
             [ -z "$v" ] && v="$("$bin" -e 'print(version())' 2>/dev/null | head -1)" ;;
@@ -545,8 +570,9 @@ engine_version() {
 }
 
 emit() {
-  local host_os
+  local host_os affinity_note
   host_os="$(uname -srm 2>/dev/null || echo unknown)"
+  affinity_note="$(cpu_affinity_note)"
   local kind="micro"
   [ "$MACROS" = "1" ] && kind="macro"
   if [ "$TIER" = "jit" ]; then
@@ -558,21 +584,21 @@ emit() {
   echo "Subprocess wall-clock; times in **ms**, **median of N=$RUNS timed"
   echo "runs** after $WARMUP discarded warmup run. \`*\` flags a fixture"
   echo "whose **winsorised** spread (one sample trimmed each end) exceeded"
-  echo "${SPREAD_LIMIT}% — treat that cell as noisy. Timed runs are pinned to one"
-  echo "core (Linux) to cut migration jitter."
+  echo "${SPREAD_LIMIT}% — treat that cell as noisy. $affinity_note"
   echo "🥇 🥈 🥉 mark the three lowest values on each fixture row"
   echo "(fastest for timing, smallest for RSS; gold also bold); tied cells share a medal."
   echo
   if [ "$TIER" = "jit" ]; then
     echo "Every engine runs at FULL SPEED — Cynic in its default posture"
-    echo "(Bistromath on; per-process cold start, so the tier warms inside"
-    echo "each run), v8/sm/jsc with all JIT tiers enabled. A different"
+    echo "(Bistromath plus Ohaimark at natural thresholds; per-process cold"
+    echo "start, so the tiers warm inside each run), v8/sm/jsc with all JIT"
+    echo "tiers enabled. A different"
     echo "fairness baseline from the interpreter-tier table; never merge"
     echo "the two."
   else
     echo "All JIT engines run JIT-disabled (interpreter tier only): v8"
     echo "\`--jitless\`, sm \`--no-baseline --no-ion\`, jsc \`JSC_useJIT=0\`;"
-    echo "Cynic pinned with \`--no-jit\` (Bistromath is the engine default)."
+    echo "Cynic pinned with \`--no-jit\` (the production default enables T1 and T2)."
   fi
   echo "Internal regression compass — not published."
   echo
@@ -680,8 +706,7 @@ EOF
   else
     echo "_Interpreter-tier-only, internal compass. Do not publish; do_"
   fi
-  echo "_not append to bench-results.md (that file is the single-engine_"
-  echo "_\`zig build bench\` artifact)._"
+  echo "_not compare absolute values across hosts; treat this as one host-local snapshot._"
 }
 
 OUTPUT="$(emit)"

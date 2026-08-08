@@ -117,54 +117,24 @@ breaches of the policy; surface and fix the breach.
 
 A `vendor/test262/` submodule bump is a different shape of
 change from an engine edit: the engine is unchanged, but the
-corpus has new fixtures, renamed paths, and sometimes
-deleted ones. Three signals must be reviewed before landing
-the bump alongside the standard `Δ pass`:
+corpus has new fixtures, renamed paths, and sometimes deleted ones. Review four
+signals before landing the bump:
 
-1. **Divergent-count delta.** A jump in the
-   `runtime_hardened` row's `divergent` column on a corpus
-   bump means a new bucket of fixtures is hitting SES rules
-   that nobody categorised. The Phase 2 divergence list in
-   `tools/test262/ses_divergent.zig` matches substrings of
-   thrown error messages; if upstream added a new fixture
-   family whose assertion text doesn't match an existing
-   pattern, those failures bucket as **real `fail`**, not
-   `divergent`. The hardened headline `spec%` drops, the
-   adjusted-vs-unhardened gap widens, and the
-   `--min-hardened-spec-pct` CI floor trips. Fix: add a
-   new pattern to `ses_divergent.zig` with an inline
-   comment naming the new fixture family and the SES
-   surface it touches. Land the pattern as part of the
-   bump PR, not after.
+1. **Denominator delta.** The main sweep is binary pass/fail. Only harness,
+   staging, Annex B, pre-Stage-4 proposal, malformed-frontmatter, and other
+   structurally unrunnable fixtures are excluded. `intl402/` is scored under
+   the harness's default `-Dintl=full` build. Account for every unexpected
+   total change against `tools/test262/skip.zig` and the upstream diff.
+2. **Pass-set delta.** Run a full non-`--only-failing` main sweep. A lower pass
+   count or a changed pass path without an upstream expectation is a
+   regression even when the percentage rounds to the same value.
+3. **Gap classification.** Run with `--list-gaps` when the engine-gap count is
+   nonzero. Fix a real engine miss, or add a body-audited by-design fixture to
+   `tools/test262/gap_audit.zig` with the exact reason. There is no
+   expected-failure bucket.
+4. **Proposal sweeps.** `--write-results` also runs each tracked feature phase.
+   Confirm newly tagged proposal fixtures appear in the correct isolated sweep
+   rather than leaking into or disappearing from the main phase.
 
-2. **Witness-path integrity.** The Phase 3 witness set in
-   `tools/test262/ses_witnesses.zig` is path-keyed
-   (`built-ins/Math/abs/length.js`, …). A corpus rename or
-   delete that touches a witness path silently shrinks the
-   witness set — the `--min-ses-witness-pct=100` floor
-   still passes (`9 / 9` is 100 %) but the coverage is
-   weaker. Check: after the bump, run
-   `zig build test262 -- --quiet --filter=<the witness
-   root>` and confirm the `ses-witness:` tally still reads
-   `10 / 10` (or whatever the current size is per
-   `ses_witnesses.zig`). If the count went DOWN, either
-   restore the moved path (most likely an upstream rename)
-   or pick a replacement witness from the new divergent
-   set.
-
-3. **Skip-list bit-rot.** New fixtures may land in a path
-   currently path-skipped in `tools/test262/skip.zig` (e.g.
-   a new `intl402/` subdirectory). The skip
-   absorbs them silently — `total` doesn't grow. That's
-   *usually* what we want (`intl402` is out of scope for the
-   default build), but a path-skip that's actually intended
-   to be narrow (a specific browser-era built-in) can drift
-   to cover too much. Check: scan the bump's `git log
-   vendor/test262` output for new top-level directories.
-   Anything new should either match an existing
-   intentional skip rule or land in the corpus as scored.
-
-Standard regression protocol (#1-4 above) still applies on
-top — the engine didn't change, but the harness's view of
-what counts as a pass might have moved if a frontmatter
-field or assertion helper changed shape.
+Standard regression protocol (#1-4 above) still applies. The engine did not
+change, but the harness's interpretation of frontmatter or helpers may have.

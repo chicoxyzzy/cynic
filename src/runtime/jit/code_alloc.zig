@@ -51,6 +51,23 @@ pub const Error = error{
     CodeRegionUnavailable,
 };
 
+/// Optional accounting hook for OS-backed executable mappings. The mapping
+/// is charged before `mmap` and discharged after `munmap`, so embedders can
+/// include native code in the same live-byte ceiling as allocator storage.
+pub const MemoryLedger = struct {
+    ctx: *anyopaque,
+    charge_fn: *const fn (*anyopaque, usize) bool,
+    discharge_fn: *const fn (*anyopaque, usize) void,
+
+    fn charge(self: MemoryLedger, bytes: usize) bool {
+        return self.charge_fn(self.ctx, bytes);
+    }
+
+    fn discharge(self: MemoryLedger, bytes: usize) void {
+        self.discharge_fn(self.ctx, bytes);
+    }
+};
+
 /// Installed slots are 16-byte aligned: AArch64 only needs 4, but 16
 /// keeps slots cache-line-tidy and covers x86_64 for free.
 const slot_align = 16;
@@ -94,6 +111,8 @@ pub const InstalledCode = struct {
 pub const CodeAllocator = struct {
     gpa: std.mem.Allocator,
     region: []align(std.heap.page_size_min) u8,
+    memory_ledger: ?MemoryLedger = null,
+    charged_bytes: usize = 0,
     /// Bump offset — everything below is allocated or free-listed.
     top: usize = 0,
     /// Freed slots, reused first-fit. No coalescing or splitting:
@@ -105,10 +124,22 @@ pub const CodeAllocator = struct {
     const Slot = struct { off: usize, len: usize };
 
     pub fn init(gpa: std.mem.Allocator, reserve_bytes: usize) Error!CodeAllocator {
+        return initMetered(gpa, reserve_bytes, null);
+    }
+
+    pub fn initMetered(gpa: std.mem.Allocator, reserve_bytes: usize, memory_ledger: ?MemoryLedger) Error!CodeAllocator {
         if (comptime !supported) {
             return error.CodeRegionUnavailable;
         } else {
-            const len = std.mem.alignForward(usize, @max(reserve_bytes, 1), std.heap.pageSize());
+            const page = std.heap.pageSize();
+            const requested = @max(reserve_bytes, 1);
+            const rounded = std.math.add(usize, requested, page - 1) catch
+                return error.CodeRegionUnavailable;
+            const len = std.mem.alignBackward(usize, rounded, page);
+            if (memory_ledger) |ledger| {
+                if (!ledger.charge(len)) return error.CodeRegionUnavailable;
+            }
+            errdefer if (memory_ledger) |ledger| ledger.discharge(len);
             // With the per-thread toggle the region is mapped RWX
             // once and the hardware enforces W^X per thread; on the
             // mprotect path it starts RW and pages flip to R-X as
@@ -129,7 +160,12 @@ pub const CodeAllocator = struct {
                 // the execute-protected state until the first write.
                 pthread_jit_write_protect_np(1);
             }
-            return .{ .gpa = gpa, .region = region };
+            return .{
+                .gpa = gpa,
+                .region = region,
+                .memory_ledger = memory_ledger,
+                .charged_bytes = if (memory_ledger != null) len else 0,
+            };
         }
     }
 
@@ -141,6 +177,7 @@ pub const CodeAllocator = struct {
         if (comptime !supported) return;
         self.free_list.deinit(self.gpa);
         std.posix.munmap(self.region);
+        if (self.memory_ledger) |ledger| ledger.discharge(self.charged_bytes);
         self.* = undefined;
     }
 
@@ -259,6 +296,55 @@ pub const ret42_stub: []const u8 = switch (builtin.cpu.arch) {
     .x86_64 => &.{ 0xB8, 0x2A, 0x00, 0x00, 0x00, 0xC3 },
     else => &.{},
 };
+
+const TestMemoryLedger = struct {
+    limit: usize,
+    live: usize = 0,
+    charge_calls: usize = 0,
+    discharge_calls: usize = 0,
+
+    fn charge(ctx: *anyopaque, bytes: usize) bool {
+        const self: *TestMemoryLedger = @ptrCast(@alignCast(ctx));
+        self.charge_calls += 1;
+        if (bytes > self.limit -| self.live) return false;
+        self.live += bytes;
+        return true;
+    }
+
+    fn discharge(ctx: *anyopaque, bytes: usize) void {
+        const self: *TestMemoryLedger = @ptrCast(@alignCast(ctx));
+        self.discharge_calls += 1;
+        self.live -= bytes;
+    }
+
+    fn ledger(self: *TestMemoryLedger) MemoryLedger {
+        return .{ .ctx = self, .charge_fn = charge, .discharge_fn = discharge };
+    }
+};
+
+test "jit code_alloc: metered reservation charges and discharges its mapped pages" {
+    if (comptime !supported) return error.SkipZigTest;
+    const page = std.heap.pageSize();
+    var meter: TestMemoryLedger = .{ .limit = page };
+    var ca = try CodeAllocator.initMetered(std.testing.allocator, 1, meter.ledger());
+    try std.testing.expectEqual(page, meter.live);
+    try std.testing.expectEqual(@as(usize, 1), meter.charge_calls);
+    ca.deinit();
+    try std.testing.expectEqual(@as(usize, 0), meter.live);
+    try std.testing.expectEqual(@as(usize, 1), meter.discharge_calls);
+}
+
+test "jit code_alloc: a refused metered reservation never maps or discharges" {
+    if (comptime !supported) return error.SkipZigTest;
+    var meter: TestMemoryLedger = .{ .limit = 0 };
+    try std.testing.expectError(
+        error.CodeRegionUnavailable,
+        CodeAllocator.initMetered(std.testing.allocator, 1, meter.ledger()),
+    );
+    try std.testing.expectEqual(@as(usize, 0), meter.live);
+    try std.testing.expectEqual(@as(usize, 1), meter.charge_calls);
+    try std.testing.expectEqual(@as(usize, 0), meter.discharge_calls);
+}
 
 test "jit code_alloc: install and execute a return-42 stub" {
     if (comptime !supported) return error.SkipZigTest;

@@ -98,15 +98,17 @@ check_zig_pin() {
   expected="\$(grep -oE '0\.[0-9]+\.[0-9]+-dev\.[0-9]+\+[0-9a-f]+' build.zig.zon | head -1)"
   actual="\$(zig version)"
   [ "\$actual" = "\$expected" ] || {
-    echo "remote-bench: Zig \$actual does not match ref pin \$expected; rerun tools/bench/provision-remote.sh" >&2
+    echo "remote-bench: resolved Zig \$actual does not match ref pin \$expected; check tools/fetch-zig.sh" >&2
     exit 2
   }
 }
 git checkout -f -q --detach "$BASELINE"
+cynic_use_pinned_zig
 check_zig_pin
 zig build -Doptimize=ReleaseFast >/dev/null 2>&1
 cp zig-out/bin/cynic /tmp/cynic-base
 git checkout -f -q --detach "$REF"
+cynic_use_pinned_zig
 check_zig_pin
 run_ab() { local l="\$1"; shift; taskset -c "$CPU" zig build bench -- --ab-baseline=/tmp/cynic-base --runs=$RUNS "\$@" > "\$JOB_DIR/ab/\$l.txt" 2>/dev/null || rm -f "\$JOB_DIR/ab/\$l.txt"; }
 case "$SUITE" in micros|both) run_ab micros-jit; run_ab micros-nojit --no-jit ;; esac
@@ -117,6 +119,8 @@ if [ "$CROSS" = "1" ]; then
   AB_CMD=$(cat <<AB
 $AB_CMD
 git checkout -f -q --detach "$REF"
+cynic_use_pinned_zig
+check_zig_pin
 echo ">> cross-engine micros (all peers x both tiers — the slow part)" >&2
 CYNIC_BENCH_CPU="$CPU" tools/bench-cross.sh --runs $RUNS > "\$JOB_DIR/cross-micros.md" 2>&1 || true
 CYNIC_BENCH_CPU="$CPU" tools/bench-cross.sh --macros --runs $RUNS > "\$JOB_DIR/cross-macros.md" 2>&1 || true

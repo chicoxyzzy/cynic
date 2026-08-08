@@ -161,6 +161,7 @@ test {
     _ = @import("runtime/wasm/tests.zig");
     _ = @import("runtime/jit/code_alloc.zig");
     _ = @import("runtime/jit/asm_aarch64.zig");
+    _ = @import("runtime/jit/asm_x86_64.zig");
     _ = @import("runtime/jit/asm_x86_64_test.zig");
     _ = @import("runtime/jit/masm.zig");
     _ = @import("runtime/jit/masm_safety_test.zig");
@@ -172,6 +173,7 @@ test {
     _ = @import("runtime/ohaimark/allocation_test.zig");
     _ = @import("runtime/ohaimark/lowering_aarch64_test.zig");
     _ = @import("runtime/ohaimark/emitter_aarch64_test.zig");
+    _ = @import("runtime/ohaimark/codegen_x86_64_test.zig");
     _ = @import("runtime/ohaimark/emitter_graph_test.zig");
     _ = @import("runtime/ohaimark/compiler_test.zig");
     _ = @import("runtime/ohaimark/driver_test.zig");

@@ -171,3 +171,18 @@ shows they split cleanly:
 
 The lesson holds either way: confirm by reading the body, not by path — the
 first read of `separator-regexp` was truncated and briefly mis-called it a gap.
+
+### Update 2026-07-29 — zero live engine gaps
+
+`checking-by-using-eval` is now closed by `f8c30570`: `slowLdaGlobal` applies
+the global object's `HasProperty` / `Get` prototype-chain path after the own
+data and accessor paths, matching §9.1.1.2.6
+`ObjectEnvironmentRecord.GetBindingValue`. Its focused test262 fixture passes,
+and the Lantern regression covers inherited `toString`, `valueOf`, and
+`hasOwnProperty` identifiers in an unhardened realm.
+
+A fresh full `--list-gaps` sweep reports **`engine gaps (0)`**. The 1,324
+remaining binary failures are all attributed to the strict-only / Annex-B /
+legacy-Intl posture or the one stale upstream fixture; none is an unaudited
+engine failure. CI enforces this with `--max-gaps=0`, so a new unclassified
+failure must be triaged before it can merge.

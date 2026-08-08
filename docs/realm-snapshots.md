@@ -1,13 +1,15 @@
-# Realm snapshots — design
+# Realm snapshots
 
-Status: design; phase 1 landing in `src/runtime/snapshot.zig`
-(format + build gate + capture/restore of a fresh installed realm).
-Last updated 2026-07-08.
-Scope: serialize a fully-initialized hardened realm (post-`Realm.init` +
-`Realm.installBuiltins`) to a binary image; reload it for near-instant
-startup, V8-snapshot style. Long-term: one snapshot backing N tenant
-realms copy-on-write. Phase 1: dump one realm, reload it, prove the
-reloaded realm behaves identically.
+Status: **the phase-1 core has landed** in `src/runtime/snapshot.zig`: format,
+same-build gate, and capture/restore of a fresh `-Dintl=off` realm. It is not a
+production startup path yet. Intl capture, restored-realm GC/test262 gates,
+split-allocator restore, CLI integration, and a restore benchmark remain open.
+The implementation notes in §6.5 are current; earlier sections preserve the
+design and prior-art record. Last implementation review: 2026-07-08.
+
+Scope: serialize a fully initialized hardened realm (post-`Realm.init` +
+`Realm.installBuiltins`) to a binary image and reload it. Long term, one
+snapshot may back multiple tenant realms copy-on-write.
 
 All `file:line` references verified against the working tree on
 2026-07-08. Anything not directly verified is flagged inline with
@@ -242,7 +244,7 @@ Fields that carry heap references or must survive the round trip:
   `SyntheticAccessor.key` (`function.zig:81-93`) borrows a
   heap-anchored key slice — relocation needed (§5.3).
 - Posture flags to stamp into the header: `hardened`, `allow_eval`,
-  `allow_wasm`, `agent_can_block`, `jit_enabled`, `feature_flags`
+  `allow_wasm_compile`, `agent_can_block`, `jit_enabled`, `feature_flags`
   (`FeatureSet`), plus the comptime intl flavour
   (`src/runtime/intl_config.zig`).
 - Everything else on `Realm` is transient runtime state that must be
@@ -403,7 +405,7 @@ Offset  Size  Field
 0       4     magic            "CYSN"
 4       4     format_version   u32 (bump on any layout change)
 8       32    build_id         hash identifying the exact engine build (§5.2)
-40      8     flags            bitfield: hardened, allow_eval, allow_wasm,
+40      8     flags            bitfield: hardened, allow_eval, allow_wasm_compile,
                                agent_can_block, jit_enabled, intl flavour (2 bits),
                                reserved
 48      8     feature_flags    serialized FeatureSet bits (features.zig)

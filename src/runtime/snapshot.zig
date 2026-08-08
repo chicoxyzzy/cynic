@@ -171,7 +171,7 @@ const section_entry_len: usize = 20; // tag u32 + offset u64 + len u64
 // Posture flag bits in the header `flags` word.
 const flag_hardened: u64 = 1 << 0;
 const flag_allow_eval: u64 = 1 << 1;
-const flag_allow_wasm: u64 = 1 << 2;
+const flag_allow_wasm_compile: u64 = 1 << 2;
 const flag_agent_can_block: u64 = 1 << 3;
 const flag_jit_enabled: u64 = 1 << 4;
 
@@ -1101,7 +1101,7 @@ const Capture = struct {
         var flags: u64 = 0;
         if (realm.hardened) flags |= flag_hardened;
         if (realm.allow_eval) flags |= flag_allow_eval;
-        if (realm.allow_wasm) flags |= flag_allow_wasm;
+        if (realm.allow_wasm_compile) flags |= flag_allow_wasm_compile;
         if (realm.agent_can_block) flags |= flag_agent_can_block;
         if (realm.jit_enabled) flags |= flag_jit_enabled;
         try out.w64(flags);
@@ -1201,7 +1201,7 @@ fn restoreImage(allocator: std.mem.Allocator, image: []const u8) Snapshot.Restor
 
     realm.hardened = flags & flag_hardened != 0;
     realm.allow_eval = flags & flag_allow_eval != 0;
-    realm.allow_wasm = flags & flag_allow_wasm != 0;
+    realm.allow_wasm_compile = flags & flag_allow_wasm_compile != 0;
     realm.agent_can_block = flags & flag_agent_can_block != 0;
     realm.jit_enabled = flags & flag_jit_enabled != 0;
     realm.feature_flags = featureSetFromBits(feature_bits);
@@ -1755,6 +1755,7 @@ const Restore = struct {
 // ────────────────────────────────────────────────────────────────────
 
 const testing = std.testing;
+const arith = @import("lantern/arith.zig");
 const lantern = @import("lantern/interpreter.zig");
 
 fn makeInstalledRealm(allocator: std.mem.Allocator, hardened: bool) !*Realm {
@@ -2026,6 +2027,26 @@ test "snapshot: restored realm survives GC and allocation pressure" {
     , "numberobject");
     restored.collectGarbage();
     try expectEvalString(restored, "[4,5,6].map(x=>x+1).join(\"\")", "567");
+}
+
+test "snapshot: warmed typeof cache round-trips and remains rooted" {
+    const source = try makeInstalledRealm(testing.allocator, true);
+    defer destroyRealm(testing.allocator, source);
+    const source_cached = try arith.typeOf(source, Value.fromInt32(0));
+    try testing.expect(source.intrinsics.typeof_number_string.isString());
+    try testing.expectEqual(source_cached.bits, source.intrinsics.typeof_number_string.bits);
+
+    const image = try Snapshot.capture(source, testing.allocator);
+    defer testing.allocator.free(image);
+
+    const restored = try Snapshot.restore(testing.allocator, image);
+    defer destroyRealm(testing.allocator, restored);
+    const cached = restored.intrinsics.typeof_number_string;
+    try testing.expect(cached.isString());
+    restored.collectGarbage();
+    try testing.expectEqual(cached.bits, restored.intrinsics.typeof_number_string.bits);
+    try expectEvalString(restored, "typeof 0", "number");
+    try testing.expectEqual(cached.bits, restored.intrinsics.typeof_number_string.bits);
 }
 
 test "snapshot: unhardened realm round-trips with its posture" {

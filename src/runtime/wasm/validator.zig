@@ -60,6 +60,7 @@ pub const ValidateError = error{
     UnknownLabel,
     UnknownTag,
     DuplicateExportName,
+    InvalidLimits,
     BadCatchKind,
     UnsupportedRefCatch,
     ImmutableGlobal,
@@ -111,6 +112,18 @@ const Ctrl = struct {
 /// each (positionally matching `module.code`). Allocations come from
 /// `arena`, which the caller owns for the module's lifetime.
 pub fn validateModule(arena: std.mem.Allocator, module: *const Module) ValidateError![]const CompiledFunc {
+    // §3.2.14-16 — limits are ordered and bounded by the address type.
+    // Tables use 2^|addrtype|-1, which the decoded u32/u64 representation
+    // already enforces. Memory limits are page counts, so their bound is
+    // 2^(|addrtype|-16).
+    for (module.imports) |imp| switch (imp.desc) {
+        .mem => |mt| try validateLimits(mt.limits, if (mt.limits.is_64) (@as(u64, 1) << 48) else (@as(u64, 1) << 16)),
+        .table => |tt| try validateLimits(tt.limits, std.math.maxInt(u64)),
+        else => {},
+    };
+    for (module.mems) |mt| try validateLimits(mt.limits, if (mt.limits.is_64) (@as(u64, 1) << 48) else (@as(u64, 1) << 16));
+    for (module.tables) |tt| try validateLimits(tt.limits, std.math.maxInt(u64));
+
     // §3.4.4 — each global's initializer is a constant expression of the
     // global's declared type. A `global.get` may name any preceding
     // immutable global (imported or defined), so each initializer sees
@@ -178,6 +191,13 @@ pub fn validateModule(arena: std.mem.Allocator, module: *const Module) ValidateE
         out[i] = try validateFunc(arena, module, type_index, body.bytes, declared, elem_types);
     }
     return out;
+}
+
+fn validateLimits(limits: types.Limits, bound: u64) ValidateError!void {
+    if (limits.min > bound) return error.InvalidLimits;
+    if (limits.max) |max| {
+        if (max > bound or limits.min > max) return error.InvalidLimits;
+    }
 }
 
 /// The type index of a function by its function-index-space index,

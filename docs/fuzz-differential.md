@@ -180,8 +180,8 @@ avoids the noise problem entirely, so it is the one that was built:
   so every Cynic-intentional divergence is identical on both sides and
   cancels.
 - **Zero format noise:** both halves emit byte-identical output; the
-  only canonicalization needed is the shared `Date`/`Math.random`
-  determinism shim.
+  `--diff` host installs one shared `Date`/`Math.random` determinism
+  prelude before either sample runs.
 - **Real correctness class:** it catches **JIT (Bistromath / Spasm)
   miscompiles** — the JIT-compiled path returning a different value
   than Lantern the interpreter.
@@ -206,12 +206,19 @@ pair, so only `processArgs` vs `processArgsReference` can differ:
   Bistromath-compiled. The target half uses it; the reference half
   stays on Lantern.
 - `--ohaimark` — set both tier enables and both threshold overrides to 1,
-  attempting Ohaimark before Bistromath. It can augment the target half to
-  isolate T2 without changing the T1-only base profile.
-- `--diff` — after each sample, write a canonical **completion-value
-  digest** to fd 103 (Fuzzilli's fuzzout sink). The digest is computed
-  with no JS re-entry (no user `toString`) so it can't perturb GC state
-  or introduce non-determinism: primitives serialize exactly
+  attempting Ohaimark before Bistromath, including default-on loop-header OSR.
+  It can augment the target half to isolate T2 without changing the T1-only
+  base profile.
+- `--no-ohaimark-osr` — isolate function-entry T2 in a forced-Ohaimark target.
+  `--ohaimark-osr` remains an explicit compatibility no-op.
+- `--diff` — install the host's deterministic `Date` / `Math.random`
+  prelude, then after each sample write a canonical **completion-value
+  digest** to fd 103 (Fuzzilli's fuzzout sink). The prelude pins both
+  `Date.now()` and zero-argument `new Date()` (the latter reads the host
+  clock directly), while explicit Date arguments preserve normal
+  behavior. The digest is computed with no JS re-entry (no user
+  `toString`) so it can't perturb GC state or introduce non-determinism:
+  primitives serialize exactly
   (`i42`, `d<ieee-bits>`, `s<len>:<fnv>`, `b1`, `u`, `n`), with a
   tag byte for returned/thrown/yielded; heap objects collapse to a
   `o` type tag (their identity is a non-deterministic heap address).
@@ -243,7 +250,7 @@ non-differential:
 target    : cynic-fuzz --jit --diff      (Bistromath, threshold 1)
 reference : cynic-fuzz      --diff       (Lantern interpreter)
 differentialMode = .fuzzout
-codePrefix = minimal Date.now / Math.random determinism shim
+codePrefix = empty (cynic-fuzz --diff installs the shared determinism prelude)
 ```
 
 ### 4.2 Setup and run
@@ -268,6 +275,14 @@ swift build -c release
   --storagePath=/tmp/fzcd-t2 --additionalArguments=--ohaimark \
   <cynic>/zig-out/bin/cynic-fuzz
 
+# Isolate function-entry T2 from the default Ohaimark+OSR target; the
+# reference remains Lantern:
+.build/release/FuzzilliCli --profile=cynicDiff \
+  --storagePath=/tmp/fzcd-t2-entry \
+  --additionalArguments=--ohaimark \
+  --additionalArguments=--no-ohaimark-osr \
+  <cynic>/zig-out/bin/cynic-fuzz
+
 # Validate the oracle end-to-end (forces a divergence on every sample;
 # --additionalArguments reaches the TARGET only):
 .build/release/FuzzilliCli --profile=cynicDiff \
@@ -279,6 +294,10 @@ Differential mode requires `--storagePath`. Divergences are logged as
 `[CYNIC-DIFF] OUTPUT DIVERGENCE` and stored (minimized) under
 `<storagePath>/differentials/`.
 
+Loop-header OSR is part of the default Ohaimark target. The focused graduation
+campaign completed with no crash or differential artifacts; use
+`--no-ohaimark-osr` only for entry-only diagnosis.
+
 ### 4.3 Demonstrated results
 
 A matched pair on this host (arm64 macOS, Bistromath active):
@@ -287,7 +306,7 @@ A matched pair on this host (arm64 macOS, Bistromath active):
 |---|---|---|
 | **Self-test** (perturbed) | target `--jit --diff --diff-self-test` vs ref `--diff` | **77** found and minimized into `differentials/` — proves the oracle fires |
 | **Real** | target `--jit --diff` vs ref `--diff` | **0** over ~7,400 execs (Correctness ~79%, Timeout ~1.2%) — proves no noise |
-| **Ohaimark graduation** | target `--jit --diff --ohaimark` vs ref `--diff` | **0** in a bounded five-minute campaign; 49 programs retained |
+| **Ohaimark OSR graduation** | target `--jit --diff --ohaimark` vs ref `--diff` | **0** after minimized-artifact replay plus 250 fresh samples / 11,388 executions in 6m30s |
 
 The self-test divergence blocks read exactly as designed, e.g.
 `TARGET fuzzout: Vo#ST` vs `REFERENCE fuzzout: Vo`. The real run's zero

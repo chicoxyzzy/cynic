@@ -1,19 +1,24 @@
-# Cynic micro-bench history
+# Archived Cynic single-engine micro-bench notes
 
-Per-fixture wall-time + peak RSS on the hand-picked micro-bench
-suite in `bench/micros/`. Produced by `zig build bench` — a
-dedicated ReleaseFast `cynic-bench` binary, median of 10 runs after
-a discarded warmup. Matched with `tools/bench-cross.sh` so
-single-engine and cross-engine numbers come out of the same sample
-budget — see the "Measurement protocol" section of
-[`docs/benchmarking.md`](docs/benchmarking.md).
+> **Archive policy.** This file preserves decision-era same-machine A/B
+> evidence. It is not an active benchmark report and should not receive
+> routine refreshes. Current peer comparisons live in
+> [`bench-cross-results.md`](bench-cross-results.md); Ohaimark and Sarcasm
+> gates retain their focused records in `docs/ohaimark.md` and
+> [`wasm-bench-results.md`](wasm-bench-results.md), respectively.
+
+Historical per-fixture wall-time and peak-RSS evidence from the hand-picked
+micro-bench suite in `bench/micros/`. The entries were produced by
+`zig build bench` with a dedicated ReleaseFast `cynic-bench` binary and a
+discarded warmup. See [`docs/benchmarking.md`](docs/benchmarking.md) for the
+active reporting policy.
 
 **Numbers are only stable on a quiet machine, and only comparable
 within the same `host` line.** Cross-machine and cross-engine
 comparison is meaningless here — see `docs/benchmarking.md`.
 
-Newest run first. Append a fresh section per recorded run; diff a
-new run against the previous section with the *same host*.
+Newest run first. Preserve the existing record for linked architecture
+decisions; do not append routine results.
 
 ## History
 
