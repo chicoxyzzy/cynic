@@ -2116,7 +2116,7 @@ pub const ToPrimitiveHint = enum { default, number, string };
 /// receiver is an object. Falls through to OrdinaryToPrimitive
 /// (`valueOf` then `toString`, hint-ordered) per §7.1.1.1.
 /// Primitive inputs return as-is.
-pub fn toPrimitive(realm: *Realm, value: Value, hint: ToPrimitiveHint) NativeError!Value {
+pub inline fn toPrimitive(realm: *Realm, value: Value, hint: ToPrimitiveHint) NativeError!Value {
     // §7.1.1 step 1 tests the ECMAScript Type. Preserve the common
     // top-tag fast path, then reject the shared Symbol/BigInt kind bit;
     // object and function kinds deliberately leave that bit clear.
@@ -2125,8 +2125,10 @@ pub fn toPrimitive(realm: *Realm, value: Value, hint: ToPrimitiveHint) NativeErr
         @branchHint(.unlikely);
         return value;
     }
-    const interp = @import("lantern/interpreter.zig");
+    return toPrimitiveObjectSlow(realm, value, hint);
+}
 
+noinline fn toPrimitiveObjectSlow(realm: *Realm, value: Value, hint: ToPrimitiveHint) NativeError!Value {
     // Root the receiver for the duration of the coercion. §7.1.1 /
     // §7.1.1.1 — resolving @@toPrimitive and the OrdinaryToPrimitive
     // `valueOf` / `toString` methods fires user getters and calls
@@ -2139,6 +2141,8 @@ pub fn toPrimitive(realm: *Realm, value: Value, hint: ToPrimitiveHint) NativeErr
     // (`obj.getProxyTarget()`, `fn_obj.get`) would hit freed memory.
     realm.heap.pushNativeRoot(value) catch return error.OutOfMemory;
     defer realm.heap.popNativeRoot();
+
+    const interp = @import("lantern/interpreter.zig");
 
     // §7.1.1.1 OrdinaryToPrimitive maps "default"→"number" for
     // non-Date objects, but the @@toPrimitive trap receives the
