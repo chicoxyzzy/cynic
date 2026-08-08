@@ -440,7 +440,7 @@ jobs:
             --filter=language/expressions --top-rss=10
 
   test262-jit-differential:
-    name: test262 JIT differential
+    name: test262 JIT differential (AArch64)
     # docs/jit.md §10.2 — the heart of Bistromath verification: a
     # full sweep with every eligible chunk force-compiled (`--jit`
     # runs each realm at tier-up threshold 1) must produce the
@@ -451,11 +451,10 @@ jobs:
     # actual fixture sets, not just the counts, so compensating
     # flips can't hide.
     #
-    # macos-latest, not ubuntu: GitHub's macOS runners are Apple
-    # Silicon, and Bistromath emits aarch64 only today (docs/jit.md
-    # §14 keeps x86_64 a mechanical follow-up). On x86_64 the tier
-    # is comptime-off and the diff would compare the interpreter
-    # with itself.
+    # The macOS lane qualifies Bistromath's AArch64 backend. A separate
+    # native Ubuntu lane below runs the same fail-closed comparison for
+    # x86_64; keeping the jobs separate lets this one also qualify the
+    # AArch64-only Ohaimark tier.
     #
     # GATING since the 2026-06-11 default-on decision (docs/jit.md
     # §10.5): the tier ships on by default, so a pass-set
@@ -489,12 +488,13 @@ jobs:
       - name: Set up Zig
         uses: xyzzylabs/setup-zig@09d85d9dbb73308882e7a26e61a8f706eed40df1  # v1.0.2
         with:
-          cache-key: jit-differential
+          cache-key: jit-differential-aarch64
 
       - name: Differential sweep (interpreter vs force-compiled)
         timeout-minutes: 50
         run: |
           set -euo pipefail
+          test "$(uname -m)" = arm64
           # The force-compile (`--jit`) sweep must produce the EXACT
           # pass-set of the interpreter sweep (docs/jit.md §10.2). Two
           # real fixture classes block in a way the cooperative
@@ -518,7 +518,7 @@ jobs:
           # the harness, doesn't block) stays in the comparison.
           EXCLUDES=(--exclude=built-ins/Atomics/wait/ --exclude=built-ins/Atomics/notify/ --exclude=built-ins/TypedArray/prototype/copyWithin/coerced)
           zig build test262 -- --quiet --threads=0 "${EXCLUDES[@]}" --pass-list-out=/tmp/pass-interp.txt
-          zig build test262 -- --quiet --threads=0 --jit "${EXCLUDES[@]}" --pass-list-out=/tmp/pass-jit.txt
+          zig build test262 -- --quiet --threads=0 --jit --require-bistromath-entry "${EXCLUDES[@]}" --pass-list-out=/tmp/pass-jit.txt
           # Both files exist and are non-empty only if both sweeps
           # completed — otherwise fail before the diff.
           test -s /tmp/pass-interp.txt
@@ -540,6 +540,44 @@ jobs:
           diff -u /tmp/pass-interp.txt /tmp/pass-ohaimark.txt
           echo "Ohaimark pass-set identical: $(wc -l < /tmp/pass-ohaimark.txt) fixtures"
 
+  test262-jit-differential-x86-64:
+    name: test262 JIT differential (x86_64)
+    # Native x86_64 qualification for Bistromath. Pass-set equality alone can
+    # self-compare if dispatch accidentally stays in Lantern, so the forced
+    # sweep also requires a positive counter at the actual generated-entry
+    # boundary. Any incomplete worker invalidates the pass-list artifact.
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    needs: build-and-test
+    steps:
+      - name: Audit egress (advisory)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411  # v2
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          submodules: recursive
+
+      - name: Set up Zig
+        uses: xyzzylabs/setup-zig@09d85d9dbb73308882e7a26e61a8f706eed40df1  # v1.0.2
+        with:
+          cache-key: jit-differential-x86-64
+
+      - name: Differential sweep (interpreter vs force-compiled x86_64)
+        timeout-minutes: 50
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          EXCLUDES=(--exclude=built-ins/Atomics/wait/ --exclude=built-ins/Atomics/notify/ --exclude=built-ins/TypedArray/prototype/copyWithin/coerced)
+          zig build test262 -- --quiet --threads=0 --timeout=120 "${EXCLUDES[@]}" --pass-list-out=/tmp/pass-interp-x86-64.txt
+          zig build test262 -- --quiet --threads=0 --timeout=120 --jit --require-bistromath-entry "${EXCLUDES[@]}" --pass-list-out=/tmp/pass-jit-x86-64.txt
+          test -s /tmp/pass-interp-x86-64.txt
+          test -s /tmp/pass-jit-x86-64.txt
+          diff -u /tmp/pass-interp-x86-64.txt /tmp/pass-jit-x86-64.txt
+          echo "x86_64 Bistromath pass-sets identical: $(wc -l < /tmp/pass-interp-x86-64.txt) fixtures"
+
   test262-gc-stress-jit:
     name: test262 GC stress + ${{ matrix.tier.label }} / ${{ matrix.bucket }} (advisory)
     # The docs/jit.md §12 step-3d net: ReleaseSafe arms
@@ -548,9 +586,10 @@ jobs:
     # so a compiled property write whose barrier mirror drifted
     # from the interpreter's (the §9 rule) trips the verifier with
     # the offending (container, field, target) instead of slipping
-    # through as a rare flake. macos-latest because Bistromath is
-    # aarch64-only (see test262-jit-differential above). Buckets
-    # are the property-write-heavy surfaces; advisory like its
+    # through as a rare flake. This mixed T1/T2 matrix stays on macOS
+    # because Ohaimark is AArch64-only; native x86_64 Bistromath is gated
+    # by the differential job above and Ubuntu's full ReleaseSafe unit run.
+    # Buckets are the property-write-heavy surfaces; advisory like its
     # sibling gc-stress job. T2 rows also print Ohaimark rollout telemetry.
     runs-on: macos-latest
     timeout-minutes: 25
