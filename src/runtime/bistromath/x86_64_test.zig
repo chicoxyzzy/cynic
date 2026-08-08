@@ -76,6 +76,20 @@ test "Bistromath x86_64: three-address subtract rejects its private-scratch alia
     );
 }
 
+test "Bistromath x86_64: subtraction preserves a left operand in private scratch" {
+    if (comptime builtin.cpu.arch != .x86_64) return error.SkipZigTest;
+    var machine = bistro_masm.Masm.init(testing.allocator);
+    defer machine.deinit();
+
+    // x0 maps to the private rax scratch. In the rd == rm lowering, saving
+    // the right operand into rax would destroy this left operand before the
+    // subtraction. Refuse the alias so the owning chunk stays in Lantern.
+    try testing.expectError(
+        error.UnsupportedInstruction,
+        machine.emit(bistro_masm.subsRegW(.x9, .x0, .x9)),
+    );
+}
+
 test "Bistromath x86_64: entry prologue returns done with the accumulator result" {
     try requireNativeBackend();
 

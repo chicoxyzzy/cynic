@@ -84,6 +84,11 @@ pub const Masm = struct {
     pub fn bind(self: *Masm, label: *Label) Error!void {
         if (label.bound != null) return error.LabelAlreadyBound;
         const target = self.offset();
+        // Preflight every fixup before changing any instruction. A later
+        // narrow branch may be out of range even when an earlier wide branch
+        // is valid; patching as we validate would leave a retryable label
+        // pointing at a partially-mutated buffer.
+        for (label.fixups.items) |fixup| try self.validateFixup(fixup, target);
         for (label.fixups.items) |fixup| try self.patch(fixup, target);
         label.bound = target;
         label.fixups.clearRetainingCapacity();
@@ -182,6 +187,17 @@ pub const Masm = struct {
         const delta_bytes = @as(i128, @intCast(to)) - @as(i128, @intCast(from));
         const delta_words = @divExact(delta_bytes, 4);
         return std.math.cast(T, delta_words) orelse error.BranchOutOfRange;
+    }
+
+    fn validateFixup(self: *const Masm, fixup: Label.Fixup, target: usize) Error!void {
+        if (fixup.at > self.code.items.len or 4 > self.code.items.len - fixup.at) {
+            return error.InvalidLabel;
+        }
+        switch (fixup.kind) {
+            .imm26 => _ = try deltaWords(i26, fixup.at, target),
+            .imm19 => _ = try deltaWords(i19, fixup.at, target),
+            .imm14 => _ = try deltaWords(i14, fixup.at, target),
+        }
     }
 
     fn patch(self: *Masm, fixup: Label.Fixup, target: usize) Error!void {
