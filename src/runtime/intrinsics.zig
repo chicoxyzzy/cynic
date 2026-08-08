@@ -2117,17 +2117,22 @@ pub const ToPrimitiveHint = enum { default, number, string };
 /// (`valueOf` then `toString`, hint-ordered) per §7.1.1.1.
 /// Primitive inputs return as-is.
 pub fn toPrimitive(realm: *Realm, value: Value, hint: ToPrimitiveHint) NativeError!Value {
+    // §7.1.1 step 1 tests the ECMAScript Type, not Cynic's broad
+    // tagged-pointer family (which also contains primitive BigInts
+    // and Symbols). Primitive inputs must return without allocating.
     if (!heap_mod.isJSObject(value)) return value;
     const interp = @import("lantern/interpreter.zig");
 
     // Root the receiver for the duration of the coercion. §7.1.1 /
     // §7.1.1.1 — resolving @@toPrimitive and the OrdinaryToPrimitive
     // `valueOf` / `toString` methods fires user getters and calls
-    // those methods (`getPropertyChainOnValue` + `callJSFunction`), each of
+    // those methods (`getPropertyChain` + `callJSFunction`), each of
     // which allocates a call frame and can therefore drive a GC.
-    // Between those re-entry hops `value` is reachable through nothing but
-    // this native local, so under allocation pressure a sweep would reclaim
-    // the receiver before the next polymorphic property read.
+    // Between those re-entry hops `value` (and the `obj` / `fn_obj`
+    // aliases derived from it) is reachable through nothing but this
+    // native local, so under allocation pressure a sweep would reclaim
+    // the receiver mid-coercion and the next slot read
+    // (`obj.getProxyTarget()`, `fn_obj.get`) would hit freed memory.
     const recv_scope = realm.heap.openScope() catch return error.OutOfMemory;
     defer recv_scope.close();
     recv_scope.push(value) catch return error.OutOfMemory;
@@ -2140,84 +2145,166 @@ pub fn toPrimitive(realm: *Realm, value: Value, hint: ToPrimitiveHint) NativeErr
         .number => "number",
         .string => "string",
     };
-    // Symbol.toPrimitive override. Use `getPropertyChainOnValue` so
-    // an accessor `get [Symbol.toPrimitive]() {…}` fires
-    // (fixtures install poisoned getters and assert the
-    // throw propagates). A plain data-slot lookup would miss
-    // those.
-    const exotic = (getPropertyChainOnValue(realm, value, "@@toPrimitive") catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return error.NativeThrew,
-    }) orelse return value;
-    // §7.1.1 step 2.b-c — GetMethod(O, @@toPrimitive). Per
-    // §7.3.10, if `exotic` is neither undefined nor null and
-    // is not Callable, throw a TypeError. Silently falling
-    // through to OrdinaryToPrimitive would swallow the abrupt
-    // (e.g. a class field key `[obj]` where `obj.Symbol.
-    // toPrimitive = 42` must throw, not coerce via toString).
-    const exotic_present = !exotic.isUndefined() and !exotic.isNull();
-    if (heap_mod.valueAsFunction(exotic)) |fn_obj| {
-        const hint_v = realm.heap.allocateString(hint_str) catch return error.OutOfMemory;
-        const args = [_]Value{Value.fromString(hint_v)};
-        const outcome = interp.callJSFunction(realm.allocator, realm, fn_obj, value, &args) catch |err| switch (err) {
+    if (heap_mod.valueAsPlainObject(value)) |obj| {
+        // Symbol.toPrimitive override. Use `getPropertyChain` so
+        // an accessor `get [Symbol.toPrimitive]() {…}` fires
+        // (fixtures install poisoned getters and assert the
+        // throw propagates). A plain data-slot lookup would miss
+        // those.
+        const exotic = getPropertyChain(realm, obj, "@@toPrimitive") catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.NativeThrew,
         };
-        switch (outcome) {
-            .value, .yielded => |v| {
-                // §7.1.1 step 6 — `If Type(result) is not Object,
-                // return result`. Symbols and BigInts are JS
-                // primitives (§6.1.5 / §6.1.6.2), so they pass
-                // through even though they share the object-tag
-                // encoding internally.
-                if (heap_mod.isJSObject(v)) return throwTypeError(realm, "Symbol.toPrimitive must return a primitive value");
-                return v;
-            },
-            .thrown => |ex| {
-                realm.pending_exception = ex;
-                return error.NativeThrew;
-            },
-        }
-    } else if (exotic_present) {
-        // §7.3.10 GetMethod — non-undefined / non-null but
-        // not Callable is a TypeError. Don't silently fall
-        // through to OrdinaryToPrimitive.
-        return throwTypeError(realm, "Symbol.toPrimitive must be callable");
-    }
-    // OrdinaryToPrimitive: `valueOf` then `toString` for
-    // number/default hint; reverse for string. `getPropertyChainOnValue`
-    // fires inherited or accessor-installed getters — fixtures
-    // like `trimStart/this-value-object-tostring-call-err.js`
-    // install `get toString() { throw ... }` and expect the
-    // getter throw to propagate.
-    const first_name: []const u8 = if (hint == .string) "toString" else "valueOf";
-    const second_name: []const u8 = if (hint == .string) "valueOf" else "toString";
-    for ([_][]const u8{ first_name, second_name }) |name| {
-        const method = (getPropertyChainOnValue(realm, value, name) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return error.NativeThrew,
-        }) orelse return value;
-        if (heap_mod.valueAsFunction(method)) |fn_obj| {
-            const outcome = interp.callJSFunction(realm.allocator, realm, fn_obj, value, &[_]Value{}) catch |err| switch (err) {
+        // §7.1.1 step 2.b-c — GetMethod(O, @@toPrimitive). Per
+        // §7.3.10, if `exotic` is neither undefined nor null and
+        // is not Callable, throw a TypeError. Silently falling
+        // through to OrdinaryToPrimitive would swallow the abrupt
+        // (e.g. a class field key `[obj]` where `obj.Symbol.
+        // toPrimitive = 42` must throw, not coerce via toString).
+        const exotic_present = !exotic.isUndefined() and !exotic.isNull();
+        if (heap_mod.valueAsFunction(exotic)) |fn_obj| {
+            const hint_v = realm.heap.allocateString(hint_str) catch return error.OutOfMemory;
+            const args = [_]Value{Value.fromString(hint_v)};
+            const outcome = interp.callJSFunction(realm.allocator, realm, fn_obj, value, &args) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => return error.NativeThrew,
             };
             switch (outcome) {
                 .value, .yielded => |v| {
-                    // §7.1.1.1 step 5.iii — accept any JS
-                    // primitive (including Symbol / BigInt). Only
-                    // a true Object result keeps the loop going to
-                    // try the second method.
-                    if (!heap_mod.isJSObject(v)) return v;
+                    // §7.1.1 step 6 — `If Type(result) is not Object,
+                    // return result`. Symbols and BigInts are JS
+                    // primitives (§6.1.5 / §6.1.6.2), so they pass
+                    // through even though they share the object-tag
+                    // encoding internally.
+                    if (heap_mod.isJSObject(v)) return throwTypeError(realm, "Symbol.toPrimitive must return a primitive value");
+                    return v;
                 },
                 .thrown => |ex| {
                     realm.pending_exception = ex;
                     return error.NativeThrew;
                 },
             }
+        } else if (exotic_present) {
+            // §7.3.10 GetMethod — non-undefined / non-null but
+            // not Callable is a TypeError. Don't silently fall
+            // through to OrdinaryToPrimitive.
+            return throwTypeError(realm, "Symbol.toPrimitive must be callable");
         }
+        // OrdinaryToPrimitive: `valueOf` then `toString` for
+        // number/default hint; reverse for string. `getPropertyChain`
+        // fires inherited or accessor-installed getters — fixtures
+        // like `trimStart/this-value-object-tostring-call-err.js`
+        // install `get toString() { throw ... }` and expect the
+        // getter throw to propagate.
+        const first_name: []const u8 = if (hint == .string) "toString" else "valueOf";
+        const second_name: []const u8 = if (hint == .string) "valueOf" else "toString";
+        for ([_][]const u8{ first_name, second_name }) |name| {
+            const method = getPropertyChain(realm, obj, name) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.NativeThrew,
+            };
+            if (heap_mod.valueAsFunction(method)) |fn_obj| {
+                const outcome = interp.callJSFunction(realm.allocator, realm, fn_obj, value, &[_]Value{}) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return error.NativeThrew,
+                };
+                switch (outcome) {
+                    .value, .yielded => |v| {
+                        // §7.1.1.1 step 5.iii — accept any JS
+                        // primitive (including Symbol / BigInt). Only
+                        // a true Object result keeps the loop going to
+                        // try the second method.
+                        if (!heap_mod.isJSObject(v)) return v;
+                    },
+                    .thrown => |ex| {
+                        realm.pending_exception = ex;
+                        return error.NativeThrew;
+                    },
+                }
+            }
+        }
+        return throwTypeError(realm, "Cannot convert object to primitive value");
     }
-    return throwTypeError(realm, "Cannot convert object to primitive value");
+    // §7.1.1 OrdinaryToPrimitive for a callable Function — same
+    // shape as the plain-object path, but Cynic stores functions in
+    // a separate value family. Symbols / BigInts are primitives and
+    // exit at the top check; they never reach this branch.
+    if (heap_mod.valueAsFunction(value)) |fn_obj| {
+        const callable_value = heap_mod.taggedFunction(fn_obj);
+        // GetMethod(@@toPrimitive) — Function objects don't usually
+        // expose it but a user can `defineProperty(fn, @@toPrimitive,
+        // …)` to install one. Use accessor-aware OrdinaryGet while
+        // forcing the polymorphic lookup machinery out of this hot
+        // coercion function.
+        const exotic = (try @call(
+            .never_inline,
+            getPropertyChainOnValue,
+            .{ realm, callable_value, "@@toPrimitive" },
+        )) orelse Value.undefined_;
+        const exotic_present = !exotic.isUndefined() and !exotic.isNull();
+        if (heap_mod.valueAsFunction(exotic)) |trap| {
+            // An accessor may have returned a fresh callable reachable only
+            // through this native local. Pin it, and the fresh hint string,
+            // across the call's allocation/re-entry window.
+            recv_scope.push(exotic) catch return error.OutOfMemory;
+            const hint_v = realm.heap.allocateString(hint_str) catch return error.OutOfMemory;
+            const hint_value = Value.fromString(hint_v);
+            recv_scope.push(hint_value) catch return error.OutOfMemory;
+            const args = [_]Value{hint_value};
+            const outcome = interp.callJSFunction(realm.allocator, realm, trap, value, &args) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.NativeThrew,
+            };
+            switch (outcome) {
+                .value, .yielded => |v| {
+                    if (heap_mod.isJSObject(v)) return throwTypeError(realm, "Symbol.toPrimitive must return a primitive value");
+                    return v;
+                },
+                .thrown => |ex| {
+                    realm.pending_exception = ex;
+                    return error.NativeThrew;
+                },
+            }
+        } else if (exotic_present) {
+            return throwTypeError(realm, "Symbol.toPrimitive must be callable");
+        }
+        // OrdinaryToPrimitive — `valueOf` then `toString` (number/default)
+        // or vice versa (string). For an ordinary Function, only
+        // `toString` is meaningful (inherited from
+        // `%Function.prototype.toString%`), but a user-installed
+        // `valueOf` (own or via the proto chain) should still fire
+        // first per spec.
+        const first_name: []const u8 = if (hint == .string) "toString" else "valueOf";
+        const second_name: []const u8 = if (hint == .string) "valueOf" else "toString";
+        for ([_][]const u8{ first_name, second_name }) |name| {
+            const method = (try @call(
+                .never_inline,
+                getPropertyChainOnValue,
+                .{ realm, callable_value, name },
+            )) orelse Value.undefined_;
+            if (heap_mod.valueAsFunction(method)) |m_fn| {
+                // `method` may be a fresh accessor result; keep it live until
+                // callJSFunction has installed its own frame roots.
+                recv_scope.push(method) catch return error.OutOfMemory;
+                const outcome = interp.callJSFunction(realm.allocator, realm, m_fn, value, &[_]Value{}) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return error.NativeThrew,
+                };
+                switch (outcome) {
+                    .value, .yielded => |v| {
+                        if (!heap_mod.isJSObject(v)) return v;
+                    },
+                    .thrown => |ex| {
+                        realm.pending_exception = ex;
+                        return error.NativeThrew;
+                    },
+                }
+            }
+        }
+        return throwTypeError(realm, "Cannot convert function to primitive value");
+    }
+    // Symbols / BigInts already exit at the top `!isJSObject()` check.
+    return value;
 }
 
 /// §7.1.4 ToNumber — like `coerceToNumber` but consults

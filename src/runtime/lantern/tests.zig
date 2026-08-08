@@ -836,6 +836,71 @@ test "interpreter: callable ToPrimitive propagates accessor throws" {
     , "true:true");
 }
 
+test "interpreter: callable ToPrimitive accessors preserve receiver and inheritance" {
+    try expectScriptStringWithBuiltins(
+        \\const exoticParent = function () {};
+        \\const exotic = function () {};
+        \\let exoticGets = 0;
+        \\let exoticThis = true;
+        \\let exoticCallThis = true;
+        \\let hints = "";
+        \\Object.defineProperty(exoticParent, Symbol.toPrimitive, {
+        \\  get() {
+        \\    exoticGets += 1;
+        \\    exoticThis = exoticThis && this === exotic;
+        \\    return function (hint) {
+        \\      exoticCallThis = exoticCallThis && this === exotic;
+        \\      hints += hint;
+        \\      return hint === "number" ? 4 : hint === "string" ? "key" : "value";
+        \\    };
+        \\  }
+        \\});
+        \\Object.setPrototypeOf(exotic, exoticParent);
+        \\const defaultResult = exotic + "";
+        \\const numberResult = +exotic;
+        \\const stringResult = String(exotic);
+        \\const ordinaryParent = function () {};
+        \\const ordinary = function () {};
+        \\let ordinaryGets = 0;
+        \\let ordinaryThis = false;
+        \\let ordinaryCallThis = false;
+        \\Object.defineProperty(ordinaryParent, "valueOf", {
+        \\  get() {
+        \\    ordinaryGets += 1;
+        \\    ordinaryThis = this === ordinary;
+        \\    return function () { ordinaryCallThis = this === ordinary; return 5; };
+        \\  }
+        \\});
+        \\Object.setPrototypeOf(ordinary, ordinaryParent);
+        \\const ordinaryResult = +ordinary;
+        \\const shadowParent = function () {};
+        \\const shadow = function () {};
+        \\let shadowGets = 0;
+        \\Object.defineProperty(shadowParent, "valueOf", {
+        \\  get() { shadowGets += 1; return () => 99; }
+        \\});
+        \\Object.setPrototypeOf(shadow, shadowParent);
+        \\Object.defineProperty(shadow, "valueOf", { value: () => 6 });
+        \\const shadowResult = +shadow;
+        \\const setterOnly = function () {};
+        \\Object.defineProperty(setterOnly, Symbol.toPrimitive, { set(value) {} });
+        \\Object.defineProperty(setterOnly, "valueOf", { value: () => 8 });
+        \\const setterOnlyResult = +setterOnly;
+        \\const bad = function () {};
+        \\bad[Symbol.toPrimitive] = 1;
+        \\let badCaught = false;
+        \\try { +bad; } catch (error) { badCaught = error instanceof TypeError; }
+        \\const objectResult = function () {};
+        \\objectResult[Symbol.toPrimitive] = () => ({});
+        \\let objectCaught = false;
+        \\try { +objectResult; } catch (error) { objectCaught = error instanceof TypeError; }
+        \\defaultResult + ":" + numberResult + ":" + stringResult + ":" + exoticGets + ":" +
+        \\  exoticThis + ":" + exoticCallThis + ":" + hints + ":" + ordinaryResult + ":" +
+        \\  ordinaryGets + ":" + ordinaryThis + ":" + ordinaryCallThis + ":" + shadowResult +
+        \\  ":" + shadowGets + ":" + setterOnlyResult + ":" + badCaught + ":" + objectCaught;
+    , "value:4:key:3:true:true:defaultnumberstring:5:1:true:true:6:0:8:true:true");
+}
+
 test "interpreter: BigInt/String relational propagates rope flatten OOM" {
     const heap_mod = @import("../heap.zig");
     var failing = std.testing.FailingAllocator.init(testing.allocator, .{});
@@ -9638,6 +9703,23 @@ test "GC: ToPrimitive receiver survives gc_threshold=1" {
         \\    get: function () { return function () { return 42; }; },
         \\  });
         \\  return o;
+        \\}
+        \\+mk();
+    , 42);
+}
+
+test "GC: callable ToPrimitive receiver survives gc_threshold=1" {
+    // The callable path has a distinct property graph from a plain
+    // object. The getter returns a fresh trap; call setup and the nested
+    // runFrames re-entry can reach GC safe points, so both receiver and
+    // accessor result must remain rooted across that window.
+    try expectScriptIntUnderAlternatingGcPressure(
+        \\function mk() {
+        \\  const callable = function () {};
+        \\  Object.defineProperty(callable, Symbol.toPrimitive, {
+        \\    get: function () { return function () { return 42; }; },
+        \\  });
+        \\  return callable;
         \\}
         \\+mk();
     , 42);
