@@ -1,7 +1,9 @@
 # JIT tiers — Bistromath (T1), Ohaimark (T2), Spasm (wasm T1), and the shared substrate
 
-Status: **Bistromath and Ohaimark ship on by default** (`--no-ohaimark`
-isolates T1; `--no-jit` selects Lantern). Ohaimark's feedback/SSA,
+Status: **Bistromath ships on AArch64 and x86_64 hosts on macOS and Linux;
+Ohaimark remains AArch64-only.** Both ship on by default where supported
+(`--no-ohaimark` isolates T1; `--no-jit` selects Lantern), while targets
+without qualified native codegen stay in Lantern. Ohaimark's feedback/SSA,
 specialization, representation/deopt plans, allocation, AArch64 codegen,
 live-cell property guards, exact Lantern recovery, backedge safepoints, and
 transactional executable ownership have landed. Its helper-free ABI now adds
@@ -11,7 +13,12 @@ graduation 30-pair T2/T1 run measured `0.997x` geometric mean, `1.041x` worst,
 and 0.8 KiB installed code. Baseline and forced-T2 test262 pass lists match at
 48,517 paths; focused ReleaseSafe GC-pressure runs and bounded crash/value
 differential fuzz campaigns found no verifier failure, host crash, or
-differential. CI now gates both T1 and T2 pass-set equality. Loop-header OSR
+differential. CI now gates both T1 and T2 pass-set equality. Bistromath's
+x86_64 qualification ran full interpreter and forced-T1 test262 sweeps on
+macOS under Rosetta: both passed 48,517 fixtures, the pass-set diff was empty,
+and `--require-bistromath-entry` counted 2,455,587 generated entries.
+`x86_64-linux-musl` and `aarch64-linux-musl` cross-builds and focused
+ReleaseSafe suites on both ISAs also passed. Loop-header OSR
 into Ohaimark is implemented behind a realm-local **default-off** gate
 (`Realm.ohaimark_osr_enabled` / CLI `--ohaimark-osr`); it does not graduate to
 default-on until its own differential and natural-threshold gates pass (see
@@ -40,14 +47,14 @@ Pinned here:
   Spasm, the wasm baseline — and the exact reuse boundary (§7);
 - the JS↔wasm call-boundary fast path — per-signature thunks in the
   shared code region, IC-integrated dispatch on both sides (§7.1);
-- executable-memory mechanics for macOS/arm64 + Linux (§8);
+- executable-memory mechanics for macOS and Linux on AArch64 and x86_64 (§8);
 - the verification gate: differential test262 at force-compile, plus
   gc-stress (§10).
 
 Deferred, each with an owner section: Ohaimark runtime deoptimization/codegen
 ([ohaimark.md](ohaimark.md) — §5), per-realm code-cache scoping (the ADR
-[multi-realm.md](multi-realm.md) already reserves — §14), x86_64
-port timing (§8), background compilation (§14).
+[multi-realm.md](multi-realm.md) already reserves — §14), additional
+codegen targets (§8), and background compilation (§14).
 
 ## 1. Why a JIT, and why now
 
@@ -210,8 +217,8 @@ including §15.10 PTC re-entries; back-edges +1) and the tier state
 ## 4. Bistromath — the T1 baseline JIT
 
 One sentence: a single forward pass over Lantern bytecode emitting
-machine code per opcode — inline fast paths for Smi arithmetic and
-IC hits, helper calls for everything else — into a function whose
+AArch64 or x86_64 machine code per opcode — inline fast paths for Smi
+arithmetic and IC hits, helper calls for everything else — into a function whose
 execution state *is* a Lantern `CallFrame`, so the interpreter, the
 GC, OSR, and the watchdog cannot tell (and don't care) which tier is
 driving.
@@ -283,7 +290,8 @@ helper-call slow path, or a bare helper call:
 - **Smi arithmetic/compare** (`add`, `sub`, `lt`, `loop_inc_lt`, …):
   inline both-int32 tag check + op + overflow check; overflow or
   non-int32 falls into the existing `arith.zig` helper. The
-  NaN-boxed tag tests are 2–3 instructions on arm64.
+  NaN-boxed tag tests compile to a short ISA-local sequence on both
+  targets.
 - **Register moves, constants** (`ldar`, `star`, `lda_smi`,
   `lda_constant`, `lda_undefined`, …): inline loads/stores against
   the register file — these opcodes exist only to feed the
@@ -612,7 +620,7 @@ same line.
 | Layer | Shared? | Notes |
 |---|---|---|
 | Per-ISA assembler/encoder (`asm_aarch64`, `asm_x86_64`) | **yes** | one encoder, grown opcode-by-opcode on demand |
-| MacroAssembler facade (labels, branches, veneers, ABI moves) | **yes** | the SM model; style: target-independent call sites, per-ISA bodies |
+| MacroAssembler facade (labels, branches, veneers, ABI moves) | **yes** | target-independent call sites with per-ISA bodies; Bistromath's thin adapter maps its logical register vocabulary onto AArch64 and x86_64 |
 | Executable-memory allocator (W^X, MAP_JIT, icache flush, free) | **yes** | one reservation per Engine (§8) |
 | Entry/exit thunks + driver loop infrastructure | **yes** (machinery) | instances differ per tier — JS thunks sync `CallFrame`, wasm thunks marshal cells; the per-signature JS↔wasm boundary thunks are first-class citizens here (§7.1) |
 | Safepoint/interrupt convention (`host_interrupt`, budgets) | **yes** | same atomic, same back-edge discipline |
@@ -631,9 +639,11 @@ src/runtime/jit/            shared substrate (new)
   code_alloc.zig            reserve/commit, W^X toggling, icache flush,
                             per-code free; one region per Engine
   asm_aarch64.zig           encoder
-  asm_x86_64.zig            encoder (second target, §8)
-  masm.zig                  facade + ABI helpers + veneer/branch fixups
+  asm_x86_64.zig            encoder
+  masm.zig                  AArch64 facade used by Ohaimark/Spasm
 src/runtime/bistromath/     T1 JS baseline (per AGENTS.md repo map)
+  bistromath.zig            target-neutral one-pass compiler
+  masm.zig                  AArch64/x86_64 register + ABI adapter
 src/runtime/ohaimark/       T2 (M6; ADR first)
 src/runtime/wasm/spasm.zig  Spasm — the wasm T1 baseline (§6)
 ```
@@ -659,10 +669,13 @@ through the host-function bridge ([wasm-engine.md](wasm-engine.md)
 noise against dispatch overhead. The moment either side compiles,
 the boundary gets the same treatment as everything else:
 
-- **Same code region, near calls both directions.** Compiled JS,
-  compiled wasm, and every boundary thunk live in the one §8
-  reservation, inside arm64 `BL` range — a warm crossing never
-  takes an indirect hop through engine plumbing.
+- **Same code region, near calls both directions.** On AArch64,
+  compiled JS, compiled wasm, and every boundary thunk live in the
+  one §8 reservation, inside `BL` (±128 MiB) range — a warm crossing
+  never takes an indirect hop through engine plumbing. x86_64
+  Bistromath already uses the corresponding `rel32` (±2 GiB) scheme;
+  Spasm and the boundary thunks remain future x86_64 work and will
+  share that reservation when they gain an x86_64 backend.
 - **Per-signature thunks, compiled once, cached by canonical
   function type** (the same type identity `call_indirect` checks).
   The JS→wasm *entry thunk* unboxes arguments straight from the
@@ -708,7 +721,10 @@ The ritual, validated against JSC/V8 practice and Apple's
 porting-JIT guide; all of it lives in `code_alloc.zig` so no tier
 ever touches a syscall:
 
-- **macOS arm64 (primary target):** `mmap(PROT_READ|WRITE|EXEC,
+- **Supported hosts:** the executable allocator supports macOS and Linux on
+  AArch64 and x86_64. Bistromath is qualified on both ISAs; Ohaimark remains
+  AArch64-only, and targets without a qualified emitter interpret in Lantern.
+- **macOS AArch64:** `mmap(PROT_READ|WRITE|EXEC,
   MAP_PRIVATE|ANONYMOUS|MAP_JIT)` — Zig's `std.c.MAP` for darwin
   already carries the `JIT` bit. Writes happen inside a
   `pthread_jit_write_protect_np(0)` … `(1)` window (per-thread,
@@ -720,18 +736,21 @@ ever touches a syscall:
   entitlement; the `com.apple.security.cs.allow-jit` entitlement
   becomes relevant only if Cynic ever ships hardened-runtime signed
   builds (recorded, not actioned).
+- **macOS x86_64:** the ordinary page-protection path flips the reserved
+  region RW↔RX with `mprotect`; coherent instruction/data caches need no
+  explicit invalidation.
 - **Linux:** start with the simple, measured thing — `mprotect`
   flipping RW↔RX around writes (SpiderMonkey measured <1% Octane
   cost for full W^X). x86_64 needs no icache maintenance; aarch64
   Linux gets compiler_rt's real `__clear_cache`.
-- **W^X always, RWX never** — including on Intel macs where the
-  toggle is a no-op; the allocator API makes writable-and-executable
+- **W^X always, RWX never** — including on Intel Macs, which use the
+  page-protection path; the allocator API makes writable-and-executable
   states mutually exclusive by construction, because retrofitting
   W^X into a JIT that assumed RWX is the documented painful path.
-- **Branch reach:** arm64 `B/BL` spans ±128 MiB. v1 reserves a
-  single region well under that (64 MiB default, flag-tunable) so
-  every intra-cache call is a near branch; veneer support in `masm`
-  is the day-two answer if a workload outgrows it.
+- **Branch reach:** AArch64 `B/BL` spans ±128 MiB and x86_64 `rel32`
+  spans ±2 GiB. v1 reserves a single region well under both (64 MiB
+  default, flag-tunable), so every intra-cache call is a near branch;
+  veneer support in `masm` is the day-two answer if a workload outgrows it.
 - **Code lifetime:** `CodeAllocator.installOwned` returns an
   `InstalledCode` handle containing the exact executable slice and allocator.
   `Chunk.JitState` owns Bistromath's main code + continuation blob and
@@ -799,7 +818,10 @@ The tier ships dark, proves equivalence, then flips on:
    vs off — the same bar every IC commit already meets
    ([inline-caches.md](inline-caches.md) "Verification"). Lantern is
    the executable spec; Bistromath is correct exactly when the
-   sweep can't tell them apart.
+   sweep can't tell them apart. The forced-T1 sweep also passes
+   `--require-bistromath-entry`, which exits 2 unless at least one generated
+   entry actually executes; equal pass sets cannot pass by comparing Lantern
+   with itself.
    Ohaimark repeats this gate independently with test262 `--ohaimark`, which
    forces T2 before T1 without changing the established T1-only `--jit` pass
    set. CI reruns that exact comparison as a gating step and adds
@@ -1049,6 +1071,17 @@ useful:
    `comm`, never counts: counts let compensating flips hide), a
    `--jit` lane in the gc-stress matrix, bench at the §11
    targets — then the default-on conversation.
+
+   3h. **x86_64 qualification (2026-08-08).** The one-pass compiler now
+       targets AArch64 and x86_64 through `bistromath/masm.zig`; the x86_64
+       side owns its SysV entry/helper ABI, register mapping, and rel32
+       branches without changing Lantern-frame identity or tier-down state.
+       Full interpreter and forced-T1 test262 sweeps on macOS under Rosetta
+       both passed 48,517 fixtures with an empty pass-set diff. The forced
+       sweep executed 2,455,587 generated entries, counted by the fail-closed
+       `--require-bistromath-entry` witness. `x86_64-linux-musl` and
+       `aarch64-linux-musl` cross-builds plus focused ReleaseSafe suites on
+       both ISAs also passed.
 4. **Spasm** — `wasm/spasm.zig` on the same substrate (§6) plus
    the §7.1 per-signature boundary thunks, gated by the wasm
    spec-testsuite at 100% with tiering forced, scored against the
@@ -1313,10 +1346,6 @@ useful:
   engine compiles its optimizing tier off-thread; Cynic realms are
   single-threaded today, which is the complication to design
   around).
-- **x86_64 timing** — the masm facade keeps the second encoder a
-  mechanical port; land it when CI hardware or an embedder demands
-  it, not before the differential gate exists to validate it
-  cheaply.
 - **Polymorphic ICs** — stay deferred per
   [inline-caches.md](inline-caches.md) until Ohaimark consumes
   feedback; T1 neither needs nor wants them.

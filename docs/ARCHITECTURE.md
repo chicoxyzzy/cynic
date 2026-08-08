@@ -38,7 +38,7 @@ that will be settled with an ADR when the time comes.
         │  hot
         ▼
    ┌──────────────────┐
-   │ Bistromath (T1)  │  ◄── default-on (M5)
+   │ Bistromath (T1)  │  ◄── default-on, AArch64 + x86_64 (M5)
    └────┬─────────────┘
         │  hotter
         ▼
@@ -241,8 +241,9 @@ selects narrow immediate / IC forms, relaxes relative branches to
 i8/i16/i32, and remaps source, handler, and dense-switch side tables.
 Load, store, and computed property sites use separate typed IC arrays
 so their layouts and index spaces stay small. Bytecode is the source
-of truth for IR — Bistromath (default-on since 2026-06; `--no-jit`
-opts out) and Ohaimark (default-on at natural thresholds;
+of truth for IR — Bistromath (AArch64 + x86_64 on macOS/Linux,
+default-on since 2026-06; `--no-jit` opts out; other targets interpret)
+and Ohaimark (AArch64-only, default-on at natural thresholds;
 `--no-ohaimark` isolates T1, while `--no-jit` disables both). Ohaimark's
 feedback/SSA/specialization/representation/deopt-home front end, differential
 evaluator, checked-int32/Number/property-IC AArch64 subset,
