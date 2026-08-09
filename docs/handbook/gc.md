@@ -363,6 +363,18 @@ for the common case). Open scopes are walked as roots by every
 collection. A native that allocates and immediately uses a value
 without re-entering JS in between needs no scope.
 
+Generic `ToPrimitive` uses `InlineOneHandleScope` for its single receiver root.
+The caller owns a stack-local `HandleScope` header plus one inline `Value` slot;
+the noinline opener preflights `heap.handle_scopes` capacity before initializing
+and registering that storage, so OOM leaves no dangling root pointer. While
+registered the self-referential storage must stay at a stable address. Its
+embedded handle list is a borrowed view of the inline slot and must be closed
+only through the specialized close, which removes the header from the
+ordinary root list without deinitializing or destroying caller storage. GC and
+snapshot quiescence see it as an ordinary active handle scope;
+`Heap.openScope` and `HandleScope.close` retain their general heap-owned
+behavior unchanged.
+
 "Re-enters JS" is broader than an explicit `callJSFunction`: a
 `ToString` / `ToNumber` / `@@toPrimitive` argument coercion, an
 accessor getter reached through `getPropertyChain`, the iterator

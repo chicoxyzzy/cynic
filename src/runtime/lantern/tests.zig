@@ -797,6 +797,35 @@ test "interpreter: fused relational branches use the number hint for callable ob
     , "true:true:numbernumber");
 }
 
+test "interpreter: InlineOneHandleScope makes generic ToPrimitive BigInt allocation-free after warmup" {
+    const heap_mod = @import("../heap.zig");
+    const intrinsics_mod = @import("../intrinsics.zig");
+
+    var realm = Realm.init(testing.allocator);
+    defer {
+        // Warmup storage belongs to `testing.allocator` even while the
+        // steady-state calls below run under the failing allocator.
+        realm.heap.allocator = testing.allocator;
+        realm.deinit();
+    }
+
+    const input = heap_mod.taggedBigInt(try realm.heap.allocateBigInt(7));
+    try testing.expectEqual(input.bits, (try intrinsics_mod.toPrimitive(&realm, input, .number)).bits);
+
+    var failing = std.testing.FailingAllocator.init(testing.allocator, .{
+        .fail_index = 0,
+        .resize_fail_index = 0,
+    });
+    realm.heap.allocator = failing.allocator();
+
+    var i: usize = 0;
+    while (i < 16) : (i += 1) {
+        const result = try intrinsics_mod.toPrimitive(&realm, input, .number);
+        try testing.expectEqual(input.bits, result.bits);
+        try testing.expectEqual(@as(usize, 0), realm.heap.handle_scopes.items.len);
+    }
+}
+
 test "interpreter: BigInt/String relational propagates rope flatten OOM" {
     const heap_mod = @import("../heap.zig");
     var failing = std.testing.FailingAllocator.init(testing.allocator, .{});

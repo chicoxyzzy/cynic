@@ -4560,6 +4560,27 @@ pub const Heap = struct {
         return scope;
     }
 
+    /// Register one caller-owned, inline Value root. The storage must remain at
+    /// a stable address until `InlineOneHandleScope.close`; never return or
+    /// otherwise move it while registered. Capacity preflight is the only
+    /// fallible step, so OOM cannot publish a pointer to caller storage.
+    pub noinline fn openInlineOneHandleScope(
+        self: *Heap,
+        scope_storage: *InlineOneHandleScope,
+        value: Value,
+    ) !void {
+        try self.handle_scopes.ensureUnusedCapacity(self.allocator, 1);
+        scope_storage.storage[0] = value;
+        scope_storage.scope = .{
+            .heap = self,
+            .handles = .{
+                .items = scope_storage.storage[0..],
+                .capacity = 1,
+            },
+        };
+        self.handle_scopes.appendAssumeCapacity(&scope_storage.scope);
+    }
+
     /// Push a native-constructor instance onto the in-flight root
     /// stack — see `native_ctor_roots`. Pair every call with a
     /// `defer heap.popNativeRoot()`.
@@ -5280,6 +5301,38 @@ pub const HandleScope = struct {
 
     pub fn push(self: *HandleScope, v: Value) !void {
         try self.handles.append(self.heap.allocator, v);
+    }
+};
+
+/// Caller-owned storage for one GC root, registered through the ordinary
+/// `heap.handle_scopes` root list without allocating a scope header or Value
+/// buffer. The embedded `handles` list is a borrowed view of `storage`, not an
+/// allocator-owned list: close it only through `InlineOneHandleScope.close`,
+/// never `HandleScope.close`. The struct is self-referential while open and
+/// therefore non-movable.
+pub const InlineOneHandleScope = struct {
+    scope: HandleScope,
+    storage: [1]Value,
+
+    /// Unregister this caller-owned scope. Unlike `HandleScope.close`, this
+    /// never deinitializes the inline handle slice or destroys its stack header.
+    /// Keep it out of line so a caller's many defer exits share one scan.
+    pub noinline fn close(self: *InlineOneHandleScope) void {
+        const scope = &self.scope;
+        const scopes = &scope.heap.handle_scopes;
+        const top = scopes.items.len;
+        if (top > 0 and scopes.items[top - 1] == scope) {
+            _ = scopes.pop();
+        } else {
+            var i: usize = top;
+            while (i > 0) {
+                i -= 1;
+                if (scopes.items[i] == scope) {
+                    _ = scopes.swapRemove(i);
+                    break;
+                }
+            }
+        }
     }
 };
 
@@ -6414,6 +6467,108 @@ test "Heap: nested handle scopes both contribute roots" {
     outer.close();
     heap.collect(&.{});
     try testing.expectEqual(@as(usize, 0), heap.stringCount());
+}
+
+test "Heap: InlineOneHandleScope registers its embedded root and unregisters without ownership" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    const rooted = try heap.allocateString("inline-root");
+    const value = Value.fromString(rooted);
+    var inline_scope: InlineOneHandleScope = undefined;
+    try heap.openInlineOneHandleScope(&inline_scope, value);
+
+    try testing.expectEqual(@as(usize, 1), heap.handle_scopes.items.len);
+    try testing.expectEqual(&inline_scope.scope, heap.handle_scopes.items[0]);
+    try testing.expectEqual(@as(usize, 1), inline_scope.scope.handles.items.len);
+    try testing.expectEqual(@as(usize, 1), inline_scope.scope.handles.capacity);
+    try testing.expectEqual(value.bits, inline_scope.scope.handles.items[0].bits);
+    try testing.expectEqual(
+        @intFromPtr(&inline_scope.storage[0]),
+        @intFromPtr(inline_scope.scope.handles.items.ptr),
+    );
+
+    heap.collect(&.{});
+    try testing.expectEqual(@as(usize, 1), heap.stringCount());
+
+    inline_scope.close();
+    try testing.expectEqual(@as(usize, 0), heap.handle_scopes.items.len);
+
+    heap.collect(&.{});
+    try testing.expectEqual(@as(usize, 0), heap.stringCount());
+}
+
+test "Heap: ordinary and InlineOneHandleScope nest and root independently" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    const outer_value = try heap.allocateString("ordinary-outer");
+    const inline_value = try heap.allocateString("inline-inner");
+
+    const outer = try heap.openScope();
+    try outer.push(Value.fromString(outer_value));
+    var inline_scope: InlineOneHandleScope = undefined;
+    try heap.openInlineOneHandleScope(&inline_scope, Value.fromString(inline_value));
+
+    try testing.expectEqual(@as(usize, 2), heap.handle_scopes.items.len);
+    try testing.expectEqual(outer, heap.handle_scopes.items[0]);
+    try testing.expectEqual(&inline_scope.scope, heap.handle_scopes.items[1]);
+    heap.collect(&.{});
+    try testing.expectEqual(@as(usize, 2), heap.stringCount());
+
+    inline_scope.close();
+    try testing.expectEqual(@as(usize, 1), heap.handle_scopes.items.len);
+    try testing.expectEqual(outer, heap.handle_scopes.items[0]);
+    heap.collect(&.{});
+    try testing.expectEqual(@as(usize, 1), heap.stringCount());
+
+    outer.close();
+    heap.collect(&.{});
+    try testing.expectEqual(@as(usize, 0), heap.stringCount());
+}
+
+test "Heap: out-of-order InlineOneHandleScope close preserves an ordinary scope" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    const dropped = try heap.allocateString("inline-dropped");
+    const kept = try heap.allocateString("ordinary-kept");
+
+    var inline_scope: InlineOneHandleScope = undefined;
+    try heap.openInlineOneHandleScope(&inline_scope, Value.fromString(dropped));
+    const ordinary = try heap.openScope();
+    try ordinary.push(Value.fromString(kept));
+
+    inline_scope.close();
+    try testing.expectEqual(@as(usize, 1), heap.handle_scopes.items.len);
+    try testing.expectEqual(ordinary, heap.handle_scopes.items[0]);
+
+    heap.collect(&.{});
+    try testing.expectEqual(@as(usize, 1), heap.stringCount());
+    try testing.expectEqualStrings("ordinary-kept", kept.flatBytes());
+
+    ordinary.close();
+    heap.collect(&.{});
+    try testing.expectEqual(@as(usize, 0), heap.stringCount());
+}
+
+test "Heap: InlineOneHandleScope OOM preflight registers no dangling stack pointer" {
+    var failing = std.testing.FailingAllocator.init(testing.allocator, .{
+        .fail_index = 0,
+        .resize_fail_index = 0,
+    });
+    var heap = Heap.init(testing.allocator);
+    heap.allocator = failing.allocator();
+
+    var inline_scope: InlineOneHandleScope = undefined;
+    try testing.expectError(
+        error.OutOfMemory,
+        heap.openInlineOneHandleScope(&inline_scope, Value.undefined_),
+    );
+    try testing.expectEqual(@as(usize, 0), heap.handle_scopes.items.len);
+
+    heap.deinit();
+    try testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
 }
 
 test "Heap: concatStrings tracks the result" {

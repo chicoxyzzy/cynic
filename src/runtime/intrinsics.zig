@@ -2121,9 +2121,9 @@ pub fn toPrimitive(realm: *Realm, value: Value, hint: ToPrimitiveHint) NativeErr
     // native local, so under allocation pressure a sweep would reclaim
     // the receiver mid-coercion and the next slot read
     // (`obj.getProxyTarget()`, `fn_obj.get`) would hit freed memory.
-    const recv_scope = realm.heap.openScope() catch return error.OutOfMemory;
+    var recv_scope: heap_mod.InlineOneHandleScope = undefined;
+    realm.heap.openInlineOneHandleScope(&recv_scope, value) catch return error.OutOfMemory;
     defer recv_scope.close();
-    recv_scope.push(value) catch return error.OutOfMemory;
 
     // §7.1.1.1 OrdinaryToPrimitive maps "default"→"number" for
     // non-Date objects, but the @@toPrimitive trap receives the
@@ -2215,8 +2215,8 @@ pub fn toPrimitive(realm: *Realm, value: Value, hint: ToPrimitiveHint) NativeErr
     }
     // §7.1.1 OrdinaryToPrimitive for a callable Function — same
     // shape as the plain-object path, but Cynic stores functions in
-    // a separate value family. Symbols / BigInts are primitives and
-    // exit at the top check; they never reach this branch.
+    // a separate value family. Symbols / BigInts do not match this
+    // branch and fall through unchanged after both object checks.
     if (heap_mod.valueAsFunction(value)) |fn_obj| {
         // GetMethod(@@toPrimitive) — Function objects don't usually
         // expose it but a user can `defineProperty(fn, @@toPrimitive,
@@ -2271,7 +2271,8 @@ pub fn toPrimitive(realm: *Realm, value: Value, hint: ToPrimitiveHint) NativeErr
         }
         return throwTypeError(realm, "Cannot convert function to primitive value");
     }
-    // Symbols / BigInts already exit at the top `!isObject()` check.
+    // The broad heap tag includes Symbol / BigInt; neither matched an
+    // Object / Function branch above, so §7.1.1 returns it unchanged.
     return value;
 }
 

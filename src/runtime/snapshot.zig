@@ -1825,6 +1825,18 @@ test "snapshot: capture refuses a non-quiescent realm" {
     try testing.expectError(error.RealmNotQuiescent, Snapshot.capture(realm, testing.allocator));
 }
 
+test "snapshot: capture rejects an active InlineOneHandleScope" {
+    const realm = try makeInstalledRealm(testing.allocator, true);
+    defer destroyRealm(testing.allocator, realm);
+
+    var inline_scope: heap_mod.InlineOneHandleScope = undefined;
+    try realm.heap.openInlineOneHandleScope(&inline_scope, Value.undefined_);
+    defer inline_scope.close();
+
+    try testing.expectEqual(@as(usize, 1), realm.heap.handle_scopes.items.len);
+    try testing.expectError(error.RealmNotQuiescent, Snapshot.capture(realm, testing.allocator));
+}
+
 test "snapshot: capture drops derived shallow ConsString cache roots" {
     const realm = try makeInstalledRealm(testing.allocator, true);
     defer destroyRealm(testing.allocator, realm);
