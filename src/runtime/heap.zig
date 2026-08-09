@@ -373,6 +373,12 @@ pub const Heap = struct {
     pub const compact_element_buf_cap = 10;
     pub const element_buf_cap = 16;
 
+    /// Generic ToPrimitive may retain its closed one-handle receiver scope for
+    /// the next native operation. Bound the retained capacity as well as the
+    /// cache entry count: some builtins temporarily grow a scope, then shrink
+    /// its logical length back to one before close.
+    pub const max_cached_handle_scope_capacity: usize = 32;
+
     allocator: std.mem.Allocator,
     /// Monotonic counter for per-ClassTail-evaluation private brand
     /// prefixes (§15.7.14 step 31; `"B{n}#"`). Lives on the Heap, not
@@ -496,9 +502,12 @@ pub const Heap = struct {
     /// recycle keys and create false collisions across realm
     /// lifetime.
     next_symbol_id: u64 = 0,
-    /// Open handle scopes, in nesting order. The top of the stack
-    /// is the innermost scope. Roots from every open scope are
-    /// scanned during a collect.
+    /// Handle-scope ownership list. Its only valid shapes are empty, one or
+    /// more active scopes (all `!is_cached`; normally in open order, with
+    /// defensive out-of-order close permitted), or the exact idle singleton
+    /// `[cached]` (`cached.heap == self`, zero logical handles). A cache never
+    /// coexists with an active scope. GC scans every entry; the empty singleton
+    /// cache contributes no roots.
     handle_scopes: std.ArrayListUnmanaged(*HandleScope) = .empty,
 
     /// Chunk-constant heap values — permanently-live non-string
@@ -1111,6 +1120,14 @@ pub const Heap = struct {
         self.young_ptr_set.deinit(self.allocator);
         self.const_roots.deinit(self.allocator);
         self.native_ctor_roots.deinit(self.allocator);
+        // Only the exact valid idle singleton is heap-owned cached storage.
+        // Active/malformed entries retain the historical caller-owned
+        // teardown contract and are not silently treated as cache state.
+        if (self.hasValidIdleHandleScopeCache()) {
+            const scope = self.handle_scopes.pop().?;
+            scope.handles.deinit(self.allocator);
+            self.allocator.destroy(scope);
+        }
         self.handle_scopes.deinit(self.allocator);
         self.weak_refs_seen.deinit(self.allocator);
         self.weak_collections_seen.deinit(self.allocator);
@@ -4554,10 +4571,42 @@ pub const Heap = struct {
     /// caller; pair with `close` (typically `defer scope.close()`).
     /// While open, every value pushed via `scope.push` is a GC root.
     pub fn openScope(self: *Heap) !*HandleScope {
+        // The idle cache is an exact singleton. Reactivating it changes no
+        // list shape and therefore cannot allocate.
+        if (self.hasValidIdleHandleScopeCache()) {
+            const cached = self.handle_scopes.items[0];
+            cached.is_cached = false;
+            return cached;
+        }
+
+        // Fresh scopes reserve their active-stack slot before allocation. Once
+        // the create succeeds, append cannot fail (and create-then-append OOM
+        // cannot leak an untracked scope).
+        try self.handle_scopes.ensureUnusedCapacity(self.allocator, 1);
         const scope = try self.allocator.create(HandleScope);
         scope.* = .{ .heap = self };
-        try self.handle_scopes.append(self.allocator, scope);
+        self.handle_scopes.appendAssumeCapacity(scope);
         return scope;
+    }
+
+    /// True only for the exact idle singleton cache representation.
+    fn hasValidIdleHandleScopeCache(self: *const Heap) bool {
+        if (self.handle_scopes.items.len != 1) return false;
+        const scope = self.handle_scopes.items[0];
+        return scope.is_cached and scope.heap == self and scope.handles.items.len == 0;
+    }
+
+    /// Number of active native-root scopes. Empty and an exact valid idle
+    /// cache both report zero; malformed cache state fails closed as active.
+    pub fn activeHandleScopeCount(self: *const Heap) usize {
+        const len = self.handle_scopes.items.len;
+        if (len == 0 or self.hasValidIdleHandleScopeCache()) return 0;
+        return len;
+    }
+
+    /// Snapshot quiescence helper: a cache-only list is not active state.
+    pub fn hasActiveHandleScopes(self: *const Heap) bool {
+        return self.activeHandleScopeCount() != 0;
     }
 
     /// Push a native-constructor instance onto the in-flight root
@@ -5253,6 +5302,10 @@ pub fn isYoungHeapValue(v: Value) bool {
 pub const HandleScope = struct {
     heap: *Heap,
     handles: std.ArrayListUnmanaged(Value) = .empty,
+    /// A tagged, empty singleton in `heap.handle_scopes` is generic
+    /// ToPrimitive's one bounded idle spare. It never coexists with an active
+    /// scope or contributes roots.
+    is_cached: bool = false,
 
     pub fn close(self: *HandleScope) void {
         // Pop ourselves off the heap's open-scope stack. The most
@@ -5276,6 +5329,29 @@ pub const HandleScope = struct {
         }
         self.handles.deinit(self.heap.allocator);
         self.heap.allocator.destroy(self);
+    }
+
+    /// Close generic ToPrimitive's one-handle receiver scope, retaining the
+    /// exact idle singleton when bounded. Every other shape uses ordinary
+    /// `close`, keeping cache-admission code out of its inline path.
+    pub noinline fn closeReusableToPrimitiveReceiver(self: *HandleScope) void {
+        const scopes = &self.heap.handle_scopes;
+        if (self.heap.hasValidIdleHandleScopeCache() and scopes.items[0] == self) {
+            return;
+        }
+
+        if (scopes.items.len == 1 and
+            scopes.items[0] == self and
+            !self.is_cached and
+            self.handles.items.len == 1 and
+            self.handles.capacity <= Heap.max_cached_handle_scope_capacity)
+        {
+            self.handles.clearRetainingCapacity();
+            self.is_cached = true;
+            return;
+        }
+
+        self.close();
     }
 
     pub fn push(self: *HandleScope, v: Value) !void {
@@ -6414,6 +6490,209 @@ test "Heap: nested handle scopes both contribute roots" {
     outer.close();
     heap.collect(&.{});
     try testing.expectEqual(@as(usize, 0), heap.stringCount());
+}
+
+test "Heap: ordinary HandleScope close never seeds the reusable cache" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    const scope = try heap.openScope();
+    try scope.push(Value.undefined_);
+    scope.close();
+
+    try testing.expectEqual(@as(usize, 0), heap.handle_scopes.items.len);
+}
+
+test "Heap: HandleScope cache is allocation-free after one-handle warmup" {
+    var heap = Heap.init(testing.allocator);
+    defer {
+        // Cached scope storage was allocated by `testing.allocator` during
+        // warmup, so restore that allocator before Heap teardown.
+        heap.allocator = testing.allocator;
+        heap.deinit();
+    }
+
+    const warm = try heap.openScope();
+    try warm.push(Value.undefined_);
+    warm.closeReusableToPrimitiveReceiver();
+
+    var failing = std.testing.FailingAllocator.init(testing.allocator, .{
+        .fail_index = 0,
+        .resize_fail_index = 0,
+    });
+    heap.allocator = failing.allocator();
+
+    var i: usize = 0;
+    while (i < 16) : (i += 1) {
+        const scope = try heap.openScope();
+        try scope.push(Value.fromInt32(@intCast(i)));
+        scope.closeReusableToPrimitiveReceiver();
+    }
+}
+
+test "Heap: HandleScope cache does not retain a closed scope root" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    const dead = try heap.allocateString("cached-dead-root");
+    const scope = try heap.openScope();
+    try scope.push(Value.fromString(dead));
+    scope.closeReusableToPrimitiveReceiver();
+
+    heap.collect(&.{});
+    try testing.expectEqual(@as(usize, 0), heap.stringCount());
+}
+
+test "Heap: HandleScope cache rejects oversized retained capacity" {
+    var heap = Heap.init(testing.allocator);
+    defer {
+        heap.allocator = testing.allocator;
+        heap.deinit();
+    }
+
+    const scope = try heap.openScope();
+    var i: usize = 0;
+    while (i <= Heap.max_cached_handle_scope_capacity) : (i += 1) {
+        try scope.push(Value.fromInt32(@intCast(i)));
+    }
+    try testing.expect(scope.handles.capacity > Heap.max_cached_handle_scope_capacity);
+    scope.handles.shrinkRetainingCapacity(1);
+    scope.closeReusableToPrimitiveReceiver();
+    try testing.expectEqual(@as(usize, 0), heap.handle_scopes.items.len);
+
+    var failing = std.testing.FailingAllocator.init(testing.allocator, .{
+        .fail_index = 0,
+        .resize_fail_index = 0,
+    });
+    heap.allocator = failing.allocator();
+    try testing.expectError(error.OutOfMemory, heap.openScope());
+}
+
+test "Heap: specialized HandleScope close tolerates cached double close" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    const scope = try heap.openScope();
+    try scope.push(Value.fromInt32(1));
+    scope.closeReusableToPrimitiveReceiver();
+    scope.closeReusableToPrimitiveReceiver();
+
+    try testing.expectEqual(@as(usize, 1), heap.handle_scopes.items.len);
+    try testing.expect(scope.is_cached);
+
+    const reopened = try heap.openScope();
+    try testing.expectEqual(scope, reopened);
+    try reopened.push(Value.fromInt32(2));
+    reopened.closeReusableToPrimitiveReceiver();
+}
+
+test "Heap: any opener consumes the cache and ordinary close destroys it" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    const scope = try heap.openScope();
+    try scope.push(Value.fromInt32(1));
+    scope.closeReusableToPrimitiveReceiver();
+
+    const reopened = try heap.openScope();
+    try testing.expectEqual(scope, reopened);
+    try testing.expect(!reopened.is_cached);
+    try reopened.push(Value.fromInt32(2));
+    reopened.close();
+
+    try testing.expectEqual(@as(usize, 0), heap.handle_scopes.items.len);
+}
+
+test "Heap: ordinary close directly destroys an exact cached singleton" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    const scope = try heap.openScope();
+    try scope.push(Value.fromInt32(1));
+    scope.closeReusableToPrimitiveReceiver();
+    try testing.expect(scope.is_cached);
+
+    scope.close();
+    try testing.expectEqual(@as(usize, 0), heap.handle_scopes.items.len);
+}
+
+test "Heap: nested specialized HandleScope close delegates in LIFO order" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    const outer = try heap.openScope();
+    try outer.push(Value.fromInt32(1));
+    const inner = try heap.openScope();
+    try inner.push(Value.fromInt32(2));
+
+    inner.closeReusableToPrimitiveReceiver();
+    try testing.expectEqual(@as(usize, 1), heap.activeHandleScopeCount());
+    try testing.expectEqual(outer, heap.handle_scopes.items[0]);
+    try testing.expect(!outer.is_cached);
+
+    outer.closeReusableToPrimitiveReceiver();
+    try testing.expectEqual(@as(usize, 0), heap.activeHandleScopeCount());
+    try testing.expectEqual(@as(usize, 1), heap.handle_scopes.items.len);
+    try testing.expectEqual(outer, heap.handle_scopes.items[0]);
+    try testing.expect(outer.is_cached);
+}
+
+test "Heap: out-of-order specialized HandleScope close delegates until last" {
+    var heap = Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    const dropped = try heap.allocateString("dropped");
+    const active_value = try heap.allocateString("active");
+
+    const outer = try heap.openScope();
+    try outer.push(Value.fromString(dropped));
+    const inner = try heap.openScope();
+    try inner.push(Value.fromString(active_value));
+
+    // A specialized close while another scope is active delegates to the
+    // ordinary out-of-order close path and cannot publish an idle cache.
+    outer.closeReusableToPrimitiveReceiver();
+    try testing.expectEqual(@as(usize, 1), heap.activeHandleScopeCount());
+    try testing.expectEqual(@as(usize, 1), heap.handle_scopes.items.len);
+    try testing.expectEqual(inner, heap.handle_scopes.items[0]);
+    try testing.expect(!inner.is_cached);
+
+    heap.collect(&.{});
+    try testing.expectEqual(@as(usize, 1), heap.stringCount());
+    try testing.expectEqualStrings("active", active_value.flatBytes());
+
+    // Only the dedicated producer closing the exact last one-handle scope may
+    // seed the singleton cache, and reopening it is allocation-free.
+    inner.closeReusableToPrimitiveReceiver();
+    try testing.expectEqual(@as(usize, 0), heap.activeHandleScopeCount());
+    try testing.expectEqual(@as(usize, 1), heap.handle_scopes.items.len);
+    try testing.expectEqual(inner, heap.handle_scopes.items[0]);
+    try testing.expect(inner.is_cached);
+
+    heap.collect(&.{});
+    try testing.expectEqual(@as(usize, 0), heap.stringCount());
+
+    const reopened = try heap.openScope();
+    try testing.expectEqual(inner, reopened);
+    try reopened.push(Value.undefined_);
+    reopened.closeReusableToPrimitiveReceiver();
+}
+
+test "Heap: fresh HandleScope preflights stack growth without leaking on OOM" {
+    var failing = std.testing.FailingAllocator.init(testing.allocator, .{
+        // Permit exactly one allocation. The correct order spends it on the
+        // active-stack buffer, then fails fresh-scope creation. The historical
+        // create-then-append order spent it on an untracked scope and leaked it
+        // when stack growth failed.
+        .fail_index = 1,
+        .resize_fail_index = 0,
+    });
+    var heap = Heap.init(testing.allocator);
+    heap.allocator = failing.allocator();
+
+    try testing.expectError(error.OutOfMemory, heap.openScope());
+    heap.deinit();
+    try testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
 }
 
 test "Heap: concatStrings tracks the result" {

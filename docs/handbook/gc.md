@@ -363,6 +363,24 @@ for the common case). Open scopes are walked as roots by every
 collection. A native that allocates and immediately uses a value
 without re-entering JS in between needs no scope.
 
+Generic `ToPrimitive` retains at most one closed exactly-one-handle receiver
+scope inside the existing `handle_scopes` list. Ordinary `HandleScope.close`
+still removes and destroys its scope; only
+`closeReusableToPrimitiveReceiver` admits the cache. The list is either empty,
+contains only active scopes (all untagged), or is the exact idle singleton
+`[cached]`. The cached scope has an empty logical handle list and therefore
+contributes no GC roots; it never coexists with an active scope. Admission is
+limited to buffers with capacity at most 32 Values so a formerly large scope
+cannot pin unbounded backing memory. Any `openScope` reactivates the singleton
+in place; if that caller uses ordinary `close`, it destroys the consumed spare
+instead of readmitting it. A fresh scope reserves its list slot before
+allocating, so append OOM cannot leak the new scope. Nested or out-of-order
+specialized closes delegate to ordinary close while another scope remains
+active. Heap teardown recognizes and frees the one valid idle spare. This
+keeps repeated generic `ToPrimitive` receiver scopes allocation-free after
+warmup without adding cache logic to the ordinary close path or weakening the
+rooting contract.
+
 "Re-enters JS" is broader than an explicit `callJSFunction`: a
 `ToString` / `ToNumber` / `@@toPrimitive` argument coercion, an
 accessor getter reached through `getPropertyChain`, the iterator

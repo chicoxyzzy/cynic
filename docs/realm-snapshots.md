@@ -282,7 +282,12 @@ Fields that carry heap references or must survive the round trip:
   runtime state, not image state. Capture clears the two strong roots
   before its pre-capture full GC so cache-only rope graphs are reclaimed;
   restore starts with an empty cache and zeroed counters.
-- `const_roots`, `native_ctor_roots`, `handle_scopes`, `dirty_list`,
+- `handle_scopes` is empty, active-only, or the exact derived idle singleton
+  `[cached]` produced only by generic `ToPrimitive`'s specialized receiver
+  close. The cached entry's handle list is empty and it never coexists with
+  active scopes, so it is neither a root nor image state; capture permits the
+  valid singleton and restore starts with an empty list.
+- `const_roots`, `native_ctor_roots`, active handle scopes, `dirty_list`,
   `young_ptr_set`, weak worklists, `jit_code` — all empty/null at
   capture (assert), default at restore.
 - GC tuning fields (`gc_threshold` etc.) — restore defaults; do not
@@ -633,7 +638,10 @@ envelope and errors otherwise (`error.RealmNotQuiescent` /
   `modules`, `script_chunks`, `eval_sources`, `child_realms`,
   `const_roots`, `dirty_list` all empty; `pending_exception == null`;
   `heap.realms.items.len == 1`; `wasm_arena == null`;
-  `jit_code == null`.
+  `jit_code == null`. A valid tagged, empty `handle_scopes` singleton is
+  ignored as derived allocator state and therefore does not make an otherwise-
+  quiescent realm unsnapshotable. Any active or malformed list state rejects
+  capture.
 - Per-object: `chunk == null` on every function; no generators, no
   environments; every `JSObjectExtension` field outside the
   supported set (`accessors`, `private_*`? — expected: only

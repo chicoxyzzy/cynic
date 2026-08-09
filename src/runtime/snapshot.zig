@@ -587,7 +587,7 @@ const Capture = struct {
         {
             return error.RealmNotQuiescent;
         }
-        if (heap.handle_scopes.items.len != 0 or
+        if (heap.hasActiveHandleScopes() or
             heap.const_roots.items.len != 0 or
             heap.native_ctor_roots.items.len != 0 or
             heap.realms.items.len != 1)
@@ -1823,6 +1823,41 @@ test "snapshot: capture refuses a non-quiescent realm" {
     defer destroyRealm(testing.allocator, realm);
     try realm.enqueueMicrotask(Value.undefined_, Value.undefined_);
     try testing.expectError(error.RealmNotQuiescent, Snapshot.capture(realm, testing.allocator));
+}
+
+test "snapshot: capture ignores an empty cached HandleScope and restore starts cold" {
+    const realm = try makeInstalledRealm(testing.allocator, true);
+    defer destroyRealm(testing.allocator, realm);
+
+    const scope = try realm.heap.openScope();
+    try scope.push(Value.undefined_);
+    scope.closeReusableToPrimitiveReceiver();
+    try testing.expectEqual(@as(usize, 0), realm.heap.activeHandleScopeCount());
+    try testing.expectEqual(@as(usize, 1), realm.heap.handle_scopes.items.len);
+    try testing.expect(realm.heap.handle_scopes.items[0].is_cached);
+
+    const image = try Snapshot.capture(realm, testing.allocator);
+    defer testing.allocator.free(image);
+
+    const restored = try Snapshot.restore(testing.allocator, image);
+    defer destroyRealm(testing.allocator, restored);
+    try testing.expectEqual(@as(usize, 0), restored.heap.activeHandleScopeCount());
+    try testing.expectEqual(@as(usize, 0), restored.heap.handle_scopes.items.len);
+}
+
+test "snapshot: capture rejects an active HandleScope" {
+    const realm = try makeInstalledRealm(testing.allocator, true);
+    defer destroyRealm(testing.allocator, realm);
+
+    const active = try realm.heap.openScope();
+    try active.push(Value.undefined_);
+
+    try testing.expectEqual(@as(usize, 1), realm.heap.activeHandleScopeCount());
+    try testing.expectEqual(@as(usize, 1), realm.heap.handle_scopes.items.len);
+    try testing.expect(!active.is_cached);
+    try testing.expectError(error.RealmNotQuiescent, Snapshot.capture(realm, testing.allocator));
+
+    active.close();
 }
 
 test "snapshot: capture drops derived shallow ConsString cache roots" {

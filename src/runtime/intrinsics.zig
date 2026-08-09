@@ -2122,7 +2122,7 @@ pub fn toPrimitive(realm: *Realm, value: Value, hint: ToPrimitiveHint) NativeErr
     // the receiver mid-coercion and the next slot read
     // (`obj.getProxyTarget()`, `fn_obj.get`) would hit freed memory.
     const recv_scope = realm.heap.openScope() catch return error.OutOfMemory;
-    defer recv_scope.close();
+    defer recv_scope.closeReusableToPrimitiveReceiver();
     recv_scope.push(value) catch return error.OutOfMemory;
 
     // §7.1.1.1 OrdinaryToPrimitive maps "default"→"number" for
