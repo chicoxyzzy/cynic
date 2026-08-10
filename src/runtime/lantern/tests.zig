@@ -12023,6 +12023,27 @@ test "array length: JSON.stringify and for-in never surface length" {
     , "[1,2]:01");
 }
 
+test "Promise.then reads source settlement after subclass capability construction" {
+    // §27.2.5.4 steps 4-5 — NewPromiseCapability(C) may run a user
+    // subclass constructor before PerformPromiseThen observes the source.
+    // If that constructor settles the still-pending source synchronously,
+    // `then` must observe the new state/value and queue the reaction.
+    try expectScriptIntWithBuiltins(
+        \\let resolveSource;
+        \\class P extends Promise {
+        \\  constructor(executor) {
+        \\    if (resolveSource !== undefined) resolveSource(42);
+        \\    super(executor);
+        \\  }
+        \\}
+        \\const source = new P(resolve => { resolveSource = resolve; });
+        \\let seen = 0;
+        \\source.then(value => { seen = value; });
+        \\globalThis.__drainMicrotasks();
+        \\seen;
+    , 42);
+}
+
 test "Promise.then: user-replaced @@species getter is still honored" {
     // §27.2.5.4 step 3 SpeciesConstructor — the pristine-species
     // short-circuit in `then` compares the constructor's @@species

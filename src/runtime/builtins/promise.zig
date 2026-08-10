@@ -622,43 +622,28 @@ fn promiseThen(realm: *Realm, this_value: Value, args: []const Value) NativeErro
     const on_fulfilled_fn: Value = if (heap_mod.valueAsFunction(on_fulfilled) != null) on_fulfilled else Value.undefined_;
     const on_rejected_fn: Value = if (heap_mod.valueAsFunction(on_rejected) != null) on_rejected else Value.undefined_;
 
-    // Fast path — built-in %Promise%, no subclass: allocate the
-    // result promise directly without going through user code.
-    if (c_fn == builtin_promise) {
-        const value = source.promise_value;
-        const result_promise = allocatePromise(realm, .pending, Value.undefined_) catch return error.OutOfMemory;
-        switch (source.brand.promise_state) {
-            .fulfilled => realm.enqueuePromiseReaction(on_fulfilled_fn, value, result_promise, false) catch return error.OutOfMemory,
-            .rejected => realm.enqueuePromiseReaction(on_rejected_fn, value, result_promise, true) catch return error.OutOfMemory,
-            else => {
-                const reactions = source.promiseReactionsPtr(realm.allocator) catch return error.OutOfMemory;
-                reactions.append(realm.allocator, .{
-                    .on_fulfilled = on_fulfilled_fn,
-                    .on_rejected = on_rejected_fn,
-                    .result_promise = result_promise,
-                }) catch return error.OutOfMemory;
-            },
-        }
-        return result_promise;
-    }
-
-    // Subclass path — NewPromiseCapability(C). The capability's
-    // resolve/reject become the settlement edges.
-    const cap = try newPromiseCapability(realm, c_fn);
+    // Built-in %Promise% can allocate the result directly; a subclass
+    // must go through NewPromiseCapability(C). Capability construction
+    // can run user code and settle `source`, so observe its state/value
+    // only after the result promise has been selected.
+    const result_promise = if (c_fn == builtin_promise)
+        allocatePromise(realm, .pending, Value.undefined_) catch return error.OutOfMemory
+    else
+        (try newPromiseCapability(realm, c_fn)).promise;
     const value = source.promise_value;
     switch (source.brand.promise_state) {
-        .fulfilled => realm.enqueuePromiseReaction(on_fulfilled_fn, value, cap.promise, false) catch return error.OutOfMemory,
-        .rejected => realm.enqueuePromiseReaction(on_rejected_fn, value, cap.promise, true) catch return error.OutOfMemory,
+        .fulfilled => realm.enqueuePromiseReaction(on_fulfilled_fn, value, result_promise, false) catch return error.OutOfMemory,
+        .rejected => realm.enqueuePromiseReaction(on_rejected_fn, value, result_promise, true) catch return error.OutOfMemory,
         else => {
             const reactions = source.promiseReactionsPtr(realm.allocator) catch return error.OutOfMemory;
             reactions.append(realm.allocator, .{
                 .on_fulfilled = on_fulfilled_fn,
                 .on_rejected = on_rejected_fn,
-                .result_promise = cap.promise,
+                .result_promise = result_promise,
             }) catch return error.OutOfMemory;
         },
     }
-    return cap.promise;
+    return result_promise;
 }
 
 fn promiseCatch(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
