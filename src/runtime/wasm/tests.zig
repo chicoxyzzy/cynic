@@ -399,7 +399,7 @@ test "wasm decoder: decodes a full adder module" {
 }
 
 test "wasm spasm: a compilable function runs Spasm-compiled with an identical result" {
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var buf: [8 + adder_body.len]u8 = undefined;
     const bytes = withPreamble(&buf, &adder_body);
 
@@ -430,7 +430,7 @@ test "wasm spasm: a compilable function runs Spasm-compiled with an identical re
 }
 
 test "wasm spasm: the per-function code cache compiles once across repeated invokes" {
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var buf: [8 + adder_body.len]u8 = undefined;
     const bytes = withPreamble(&buf, &adder_body);
 
@@ -475,7 +475,7 @@ const div_s_body = [_]u8{
 };
 
 test "wasm spasm: i32.div_s compiles and runs Spasm-compiled" {
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var buf: [8 + div_s_body.len]u8 = undefined;
     const bytes = withPreamble(&buf, &div_s_body);
 
@@ -512,7 +512,7 @@ test "wasm spasm: a direct call to a leaf function runs Spasm-compiled" {
     // the callee inline, so `spasm_runs` stayed 0. With the direct-call
     // ABI, "main" runs via Spasm and the leaf enters its cached native
     // EntryFn without re-entering `invoke`.
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -569,8 +569,8 @@ test "wasm spasm: a direct call to a leaf function runs Spasm-compiled" {
     try testing.expectEqual(@as(u32, 25), @as(u32, @truncate(warm_res[0])));
     try testing.expectEqual(@as(u32, 1), instance.spasm_native_calls);
 
-    // The warm gate carries the armed execution controller in x7 while its
-    // stable gate record lives in x8. Both main and square poll at entry.
+    // The warm gate carries both the armed execution controller and its stable
+    // gate record through the backend's private ABI. Both functions poll at entry.
     var control: CountingExecutionControl = .{};
     instance.execution_control = control.control();
     const metered_res = try interp.invoke(&instance, testing.allocator, fidx, cells);
@@ -592,12 +592,76 @@ test "wasm spasm: a direct call to a leaf function runs Spasm-compiled" {
     try testing.expectEqual(native_calls_before, instance.spasm_native_calls);
 }
 
+test "wasm spasm: x86 cold gate preserves interpreter fallback for a refused callee" {
+    const spasm = @import("spasm.zig");
+    if (comptime !spasm.supported or spasm.full_coverage_supported) return error.SkipZigTest;
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // Both functions have the x86-qualified i32 signature. The caller is
+    // emittable, while the callee's i32.rotl remains outside the x86 subset.
+    // Its cold stable gate must resolve through Sarcasm without publishing a
+    // bogus native entry or changing the result.
+    const tbody = [_]u8{ 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f };
+    const fbody = [_]u8{ 0x02, 0x00, 0x00 };
+    const xbody = [_]u8{ 0x01, 0x04, 'm', 'a', 'i', 'n', 0x00, 0x00 };
+    const cbody = [_]u8{
+        0x02,
+        0x06,
+        0x00,
+        0x20,
+        0x00,
+        0x10,
+        0x01,
+        0x0b,
+        0x07,
+        0x00,
+        0x20,
+        0x00,
+        0x41,
+        0x01,
+        0x77,
+        0x0b,
+    };
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 10, .body = &cbody },
+    });
+
+    const m = try wasm.decode(a, bytes);
+    const mp = try a.create(wasm.Module);
+    mp.* = m;
+
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, mp, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true;
+
+    const fidx = funcExport(mp, "main") orelse return error.NoSuchExport;
+    const cells = try a.alloc(u128, 1);
+    cells[0] = 21;
+
+    var invocation: usize = 0;
+    while (invocation < 2) : (invocation += 1) {
+        const result = try interp.invoke(&instance, testing.allocator, fidx, cells);
+        defer testing.allocator.free(result);
+        try testing.expectEqual(@as(u32, 42), @as(u32, @truncate(result[0])));
+    }
+    try testing.expectEqual(@as(u32, 2), instance.spasm_runs);
+    try testing.expectEqual(@as(u32, 1), instance.spasm_compiles);
+    try testing.expectEqual(@as(u32, 0), instance.spasm_native_calls);
+}
+
 test "wasm spasm: warm mutually recursive calls use same-instance native links" {
     // §4.4.1 / §5.4.1 — `even(n)` and `odd(n)` call one another. Unlike a
     // self-recursive BL, each edge needs a stable target entry that survives
     // the lazy compilation order. The first invocation may visit the cold
     // helper while it compiles `odd`; after that, no recursive edge may do so.
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -693,7 +757,7 @@ test "wasm spasm: a warm native link reinitializes declared callee locals" {
     // initial value, then writes 42 into it. The cold helper initializes the
     // first frame; the second call reuses the native stack area and proves the
     // hot gate emits the same zero-initialization before entering the target.
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -766,7 +830,7 @@ test "wasm spasm: a call with a live operand under the args runs Spasm-compiled"
     // live operand below the args across the helper call and reload it
     // after, then `i32.add` it to the result. Before this, a deeper-than-
     // arity stack at a call degraded to the interpreter.
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -825,7 +889,7 @@ test "wasm spasm: a constant under an if/else with calls in both arms is not cor
     // else-arm, whose path never ran the `mov`, so main(0) would read a
     // garbage "7". The const must stay a const, re-materialized after the
     // call on whichever arm runs. main(0) == 7 (else), main(1) == 8 (then).
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -1051,7 +1115,7 @@ test "wasm spasm: a self-recursive call traps CallStackExhausted, never crashes"
     //   ...
     // Simpler shape: `local.get 0; if (result i32) ... else 0 end`. We
     // hand-assemble: if n==0 return 0, else return f(n-1).
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -5169,7 +5233,7 @@ test "wasm spasm: an imported call keeps the generic invocation boundary" {
 }
 
 test "wasm spasm: imported execution control reaches a cold native callee" {
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -5217,7 +5281,7 @@ test "wasm spasm: imported execution control reaches a cold native callee" {
 }
 
 test "wasm spasm: an interrupt raised after native entry stops the next backedge" {
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();

@@ -536,9 +536,10 @@ the measured design space:
   guarded local self-links, and stable W^X-safe cross-function call gates.
   Every other x86 body refuses before code publication and runs in Sarcasm.
   This is a coverage difference, not a semantic one: forced-Spasm sweeps on
-  both architectures pass all 58,779 scored spec commands, and focused x86
-  tests require actual native entry so the differential gate cannot be
-  satisfied by fallback alone.
+  both architectures pass all 58,779 scored spec commands. CI pairs
+  `--spasm` with `--require-spasm-entry`, and the focused x86 instance/cache,
+  trap, safe-point, self-link, and stable-gate tests require actual native
+  entry, so the differential gate cannot be satisfied by fallback alone.
 - **Narrowing the operand cell was measured and declined** (2026-06).
   Splitting the 128-bit `Cell` into parallel 64-bit lanes (scalars in
   the low lane only) was prototyped and benchmarked on Apple Silicon:

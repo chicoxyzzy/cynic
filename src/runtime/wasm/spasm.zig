@@ -5678,15 +5678,14 @@ test "spasm: br_table dispatches by index to distinct block ends" {
 }
 
 test "spasm: an unsupported opcode degrades to null (stay interpreted)" {
-    if (comptime !full_coverage_supported) return error.SkipZigTest;
+    if (comptime !supported) return error.SkipZigTest;
     var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
     defer ca.deinit();
 
-    // `memory.grow` (0x40) is outside the baseline's current set —
-    // Spasm must refuse the whole function, not abort. The
-    // interpreter runs it. (`call` is now emittable, so this guard
-    // uses an op that still degrades.)
-    const body = [_]u8{ 0x40, 0x00, op_end };
+    // A supported prefix followed by `memory.grow` without its helper must
+    // refuse the whole function before publishing partial native code. The
+    // interpreter runs it instead.
+    const body = [_]u8{ op_i32_const, 0x01, 0x40, 0x00, op_end };
     const func: CompiledFunc = .{
         .type_index = 0,
         .local_types = &.{},
@@ -5695,5 +5694,7 @@ test "spasm: an unsupported opcode degrades to null (stay interpreted)" {
         .max_stack = 1,
     };
     const ftype: FuncType = .{ .params = &.{}, .results = &.{.i32} };
+    const top_before = ca.top;
     try testing.expectEqual(@as(?EntryFn, null), try compileT(&ca, &func, &ftype));
+    try testing.expectEqual(top_before, ca.top);
 }

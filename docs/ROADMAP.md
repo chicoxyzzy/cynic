@@ -2297,9 +2297,11 @@ and the per-builtin checklist; this section tracks status.
   execution polls, guarded self-links, and W^X-safe stable cross-function
   gates. Unsupported x86 functions refuse transactionally and stay in
   Sarcasm; the forced-tier spec sweep is exact at 58,779/58,779 on both
-  x86_64 and AArch64. Remaining x86 scalar/memory/SIMD parity, remaining SIMD
-  lane operations generally, and the native-register/imported-call ABI remain
-  next.
+  x86_64 and AArch64. The forced sweep is fail-closed on native engagement via
+  `--require-spasm-entry`, and the shared instance/cache, recursive stack,
+  cold-gate fallback, and post-entry interrupt tests now execute on both
+  architectures. Remaining x86 scalar/memory/SIMD parity, remaining SIMD lane
+  operations generally, and the native-register/imported-call ABI remain next.
 
   The architecture for all three tiers — the shared codegen
   substrate and the JS↔wasm call-boundary fast path included — is

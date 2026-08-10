@@ -286,7 +286,7 @@ pub fn compile(
                     try m.movImm64(.r11, config.call_helper.?);
                     try m.callReg(.r11);
                 }
-                try m.testReg64(.rax, .rax);
+                try m.cmpReg32Imm32(.rax, 0);
                 var call_ok: x64.Masm.Label = .{};
                 defer call_ok.deinit(gpa);
                 try m.jumpCond(.equal, &call_ok);
@@ -642,13 +642,13 @@ fn emitExecutionPoll(
     try m.jumpCond(.equal, &done);
     try m.load64Disp32(.r11, .rbx, wake_flag_offset);
     try m.load8Disp32(.rax, .r11, 0);
-    try m.testReg64(.rax, .rax);
+    try m.cmpReg32Imm32(.rax, 0);
     try m.jumpCond(.equal, &done);
 
     try m.movReg64(.rdi, .rbx);
     try m.movImm64(.r11, poll_helper);
     try m.callReg(.r11);
-    try m.testReg64(.rax, .rax);
+    try m.cmpReg32Imm32(.rax, 0);
     try m.jumpCond(.not_equal, epilogue);
     try m.bind(&done);
 }
