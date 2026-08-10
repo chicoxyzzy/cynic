@@ -3869,6 +3869,48 @@ test "update: non-fused for-update postfix counts correctly" {
     , 10);
 }
 
+test "incOrDec reorder fence preserves Double, BigInt, coercion, and postfix semantics" {
+    // §13.4 routes already-ToNumeric values through incOrDec. Keep every
+    // interesting input behind a function parameter so this exercises the
+    // runtime helper rather than a constant-folded update expression.
+    try expectScriptStringWithBuiltins(
+        \\function preInc(x) { return ++x; }
+        \\function preDec(x) { return --x; }
+        \\function postInc(x) { const old = x++; return [old, x]; }
+        \\function postDec(x) { const old = x--; return [old, x]; }
+        \\function crossMaxInt(bound) {
+        \\  let visits = 0;
+        \\  let last = 0;
+        \\  for (let i = 2147483647; i < bound; i++) {
+        \\    visits++;
+        \\    last = i;
+        \\    if (visits === 2) break;
+        \\  }
+        \\  return visits + ":" + last;
+        \\}
+        \\let doubleCalls = 0;
+        \\let bigintCalls = 0;
+        \\const zero = postInc(-0);
+        \\const nan = postInc(NaN);
+        \\const infinity = postDec(Infinity);
+        \\const objectDouble = postInc({ valueOf() { doubleCalls++; return 1.5; } });
+        \\const objectBigInt = postDec({
+        \\  [Symbol.toPrimitive]() { bigintCalls++; return 5n; }
+        \\});
+        \\[
+        \\  preInc(1.25) === 2.25,
+        \\  preDec(-1.25) === -2.25,
+        \\  Object.is(zero[0], -0), Object.is(zero[1], 1),
+        \\  Number.isNaN(nan[0]), Number.isNaN(nan[1]),
+        \\  infinity[0] === Infinity, infinity[1] === Infinity,
+        \\  crossMaxInt(2147483649.5) === "2:2147483648",
+        \\  preInc(5n) === 6n,
+        \\  objectDouble[0] === 1.5, objectDouble[1] === 2.5, doubleCalls === 1,
+        \\  objectBigInt[0] === 5n, objectBigInt[1] === 4n, bigintCalls === 1
+        \\].join(":");
+    , "true:true:true:true:true:true:true:true:true:true:true:true:true:true:true:true");
+}
+
 test "register update: prefix and discarded postfix preserve bumped results" {
     // Function parameters and `var` locals are non-TDZ register bindings, so
     // these exercise IncReg / DecReg once the compiler specialization lands.
