@@ -237,7 +237,7 @@ jobs:
         run: zig build wasm
 
   wasm-testsuite:
-    name: WASM spec testsuite (Sarcasm)
+    name: WASM spec testsuite (Sarcasm + x86_64 Spasm)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     needs: build-and-test
@@ -280,15 +280,21 @@ jobs:
           zig build wasm-testsuite -Dwasm-corpus=vendor/wasm-testsuite -- \
             --quiet --min-pass-pct=100
 
+      - name: Score the spec testsuite through x86_64 Spasm (gating)
+        timeout-minutes: 12
+        run: |
+          zig build wasm-testsuite -Dwasm-corpus=vendor/wasm-testsuite -- \
+            --quiet --spasm --min-pass-pct=100
+
   wasm-testsuite-spasm:
     name: WASM spec testsuite (Spasm, AArch64)
     runs-on: macos-latest
     timeout-minutes: 25
     needs: build-and-test
-    # Spasm emits AArch64 machine code, so the Ubuntu Sarcasm gate above
-    # cannot exercise it. Force the tier over the same full corpus and keep
-    # the 100%-of-scored-commands floor: compilable functions run native and
-    # unsupported functions must degrade to Sarcasm without changing results.
+    # Force the mature AArch64 backend over the same full corpus and keep the
+    # 100%-of-scored-commands floor on both qualified architectures:
+    # compilable functions run native and unsupported functions must degrade
+    # to Sarcasm without changing results.
     steps:
       - name: Audit egress (advisory)
         uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411  # v2

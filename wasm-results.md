@@ -28,3 +28,10 @@ proposal's `(ref exn)` text syntax, so its `.wast` files don't lower
 | passing | failing | pass% | skipped | files |
 |---|---|---|---|---|
 | 58779 | 0 | 100.00 | 1232 | 222 |
+
+The forced-Spasm differential posture (`--spasm`) produces this exact score on
+both qualified code-generation targets: native AArch64 and x86_64-macos under
+Rosetta (2026-08-10). Focused target tests additionally require generated x86
+entry, trap, safe-point, self-link, and stable-gate execution; unsupported x86
+opcode families fall back per function and therefore remain covered by the
+same semantic sweep.

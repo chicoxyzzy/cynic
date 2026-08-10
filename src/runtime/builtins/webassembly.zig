@@ -1930,7 +1930,7 @@ fn testRealmBackedMemoryGrow(jit_enabled: bool) !void {
         .value => |value| try testing.expectEqual(@as(i32, 1), value.asInt32()),
         else => return error.TestUnexpectedResult,
     }
-    if (jit_enabled and comptime @import("../wasm/spasm.zig").supported)
+    if (jit_enabled and comptime @import("../wasm/spasm.zig").full_coverage_supported)
         try testing.expect(record.instance.spasm_runs >= 1);
     if (!jit_enabled) {
         try testing.expect(!record.instance.spasm_enabled);
@@ -1950,7 +1950,7 @@ fn testRealmBackedMemoryGrow(jit_enabled: bool) !void {
         else => return error.TestUnexpectedResult,
     }
     try testing.expectEqual(live_before_grow + wasm.PAGE_SIZE, realm.heap.bytes_live);
-    if (jit_enabled and comptime @import("../wasm/spasm.zig").supported)
+    if (jit_enabled and comptime @import("../wasm/spasm.zig").full_coverage_supported)
         try testing.expect(record.instance.spasm_runs > runs_before_grow);
     if (!jit_enabled) try testing.expectEqual(@as(u32, 0), record.instance.spasm_runs);
     try testing.expect(old_buffer.getArrayBuffer() == null);
@@ -2009,7 +2009,7 @@ fn testRealmBackedTableGrow(jit_enabled: bool) !void {
         .value => |value| try testing.expectEqual(@as(i32, 2), value.asInt32()),
         else => return error.TestUnexpectedResult,
     }
-    if (jit_enabled and comptime @import("../wasm/spasm.zig").supported)
+    if (jit_enabled and comptime @import("../wasm/spasm.zig").full_coverage_supported)
         try testing.expect(record.instance.spasm_runs >= 1);
     if (!jit_enabled) {
         try testing.expect(!record.instance.spasm_enabled);
@@ -2025,7 +2025,7 @@ fn testRealmBackedTableGrow(jit_enabled: bool) !void {
     }
     try testing.expectEqual(live_before_grow + 3 * @sizeOf(u128), realm.heap.bytes_live);
     try testing.expectEqual(@as(usize, 5), record.instance.tables[0].elems.len);
-    if (jit_enabled and comptime @import("../wasm/spasm.zig").supported)
+    if (jit_enabled and comptime @import("../wasm/spasm.zig").full_coverage_supported)
         try testing.expect(record.instance.spasm_runs > runs_before_grow);
     if (!jit_enabled) try testing.expectEqual(@as(u32, 0), record.instance.spasm_runs);
 }
@@ -2180,7 +2180,7 @@ test "WebAssembly JS API: Realm.requestInterrupt wakes Spasm after native entry"
     const testing = std.testing;
     const lantern = @import("../lantern/interpreter.zig");
     const spasm = @import("../wasm/spasm.zig");
-    if (comptime !spasm.supported) return error.SkipZigTest;
+    if (comptime !spasm.full_coverage_supported) return error.SkipZigTest;
 
     // import host.barrier : () -> (); export run : () -> i32. The imported
     // host function parks after Spasm's entry poll; the two-trip loop then

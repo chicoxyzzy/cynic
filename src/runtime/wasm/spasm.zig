@@ -10,8 +10,9 @@
 //! dispatch.
 //!
 //! Spasm shares the codegen substrate in `src/runtime/jit/` with
-//! Bistromath — the per-ISA encoders, the masm facade, the
-//! executable-memory allocator (§7). What it does NOT share is the
+//! Bistromath — the per-ISA encoders and executable-memory allocator (§7).
+//! AArch64 uses the shared masm facade; the qualified x86_64 subset keeps its
+//! SysV frame/operand policy in `spasm_x86_64.zig`. What Spasm does NOT share is the
 //! abstract state above the assembler: Bistromath mirrors the
 //! interpreter's `CallFrame`; Spasm's operand-stack machine is its
 //! whole compiler, and wasm frames live on the native stack with no GC
@@ -20,8 +21,8 @@
 //! Build-up is incremental, like Bistromath's: each increment grows the
 //! compilable function class and is gated by the wasm spec-testsuite
 //! differential (a force-tier-up run must produce the identical
-//! pass-set). This first increment compiles the trivial class — a body
-//! that pushes constants and returns them.
+//! pass-set). Unsupported functions refuse transactionally before code
+//! publication and remain in Sarcasm.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -29,50 +30,52 @@ const builtin = @import("builtin");
 const code_alloc = @import("../jit/code_alloc.zig");
 const masm_mod = @import("../jit/masm.zig");
 const a64 = @import("../jit/asm_aarch64.zig");
+const spasm_x86_64 = @import("spasm_x86_64.zig");
 const CompiledFunc = @import("code.zig").CompiledFunc;
 const FuncType = @import("types.zig").FuncType;
 const ValType = @import("types.zig").ValType;
 const Module = @import("module.zig").Module;
 
-/// Whether this target can host Spasm. Bistromath's gate, verbatim:
-/// the substrate emits aarch64 today (docs/jit.md §8/§14 keep x86_64
-/// a mechanical follow-up); elsewhere the tier is a comptime no-op and
-/// the interpreter runs everything.
-pub const supported = code_alloc.supported and builtin.cpu.arch == .aarch64;
+/// Whether this target can host at least the helper-free Spasm core. The
+/// AArch64 backend remains the full implementation while x86_64 grows through
+/// the same transactional-refusal boundary; every unsupported body falls back
+/// to Sarcasm.
+pub const supported = code_alloc.supported and switch (builtin.cpu.arch) {
+    .aarch64, .x86_64 => true,
+    else => false,
+};
+
+/// Tests that exercise the complete opcode surface use this narrower gate
+/// until the x86_64 backend reaches parity.
+pub const full_coverage_supported = code_alloc.supported and builtin.cpu.arch == .aarch64;
 
 /// The interpreter's value cell — a 16-byte slot holding any wasm
 /// scalar (low bits) or a `v128`.
 pub const Cell = u128;
 
-/// v1 boundary ABI. The interpreter already marshals a call's
+/// Native boundary ABI. The interpreter already marshals a call's
 /// arguments and results as `Cell` arrays (`interpreter.invoke`), so
-/// the first boundary reuses that representation verbatim: `locals`
-/// (x0) is the param+local cell array the caller seeded, `results`
-/// (x1) is where the compiled body writes its result cells. `mem_base`
-/// (x2) and `mem_len` (x3) are the active linear memory's byte pointer
+/// the boundary reuses that representation verbatim: `locals` is the
+/// param+local cell array the caller seeded, `results` is where the compiled
+/// body writes its result cells. `mem_base` and `mem_len` are the active linear memory's byte pointer
 /// and length — every memory op bounds-checks against `mem_len` and
-/// addresses off `mem_base`. They are stable for the body's duration:
-/// the only ops that resize memory (`memory.grow`) or could call into
-/// resizing code (`call`) are outside the emittable class, so a compiled
-/// body never observes a mid-execution change. The optimized
+/// addresses off `mem_base`; helper paths that can resize memory must refresh
+/// the cached pair. The optimized
 /// native-register boundary (the per-signature §7.1 thunks) is a later
 /// increment; correctness first.
 ///
-/// The `u32` return (w0) is the trap channel: `trap_ok` (0) means the
+/// The `u32` return (`w0`/`eax`) is the trap channel: `trap_ok` (0) means the
 /// body completed and `results` is valid; a non-zero `TrapCode` means
 /// the body trapped before writing results, and the caller maps it to
 /// the matching `TrapError` (so a Spasm trap is indistinguishable from
 /// an interpreter trap at the boundary). This is the mechanism every
 /// trapping op reuses — divide-by-zero and memory bounds today.
 ///
-/// `instance` (x5 on entry) is the opaque `*Instance` the compiled body
-/// passes to the call helper when it emits a `call` (§5.4.1). `stack_limit`
-/// (x6) is the current thread's native-stack cutoff; the prologue parks it
-/// in x20 so any helper-free same-instance link can compare projected SP
-/// without re-entering Zig. `execution_control` (x7) is null on the ordinary
-/// unmetered path; otherwise it points at the embedding's shared execution
-/// controller and the prologue parks it in x21. All three are append-only
-/// boundary arguments.
+/// `instance` is the opaque `*Instance` used by call helpers. `stack_limit` is
+/// the current thread's native-stack cutoff used before every linked call.
+/// `execution_control` is null on the ordinary unmetered path; otherwise it
+/// points at the embedding's shared controller. All three are append-only
+/// boundary arguments; each backend owns its register/stack mapping.
 pub const EntryFn = *const fn (
     locals: [*]Cell,
     results: [*]Cell,
@@ -88,7 +91,7 @@ pub const EntryFn = *const fn (
 /// callers embed only this heap address, never a lazily-installed code address:
 /// the gate stub loads `entry` on every call and tail-branches when it is hot.
 /// `entry` must stay first because the stub's load is intentionally a fixed
-/// zero-offset AArch64 instruction.
+/// zero-offset load on both backends.
 pub const CallGate = extern struct {
     entry: ?EntryFn,
     instance: *anyopaque,
@@ -103,8 +106,9 @@ comptime {
 }
 
 /// The generated gate accepts the EntryFn ABI. Generated callers additionally
-/// carry the stable gate record in x8, an internal extension beyond the C ABI.
-/// On the hot path it tail-branches to `CallGate.entry`, which receives x0..x7
+/// carry the stable gate record in an internal extension beyond the C ABI
+/// (`x8` on AArch64, a private ninth stack argument on SysV). On the hot path
+/// it tail-branches to `CallGate.entry` with the ordinary eight arguments
 /// unchanged and returns directly to the compiled caller.
 pub const CallGateStubFn = *const fn (
     locals: [*]Cell,
@@ -139,6 +143,16 @@ pub fn compileCallGateStub(
     slow: CallGateSlowHelperFn,
 ) ?CallGateStubFn {
     if (comptime !supported) return null;
+    if (comptime builtin.cpu.arch == .x86_64) {
+        const installed = (spasm_x86_64.compileCallGateStub(
+            gpa,
+            ca,
+            @intFromPtr(slow),
+            @intCast(@offsetOf(CallGate, "entry")),
+        ) catch return null) orelse return null;
+        return code_alloc.asFn(CallGateStubFn, installed);
+    }
+    if (comptime builtin.cpu.arch != .aarch64) return null;
 
     var m = masm_mod.Masm.init(gpa);
     defer m.deinit();
@@ -642,6 +656,12 @@ const Loc = union(enum) {
 /// this deep, so at most this many references are simultaneously live.
 pub const operand_reg_count = 7;
 
+comptime {
+    if (spasm_x86_64.operand_stack_capacity != operand_reg_count) {
+        @compileError("Spasm backends must reserve the same operand scratch capacity");
+    }
+}
+
 /// Cells a native `EntryFn` needs for its locals and depth-keyed reference / SIMD
 /// scratch slots, or null if the count overflows. `results` may alias this
 /// buffer: compiled bodies materialize results only after consuming locals.
@@ -804,6 +824,59 @@ pub fn compile(
     execution_poll_helper: ExecutionPollHelperFn,
 ) CompileError!?EntryFn {
     if (comptime !supported) return null;
+    if (comptime builtin.cpu.arch == .x86_64) {
+        const installed = try spasm_x86_64.compile(
+            gpa,
+            ca,
+            func,
+            ftype,
+            module,
+            funcs,
+            func_index,
+            .{
+                .execution_poll_helper = @intFromPtr(execution_poll_helper),
+                .call_helper = if (helpers.call) |helper| @intFromPtr(helper) else null,
+                .call_gate_stub = if (call_gate_stub) |stub| @intFromPtr(stub) else null,
+                .call_gates_base = if (call_gates.len == 0) null else @intFromPtr(call_gates.ptr),
+                .call_gates_len = call_gates.len,
+                .call_gate_stride = @sizeOf(CallGate),
+                .wake_flag_offset = @intCast(@offsetOf(NativeExecutionControl, "wake_flag")),
+                .trap_divide_by_zero = trap_divide_by_zero,
+                .trap_int_overflow = trap_int_overflow,
+                .trap_call_stack_exhausted = trap_call_stack_exhausted,
+            },
+        );
+        return if (installed) |bytes| code_alloc.asFn(EntryFn, bytes) else null;
+    }
+    return compileAarch64(
+        gpa,
+        ca,
+        func,
+        ftype,
+        module,
+        funcs,
+        func_index,
+        call_gates,
+        call_gate_stub,
+        helpers,
+        execution_poll_helper,
+    );
+}
+
+fn compileAarch64(
+    gpa: std.mem.Allocator,
+    ca: *code_alloc.CodeAllocator,
+    func: *const CompiledFunc,
+    ftype: *const FuncType,
+    module: *const Module,
+    funcs: []const CompiledFunc,
+    func_index: u32,
+    call_gates: []const CallGate,
+    call_gate_stub: ?CallGateStubFn,
+    helpers: Helpers,
+    execution_poll_helper: ExecutionPollHelperFn,
+) CompileError!?EntryFn {
+    if (comptime builtin.cpu.arch != .aarch64 or !code_alloc.supported) return null;
     // The operand-stack bank is fixed (regForDepth); a deeper body
     // tiers down.
     if (func.max_stack > operand_reg_count) return null;
@@ -4564,6 +4637,319 @@ fn readV128Bytes(body: []const u8, i: *usize) ?struct { lo: u64, hi: u64 } {
 
 const testing = std.testing;
 
+test "spasm: x86_64 executable hosts are supported" {
+    if (comptime builtin.cpu.arch != .x86_64 or !code_alloc.supported) {
+        return error.SkipZigTest;
+    }
+    try testing.expect(supported);
+}
+
+test "spasm: x86_64 native entry returns an i32 constant" {
+    if (comptime builtin.cpu.arch != .x86_64 or !supported) {
+        return error.SkipZigTest;
+    }
+    var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
+    defer ca.deinit();
+
+    const body = [_]u8{ op_i32_const, 42, op_end };
+    const func: CompiledFunc = .{
+        .type_index = 0,
+        .local_types = &.{},
+        .body = &body,
+        .side_table = &.{},
+        .max_stack = 1,
+    };
+    const ftype: FuncType = .{ .params = &.{}, .results = &.{.i32} };
+    const entry = (try compileT(&ca, &func, &ftype)) orelse return error.SpasmRefused;
+
+    var frame: [operand_reg_count]Cell = @splat(0);
+    var results: [1]Cell = .{0};
+    const status = entry(&frame, &results, @ptrCast(&frame), 0, @ptrCast(&frame), @ptrCast(&frame), 0, null);
+    try testing.expectEqual(trap_ok, status);
+    try testing.expectEqual(@as(u32, 42), @as(u32, @truncate(results[0])));
+}
+
+test "spasm: x86_64 native loop computes sum of squares" {
+    if (comptime builtin.cpu.arch != .x86_64 or !supported) {
+        return error.SkipZigTest;
+    }
+    var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
+    defer ca.deinit();
+
+    // `(param n) (local i acc); sum i*i for i in [0,n)` -- the same scalar
+    // control-flow kernel used by tools/wasm_bench.zig, minus its locals header.
+    const body = [_]u8{
+        op_block,     0x40,
+        op_loop,      0x40,
+        op_local_get, 0x01,
+        op_local_get, 0x00,
+        op_i32_ge_s,  op_br_if,
+        0x01,         op_local_get,
+        0x02,         op_local_get,
+        0x01,         op_local_get,
+        0x01,         op_i32_mul,
+        op_i32_add,   op_local_set,
+        0x02,         op_local_get,
+        0x01,         op_i32_const,
+        0x01,         op_i32_add,
+        op_local_set, 0x01,
+        op_br,        0x00,
+        op_end,       op_end,
+        op_local_get, 0x02,
+        op_end,
+    };
+    const func: CompiledFunc = .{
+        .type_index = 0,
+        .local_types = &.{ .i32, .i32, .i32 },
+        .body = &body,
+        .side_table = &.{},
+        .max_stack = 3,
+    };
+    const ftype: FuncType = .{ .params = &.{.i32}, .results = &.{.i32} };
+    const entry = (try compileT(&ca, &func, &ftype)) orelse return error.SpasmRefused;
+
+    var frame: [3 + operand_reg_count]Cell = @splat(0);
+    frame[0] = 10;
+    var results: [1]Cell = .{0};
+    const status = entry(&frame, &results, @ptrCast(&frame), 0, @ptrCast(&frame), @ptrCast(&frame), 0, null);
+    try testing.expectEqual(trap_ok, status);
+    try testing.expectEqual(@as(u32, 285), @as(u32, @truncate(results[0])));
+}
+
+test "spasm: x86_64 signed division preserves wasm traps" {
+    if (comptime builtin.cpu.arch != .x86_64 or !supported) {
+        return error.SkipZigTest;
+    }
+    var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
+    defer ca.deinit();
+
+    const body = [_]u8{ op_local_get, 0x00, op_local_get, 0x01, op_i32_div_s, op_end };
+    const func: CompiledFunc = .{
+        .type_index = 0,
+        .local_types = &.{ .i32, .i32 },
+        .body = &body,
+        .side_table = &.{},
+        .max_stack = 2,
+    };
+    const ftype: FuncType = .{ .params = &.{ .i32, .i32 }, .results = &.{.i32} };
+    const entry = (try compileT(&ca, &func, &ftype)) orelse return error.SpasmRefused;
+
+    var frame: [2 + operand_reg_count]Cell = @splat(0);
+    var results: [1]Cell = .{0};
+    frame[0] = 84;
+    frame[1] = 2;
+    try testing.expectEqual(trap_ok, entry(&frame, &results, @ptrCast(&frame), 0, @ptrCast(&frame), @ptrCast(&frame), 0, null));
+    try testing.expectEqual(@as(u32, 42), @as(u32, @truncate(results[0])));
+
+    frame[1] = 0;
+    results[0] = 0xfeed;
+    try testing.expectEqual(trap_divide_by_zero, entry(&frame, &results, @ptrCast(&frame), 0, @ptrCast(&frame), @ptrCast(&frame), 0, null));
+    try testing.expectEqual(@as(Cell, 0xfeed), results[0]);
+
+    frame[0] = 0x8000_0000;
+    frame[1] = @as(u32, @bitCast(@as(i32, -1)));
+    try testing.expectEqual(trap_int_overflow, entry(&frame, &results, @ptrCast(&frame), 0, @ptrCast(&frame), @ptrCast(&frame), 0, null));
+    try testing.expectEqual(@as(Cell, 0xfeed), results[0]);
+}
+
+const X86CallTestState = struct {
+    called: bool = false,
+    func_index: u32 = 0,
+    argument: u32 = 0,
+    capacity: u32 = 0,
+    control_was_null: bool = false,
+
+    fn call(
+        instance: *anyopaque,
+        func_index: u32,
+        buf: [*]Cell,
+        buf_cells: u32,
+        execution_control: ?*anyopaque,
+    ) callconv(.c) u32 {
+        const self: *X86CallTestState = @ptrCast(@alignCast(instance));
+        self.called = true;
+        self.func_index = func_index;
+        self.argument = @truncate(buf[0]);
+        self.capacity = buf_cells;
+        self.control_was_null = execution_control == null;
+        buf[0] = self.argument + 1;
+        return trap_ok;
+    }
+};
+
+test "spasm: x86_64 checked call marshals cells through the helper" {
+    if (comptime builtin.cpu.arch != .x86_64 or !supported) {
+        return error.SkipZigTest;
+    }
+    var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
+    defer ca.deinit();
+
+    const caller_body = [_]u8{ op_local_get, 0x00, op_call, 0x01, op_end };
+    const callee_body = [_]u8{ op_local_get, 0x00, op_end };
+    const ftype: FuncType = .{ .params = &.{.i32}, .results = &.{.i32} };
+    const funcs = [_]CompiledFunc{
+        .{ .type_index = 0, .local_types = &.{.i32}, .body = &caller_body, .side_table = &.{}, .max_stack = 1 },
+        .{ .type_index = 0, .local_types = &.{.i32}, .body = &callee_body, .side_table = &.{}, .max_stack = 1 },
+    };
+    const types = [_]FuncType{ftype};
+    const module: Module = .{ .types = &types, .funcs = &.{ 0, 0 } };
+    const entry = (try compile(
+        testing.allocator,
+        &ca,
+        &funcs[0],
+        &ftype,
+        &module,
+        &funcs,
+        0,
+        &.{},
+        null,
+        .{ .call = X86CallTestState.call },
+        testExecutionPoll,
+    )) orelse return error.SpasmRefused;
+
+    var state: X86CallTestState = .{};
+    var frame: [1 + operand_reg_count]Cell = @splat(0);
+    frame[0] = 41;
+    var results: [1]Cell = .{0};
+    const status = entry(&frame, &results, @ptrCast(&frame), 0, @ptrCast(&frame), @ptrCast(&state), 0, null);
+    try testing.expectEqual(trap_ok, status);
+    try testing.expect(state.called);
+    try testing.expectEqual(@as(u32, 1), state.func_index);
+    try testing.expectEqual(@as(u32, 41), state.argument);
+    try testing.expect(state.capacity >= 1);
+    try testing.expect(state.control_was_null);
+    try testing.expectEqual(@as(u32, 42), @as(u32, @truncate(results[0])));
+}
+
+test "spasm: x86_64 self recursion links directly with a stack guard" {
+    if (comptime builtin.cpu.arch != .x86_64 or !supported) {
+        return error.SkipZigTest;
+    }
+    var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
+    defer ca.deinit();
+
+    // factorial(n): n == 0 ? 1 : n * factorial(n - 1)
+    const body = [_]u8{
+        op_local_get, 0x00,         op_i32_eqz,
+        op_if,        0x7f,         op_i32_const,
+        0x01,         op_else,      op_local_get,
+        0x00,         op_local_get, 0x00,
+        op_i32_const, 0x01,         op_i32_sub,
+        op_call,      0x00,         op_i32_mul,
+        op_end,       op_end,
+    };
+    const func: CompiledFunc = .{
+        .type_index = 0,
+        .local_types = &.{.i32},
+        .body = &body,
+        .side_table = &.{},
+        .max_stack = 3,
+    };
+    const ftype: FuncType = .{ .params = &.{.i32}, .results = &.{.i32} };
+    const types = [_]FuncType{ftype};
+    const funcs = [_]CompiledFunc{func};
+    const module: Module = .{ .types = &types, .funcs = &.{0} };
+    const entry = (try compile(
+        testing.allocator,
+        &ca,
+        &func,
+        &ftype,
+        &module,
+        &funcs,
+        0,
+        &.{},
+        null,
+        .{},
+        testExecutionPoll,
+    )) orelse return error.SpasmRefused;
+
+    var frame: [1 + operand_reg_count]Cell = @splat(0);
+    frame[0] = 5;
+    var results: [1]Cell = .{0};
+    const status = entry(&frame, &results, @ptrCast(&frame), 0, @ptrCast(&frame), @ptrCast(&frame), 0, null);
+    try testing.expectEqual(trap_ok, status);
+    try testing.expectEqual(@as(u32, 120), @as(u32, @truncate(results[0])));
+
+    results[0] = 0xfeed;
+    const exhausted = entry(
+        &frame,
+        &results,
+        @ptrCast(&frame),
+        0,
+        @ptrCast(&frame),
+        @ptrCast(&frame),
+        std.math.maxInt(usize),
+        null,
+    );
+    try testing.expectEqual(trap_call_stack_exhausted, exhausted);
+    try testing.expectEqual(@as(Cell, 0xfeed), results[0]);
+}
+
+fn x86CallGateSlowTest(
+    _: [*]Cell,
+    _: *const CallGate,
+    _: ?*anyopaque,
+) callconv(.c) u32 {
+    return trap_pending;
+}
+
+test "spasm: x86_64 cross-function call uses the stable gate" {
+    if (comptime builtin.cpu.arch != .x86_64 or !supported) {
+        return error.SkipZigTest;
+    }
+    var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
+    defer ca.deinit();
+
+    const caller_body = [_]u8{ op_local_get, 0x00, op_call, 0x01, op_end };
+    const callee_body = [_]u8{ op_local_get, 0x00, op_i32_const, 0x01, op_i32_add, op_end };
+    const ftype: FuncType = .{ .params = &.{.i32}, .results = &.{.i32} };
+    const funcs = [_]CompiledFunc{
+        .{ .type_index = 0, .local_types = &.{.i32}, .body = &caller_body, .side_table = &.{}, .max_stack = 1 },
+        .{ .type_index = 0, .local_types = &.{.i32}, .body = &callee_body, .side_table = &.{}, .max_stack = 2 },
+    };
+    const types = [_]FuncType{ftype};
+    const module: Module = .{ .types = &types, .funcs = &.{ 0, 0 } };
+    var gates = [_]CallGate{
+        .{ .entry = null, .instance = @ptrCast(&ca), .func_index = 0, .frame_cells = 8 },
+        .{ .entry = null, .instance = @ptrCast(&ca), .func_index = 1, .frame_cells = 8 },
+    };
+    const gate_stub = compileCallGateStub(testing.allocator, &ca, x86CallGateSlowTest) orelse
+        return error.SpasmRefused;
+    gates[1].entry = (try compile(
+        testing.allocator,
+        &ca,
+        &funcs[1],
+        &ftype,
+        &module,
+        &funcs,
+        1,
+        &gates,
+        gate_stub,
+        .{},
+        testExecutionPoll,
+    )) orelse return error.SpasmRefused;
+    const caller = (try compile(
+        testing.allocator,
+        &ca,
+        &funcs[0],
+        &ftype,
+        &module,
+        &funcs,
+        0,
+        &gates,
+        gate_stub,
+        .{},
+        testExecutionPoll,
+    )) orelse return error.SpasmRefused;
+
+    var frame: [1 + operand_reg_count]Cell = @splat(0);
+    frame[0] = 41;
+    var results: [1]Cell = .{0};
+    const status = caller(&frame, &results, @ptrCast(&frame), 0, @ptrCast(&frame), @ptrCast(&ca), 0, null);
+    try testing.expectEqual(trap_ok, status);
+    try testing.expectEqual(@as(u32, 42), @as(u32, @truncate(results[0])));
+}
+
 fn testExecutionPoll(_: *anyopaque) callconv(.c) u32 {
     return trap_ok;
 }
@@ -4610,7 +4996,7 @@ fn compileWithPollT(
 }
 
 test "spasm: a const-return function compiles and returns its constant" {
-    if (comptime !supported) return error.SkipZigTest;
+    if (comptime !full_coverage_supported) return error.SkipZigTest;
     var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
     defer ca.deinit();
 
@@ -4637,7 +5023,7 @@ test "spasm: a const-return function compiles and returns its constant" {
 }
 
 test "spasm: a negative constant sign-extends through the LEB path" {
-    if (comptime !supported) return error.SkipZigTest;
+    if (comptime !full_coverage_supported) return error.SkipZigTest;
     var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
     defer ca.deinit();
 
@@ -4662,7 +5048,7 @@ test "spasm: a negative constant sign-extends through the LEB path" {
 }
 
 test "spasm: i32 add of two params compiles and computes" {
-    if (comptime !supported) return error.SkipZigTest;
+    if (comptime !full_coverage_supported) return error.SkipZigTest;
     var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
     defer ca.deinit();
     // (func (param i32 i32) (result i32) local.get 0; local.get 1; i32.add)
@@ -4677,7 +5063,7 @@ test "spasm: i32 add of two params compiles and computes" {
 }
 
 test "spasm: i32 sub and mul of params compute" {
-    if (comptime !supported) return error.SkipZigTest;
+    if (comptime !full_coverage_supported) return error.SkipZigTest;
     var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
     defer ca.deinit();
     const ftype: FuncType = .{ .params = &.{ .i32, .i32 }, .results = &.{.i32} };
@@ -4704,7 +5090,7 @@ test "spasm: i32 sub and mul of params compute" {
 }
 
 test "spasm: i32 arithmetic folds two constants at compile time" {
-    if (comptime !supported) return error.SkipZigTest;
+    if (comptime !full_coverage_supported) return error.SkipZigTest;
     var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
     defer ca.deinit();
     // (func (result i32) i32.const 40; i32.const 2; i32.add) -> 42, no runtime add
@@ -4719,7 +5105,7 @@ test "spasm: i32 arithmetic folds two constants at compile time" {
 }
 
 test "spasm: i32 bitwise and/or/xor compute and fold" {
-    if (comptime !supported) return error.SkipZigTest;
+    if (comptime !full_coverage_supported) return error.SkipZigTest;
     var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
     defer ca.deinit();
     const ftype: FuncType = .{ .params = &.{ .i32, .i32 }, .results = &.{.i32} };
@@ -4747,7 +5133,7 @@ test "spasm: i32 bitwise and/or/xor compute and fold" {
 }
 
 test "spasm: local.set writes a local that local.get reads back" {
-    if (comptime !supported) return error.SkipZigTest;
+    if (comptime !full_coverage_supported) return error.SkipZigTest;
     var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
     defer ca.deinit();
     // (func (param i32) (result i32) i32.const 5; local.set 0; local.get 0)
@@ -4762,7 +5148,7 @@ test "spasm: local.set writes a local that local.get reads back" {
 }
 
 test "spasm: local.tee stores and leaves the value on the stack" {
-    if (comptime !supported) return error.SkipZigTest;
+    if (comptime !full_coverage_supported) return error.SkipZigTest;
     var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
     defer ca.deinit();
     // (func (param i32) (result i32) i32.const 7; local.tee 0; local.get 0; i32.add) -> 14
@@ -4777,7 +5163,7 @@ test "spasm: local.tee stores and leaves the value on the stack" {
 }
 
 test "spasm: i32 comparisons distinguish signed from unsigned" {
-    if (comptime !supported) return error.SkipZigTest;
+    if (comptime !full_coverage_supported) return error.SkipZigTest;
     var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
     defer ca.deinit();
     const ftype: FuncType = .{ .params = &.{ .i32, .i32 }, .results = &.{.i32} };
@@ -4803,7 +5189,7 @@ test "spasm: i32 comparisons distinguish signed from unsigned" {
 }
 
 test "spasm: i32.eqz computes and folds" {
-    if (comptime !supported) return error.SkipZigTest;
+    if (comptime !full_coverage_supported) return error.SkipZigTest;
     var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
     defer ca.deinit();
     const ftype: FuncType = .{ .params = &.{.i32}, .results = &.{.i32} };
@@ -4828,7 +5214,7 @@ test "spasm: i32.eqz computes and folds" {
 }
 
 test "spasm: i32 shifts (shl, shr_s, shr_u) with count mod 32 and folding" {
-    if (comptime !supported) return error.SkipZigTest;
+    if (comptime !full_coverage_supported) return error.SkipZigTest;
     var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
     defer ca.deinit();
     const ftype: FuncType = .{ .params = &.{ .i32, .i32 }, .results = &.{.i32} };
@@ -4860,7 +5246,7 @@ test "spasm: i32 shifts (shl, shr_s, shr_u) with count mod 32 and folding" {
 }
 
 test "spasm: select picks an operand by the condition (branchless)" {
-    if (comptime !supported) return error.SkipZigTest;
+    if (comptime !full_coverage_supported) return error.SkipZigTest;
     var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
     defer ca.deinit();
     // (func (param i32 i32 i32) (result i32)
@@ -4880,7 +5266,7 @@ test "spasm: select picks an operand by the condition (branchless)" {
 }
 
 test "spasm: drop pops a value; nop is a no-op" {
-    if (comptime !supported) return error.SkipZigTest;
+    if (comptime !full_coverage_supported) return error.SkipZigTest;
     var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
     defer ca.deinit();
     // (func (param i32 i32) (result i32) nop; local.get 0; local.get 1; drop; nop)
@@ -4897,7 +5283,7 @@ test "spasm: drop pops a value; nop is a no-op" {
 }
 
 test "spasm: block with br_if picks a result by condition (forward branch)" {
-    if (comptime !supported) return error.SkipZigTest;
+    if (comptime !full_coverage_supported) return error.SkipZigTest;
     var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
     defer ca.deinit();
     // (func (param i32) (result i32)
@@ -4932,7 +5318,7 @@ test "spasm: block with br_if picks a result by condition (forward branch)" {
 }
 
 test "spasm: empty block with br_if as an early break (arity 0)" {
-    if (comptime !supported) return error.SkipZigTest;
+    if (comptime !full_coverage_supported) return error.SkipZigTest;
     var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
     defer ca.deinit();
     // (func (param i32) (result i32) (local i32)
@@ -4965,7 +5351,7 @@ test "spasm: empty block with br_if as an early break (arity 0)" {
 }
 
 test "spasm: nested block, br_if 1 exits two levels carrying a result" {
-    if (comptime !supported) return error.SkipZigTest;
+    if (comptime !full_coverage_supported) return error.SkipZigTest;
     var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
     defer ca.deinit();
     // (func (param i32) (result i32)
@@ -5001,7 +5387,7 @@ test "spasm: nested block, br_if 1 exits two levels carrying a result" {
 }
 
 test "spasm: loop with backward br_if accumulates (do-while)" {
-    if (comptime !supported) return error.SkipZigTest;
+    if (comptime !full_coverage_supported) return error.SkipZigTest;
     var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
     defer ca.deinit();
     // (func (param i32) (result i32) (local i32)
@@ -5034,7 +5420,7 @@ test "spasm: loop with backward br_if accumulates (do-while)" {
 }
 
 test "spasm: execution polls preserve live operands and propagate termination" {
-    if (comptime !supported) return error.SkipZigTest;
+    if (comptime !full_coverage_supported) return error.SkipZigTest;
     var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
     defer ca.deinit();
 
@@ -5088,7 +5474,7 @@ test "spasm: execution polls preserve live operands and propagate termination" {
 }
 
 test "spasm: loop (result i32) iterates then yields its result" {
-    if (comptime !supported) return error.SkipZigTest;
+    if (comptime !full_coverage_supported) return error.SkipZigTest;
     var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
     defer ca.deinit();
     // (func (param i32) (result i32) (local i32)
@@ -5121,7 +5507,7 @@ test "spasm: loop (result i32) iterates then yields its result" {
 }
 
 test "spasm: while loop — br as continue, br_if as break" {
-    if (comptime !supported) return error.SkipZigTest;
+    if (comptime !full_coverage_supported) return error.SkipZigTest;
     var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
     defer ca.deinit();
     // (func (param i32) (result i32) (local i32)        ;; n = p0, sum = l1
@@ -5160,7 +5546,7 @@ test "spasm: while loop — br as continue, br_if as break" {
 }
 
 test "spasm: br exits a block forward; dead code (nested block) is skipped" {
-    if (comptime !supported) return error.SkipZigTest;
+    if (comptime !full_coverage_supported) return error.SkipZigTest;
     var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
     defer ca.deinit();
     // (func (result i32)
@@ -5190,7 +5576,7 @@ test "spasm: br exits a block forward; dead code (nested block) is skipped" {
 }
 
 test "spasm: if/else picks a result arm by the condition" {
-    if (comptime !supported) return error.SkipZigTest;
+    if (comptime !full_coverage_supported) return error.SkipZigTest;
     var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
     defer ca.deinit();
     // (func (param i32) (result i32)
@@ -5222,7 +5608,7 @@ test "spasm: if/else picks a result arm by the condition" {
 }
 
 test "spasm: if without else conditionally overwrites a local" {
-    if (comptime !supported) return error.SkipZigTest;
+    if (comptime !full_coverage_supported) return error.SkipZigTest;
     var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
     defer ca.deinit();
     // (func (param i32) (result i32) (local i32)
@@ -5253,7 +5639,7 @@ test "spasm: if without else conditionally overwrites a local" {
 }
 
 test "spasm: br_table dispatches by index to distinct block ends" {
-    if (comptime !supported) return error.SkipZigTest;
+    if (comptime !full_coverage_supported) return error.SkipZigTest;
     var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
     defer ca.deinit();
     // (func (param i32) (result i32) (local i32)         ;; i=p0, r=l1
@@ -5292,7 +5678,7 @@ test "spasm: br_table dispatches by index to distinct block ends" {
 }
 
 test "spasm: an unsupported opcode degrades to null (stay interpreted)" {
-    if (comptime !supported) return error.SkipZigTest;
+    if (comptime !full_coverage_supported) return error.SkipZigTest;
     var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
     defer ca.deinit();
 

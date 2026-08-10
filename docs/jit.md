@@ -44,8 +44,12 @@ worst at function entry and `0.338x` with `0.368x` worst for OSR. Current
 qualification and module ownership are recorded in
 [ohaimark.md](ohaimark.md) "x86_64 architecture-parity closure."
 Generalized JS-reentrant helpers, native post-call continuations, remaining
-opcode families, and additional codegen targets remain future work. Spasm's
-delivery state is tracked below. This document doubles as the design record
+opcode families, and additional codegen targets remain future work. Spasm now
+also has a qualified x86_64 SysV backend for its i32 scalar/control core,
+catchable integer/stack traps, Realm safe points, guarded self-links, and
+stable cross-function gates; unsupported functions retain transactional
+fallback to Sarcasm. Spasm's delivery state is tracked below. This document
+doubles as the design record
 that pinned the architecture before the first emitter was written and as the
 delivery ledger (the "Delivery order" section tracks what each increment
 shipped). It is the
@@ -699,16 +703,16 @@ same line.
 
 Spasm participates in the shared safe-point convention without giving up its
 unmetered fast path. Its append-only entry ABI carries an optional execution
-controller in `x7`; the prologue parks it in callee-saved `x21`, and direct
-self-links, W^X-safe call gates (including their cold helper), generic imported
-calls, and indirect dispatch propagate it to callees. Function entry and each
-taken structured-loop backedge first test `x21`. Null skips with one predictable
-branch. A non-null controller acquire-loads its wake byte and still skips all
-spills and host calls while that byte is clear; once set, Spasm spills the live
-operand bank, calls the outlined Realm poll, restores on success, or returns the
-poll's status through its existing trap epilogue. Sarcasm retains the same
-entry/backedge polls plus proper-tail-call re-entry for bodies Spasm cannot
-compile.
+controller, parked in a callee-saved register (`x21` on AArch64, `rbx` on
+x86_64), and direct self-links, W^X-safe call gates (including their cold
+helper), generic imported calls, and indirect dispatch propagate it to
+callees. Function entry and each taken structured-loop backedge first test that
+register. Null skips with one predictable branch. A non-null controller
+acquire-loads its wake byte and still skips all spills and host calls while that
+byte is clear; once set, Spasm calls the outlined Realm poll, restores any live
+state on success, or returns the poll's status through its existing trap
+epilogue. Sarcasm retains the same entry/backedge polls plus proper-tail-call
+re-entry for bodies Spasm cannot compile.
 
 The placement follows the established Wasm baseline practice:
 [SpiderMonkey's baseline compiler](https://searchfox.org/firefox-main/source/js/src/wasm/WasmBaselineCompile.cpp)
@@ -727,12 +731,14 @@ src/runtime/jit/            shared substrate (new)
                             per-code free; one region per Engine
   asm_aarch64.zig           encoder
   asm_x86_64.zig            encoder
-  masm.zig                  AArch64 facade used by Ohaimark/Spasm
+  masm.zig                  AArch64 facade used by mature Spasm lowering
 src/runtime/bistromath/     T1 JS baseline (per AGENTS.md repo map)
   bistromath.zig            target-neutral one-pass compiler
   masm.zig                  AArch64/x86_64 register + ABI adapter
 src/runtime/ohaimark/       T2 (M6; ADR first)
-src/runtime/wasm/spasm.zig  Spasm — the wasm T1 baseline (§6)
+src/runtime/wasm/spasm.zig  Spasm public ABI + mature AArch64 backend (§6)
+src/runtime/wasm/spasm_x86_64.zig
+                            qualified SysV i32/control/call backend
 ```
 
 ### 7.1 The JS↔wasm call boundary
@@ -760,9 +766,9 @@ the boundary gets the same treatment as everything else:
   compiled JS, compiled wasm, and every boundary thunk live in the
   one §8 reservation, inside `BL` (±128 MiB) range — a warm crossing
   never takes an indirect hop through engine plumbing. x86_64
-  Bistromath already uses the corresponding `rel32` (±2 GiB) scheme;
-  Spasm and the boundary thunks remain future x86_64 work and will
-  share that reservation when they gain an x86_64 backend.
+  Bistromath and Spasm use the corresponding `rel32` (±2 GiB) scheme;
+  the per-signature boundary thunks remain future x86_64 work and will
+  share that reservation.
 - **Per-signature thunks, compiled once, cached by canonical
   function type** (the same type identity `call_indirect` checks).
   The JS→wasm *entry thunk* unboxes arguments straight from the
@@ -1346,6 +1352,11 @@ useful:
    and follows the direct wasm-call / stable-frame shape used by
    [V8 Liftoff](https://chromium.googlesource.com/v8/v8/+/352e408b0edd6e574d251281e395fcde92ec6898/src/wasm/baseline/liftoff-assembler.h)
    and [Wasmtime Winch](https://github.com/bytecodealliance/rfcs/blob/main/accepted/wasmtime-baseline-compilation.md).
+   The x86_64 subset applies the same contract with a SysV frame: an eligible
+   self-call uses local `rel32`, a cross-function caller passes the stable gate
+   as a private ninth stack argument to a shared tail-jump stub, and its stack
+   guard includes the staging frame, return address, and target prologue.
+   Non-gated calls retain the checked helper and per-function Sarcasm fallback.
    Imports, `call_indirect`, cross-instance calls, overlarge frames, and bodies
    Spasm cannot compile keep the generic helper / `invoke` fallback. Operands
    live below the args are spilled across either helper call and reloaded after

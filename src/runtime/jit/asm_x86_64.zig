@@ -248,6 +248,37 @@ pub const Masm = struct {
         try self.emitRegImm32(7, left, immediate);
     }
 
+    /// `cmp left32, immediate32`.
+    pub fn cmpReg32Imm32(
+        self: *Masm,
+        left: Reg,
+        immediate: u32,
+    ) error{OutOfMemory}!void {
+        try self.emitByte(rex(false, false, false, isExtended(left)));
+        try self.emitByte(0x81);
+        try self.emitByte(0xF8 | lowBits(left));
+        try self.emitU32(immediate);
+    }
+
+    /// `cdq` -- sign-extend eax into edx:eax before a signed divide.
+    pub fn signExtendAccumulator32(self: *Masm) error{OutOfMemory}!void {
+        try self.emitByte(0x99);
+    }
+
+    /// `div source32` -- divide edx:eax by the unsigned source.
+    pub fn divReg32(self: *Masm, source: Reg) error{OutOfMemory}!void {
+        try self.emitByte(rex(false, false, false, isExtended(source)));
+        try self.emitByte(0xF7);
+        try self.emitByte(0xF0 | lowBits(source));
+    }
+
+    /// `idiv source32` -- divide edx:eax by the signed source.
+    pub fn idivReg32(self: *Masm, source: Reg) error{OutOfMemory}!void {
+        try self.emitByte(rex(false, false, false, isExtended(source)));
+        try self.emitByte(0xF7);
+        try self.emitByte(0xF8 | lowBits(source));
+    }
+
     /// `shl destination, amount`.
     pub fn shlImm8(self: *Masm, destination: Reg, amount: u8) error{OutOfMemory}!void {
         try self.emitByte(rex(true, false, false, isExtended(destination)));
@@ -471,6 +502,19 @@ pub const Masm = struct {
         try self.emitByte(rex(false, false, false, isExtended(target)));
         try self.emitByte(0xFF);
         try self.emitByte(0xD0 | lowBits(target));
+    }
+
+    /// `call rel32` to a local label.
+    pub fn call(self: *Masm, label: *Label) !void {
+        try self.emitByte(0xE8);
+        try self.emitBranchDisplacement(label);
+    }
+
+    /// `jmp target`.
+    pub fn jumpReg(self: *Masm, target: Reg) error{OutOfMemory}!void {
+        try self.emitByte(rex(false, false, false, isExtended(target)));
+        try self.emitByte(0xFF);
+        try self.emitByte(0xE0 | lowBits(target));
     }
 
     pub fn ret(self: *Masm) error{OutOfMemory}!void {

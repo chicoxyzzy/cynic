@@ -16,6 +16,25 @@ run against the previous section with the *same host*.
 
 ## History
 
+### 2026-08-10, x86_64 Spasm qualification, current worktree, target `x86_64-macos` under Rosetta on `Darwin 25.6.0 arm64`
+
+Three ReleaseFast ABBA samples after adding the SysV backend. The qualified
+surface covers the i32 scalar/control kernel, explicit integer/native-stack
+traps, entry/backedge polls, guarded local self-recursion, and stable
+cross-function call gates. Every checksum matched, every row stayed native in
+bare and wake modes, and timed diagnostics reported `helper 0/0` throughout.
+
+These are same-binary interpreter/Spasm ratios and include Rosetta in both
+lanes; they qualify the backend but are not absolute native-Linux timings. The
+loop and both recursive workloads clear the existing 5x Spasm target in every
+sample. Wake/bare remains noise-sized and has no one-direction regression.
+
+| bench | interpreter ms/rep | Spasm bare ms/rep | Spasm wake ms/rep | paired speedup | wake / bare |
+|---|---:|---:|---:|---:|---:|
+| loop `sum(i*i)`, n=2,000,000 | 107.401-155.358 | 11.675-15.852 | 12.110-15.113 | 9.20-11.81x | 0.926-1.077x |
+| `fib(32)` self-recursive | 376.010-511.721 | 52.251-83.956 | 54.418-76.863 | 6.10-7.42x | 0.916-1.045x |
+| `fib(32)` cross-recursive | 360.922-655.387 | 64.183-73.269 | 61.785-76.031 | 5.62-8.94x | 0.963-1.042x |
+
 ### 2026-08-08, asynchronous Realm wake-byte paired A/B, current worktree, host `Darwin 25.6.0 arm64`
 
 Three ReleaseFast ABBA samples from the final implementation. Each sample runs
@@ -29,9 +48,9 @@ The tight loop is flat within noise (`0.963-1.033x`). Entry-heavy recursive
 code exposes the expected extra function-entry probe: `1.047-1.079x` for
 self-recursion and a noisier `1.036-1.153x` for cross-recursion. This is the
 measured correctness/performance tradeoff for interrupts raised after native
-entry; the clear path performs no spills and no host call. The configured
-remote benchmark host is `Linux x86_64`, while Spasm is AArch64-only, so this
-paired A/B cannot be reproduced on that box.
+entry; the clear path performs no spills and no host call. At this checkpoint
+the configured remote benchmark host was `Linux x86_64` while Spasm was still
+AArch64-only, so this paired A/B could not be reproduced on that box.
 
 | bench | interpreter ms/rep | Spasm bare ms/rep | Spasm wake ms/rep | wake / bare |
 |---|---:|---:|---:|---:|
