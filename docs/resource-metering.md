@@ -254,9 +254,9 @@ benchmark gained paired bare/wake modes in ABBA order. Three final samples kept
 every workload native with matching checksums and `helper 0/0`. The tight loop
 was flat within noise (`0.963-1.033x` wake/bare); self-recursive code measured
 `1.047-1.079x`, and cross-recursive code `1.036-1.153x`, exposing the expected
-extra probe at function-heavy entry boundaries. The configured remote host is
-x86_64 and cannot run AArch64-only Spasm, so the paired raw samples and host
-caveat are recorded in
+extra probe at function-heavy entry boundaries. Spasm now has a qualified
+x86_64 backend; its independent bare/wake qualification samples and the older
+AArch64 paired runs are recorded in
 [`wasm-bench-results.md`](../wasm-bench-results.md).
 
 ## 7. JIT interaction

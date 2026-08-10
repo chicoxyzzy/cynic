@@ -529,6 +529,16 @@ the measured design space:
   [jit.md](jit.md) §6, with the JS↔wasm
   call-boundary fast path (per-signature thunks, IC-integrated dispatch)
   in jit.md §7.1 (still deferred).
+
+  The complete opcode surface above is the mature AArch64 backend. The
+  qualified x86_64 SysV backend currently emits the i32 scalar/control core,
+  catchable integer and native-stack traps, Realm entry/backedge polls,
+  guarded local self-links, and stable W^X-safe cross-function call gates.
+  Every other x86 body refuses before code publication and runs in Sarcasm.
+  This is a coverage difference, not a semantic one: forced-Spasm sweeps on
+  both architectures pass all 58,779 scored spec commands, and focused x86
+  tests require actual native entry so the differential gate cannot be
+  satisfied by fallback alone.
 - **Narrowing the operand cell was measured and declined** (2026-06).
   Splitting the 128-bit `Cell` into parallel 64-bit lanes (scalars in
   the low lane only) was prototyped and benchmarked on Apple Silicon:

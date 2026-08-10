@@ -2292,8 +2292,14 @@ and the per-builtin checklist; this section tracks status.
   helper-free local link for eligible self-recursion), the table/reference
   family, the first SIMD data path, and Realm fuel/interrupt safe points at
   native entry plus taken structured-loop backedges ship and are default-on
-  for wasm. Remaining SIMD lane operations and the native-register /
-  imported-call ABI remain next.
+  for wasm. A qualified SysV x86_64 backend now covers the helper-free i32
+  scalar/control core, explicit div/overflow/stack traps, entry/backedge
+  execution polls, guarded self-links, and W^X-safe stable cross-function
+  gates. Unsupported x86 functions refuse transactionally and stay in
+  Sarcasm; the forced-tier spec sweep is exact at 58,779/58,779 on both
+  x86_64 and AArch64. Remaining x86 scalar/memory/SIMD parity, remaining SIMD
+  lane operations generally, and the native-register/imported-call ABI remain
+  next.
 
   The architecture for all three tiers — the shared codegen
   substrate and the JS↔wasm call-boundary fast path included — is
