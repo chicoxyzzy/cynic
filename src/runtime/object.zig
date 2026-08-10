@@ -1655,6 +1655,21 @@ pub const JSObject = struct {
         return self.ensureSpilledElements(allocator);
     }
 
+    /// Construction-only access to the inline dense-element header.
+    /// The fresh-object path cannot need the named-slot spill handled by
+    /// `elementsMut`, so safety builds pin that representation contract.
+    pub inline fn freshElementsMut(self: *JSObject) *std.ArrayListUnmanaged(Value) {
+        if (std.debug.runtime_safety) {
+            std.debug.assert(self.slot_count == 0);
+            std.debug.assert(!self.brand.secondary_is_overflow);
+            std.debug.assert(self.brand.aux_kind == .none);
+            std.debug.assert(self.aux_store == null);
+            std.debug.assert(self.secondary_values.items.len == 0);
+            std.debug.assert(self.secondary_values.capacity == 0);
+        }
+        return &self.secondary_values;
+    }
+
     pub inline fn elementItems(self: *const JSObject) []const Value {
         return self.elementsConst().items;
     }
@@ -4552,6 +4567,24 @@ test "JSObject: inline/overflow slot boundary round-trips" {
     // inline array.
     o.setSlot(inline_slot_cap + 1, Value.fromInt32(777));
     try testing.expectEqual(@as(i32, 777), o.slotAt(inline_slot_cap + 1).asInt32());
+}
+
+test "JSObject: fresh array branding preserves direct dense-element storage" {
+    const heap_mod = @import("heap.zig");
+    var heap = heap_mod.Heap.init(testing.allocator);
+    defer heap.deinit();
+
+    const proto = try heap.allocateObject();
+    const o = try heap.allocateObject();
+    heap.setObjectPrototype(o, proto);
+    try o.markAsArrayExotic(heap.allocator);
+
+    try testing.expectEqual(@as(u32, 0), o.slot_count);
+    try testing.expect(!o.brand.secondary_is_overflow);
+    try testing.expectEqual(ObjectAuxKind.none, o.brand.aux_kind);
+    try testing.expect(o.aux_store == null);
+    try testing.expectEqual(@as(usize, 0), o.secondary_values.items.len);
+    try testing.expectEqual(@as(usize, 0), o.secondary_values.capacity);
 }
 
 test "JSObject: named overflow and dense elements coexist through the cold spill" {

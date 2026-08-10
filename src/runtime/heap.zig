@@ -1301,7 +1301,7 @@ pub const Heap = struct {
         const obj = self.allocateObject() catch return error.OutOfMemory;
         self.setObjectPrototype(obj, array_prototype);
         obj.markAsArrayExotic(self.allocator) catch return error.OutOfMemory;
-        const elements = obj.elementsMut(self.allocator) catch return error.OutOfMemory;
+        const elements = obj.freshElementsMut();
         elements.* = try self.allocatePooledElements(elems.len);
         obj.brand.elements_pooled = true;
         elements.appendSliceAssumeCapacity(elems);
