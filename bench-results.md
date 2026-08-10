@@ -92,6 +92,56 @@ cannot be independently recomputed from raw pairs or tied back to archived
 binary bytes; the exact overlay refs, role-swapped jobs, structural proof,
 correctness ladder, and conservative rounding gates delimit the decision.
 
+Before integration, main advanced to
+`ad4fe9a9e41015c9c9780447a8ed3a8da01c0273` with the x86_64 Spasm backend
+and its qualification hardening. Those commits do not touch Lantern's update
+helper or its callers, but they do change the linked x86_64 image. The accepted
+three-commit series was therefore replayed exactly on that main and revalidated
+instead of treating the earlier absolute addresses as current evidence.
+Exact-main baseline `61aefbdfd2ea166df9986c76197f3c8db44d774c` and candidate
+`7f7ae9ee64ee17739f3c1cb70eb8bcd0b71ab96d` retained byte-identical
+fixtures and benchmark machinery. Fresh paired ReleaseFast codegen again
+confined every executable-code difference to `incOrDec`; `runFrames` was
+byte-identical on AArch64 and x86_64, with unchanged non-helper frames and
+calls. The x86_64 symbol table had one compiler-owned anonymous-suffix
+renumbering at the same address with identical code, and the remaining file
+differences on both architectures were debug/linkedit metadata. Canonical
+AArch64 baseline/candidate artifacts were `409e7440` / `c3940cec`; x86_64
+artifacts were `a3e8967f` / `ec4d01dc` (SHA-256 prefixes).
+
+Focused exact-main job `cynic-1786366925-48104` then ran 40 interleaved pairs
+in each physical role on CPU 1. Its manifest records the exact commits and
+trees, Linux/AMD EPYC host, pinned Zig, and remote binary SHA-256 values
+`ed909ffdbb81e23beaeafa4b3c7d04e3e75ef836abc5d632104a8264589d58c0`
+(baseline) and
+`804712b85a0c48e2e14a3fbbbf1c1e1bd8ac10ec6af7369635bafbc8018c1997`
+(candidate). These identify the standalone `cynic` artifacts used in each
+external `--ab-baseline` position; the per-checkout `cynic-bench` head
+binaries were not hashed or archived. The order-neutral supplement was:
+
+| fixture | Lantern neutral C/B (upper) | default neutral C/B (upper) |
+|---|---:|---:|
+| **`inc_double` target** | **0.926892x (0.927357x)** | 0.998020x (0.998514x) |
+| `inc_bigint` control | 1.007494x (1.007996x) | 0.997938x (0.998453x) |
+| `arith_loop` control | 1.000495x (1.000991x) | 1.006538x (1.007042x) |
+| `relational_bigint` control | 0.999500x (1.000000x) | 1.004073x (1.004584x) |
+
+The no-JIT target agreed in both roles (forward candidate/base **0.927x**;
+reverse base/candidate **1.079x**) with a near-neutral launch-order factor.
+Every focused upper bound is below 1.020x, including the preferred 1.010x
+BigInt-control bound. The exact-main full ReleaseSafe unit suite also passed
+with **3,559 passed / 299 skipped**. Pair-ratio spreads were material—up to 83.7%,
+including 49.3% forward and 71.6% reverse for the target—so the six-decimal
+neutral values above are rounding-envelope calculations, not six-digit
+measurement precision. Role swapping, the near-perfect target order factor,
+and strong agreement in both target roles satisfy the retained gate despite
+that dispersion. The focused archive retains the 16 summary tables, manifest,
+job script, durable log, and zero exit sentinel; like the historical
+full-panel archive, it does not retain the 40 raw pairs or remote binary bytes
+themselves. The earlier 90-row full panel remains the broad retention
+authority, while this exact-main supplement closes the post-Spasm integration
+and linked-layout boundary.
+
 ### 2026-08-05 — type-routed inline dense computed reads, host `Linux 6.8.0-136-generic x86_64` (remote bench box)
 
 Exact merged main `ff78af5a` and candidate `85dcaaa0` were built with the
