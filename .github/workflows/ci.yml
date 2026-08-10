@@ -284,7 +284,7 @@ jobs:
         timeout-minutes: 12
         run: |
           zig build wasm-testsuite -Dwasm-corpus=vendor/wasm-testsuite -- \
-            --quiet --spasm --min-pass-pct=100
+            --quiet --spasm --require-spasm-entry --min-pass-pct=100
 
   wasm-testsuite-spasm:
     name: WASM spec testsuite (Spasm, AArch64)
@@ -292,9 +292,9 @@ jobs:
     timeout-minutes: 25
     needs: build-and-test
     # Force the mature AArch64 backend over the same full corpus and keep the
-    # 100%-of-scored-commands floor on both qualified architectures:
-    # compilable functions run native and unsupported functions must degrade
-    # to Sarcasm without changing results.
+    # 100%-of-scored-commands floor on both qualified architectures. The
+    # native-entry witness prevents an all-Sarcasm fallback from satisfying
+    # the differential gate.
     steps:
       - name: Audit egress (advisory)
         uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411  # v2
@@ -319,7 +319,7 @@ jobs:
         timeout-minutes: 15
         run: |
           zig build wasm-testsuite -Dwasm-corpus=vendor/wasm-testsuite -- \
-            --quiet --spasm --min-pass-pct=100
+            --quiet --spasm --require-spasm-entry --min-pass-pct=100
 
   cross-build:
     name: Cross-build (${{ matrix.target }})

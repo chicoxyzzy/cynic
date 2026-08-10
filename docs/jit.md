@@ -1297,8 +1297,10 @@ useful:
    `.wast` files, 1232 skip) produces the interpreter's exact pass-set —
    the §10-analog authoritative correctness gate, reproduced with
    `zig build wasm-testsuite -Dwasm-corpus=vendor/wasm-testsuite --
-   --quiet [--spasm]` (the harness `--spasm` flag forces the per-instance
-   gate on for every loaded module). The **per-function code cache**
+   --quiet --spasm --require-spasm-entry` (the harness `--spasm` flag forces
+   the per-instance gate on for every loaded module, while
+   `--require-spasm-entry` fails if fallback alone produced the pass set).
+   The **per-function code cache**
    now ships (`spasmEntryFor`): each emittable function compiles once on
    its first Spasm-enabled invoke and the cached `EntryFn` runs every
    later call (the instance owns the executable pages for its lifetime;

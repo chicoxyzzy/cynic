@@ -15,7 +15,8 @@
 //!
 //! Usage:
 //!   zig build wasm-testsuite -- [--gen-dir=<dir>] [--filter=<s>]
-//!                               [--quiet] [--write-results]
+//!                               [--quiet] [--write-results] [--spasm]
+//!                               [--require-spasm-entry]
 
 const std = @import("std");
 const cynic = @import("cynic");
@@ -28,11 +29,15 @@ const Counts = struct {
     pass: u32 = 0,
     fail: u32 = 0,
     skip: u32 = 0,
+    spasm_runs: u64 = 0,
+    spasm_compiles: u64 = 0,
 
     fn add(self: *Counts, other: Counts) void {
         self.pass += other.pass;
         self.fail += other.fail;
         self.skip += other.skip;
+        self.spasm_runs += other.spasm_runs;
+        self.spasm_compiles += other.spasm_compiles;
     }
 };
 
@@ -47,6 +52,10 @@ const Options = struct {
     /// default interpreter run: that diff is the goes-live correctness
     /// gate (compilable functions run native, everything else degrades).
     spasm: bool = false,
+    /// Fail unless a forced-Spasm run actually enters generated code. Semantic
+    /// parity alone is insufficient because an all-interpreter fallback can
+    /// produce the same pass set while leaving the native tier broken.
+    require_spasm_entry: bool = false,
     /// Headline floor. Exit 2 if `pass%` falls below it (0 = no gate).
     /// Mirrors the test262 harness so CI can gate the Sarcasm engine.
     min_pass_pct: f64 = 0.0,
@@ -71,12 +80,19 @@ pub fn main(init: std.process.Init) !void {
                 opts.write_results = true;
             } else if (std.mem.eql(u8, a, "--spasm")) {
                 opts.spasm = true;
+            } else if (std.mem.eql(u8, a, "--require-spasm-entry")) {
+                opts.require_spasm_entry = true;
             } else if (std.mem.startsWith(u8, a, "--min-pass-pct=")) {
                 opts.min_pass_pct = std.fmt.parseFloat(f64, a["--min-pass-pct=".len..]) catch 0.0;
             } else if (std.mem.eql(u8, a, "--debug-loads")) {
                 debug_loads = true;
             }
         }
+    }
+
+    if (opts.require_spasm_entry and !opts.spasm) {
+        try std.Io.File.stderr().writeStreamingAll(io, "wasm-testsuite: --require-spasm-entry requires --spasm\n");
+        std.process.exit(2);
     }
 
     const cwd = std.Io.Dir.cwd();
@@ -124,6 +140,15 @@ pub fn main(init: std.process.Init) !void {
     var line: [512]u8 = undefined;
     const summary = try std.fmt.bufPrint(&line, "\nwasm spec testsuite: {d}/{d} pass ({d:.2}%), {d} skip across {d} files\n", .{ total.pass, scored, pct, total.skip, files });
     try std.Io.File.stdout().writeStreamingAll(io, summary);
+    if (opts.spasm) {
+        var spasm_line: [256]u8 = undefined;
+        const spasm_summary = try std.fmt.bufPrint(
+            &spasm_line,
+            "Spasm engagement: {d} native entries, {d} compiled functions\n",
+            .{ total.spasm_runs, total.spasm_compiles },
+        );
+        try std.Io.File.stdout().writeStreamingAll(io, spasm_summary);
+    }
 
     if (opts.write_results) try writeResults(gpa, io, total, files);
 
@@ -138,6 +163,10 @@ pub fn main(init: std.process.Init) !void {
         try std.Io.File.stderr().writeStreamingAll(io, fmsg);
         std.process.exit(2);
     }
+    if (opts.require_spasm_entry and total.spasm_runs == 0) {
+        try std.Io.File.stderr().writeStreamingAll(io, "wasm-testsuite: --require-spasm-entry failed -- no generated Spasm entry executed\n");
+        std.process.exit(2);
+    }
 }
 
 // ── per-manifest execution ──────────────────────────────────────────
@@ -149,6 +178,7 @@ fn runManifest(arena: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, json_path:
 
     var counts: Counts = .{};
     var current: ?*wasm.Instance = null;
+    var spasm_instances: std.ArrayListUnmanaged(*wasm.Instance) = .empty;
 
     // Cross-module linking registry: registered name → instance. Names
     // a `register` command exposes for a later module's imports.
@@ -169,13 +199,14 @@ fn runManifest(arena: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, json_path:
         const kind = (cmd.get("type") orelse continue).string;
 
         if (std.mem.eql(u8, kind, "module")) {
-            const res = loadModule(arena, io, dir, cmd, &registry) catch null;
+            const res = loadModule(arena, io, dir, cmd, &registry, spasm_enabled) catch null;
             if (res) |loaded| {
                 current = loaded.instance;
-                // Force the baseline tier on this instance so every
-                // subsequent action/assert runs the compilable functions
-                // as native code — the differential gate's whole point.
-                if (spasm_enabled) loaded.instance.spasm_enabled = true;
+                // loadModule enabled the tier before any start function ran;
+                // retain the instance so the harness can prove native entry.
+                if (spasm_enabled) {
+                    try spasm_instances.append(arena, loaded.instance);
+                }
                 // A named module ((module $M …)) is addressable by later
                 // actions and registers via its internal name.
                 if (cmd.get("name")) |n| registry.put(arena, n.string, loaded.instance) catch {};
@@ -216,12 +247,16 @@ fn runManifest(arena: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, json_path:
             // Instantiate the module and expect a trap. Side effects that
             // ran before the trap (e.g. an active element segment writing
             // into a shared imported table) persist by design.
-            const res = loadModule(arena, io, dir, cmd, &registry) catch null;
+            const res = loadModule(arena, io, dir, cmd, &registry, spasm_enabled) catch null;
             if (res == null) counts.pass += 1 else counts.fail += 1;
         } else {
             // register / assert_unlinkable — not yet scored.
             counts.skip += 1;
         }
+    }
+    for (spasm_instances.items) |instance| {
+        counts.spasm_runs += instance.spasm_runs;
+        counts.spasm_compiles += instance.spasm_compiles;
     }
     return counts;
 }
@@ -369,7 +404,14 @@ fn resolveImports(arena: std.mem.Allocator, modp: *wasm.Module, registry: *const
     return .{ .funcs = funcs, .globals = globals, .tables = tables, .memories = memories, .share_memory = true, .tags = tags };
 }
 
-fn loadModule(arena: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, cmd: std.json.ObjectMap, registry: *const Registry) !?Loaded {
+fn loadModule(
+    arena: std.mem.Allocator,
+    io: std.Io,
+    dir: std.Io.Dir,
+    cmd: std.json.ObjectMap,
+    registry: *const Registry,
+    spasm_enabled: bool,
+) !?Loaded {
     const filename = (cmd.get("filename") orelse return null).string;
     const bytes = dir.readFileAlloc(io, filename, arena, .limited(64 * 1024 * 1024)) catch return null;
     const modp = try arena.create(wasm.Module);
@@ -388,6 +430,10 @@ fn loadModule(arena: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, cmd: std.js
         if (debug_loads) logLoadError(io, filename, "instantiate", err);
         return null;
     };
+    if (spasm_enabled) {
+        ip.spasm_enabled = true;
+        ip.spasm_diagnostics = true;
+    }
     // §5.5.11 — the start function runs as part of instantiation; a trap
     // here means the module failed to instantiate.
     wasm.runStart(ip, arena) catch |err| {

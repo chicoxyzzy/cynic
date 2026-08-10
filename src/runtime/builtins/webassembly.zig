@@ -2180,7 +2180,7 @@ test "WebAssembly JS API: Realm.requestInterrupt wakes Spasm after native entry"
     const testing = std.testing;
     const lantern = @import("../lantern/interpreter.zig");
     const spasm = @import("../wasm/spasm.zig");
-    if (comptime !spasm.full_coverage_supported) return error.SkipZigTest;
+    if (comptime !spasm.supported) return error.SkipZigTest;
 
     // import host.barrier : () -> (); export run : () -> i32. The imported
     // host function parks after Spasm's entry poll; the two-trip loop then
