@@ -22,6 +22,76 @@ decisions; do not append routine results.
 
 ## History
 
+### 2026-08-10 — Double-first update-helper dispatch, host `Linux 6.8.0-136-generic x86_64` (remote bench box)
+
+Exact main `M=6de779d2ec3b570561620cad20337495e07e15f7` and source
+candidate `S=173af0e6b91c99e7071eb11e452447aa10f18ea5` were compared
+through full-panel overlays BASE
+`ba306f21e688f27a7eb028322768ef6102c98e62` and CAND
+`eb08bb352d5cd0e1d385653691bd6acdc97036ff`. Both overlays contain
+the same fixture, tool-list, and documentation alignment patch, so
+BASE to CAND differs only by the frozen `S` arithmetic-and-test diff.
+Forward job `cynic-1786358426-75679` and reverse job
+`cynic-1786360223-17233` used the repository-pinned Zig
+`0.17.0-dev.1275+59a628c6d`, CPU 1, and 40 interleaved pairs per
+physical launch role. Focused job `cynic-1786356769-64071` was
+preliminary corroboration; the two full jobs are the retained authority.
+
+Lantern's §13.4 `incOrDec` now routes Double, then BigInt, then Int32.
+The production change moves only the existing three-line Double arm;
+the BigInt and Int32 bodies remain source-identical. Exact-v4 codegen
+reduced the Double path from **37 → 30 instructions** on AArch64 and
+**40 → 32** on x86_64, with type-gate conditional branches **4 → 2**
+on both architectures. Every non-`incOrDec` text symbol remained exact.
+
+The two aligned dynamic fixtures keep the updated value in a function
+parameter: `inc_double` starts at `0.5`, and `inc_bigint` starts at `0n`.
+Both produced the expected final values after repeated increment/decrement.
+Their `run` template bytecode was identical between overlays and contained
+exactly one `IncReg`, one `DecReg`, and one `LoopIncLt8`, with no other
+update opcode. The primary no-JIT target roles also agree independently:
+forward candidate/base was **0.929x**, while reverse base/candidate was
+**1.096x**.
+
+Forward is candidate/base, reverse is base/candidate, and the order-neutral
+estimate is `sqrt(forward / reverse)`. Because the archived reports round
+each physical-role ratio to three decimals, the parenthesized value is the
+conservative upper end of the corresponding rounding envelope:
+
+| fixture | Lantern neutral C/B (upper) | default neutral C/B (upper) |
+|---|---:|---:|
+| **`inc_double` target** | **0.920667x (0.921125x)** | 1.000496x (1.000993x) |
+| `inc_bigint` control | 0.974933x (0.975429x) | 0.972217x (0.972706x) |
+| `arith_loop` control | 1.010142x (1.010652x) | 0.997507x (0.998005x) |
+| `relational_bigint` control | 0.974782x (0.975280x) | 0.978365x (0.978852x) |
+| **six-macro geomean** | **0.999572x (1.000071x)** | **1.004381x (1.004883x)** |
+
+Thus the targeted interpreter path improves about **7.93%**, while its
+default-tier result is flat. The macro aggregates are neutral. The worst
+unrelated row is default-tier `prop_access` at **1.016597x**, with a
+**1.017104x** conservative upper bound. All **90 / 90** logical full-panel
+rows have upper bounds below 1.020x, and both macro-geomean upper bounds are
+at most 1.010x.
+
+The full pinned ReleaseSafe unit suite passed (**3,559 pass / 291 skip**).
+The serialized, allocation-pressure test262 update-expression buckets passed
+every strict-compatible fixture: prefix increment **27**, postfix increment
+**32**, prefix decrement **28**, and postfix decrement **31**. Each path's
+six remaining fixtures are established strict-only-incompatible cases tagged
+`flags: [noStrict]`; all 24 were expected failures, with no new failure,
+abort, or timeout.
+The runtime fence additionally pins fractional Double increment/decrement,
+`-0`, `NaN`, `Infinity`, an Int32-maximum crossing through a dynamic Double
+loop bound, primitive BigInt, exactly-once object-to-Double and
+object-to-BigInt coercion, and postfix old/new result discipline.
+
+This is decision-era evidence, not a routine benchmark refresh. The retained
+full-job archive contains report summaries and job metadata, but not the 40
+raw pair samples or remote binary hashes. The accepted estimates therefore
+cannot be independently recomputed from raw pairs or tied back to archived
+binary bytes; the exact overlay refs, role-swapped jobs, structural proof,
+correctness ladder, and conservative rounding gates delimit the decision.
+
 ### 2026-08-05 — type-routed inline dense computed reads, host `Linux 6.8.0-136-generic x86_64` (remote bench box)
 
 Exact merged main `ff78af5a` and candidate `85dcaaa0` were built with the

@@ -974,6 +974,16 @@ sampling by `/profile`.
 
 **Shipped.**
 
+- **Double-first update-helper dispatch (2026-08-10).** Lantern's §13.4
+  `incOrDec` now checks Double before BigInt and Int32 by moving only its
+  existing three-line Double arm. The Double path shrank **37 → 30**
+  instructions on AArch64 and **40 → 32** on x86_64, with type-gate branches
+  **4 → 2** and all non-helper text exact. Pinned-CPU, 40+40 role-swapped
+  x86_64 evidence measured the Double no-JIT target at **0.920667x** neutral;
+  its default-tier result was **1.000496x**, macro geomeans were
+  **0.999572x / 1.004381x**, and all **90 / 90** conservative regression
+  gates passed. Full ReleaseSafe and strict-compatible update-expression
+  correctness remained green. See `bench-results.md`.
 - **Threaded interpreter dispatch (rung-3 / 4 / 5).** The
   `while + switch` dispatch loop became a Zig labeled switch with
   per-opcode `continue :dispatch` tails (rung-3); opcode decode
