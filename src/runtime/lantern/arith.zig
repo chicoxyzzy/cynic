@@ -169,8 +169,8 @@ pub fn toInt32(v: Value) i32 {
     // Modulo 2**32 in unsigned space, then re-bitcast.
     const two_32: f64 = 4294967296.0;
     const mod = @mod(trunc, two_32);
-    const non_neg = if (mod < 0) mod + two_32 else mod;
-    const u: u32 = @intFromFloat(non_neg);
+    // Zig's floored modulo already lies in [0, 2**32) here.
+    const u: u32 = @intFromFloat(mod);
     return @bitCast(u);
 }
 

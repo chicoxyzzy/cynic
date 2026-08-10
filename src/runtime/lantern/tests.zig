@@ -16423,6 +16423,19 @@ test "to_int32: i32 overflow wraps modulo 2^32" {
     , -2147483648);
 }
 
+test "to_int32: negative modulo boundaries wrap through a non-negative residue" {
+    try expectScriptStringWithBuiltins(
+        \\function i32(x) { return x | 0; }
+        \\const a = i32(-4294967295);
+        \\const b = i32(-4294967296);
+        \\const c = i32(-4294967297);
+        \\const z = i32(-0);
+        \\const max = i32(Number.MAX_VALUE);
+        \\const min = i32(-Number.MAX_VALUE);
+        \\a + ":" + b + ":" + c + ":" + max + ":" + min + ":" + Object.is(z, 0) + ":" + Object.is(z, -0);
+    , "1:0:-1:0:0:true:false");
+}
+
 test "to_int32: string coerces via ToNumber → ToInt32" {
     try expectScriptIntWithBuiltins(
         \\("42" | 0);
