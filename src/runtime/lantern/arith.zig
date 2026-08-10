@@ -590,6 +590,9 @@ pub fn unaryToNumeric(realm: *Realm, v: Value) RunError!?Value {
 /// via ToNumeric (the compiler emits a `to_number` immediately
 /// before the bump).
 pub fn incOrDec(realm: *Realm, v: Value, delta: i32) RunError!?Value {
+    if (v.isDouble()) {
+        return Value.fromDouble(v.asDouble() + @as(f64, @floatFromInt(delta)));
+    }
     if (heap_mod.valueAsBigInt(v)) |bi| {
         // §6.1.6.2.7 BigInt::add(x, ±1n) — the §13.4 update unit.
         const delta_mag = [_]bigint_mod.Limb{1};
@@ -602,9 +605,6 @@ pub fn incOrDec(realm: *Realm, v: Value, delta: i32) RunError!?Value {
         const ov = @addWithOverflow(v.asInt32(), delta);
         if (ov[1] == 0) return Value.fromInt32(ov[0]);
         return Value.fromDouble(@as(f64, @floatFromInt(v.asInt32())) + @as(f64, @floatFromInt(delta)));
-    }
-    if (v.isDouble()) {
-        return Value.fromDouble(v.asDouble() + @as(f64, @floatFromInt(delta)));
     }
     // ToNumeric on an exotic that returned NaN-y value: treat as
     // NaN-arithmetic — the `to_number` op already produced this
