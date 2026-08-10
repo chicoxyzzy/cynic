@@ -96,6 +96,8 @@ Run one fixture with `zig build bench -- --filter=<name>`; combine it with
 | Fixture | Iters | Stresses |
 |---|---:|---|
 | `arith_loop` | 5,000,000 | Bytecode dispatch density on `Op.add` / `Op.lt` / `Op.jmp` — int32 fast-path + the threaded-dispatch loop with no property access. Smi-overflow paths are NOT exercised (every step stays int32-clean via `\| 0`). |
+| `inc_double` | 4,000,000 × 2 | Fractional Double `IncReg` / `DecReg` execution. A function-parameter value starts at `0.5`, pinning `incOrDec`'s Double path for both updates on every iteration; the counter uses one fused `LoopIncLt`. |
+| `inc_bigint` | 500,000 × 2 | Primitive BigInt `IncReg` / `DecReg` execution. A function-parameter value starts at `0n`, pinning `incOrDec`'s type-matched BigInt allocation path for both updates on every iteration; the counter uses one fused `LoopIncLt`. |
 | `bit_and_double` | 5,000,000 | Double-heavy `LdaSmi16 -> BitAnd` execution. Adding `0.5` after every result keeps the next left operand outside Int32, pinning one failed Int32 probe followed by the shared §13.15.3 ToNumeric and §6.1.6.1.16 NumberBitwiseOp / ToInt32 path on every iteration. |
 | `bit_and_object` | 1,000,000 | Coercible-object `LdaSmi16 -> BitAnd` execution. A stable `valueOf` operand pins the successor's shared §13.15.3 ToNumeric and §6.1.6.1.16 NumberBitwiseOp / ToInt32 path on every iteration and catches repeated coercion or fallback-probe regressions. |
 | `relational_number` | 1,000,000 + 1,000,001 | Fused `JmpIfNotLt8` execution over Double/Int32 and Double/Double pairs. The comparison is each loop's sole condition, isolating §7.2.13 primitive-Number comparison from coercion and unrelated relational branches. |

@@ -88,6 +88,8 @@ const Bench = struct {
 
 const BENCHES = [_]Bench{
     .{ .name = "arith_loop", .path = "bench/micros/arith_loop.js" },
+    .{ .name = "inc_double", .path = "bench/micros/inc_double.js" },
+    .{ .name = "inc_bigint", .path = "bench/micros/inc_bigint.js" },
     .{ .name = "bit_and_double", .path = "bench/micros/bit_and_double.js" },
     .{ .name = "bit_and_object", .path = "bench/micros/bit_and_object.js" },
     .{ .name = "relational_number", .path = "bench/micros/relational_number.js" },
