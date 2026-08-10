@@ -208,9 +208,16 @@ fn jsonStringify(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     // Proxy-of-array routes to the function branch. For non-
     // callable objects, §7.2.2 IsArray unwraps Proxy targets and
     // throws TypeError on a revoked proxy — propagate that abrupt.
+    var needs_wrapper = false;
     if (heap_mod.valueAsFunction(replacer_v)) |fn_obj| {
         state.replacer_fn = fn_obj;
-    } else if (heap_mod.valueAsPlainObject(replacer_v)) |_| {
+        needs_wrapper = true;
+    } else if (heap_mod.valueAsPlainObject(replacer_v)) |obj| {
+        // Callable Proxies and `%Function.prototype%` are plain JSObjects
+        // rather than JSFunction values. The current resolver does not yet
+        // install them in `state.replacer_fn`; retain their wrapper so this
+        // optimization does not widen that separate IsCallable gap.
+        needs_wrapper = obj.brand.proxy_callable;
         if (try jsonIsArrayValue(realm, replacer_v)) {
             try resolvePropertyList(&state, replacer_v);
         }
@@ -218,23 +225,6 @@ fn jsonStringify(realm: *Realm, this_value: Value, args: []const Value) NativeEr
 
     // §25.5.2 step 5-8 — resolve space.
     try resolveSpace(&state, space_v);
-
-    // §25.5.2 step 9-12 — wrap value in `{ "": value }` and
-    // serialize via SerializeJSONProperty(state, "", wrapper).
-    const wrapper = realm.heap.allocateObject() catch return error.OutOfMemory;
-    realm.heap.setObjectPrototype(wrapper, realm.intrinsics.object_prototype);
-    wrapper.set(realm.allocator, "", value) catch return error.OutOfMemory;
-
-    // Root the synthetic { "": value } holder for the duration of
-    // serialization. SerializeJSONProperty re-enters user JS via
-    // `toJSON` and the replacer function, and those calls allocate;
-    // under allocation pressure a GC would otherwise sweep this bare
-    // local, leaving a dangling `this` for the replacer call
-    // (§25.5.2.4 step 3). Rooting the holder also keeps `value`
-    // reachable, since the holder owns it.
-    const wrapper_scope = realm.heap.openScope() catch return error.OutOfMemory;
-    defer wrapper_scope.close();
-    wrapper_scope.push(heap_mod.taggedObject(wrapper)) catch return error.OutOfMemory;
 
     var buf: std.ArrayListUnmanaged(u8) = if (reuse_pool) realm.json_scratch_buf else .empty;
     defer if (reuse_pool) {
@@ -246,11 +236,43 @@ fn jsonStringify(realm: *Realm, this_value: Value, args: []const Value) NativeEr
         buf.deinit(realm.allocator);
     };
 
-    const ok = try serializeJSONProperty(&state, "", heap_mod.taggedObject(wrapper), null, &buf);
+    const ok = try serializeJSONRoot(&state, value, needs_wrapper, &buf);
     if (!ok) return Value.undefined_;
 
     const out = realm.heap.allocateString(buf.items) catch return error.OutOfMemory;
     return Value.fromString(out);
+}
+
+/// §25.5.2 steps 9-12 — serialize the top-level value, retaining the
+/// synthetic `{ "": value }` holder only when a callable replacer can
+/// observe it as the §25.5.2.4 step-3 `this` binding.
+noinline fn serializeJSONRoot(
+    state: *StringifyState,
+    value: Value,
+    needs_wrapper: bool,
+    buf: *std.ArrayListUnmanaged(u8),
+) NativeError!bool {
+    const realm = state.realm;
+    var holder_v = Value.undefined_;
+    var prefetched: ?Value = value;
+    var root_v = value;
+    if (needs_wrapper) {
+        const wrapper = realm.heap.allocateObject() catch return error.OutOfMemory;
+        realm.heap.setObjectPrototype(wrapper, realm.intrinsics.object_prototype);
+        wrapper.set(realm.allocator, "", value) catch return error.OutOfMemory;
+        holder_v = heap_mod.taggedObject(wrapper);
+        prefetched = null;
+        root_v = holder_v;
+    }
+
+    // SerializeJSONProperty may re-enter through toJSON or the replacer. Root
+    // the raw input on the elided path; on the callable path the rooted holder
+    // owns that same input and remains the replacer's observable `this`.
+    const holder_scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer holder_scope.close();
+    holder_scope.push(root_v) catch return error.OutOfMemory;
+
+    return serializeJSONProperty(state, "", holder_v, prefetched, buf);
 }
 
 /// §25.5.2 step 4.b — walk the array-replacer building a unique,
@@ -408,16 +430,21 @@ fn resolveSpace(state: *StringifyState, space_v: Value) NativeError!void {
 /// `holder_v` carries the holder as a Value — it's both the
 /// receiver for any Proxy `get` trap dispatched on the property
 /// read AND the `this`-binding for the replacer call at step 3.
+/// It is inert only for the prefetched top-level value when no
+/// callable replacer exists.
 fn serializeJSONProperty(
     state: *StringifyState,
     key: []const u8,
     holder_v: Value,
     /// Pre-read property value, when the caller already has it in hand
     /// and reading it again via `Get(holder, key)` would be redundant
-    /// (the dense-array fast path — see `serializeJSONArray`). MUST
-    /// equal what `Get(holder, key)` returns: pass it only for an
-    /// ordinary (non-Proxy) holder's own data slot. `null` keeps the
-    /// spec-exact `Get` read (accessors, proxies, prototype walks).
+    /// (the dense-array fast path — see `serializeJSONArray` — or the
+    /// no-callable-replacer top-level entry). MUST
+    /// equal the logical property value being serialized: either an
+    /// ordinary (non-Proxy) holder's own data slot, or the direct
+    /// top-level value for which no observable holder exists (and
+    /// `holder_v` is unused). `null` keeps the spec-exact `Get` read
+    /// (accessors, proxies, prototype walks).
     prefetched: ?Value,
     buf: *std.ArrayListUnmanaged(u8),
 ) NativeError!bool {
@@ -1889,4 +1916,144 @@ fn jsonIsRawJSON(realm: *Realm, this_value: Value, args: []const Value) NativeEr
 /// §25.5.4 step 2 whitespace set: TAB, LF, CR, SPACE.
 fn isJsonWhitespace(c: u8) bool {
     return c == 0x09 or c == 0x0A or c == 0x0D or c == 0x20;
+}
+
+// ── focused allocation tests ───────────────────────────────────────────────
+
+test "JSON.stringify: no replacer allocates no synthetic root holder" {
+    const testing = std.testing;
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.hardened = false;
+    try realm.installBuiltins();
+
+    // §25.5.2 steps 9-12 describe a wrapper object, but without a callable
+    // replacer neither that object nor its empty-string data property is
+    // observable. The optimized entry must serialize the already-read value
+    // without adding a JSObject to the heap.
+    const objects_before = realm.heap.objectCount();
+    const result = try jsonStringify(
+        &realm,
+        Value.undefined_,
+        &.{Value.fromInt32(7)},
+    );
+
+    try testing.expect(result.isString());
+    const out: *JSString = @ptrCast(@alignCast(result.asString()));
+    try testing.expectEqualStrings("7", out.flatBytes());
+    try testing.expectEqual(objects_before, realm.heap.objectCount());
+}
+
+test "JSON.stringify: callable replacer retains observable synthetic holder" {
+    const testing = std.testing;
+    const HolderProbe = struct {
+        fn call(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+            const holder = heap_mod.valueAsPlainObject(this_value) orelse return Value.fromInt32(-1);
+            if (holder.prototype != realm.intrinsics.object_prototype or !holder.brand.extensible) {
+                return Value.fromInt32(-2);
+            }
+            if (args.len < 2 or !args[0].isString()) return Value.fromInt32(-3);
+            const key: *JSString = @ptrCast(@alignCast(args[0].asString()));
+            if (key.flatBytes().len != 0) return Value.fromInt32(-4);
+            const own = holder.lookupOwn("") orelse return Value.fromInt32(-5);
+            if (!own.isInt32() or own.asInt32() != 7) return Value.fromInt32(-6);
+            return args[1];
+        }
+    };
+
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.hardened = false;
+    try realm.installBuiltins();
+    const replacer = try realm.heap.allocateFunctionNative(&realm, HolderProbe.call, 2, "holderProbe");
+
+    const objects_before = realm.heap.objectCount();
+    const result = try jsonStringify(
+        &realm,
+        Value.undefined_,
+        &.{ Value.fromInt32(7), heap_mod.taggedFunction(replacer) },
+    );
+
+    try testing.expect(result.isString());
+    const out: *JSString = @ptrCast(@alignCast(result.asString()));
+    try testing.expectEqualStrings("7", out.flatBytes());
+    try testing.expectEqual(objects_before + 1, realm.heap.objectCount());
+}
+
+test "JSON.stringify: proxy-callable replacer conservatively retains synthetic holder" {
+    const testing = std.testing;
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.hardened = false;
+    try realm.installBuiltins();
+
+    // `%Function.prototype%` and callable Proxies are represented as plain
+    // JSObjects carrying `proxy_callable`, not as JSFunction. Keep them on the
+    // wrapper path even though the current replacer resolver only stores a
+    // direct JSFunction in `state.replacer_fn`; this optimization must not
+    // silently widen that pre-existing callable-Proxy gap.
+    const replacer = realm.intrinsics.function_prototype.?;
+    try testing.expect(replacer.brand.proxy_callable);
+    const objects_before = realm.heap.objectCount();
+    _ = try jsonStringify(
+        &realm,
+        Value.undefined_,
+        &.{ Value.fromInt32(7), heap_mod.taggedObject(replacer) },
+    );
+
+    try testing.expectEqual(objects_before + 1, realm.heap.objectCount());
+}
+
+test "JSON.stringify: array replacer allocates no synthetic root holder" {
+    const testing = std.testing;
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.hardened = false;
+    try realm.installBuiltins();
+
+    const value = try realm.heap.allocateObject();
+    realm.heap.setObjectPrototype(value, realm.intrinsics.object_prototype);
+    try value.set(realm.allocator, "keep", Value.fromInt32(1));
+    try value.set(realm.allocator, "drop", Value.fromInt32(2));
+    const keep = try realm.heap.allocateString("keep");
+    const replacer = try realm.heap.makeDenseArray(
+        realm.intrinsics.array_prototype,
+        &.{Value.fromString(keep)},
+    );
+
+    // An array-form replacer creates PropertyList but is not callable, so the
+    // top-level wrapper remains unobservable and belongs on the elided path.
+    const objects_before = realm.heap.objectCount();
+    const result = try jsonStringify(
+        &realm,
+        Value.undefined_,
+        &.{ heap_mod.taggedObject(value), heap_mod.taggedObject(replacer) },
+    );
+
+    try testing.expect(result.isString());
+    const out: *JSString = @ptrCast(@alignCast(result.asString()));
+    try testing.expectEqualStrings("{\"keep\":1}", out.flatBytes());
+    try testing.expectEqual(objects_before, realm.heap.objectCount());
+}
+
+test "JSON.stringify: non-callable object replacer allocates no synthetic root holder" {
+    const testing = std.testing;
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.hardened = false;
+    try realm.installBuiltins();
+
+    const replacer = try realm.heap.allocateObject();
+    realm.heap.setObjectPrototype(replacer, realm.intrinsics.object_prototype);
+    const objects_before = realm.heap.objectCount();
+    const result = try jsonStringify(
+        &realm,
+        Value.undefined_,
+        &.{ Value.fromInt32(7), heap_mod.taggedObject(replacer) },
+    );
+
+    try testing.expect(result.isString());
+    const out: *JSString = @ptrCast(@alignCast(result.asString()));
+    try testing.expectEqualStrings("7", out.flatBytes());
+    try testing.expectEqual(objects_before, realm.heap.objectCount());
 }

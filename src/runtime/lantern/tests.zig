@@ -9452,6 +9452,29 @@ test "GC: JSON.stringify replacer holder survives gc_threshold=1" {
     , "{\"a\":1,\"b\":2,\"c\":3}");
 }
 
+test "GC: JSON.stringify top-level value survives holder elision at gc_threshold=1" {
+    // §25.5.2.4 step 2 calls top-level toJSON with the original value as
+    // `this` and the empty-string key. On the no-callable-replacer path the
+    // synthetic wrapper is elided, so the entry scope directly roots the raw
+    // value across this allocating JS re-entry. This is integration pressure,
+    // not the sole proof of the edge: test builds also conservatively scan a
+    // native callback's stack, so source review separately gates that the
+    // original value is pushed before SerializeJSONProperty.
+    try expectScriptStringUnderAlternatingGcPressure(
+        \\function make() {
+        \\  return {
+        \\    marker: "alive",
+        \\    get toJSON() {
+        \\      __collectGarbage();
+        \\      for (let i = 0; i < 40; i++) ({ i: i });
+        \\      return function (key) { return this.marker + ":" + key; };
+        \\    },
+        \\  };
+        \\}
+        \\JSON.stringify(make());
+    , "\"alive:\"");
+}
+
 test "GC: RegExp.prototype[@@match] global array survives gc_threshold=1" {
     // §22.2.5.8 step 6 — the global match loop allocates result
     // array A up front, then repeatedly RegExpExecs and
