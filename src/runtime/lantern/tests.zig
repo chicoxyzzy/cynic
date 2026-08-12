@@ -837,6 +837,38 @@ test "interpreter: callable ToPrimitive propagates accessor throws" {
     , "true:true");
 }
 
+test "interpreter: callable ToPrimitive resolves inherited accessors with the original receiver" {
+    try expectScriptStringWithBuiltins(
+        \\const exoticParent = function () {};
+        \\const exotic = function () {};
+        \\let exoticGetterThis = false;
+        \\let exoticCallThis = false;
+        \\Object.defineProperty(exoticParent, Symbol.toPrimitive, {
+        \\  get() {
+        \\    exoticGetterThis = this === exotic;
+        \\    return function (hint) {
+        \\      exoticCallThis = this === exotic;
+        \\      return hint === "number" ? 4 : 9;
+        \\    };
+        \\  }
+        \\});
+        \\Object.setPrototypeOf(exotic, exoticParent);
+        \\const ordinaryParent = function () {};
+        \\const ordinary = function () {};
+        \\let ordinaryGetterThis = false;
+        \\let ordinaryCallThis = false;
+        \\Object.defineProperty(ordinaryParent, "valueOf", {
+        \\  get() {
+        \\    ordinaryGetterThis = this === ordinary;
+        \\    return function () { ordinaryCallThis = this === ordinary; return 5; };
+        \\  }
+        \\});
+        \\Object.setPrototypeOf(ordinary, ordinaryParent);
+        \\(+exotic) + ":" + (+ordinary) + ":" + exoticGetterThis + ":" +
+        \\  exoticCallThis + ":" + ordinaryGetterThis + ":" + ordinaryCallThis;
+    , "4:5:true:true:true:true");
+}
+
 test "interpreter: BigInt/String relational propagates rope flatten OOM" {
     const heap_mod = @import("../heap.zig");
     var failing = std.testing.FailingAllocator.init(testing.allocator, .{});
@@ -1039,6 +1071,29 @@ test "interpreter: BigInt/String loose equality bytecode charges rope materializ
     try testing.expectError(
         error.OutOfMemory,
         run(testing.allocator, &realm, &chunk),
+    );
+}
+
+test "interpreter: BigInt/String loose equality propagates full-parser OOM" {
+    const heap_mod = @import("../heap.zig");
+    var failing = std.testing.FailingAllocator.init(testing.allocator, .{});
+    var realm = Realm.init(failing.allocator());
+    defer {
+        failing.fail_index = std.math.maxInt(usize);
+        realm.deinit();
+    }
+
+    const lhs = heap_mod.taggedBigInt(try realm.heap.allocateBigInt(0));
+    const rhs = try realm.heap.allocateString("340282366920938463463374607431768211456");
+
+    // The adjacent rope-backed bytecode test proves the interpreter routes
+    // BigInt/String == through this helper. This flat, >128-bit decimal makes
+    // flattening allocation-free, so the armed allocator fails specifically
+    // in the canonical arbitrary-precision StringToBigInt parser.
+    failing.fail_index = failing.alloc_index;
+    try testing.expectError(
+        error.OutOfMemory,
+        lantern_arith.looseEqBigIntString(&realm, Value.fromString(rhs), lhs),
     );
 }
 
@@ -9723,6 +9778,29 @@ test "GC: ToPrimitive receiver survives gc_threshold=1" {
         \\}
         \\+mk();
     , 42);
+}
+
+test "GC: callable ToPrimitive receiver survives gc_threshold=1" {
+    // PR #98 makes Function receivers use accessor-aware OrdinaryGet. The
+    // temporary receiver exists only in the interpreter accumulator when the
+    // getter re-enters runFrames, so the ToPrimitive scope must keep it live.
+    // The exact unit test in intrinsics separately pins the fresh method and
+    // hint Values in that same scope before dispatch.
+    try expectScriptIntUnderAlternatingGcPressure(
+        \\var getterReceiverOK = false;
+        \\function makeCallable() {
+        \\  const receiver = function () {};
+        \\  receiver.sentinel = 47;
+        \\  Object.defineProperty(receiver, Symbol.toPrimitive, {
+        \\    get: function () {
+        \\      getterReceiverOK = this === receiver;
+        \\      return function () { return this.sentinel; };
+        \\    },
+        \\  });
+        \\  return receiver;
+        \\}
+        \\+makeCallable() + (getterReceiverOK ? 100 : 0);
+    , 147);
 }
 
 test "GC: String.prototype.slice fresh-ToString receiver survives gc_threshold=1" {

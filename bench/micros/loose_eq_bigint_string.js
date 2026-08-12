@@ -1,6 +1,6 @@
 // Mixed BigInt/String loose-equality control. Parameters keep both operand
 // orders out of constant folding; two comparisons per iteration pin
-// §7.2.14 StringToBigInt parsing through the interpreter's allocating path.
+// §7.2.13 StringToBigInt parsing through the interpreter's allocating path.
 'use strict';
 
 function run(bigint, string, limit) {

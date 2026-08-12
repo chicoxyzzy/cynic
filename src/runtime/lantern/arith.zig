@@ -871,7 +871,7 @@ pub fn looseEq(allocator: std.mem.Allocator, a: Value, b: Value) bool {
     return false;
 }
 
-/// Runtime §7.2.14 BigInt/String equality. The compiler-only `looseEq`
+/// Runtime §7.2.13 BigInt/String equality. The compiler-only `looseEq`
 /// helper never sees BigInt literals; the interpreter routes this allocating
 /// pair here so rope materialization and parser OOM remain host errors instead
 /// of being mistaken for the empty string or an ordinary parse mismatch.
