@@ -284,12 +284,14 @@ test "ToBigInt propagates rope materialization OOM" {
     const right = try realm.heap.allocateString("0000000001");
     const rope = try realm.heap.allocateConsString(left, right);
     try std.testing.expect(!rope.isFlat());
+    const bytes_live_before = realm.heap.bytes_live;
 
     failing.fail_index = failing.alloc_index;
     try std.testing.expectError(
         error.OutOfMemory,
         toBigIntValue(&realm, Value.fromString(rope)),
     );
+    try std.testing.expectEqual(bytes_live_before, realm.heap.bytes_live);
 }
 
 test "ToBigInt charges rope materialization" {

@@ -2114,7 +2114,7 @@ pub fn toPrimitive(realm: *Realm, value: Value, hint: ToPrimitiveHint) NativeErr
     // Root the receiver for the duration of the coercion. §7.1.1 /
     // §7.1.1.1 — resolving @@toPrimitive and the OrdinaryToPrimitive
     // `valueOf` / `toString` methods fires user getters and calls
-    // those methods (`getPropertyChainOnValue` + `callJSFunction`), each of
+    // those methods (`getPropertyChain` + `callJSFunction`), each of
     // which allocates a call frame and can therefore drive a GC.
     // Between those re-entry hops `value` is reachable through nothing but
     // this native local, so under allocation pressure a sweep would reclaim
@@ -2122,6 +2122,11 @@ pub fn toPrimitive(realm: *Realm, value: Value, hint: ToPrimitiveHint) NativeErr
     const recv_scope = realm.heap.openScope() catch return error.OutOfMemory;
     defer recv_scope.close();
     recv_scope.push(value) catch return error.OutOfMemory;
+
+    // Preserve main's direct plain-object lookup. Only the callable-object
+    // arm needs the new accessor-aware polymorphic helper; outlining that
+    // cold arm avoids regressing ordinary object coercion loops.
+    const plain_obj = heap_mod.valueAsPlainObject(value);
 
     // §7.1.1.1 OrdinaryToPrimitive maps "default"→"number" for
     // non-Date objects, but the @@toPrimitive trap receives the
@@ -2136,10 +2141,20 @@ pub fn toPrimitive(realm: *Realm, value: Value, hint: ToPrimitiveHint) NativeErr
     // (fixtures install poisoned getters and assert the
     // throw propagates). A plain data-slot lookup would miss
     // those.
-    const exotic = (getPropertyChainOnValue(realm, value, "@@toPrimitive") catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return error.NativeThrew,
-    }) orelse return value;
+    const exotic = if (plain_obj) |obj|
+        getPropertyChain(realm, obj, "@@toPrimitive") catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.NativeThrew,
+        }
+    else
+        (@call(
+            .never_inline,
+            getPropertyChainOnValue,
+            .{ realm, value, "@@toPrimitive" },
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.NativeThrew,
+        }) orelse Value.undefined_;
     // §7.1.1 step 2.b-c — GetMethod(O, @@toPrimitive). Per
     // §7.3.10, if `exotic` is neither undefined nor null and
     // is not Callable, throw a TypeError. Silently falling
@@ -2148,8 +2163,13 @@ pub fn toPrimitive(realm: *Realm, value: Value, hint: ToPrimitiveHint) NativeErr
     // toPrimitive = 42` must throw, not coerce via toString).
     const exotic_present = !exotic.isUndefined() and !exotic.isNull();
     if (heap_mod.valueAsFunction(exotic)) |fn_obj| {
+        // An accessor may have returned a fresh function with no remaining
+        // heap edge. Root it before allocating the hint and entering JS.
+        recv_scope.push(exotic) catch return error.OutOfMemory;
         const hint_v = realm.heap.allocateString(hint_str) catch return error.OutOfMemory;
-        const args = [_]Value{Value.fromString(hint_v)};
+        const hint_value = Value.fromString(hint_v);
+        recv_scope.push(hint_value) catch return error.OutOfMemory;
+        const args = [_]Value{hint_value};
         const outcome = interp.callJSFunction(realm.allocator, realm, fn_obj, value, &args) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.NativeThrew,
@@ -2184,11 +2204,25 @@ pub fn toPrimitive(realm: *Realm, value: Value, hint: ToPrimitiveHint) NativeErr
     const first_name: []const u8 = if (hint == .string) "toString" else "valueOf";
     const second_name: []const u8 = if (hint == .string) "valueOf" else "toString";
     for ([_][]const u8{ first_name, second_name }) |name| {
-        const method = (getPropertyChainOnValue(realm, value, name) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return error.NativeThrew,
-        }) orelse return value;
+        const method = if (plain_obj) |obj|
+            getPropertyChain(realm, obj, name) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.NativeThrew,
+            }
+        else
+            (@call(
+                .never_inline,
+                getPropertyChainOnValue,
+                .{ realm, value, name },
+            ) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.NativeThrew,
+            }) orelse Value.undefined_;
         if (heap_mod.valueAsFunction(method)) |fn_obj| {
+            // Function accessors can return a fresh method reachable only
+            // through this local. Keep every callable alive until its frame
+            // has been installed (also closes the pre-existing object case).
+            recv_scope.push(method) catch return error.OutOfMemory;
             const outcome = interp.callJSFunction(realm.allocator, realm, fn_obj, value, &[_]Value{}) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => return error.NativeThrew,
@@ -2208,7 +2242,82 @@ pub fn toPrimitive(realm: *Realm, value: Value, hint: ToPrimitiveHint) NativeErr
             }
         }
     }
-    return throwTypeError(realm, "Cannot convert object to primitive value");
+    return throwTypeError(
+        realm,
+        if (plain_obj != null)
+            "Cannot convert object to primitive value"
+        else
+            "Cannot convert function to primitive value",
+    );
+}
+
+test "ToPrimitive returns BigInt and Symbol primitives without allocating" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var realm = Realm.init(failing.allocator());
+    defer {
+        failing.fail_index = std.math.maxInt(usize);
+        realm.deinit();
+    }
+
+    const bigint = heap_mod.taggedBigInt(try realm.heap.allocateBigInt(1));
+    const symbol = heap_mod.taggedSymbol(try realm.heap.allocateSymbol("primitive"));
+
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectEqual(bigint.bits, (try toPrimitive(&realm, bigint, .number)).bits);
+    try std.testing.expectEqual(symbol.bits, (try toPrimitive(&realm, symbol, .string)).bits);
+}
+
+test "ToPrimitive roots fresh callable accessor results" {
+    const Native = struct {
+        fn inspectRoots(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+            const active = realm.active_native_fn orelse return Value.fromInt32(0);
+            const callee = heap_mod.taggedFunction(active);
+            var mask: i32 = 0;
+            for (realm.heap.handle_scopes.items) |scope| {
+                for (scope.handles.items) |root| {
+                    if (root.bits == this_value.bits) mask |= 1;
+                    if (root.bits == callee.bits) mask |= 2;
+                    if (args.len > 0 and root.bits == args[0].bits) mask |= 4;
+                }
+            }
+            return Value.fromInt32(mask);
+        }
+
+        fn freshCallable(realm: *Realm, _: Value, _: []const Value) NativeError!Value {
+            const callable = realm.heap.allocateFunctionNative(realm, inspectRoots, 1, "fresh") catch return error.OutOfMemory;
+            return heap_mod.taggedFunction(callable);
+        }
+
+        fn oom(_: *Realm, _: Value, _: []const Value) NativeError!Value {
+            return error.OutOfMemory;
+        }
+    };
+
+    var realm = Realm.init(std.testing.allocator);
+    defer realm.deinit();
+    const getter = try realm.heap.allocateFunctionNative(&realm, Native.freshCallable, 0, "get");
+
+    const exotic_receiver = try realm.heap.allocateFunctionNative(&realm, Native.oom, 0, "exoticReceiver");
+    const exotic_entry = try exotic_receiver.accessors.getOrPut(realm.allocator, "@@toPrimitive");
+    exotic_entry.value_ptr.* = .{ .getter = getter };
+    const exotic_result = try toPrimitive(&realm, heap_mod.taggedFunction(exotic_receiver), .number);
+    try std.testing.expectEqual(@as(i32, 7), exotic_result.asInt32());
+    try std.testing.expectEqual(@as(usize, 0), realm.heap.handle_scopes.items.len);
+
+    const ordinary_receiver = try realm.heap.allocateFunctionNative(&realm, Native.oom, 0, "ordinaryReceiver");
+    const ordinary_entry = try ordinary_receiver.accessors.getOrPut(realm.allocator, "valueOf");
+    ordinary_entry.value_ptr.* = .{ .getter = getter };
+    const ordinary_result = try toPrimitive(&realm, heap_mod.taggedFunction(ordinary_receiver), .number);
+    try std.testing.expectEqual(@as(i32, 3), ordinary_result.asInt32());
+    try std.testing.expectEqual(@as(usize, 0), realm.heap.handle_scopes.items.len);
+
+    const throwing = try realm.heap.allocateFunctionNative(&realm, Native.oom, 0, "throwing");
+    try ordinary_receiver.set(realm.allocator, "@@toPrimitive", heap_mod.taggedFunction(throwing));
+    try std.testing.expectError(
+        error.OutOfMemory,
+        toPrimitive(&realm, heap_mod.taggedFunction(ordinary_receiver), .number),
+    );
+    try std.testing.expectEqual(@as(usize, 0), realm.heap.handle_scopes.items.len);
 }
 
 /// §7.1.4 ToNumber — like `coerceToNumber` but consults
