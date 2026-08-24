@@ -112,7 +112,7 @@ jobs:
           submodules: false
 
       - name: Set up Zig
-        uses: xyzzylabs/setup-zig@09d85d9dbb73308882e7a26e61a8f706eed40df1  # v1.0.2
+        uses: xyzzylabs/setup-zig@df7066a4910fe13f4643390dbbd8ce6a785fff63  # v1.0.3
         with:
           cache-key: fuzz
 
