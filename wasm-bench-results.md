@@ -16,6 +16,26 @@ run against the previous section with the *same host*.
 
 ## History
 
+### 2026-09-10, x86_64 scalar-float expansion, target `x86_64-macos` under Rosetta on `Darwin 25.6.0 arm64`
+
+Three ReleaseFast ABBA samples after adding the complete f32/f64 scalar ALU and
+conversion family to the SysV backend. The fixed benchmark workloads are still
+integer-only, so this is a regression sentinel for the shared entry, frame, and
+call paths rather than a float-throughput claim. The full forced-Spasm corpus
+stayed `58,779/58,779`, while x86 native engagement rose from 10,606 to 23,667
+entries and from 1,365 to 2,320 compiled functions.
+
+Every checksum matched, every timed row stayed native, and diagnostics reported
+`helper 0/0`; all three workloads remained above the 5x Spasm target. The new
+SSE2-portable rounding helpers are covered by focused and spec-corpus tests but
+are not exercised by these workloads.
+
+| bench | interpreter ms/rep | Spasm bare ms/rep | Spasm wake ms/rep | paired speedup | wake / bare |
+|---|---:|---:|---:|---:|---:|
+| loop `sum(i*i)`, n=2,000,000 | 59.325-70.117 | 8.082-8.110 | 7.972-8.150 | 7.32-8.68x | 0.984-1.005x |
+| `fib(32)` self-recursive | 248.464-318.792 | 34.937-37.996 | 35.088-36.217 | 7.11-8.39x | 0.953-1.004x |
+| `fib(32)` cross-recursive | 231.803-254.294 | 37.016-38.513 | 36.773-37.056 | 6.02-6.87x | 0.958-1.000x |
+
 ### 2026-08-12, x86_64 integer/memory expansion, target `x86_64-macos` under Rosetta on `Darwin 25.6.0 arm64`
 
 Three ReleaseFast ABBA samples after extending the SysV backend through i64,

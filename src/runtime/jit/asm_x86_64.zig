@@ -568,11 +568,42 @@ pub const Masm = struct {
 
     /// `cvtsi2sd destination, source32`.
     pub fn cvtI32ToDouble(self: *Masm, destination: Xmm, source: Reg) error{OutOfMemory}!void {
-        try self.emitByte(0xF2);
-        try self.emitByte(rex(false, isExtendedXmm(destination), false, isExtended(source)));
-        try self.emitByte(0x0F);
-        try self.emitByte(0x2A);
-        try self.emitByte(0xC0 | (lowBitsXmm(destination) << 3) | lowBits(source));
+        try self.emitScalarIntToFloat(0xF2, false, destination, source);
+    }
+
+    /// `cvtsi2ss destination, source32`.
+    pub fn cvtI32ToFloat(self: *Masm, destination: Xmm, source: Reg) error{OutOfMemory}!void {
+        try self.emitScalarIntToFloat(0xF3, false, destination, source);
+    }
+
+    /// `cvtsi2ss destination, source64`.
+    pub fn cvtI64ToFloat(self: *Masm, destination: Xmm, source: Reg) error{OutOfMemory}!void {
+        try self.emitScalarIntToFloat(0xF3, true, destination, source);
+    }
+
+    /// `cvtsi2sd destination, source64`.
+    pub fn cvtI64ToDouble(self: *Masm, destination: Xmm, source: Reg) error{OutOfMemory}!void {
+        try self.emitScalarIntToFloat(0xF2, true, destination, source);
+    }
+
+    /// `cvttss2si destination32, source` (round toward zero).
+    pub fn cvttFloatToI32(self: *Masm, destination: Reg, source: Xmm) error{OutOfMemory}!void {
+        try self.emitScalarFloatToInt(0xF3, false, destination, source);
+    }
+
+    /// `cvttss2si destination64, source` (round toward zero).
+    pub fn cvttFloatToI64(self: *Masm, destination: Reg, source: Xmm) error{OutOfMemory}!void {
+        try self.emitScalarFloatToInt(0xF3, true, destination, source);
+    }
+
+    /// `cvttsd2si destination32, source` (round toward zero).
+    pub fn cvttDoubleToI32(self: *Masm, destination: Reg, source: Xmm) error{OutOfMemory}!void {
+        try self.emitScalarFloatToInt(0xF2, false, destination, source);
+    }
+
+    /// `cvttsd2si destination64, source` (round toward zero).
+    pub fn cvttDoubleToI64(self: *Masm, destination: Reg, source: Xmm) error{OutOfMemory}!void {
+        try self.emitScalarFloatToInt(0xF2, true, destination, source);
     }
 
     /// `movq destination, source` where destination is an XMM register and
@@ -595,6 +626,52 @@ pub const Masm = struct {
         try self.emitByte(0xC0 | (lowBitsXmm(source) << 3) | lowBits(destination));
     }
 
+    /// `movd destination, source32` where destination is an XMM register.
+    pub fn movDXmmFromReg(self: *Masm, destination: Xmm, source: Reg) error{OutOfMemory}!void {
+        try self.emitByte(0x66);
+        try self.emitByte(rex(false, isExtendedXmm(destination), false, isExtended(source)));
+        try self.emitByte(0x0F);
+        try self.emitByte(0x6E);
+        try self.emitByte(0xC0 | (lowBitsXmm(destination) << 3) | lowBits(source));
+    }
+
+    /// `movd destination32, source` where source is an XMM register.
+    pub fn movDRegFromXmm(self: *Masm, destination: Reg, source: Xmm) error{OutOfMemory}!void {
+        try self.emitByte(0x66);
+        try self.emitByte(rex(false, isExtendedXmm(source), false, isExtended(destination)));
+        try self.emitByte(0x0F);
+        try self.emitByte(0x7E);
+        try self.emitByte(0xC0 | (lowBitsXmm(source) << 3) | lowBits(destination));
+    }
+
+    pub fn addFloat(self: *Masm, destination: Xmm, source: Xmm) error{OutOfMemory}!void {
+        try self.emitXmmReg(0xF3, 0x58, destination, source);
+    }
+
+    pub fn subFloat(self: *Masm, destination: Xmm, source: Xmm) error{OutOfMemory}!void {
+        try self.emitXmmReg(0xF3, 0x5C, destination, source);
+    }
+
+    pub fn mulFloat(self: *Masm, destination: Xmm, source: Xmm) error{OutOfMemory}!void {
+        try self.emitXmmReg(0xF3, 0x59, destination, source);
+    }
+
+    pub fn divFloat(self: *Masm, destination: Xmm, source: Xmm) error{OutOfMemory}!void {
+        try self.emitXmmReg(0xF3, 0x5E, destination, source);
+    }
+
+    pub fn sqrtFloat(self: *Masm, destination: Xmm, source: Xmm) error{OutOfMemory}!void {
+        try self.emitXmmReg(0xF3, 0x51, destination, source);
+    }
+
+    pub fn addDouble(self: *Masm, destination: Xmm, source: Xmm) error{OutOfMemory}!void {
+        try self.emitXmmReg(0xF2, 0x58, destination, source);
+    }
+
+    pub fn subDouble(self: *Masm, destination: Xmm, source: Xmm) error{OutOfMemory}!void {
+        try self.emitXmmReg(0xF2, 0x5C, destination, source);
+    }
+
     pub fn mulDouble(self: *Masm, destination: Xmm, source: Xmm) error{OutOfMemory}!void {
         try self.emitXmmReg(0xF2, 0x59, destination, source);
     }
@@ -603,11 +680,31 @@ pub const Masm = struct {
         try self.emitXmmReg(0xF2, 0x5E, destination, source);
     }
 
-    /// `ucomisd left, right` — its parity flag reports an unordered (NaN)
-    /// comparison, which native lowering routes back to Lantern for canonical
-    /// NaN boxing.
+    pub fn sqrtDouble(self: *Masm, destination: Xmm, source: Xmm) error{OutOfMemory}!void {
+        try self.emitXmmReg(0xF2, 0x51, destination, source);
+    }
+
+    /// `cvtss2sd destination, source`.
+    pub fn cvtFloatToDouble(self: *Masm, destination: Xmm, source: Xmm) error{OutOfMemory}!void {
+        try self.emitXmmReg(0xF3, 0x5A, destination, source);
+    }
+
+    /// `cvtsd2ss destination, source`.
+    pub fn cvtDoubleToFloat(self: *Masm, destination: Xmm, source: Xmm) error{OutOfMemory}!void {
+        try self.emitXmmReg(0xF2, 0x5A, destination, source);
+    }
+
+    /// `ucomisd left, right`; PF reports an unordered (NaN) comparison.
     pub fn ucomisDouble(self: *Masm, left: Xmm, right: Xmm) error{OutOfMemory}!void {
         try self.emitXmmReg(0x66, 0x2E, left, right);
+    }
+
+    /// `ucomiss left, right`; PF reports an unordered (NaN) comparison.
+    pub fn ucomisFloat(self: *Masm, left: Xmm, right: Xmm) error{OutOfMemory}!void {
+        try self.emitByte(rex(false, isExtendedXmm(left), false, isExtendedXmm(right)));
+        try self.emitByte(0x0F);
+        try self.emitByte(0x2E);
+        try self.emitByte(0xC0 | (lowBitsXmm(left) << 3) | lowBitsXmm(right));
     }
 
     /// `call target`.
@@ -752,6 +849,34 @@ pub const Masm = struct {
         try self.emitByte(0x0F);
         try self.emitByte(opcode);
         try self.emitByte(0xC0 | (lowBitsXmm(destination) << 3) | lowBitsXmm(source));
+    }
+
+    fn emitScalarIntToFloat(
+        self: *Masm,
+        prefix: u8,
+        source64: bool,
+        destination: Xmm,
+        source: Reg,
+    ) error{OutOfMemory}!void {
+        try self.emitByte(prefix);
+        try self.emitByte(rex(source64, isExtendedXmm(destination), false, isExtended(source)));
+        try self.emitByte(0x0F);
+        try self.emitByte(0x2A);
+        try self.emitByte(0xC0 | (lowBitsXmm(destination) << 3) | lowBits(source));
+    }
+
+    fn emitScalarFloatToInt(
+        self: *Masm,
+        prefix: u8,
+        destination64: bool,
+        destination: Reg,
+        source: Xmm,
+    ) error{OutOfMemory}!void {
+        try self.emitByte(prefix);
+        try self.emitByte(rex(destination64, isExtended(destination), false, isExtendedXmm(source)));
+        try self.emitByte(0x0F);
+        try self.emitByte(0x2C);
+        try self.emitByte(0xC0 | (lowBits(destination) << 3) | lowBitsXmm(source));
     }
 
     fn emitBranchDisplacement(self: *Masm, label: *Label) !void {
@@ -971,6 +1096,59 @@ test "jit asm_x86_64: encodes i64 division, narrow memory, and CL shifts" {
         0x49, 0xD3,
         0xC2, 0x41,
         0xD3, 0xEA,
+    }, machine.code.items);
+}
+
+test "jit asm_x86_64: encodes scalar float bridges, arithmetic, and compares" {
+    var machine = Masm.init(std.testing.allocator);
+    defer machine.deinit();
+
+    try machine.movDXmmFromReg(.xmm0, .rax);
+    try machine.movDRegFromXmm(.rax, .xmm0);
+    try machine.addFloat(.xmm0, .xmm1);
+    try machine.subFloat(.xmm0, .xmm1);
+    try machine.mulFloat(.xmm0, .xmm1);
+    try machine.divFloat(.xmm0, .xmm1);
+    try machine.addDouble(.xmm0, .xmm1);
+    try machine.subDouble(.xmm0, .xmm1);
+    try machine.sqrtFloat(.xmm0, .xmm1);
+    try machine.sqrtDouble(.xmm0, .xmm1);
+    try machine.cvtI32ToFloat(.xmm0, .rax);
+    try machine.cvtI64ToFloat(.xmm0, .rax);
+    try machine.cvtI32ToDouble(.xmm0, .rax);
+    try machine.cvtI64ToDouble(.xmm0, .rax);
+    try machine.cvttFloatToI32(.rax, .xmm0);
+    try machine.cvttFloatToI64(.rax, .xmm0);
+    try machine.cvttDoubleToI32(.rax, .xmm0);
+    try machine.cvttDoubleToI64(.rax, .xmm0);
+    try machine.cvtFloatToDouble(.xmm0, .xmm1);
+    try machine.cvtDoubleToFloat(.xmm0, .xmm1);
+    try machine.ucomisFloat(.xmm0, .xmm1);
+    try machine.ucomisDouble(.xmm0, .xmm1);
+
+    try std.testing.expectEqualSlices(u8, &.{
+        0x66, 0x40, 0x0F, 0x6E, 0xC0,
+        0x66, 0x40, 0x0F, 0x7E, 0xC0,
+        0xF3, 0x40, 0x0F, 0x58, 0xC1,
+        0xF3, 0x40, 0x0F, 0x5C, 0xC1,
+        0xF3, 0x40, 0x0F, 0x59, 0xC1,
+        0xF3, 0x40, 0x0F, 0x5E, 0xC1,
+        0xF2, 0x40, 0x0F, 0x58, 0xC1,
+        0xF2, 0x40, 0x0F, 0x5C, 0xC1,
+        0xF3, 0x40, 0x0F, 0x51, 0xC1,
+        0xF2, 0x40, 0x0F, 0x51, 0xC1,
+        0xF3, 0x40, 0x0F, 0x2A, 0xC0,
+        0xF3, 0x48, 0x0F, 0x2A, 0xC0,
+        0xF2, 0x40, 0x0F, 0x2A, 0xC0,
+        0xF2, 0x48, 0x0F, 0x2A, 0xC0,
+        0xF3, 0x40, 0x0F, 0x2C, 0xC0,
+        0xF3, 0x48, 0x0F, 0x2C, 0xC0,
+        0xF2, 0x40, 0x0F, 0x2C, 0xC0,
+        0xF2, 0x48, 0x0F, 0x2C, 0xC0,
+        0xF3, 0x40, 0x0F, 0x5A, 0xC1,
+        0xF2, 0x40, 0x0F, 0x5A, 0xC1,
+        0x40, 0x0F, 0x2E, 0xC1, 0x66,
+        0x40, 0x0F, 0x2E, 0xC1,
     }, machine.code.items);
 }
 

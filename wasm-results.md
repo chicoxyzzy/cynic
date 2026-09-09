@@ -31,9 +31,11 @@ proposal's `(ref exn)` text syntax, so its `.wast` files don't lower
 
 The forced-Spasm differential posture (`--spasm`) produces this exact score on
 both qualified code-generation targets: native AArch64 and x86_64-macos under
-Rosetta (2026-08-10). Gating runs add `--require-spasm-entry`; focused target
+Rosetta (2026-09-10). Gating runs add `--require-spasm-entry`; focused target
 tests additionally require generated x86 instance/cache, trap, safe-point,
 self-link, and stable-gate execution. Unsupported x86 opcode families fall
 back per function and therefore remain covered by the same semantic sweep.
-The fail-closed witness observed 880 native entries / 559 compiled functions
-on x86_64 and 53,718 / 3,648 on AArch64 in the qualification rerun.
+The fail-closed witness observed 23,667 native entries / 2,320 compiled
+functions on x86_64 and 53,707 / 3,637 on AArch64. The x86 sweep recorded
+3,220 transactional refusals (8 limits, 1,401 signatures, 745 bytecode shapes,
+1,066 opcodes) and zero emission or install failures.

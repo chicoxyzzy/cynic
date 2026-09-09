@@ -22,6 +22,7 @@ const opcodes = @import("opcodes.zig");
 const validator = @import("validator.zig");
 const reader_mod = @import("reader.zig");
 const spasm = @import("spasm.zig");
+const float_ops = @import("float_ops.zig");
 const code_alloc = @import("../jit/code_alloc.zig");
 
 const ValType = types.ValType;
@@ -3871,19 +3872,6 @@ fn readF64(body: []const u8, pc: *usize) f64 {
 
 // ── floating point ──────────────────────────────────────────────────
 
-/// Round to nearest, ties to even (§4.3.3) — distinct from Zig's
-/// `@round`, which rounds ties away from zero.
-fn roundEven(comptime T: type, x: T) T {
-    const r = @round(x);
-    var result = r;
-    if (@abs(x - @trunc(x)) == 0.5 and @rem(r, 2) != 0) {
-        result = r - std.math.sign(r);
-    }
-    // Preserve the sign of a zero result (e.g. nearest(-0.4) = -0.0).
-    if (result == 0) return std.math.copysign(@as(T, 0), x);
-    return result;
-}
-
 /// wasm min: NaN-propagating, with min(-0, +0) = -0 (§4.3.3).
 fn fmin(comptime T: type, a: T, b: T) T {
     if (a != a) return a;
@@ -3907,7 +3895,7 @@ fn floatUnop(comptime T: type, op: Op, x: T) T {
         .f32_ceil, .f64_ceil => @ceil(x),
         .f32_floor, .f64_floor => @floor(x),
         .f32_trunc, .f64_trunc => @trunc(x),
-        .f32_nearest, .f64_nearest => roundEven(T, x),
+        .f32_nearest, .f64_nearest => float_ops.roundEven(T, x),
         .f32_sqrt, .f64_sqrt => @sqrt(x),
         else => unreachable,
     };
@@ -4671,7 +4659,7 @@ fn vround(comptime N: usize, comptime T: type, comptime op: enum { ceil, floor, 
         .trunc => return @bitCast(@trunc(x)),
         .nearest => {
             var r: @Vector(N, T) = x;
-            inline for (0..N) |i| r[i] = roundEven(T, x[i]);
+            inline for (0..N) |i| r[i] = float_ops.roundEven(T, x[i]);
             return @bitCast(r);
         },
     }

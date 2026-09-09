@@ -45,11 +45,12 @@ qualification and module ownership are recorded in
 [ohaimark.md](ohaimark.md) "x86_64 architecture-parity closure."
 Generalized JS-reentrant helpers, native post-call continuations, remaining
 opcode families, and additional codegen targets remain future work. Spasm now
-also has a qualified x86_64 SysV backend for integer scalar/control, i32/i64
-globals, integer memory access, and memory size/grow/fill/copy, alongside
-catchable integer/memory/stack traps, Realm safe points, guarded self-links,
-and stable cross-function gates. Unsupported functions retain transactional
-fallback to Sarcasm. Spasm's delivery state is tracked below. This document
+also has a qualified x86_64 SysV backend for the full f32/f64 scalar ALU and
+conversion family, the i32/i64 binary/comparison core, scalar globals and
+memory access, and memory size/grow/fill/copy, alongside catchable
+numeric/memory/stack traps, Realm safe points, guarded self-links, and stable
+cross-function gates. Unsupported functions retain transactional fallback to
+Sarcasm. Spasm's delivery state is tracked below. This document
 doubles as the design record
 that pinned the architecture before the first emitter was written and as the
 delivery ledger (the "Delivery order" section tracks what each increment
@@ -1303,11 +1304,26 @@ useful:
    --quiet --spasm --require-spasm-entry` (the harness `--spasm` flag forces
    the per-instance gate on for every loaded module, while
    `--require-spasm-entry` fails if fallback alone produced the pass set).
-   On the 2026-08-12 x86_64 qualification this produced 10,606 native entries
-   and 1,365 compiled functions. Refusal telemetry reported 4,158 intentional
-   fallbacks (8 limits, 2,336 signatures, 711 bytecode-shape refusals, and
+   The 2026-08-12 x86_64 integer/memory checkpoint produced 10,606 native
+   entries and 1,365 compiled functions. Refusal telemetry reported 4,158
+   intentional fallbacks (8 limits, 2,336 signatures, 711 bytecode-shape
+   refusals, and
    1,103 unsupported opcodes) with zero code-install exhaustion; the preceding
    fixed 64 KiB arena had lost 253 otherwise-emittable functions at install.
+   The 2026-09-10 scalar-float closure adds f32/f64 signatures, locals, globals,
+   memory operations, arithmetic, comparisons, unary operations, min/max with
+   explicit NaN and signed-zero handling, reinterprets, precision changes, and
+   every trapping, saturating, signed, and unsigned float/int conversion. The
+   x86_64 baseline remains SSE2-safe: ceil/floor/trunc/nearest use small
+   raw-bit helpers instead of assuming SSE4.1, and unsigned i64 conversions use
+   split-at-2^63 lowerings. Float comparisons follow
+   [V8 Liftoff's x64 lowering](https://chromium.googlesource.com/v8/v8.git/+/6a8e79d4df27354a2446b75a7c7916bce1c6844e/src/wasm/baseline/x64/liftoff-assembler-x64-inl.h):
+   UCOMIS plus an explicit parity branch keeps unordered NaN semantics out of
+   ordinary SETcc conditions. The full differential remains 58,779/58,779 and now
+   executes 23,667 native entries across 2,320 compiled functions. The 3,220
+   remaining refusals are 8 limits, 1,401 non-scalar signatures, 745 unsupported
+   bytecode shapes, and 1,066 unsupported opcodes, with zero emission or install
+   failures.
    The **per-function code cache**
    now ships (`spasmEntryFor`): each emittable function compiles once on
    its first Spasm-enabled invoke and the cached `EntryFn` runs every
@@ -1366,13 +1382,16 @@ useful:
    self-call uses local `rel32`, a cross-function caller passes the stable gate
    as a private ninth stack argument to a shared tail-jump stub, and its stack
    guard includes the staging frame, return address, and target prologue.
-   Its low-64-bit Cell lane now carries both i32 and i64 locals, parameters,
-   results, comparisons, arithmetic, div/rem, shifts/rotates, and wrap/extend
-   conversions. The same backend emits i32/i64 globals; every integer load and
-   store width with explicit overflow-safe software bounds checks; and
+   Its low-64-bit Cell lane now carries i32/i64/f32/f64 locals, parameters,
+   results, comparisons, arithmetic, and conversions as raw scalar bits. The
+   f32/f64 surface includes all unary and binary numeric operations, NaN-aware
+   comparisons and min/max, signed-zero handling, reinterprets and precision
+   changes, and every trapping/saturating signed/unsigned float-int conversion.
+   The same backend emits scalar globals; every scalar load and store width with
+   explicit overflow-safe software bounds checks; and
    `memory.size`, helper-backed `memory.grow` with base/length refresh, plus
    overlap-safe inline `memory.fill` / `memory.copy`. Memory64 access/grow,
-   floats and conversions, bit counts, passive bulk-memory operations,
+   integer bit counts and sign-extension ops, passive bulk-memory operations,
    tables/references, SIMD, `call_indirect`, and imported-call native lowering
    remain transactional refusals.
    Non-gated calls retain the checked helper and per-function Sarcasm fallback.
