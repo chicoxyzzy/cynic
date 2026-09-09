@@ -265,6 +265,12 @@ pub const Masm = struct {
         try self.emitByte(0x99);
     }
 
+    /// `cqo` -- sign-extend rax into rdx:rax before a signed 64-bit divide.
+    pub fn signExtendAccumulator64(self: *Masm) error{OutOfMemory}!void {
+        try self.emitByte(0x48);
+        try self.emitByte(0x99);
+    }
+
     /// `div source32` -- divide edx:eax by the unsigned source.
     pub fn divReg32(self: *Masm, source: Reg) error{OutOfMemory}!void {
         try self.emitByte(rex(false, false, false, isExtended(source)));
@@ -277,6 +283,60 @@ pub const Masm = struct {
         try self.emitByte(rex(false, false, false, isExtended(source)));
         try self.emitByte(0xF7);
         try self.emitByte(0xF8 | lowBits(source));
+    }
+
+    /// `div source` -- divide rdx:rax by the unsigned 64-bit source.
+    pub fn divReg64(self: *Masm, source: Reg) error{OutOfMemory}!void {
+        try self.emitByte(rex(true, false, false, isExtended(source)));
+        try self.emitByte(0xF7);
+        try self.emitByte(0xF0 | lowBits(source));
+    }
+
+    /// `idiv source` -- divide rdx:rax by the signed 64-bit source.
+    pub fn idivReg64(self: *Masm, source: Reg) error{OutOfMemory}!void {
+        try self.emitByte(rex(true, false, false, isExtended(source)));
+        try self.emitByte(0xF7);
+        try self.emitByte(0xF8 | lowBits(source));
+    }
+
+    pub fn shlReg32Cl(self: *Masm, destination: Reg) error{OutOfMemory}!void {
+        try self.emitShiftByCl(false, 4, destination);
+    }
+
+    pub fn shrReg32Cl(self: *Masm, destination: Reg) error{OutOfMemory}!void {
+        try self.emitShiftByCl(false, 5, destination);
+    }
+
+    pub fn sarReg32Cl(self: *Masm, destination: Reg) error{OutOfMemory}!void {
+        try self.emitShiftByCl(false, 7, destination);
+    }
+
+    pub fn rolReg32Cl(self: *Masm, destination: Reg) error{OutOfMemory}!void {
+        try self.emitShiftByCl(false, 0, destination);
+    }
+
+    pub fn rorReg32Cl(self: *Masm, destination: Reg) error{OutOfMemory}!void {
+        try self.emitShiftByCl(false, 1, destination);
+    }
+
+    pub fn shlReg64Cl(self: *Masm, destination: Reg) error{OutOfMemory}!void {
+        try self.emitShiftByCl(true, 4, destination);
+    }
+
+    pub fn shrReg64Cl(self: *Masm, destination: Reg) error{OutOfMemory}!void {
+        try self.emitShiftByCl(true, 5, destination);
+    }
+
+    pub fn sarReg64Cl(self: *Masm, destination: Reg) error{OutOfMemory}!void {
+        try self.emitShiftByCl(true, 7, destination);
+    }
+
+    pub fn rolReg64Cl(self: *Masm, destination: Reg) error{OutOfMemory}!void {
+        try self.emitShiftByCl(true, 0, destination);
+    }
+
+    pub fn rorReg64Cl(self: *Masm, destination: Reg) error{OutOfMemory}!void {
+        try self.emitShiftByCl(true, 1, destination);
     }
 
     /// `shl destination, amount`.
@@ -378,6 +438,42 @@ pub const Masm = struct {
         try self.emitDisp32ModRm(lowBits(destination), base, displacement);
     }
 
+    /// `movzx destination32, word ptr [base + displacement]`.
+    pub fn load16Disp32(
+        self: *Masm,
+        destination: Reg,
+        base: Reg,
+        displacement: i32,
+    ) error{OutOfMemory}!void {
+        try self.emitByte(rex(false, isExtended(destination), false, isExtended(base)));
+        try self.emitByte(0x0F);
+        try self.emitByte(0xB7);
+        try self.emitDisp32ModRm(lowBits(destination), base, displacement);
+    }
+
+    pub fn load8Signed32Disp32(self: *Masm, destination: Reg, base: Reg, displacement: i32) error{OutOfMemory}!void {
+        try self.emitSignExtendingLoad(false, 0xBE, destination, base, displacement);
+    }
+
+    pub fn load8Signed64Disp32(self: *Masm, destination: Reg, base: Reg, displacement: i32) error{OutOfMemory}!void {
+        try self.emitSignExtendingLoad(true, 0xBE, destination, base, displacement);
+    }
+
+    pub fn load16Signed32Disp32(self: *Masm, destination: Reg, base: Reg, displacement: i32) error{OutOfMemory}!void {
+        try self.emitSignExtendingLoad(false, 0xBF, destination, base, displacement);
+    }
+
+    pub fn load16Signed64Disp32(self: *Masm, destination: Reg, base: Reg, displacement: i32) error{OutOfMemory}!void {
+        try self.emitSignExtendingLoad(true, 0xBF, destination, base, displacement);
+    }
+
+    /// `movsxd destination, dword ptr [base + displacement]`.
+    pub fn load32Signed64Disp32(self: *Masm, destination: Reg, base: Reg, displacement: i32) error{OutOfMemory}!void {
+        try self.emitByte(rex(true, isExtended(destination), false, isExtended(base)));
+        try self.emitByte(0x63);
+        try self.emitDisp32ModRm(lowBits(destination), base, displacement);
+    }
+
     /// `cmp qword ptr [base + displacement], source`.
     pub fn cmp64Disp32Reg(
         self: *Masm,
@@ -448,6 +544,23 @@ pub const Masm = struct {
         displacement: i32,
         source: Reg,
     ) error{OutOfMemory}!void {
+        try self.emitByte(rex(false, isExtended(source), false, isExtended(base)));
+        try self.emitByte(0x89);
+        try self.emitDisp32ModRm(lowBits(source), base, displacement);
+    }
+
+    /// `mov byte ptr [base + displacement], source8`.
+    pub fn store8Disp32(self: *Masm, base: Reg, displacement: i32, source: Reg) error{OutOfMemory}!void {
+        // Always emit a REX prefix: it selects spl/bpl/sil/dil for source
+        // registers 4..7 and carries the extension bits for r8..r15.
+        try self.emitByte(rex(false, isExtended(source), false, isExtended(base)));
+        try self.emitByte(0x88);
+        try self.emitDisp32ModRm(lowBits(source), base, displacement);
+    }
+
+    /// `mov word ptr [base + displacement], source16`.
+    pub fn store16Disp32(self: *Masm, base: Reg, displacement: i32, source: Reg) error{OutOfMemory}!void {
+        try self.emitByte(0x66);
         try self.emitByte(rex(false, isExtended(source), false, isExtended(base)));
         try self.emitByte(0x89);
         try self.emitDisp32ModRm(lowBits(source), base, displacement);
@@ -592,6 +705,26 @@ pub const Masm = struct {
         try self.emitByte(0x81);
         try self.emitByte(0xC0 | (@as(u8, operation) << 3) | lowBits(destination));
         try self.emitU32(immediate);
+    }
+
+    fn emitShiftByCl(self: *Masm, width64: bool, operation: u3, destination: Reg) error{OutOfMemory}!void {
+        try self.emitByte(rex(width64, false, false, isExtended(destination)));
+        try self.emitByte(0xD3);
+        try self.emitByte(0xC0 | (@as(u8, operation) << 3) | lowBits(destination));
+    }
+
+    fn emitSignExtendingLoad(
+        self: *Masm,
+        width64: bool,
+        opcode: u8,
+        destination: Reg,
+        base: Reg,
+        displacement: i32,
+    ) error{OutOfMemory}!void {
+        try self.emitByte(rex(width64, isExtended(destination), false, isExtended(base)));
+        try self.emitByte(0x0F);
+        try self.emitByte(opcode);
+        try self.emitDisp32ModRm(lowBits(destination), base, displacement);
     }
 
     fn emitDisp32ModRm(
@@ -773,6 +906,71 @@ test "jit asm_x86_64: encodes checked loop arithmetic and spill primitives" {
         0x00, 0x00, 0x48,
         0x81, 0xC4, 0x20,
         0x00, 0x00, 0x00,
+    }, machine.code.items);
+}
+
+test "jit asm_x86_64: encodes i64 division, narrow memory, and CL shifts" {
+    var machine = Masm.init(std.testing.allocator);
+    defer machine.deinit();
+
+    try machine.signExtendAccumulator64();
+    try machine.idivReg64(.r9);
+    try machine.divReg64(.r10);
+    try machine.load16Disp32(.r10, .r9, 0x1234);
+    try machine.load8Signed32Disp32(.r10, .r9, 0x1234);
+    try machine.load8Signed64Disp32(.r10, .r9, 0x1234);
+    try machine.load16Signed32Disp32(.r10, .r9, 0x1234);
+    try machine.load16Signed64Disp32(.r10, .r9, 0x1234);
+    try machine.load32Signed64Disp32(.r10, .r9, 0x1234);
+    try machine.store8Disp32(.r9, 0x1234, .r10);
+    try machine.store16Disp32(.r9, 0x1234, .r10);
+    try machine.shlReg64Cl(.r10);
+    try machine.sarReg64Cl(.r10);
+    try machine.rolReg64Cl(.r10);
+    try machine.shrReg32Cl(.r10);
+
+    try std.testing.expectEqualSlices(u8, &.{
+        0x48, 0x99,
+        0x49, 0xF7,
+        0xF9, 0x49,
+        0xF7, 0xF2,
+        0x45, 0x0F,
+        0xB7, 0x91,
+        0x34, 0x12,
+        0x00, 0x00,
+        0x45, 0x0F,
+        0xBE, 0x91,
+        0x34, 0x12,
+        0x00, 0x00,
+        0x4D, 0x0F,
+        0xBE, 0x91,
+        0x34, 0x12,
+        0x00, 0x00,
+        0x45, 0x0F,
+        0xBF, 0x91,
+        0x34, 0x12,
+        0x00, 0x00,
+        0x4D, 0x0F,
+        0xBF, 0x91,
+        0x34, 0x12,
+        0x00, 0x00,
+        0x4D, 0x63,
+        0x91, 0x34,
+        0x12, 0x00,
+        0x00, 0x45,
+        0x88, 0x91,
+        0x34, 0x12,
+        0x00, 0x00,
+        0x66, 0x45,
+        0x89, 0x91,
+        0x34, 0x12,
+        0x00, 0x00,
+        0x49, 0xD3,
+        0xE2, 0x49,
+        0xD3, 0xFA,
+        0x49, 0xD3,
+        0xC2, 0x41,
+        0xD3, 0xEA,
     }, machine.code.items);
 }
 

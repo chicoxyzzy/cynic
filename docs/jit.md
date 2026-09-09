@@ -45,9 +45,10 @@ qualification and module ownership are recorded in
 [ohaimark.md](ohaimark.md) "x86_64 architecture-parity closure."
 Generalized JS-reentrant helpers, native post-call continuations, remaining
 opcode families, and additional codegen targets remain future work. Spasm now
-also has a qualified x86_64 SysV backend for its i32 scalar/control core,
-catchable integer/stack traps, Realm safe points, guarded self-links, and
-stable cross-function gates; unsupported functions retain transactional
+also has a qualified x86_64 SysV backend for integer scalar/control, i32/i64
+globals, integer memory access, and memory size/grow/fill/copy, alongside
+catchable integer/memory/stack traps, Realm safe points, guarded self-links,
+and stable cross-function gates. Unsupported functions retain transactional
 fallback to Sarcasm. Spasm's delivery state is tracked below. This document
 doubles as the design record
 that pinned the architecture before the first emitter was written and as the
@@ -856,11 +857,13 @@ ever touches a syscall:
   [multi-realm.md](multi-realm.md) reserved for it; nothing in v1
   forecloses either answer.
 - **Realm quota accounting:** `CodeAllocator.initMetered` accepts an optional
-  live-byte ledger. Realm-backed Spasm uses it for each lazy 64 KiB
-  per-instance reservation: charge the page-aligned length before `mmap`,
-  roll the charge back if mapping fails, and discharge only after `munmap`.
-  A refused reservation leaves that instance on Sarcasm. Bare Wasm and the
-  shared JS-tier allocator keep the ordinary unmetered constructor.
+  live-byte ledger. Realm-backed Spasm charges each lazy per-instance mapping:
+  AArch64 retains the 64 KiB reservation; x86_64 uses a saturating module-size
+  estimate between 64 KiB and 4 MiB because its Cell-spill lowering expands
+  bodies more. Charge happens before `mmap`, rolls back if mapping fails, and
+  discharges only after `munmap`. A refused reservation leaves that instance
+  on Sarcasm. Bare Wasm and the shared JS-tier allocator keep the ordinary
+  unmetered constructor.
 - **Targets without codegen:** the playground builds Cynic to
   `wasm32-freestanding` — the entire `src/runtime/jit/` directory is
   comptime-gated on native targets, and every tier-up check
@@ -1300,6 +1303,11 @@ useful:
    --quiet --spasm --require-spasm-entry` (the harness `--spasm` flag forces
    the per-instance gate on for every loaded module, while
    `--require-spasm-entry` fails if fallback alone produced the pass set).
+   On the 2026-08-12 x86_64 qualification this produced 10,606 native entries
+   and 1,365 compiled functions. Refusal telemetry reported 4,158 intentional
+   fallbacks (8 limits, 2,336 signatures, 711 bytecode-shape refusals, and
+   1,103 unsupported opcodes) with zero code-install exhaustion; the preceding
+   fixed 64 KiB arena had lost 253 otherwise-emittable functions at install.
    The **per-function code cache**
    now ships (`spasmEntryFor`): each emittable function compiles once on
    its first Spasm-enabled invoke and the cached `EntryFn` runs every
@@ -1358,6 +1366,15 @@ useful:
    self-call uses local `rel32`, a cross-function caller passes the stable gate
    as a private ninth stack argument to a shared tail-jump stub, and its stack
    guard includes the staging frame, return address, and target prologue.
+   Its low-64-bit Cell lane now carries both i32 and i64 locals, parameters,
+   results, comparisons, arithmetic, div/rem, shifts/rotates, and wrap/extend
+   conversions. The same backend emits i32/i64 globals; every integer load and
+   store width with explicit overflow-safe software bounds checks; and
+   `memory.size`, helper-backed `memory.grow` with base/length refresh, plus
+   overlap-safe inline `memory.fill` / `memory.copy`. Memory64 access/grow,
+   floats and conversions, bit counts, passive bulk-memory operations,
+   tables/references, SIMD, `call_indirect`, and imported-call native lowering
+   remain transactional refusals.
    Non-gated calls retain the checked helper and per-function Sarcasm fallback.
    Imports, `call_indirect`, cross-instance calls, overlarge frames, and bodies
    Spasm cannot compile keep the generic helper / `invoke` fallback. Operands

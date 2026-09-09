@@ -16,6 +16,26 @@ run against the previous section with the *same host*.
 
 ## History
 
+### 2026-08-12, x86_64 integer/memory expansion, target `x86_64-macos` under Rosetta on `Darwin 25.6.0 arm64`
+
+Three ReleaseFast ABBA samples after extending the SysV backend through i64,
+globals, integer memory access, and memory size/grow/fill/copy. This checkpoint
+also replaces the fixed 64 KiB per-instance code arena with a bounded,
+module-sized x86 reservation. The full forced-Spasm corpus stayed
+`58,779/58,779`; native engagement rose from 10,353 to 10,606 entries and all
+253 install-stage refusals disappeared.
+
+Every checksum matched, every timed row stayed native, and diagnostics reported
+`helper 0/0`. These are same-binary interpreter/Spasm ratios under Rosetta, so
+they qualify the changed backend but are not absolute native-Linux timings.
+All three workloads remain above the 5x Spasm target in every sample.
+
+| bench | interpreter ms/rep | Spasm bare ms/rep | Spasm wake ms/rep | paired speedup | wake / bare |
+|---|---:|---:|---:|---:|---:|
+| loop `sum(i*i)`, n=2,000,000 | 68.690-77.586 | 8.799-10.155 | 9.249-11.115 | 7.64-7.82x | 1.036-1.095x |
+| `fib(32)` self-recursive | 262.897-345.381 | 44.173-46.529 | 43.759-48.671 | 5.95-7.76x | 0.984-1.046x |
+| `fib(32)` cross-recursive | 264.075-283.530 | 44.118-48.297 | 45.920-49.730 | 5.87-5.99x | 1.021-1.045x |
+
 ### 2026-08-10, x86_64 Spasm qualification, current worktree, target `x86_64-macos` under Rosetta on `Darwin 25.6.0 arm64`
 
 Three ReleaseFast ABBA samples after adding the SysV backend. The qualified
