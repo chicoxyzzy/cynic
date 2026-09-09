@@ -150,8 +150,8 @@ gets one discarded warmup per posture, then alternating T1/T2 and T2/T1 process
 pairs so slow host drift does not consistently favor one tier. T2 compilation
 remains inside the timed child lifetime.
 
-On a target without a Bistromath backend, currently x86_64, the
-`--jit --no-ohaimark` control naturally resolves to Lantern. The report keeps
+On a target without a Bistromath backend, the `--jit --no-ohaimark` control
+naturally resolves to Lantern. The report keeps
 its historical `t1_ms` column name, but on that target it means the available
 lower-tier baseline rather than native T1.
 
