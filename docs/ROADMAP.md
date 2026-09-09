@@ -2302,19 +2302,21 @@ and the per-builtin checklist; this section tracks status.
   helper-free local link for eligible self-recursion), the table/reference
   family, the first SIMD data path, and Realm fuel/interrupt safe points at
   native entry plus taken structured-loop backedges ship and are default-on
-  for wasm. A qualified SysV x86_64 backend now covers the i32/i64
-  scalar/control core, integer globals and memory access, memory
-  size/grow/fill/copy, explicit integer/memory/stack traps, entry/backedge
-  execution polls, guarded self-links, and W^X-safe stable cross-function
-  gates. Unsupported x86 functions refuse transactionally and stay in
-  Sarcasm; the forced-tier spec sweep is exact at 58,779/58,779 on both
-  x86_64 and AArch64. The 2026-08-12 x86 run reached 10,606 native entries and
-  1,365 compiled functions; stage/opcode refusal telemetry plus a bounded
-  module-sized code reservation removed all 253 fixed-arena install
-  refusals. The forced sweep is fail-closed on native engagement via
+  for wasm. A qualified SysV x86_64 backend now covers the full f32/f64 scalar
+  ALU and conversion family, the i32/i64 binary/comparison core, scalar globals
+  and memory access, memory size/grow/fill/copy, explicit numeric/memory/stack
+  traps, entry/backedge execution polls, guarded self-links, and W^X-safe stable
+  cross-function gates. Unsupported x86 functions refuse
+  transactionally and stay in Sarcasm; the forced-tier spec sweep is exact at
+  58,779/58,779 on both x86_64 and AArch64. The 2026-09-10 x86 scalar-float
+  checkpoint reached 23,667 native entries and 2,320 compiled functions, up
+  from 10,606/1,365 at the integer/memory checkpoint. The remaining 3,220
+  refusals include zero emission or install failures; SSE2-only hosts use
+  raw-bit rounding helpers instead of assuming SSE4.1. The forced sweep is
+  fail-closed on native engagement via
   `--require-spasm-entry`, and the shared instance/cache, recursive stack,
   cold-gate fallback, and post-entry interrupt tests now execute on both
-  architectures. Remaining x86 float/conversion, bit-count,
+  architectures. Remaining x86 integer bit-count/sign-extension,
   table/reference, passive bulk-memory, SIMD, indirect-call, and memory64
   parity, remaining SIMD lane operations generally, and the
   native-register/imported-call ABI remain next.
