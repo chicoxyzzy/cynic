@@ -31,6 +31,10 @@ const Counts = struct {
     skip: u32 = 0,
     spasm_runs: u64 = 0,
     spasm_compiles: u64 = 0,
+    spasm_refusals: u64 = 0,
+    spasm_refusal_stages: [wasm.spasm_refusal_stage_count]u64 = std.mem.zeroes([wasm.spasm_refusal_stage_count]u64),
+    spasm_refused_opcodes: [256]u64 = std.mem.zeroes([256]u64),
+    spasm_refused_opcode_overflow: u64 = 0,
 
     fn add(self: *Counts, other: Counts) void {
         self.pass += other.pass;
@@ -38,6 +42,10 @@ const Counts = struct {
         self.skip += other.skip;
         self.spasm_runs += other.spasm_runs;
         self.spasm_compiles += other.spasm_compiles;
+        self.spasm_refusals += other.spasm_refusals;
+        for (&self.spasm_refusal_stages, other.spasm_refusal_stages) |*total, count| total.* += count;
+        for (&self.spasm_refused_opcodes, other.spasm_refused_opcodes) |*total, count| total.* += count;
+        self.spasm_refused_opcode_overflow += other.spasm_refused_opcode_overflow;
     }
 };
 
@@ -148,6 +156,7 @@ pub fn main(init: std.process.Init) !void {
             .{ total.spasm_runs, total.spasm_compiles },
         );
         try std.Io.File.stdout().writeStreamingAll(io, spasm_summary);
+        if (total.spasm_refusals != 0) try writeSpasmRefusalSummary(io, total);
     }
 
     if (opts.write_results) try writeResults(gpa, io, total, files);
@@ -257,8 +266,52 @@ fn runManifest(arena: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, json_path:
     for (spasm_instances.items) |instance| {
         counts.spasm_runs += instance.spasm_runs;
         counts.spasm_compiles += instance.spasm_compiles;
+        counts.spasm_refusals += instance.spasm_refusals;
+        for (&counts.spasm_refusal_stages, instance.spasm_refusal_stages) |*total, count| total.* += count;
+        for (instance.spasm_refused_opcodes) |entry| {
+            if (entry.count != 0) counts.spasm_refused_opcodes[entry.opcode] += entry.count;
+        }
+        counts.spasm_refused_opcode_overflow += instance.spasm_refused_opcode_overflow;
     }
     return counts;
+}
+
+fn writeSpasmRefusalSummary(io: std.Io, counts: Counts) !void {
+    var line: [512]u8 = undefined;
+    const stages = counts.spasm_refusal_stages;
+    const summary = try std.fmt.bufPrint(
+        &line,
+        "Spasm refusals: {d} (limits {d}, signature {d}, bytecode {d}, opcode {d}, emission {d}, install {d})\n",
+        .{ counts.spasm_refusals, stages[0], stages[1], stages[2], stages[3], stages[4], stages[5] },
+    );
+    try std.Io.File.stdout().writeStreamingAll(io, summary);
+
+    var selected = std.mem.zeroes([256]bool);
+    var rank: usize = 0;
+    while (rank < 5) : (rank += 1) {
+        var best_opcode: ?u8 = null;
+        var best_count: u64 = 0;
+        for (counts.spasm_refused_opcodes, 0..) |count, opcode| {
+            if (!selected[opcode] and count > best_count) {
+                best_opcode = @intCast(opcode);
+                best_count = count;
+            }
+        }
+        const opcode = best_opcode orelse break;
+        selected[opcode] = true;
+        var top_line: [96]u8 = undefined;
+        const top = try std.fmt.bufPrint(&top_line, "  refused opcode 0x{x:0>2}: {d}\n", .{ opcode, best_count });
+        try std.Io.File.stdout().writeStreamingAll(io, top);
+    }
+    if (counts.spasm_refused_opcode_overflow != 0) {
+        var overflow_line: [128]u8 = undefined;
+        const overflow = try std.fmt.bufPrint(
+            &overflow_line,
+            "  compact per-instance opcode table overflow: {d}\n",
+            .{counts.spasm_refused_opcode_overflow},
+        );
+        try std.Io.File.stdout().writeStreamingAll(io, overflow);
+    }
 }
 
 const Loaded = struct { instance: *wasm.Instance, module: *wasm.Module };

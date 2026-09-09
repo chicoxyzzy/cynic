@@ -11,9 +11,9 @@
 //!
 //! Spasm shares the codegen substrate in `src/runtime/jit/` with
 //! Bistromath — the per-ISA encoders and executable-memory allocator (§7).
-//! AArch64 uses the shared masm facade; the qualified x86_64 subset keeps its
-//! SysV frame/operand policy in `spasm_x86_64.zig`. What Spasm does NOT share is the
-//! abstract state above the assembler: Bistromath mirrors the
+//! AArch64 uses the shared masm facade; the qualified x86_64 integer/memory
+//! backend keeps its SysV frame/operand policy in `spasm_x86_64.zig`. What
+//! Spasm does NOT share is the abstract state above the assembler: Bistromath mirrors the
 //! interpreter's `CallFrame`; Spasm's operand-stack machine is its
 //! whole compiler, and wasm frames live on the native stack with no GC
 //! walking them.
@@ -48,6 +48,10 @@ pub const supported = code_alloc.supported and switch (builtin.cpu.arch) {
 /// Tests that exercise the complete opcode surface use this narrower gate
 /// until the x86_64 backend reaches parity.
 pub const full_coverage_supported = code_alloc.supported and builtin.cpu.arch == .aarch64;
+
+pub const RefusalStage = spasm_x86_64.RefusalStage;
+pub const CompileDiagnostics = spasm_x86_64.Diagnostics;
+pub const refusal_stage_count = spasm_x86_64.refusal_stage_count;
 
 /// The interpreter's value cell — a 16-byte slot holding any wasm
 /// scalar (low bits) or a `v128`.
@@ -208,6 +212,15 @@ pub const CompileError = error{
     BranchOutOfRange,
 };
 
+fn diagnosticsForCompileError(err: CompileError) CompileDiagnostics {
+    return .{
+        .stage = switch (err) {
+            error.UnsupportedOp => .bytecode,
+            else => .emission,
+        },
+    };
+}
+
 /// Outlined execution poll called only when EntryFn's x21 controller pointer
 /// is non-null. It returns one of the trap statuses above, keeping policy and
 /// error construction in the embedding while generated code owns state
@@ -265,6 +278,13 @@ pub const CallIndirectHelperFn = *const fn (
 /// module dependency one-directional (interpreter imports spasm, never the
 /// reverse).
 pub const MemGrowHelperFn = *const fn (instance: *anyopaque, mem_index: u32, delta_pages: u64, out_baselen: [*]u64) callconv(.c) i64;
+
+/// Refresh a compiled caller's cached linear-memory view after an arbitrary
+/// wasm call. A callee can execute `memory.grow`, relocating the shared
+/// backing; retaining the pre-call base would turn the caller's next access
+/// into a use-after-free. The helper writes the current base and byte length
+/// to `out_baselen`, or a null/zero view for an invalid index.
+pub const MemViewHelperFn = *const fn (instance: *anyopaque, mem_index: u32, out_baselen: [*]u64) callconv(.c) void;
 
 /// The native helper a Spasm-compiled `memory.init` (§4.4.7) branches to:
 /// `(instance, data_index, mem_index, dst, src, len) -> status`. It copies
@@ -371,6 +391,7 @@ pub const TableFillHelperFn = *const fn (instance: *anyopaque, table_index: u32,
 pub const Helpers = struct {
     call: ?CallHelperFn = null,
     call_indirect: ?CallIndirectHelperFn = null,
+    mem_view: ?MemViewHelperFn = null,
     mem_grow: ?MemGrowHelperFn = null,
     mem_init: ?MemInitHelperFn = null,
     data_drop: ?DataDropHelperFn = null,
@@ -823,9 +844,43 @@ pub fn compile(
     helpers: Helpers,
     execution_poll_helper: ExecutionPollHelperFn,
 ) CompileError!?EntryFn {
+    return compileWithDiagnostics(
+        gpa,
+        ca,
+        func,
+        ftype,
+        module,
+        funcs,
+        func_index,
+        call_gates,
+        call_gate_stub,
+        helpers,
+        execution_poll_helper,
+        null,
+    );
+}
+
+/// The diagnostic variant used by conformance/coverage tooling. Production
+/// callers keep using `compile`, so no counter or mutable global enters the
+/// native hot path.
+pub fn compileWithDiagnostics(
+    gpa: std.mem.Allocator,
+    ca: *code_alloc.CodeAllocator,
+    func: *const CompiledFunc,
+    ftype: *const FuncType,
+    module: *const Module,
+    funcs: []const CompiledFunc,
+    func_index: u32,
+    call_gates: []const CallGate,
+    call_gate_stub: ?CallGateStubFn,
+    helpers: Helpers,
+    execution_poll_helper: ExecutionPollHelperFn,
+    diagnostics: ?*CompileDiagnostics,
+) CompileError!?EntryFn {
+    if (diagnostics) |out| out.* = .{};
     if (comptime !supported) return null;
     if (comptime builtin.cpu.arch == .x86_64) {
-        const installed = try spasm_x86_64.compile(
+        const installed = spasm_x86_64.compile(
             gpa,
             ca,
             func,
@@ -843,9 +898,16 @@ pub fn compile(
                 .wake_flag_offset = @intCast(@offsetOf(NativeExecutionControl, "wake_flag")),
                 .trap_divide_by_zero = trap_divide_by_zero,
                 .trap_int_overflow = trap_int_overflow,
+                .trap_out_of_bounds = trap_out_of_bounds,
                 .trap_call_stack_exhausted = trap_call_stack_exhausted,
+                .mem_view_helper = if (helpers.mem_view) |helper| @intFromPtr(helper) else null,
+                .mem_grow_helper = if (helpers.mem_grow) |helper| @intFromPtr(helper) else null,
+                .diagnostics = diagnostics,
             },
-        );
+        ) catch |err| {
+            if (diagnostics) |out| out.* = diagnosticsForCompileError(err);
+            return err;
+        };
         return if (installed) |bytes| code_alloc.asFn(EntryFn, bytes) else null;
     }
     return compileAarch64(
@@ -860,7 +922,10 @@ pub fn compile(
         call_gate_stub,
         helpers,
         execution_poll_helper,
-    );
+    ) catch |err| {
+        if (diagnostics) |out| out.* = diagnosticsForCompileError(err);
+        return err;
+    };
 }
 
 fn compileAarch64(
@@ -2480,6 +2545,9 @@ fn compileAarch64(
                     const r_n = try materialize(&m, stack[sp - 1], sp - 1);
                     const r_val = try materialize(&m, stack[sp - 2], sp - 2);
                     const r_dst = try materialize(&m, stack[sp - 3], sp - 3);
+                    stack[sp - 1] = .{ .reg = r_n };
+                    stack[sp - 2] = .{ .reg = r_val };
+                    stack[sp - 3] = .{ .reg = r_dst };
                     try m.emit(a64.subsReg(.x17, .x3, r_dst)); // x17 = mem_len - dst
                     try m.jumpCond(.cc, &trap_oob); // dst > mem_len
                     try m.emit(a64.cmpReg(.x17, r_n));
@@ -2495,6 +2563,14 @@ fn compileAarch64(
                     try m.emit(a64.strbRegW(r_val, .x2, r_dst));
                     try m.emit(a64.addImm(r_dst, r_dst, 1, false));
                     try m.emit(a64.subImm(r_n, r_n, 1, false));
+                    try m.jumpCbz(r_n, &fill_done);
+                    var fill_continue: masm_mod.Masm.Label = .{};
+                    defer fill_continue.deinit(gpa);
+                    try m.movImm64(.x16, 0x0fff);
+                    try m.emit(a64.andReg(.x17, r_n, .x16));
+                    try m.jumpCbnz(.x17, &fill_continue);
+                    try emitExecutionPoll(&m, gpa, stack[0..sp], &epilogue, execution_poll_helper);
+                    try m.bind(&fill_continue);
                     try m.jump(&fill_loop);
                     try m.bind(&fill_done);
                     sp -= 3;
@@ -2514,6 +2590,9 @@ fn compileAarch64(
                     const r_n = try materialize(&m, stack[sp - 1], sp - 1);
                     const r_src = try materialize(&m, stack[sp - 2], sp - 2);
                     const r_dst = try materialize(&m, stack[sp - 3], sp - 3);
+                    stack[sp - 1] = .{ .reg = r_n };
+                    stack[sp - 2] = .{ .reg = r_src };
+                    stack[sp - 3] = .{ .reg = r_dst };
                     // Both [src, src+n) and [dst, dst+n) must lie in [0, len).
                     try m.emit(a64.subsReg(.x17, .x3, r_src));
                     try m.jumpCond(.cc, &trap_oob);
@@ -2542,6 +2621,14 @@ fn compileAarch64(
                     try m.emit(a64.ldrbRegW(.x16, .x2, r_src));
                     try m.emit(a64.strbRegW(.x16, .x2, r_dst));
                     try m.emit(a64.subImm(r_n, r_n, 1, false));
+                    try m.jumpCbz(r_n, &copy_done);
+                    var bwd_continue: masm_mod.Masm.Label = .{};
+                    defer bwd_continue.deinit(gpa);
+                    try m.movImm64(.x16, 0x0fff);
+                    try m.emit(a64.andReg(.x17, r_n, .x16));
+                    try m.jumpCbnz(.x17, &bwd_continue);
+                    try emitExecutionPoll(&m, gpa, stack[0..sp], &epilogue, execution_poll_helper);
+                    try m.bind(&bwd_continue);
                     try m.jump(&bwd_loop);
                     try m.bind(&fwd_loop);
                     try m.jumpCbz(r_n, &copy_done);
@@ -2550,6 +2637,14 @@ fn compileAarch64(
                     try m.emit(a64.addImm(r_src, r_src, 1, false));
                     try m.emit(a64.addImm(r_dst, r_dst, 1, false));
                     try m.emit(a64.subImm(r_n, r_n, 1, false));
+                    try m.jumpCbz(r_n, &copy_done);
+                    var fwd_continue: masm_mod.Masm.Label = .{};
+                    defer fwd_continue.deinit(gpa);
+                    try m.movImm64(.x16, 0x0fff);
+                    try m.emit(a64.andReg(.x17, r_n, .x16));
+                    try m.jumpCbnz(.x17, &fwd_continue);
+                    try emitExecutionPoll(&m, gpa, stack[0..sp], &epilogue, execution_poll_helper);
+                    try m.bind(&fwd_continue);
                     try m.jump(&fwd_loop);
                     try m.bind(&copy_done);
                     sp -= 3;
@@ -3522,6 +3617,8 @@ fn compileAarch64(
                 const callee = calleeFuncType(module, fidx) orelse return null;
                 const nparams: usize = callee.params.len;
                 const nresults: usize = callee.results.len;
+                const refresh_memory = moduleHasMemory(module);
+                if (refresh_memory and helpers.mem_view == null) return null;
                 // Increment 1: only scalar params/results travel through
                 // the cell buffer (the low 64 bits carry the value; an i32
                 // is zero-extended). A v128/ref operand degrades.
@@ -3714,6 +3811,23 @@ fn compileAarch64(
                 // frame and the `blr`, so SP again equals the buffer base.
                 // Recompute x6 from SP before any reload.
                 try m.emit(a64.addRegSp(.x6, 0));
+                if (refresh_memory) {
+                    // The callee may have grown this instance's memory (or an
+                    // imported memory it shares), invalidating the caller's
+                    // saved x2/x3 pair. Replace those two spill slots with the
+                    // live view before the ordinary boundary reload.
+                    const out_off: u15 = spill_off + 16;
+                    if (out_off <= 4095) {
+                        try m.emit(a64.addImm(.x2, .x6, @intCast(out_off), false));
+                    } else {
+                        try m.movImm64(.x16, out_off);
+                        try m.emit(a64.addReg(.x2, .x6, .x16));
+                    }
+                    try m.emit(a64.movReg(.x0, .x19));
+                    try m.movImm64(.x1, 0);
+                    try m.callAbs(.x16, @intFromPtr(helpers.mem_view.?));
+                    try m.emit(a64.addRegSp(.x6, 0));
+                }
                 // Reload the results onto the operand bank *above* the
                 // survivors (low 64 bits per cell): result r lands at depth
                 // below+r. Then restore the spilled boundary registers, the
@@ -3755,6 +3869,8 @@ fn compileAarch64(
                 const callee = &module.types[type_idx];
                 const nparams: usize = callee.params.len;
                 const nresults: usize = callee.results.len;
+                const refresh_memory = moduleHasMemory(module);
+                if (refresh_memory and helpers.mem_view == null) return null;
                 for (callee.params) |t| if (t != .i32 and t != .i64 and t != .f32 and t != .f64) return null;
                 for (callee.results) |t| if (t != .i32 and t != .i64 and t != .f32 and t != .f64) return null;
                 // Stack at entry: [below..., args..., index]. Validation
@@ -3836,6 +3952,19 @@ fn compileAarch64(
                 // survivors, restore the boundary registers and survivors,
                 // release the frame.
                 try m.emit(a64.addRegSp(.x6, 0));
+                if (refresh_memory) {
+                    const out_off: u15 = spill_off + 16;
+                    if (out_off <= 4095) {
+                        try m.emit(a64.addImm(.x2, .x6, @intCast(out_off), false));
+                    } else {
+                        try m.movImm64(.x16, out_off);
+                        try m.emit(a64.addReg(.x2, .x6, .x16));
+                    }
+                    try m.emit(a64.movReg(.x0, .x19));
+                    try m.movImm64(.x1, 0);
+                    try m.callAbs(.x16, @intFromPtr(helpers.mem_view.?));
+                    try m.emit(a64.addRegSp(.x6, 0));
+                }
                 var r: usize = 0;
                 while (r < nresults) : (r += 1) {
                     const cell_off: u15 = @intCast(r * @sizeOf(Cell));
@@ -4015,6 +4144,14 @@ fn calleeFuncType(module: *const Module, fidx: u32) ?*const FuncType {
     const ti = module.funcs[local];
     if (ti >= module.types.len) return null;
     return &module.types[ti];
+}
+
+fn moduleHasMemory(module: *const Module) bool {
+    if (module.mems.len != 0) return true;
+    for (module.imports) |import| {
+        if (import.desc == .mem) return true;
+    }
+    return false;
 }
 
 /// Compile-time metadata for a statically defined direct callee. Imported
@@ -4669,6 +4806,59 @@ test "spasm: x86_64 native entry returns an i32 constant" {
     try testing.expectEqual(@as(u32, 42), @as(u32, @truncate(results[0])));
 }
 
+test "spasm: x86_64 diagnostics distinguish emission OOM" {
+    if (comptime builtin.cpu.arch != .x86_64 or !supported) {
+        return error.SkipZigTest;
+    }
+    var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
+    defer ca.deinit();
+    var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+
+    const body = [_]u8{ op_i32_const, 42, op_end };
+    const func: CompiledFunc = .{
+        .type_index = 0,
+        .local_types = &.{},
+        .body = &body,
+        .side_table = &.{},
+        .max_stack = 1,
+    };
+    const ftype: FuncType = .{ .params = &.{}, .results = &.{.i32} };
+    const types_arr = [_]FuncType{ftype};
+    const funcs_arr = [_]CompiledFunc{func};
+    const module: Module = .{ .types = &types_arr, .funcs = &.{0} };
+    var diagnostics: CompileDiagnostics = .{};
+
+    try testing.expectError(
+        error.OutOfMemory,
+        compileWithDiagnostics(
+            failing.allocator(),
+            &ca,
+            &func,
+            &ftype,
+            &module,
+            &funcs_arr,
+            0,
+            &.{},
+            null,
+            .{},
+            testExecutionPoll,
+            &diagnostics,
+        ),
+    );
+    try testing.expectEqual(RefusalStage.emission, diagnostics.stage);
+    try testing.expectEqual(@as(u8, 0), diagnostics.opcode);
+}
+
+test "spasm: diagnostics keep intentional unsupported operations out of emission failures" {
+    const unsupported = diagnosticsForCompileError(error.UnsupportedOp);
+    try testing.expectEqual(RefusalStage.bytecode, unsupported.stage);
+    try testing.expect(!unsupported.has_opcode);
+    try testing.expectEqual(RefusalStage.emission, diagnosticsForCompileError(error.OutOfMemory).stage);
+    try testing.expectEqual(RefusalStage.emission, diagnosticsForCompileError(error.LabelAlreadyBound).stage);
+    try testing.expectEqual(RefusalStage.emission, diagnosticsForCompileError(error.InvalidLabel).stage);
+    try testing.expectEqual(RefusalStage.emission, diagnosticsForCompileError(error.BranchOutOfRange).stage);
+}
+
 test "spasm: x86_64 native loop computes sum of squares" {
     if (comptime builtin.cpu.arch != .x86_64 or !supported) {
         return error.SkipZigTest;
@@ -4750,6 +4940,42 @@ test "spasm: x86_64 signed division preserves wasm traps" {
     frame[1] = @as(u32, @bitCast(@as(i32, -1)));
     try testing.expectEqual(trap_int_overflow, entry(&frame, &results, @ptrCast(&frame), 0, @ptrCast(&frame), @ptrCast(&frame), 0, null));
     try testing.expectEqual(@as(Cell, 0xfeed), results[0]);
+}
+
+test "spasm: x86_64 i64 min division and remainder avoid host faults" {
+    if (comptime builtin.cpu.arch != .x86_64 or !supported) {
+        return error.SkipZigTest;
+    }
+    var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
+    defer ca.deinit();
+
+    const ftype: FuncType = .{ .params = &.{ .i64, .i64 }, .results = &.{.i64} };
+    var func: CompiledFunc = .{
+        .type_index = 0,
+        .local_types = ftype.params,
+        .body = &.{ op_local_get, 0x00, op_local_get, 0x01, op_i64_div_s, op_end },
+        .side_table = &.{},
+        .max_stack = 2,
+    };
+    const div_entry = (try compileT(&ca, &func, &ftype)) orelse return error.SpasmRefused;
+
+    var frame: [2 + operand_reg_count]Cell = @splat(0);
+    var results: [1]Cell = .{0xfeed};
+    frame[0] = @as(u64, @bitCast(@as(i64, std.math.minInt(i64))));
+    frame[1] = @as(u64, @bitCast(@as(i64, -1)));
+    try testing.expectEqual(
+        trap_int_overflow,
+        div_entry(&frame, &results, @ptrCast(&frame), 0, @ptrCast(&frame), @ptrCast(&frame), 0, null),
+    );
+    try testing.expectEqual(@as(Cell, 0xfeed), results[0]);
+
+    func.body = &.{ op_local_get, 0x00, op_local_get, 0x01, op_i64_rem_s, op_end };
+    const rem_entry = (try compileT(&ca, &func, &ftype)) orelse return error.SpasmRefused;
+    try testing.expectEqual(
+        trap_ok,
+        rem_entry(&frame, &results, @ptrCast(&frame), 0, @ptrCast(&frame), @ptrCast(&frame), 0, null),
+    );
+    try testing.expectEqual(@as(u64, 0), @as(u64, @truncate(results[0])));
 }
 
 const X86CallTestState = struct {
@@ -4969,6 +5195,179 @@ const TestExecutionPoll = struct {
         return trap_ok;
     }
 };
+
+test "spasm: native bulk-memory loops observe post-entry interrupts" {
+    if (comptime !supported) return error.SkipZigTest;
+
+    var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
+    defer ca.deinit();
+
+    const ftype: FuncType = .{ .params = &.{ .i32, .i32, .i32 }, .results = &.{} };
+    const types_arr = [_]FuncType{ftype};
+    const mems = [_]@import("types.zig").MemType{.{ .limits = .{ .min = 1 } }};
+    const module: Module = .{ .types = &types_arr, .funcs = &.{0}, .mems = &mems };
+    const fill_body = [_]u8{
+        op_local_get,   0x00, op_local_get, 0x01,   op_local_get, 0x02,
+        op_misc_prefix, 0x0b, 0x00,         op_end,
+    };
+    const copy_body = [_]u8{
+        op_local_get,   0x00, op_local_get, 0x01, op_local_get, 0x02,
+        op_misc_prefix, 0x0a, 0x00,         0x00, op_end,
+    };
+    const bodies = [_][]const u8{ &fill_body, &copy_body };
+    var funcs = [_]CompiledFunc{.{
+        .type_index = 0,
+        .local_types = ftype.params,
+        .body = bodies[0],
+        .side_table = &.{},
+        .max_stack = 3,
+    }};
+
+    var memory: [32 * 1024]u8 = @splat(0x5a);
+    var frame: [3 + operand_reg_count]Cell = @splat(0);
+    var results: [1]Cell = .{0};
+    var wake = std.atomic.Value(bool).init(true);
+    var poll: TestExecutionPoll = .{ .stop_after = 2 };
+    var control: NativeExecutionControl = .{ .wake_flag = &wake, .poll_context = &poll };
+
+    var body_index: usize = 0;
+    while (body_index < bodies.len) : (body_index += 1) {
+        funcs[0].body = bodies[body_index];
+        const entry = (try compile(
+            testing.allocator,
+            &ca,
+            &funcs[0],
+            &ftype,
+            &module,
+            &funcs,
+            0,
+            &.{},
+            null,
+            .{},
+            TestExecutionPoll.poll,
+        )) orelse return error.SpasmRefused;
+
+        const invocations: usize = if (body_index == 0) 1 else 2;
+        var invocation: usize = 0;
+        while (invocation < invocations) : (invocation += 1) {
+            poll.calls = 0;
+            frame[0] = if (body_index == 0) 0 else if (invocation == 0) 0 else 8192;
+            frame[1] = if (body_index == 0) 0xab else if (invocation == 0) 8192 else 0;
+            frame[2] = 8192;
+            const status = entry(
+                &frame,
+                &results,
+                &memory,
+                memory.len,
+                @ptrCast(&frame),
+                @ptrCast(&frame),
+                0,
+                @ptrCast(&control),
+            );
+            try testing.expectEqual(trap_execution_interrupted, status);
+            try testing.expect(poll.calls >= 2);
+        }
+    }
+}
+
+test "spasm: native bulk memory checks before writes and copies overlap safely" {
+    if (comptime !supported) return error.SkipZigTest;
+
+    var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
+    defer ca.deinit();
+
+    const ftype: FuncType = .{ .params = &.{ .i32, .i32, .i32 }, .results = &.{} };
+    const types_arr = [_]FuncType{ftype};
+    const mems = [_]@import("types.zig").MemType{.{ .limits = .{ .min = 1 } }};
+    const module: Module = .{ .types = &types_arr, .funcs = &.{0}, .mems = &mems };
+    var func: CompiledFunc = .{
+        .type_index = 0,
+        .local_types = ftype.params,
+        .body = &.{
+            op_local_get,   0x00, op_local_get, 0x01,   op_local_get, 0x02,
+            op_misc_prefix, 0x0b, 0x00,         op_end,
+        },
+        .side_table = &.{},
+        .max_stack = 3,
+    };
+    var funcs = [_]CompiledFunc{func};
+    const fill_entry = (try compile(
+        testing.allocator,
+        &ca,
+        &funcs[0],
+        &ftype,
+        &module,
+        &funcs,
+        0,
+        &.{},
+        null,
+        .{},
+        testExecutionPoll,
+    )) orelse return error.SpasmRefused;
+
+    var memory: [32]u8 = @splat(0x5a);
+    const untouched = memory;
+    var frame: [3 + operand_reg_count]Cell = @splat(0);
+    var results: [1]Cell = .{0};
+    frame[0] = 30;
+    frame[1] = 0xab;
+    frame[2] = 4;
+    try testing.expectEqual(
+        trap_out_of_bounds,
+        fill_entry(&frame, &results, &memory, memory.len, @ptrCast(&frame), @ptrCast(&frame), 0, null),
+    );
+    try testing.expectEqualSlices(u8, &untouched, &memory);
+
+    func.body = &.{
+        op_local_get,   0x00, op_local_get, 0x01, op_local_get, 0x02,
+        op_misc_prefix, 0x0a, 0x00,         0x00, op_end,
+    };
+    funcs[0] = func;
+    const copy_entry = (try compile(
+        testing.allocator,
+        &ca,
+        &funcs[0],
+        &ftype,
+        &module,
+        &funcs,
+        0,
+        &.{},
+        null,
+        .{},
+        testExecutionPoll,
+    )) orelse return error.SpasmRefused;
+
+    for (memory[0..8], 0..) |*byte, index| byte.* = @intCast(index);
+    frame[0] = 2;
+    frame[1] = 0;
+    frame[2] = 6;
+    try testing.expectEqual(
+        trap_ok,
+        copy_entry(&frame, &results, &memory, memory.len, @ptrCast(&frame), @ptrCast(&frame), 0, null),
+    );
+    try testing.expectEqualSlices(u8, &.{ 0, 1, 0, 1, 2, 3, 4, 5 }, memory[0..8]);
+
+    for (memory[0..8], 0..) |*byte, index| byte.* = @intCast(index);
+    frame[0] = 0;
+    frame[1] = 2;
+    frame[2] = 6;
+    try testing.expectEqual(
+        trap_ok,
+        copy_entry(&frame, &results, &memory, memory.len, @ptrCast(&frame), @ptrCast(&frame), 0, null),
+    );
+    try testing.expectEqualSlices(u8, &.{ 2, 3, 4, 5, 6, 7, 6, 7 }, memory[0..8]);
+
+    @memset(&memory, 0x5a);
+    const before_copy_oob = memory;
+    frame[0] = 30;
+    frame[1] = 0;
+    frame[2] = 4;
+    try testing.expectEqual(
+        trap_out_of_bounds,
+        copy_entry(&frame, &results, &memory, memory.len, @ptrCast(&frame), @ptrCast(&frame), 0, null),
+    );
+    try testing.expectEqualSlices(u8, &before_copy_oob, &memory);
+}
 
 /// Compile `func` against a throwaway single-function module — the unit tests
 /// here build a `CompiledFunc`/`FuncType` directly and never emit a `call`, so

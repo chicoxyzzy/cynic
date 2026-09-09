@@ -531,12 +531,18 @@ the measured design space:
   in jit.md §7.1 (still deferred).
 
   The complete opcode surface above is the mature AArch64 backend. The
-  qualified x86_64 SysV backend currently emits the i32 scalar/control core,
-  catchable integer and native-stack traps, Realm entry/backedge polls,
+  qualified x86_64 SysV backend emits the i32/i64 scalar/control core, integer
+  globals, every integer memory load/store width, memory size/grow/fill/copy,
+  catchable integer/memory/native-stack traps, Realm entry/backedge polls,
   guarded local self-links, and stable W^X-safe cross-function call gates.
-  Every other x86 body refuses before code publication and runs in Sarcasm.
+  Float, table/reference, passive bulk-memory, SIMD, indirect-call, memory64
+  access/grow, and other unsupported x86 bodies refuse before code publication
+  and run in Sarcasm.
   This is a coverage difference, not a semantic one: forced-Spasm sweeps on
-  both architectures pass all 58,779 scored spec commands. CI pairs
+  both architectures pass all 58,779 scored spec commands. The 2026-08-12
+  x86 sweep exercised 10,606 native entries / 1,365 compiled functions and
+  recorded zero code-install exhaustion after introducing the bounded,
+  module-sized executable-code reservation. CI pairs
   `--spasm` with `--require-spasm-entry`, and the focused x86 instance/cache,
   trap, safe-point, self-link, and stable-gate tests require actual native
   entry, so the differential gate cannot be satisfied by fallback alone.

@@ -205,6 +205,7 @@ pub const PAGE_SIZE = 1 << 16;
 const spasm_helpers: spasm.Helpers = .{
     .call = spasmCall,
     .call_indirect = spasmCallIndirect,
+    .mem_view = spasmMemoryView,
     .mem_grow = spasmMemoryGrow,
     .mem_init = spasmMemoryInit,
     .data_drop = spasmDataDrop,
@@ -364,6 +365,48 @@ const SpasmCache = struct {
     }
 };
 
+const spasm_code_reserve_min: usize = 64 * 1024;
+const spasm_code_reserve_max: usize = 4 * 1024 * 1024;
+
+fn spasmX86CodeReserve(body_bytes: usize, func_count: usize) usize {
+    // The x86_64 backend deliberately spills each operand to a Cell, so its
+    // native expansion is materially larger than AArch64's register-cached
+    // code. Keep tiny instances at the historical footprint, but size larger
+    // modules once up front because installed entry pointers make relocating a
+    // full CodeAllocator unsafe. Saturating arithmetic keeps hostile module
+    // sizes inside the hard reservation cap.
+    const body_code = std.math.mul(usize, body_bytes, 64) catch std.math.maxInt(usize);
+    const func_code = std.math.mul(usize, func_count, 256) catch std.math.maxInt(usize);
+    const estimate = std.math.add(usize, body_code, func_code) catch std.math.maxInt(usize);
+    return @min(@max(estimate, spasm_code_reserve_min), spasm_code_reserve_max);
+}
+
+fn spasmCodeReserve(funcs: []const CompiledFunc) usize {
+    if (comptime builtin.cpu.arch != .x86_64) return spasm_code_reserve_min;
+
+    var body_bytes: usize = 0;
+    for (funcs) |func| {
+        body_bytes = std.math.add(usize, body_bytes, func.body.len) catch std.math.maxInt(usize);
+    }
+    return spasmX86CodeReserve(body_bytes, funcs.len);
+}
+
+test "wasm spasm: x86 code reserve scales and stays bounded" {
+    const testing = std.testing;
+
+    try testing.expectEqual(@as(usize, 64 * 1024), spasmX86CodeReserve(0, 0));
+    try testing.expectEqual(@as(usize, 64 * 1024), spasmX86CodeReserve(128, 1));
+    try testing.expect(spasmX86CodeReserve(4 * 1024, 64) > 64 * 1024);
+    try testing.expectEqual(@as(usize, 4 * 1024 * 1024), spasmX86CodeReserve(std.math.maxInt(usize), std.math.maxInt(usize)));
+}
+
+pub const SpasmRefusedOpcode = struct {
+    opcode: u8 = 0,
+    count: u32 = 0,
+};
+
+pub const spasm_refused_opcode_capacity = 16;
+
 pub const Instance = struct {
     module: *const Module,
     funcs: []const CompiledFunc,
@@ -461,6 +504,15 @@ pub const Instance = struct {
     /// reuses an `EntryFn` instead of recompiling every call (N runs,
     /// 1 compile). docs/jit.md §6.
     spasm_compiles: u32 = 0,
+    /// Transactional compile refusals, grouped by terminal stage and opcode.
+    /// The compact opcode table is populated only while diagnostics are on;
+    /// production does not scan or mutate it.
+    spasm_refusals: u32 = 0,
+    spasm_last_refusal_stage: spasm.RefusalStage = .none,
+    spasm_last_refused_opcode: u8 = 0,
+    spasm_refusal_stages: [spasm.refusal_stage_count]u32 = std.mem.zeroes([spasm.refusal_stage_count]u32),
+    spasm_refused_opcodes: [spasm_refused_opcode_capacity]SpasmRefusedOpcode = std.mem.zeroes([spasm_refused_opcode_capacity]SpasmRefusedOpcode),
+    spasm_refused_opcode_overflow: u32 = 0,
     /// Nested helper-mediated direct `call`s that entered a cached Spasm
     /// `EntryFn` without re-entering `invoke`. Hot local and same-instance
     /// gate links do not update this per-call diagnostic counter. The top-level
@@ -567,7 +619,9 @@ pub const Instance = struct {
                 const ftype = &self.module.types[func.type_index];
                 const defined_index = std.math.cast(u32, idx) orelse return null;
                 const func_index = std.math.add(u32, self.func_import_count, defined_index) catch return null;
-                if (spasm.compile(self.gpa, &cache.ca, func, ftype, self.module, self.funcs, func_index, cache.gates, cache.call_gate_stub, spasm_helpers, spasmPollExecution) catch null) |e| {
+                var diagnostics: spasm.CompileDiagnostics = .{};
+                const diagnostics_out: ?*spasm.CompileDiagnostics = if (self.spasm_diagnostics) &diagnostics else null;
+                if (spasm.compileWithDiagnostics(self.gpa, &cache.ca, func, ftype, self.module, self.funcs, func_index, cache.gates, cache.call_gate_stub, spasm_helpers, spasmPollExecution, diagnostics_out) catch null) |e| {
                     cache.slots[idx] = .{ .compiled = e };
                     // Code pages are never patched after installation. This
                     // data-only store is the lazy-link publication the gate
@@ -577,9 +631,30 @@ pub const Instance = struct {
                     return e;
                 }
                 cache.slots[idx] = .failed;
+                if (self.spasm_diagnostics) self.recordSpasmRefusal(diagnostics);
                 return null;
             },
         }
+    }
+
+    fn recordSpasmRefusal(self: *Instance, diagnostics: spasm.CompileDiagnostics) void {
+        if (diagnostics.stage == .none or diagnostics.stage == .count) return;
+        self.spasm_refusals +%= 1;
+        self.spasm_last_refusal_stage = diagnostics.stage;
+        self.spasm_last_refused_opcode = diagnostics.opcode;
+
+        const stage_index = @intFromEnum(diagnostics.stage) - 1;
+        self.spasm_refusal_stages[stage_index] +%= 1;
+
+        if (!diagnostics.has_opcode) return;
+
+        for (&self.spasm_refused_opcodes) |*entry| {
+            if (entry.count != 0 and entry.opcode != diagnostics.opcode) continue;
+            entry.opcode = diagnostics.opcode;
+            entry.count +%= 1;
+            return;
+        }
+        self.spasm_refused_opcode_overflow +%= 1;
     }
 
     /// Create the per-instance native cache and its stable call-gate records.
@@ -587,7 +662,7 @@ pub const Instance = struct {
     /// can therefore embed gate addresses while the entry pointer itself is
     /// filled later by lazy compilation.
     fn initSpasmCache(self: *Instance) ?SpasmCache {
-        var ca = code_alloc.CodeAllocator.initMetered(self.gpa, 64 * 1024, self.spasm_memory_ledger) catch return null;
+        var ca = code_alloc.CodeAllocator.initMetered(self.gpa, spasmCodeReserve(self.funcs), self.spasm_memory_ledger) catch return null;
         const slots = self.gpa.alloc(SpasmCache.Slot, self.funcs.len) catch {
             ca.deinit();
             return null;
@@ -1869,6 +1944,18 @@ fn spasmMemoryGrow(instance_opaque: *anyopaque, mem_idx: u32, delta: u64, out_ba
     out_baselen[0] = @intFromPtr(mem.data.ptr);
     out_baselen[1] = mem.data.len;
     return result;
+}
+
+fn spasmMemoryView(instance_opaque: *anyopaque, mem_idx: u32, out_baselen: [*]u64) callconv(.c) void {
+    const inst: *Instance = @ptrCast(@alignCast(instance_opaque));
+    if (mem_idx >= inst.memories.len) {
+        out_baselen[0] = 0;
+        out_baselen[1] = 0;
+        return;
+    }
+    const mem = inst.memories[mem_idx];
+    out_baselen[0] = @intFromPtr(mem.data.ptr);
+    out_baselen[1] = mem.data.len;
 }
 
 /// The native helper a Spasm-compiled `memory.init` (§4.4.7) branches to.

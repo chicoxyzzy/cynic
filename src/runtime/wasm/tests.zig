@@ -601,7 +601,7 @@ test "wasm spasm: x86 cold gate preserves interpreter fallback for a refused cal
     const a = arena.allocator();
 
     // Both functions have the x86-qualified i32 signature. The caller is
-    // emittable, while the callee's i32.rotl remains outside the x86 subset.
+    // emittable, while the callee's i32.clz remains outside the x86 subset.
     // Its cold stable gate must resolve through Sarcasm without publishing a
     // bogus native entry or changing the result.
     const tbody = [_]u8{ 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f };
@@ -616,13 +616,11 @@ test "wasm spasm: x86 cold gate preserves interpreter fallback for a refused cal
         0x10,
         0x01,
         0x0b,
-        0x07,
+        0x05,
         0x00,
         0x20,
         0x00,
-        0x41,
-        0x01,
-        0x77,
+        0x67,
         0x0b,
     };
     const bytes = try assemble(a, &.{
@@ -649,11 +647,13 @@ test "wasm spasm: x86 cold gate preserves interpreter fallback for a refused cal
     while (invocation < 2) : (invocation += 1) {
         const result = try interp.invoke(&instance, testing.allocator, fidx, cells);
         defer testing.allocator.free(result);
-        try testing.expectEqual(@as(u32, 42), @as(u32, @truncate(result[0])));
+        try testing.expectEqual(@as(u32, 27), @as(u32, @truncate(result[0])));
     }
     try testing.expectEqual(@as(u32, 2), instance.spasm_runs);
     try testing.expectEqual(@as(u32, 1), instance.spasm_compiles);
     try testing.expectEqual(@as(u32, 0), instance.spasm_native_calls);
+    try testing.expectEqual(@as(u32, 1), instance.spasm_refusals);
+    try testing.expectEqual(@as(u8, 0x67), instance.spasm_last_refused_opcode);
 }
 
 test "wasm spasm: warm mutually recursive calls use same-instance native links" {
@@ -1249,7 +1249,7 @@ const mem_module_body = [_]u8{
 };
 
 test "wasm spasm: i32.load compiles and reads linear memory" {
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var buf: [8 + mem_module_body.len]u8 = undefined;
     const bytes = withPreamble(&buf, &mem_module_body);
 
@@ -1290,7 +1290,7 @@ fn setupMemModule(instance: *interp.Instance, a: std.mem.Allocator, bytes: []con
 }
 
 test "wasm spasm: i32.store compiles and writes linear memory" {
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var buf: [8 + mem_module_body.len]u8 = undefined;
     const bytes = withPreamble(&buf, &mem_module_body);
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -1315,7 +1315,7 @@ test "wasm spasm: i32.store compiles and writes linear memory" {
 }
 
 test "wasm spasm: an out-of-bounds load raises a catchable trap" {
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var buf: [8 + mem_module_body.len]u8 = undefined;
     const bytes = withPreamble(&buf, &mem_module_body);
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -1358,7 +1358,7 @@ const subwidth_module_body = [_]u8{
 };
 
 test "wasm spasm: i32.load8_u compiles and zero-extends a byte" {
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var buf: [8 + subwidth_module_body.len]u8 = undefined;
     const bytes = withPreamble(&buf, &subwidth_module_body);
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -1402,7 +1402,7 @@ const memfill_body = [_]u8{
 };
 
 test "wasm spasm: memory.fill writes the byte range, then loads it back" {
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var buf: [8 + memfill_body.len]u8 = undefined;
     const bytes = withPreamble(&buf, &memfill_body);
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -1445,7 +1445,7 @@ const memcopy_body = [_]u8{
 };
 
 test "wasm spasm: memory.copy moves a byte range" {
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var buf: [8 + memcopy_body.len]u8 = undefined;
     const bytes = withPreamble(&buf, &memcopy_body);
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -2369,7 +2369,7 @@ const memsize_body = [_]u8{
 };
 
 test "wasm spasm: memory.size returns the page count" {
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var buf: [8 + memsize_body.len]u8 = undefined;
     const bytes = withPreamble(&buf, &memsize_body);
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -2400,7 +2400,7 @@ const memgrow_body = [_]u8{
 };
 
 test "wasm spasm: memory.grow grows the memory and returns the previous page count" {
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var buf: [8 + memgrow_body.len]u8 = undefined;
     const bytes = withPreamble(&buf, &memgrow_body);
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -2423,6 +2423,43 @@ test "wasm spasm: memory.grow grows the memory and returns the previous page cou
     try testing.expect(instance.spasm_runs >= 1);
 }
 
+test "wasm spasm: caller refreshes memory after callee growth" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+
+    // f() calls g(), then reads the first byte of the page g() added. A
+    // compiled caller that retained its pre-call base/length would report an
+    // OOB trap here (or use a stale pointer for an address in the old page).
+    const module_body = [_]u8{
+        0x01, 0x08, 0x02,
+        0x60, 0x00, 0x01, 0x7f, // type 0: () -> i32
+        0x60, 0x00, 0x00, // type 1: () -> ()
+        0x03, 0x03, 0x02, 0x00, 0x01, // funcs: f(type 0), g(type 1)
+        0x05, 0x04, 0x01, 0x01, 0x01, 0x02, // memory: min 1, max 2
+        0x07, 0x05, 0x01, 0x01, 0x66, 0x00, 0x00, // export f
+        0x0a, 0x15, 0x02, 0x0b, 0x00, 0x10, 0x01,
+        0x41, 0x80, 0x80, 0x04, 0x2d, 0x00, 0x00,
+        0x0b, 0x07, 0x00, 0x41, 0x01, 0x40, 0x00,
+        0x1a, 0x0b,
+    };
+    var buf: [8 + module_body.len]u8 = undefined;
+    const bytes = withPreamble(&buf, &module_body);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var instance: interp.Instance = undefined;
+    const mp = try setupMemModule(&instance, a, bytes);
+    defer instance.deinit();
+
+    const fidx = funcExport(mp, "f") orelse return error.NoSuchExport;
+    const result = try interp.invoke(&instance, testing.allocator, fidx, &.{});
+    defer testing.allocator.free(result);
+
+    try testing.expectEqual(@as(u32, 0), @as(u32, @truncate(result[0])));
+    try testing.expectEqual(@as(u64, 2 * interp.PAGE_SIZE), @as(u64, instance.memories[0].data.len));
+    try testing.expect(instance.spasm_runs >= 2);
+}
+
 // `(i32,i32)->i32` adders for the rotates: "rl" = i32.rotl (0x77),
 // "rr" = i32.rotr (0x78).
 const i32_rotl_body = [_]u8{
@@ -2432,8 +2469,8 @@ const i32_rotl_body = [_]u8{
     0x0a, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x20, 0x01, 0x77, 0x0b, // local.get 0; local.get 1; i32.rotl; end
 };
 
-test "wasm spasm: i32.rotl rotates left via RORV by (32 - count)" {
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+test "wasm spasm: i32.rotl rotates left by the variable count" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var buf: [8 + i32_rotl_body.len]u8 = undefined;
     const bytes = withPreamble(&buf, &i32_rotl_body);
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -2468,8 +2505,8 @@ const i32_rotr_body = [_]u8{
     0x0a, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x20, 0x01, 0x78, 0x0b, // local.get 0; local.get 1; i32.rotr; end
 };
 
-test "wasm spasm: i32.rotr rotates right via RORV" {
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+test "wasm spasm: i32.rotr rotates right by the variable count" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var buf: [8 + i32_rotr_body.len]u8 = undefined;
     const bytes = withPreamble(&buf, &i32_rotr_body);
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -2498,7 +2535,7 @@ test "wasm spasm: i32.rotr rotates right via RORV" {
 }
 
 test "wasm spasm: i32.load8_s sign-extends a byte" {
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var buf: [8 + subwidth_module_body.len]u8 = undefined;
     const bytes = withPreamble(&buf, &subwidth_module_body);
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -2523,7 +2560,7 @@ test "wasm spasm: i32.load8_s sign-extends a byte" {
 }
 
 test "wasm spasm: i32.store8 writes only the low byte" {
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var buf: [8 + subwidth_module_body.len]u8 = undefined;
     const bytes = withPreamble(&buf, &subwidth_module_body);
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -2559,7 +2596,7 @@ const i64_add_body = [_]u8{
 };
 
 test "wasm spasm: i64.add compiles and runs Spasm-compiled (full 64-bit)" {
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var buf: [8 + i64_add_body.len]u8 = undefined;
     const bytes = withPreamble(&buf, &i64_add_body);
 
@@ -2598,7 +2635,7 @@ const i64_lt_s_body = [_]u8{
 };
 
 test "wasm spasm: i64.lt_s compiles and compares the full 64 bits" {
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var buf: [8 + i64_lt_s_body.len]u8 = undefined;
     const bytes = withPreamble(&buf, &i64_lt_s_body);
 
@@ -2657,7 +2694,7 @@ fn runSpasmI64Div(a_alloc: std.mem.Allocator, arg_a: u64, arg_b: u64) ![]u128 {
 }
 
 test "wasm spasm: i64.div_s compiles and divides the full 64 bits" {
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var buf: [8 + i64_div_s_body.len]u8 = undefined;
     const bytes = withPreamble(&buf, &i64_div_s_body);
 
@@ -2687,7 +2724,7 @@ test "wasm spasm: i64.div_s compiles and divides the full 64 bits" {
 }
 
 test "wasm spasm: i64.div_s by zero raises a catchable trap" {
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     try testing.expectError(error.IntegerDivideByZero, runSpasmI64Div(arena.allocator(), 5, 0));
@@ -2713,7 +2750,7 @@ const i64_mem_module_body = [_]u8{
 };
 
 test "wasm spasm: i64.load compiles and reads eight bytes" {
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var buf: [8 + i64_mem_module_body.len]u8 = undefined;
     const bytes = withPreamble(&buf, &i64_mem_module_body);
 
@@ -2742,6 +2779,32 @@ test "wasm spasm: i64.load compiles and reads eight bytes" {
     try testing.expect(instance.spasm_runs >= 1);
 }
 
+test "wasm spasm: i64.store compiles and writes eight bytes" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var buf: [8 + i64_mem_module_body.len]u8 = undefined;
+    const bytes = withPreamble(&buf, &i64_mem_module_body);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var instance: interp.Instance = undefined;
+    const mp = try setupMemModule(&instance, a, bytes);
+    defer instance.deinit();
+
+    const fidx = funcExport(mp, "st") orelse return error.NoSuchExport;
+    const cells = try a.alloc(u128, 2);
+    cells[0] = 24;
+    cells[1] = 0x0123_4567_89AB_CDEF;
+    const res = try interp.invoke(&instance, testing.allocator, fidx, cells);
+    defer testing.allocator.free(res);
+
+    try testing.expectEqual(
+        @as(u64, 0x0123_4567_89AB_CDEF),
+        std.mem.readInt(u64, instance.memories[0].data[24..][0..8], .little),
+    );
+    try testing.expect(instance.spasm_runs >= 1);
+}
+
 // An `(i32)->i64` exported as "ext": local.get 0; i64.extend_i32_s; end.
 const i64_extend_body = [_]u8{
     0x01, 0x06, 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7e, // type (i32)->i64
@@ -2751,7 +2814,7 @@ const i64_extend_body = [_]u8{
 };
 
 test "wasm spasm: i64.extend_i32_s sign-extends a negative i32" {
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var buf: [8 + i64_extend_body.len]u8 = undefined;
     const bytes = withPreamble(&buf, &i64_extend_body);
 
@@ -3585,7 +3648,7 @@ const global_get_body = [_]u8{
 };
 
 test "wasm spasm: global.get reads the instance global" {
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var buf: [8 + global_get_body.len]u8 = undefined;
     const bytes = withPreamble(&buf, &global_get_body);
 
@@ -3622,7 +3685,7 @@ const global_set_body = [_]u8{
 };
 
 test "wasm spasm: global.set then global.get round-trips" {
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var buf: [8 + global_set_body.len]u8 = undefined;
     const bytes = withPreamble(&buf, &global_set_body);
 
