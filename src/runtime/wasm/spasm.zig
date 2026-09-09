@@ -11,8 +11,8 @@
 //!
 //! Spasm shares the codegen substrate in `src/runtime/jit/` with
 //! Bistromath — the per-ISA encoders and executable-memory allocator (§7).
-//! AArch64 uses the shared masm facade; the qualified x86_64 integer/memory
-//! backend keeps its SysV frame/operand policy in `spasm_x86_64.zig`. What
+//! AArch64 uses the shared masm facade; the qualified x86_64 scalar backend
+//! keeps its SysV frame/operand policy in `spasm_x86_64.zig`. What
 //! Spasm does NOT share is the abstract state above the assembler: Bistromath mirrors the
 //! interpreter's `CallFrame`; Spasm's operand-stack machine is its
 //! whole compiler, and wasm frames live on the native stack with no GC
@@ -898,6 +898,7 @@ pub fn compileWithDiagnostics(
                 .wake_flag_offset = @intCast(@offsetOf(NativeExecutionControl, "wake_flag")),
                 .trap_divide_by_zero = trap_divide_by_zero,
                 .trap_int_overflow = trap_int_overflow,
+                .trap_invalid_conversion = trap_invalid_conversion,
                 .trap_out_of_bounds = trap_out_of_bounds,
                 .trap_call_stack_exhausted = trap_call_stack_exhausted,
                 .mem_view_helper = if (helpers.mem_view) |helper| @intFromPtr(helper) else null,

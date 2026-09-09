@@ -1,6 +1,6 @@
 //! x86_64 Spasm backend.
 //!
-//! This first backend slice keeps scalar operands in the existing trailing
+//! This backend keeps scalar operands in the existing trailing
 //! `Cell` scratch area rather than trying to project AArch64's seven-register
 //! cache onto the smaller SysV register file. The validated-bytecode compiler
 //! remains one pass, constants still fold, and unsupported instructions refuse
@@ -10,6 +10,7 @@ const std = @import("std");
 
 const x64 = @import("../jit/asm_x86_64.zig");
 const code_alloc = @import("../jit/code_alloc.zig");
+const float_ops = @import("float_ops.zig");
 const CompiledFunc = @import("code.zig").CompiledFunc;
 const Module = @import("module.zig").Module;
 const FuncType = @import("types.zig").FuncType;
@@ -56,6 +57,7 @@ pub const Config = struct {
     wake_flag_offset: i32,
     trap_divide_by_zero: u32,
     trap_int_overflow: u32,
+    trap_invalid_conversion: u32,
     trap_out_of_bounds: u32,
     trap_call_stack_exhausted: u32,
     mem_view_helper: ?usize,
@@ -95,6 +97,8 @@ const op_global_get: u8 = 0x23;
 const op_global_set: u8 = 0x24;
 const op_i32_load: u8 = 0x28;
 const op_i64_load: u8 = 0x29;
+const op_f32_load: u8 = 0x2a;
+const op_f64_load: u8 = 0x2b;
 const op_i32_load8_s: u8 = 0x2c;
 const op_i32_load8_u: u8 = 0x2d;
 const op_i32_load16_s: u8 = 0x2e;
@@ -107,6 +111,8 @@ const op_i64_load32_s: u8 = 0x34;
 const op_i64_load32_u: u8 = 0x35;
 const op_i32_store: u8 = 0x36;
 const op_i64_store: u8 = 0x37;
+const op_f32_store: u8 = 0x38;
+const op_f64_store: u8 = 0x39;
 const op_i32_store8: u8 = 0x3a;
 const op_i32_store16: u8 = 0x3b;
 const op_i64_store8: u8 = 0x3c;
@@ -116,6 +122,8 @@ const op_memory_size: u8 = 0x3f;
 const op_memory_grow: u8 = 0x40;
 const op_i32_const: u8 = 0x41;
 const op_i64_const: u8 = 0x42;
+const op_f32_const: u8 = 0x43;
+const op_f64_const: u8 = 0x44;
 const op_i32_eqz: u8 = 0x45;
 const op_i32_eq: u8 = 0x46;
 const op_i32_ne: u8 = 0x47;
@@ -127,6 +135,18 @@ const op_i32_le_s: u8 = 0x4c;
 const op_i32_le_u: u8 = 0x4d;
 const op_i32_ge_s: u8 = 0x4e;
 const op_i32_ge_u: u8 = 0x4f;
+const op_f32_eq: u8 = 0x5b;
+const op_f32_ne: u8 = 0x5c;
+const op_f32_lt: u8 = 0x5d;
+const op_f32_gt: u8 = 0x5e;
+const op_f32_le: u8 = 0x5f;
+const op_f32_ge: u8 = 0x60;
+const op_f64_eq: u8 = 0x61;
+const op_f64_ne: u8 = 0x62;
+const op_f64_lt: u8 = 0x63;
+const op_f64_gt: u8 = 0x64;
+const op_f64_le: u8 = 0x65;
+const op_f64_ge: u8 = 0x66;
 const op_i32_add: u8 = 0x6a;
 const op_i32_sub: u8 = 0x6b;
 const op_i32_mul: u8 = 0x6c;
@@ -168,9 +188,59 @@ const op_i64_shr_s: u8 = 0x87;
 const op_i64_shr_u: u8 = 0x88;
 const op_i64_rotl: u8 = 0x89;
 const op_i64_rotr: u8 = 0x8a;
+const op_f32_abs: u8 = 0x8b;
+const op_f32_neg: u8 = 0x8c;
+const op_f32_ceil: u8 = 0x8d;
+const op_f32_floor: u8 = 0x8e;
+const op_f32_trunc: u8 = 0x8f;
+const op_f32_nearest: u8 = 0x90;
+const op_f32_sqrt: u8 = 0x91;
+const op_f32_add: u8 = 0x92;
+const op_f32_sub: u8 = 0x93;
+const op_f32_mul: u8 = 0x94;
+const op_f32_div: u8 = 0x95;
+const op_f32_min: u8 = 0x96;
+const op_f32_max: u8 = 0x97;
+const op_f32_copysign: u8 = 0x98;
+const op_f64_abs: u8 = 0x99;
+const op_f64_neg: u8 = 0x9a;
+const op_f64_ceil: u8 = 0x9b;
+const op_f64_floor: u8 = 0x9c;
+const op_f64_trunc: u8 = 0x9d;
+const op_f64_nearest: u8 = 0x9e;
+const op_f64_sqrt: u8 = 0x9f;
+const op_f64_add: u8 = 0xa0;
+const op_f64_sub: u8 = 0xa1;
+const op_f64_mul: u8 = 0xa2;
+const op_f64_div: u8 = 0xa3;
+const op_f64_min: u8 = 0xa4;
+const op_f64_max: u8 = 0xa5;
+const op_f64_copysign: u8 = 0xa6;
 const op_i32_wrap_i64: u8 = 0xa7;
+const op_i32_trunc_f32_s: u8 = 0xa8;
+const op_i32_trunc_f32_u: u8 = 0xa9;
+const op_i32_trunc_f64_s: u8 = 0xaa;
+const op_i32_trunc_f64_u: u8 = 0xab;
 const op_i64_extend_i32_s: u8 = 0xac;
 const op_i64_extend_i32_u: u8 = 0xad;
+const op_i64_trunc_f32_s: u8 = 0xae;
+const op_i64_trunc_f32_u: u8 = 0xaf;
+const op_i64_trunc_f64_s: u8 = 0xb0;
+const op_i64_trunc_f64_u: u8 = 0xb1;
+const op_f32_convert_i32_s: u8 = 0xb2;
+const op_f32_convert_i32_u: u8 = 0xb3;
+const op_f32_convert_i64_s: u8 = 0xb4;
+const op_f32_convert_i64_u: u8 = 0xb5;
+const op_f32_demote_f64: u8 = 0xb6;
+const op_f64_convert_i32_s: u8 = 0xb7;
+const op_f64_convert_i32_u: u8 = 0xb8;
+const op_f64_convert_i64_s: u8 = 0xb9;
+const op_f64_convert_i64_u: u8 = 0xba;
+const op_f64_promote_f32: u8 = 0xbb;
+const op_i32_reinterpret_f32: u8 = 0xbc;
+const op_i64_reinterpret_f64: u8 = 0xbd;
+const op_f32_reinterpret_i32: u8 = 0xbe;
+const op_f64_reinterpret_i64: u8 = 0xbf;
 const op_misc_prefix: u8 = 0xfc;
 
 const Loc = union(enum) {
@@ -241,11 +311,12 @@ pub fn compile(
     const highest_slot = std.math.add(usize, num_locals, operand_stack_capacity) catch return refuse(config, .limits, 0);
     if (highest_slot > @as(usize, std.math.maxInt(i32)) / 16) return refuse(config, .limits, 0);
 
-    // Integer Cells share the same low-64-bit representation at this boundary.
-    // Float, vector, and reference signatures stay transactional refusals.
-    for (func.local_types) |local_type| if (!isIntegerScalar(local_type)) return refuse(config, .signature, 0);
-    for (ftype.params) |param_type| if (!isIntegerScalar(param_type)) return refuse(config, .signature, 0);
-    for (ftype.results) |result_type| if (!isIntegerScalar(result_type)) return refuse(config, .signature, 0);
+    // Scalar Cells share the same low-64-bit representation at this boundary;
+    // floats cross as their raw IEEE-754 bits. Vector and reference signatures
+    // remain transactional refusals.
+    for (func.local_types) |local_type| if (!isScalar(local_type)) return refuse(config, .signature, 0);
+    for (ftype.params) |param_type| if (!isScalar(param_type)) return refuse(config, .signature, 0);
+    for (ftype.results) |result_type| if (!isScalar(result_type)) return refuse(config, .signature, 0);
 
     var m = x64.Masm.init(gpa);
     defer m.deinit();
@@ -254,16 +325,19 @@ pub fn compile(
     var epilogue: x64.Masm.Label = .{};
     var trap_div0: x64.Masm.Label = .{};
     var trap_overflow: x64.Masm.Label = .{};
+    var trap_invalid: x64.Masm.Label = .{};
     var trap_oob: x64.Masm.Label = .{};
     var trap_stack_exhausted: x64.Masm.Label = .{};
     defer entry.deinit(gpa);
     defer epilogue.deinit(gpa);
     defer trap_div0.deinit(gpa);
     defer trap_overflow.deinit(gpa);
+    defer trap_invalid.deinit(gpa);
     defer trap_oob.deinit(gpa);
     defer trap_stack_exhausted.deinit(gpa);
     var trap_div0_used = false;
     var trap_overflow_used = false;
+    var trap_invalid_used = false;
     var trap_oob_used = false;
     var trap_stack_exhausted_used = false;
 
@@ -305,6 +379,18 @@ pub fn compile(
                 stack[sp] = .{ .const_i64 = value };
                 sp += 1;
             },
+            op_f32_const => {
+                const bits = readF32Bits(body, &i) orelse return null;
+                if (sp >= operand_stack_capacity) return null;
+                stack[sp] = .{ .const_i32 = @bitCast(bits) };
+                sp += 1;
+            },
+            op_f64_const => {
+                const bits = readF64Bits(body, &i) orelse return null;
+                if (sp >= operand_stack_capacity) return null;
+                stack[sp] = .{ .const_i64 = @bitCast(bits) };
+                sp += 1;
+            },
             op_drop => {
                 if (sp == 0) return null;
                 sp -= 1;
@@ -312,8 +398,8 @@ pub fn compile(
             op_call => {
                 const callee_index = readUleb32(body, &i) orelse return null;
                 const callee = calleeFuncType(module, callee_index) orelse return null;
-                for (callee.params) |param_type| if (!isIntegerScalar(param_type)) return null;
-                for (callee.results) |result_type| if (!isIntegerScalar(result_type)) return null;
+                for (callee.params) |param_type| if (!isScalar(param_type)) return null;
+                for (callee.results) |result_type| if (!isScalar(result_type)) return null;
 
                 const param_count = callee.params.len;
                 const result_count = callee.results.len;
@@ -425,8 +511,8 @@ pub fn compile(
                 const index = readUleb32(body, &i) orelse return null;
                 if (index >= num_locals or sp >= operand_stack_capacity) return null;
                 switch (func.local_types[index]) {
-                    .i32 => try m.load32Disp32(.rax, .r12, localOffset(index)),
-                    .i64 => try m.load64Disp32(.rax, .r12, localOffset(index)),
+                    .i32, .f32 => try m.load32Disp32(.rax, .r12, localOffset(index)),
+                    .i64, .f64 => try m.load64Disp32(.rax, .r12, localOffset(index)),
                     else => return null,
                 }
                 try m.store64Disp32(.r12, scratchOffset(num_locals, sp), .rax);
@@ -451,11 +537,11 @@ pub fn compile(
                 // the scalar payload starts at offset zero in each Global.
                 const index = readUleb32(body, &i) orelse return null;
                 const global_type = globalValType(module, index) orelse return null;
-                if (!isIntegerScalar(global_type) or sp >= operand_stack_capacity) return null;
+                if (!isScalar(global_type) or sp >= operand_stack_capacity) return null;
                 const pointer_offset = std.math.mul(u32, index, 8) catch return null;
                 if (pointer_offset > std.math.maxInt(i32)) return null;
                 try m.load64Disp32(.r10, .rbp, @intCast(pointer_offset));
-                if (global_type == .i32)
+                if (global_type == .i32 or global_type == .f32)
                     try m.load32Disp32(.rax, .r10, 0)
                 else
                     try m.load64Disp32(.rax, .r10, 0);
@@ -469,7 +555,7 @@ pub fn compile(
                 // registers so a folded constant cannot clobber either.
                 const index = readUleb32(body, &i) orelse return null;
                 const global_type = globalValType(module, index) orelse return null;
-                if (!isIntegerScalar(global_type) or sp == 0) return null;
+                if (!isScalar(global_type) or sp == 0) return null;
                 const pointer_offset = std.math.mul(u32, index, 8) catch return null;
                 if (pointer_offset > std.math.maxInt(i32)) return null;
                 const depth = sp - 1;
@@ -790,6 +876,369 @@ pub fn compile(
                 try m.store64Disp32(.r12, scratchOffset(num_locals, sp - 1), .rax);
                 stack[sp - 1] = .runtime;
             },
+            op_f32_add,
+            op_f32_sub,
+            op_f32_mul,
+            op_f32_div,
+            op_f64_add,
+            op_f64_sub,
+            op_f64_mul,
+            op_f64_div,
+            => {
+                // §4.3.3 scalar float arithmetic. Cell slots retain the raw
+                // IEEE-754 bits; xmm0/xmm1 are short-lived SSE temporaries.
+                if (sp < 2) return null;
+                const right = stack[sp - 1];
+                const left = stack[sp - 2];
+                sp -= 1;
+                try materialize(&m, left, num_locals, sp - 1);
+                try materialize(&m, right, num_locals, sp);
+                const is_f32 = op >= op_f32_add and op <= op_f32_div;
+                if (is_f32) {
+                    try m.load32Disp32(.rax, .r12, scratchOffset(num_locals, sp - 1));
+                    try m.load32Disp32(.rcx, .r12, scratchOffset(num_locals, sp));
+                    try m.movDXmmFromReg(.xmm0, .rax);
+                    try m.movDXmmFromReg(.xmm1, .rcx);
+                    switch (op) {
+                        op_f32_add => try m.addFloat(.xmm0, .xmm1),
+                        op_f32_sub => try m.subFloat(.xmm0, .xmm1),
+                        op_f32_mul => try m.mulFloat(.xmm0, .xmm1),
+                        else => try m.divFloat(.xmm0, .xmm1),
+                    }
+                    try m.movDRegFromXmm(.rax, .xmm0);
+                } else {
+                    try m.load64Disp32(.rax, .r12, scratchOffset(num_locals, sp - 1));
+                    try m.load64Disp32(.rcx, .r12, scratchOffset(num_locals, sp));
+                    try m.movQXmmFromReg(.xmm0, .rax);
+                    try m.movQXmmFromReg(.xmm1, .rcx);
+                    switch (op) {
+                        op_f64_add => try m.addDouble(.xmm0, .xmm1),
+                        op_f64_sub => try m.subDouble(.xmm0, .xmm1),
+                        op_f64_mul => try m.mulDouble(.xmm0, .xmm1),
+                        else => try m.divDouble(.xmm0, .xmm1),
+                    }
+                    try m.movQRegFromXmm(.rax, .xmm0);
+                }
+                try m.store64Disp32(.r12, scratchOffset(num_locals, sp - 1), .rax);
+                stack[sp - 1] = .runtime;
+            },
+            op_f32_min, op_f32_max, op_f64_min, op_f64_max => {
+                // SSE MIN/MAX choose the source operand for equal values and
+                // NaNs, which disagrees with Wasm for one signed-zero order and
+                // for a NaN in the destination. Handle unordered/equal cases
+                // explicitly, then select the ordered result by condition.
+                if (sp < 2) return null;
+                const right = stack[sp - 1];
+                const left = stack[sp - 2];
+                sp -= 1;
+                try materialize(&m, left, num_locals, sp - 1);
+                try materialize(&m, right, num_locals, sp);
+                const is_f32 = op == op_f32_min or op == op_f32_max;
+                if (is_f32) {
+                    try m.load32Disp32(.rax, .r12, scratchOffset(num_locals, sp - 1));
+                    try m.load32Disp32(.rcx, .r12, scratchOffset(num_locals, sp));
+                    try m.movDXmmFromReg(.xmm0, .rax);
+                    try m.movDXmmFromReg(.xmm1, .rcx);
+                    try m.ucomisFloat(.xmm0, .xmm1);
+                } else {
+                    try m.load64Disp32(.rax, .r12, scratchOffset(num_locals, sp - 1));
+                    try m.load64Disp32(.rcx, .r12, scratchOffset(num_locals, sp));
+                    try m.movQXmmFromReg(.xmm0, .rax);
+                    try m.movQXmmFromReg(.xmm1, .rcx);
+                    try m.ucomisDouble(.xmm0, .xmm1);
+                }
+
+                var unordered: x64.Masm.Label = .{};
+                var equal: x64.Masm.Label = .{};
+                var minmax_done: x64.Masm.Label = .{};
+                defer unordered.deinit(gpa);
+                defer equal.deinit(gpa);
+                defer minmax_done.deinit(gpa);
+                try m.jumpCond(.parity, &unordered);
+                try m.jumpCond(.equal, &equal);
+                const keep_left: x64.Cond = if (op == op_f32_min or op == op_f64_min) .below else .above;
+                try m.jumpCond(keep_left, &minmax_done);
+                try m.movReg64(.rax, .rcx);
+                try m.jump(&minmax_done);
+
+                try m.bind(&equal);
+                if (op == op_f32_min)
+                    try m.orReg32(.rax, .rcx)
+                else if (op == op_f32_max)
+                    try m.andReg32(.rax, .rcx)
+                else if (op == op_f64_min)
+                    try m.orReg64(.rax, .rcx)
+                else
+                    try m.andReg64(.rax, .rcx);
+                try m.jump(&minmax_done);
+
+                try m.bind(&unordered);
+                if (is_f32) {
+                    try m.addFloat(.xmm0, .xmm1);
+                    try m.movDRegFromXmm(.rax, .xmm0);
+                } else {
+                    try m.addDouble(.xmm0, .xmm1);
+                    try m.movQRegFromXmm(.rax, .xmm0);
+                }
+                try m.bind(&minmax_done);
+                try m.store64Disp32(.r12, scratchOffset(num_locals, sp - 1), .rax);
+                stack[sp - 1] = .runtime;
+            },
+            op_f32_eq,
+            op_f32_ne,
+            op_f32_lt,
+            op_f32_gt,
+            op_f32_le,
+            op_f32_ge,
+            op_f64_eq,
+            op_f64_ne,
+            op_f64_lt,
+            op_f64_gt,
+            op_f64_le,
+            op_f64_ge,
+            => {
+                // UCOMIS marks NaN with PF=1 and also sets ZF/CF, so no plain
+                // SETcc is sufficient for every Wasm relation. Split the
+                // unordered case explicitly: only `ne` is true for NaN.
+                if (sp < 2) return null;
+                const right = stack[sp - 1];
+                const left = stack[sp - 2];
+                sp -= 1;
+                try materialize(&m, left, num_locals, sp - 1);
+                try materialize(&m, right, num_locals, sp);
+                const is_f32 = op >= op_f32_eq and op <= op_f32_ge;
+                if (is_f32) {
+                    try m.load32Disp32(.rax, .r12, scratchOffset(num_locals, sp - 1));
+                    try m.load32Disp32(.rcx, .r12, scratchOffset(num_locals, sp));
+                    try m.movDXmmFromReg(.xmm0, .rax);
+                    try m.movDXmmFromReg(.xmm1, .rcx);
+                    try m.ucomisFloat(.xmm0, .xmm1);
+                } else {
+                    try m.load64Disp32(.rax, .r12, scratchOffset(num_locals, sp - 1));
+                    try m.load64Disp32(.rcx, .r12, scratchOffset(num_locals, sp));
+                    try m.movQXmmFromReg(.xmm0, .rax);
+                    try m.movQXmmFromReg(.xmm1, .rcx);
+                    try m.ucomisDouble(.xmm0, .xmm1);
+                }
+
+                var ordered: x64.Masm.Label = .{};
+                var compare_done: x64.Masm.Label = .{};
+                defer ordered.deinit(gpa);
+                defer compare_done.deinit(gpa);
+                try m.jumpCond(.not_parity, &ordered);
+                const is_ne = op == op_f32_ne or op == op_f64_ne;
+                try m.movImm64(.rax, @intFromBool(is_ne));
+                try m.jump(&compare_done);
+                try m.bind(&ordered);
+                const condition: x64.Cond = switch (op) {
+                    op_f32_eq, op_f64_eq => .equal,
+                    op_f32_ne, op_f64_ne => .not_equal,
+                    op_f32_lt, op_f64_lt => .below,
+                    op_f32_gt, op_f64_gt => .above,
+                    op_f32_le, op_f64_le => .below_or_equal,
+                    else => .above_or_equal,
+                };
+                try m.setCond32(.rax, condition);
+                try m.bind(&compare_done);
+                try m.store64Disp32(.r12, scratchOffset(num_locals, sp - 1), .rax);
+                stack[sp - 1] = .runtime;
+            },
+            op_f32_ceil,
+            op_f32_floor,
+            op_f32_trunc,
+            op_f32_nearest,
+            op_f64_ceil,
+            op_f64_floor,
+            op_f64_trunc,
+            op_f64_nearest,
+            => {
+                // SSE4.1 ROUNDSS/ROUNDSD are not part of the x86_64 baseline.
+                // Keep the whole function native on SSE2-only hosts by calling
+                // a small raw-bit helper for the four exact Wasm round modes.
+                if (sp == 0) return null;
+                const depth = sp - 1;
+                try materialize(&m, stack[depth], num_locals, depth);
+                const is_f32 = op >= op_f32_ceil and op <= op_f32_nearest;
+                if (is_f32) {
+                    try m.load32Disp32(.rdi, .r12, scratchOffset(num_locals, depth));
+                    try m.movImm64(.rsi, op - op_f32_ceil);
+                    try m.movImm64(.r11, @intFromPtr(&roundF32Bits));
+                } else {
+                    try m.load64Disp32(.rdi, .r12, scratchOffset(num_locals, depth));
+                    try m.movImm64(.rsi, op - op_f64_ceil);
+                    try m.movImm64(.r11, @intFromPtr(&roundF64Bits));
+                }
+                try m.callReg(.r11);
+                try m.store64Disp32(.r12, scratchOffset(num_locals, depth), .rax);
+                stack[depth] = .runtime;
+            },
+            op_f32_abs, op_f32_neg, op_f32_sqrt, op_f64_abs, op_f64_neg, op_f64_sqrt => {
+                if (sp == 0) return null;
+                const depth = sp - 1;
+                try materialize(&m, stack[depth], num_locals, depth);
+                const is_f32 = op == op_f32_abs or op == op_f32_neg or op == op_f32_sqrt;
+                if (is_f32) {
+                    try m.load32Disp32(.rax, .r12, scratchOffset(num_locals, depth));
+                    switch (op) {
+                        op_f32_abs => {
+                            try m.movImm64(.r10, 0x7fff_ffff);
+                            try m.andReg32(.rax, .r10);
+                        },
+                        op_f32_neg => {
+                            try m.movImm64(.r10, 0x8000_0000);
+                            try m.xorReg32(.rax, .r10);
+                        },
+                        else => {
+                            try m.movDXmmFromReg(.xmm0, .rax);
+                            try m.sqrtFloat(.xmm0, .xmm0);
+                            try m.movDRegFromXmm(.rax, .xmm0);
+                        },
+                    }
+                } else {
+                    try m.load64Disp32(.rax, .r12, scratchOffset(num_locals, depth));
+                    switch (op) {
+                        op_f64_abs => {
+                            try m.movImm64(.r10, 0x7fff_ffff_ffff_ffff);
+                            try m.andReg64(.rax, .r10);
+                        },
+                        op_f64_neg => {
+                            try m.movImm64(.r10, 0x8000_0000_0000_0000);
+                            try m.xorReg64(.rax, .r10);
+                        },
+                        else => {
+                            try m.movQXmmFromReg(.xmm0, .rax);
+                            try m.sqrtDouble(.xmm0, .xmm0);
+                            try m.movQRegFromXmm(.rax, .xmm0);
+                        },
+                    }
+                }
+                try m.store64Disp32(.r12, scratchOffset(num_locals, depth), .rax);
+                stack[depth] = .runtime;
+            },
+            op_f32_copysign, op_f64_copysign => {
+                if (sp < 2) return null;
+                const right = stack[sp - 1];
+                const left = stack[sp - 2];
+                sp -= 1;
+                try materialize(&m, left, num_locals, sp - 1);
+                try materialize(&m, right, num_locals, sp);
+                if (op == op_f32_copysign) {
+                    try m.load32Disp32(.rax, .r12, scratchOffset(num_locals, sp - 1));
+                    try m.load32Disp32(.rcx, .r12, scratchOffset(num_locals, sp));
+                    try m.movImm64(.r10, 0x8000_0000);
+                    try m.andReg32(.rcx, .r10);
+                    try m.movImm64(.r10, 0x7fff_ffff);
+                    try m.andReg32(.rax, .r10);
+                    try m.orReg32(.rax, .rcx);
+                } else {
+                    try m.load64Disp32(.rax, .r12, scratchOffset(num_locals, sp - 1));
+                    try m.load64Disp32(.rcx, .r12, scratchOffset(num_locals, sp));
+                    try m.movImm64(.r10, 0x8000_0000_0000_0000);
+                    try m.andReg64(.rcx, .r10);
+                    try m.movImm64(.r10, 0x7fff_ffff_ffff_ffff);
+                    try m.andReg64(.rax, .r10);
+                    try m.orReg64(.rax, .rcx);
+                }
+                try m.store64Disp32(.r12, scratchOffset(num_locals, sp - 1), .rax);
+                stack[sp - 1] = .runtime;
+            },
+            op_i32_reinterpret_f32, op_i64_reinterpret_f64, op_f32_reinterpret_i32, op_f64_reinterpret_i64 => {
+                // Cell lanes already hold the exact scalar bit pattern.
+                if (sp == 0) return null;
+            },
+            op_f32_demote_f64, op_f64_promote_f32 => {
+                if (sp == 0) return null;
+                const depth = sp - 1;
+                try materialize(&m, stack[depth], num_locals, depth);
+                if (op == op_f32_demote_f64) {
+                    try m.load64Disp32(.rax, .r12, scratchOffset(num_locals, depth));
+                    try m.movQXmmFromReg(.xmm0, .rax);
+                    try m.cvtDoubleToFloat(.xmm0, .xmm0);
+                    try m.movDRegFromXmm(.rax, .xmm0);
+                } else {
+                    try m.load32Disp32(.rax, .r12, scratchOffset(num_locals, depth));
+                    try m.movDXmmFromReg(.xmm0, .rax);
+                    try m.cvtFloatToDouble(.xmm0, .xmm0);
+                    try m.movQRegFromXmm(.rax, .xmm0);
+                }
+                try m.store64Disp32(.r12, scratchOffset(num_locals, depth), .rax);
+                stack[depth] = .runtime;
+            },
+            op_i32_trunc_f32_s,
+            op_i32_trunc_f32_u,
+            op_i32_trunc_f64_s,
+            op_i32_trunc_f64_u,
+            op_i64_trunc_f32_s,
+            op_i64_trunc_f32_u,
+            op_i64_trunc_f64_s,
+            op_i64_trunc_f64_u,
+            => {
+                // §4.3.3 trapping float-to-int truncation. CVTT returns an
+                // ambiguous integer-indefinite value for NaN and overflow, so
+                // distinguish those traps with explicit half-open range tests
+                // before converting an in-range operand.
+                if (sp == 0) return null;
+                const depth = sp - 1;
+                try materialize(&m, stack[depth], num_locals, depth);
+                const src_f32 = op == op_i32_trunc_f32_s or op == op_i32_trunc_f32_u or
+                    op == op_i64_trunc_f32_s or op == op_i64_trunc_f32_u;
+                if (src_f32) {
+                    try m.load32Disp32(.rax, .r12, scratchOffset(num_locals, depth));
+                    try m.movDXmmFromReg(.xmm0, .rax);
+                } else {
+                    try m.load64Disp32(.rax, .r12, scratchOffset(num_locals, depth));
+                    try m.movQXmmFromReg(.xmm0, .rax);
+                }
+                trap_invalid_used = true;
+                trap_overflow_used = true;
+                switch (op) {
+                    op_i32_trunc_f32_s => try emitTruncTrap(&m, true, false, true, -2147483648.0, true, 2147483648.0, &trap_invalid, &trap_overflow),
+                    op_i32_trunc_f32_u => try emitTruncTrap(&m, true, false, false, -1.0, false, 4294967296.0, &trap_invalid, &trap_overflow),
+                    op_i32_trunc_f64_s => try emitTruncTrap(&m, false, false, true, -2147483649.0, false, 2147483648.0, &trap_invalid, &trap_overflow),
+                    op_i32_trunc_f64_u => try emitTruncTrap(&m, false, false, false, -1.0, false, 4294967296.0, &trap_invalid, &trap_overflow),
+                    op_i64_trunc_f32_s => try emitTruncTrap(&m, true, true, true, -9223372036854775808.0, true, 9223372036854775808.0, &trap_invalid, &trap_overflow),
+                    op_i64_trunc_f32_u => try emitTruncTrap(&m, true, true, false, -1.0, false, 18446744073709551616.0, &trap_invalid, &trap_overflow),
+                    op_i64_trunc_f64_s => try emitTruncTrap(&m, false, true, true, -9223372036854775808.0, true, 9223372036854775808.0, &trap_invalid, &trap_overflow),
+                    else => try emitTruncTrap(&m, false, true, false, -1.0, false, 18446744073709551616.0, &trap_invalid, &trap_overflow),
+                }
+                try m.store64Disp32(.r12, scratchOffset(num_locals, depth), .rax);
+                stack[depth] = .runtime;
+            },
+            op_f32_convert_i32_s,
+            op_f32_convert_i32_u,
+            op_f32_convert_i64_s,
+            op_f32_convert_i64_u,
+            op_f64_convert_i32_s,
+            op_f64_convert_i32_u,
+            op_f64_convert_i64_s,
+            op_f64_convert_i64_u,
+            => {
+                if (sp == 0) return null;
+                const depth = sp - 1;
+                try materialize(&m, stack[depth], num_locals, depth);
+                const source_i32 = op == op_f32_convert_i32_s or op == op_f32_convert_i32_u or
+                    op == op_f64_convert_i32_s or op == op_f64_convert_i32_u;
+                if (source_i32)
+                    try m.load32Disp32(.rax, .r12, scratchOffset(num_locals, depth))
+                else
+                    try m.load64Disp32(.rax, .r12, scratchOffset(num_locals, depth));
+
+                switch (op) {
+                    op_f32_convert_i32_s => try m.cvtI32ToFloat(.xmm0, .rax),
+                    op_f32_convert_i32_u, op_f32_convert_i64_s => try m.cvtI64ToFloat(.xmm0, .rax),
+                    op_f32_convert_i64_u => try emitConvertU64ToFloat(&m, true),
+                    op_f64_convert_i32_s => try m.cvtI32ToDouble(.xmm0, .rax),
+                    op_f64_convert_i32_u, op_f64_convert_i64_s => try m.cvtI64ToDouble(.xmm0, .rax),
+                    else => try emitConvertU64ToFloat(&m, false),
+                }
+                if (op == op_f32_convert_i32_s or op == op_f32_convert_i32_u or
+                    op == op_f32_convert_i64_s or op == op_f32_convert_i64_u)
+                    try m.movDRegFromXmm(.rax, .xmm0)
+                else
+                    try m.movQRegFromXmm(.rax, .xmm0);
+                try m.store64Disp32(.r12, scratchOffset(num_locals, depth), .rax);
+                stack[depth] = .runtime;
+            },
             op_i32_wrap_i64, op_i64_extend_i32_s, op_i64_extend_i32_u => {
                 if (sp == 0) return null;
                 const depth = sp - 1;
@@ -805,6 +1254,8 @@ pub fn compile(
             op_i32_load16_s,
             op_i32_load16_u,
             op_i64_load,
+            op_f32_load,
+            op_f64_load,
             op_i64_load8_s,
             op_i64_load8_u,
             op_i64_load16_s,
@@ -820,18 +1271,18 @@ pub fn compile(
                 const width: u32 = switch (op) {
                     op_i32_load8_s, op_i32_load8_u, op_i64_load8_s, op_i64_load8_u => 1,
                     op_i32_load16_s, op_i32_load16_u, op_i64_load16_s, op_i64_load16_u => 2,
-                    op_i32_load, op_i64_load32_s, op_i64_load32_u => 4,
+                    op_i32_load, op_f32_load, op_i64_load32_s, op_i64_load32_u => 4,
                     else => 8,
                 };
                 try emitMemAddress(&m, offset, width, &trap_oob);
                 trap_oob_used = true;
                 switch (op) {
-                    op_i32_load => try m.load32Disp32(.rax, .r11, 0),
+                    op_i32_load, op_f32_load => try m.load32Disp32(.rax, .r11, 0),
                     op_i32_load8_s => try m.load8Signed32Disp32(.rax, .r11, 0),
                     op_i32_load8_u => try m.load8Disp32(.rax, .r11, 0),
                     op_i32_load16_s => try m.load16Signed32Disp32(.rax, .r11, 0),
                     op_i32_load16_u => try m.load16Disp32(.rax, .r11, 0),
-                    op_i64_load => try m.load64Disp32(.rax, .r11, 0),
+                    op_i64_load, op_f64_load => try m.load64Disp32(.rax, .r11, 0),
                     op_i64_load8_s => try m.load8Signed64Disp32(.rax, .r11, 0),
                     op_i64_load8_u => try m.load8Disp32(.rax, .r11, 0),
                     op_i64_load16_s => try m.load16Signed64Disp32(.rax, .r11, 0),
@@ -846,6 +1297,8 @@ pub fn compile(
             op_i32_store8,
             op_i32_store16,
             op_i64_store,
+            op_f32_store,
+            op_f64_store,
             op_i64_store8,
             op_i64_store16,
             op_i64_store32,
@@ -861,7 +1314,7 @@ pub fn compile(
                 const width: u32 = switch (op) {
                     op_i32_store8, op_i64_store8 => 1,
                     op_i32_store16, op_i64_store16 => 2,
-                    op_i32_store, op_i64_store32 => 4,
+                    op_i32_store, op_f32_store, op_i64_store32 => 4,
                     else => 8,
                 };
                 try emitMemAddress(&m, offset, width, &trap_oob);
@@ -869,7 +1322,7 @@ pub fn compile(
                 switch (op) {
                     op_i32_store8, op_i64_store8 => try m.store8Disp32(.r11, 0, .rax),
                     op_i32_store16, op_i64_store16 => try m.store16Disp32(.r11, 0, .rax),
-                    op_i32_store, op_i64_store32 => try m.store32Disp32(.r11, 0, .rax),
+                    op_i32_store, op_f32_store, op_i64_store32 => try m.store32Disp32(.r11, 0, .rax),
                     else => try m.store64Disp32(.r11, 0, .rax),
                 }
                 sp -= 2;
@@ -907,7 +1360,34 @@ pub fn compile(
             },
             op_misc_prefix => {
                 const sub = readUleb32(body, &i) orelse return null;
-                if (sub == 11) {
+                if (sub <= 7) {
+                    // §4.3.3 saturating float-to-int truncations. Explicit
+                    // branches implement NaN -> 0 and clamp both bounds;
+                    // in-range values share the trapping forms' SSE2 lowering.
+                    if (sp == 0) return null;
+                    const depth = sp - 1;
+                    try materialize(&m, stack[depth], num_locals, depth);
+                    const src_f32 = (sub & 0x2) == 0;
+                    if (src_f32) {
+                        try m.load32Disp32(.rax, .r12, scratchOffset(num_locals, depth));
+                        try m.movDXmmFromReg(.xmm0, .rax);
+                    } else {
+                        try m.load64Disp32(.rax, .r12, scratchOffset(num_locals, depth));
+                        try m.movQXmmFromReg(.xmm0, .rax);
+                    }
+                    switch (sub) {
+                        0 => try emitTruncSat(&m, true, false, true),
+                        1 => try emitTruncSat(&m, true, false, false),
+                        2 => try emitTruncSat(&m, false, false, true),
+                        3 => try emitTruncSat(&m, false, false, false),
+                        4 => try emitTruncSat(&m, true, true, true),
+                        5 => try emitTruncSat(&m, true, true, false),
+                        6 => try emitTruncSat(&m, false, true, true),
+                        else => try emitTruncSat(&m, false, true, false),
+                    }
+                    try m.store64Disp32(.r12, scratchOffset(num_locals, depth), .rax);
+                    stack[depth] = .runtime;
+                } else if (sub == 11) {
                     const memory_index = readUleb32(body, &i) orelse return null;
                     if (memory_index != 0 or memoryIs64(module, memory_index) != false or sp < 3) return null;
                     const below = sp - 3;
@@ -1161,6 +1641,11 @@ pub fn compile(
         try m.movImm64(.rax, config.trap_int_overflow);
         try m.jump(&epilogue);
     }
+    if (trap_invalid_used) {
+        try m.bind(&trap_invalid);
+        try m.movImm64(.rax, config.trap_invalid_conversion);
+        try m.jump(&epilogue);
+    }
     if (trap_oob_used) {
         try m.bind(&trap_oob);
         try m.movImm64(.rax, config.trap_out_of_bounds);
@@ -1265,6 +1750,260 @@ fn materializeRange(
     return true;
 }
 
+fn roundF32Bits(bits: u32, mode: u32) callconv(.c) u32 {
+    return @bitCast(roundFloat(f32, @bitCast(bits), mode));
+}
+
+fn roundF64Bits(bits: u64, mode: u32) callconv(.c) u64 {
+    return @bitCast(roundFloat(f64, @bitCast(bits), mode));
+}
+
+fn roundFloat(comptime T: type, value: T, mode: u32) T {
+    return switch (mode) {
+        0 => @ceil(value),
+        1 => @floor(value),
+        2 => @trunc(value),
+        3 => float_ops.roundEven(T, value),
+        else => value,
+    };
+}
+
+/// Emit a §4.3.3 trapping float-to-int truncation. The operand enters in
+/// xmm0. NaN has its own trap; finite values outside the operation's exact
+/// half-open input interval use the integer-overflow trap. Only then is CVTT's
+/// otherwise ambiguous integer-indefinite result safe to consume.
+fn emitTruncTrap(
+    m: *x64.Masm,
+    comptime src_f32: bool,
+    comptime to_i64: bool,
+    comptime signed: bool,
+    comptime lo: f64,
+    comptime lo_inclusive: bool,
+    comptime hi: f64,
+    invalid: *x64.Masm.Label,
+    overflow: *x64.Masm.Label,
+) Error!void {
+    const lo_bits: u64 = if (src_f32)
+        @as(u32, @bitCast(@as(f32, @floatCast(lo))))
+    else
+        @bitCast(lo);
+    const hi_bits: u64 = if (src_f32)
+        @as(u32, @bitCast(@as(f32, @floatCast(hi))))
+    else
+        @bitCast(hi);
+
+    if (src_f32)
+        try m.ucomisFloat(.xmm0, .xmm0)
+    else
+        try m.ucomisDouble(.xmm0, .xmm0);
+    try m.jumpCond(.parity, invalid);
+
+    try m.movImm64(.r10, lo_bits);
+    if (src_f32) {
+        try m.movDXmmFromReg(.xmm1, .r10);
+        try m.ucomisFloat(.xmm0, .xmm1);
+    } else {
+        try m.movQXmmFromReg(.xmm1, .r10);
+        try m.ucomisDouble(.xmm0, .xmm1);
+    }
+    try m.jumpCond(if (lo_inclusive) .below else .below_or_equal, overflow);
+
+    try m.movImm64(.r10, hi_bits);
+    if (src_f32) {
+        try m.movDXmmFromReg(.xmm1, .r10);
+        try m.ucomisFloat(.xmm0, .xmm1);
+    } else {
+        try m.movQXmmFromReg(.xmm1, .r10);
+        try m.ucomisDouble(.xmm0, .xmm1);
+    }
+    try m.jumpCond(.above_or_equal, overflow);
+
+    try emitInRangeFloatToInt(m, src_f32, to_i64, signed);
+}
+
+/// Emit a non-trapping saturating float-to-int conversion. The source enters
+/// in xmm0 and the exact integer bits leave in rax.
+fn emitTruncSat(
+    m: *x64.Masm,
+    comptime src_f32: bool,
+    comptime to_i64: bool,
+    comptime signed: bool,
+) Error!void {
+    const lo: f64 = if (signed)
+        (if (to_i64) -9223372036854775808.0 else -2147483648.0)
+    else
+        0.0;
+    const hi: f64 = if (to_i64)
+        (if (signed) 9223372036854775808.0 else 18446744073709551616.0)
+    else
+        (if (signed) 2147483648.0 else 4294967296.0);
+    const lo_bits: u64 = if (src_f32)
+        @as(u32, @bitCast(@as(f32, @floatCast(lo))))
+    else
+        @bitCast(lo);
+    const hi_bits: u64 = if (src_f32)
+        @as(u32, @bitCast(@as(f32, @floatCast(hi))))
+    else
+        @bitCast(hi);
+    const min_result: u64 = if (!signed) 0 else if (to_i64) 0x8000_0000_0000_0000 else 0x8000_0000;
+    const max_result: u64 = if (to_i64)
+        (if (signed) 0x7fff_ffff_ffff_ffff else 0xffff_ffff_ffff_ffff)
+    else
+        (if (signed) 0x7fff_ffff else 0xffff_ffff);
+
+    var nan: x64.Masm.Label = .{};
+    var clamp_low: x64.Masm.Label = .{};
+    var clamp_high: x64.Masm.Label = .{};
+    var done: x64.Masm.Label = .{};
+    defer nan.deinit(m.gpa);
+    defer clamp_low.deinit(m.gpa);
+    defer clamp_high.deinit(m.gpa);
+    defer done.deinit(m.gpa);
+
+    if (src_f32)
+        try m.ucomisFloat(.xmm0, .xmm0)
+    else
+        try m.ucomisDouble(.xmm0, .xmm0);
+    try m.jumpCond(.parity, &nan);
+
+    try m.movImm64(.r10, lo_bits);
+    if (src_f32) {
+        try m.movDXmmFromReg(.xmm1, .r10);
+        try m.ucomisFloat(.xmm0, .xmm1);
+    } else {
+        try m.movQXmmFromReg(.xmm1, .r10);
+        try m.ucomisDouble(.xmm0, .xmm1);
+    }
+    try m.jumpCond(.below_or_equal, &clamp_low);
+
+    try m.movImm64(.r10, hi_bits);
+    if (src_f32) {
+        try m.movDXmmFromReg(.xmm1, .r10);
+        try m.ucomisFloat(.xmm0, .xmm1);
+    } else {
+        try m.movQXmmFromReg(.xmm1, .r10);
+        try m.ucomisDouble(.xmm0, .xmm1);
+    }
+    try m.jumpCond(.above_or_equal, &clamp_high);
+
+    try emitInRangeFloatToInt(m, src_f32, to_i64, signed);
+    try m.jump(&done);
+
+    try m.bind(&nan);
+    try m.movImm64(.rax, 0);
+    try m.jump(&done);
+    try m.bind(&clamp_low);
+    try m.movImm64(.rax, min_result);
+    try m.jump(&done);
+    try m.bind(&clamp_high);
+    try m.movImm64(.rax, max_result);
+    try m.bind(&done);
+}
+
+fn emitInRangeFloatToInt(
+    m: *x64.Masm,
+    comptime src_f32: bool,
+    comptime to_i64: bool,
+    comptime signed: bool,
+) Error!void {
+    if (signed) {
+        if (src_f32) {
+            if (to_i64)
+                try m.cvttFloatToI64(.rax, .xmm0)
+            else
+                try m.cvttFloatToI32(.rax, .xmm0);
+        } else {
+            if (to_i64)
+                try m.cvttDoubleToI64(.rax, .xmm0)
+            else
+                try m.cvttDoubleToI32(.rax, .xmm0);
+        }
+    } else if (to_i64) {
+        try emitTruncFloatToU64(m, src_f32);
+    } else if (src_f32) {
+        // Every valid u32 result fits a signed i64 conversion.
+        try m.cvttFloatToI64(.rax, .xmm0);
+    } else {
+        try m.cvttDoubleToI64(.rax, .xmm0);
+    }
+}
+
+/// x86_64 has no baseline scalar float-to-u64 conversion. Values below 2^63
+/// use CVTT directly; the high half converts `value - 2^63` and restores the
+/// top bit. `emitTruncTrap` has already excluded NaN and values outside u64.
+fn emitTruncFloatToU64(m: *x64.Masm, comptime src_f32: bool) Error!void {
+    const two63_bits: u64 = if (src_f32)
+        @as(u32, @bitCast(@as(f32, 9223372036854775808.0)))
+    else
+        @bitCast(@as(f64, 9223372036854775808.0));
+    var low_half: x64.Masm.Label = .{};
+    var done: x64.Masm.Label = .{};
+    defer low_half.deinit(m.gpa);
+    defer done.deinit(m.gpa);
+
+    try m.movImm64(.r10, two63_bits);
+    if (src_f32) {
+        try m.movDXmmFromReg(.xmm1, .r10);
+        try m.ucomisFloat(.xmm0, .xmm1);
+    } else {
+        try m.movQXmmFromReg(.xmm1, .r10);
+        try m.ucomisDouble(.xmm0, .xmm1);
+    }
+    try m.jumpCond(.below, &low_half);
+
+    if (src_f32) {
+        try m.subFloat(.xmm0, .xmm1);
+        try m.cvttFloatToI64(.rax, .xmm0);
+    } else {
+        try m.subDouble(.xmm0, .xmm1);
+        try m.cvttDoubleToI64(.rax, .xmm0);
+    }
+    try m.movImm64(.r10, 0x8000_0000_0000_0000);
+    try m.orReg64(.rax, .r10);
+    try m.jump(&done);
+
+    try m.bind(&low_half);
+    if (src_f32)
+        try m.cvttFloatToI64(.rax, .xmm0)
+    else
+        try m.cvttDoubleToI64(.rax, .xmm0);
+    try m.bind(&done);
+}
+
+/// SSE2 has signed i64-to-float conversion only. For values in the unsigned
+/// high half, convert `(value >> 1) | (value & 1)` and double the result; this
+/// is the standard correctly-rounded lowering used by baseline wasm engines.
+/// Enters with the u64 in rax and leaves the result in xmm0.
+fn emitConvertU64ToFloat(m: *x64.Masm, output_f32: bool) Error!void {
+    var low_half: x64.Masm.Label = .{};
+    var done: x64.Masm.Label = .{};
+    defer low_half.deinit(m.gpa);
+    defer done.deinit(m.gpa);
+
+    try m.testReg64(.rax, .rax);
+    try m.jumpCond(.not_sign, &low_half);
+    try m.movReg64(.rcx, .rax);
+    try m.shrImm8(.rax, 1);
+    try m.movImm64(.r10, 1);
+    try m.andReg64(.rcx, .r10);
+    try m.orReg64(.rax, .rcx);
+    if (output_f32) {
+        try m.cvtI64ToFloat(.xmm0, .rax);
+        try m.addFloat(.xmm0, .xmm0);
+    } else {
+        try m.cvtI64ToDouble(.xmm0, .rax);
+        try m.addDouble(.xmm0, .xmm0);
+    }
+    try m.jump(&done);
+
+    try m.bind(&low_half);
+    if (output_f32)
+        try m.cvtI64ToFloat(.xmm0, .rax)
+    else
+        try m.cvtI64ToDouble(.xmm0, .rax);
+    try m.bind(&done);
+}
+
 fn compareCondition(op: u8) x64.Cond {
     return switch (op) {
         op_i32_eq => .equal,
@@ -1304,8 +2043,8 @@ fn refuse(config: Config, stage: RefusalStage, opcode: u8) ?[]const u8 {
     return null;
 }
 
-fn isIntegerScalar(value_type: ValType) bool {
-    return value_type == .i32 or value_type == .i64;
+fn isScalar(value_type: ValType) bool {
+    return value_type == .i32 or value_type == .i64 or value_type == .f32 or value_type == .f64;
 }
 
 /// Resolve the global index space (imports first, then definitions) without
@@ -1469,7 +2208,7 @@ fn callGateAddress(config: Config, callee: DefinedCallee) ?usize {
     _ = stub;
     const base = config.call_gates_base orelse return null;
     if (callee.local_index >= config.call_gates_len) return null;
-    for (callee.func.local_types) |local_type| if (!isIntegerScalar(local_type)) return null;
+    for (callee.func.local_types) |local_type| if (!isScalar(local_type)) return null;
     const offset = std.math.mul(usize, callee.local_index, config.call_gate_stride) catch return null;
     return std.math.add(usize, base, offset) catch null;
 }
@@ -1481,7 +2220,7 @@ fn readBlockArity(body: []const u8, index: *usize) ?u32 {
             index.* += 1;
             break :blk 0;
         },
-        0x7f, 0x7e => blk: {
+        0x7f, 0x7e, 0x7d, 0x7c => blk: {
             index.* += 1;
             break :blk 1;
         },
@@ -1540,6 +2279,20 @@ fn readSleb64(body: []const u8, index: *usize) ?i64 {
         if (shift >= 70) return null;
     }
     return null;
+}
+
+fn readF32Bits(body: []const u8, index: *usize) ?u32 {
+    if (index.* > body.len or body.len - index.* < @sizeOf(u32)) return null;
+    const bits = std.mem.readInt(u32, body[index.*..][0..@sizeOf(u32)], .little);
+    index.* += @sizeOf(u32);
+    return bits;
+}
+
+fn readF64Bits(body: []const u8, index: *usize) ?u64 {
+    if (index.* > body.len or body.len - index.* < @sizeOf(u64)) return null;
+    const bits = std.mem.readInt(u64, body[index.*..][0..@sizeOf(u64)], .little);
+    index.* += @sizeOf(u64);
+    return bits;
 }
 
 fn readMemArg(body: []const u8, index: *usize) ?u32 {

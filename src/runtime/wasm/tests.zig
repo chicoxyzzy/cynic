@@ -2928,7 +2928,7 @@ const f64_min_body = [_]u8{
 };
 
 test "wasm spasm: f64.min compiles and runs in the FP unit" {
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var buf: [8 + f64_min_body.len]u8 = undefined;
     const bytes = withPreamble(&buf, &f64_min_body);
 
@@ -2955,6 +2955,18 @@ test "wasm spasm: f64.min compiles and runs in the FP unit" {
     // min(3.0, 5.0) == 3.0, via FMIN.
     try testing.expectEqual(@as(f64, 3.0), @as(f64, @bitCast(@as(u64, @truncate(res[0])))));
     try testing.expect(instance.spasm_runs >= 1);
+
+    cells[0] = @as(u128, @as(u64, @bitCast(@as(f64, -0.0))));
+    cells[1] = @as(u128, @as(u64, @bitCast(@as(f64, 0.0))));
+    const zero_res = try interp.invoke(&instance, testing.allocator, fidx, cells);
+    defer testing.allocator.free(zero_res);
+    try testing.expect(std.math.signbit(@as(f64, @bitCast(@as(u64, @truncate(zero_res[0]))))));
+
+    cells[0] = @as(u128, @as(u64, @bitCast(std.math.nan(f64))));
+    cells[1] = @as(u128, @as(u64, @bitCast(@as(f64, 1.0))));
+    const nan_res = try interp.invoke(&instance, testing.allocator, fidx, cells);
+    defer testing.allocator.free(nan_res);
+    try testing.expect(std.math.isNan(@as(f64, @bitCast(@as(u64, @truncate(nan_res[0]))))));
 }
 
 // An `(f64,f64)->f64` copysign exported as "cs" (0xa6 = f64.copysign).
@@ -2966,7 +2978,7 @@ const f64_copysign_body = [_]u8{
 };
 
 test "wasm spasm: f64.copysign combines magnitude and sign by bit ops" {
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var buf: [8 + f64_copysign_body.len]u8 = undefined;
     const bytes = withPreamble(&buf, &f64_copysign_body);
 
@@ -3005,7 +3017,7 @@ const reinterpret_body = [_]u8{
 };
 
 test "wasm spasm: i32.reinterpret_f32 passes the bits through" {
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var buf: [8 + reinterpret_body.len]u8 = undefined;
     const bytes = withPreamble(&buf, &reinterpret_body);
 
@@ -3042,7 +3054,7 @@ const promote_body = [_]u8{
 };
 
 test "wasm spasm: f64.promote_f32 widens via FCVT" {
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var buf: [8 + promote_body.len]u8 = undefined;
     const bytes = withPreamble(&buf, &promote_body);
 
@@ -3079,7 +3091,7 @@ const demote_body = [_]u8{
 };
 
 test "wasm spasm: f32.demote_f64 narrows via FCVT" {
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var buf: [8 + demote_body.len]u8 = undefined;
     const bytes = withPreamble(&buf, &demote_body);
 
@@ -3116,7 +3128,7 @@ const convert_i32_s_body = [_]u8{
 };
 
 test "wasm spasm: f64.convert_i32_s widens a signed i32 via SCVTF" {
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var buf: [8 + convert_i32_s_body.len]u8 = undefined;
     const bytes = withPreamble(&buf, &convert_i32_s_body);
 
@@ -3154,7 +3166,7 @@ const convert_i32_u_body = [_]u8{
 };
 
 test "wasm spasm: f32.convert_i32_u widens an unsigned i32 via UCVTF" {
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var buf: [8 + convert_i32_u_body.len]u8 = undefined;
     const bytes = withPreamble(&buf, &convert_i32_u_body);
 
@@ -3191,7 +3203,7 @@ const convert_i64_s_body = [_]u8{
 };
 
 test "wasm spasm: f64.convert_i64_s widens a signed i64 via SCVTF (X-form)" {
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var buf: [8 + convert_i64_s_body.len]u8 = undefined;
     const bytes = withPreamble(&buf, &convert_i64_s_body);
 
@@ -3219,6 +3231,43 @@ test "wasm spasm: f64.convert_i64_s widens a signed i64 via SCVTF (X-form)" {
     try testing.expect(instance.spasm_runs >= 1);
 }
 
+// An `(i64)->f64` unsigned convert exported as "u64" (0xba =
+// f64.convert_i64_u). maxInt(u64) rounds to 2^64 in binary64.
+const convert_i64_u_body = [_]u8{
+    0x01, 0x06, 0x01, 0x60, 0x01, 0x7e, 0x01, 0x7c, // type (i64)->f64
+    0x03, 0x02, 0x01, 0x00, // func 0 : type 0
+    0x07, 0x07, 0x01, 0x03, 0x75, 0x36, 0x34, 0x00, 0x00, // export "u64" -> 0
+    0x0a, 0x07, 0x01, 0x05, 0x00, 0x20, 0x00, 0xba, 0x0b, // local.get 0; f64.convert_i64_u; end
+};
+
+test "wasm spasm: f64.convert_i64_u handles the unsigned high half" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var buf: [8 + convert_i64_u_body.len]u8 = undefined;
+    const bytes = withPreamble(&buf, &convert_i64_u_body);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const m = try wasm.decode(a, bytes);
+    const mp = try a.create(wasm.Module);
+    mp.* = m;
+
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, mp, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true;
+
+    const fidx = funcExport(mp, "u64") orelse return error.NoSuchExport;
+    const cells = try a.alloc(u128, 1);
+    cells[0] = std.math.maxInt(u64);
+
+    const res = try interp.invoke(&instance, testing.allocator, fidx, cells);
+    defer testing.allocator.free(res);
+
+    try testing.expectEqual(@as(f64, 18446744073709551616.0), @as(f64, @bitCast(@as(u64, @truncate(res[0])))));
+    try testing.expect(instance.spasm_runs >= 1);
+}
+
 // An `(f32)->i32` saturating truncation exported as "ts": local.get 0;
 // i32.trunc_sat_f32_s; end. The op is the 0xFC prefix + sub-opcode 0.
 const trunc_sat_s_body = [_]u8{
@@ -3228,8 +3277,8 @@ const trunc_sat_s_body = [_]u8{
     0x0a, 0x08, 0x01, 0x06, 0x00, 0x20, 0x00, 0xfc, 0x00, 0x0b, // local.get 0; i32.trunc_sat_f32_s; end
 };
 
-test "wasm spasm: i32.trunc_sat_f32_s saturates out-of-range via FCVTZS" {
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+test "wasm spasm: i32.trunc_sat_f32_s clamps both bounds" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var buf: [8 + trunc_sat_s_body.len]u8 = undefined;
     const bytes = withPreamble(&buf, &trunc_sat_s_body);
 
@@ -3254,6 +3303,11 @@ test "wasm spasm: i32.trunc_sat_f32_s saturates out-of-range via FCVTZS" {
 
     // 1e30 is far past INT32_MAX, so the saturating truncation clamps to it.
     try testing.expectEqual(@as(u32, 0x7fffffff), @as(u32, @truncate(res[0])));
+
+    cells[0] = @as(u128, @as(u32, @bitCast(@as(f32, -1e30))));
+    const negative_res = try interp.invoke(&instance, testing.allocator, fidx, cells);
+    defer testing.allocator.free(negative_res);
+    try testing.expectEqual(@as(u32, 0x80000000), @as(u32, @truncate(negative_res[0])));
     try testing.expect(instance.spasm_runs >= 1);
 }
 
@@ -3266,8 +3320,8 @@ const trunc_sat_u_body = [_]u8{
     0x0a, 0x08, 0x01, 0x06, 0x00, 0x20, 0x00, 0xfc, 0x07, 0x0b, // local.get 0; i64.trunc_sat_f64_u; end
 };
 
-test "wasm spasm: i64.trunc_sat_f64_u maps NaN to zero via FCVTZU" {
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+test "wasm spasm: i64.trunc_sat_f64_u handles NaN, bounds, and the high half" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var buf: [8 + trunc_sat_u_body.len]u8 = undefined;
     const bytes = withPreamble(&buf, &trunc_sat_u_body);
 
@@ -3290,8 +3344,23 @@ test "wasm spasm: i64.trunc_sat_f64_u maps NaN to zero via FCVTZU" {
     const res = try interp.invoke(&instance, testing.allocator, fidx, cells);
     defer testing.allocator.free(res);
 
-    // The saturating truncation maps NaN to 0 (FCVTZU's NaN behavior).
+    // Saturating truncation maps NaN to 0 on every backend.
     try testing.expectEqual(@as(u64, 0), @as(u64, @truncate(res[0])));
+
+    cells[0] = @as(u128, @as(u64, @bitCast(@as(f64, 9223372036854779904.0))));
+    const high_res = try interp.invoke(&instance, testing.allocator, fidx, cells);
+    defer testing.allocator.free(high_res);
+    try testing.expectEqual(@as(u64, 0x8000_0000_0000_1000), @as(u64, @truncate(high_res[0])));
+
+    cells[0] = @as(u128, @as(u64, @bitCast(@as(f64, -1.5))));
+    const negative_res = try interp.invoke(&instance, testing.allocator, fidx, cells);
+    defer testing.allocator.free(negative_res);
+    try testing.expectEqual(@as(u64, 0), @as(u64, @truncate(negative_res[0])));
+
+    cells[0] = @as(u128, @as(u64, @bitCast(@as(f64, 18446744073709551616.0))));
+    const overflow_res = try interp.invoke(&instance, testing.allocator, fidx, cells);
+    defer testing.allocator.free(overflow_res);
+    try testing.expectEqual(std.math.maxInt(u64), @as(u64, @truncate(overflow_res[0])));
     try testing.expect(instance.spasm_runs >= 1);
 }
 
@@ -3321,8 +3390,8 @@ fn truncTrapInstance(a: std.mem.Allocator, mp: **wasm.Module) !interp.Instance {
     return instance;
 }
 
-test "wasm spasm: i32.trunc_f32_s converts an in-range value via FCVTZS" {
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+test "wasm spasm: i32.trunc_f32_s converts an in-range value natively" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -3343,7 +3412,7 @@ test "wasm spasm: i32.trunc_f32_s converts an in-range value via FCVTZS" {
 }
 
 test "wasm spasm: i32.trunc_f32_s traps on NaN (invalid conversion)" {
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -3361,7 +3430,7 @@ test "wasm spasm: i32.trunc_f32_s traps on NaN (invalid conversion)" {
 }
 
 test "wasm spasm: i32.trunc_f32_s traps on overflow (out of range)" {
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -3373,6 +3442,52 @@ test "wasm spasm: i32.trunc_f32_s traps on overflow (out of range)" {
     const cells = try a.alloc(u128, 1);
     cells[0] = @as(u128, @as(u32, @bitCast(@as(f32, 1e30)))); // far past INT32_MAX
 
+    try testing.expectError(error.IntegerOverflow, interp.invoke(&instance, testing.allocator, fidx, cells));
+    try testing.expect(instance.spasm_runs >= 1);
+}
+
+// An `(f64)->i64` unsigned trapping truncation exported as "tu64"
+// (0xb1 = i64.trunc_f64_u). This exercises the range above INT64_MAX,
+// which x86_64's signed CVTTSD2SI instruction cannot convert directly.
+const trunc_u64_body = [_]u8{
+    0x01, 0x06, 0x01, 0x60, 0x01, 0x7c, 0x01, 0x7e, // type (f64)->i64
+    0x03, 0x02, 0x01, 0x00, // func 0 : type 0
+    0x07, 0x08, 0x01, 0x04, 0x74, 0x75, 0x36, 0x34, 0x00, 0x00, // export "tu64" -> 0
+    0x0a, 0x07, 0x01, 0x05, 0x00, 0x20, 0x00, 0xb1, 0x0b, // local.get 0; i64.trunc_f64_u; end
+};
+
+test "wasm spasm: i64.trunc_f64_u handles the unsigned high half and bounds" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var buf: [8 + trunc_u64_body.len]u8 = undefined;
+    const bytes = withPreamble(&buf, &trunc_u64_body);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const m = try wasm.decode(a, bytes);
+    const mp = try a.create(wasm.Module);
+    mp.* = m;
+
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, mp, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true;
+
+    const fidx = funcExport(mp, "tu64") orelse return error.NoSuchExport;
+    const cells = try a.alloc(u128, 1);
+    const high_value: f64 = 9223372036854779904.0; // 2^63 + 4096
+    cells[0] = @as(u128, @as(u64, @bitCast(high_value)));
+
+    const high_res = try interp.invoke(&instance, testing.allocator, fidx, cells);
+    defer testing.allocator.free(high_res);
+    try testing.expectEqual(@as(u64, 0x8000_0000_0000_1000), @as(u64, @truncate(high_res[0])));
+
+    cells[0] = @as(u128, @as(u64, @bitCast(@as(f64, -0.5))));
+    const negative_fraction_res = try interp.invoke(&instance, testing.allocator, fidx, cells);
+    defer testing.allocator.free(negative_fraction_res);
+    try testing.expectEqual(@as(u64, 0), @as(u64, @truncate(negative_fraction_res[0])));
+
+    cells[0] = @as(u128, @as(u64, @bitCast(@as(f64, 18446744073709551616.0))));
     try testing.expectError(error.IntegerOverflow, interp.invoke(&instance, testing.allocator, fidx, cells));
     try testing.expect(instance.spasm_runs >= 1);
 }
@@ -3723,7 +3838,7 @@ const f64_lt_body = [_]u8{
 };
 
 test "wasm spasm: f64.lt compiles and compares in the FP unit" {
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var buf: [8 + f64_lt_body.len]u8 = undefined;
     const bytes = withPreamble(&buf, &f64_lt_body);
 
@@ -3749,6 +3864,11 @@ test "wasm spasm: f64.lt compiles and compares in the FP unit" {
 
     try testing.expectEqual(@as(u32, 1), @as(u32, @truncate(res[0]))); // 1.5 < 2.5
     try testing.expect(instance.spasm_runs >= 1);
+
+    cells[0] = @as(u128, @as(u64, @bitCast(std.math.nan(f64))));
+    const nan_res = try interp.invoke(&instance, testing.allocator, fidx, cells);
+    defer testing.allocator.free(nan_res);
+    try testing.expectEqual(@as(u32, 0), @as(u32, @truncate(nan_res[0])));
 }
 
 // A one-page-memory module: `(i32)->f64` exported as "ld" — local.get 0;
@@ -3762,7 +3882,7 @@ const f64_load_body = [_]u8{
 };
 
 test "wasm spasm: f64.load reads an eight-byte double" {
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var buf: [8 + f64_load_body.len]u8 = undefined;
     const bytes = withPreamble(&buf, &f64_load_body);
 
@@ -3799,7 +3919,7 @@ const f32_add_body = [_]u8{
 };
 
 test "wasm spasm: f32.add compiles and runs Spasm-compiled" {
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var buf: [8 + f32_add_body.len]u8 = undefined;
     const bytes = withPreamble(&buf, &f32_add_body);
 
@@ -3838,7 +3958,7 @@ const f32_sqrt_body = [_]u8{
 };
 
 test "wasm spasm: f32.sqrt compiles and runs in the FP unit" {
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var buf: [8 + f32_sqrt_body.len]u8 = undefined;
     const bytes = withPreamble(&buf, &f32_sqrt_body);
 
@@ -3863,6 +3983,84 @@ test "wasm spasm: f32.sqrt compiles and runs in the FP unit" {
 
     // sqrt(16.0) == 4.0 in single precision, via FSQRT through the W↔S bridge.
     try testing.expectEqual(@as(f32, 4.0), @as(f32, @bitCast(@as(u32, @truncate(res[0])))));
+    try testing.expect(instance.spasm_runs >= 1);
+}
+
+// An `(f32)->f32` ceil exported as "ceil" (0x8d = f32.ceil).
+const f32_ceil_body = [_]u8{
+    0x01, 0x06, 0x01, 0x60, 0x01, 0x7d, 0x01, 0x7d, // type (f32)->f32
+    0x03, 0x02, 0x01, 0x00, // func 0 : type 0
+    0x07, 0x08, 0x01, 0x04, 0x63, 0x65, 0x69, 0x6c, 0x00, 0x00, // export "ceil" -> 0
+    0x0a, 0x07, 0x01, 0x05, 0x00, 0x20, 0x00, 0x8d, 0x0b, // local.get 0; f32.ceil; end
+};
+
+test "wasm spasm: f32.ceil preserves directed rounding and negative zero" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var buf: [8 + f32_ceil_body.len]u8 = undefined;
+    const bytes = withPreamble(&buf, &f32_ceil_body);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const m = try wasm.decode(a, bytes);
+    const mp = try a.create(wasm.Module);
+    mp.* = m;
+
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, mp, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true;
+
+    const fidx = funcExport(mp, "ceil") orelse return error.NoSuchExport;
+    const cells = try a.alloc(u128, 1);
+    cells[0] = @as(u128, @as(u32, @bitCast(@as(f32, 1.25))));
+    const positive_res = try interp.invoke(&instance, testing.allocator, fidx, cells);
+    defer testing.allocator.free(positive_res);
+    try testing.expectEqual(@as(f32, 2.0), @as(f32, @bitCast(@as(u32, @truncate(positive_res[0])))));
+
+    cells[0] = @as(u128, @as(u32, @bitCast(@as(f32, -0.25))));
+    const zero_res = try interp.invoke(&instance, testing.allocator, fidx, cells);
+    defer testing.allocator.free(zero_res);
+    try testing.expect(std.math.signbit(@as(f32, @bitCast(@as(u32, @truncate(zero_res[0]))))));
+    try testing.expect(instance.spasm_runs >= 1);
+}
+
+// An `(f64)->f64` nearest exported as "near" (0x9e = f64.nearest).
+const f64_nearest_body = [_]u8{
+    0x01, 0x06, 0x01, 0x60, 0x01, 0x7c, 0x01, 0x7c, // type (f64)->f64
+    0x03, 0x02, 0x01, 0x00, // func 0 : type 0
+    0x07, 0x08, 0x01, 0x04, 0x6e, 0x65, 0x61, 0x72, 0x00, 0x00, // export "near" -> 0
+    0x0a, 0x07, 0x01, 0x05, 0x00, 0x20, 0x00, 0x9e, 0x0b, // local.get 0; f64.nearest; end
+};
+
+test "wasm spasm: f64.nearest rounds ties to even" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var buf: [8 + f64_nearest_body.len]u8 = undefined;
+    const bytes = withPreamble(&buf, &f64_nearest_body);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const m = try wasm.decode(a, bytes);
+    const mp = try a.create(wasm.Module);
+    mp.* = m;
+
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, mp, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true;
+
+    const fidx = funcExport(mp, "near") orelse return error.NoSuchExport;
+    const cells = try a.alloc(u128, 1);
+    cells[0] = @as(u128, @as(u64, @bitCast(@as(f64, 2.5))));
+    const even_res = try interp.invoke(&instance, testing.allocator, fidx, cells);
+    defer testing.allocator.free(even_res);
+    try testing.expectEqual(@as(f64, 2.0), @as(f64, @bitCast(@as(u64, @truncate(even_res[0])))));
+
+    cells[0] = @as(u128, @as(u64, @bitCast(@as(f64, -3.5))));
+    const negative_res = try interp.invoke(&instance, testing.allocator, fidx, cells);
+    defer testing.allocator.free(negative_res);
+    try testing.expectEqual(@as(f64, -4.0), @as(f64, @bitCast(@as(u64, @truncate(negative_res[0])))));
     try testing.expect(instance.spasm_runs >= 1);
 }
 
