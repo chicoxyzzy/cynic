@@ -511,9 +511,13 @@ pub const Instance = struct {
     spasm_refusals: u32 = 0,
     spasm_last_refusal_stage: spasm.RefusalStage = .none,
     spasm_last_refused_opcode: u8 = 0,
+    spasm_last_refused_subopcode: u32 = 0,
+    spasm_last_refusal_has_subopcode: bool = false,
     spasm_refusal_stages: [spasm.refusal_stage_count]u32 = std.mem.zeroes([spasm.refusal_stage_count]u32),
     spasm_refused_opcodes: [spasm_refused_opcode_capacity]SpasmRefusedOpcode = std.mem.zeroes([spasm_refused_opcode_capacity]SpasmRefusedOpcode),
     spasm_refused_opcode_overflow: u32 = 0,
+    spasm_refused_misc_subopcodes: [spasm.refusal_misc_subopcode_count]u32 = std.mem.zeroes([spasm.refusal_misc_subopcode_count]u32),
+    spasm_refused_misc_subopcode_other: u32 = 0,
     /// Nested helper-mediated direct `call`s that entered a cached Spasm
     /// `EntryFn` without re-entering `invoke`. Hot local and same-instance
     /// gate links do not update this per-call diagnostic counter. The top-level
@@ -643,9 +647,19 @@ pub const Instance = struct {
         self.spasm_refusals +%= 1;
         self.spasm_last_refusal_stage = diagnostics.stage;
         self.spasm_last_refused_opcode = diagnostics.opcode;
+        self.spasm_last_refused_subopcode = diagnostics.subopcode;
+        self.spasm_last_refusal_has_subopcode = diagnostics.has_subopcode;
 
         const stage_index = @intFromEnum(diagnostics.stage) - 1;
         self.spasm_refusal_stages[stage_index] +%= 1;
+
+        if (diagnostics.has_subopcode and diagnostics.opcode == 0xfc) {
+            if (diagnostics.subopcode < self.spasm_refused_misc_subopcodes.len) {
+                self.spasm_refused_misc_subopcodes[diagnostics.subopcode] +%= 1;
+            } else {
+                self.spasm_refused_misc_subopcode_other +%= 1;
+            }
+        }
 
         if (!diagnostics.has_opcode) return;
 

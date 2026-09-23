@@ -2302,23 +2302,26 @@ and the per-builtin checklist; this section tracks status.
   helper-free local link for eligible self-recursion), the table/reference
   family, the first SIMD data path, and Realm fuel/interrupt safe points at
   native entry plus taken structured-loop backedges ship and are default-on
-  for wasm. A qualified SysV x86_64 backend now covers the full f32/f64 scalar
-  ALU and conversion family, the i32/i64 binary/comparison core, scalar globals
-  and memory access, memory size/grow/fill/copy, explicit numeric/memory/stack
-  traps, entry/backedge execution polls, guarded self-links, and W^X-safe stable
+  for wasm. A qualified SysV x86_64 backend now covers the complete scalar
+  numeric ISA, scalar globals and memory access, memory size/grow/fill/copy,
+  scalar select, value-carrying branches, `br_table`, top-level explicit
+  return, explicit numeric/memory/stack traps, entry/backedge execution polls,
+  guarded self-links, and W^X-safe stable
   cross-function gates. Unsupported x86 functions refuse
   transactionally and stay in Sarcasm; the forced-tier spec sweep is exact at
-  58,779/58,779 on both x86_64 and AArch64. The 2026-09-10 x86 scalar-float
-  checkpoint reached 23,667 native entries and 2,320 compiled functions, up
-  from 10,606/1,365 at the integer/memory checkpoint. The remaining 3,220
-  refusals include zero emission or install failures; SSE2-only hosts use
+  58,779/58,779 on both x86_64 and AArch64. The 2026-09-23 x86 scalar/control
+  checkpoint reached 24,412 native entries and 2,743 compiled functions, up
+  from 23,667/2,320 at the scalar-float checkpoint. The remaining 2,806
+  refusals include zero emission or install failures; prefix telemetry names
+  `table.copy` (99) and `memory.init` (52) as the largest `0xfc` groups.
+  SSE2-only hosts use
   raw-bit rounding helpers instead of assuming SSE4.1. The forced sweep is
   fail-closed on native engagement via
   `--require-spasm-entry`, and the shared instance/cache, recursive stack,
   cold-gate fallback, and post-entry interrupt tests now execute on both
-  architectures. Remaining x86 integer bit-count/sign-extension,
-  table/reference, passive bulk-memory, SIMD, indirect-call, and memory64
-  parity, remaining SIMD lane operations generally, and the
+  architectures. Remaining x86 table/reference, passive bulk-memory, SIMD,
+  indirect-call, nested-return control arms, and memory64 parity, remaining
+  SIMD lane operations generally, and the
   native-register/imported-call ABI remain next.
 
   The architecture for all three tiers — the shared codegen

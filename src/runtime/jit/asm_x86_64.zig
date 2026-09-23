@@ -164,6 +164,44 @@ pub const Masm = struct {
         try self.emitByte(0xC0 | (lowBits(destination) << 3) | lowBits(source));
     }
 
+    /// `bsf destination32, source32` -- index of the least-significant set
+    /// bit. The destination is undefined for zero; callers must handle ZF.
+    pub fn bitScanForward32(
+        self: *Masm,
+        destination: Reg,
+        source: Reg,
+    ) error{OutOfMemory}!void {
+        try self.emitBitScan(false, 0xBC, destination, source);
+    }
+
+    /// `bsf destination, source` over a 64-bit operand.
+    pub fn bitScanForward64(
+        self: *Masm,
+        destination: Reg,
+        source: Reg,
+    ) error{OutOfMemory}!void {
+        try self.emitBitScan(true, 0xBC, destination, source);
+    }
+
+    /// `bsr destination32, source32` -- index of the most-significant set
+    /// bit. The destination is undefined for zero; callers must handle ZF.
+    pub fn bitScanReverse32(
+        self: *Masm,
+        destination: Reg,
+        source: Reg,
+    ) error{OutOfMemory}!void {
+        try self.emitBitScan(false, 0xBD, destination, source);
+    }
+
+    /// `bsr destination, source` over a 64-bit operand.
+    pub fn bitScanReverse64(
+        self: *Masm,
+        destination: Reg,
+        source: Reg,
+    ) error{OutOfMemory}!void {
+        try self.emitBitScan(true, 0xBD, destination, source);
+    }
+
     /// `add destination, immediate32`.
     pub fn addRegImm32(
         self: *Masm,
@@ -790,6 +828,19 @@ pub const Masm = struct {
         try self.emitByte(rex(false, isExtended(source), false, isExtended(destination)));
         try self.emitByte(opcode);
         try self.emitByte(0xC0 | (lowBits(source) << 3) | lowBits(destination));
+    }
+
+    fn emitBitScan(
+        self: *Masm,
+        wide: bool,
+        opcode: u8,
+        destination: Reg,
+        source: Reg,
+    ) error{OutOfMemory}!void {
+        try self.emitByte(rex(wide, isExtended(destination), false, isExtended(source)));
+        try self.emitByte(0x0F);
+        try self.emitByte(opcode);
+        try self.emitByte(0xC0 | (lowBits(destination) << 3) | lowBits(source));
     }
 
     fn emitRegImm32(

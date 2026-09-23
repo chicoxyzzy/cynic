@@ -16,6 +16,24 @@ run against the previous section with the *same host*.
 
 ## History
 
+### 2026-09-23, x86_64 scalar/control closure, target `x86_64-macos` under Rosetta on `Darwin 25.6.0 arm64`
+
+Three ReleaseFast ABBA samples after completing integer bit-count and
+sign-extension lowering and broadening scalar structured control. The fixed
+workloads do not contain the newly added unary operations or branch shapes, so
+this is a regression sentinel for the shared entry, loop, and call paths. The
+forced-Spasm corpus stayed `58,779/58,779`; x86 native engagement rose from
+23,667 to 24,412 entries and from 2,320 to 2,743 compiled functions.
+
+Every checksum matched, every timed row stayed native, and diagnostics reported
+`helper 0/0`. All workloads remained above the 5x Spasm target.
+
+| bench | interpreter ms/rep | Spasm bare ms/rep | Spasm wake ms/rep | paired speedup | wake / bare |
+|---|---:|---:|---:|---:|---:|
+| loop `sum(i*i)`, n=2,000,000 | 57.279-58.090 | 7.757-7.871 | 7.643-7.864 | 7.28-7.49x | 0.972-0.999x |
+| `fib(32)` self-recursive | 216.398-257.120 | 34.877-35.211 | 34.301-34.828 | 6.18-7.30x | 0.983-0.989x |
+| `fib(32)` cross-recursive | 217.362-256.773 | 36.875-37.722 | 37.351-38.025 | 5.84-6.96x | 1.008-1.016x |
+
 ### 2026-09-10, x86_64 scalar-float expansion, target `x86_64-macos` under Rosetta on `Darwin 25.6.0 arm64`
 
 Three ReleaseFast ABBA samples after adding the complete f32/f64 scalar ALU and

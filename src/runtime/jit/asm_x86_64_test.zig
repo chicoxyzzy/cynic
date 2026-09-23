@@ -27,6 +27,23 @@ test "jit asm_x86_64: Bistromath integer primitives have stable encodings" {
     }, machine.code.items);
 }
 
+test "jit asm_x86_64: baseline bit scans have stable encodings" {
+    var machine = x64.Masm.init(std.testing.allocator);
+    defer machine.deinit();
+
+    try machine.bitScanForward32(.r9, .r10);
+    try machine.bitScanReverse32(.rax, .rcx);
+    try machine.bitScanForward64(.r8, .r11);
+    try machine.bitScanReverse64(.r11, .rax);
+
+    try std.testing.expectEqualSlices(u8, &.{
+        0x45, 0x0F, 0xBC, 0xCA,
+        0x40, 0x0F, 0xBD, 0xC1,
+        0x4D, 0x0F, 0xBC, 0xC3,
+        0x4C, 0x0F, 0xBD, 0xD8,
+    }, machine.code.items);
+}
+
 test "jit asm_x86_64: rel32 labels handle forward and backward edges" {
     var machine = x64.Masm.init(std.testing.allocator);
     defer machine.deinit();
