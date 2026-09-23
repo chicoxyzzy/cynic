@@ -531,21 +531,23 @@ the measured design space:
   in jit.md §7.1 (still deferred).
 
   The complete opcode surface above is the mature AArch64 backend. The
-  qualified x86_64 SysV backend emits the full f32/f64 scalar numeric and
-  conversion family, the i32/i64 binary/comparison core, scalar globals, every
+  qualified x86_64 SysV backend emits the complete scalar numeric family --
+  including integer bit counts and sign-extension -- scalar globals, every
   scalar memory load/store width, memory size/grow/fill/copy, catchable
   numeric/memory/native-stack traps, Realm entry/backedge polls, guarded local
-  self-links, and stable W^X-safe
+  self-links, scalar `select`, value-carrying structured branches, `br_table`,
+  top-level explicit `return`, and stable W^X-safe
   cross-function call gates. Table/reference, passive bulk-memory, SIMD,
-  indirect-call, memory64 access/grow, and other unsupported x86 bodies refuse
-  before code publication and run in Sarcasm.
+  indirect-call, memory64 access/grow, nested-return control arms, and other
+  unsupported x86 bodies refuse before code publication and run in Sarcasm.
   This is a coverage difference, not a semantic one: forced-Spasm sweeps on
-  both architectures pass all 58,779 scored spec commands. The 2026-09-10
-  x86 sweep exercised 23,667 native entries / 2,320 compiled functions and
+  both architectures pass all 58,779 scored spec commands. The 2026-09-23
+  x86 sweep exercised 24,412 native entries / 2,743 compiled functions and
   recorded zero emission or install failures. Its scalar rounding fallback is
   deliberately helper-based on SSE2-only targets rather than assuming SSE4.1;
-  the remaining 3,220 refusals are non-scalar signatures, unsupported bytecode
-  shapes/opcodes, and eight size limits. CI pairs
+  the remaining 2,806 refusals are non-scalar signatures, unsupported bytecode
+  shapes/opcodes, and eight size limits. `0xfc` telemetry now separates prefix
+  suboperations; `table.copy` (99) and `memory.init` (52) lead that family. CI pairs
   `--spasm` with `--require-spasm-entry`, and the focused x86 instance/cache,
   trap, safe-point, self-link, and stable-gate tests require actual native
   entry, so the differential gate cannot be satisfied by fallback alone.

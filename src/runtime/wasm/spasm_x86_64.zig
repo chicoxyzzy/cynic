@@ -11,6 +11,7 @@ const std = @import("std");
 const x64 = @import("../jit/asm_x86_64.zig");
 const code_alloc = @import("../jit/code_alloc.zig");
 const float_ops = @import("float_ops.zig");
+const dead_code = @import("spasm_dead_code.zig");
 const CompiledFunc = @import("code.zig").CompiledFunc;
 const Module = @import("module.zig").Module;
 const FuncType = @import("types.zig").FuncType;
@@ -40,11 +41,14 @@ pub const RefusalStage = enum(u8) {
 };
 
 pub const refusal_stage_count: usize = @intFromEnum(RefusalStage.count) - 1;
+pub const misc_subopcode_count: usize = 18;
 
 pub const Diagnostics = struct {
     stage: RefusalStage = .none,
     opcode: u8 = 0,
     has_opcode: bool = false,
+    subopcode: u32 = 0,
+    has_subopcode: bool = false,
 };
 
 pub const Config = struct {
@@ -88,8 +92,12 @@ const op_else: u8 = 0x05;
 const op_end: u8 = 0x0b;
 const op_br: u8 = 0x0c;
 const op_br_if: u8 = 0x0d;
+const op_br_table: u8 = 0x0e;
+const op_return: u8 = 0x0f;
 const op_call: u8 = 0x10;
 const op_drop: u8 = 0x1a;
+const op_select: u8 = 0x1b;
+const op_select_t: u8 = 0x1c;
 const op_local_get: u8 = 0x20;
 const op_local_set: u8 = 0x21;
 const op_local_tee: u8 = 0x22;
@@ -147,6 +155,9 @@ const op_f64_lt: u8 = 0x63;
 const op_f64_gt: u8 = 0x64;
 const op_f64_le: u8 = 0x65;
 const op_f64_ge: u8 = 0x66;
+const op_i32_clz: u8 = 0x67;
+const op_i32_ctz: u8 = 0x68;
+const op_i32_popcnt: u8 = 0x69;
 const op_i32_add: u8 = 0x6a;
 const op_i32_sub: u8 = 0x6b;
 const op_i32_mul: u8 = 0x6c;
@@ -173,6 +184,9 @@ const op_i64_le_s: u8 = 0x57;
 const op_i64_le_u: u8 = 0x58;
 const op_i64_ge_s: u8 = 0x59;
 const op_i64_ge_u: u8 = 0x5a;
+const op_i64_clz: u8 = 0x79;
+const op_i64_ctz: u8 = 0x7a;
+const op_i64_popcnt: u8 = 0x7b;
 const op_i64_add: u8 = 0x7c;
 const op_i64_sub: u8 = 0x7d;
 const op_i64_mul: u8 = 0x7e;
@@ -241,6 +255,11 @@ const op_i32_reinterpret_f32: u8 = 0xbc;
 const op_i64_reinterpret_f64: u8 = 0xbd;
 const op_f32_reinterpret_i32: u8 = 0xbe;
 const op_f64_reinterpret_i64: u8 = 0xbf;
+const op_i32_extend8_s: u8 = 0xc0;
+const op_i32_extend16_s: u8 = 0xc1;
+const op_i64_extend8_s: u8 = 0xc2;
+const op_i64_extend16_s: u8 = 0xc3;
+const op_i64_extend32_s: u8 = 0xc4;
 const op_misc_prefix: u8 = 0xfc;
 
 const Loc = union(enum) {
@@ -322,6 +341,7 @@ pub fn compile(
     defer m.deinit();
 
     var entry: x64.Masm.Label = .{};
+    var success: x64.Masm.Label = .{};
     var epilogue: x64.Masm.Label = .{};
     var trap_div0: x64.Masm.Label = .{};
     var trap_overflow: x64.Masm.Label = .{};
@@ -329,6 +349,7 @@ pub fn compile(
     var trap_oob: x64.Masm.Label = .{};
     var trap_stack_exhausted: x64.Masm.Label = .{};
     defer entry.deinit(gpa);
+    defer success.deinit(gpa);
     defer epilogue.deinit(gpa);
     defer trap_div0.deinit(gpa);
     defer trap_overflow.deinit(gpa);
@@ -364,6 +385,8 @@ pub fn compile(
             diagnostics.stage = .bytecode;
             diagnostics.opcode = op;
             diagnostics.has_opcode = true;
+            diagnostics.subopcode = 0;
+            diagnostics.has_subopcode = false;
         }
         switch (op) {
             op_nop => {},
@@ -394,6 +417,33 @@ pub fn compile(
             op_drop => {
                 if (sp == 0) return null;
                 sp -= 1;
+            },
+            op_select, op_select_t => {
+                // §4.2.4: [v1, v2, condition] -> condition ? v1 : v2.
+                // Scalar Cells share one low-64-bit representation, so the
+                // same branch preserves i32/i64/f32/f64 payloads exactly.
+                if (op == op_select_t) {
+                    const type_count = readUleb32(body, &i) orelse return null;
+                    if (type_count != 1 or i >= body.len or !isScalarTypeByte(body[i])) return null;
+                    i += 1;
+                }
+                if (sp < 3) return null;
+                const result_depth = sp - 3;
+                try materialize(&m, stack[result_depth], num_locals, result_depth);
+                try materialize(&m, stack[result_depth + 1], num_locals, result_depth + 1);
+                try materialize(&m, stack[result_depth + 2], num_locals, result_depth + 2);
+
+                var selected: x64.Masm.Label = .{};
+                defer selected.deinit(gpa);
+                try m.load32Disp32(.r10, .r12, scratchOffset(num_locals, result_depth + 2));
+                try m.load64Disp32(.rax, .r12, scratchOffset(num_locals, result_depth));
+                try m.cmpReg32Imm32(.r10, 0);
+                try m.jumpCond(.not_equal, &selected);
+                try m.load64Disp32(.rax, .r12, scratchOffset(num_locals, result_depth + 1));
+                try m.bind(&selected);
+                try m.store64Disp32(.r12, scratchOffset(num_locals, result_depth), .rax);
+                stack[result_depth] = .runtime;
+                sp -= 2;
             },
             op_call => {
                 const callee_index = readUleb32(body, &i) orelse return null;
@@ -579,6 +629,24 @@ pub fn compile(
                     },
                 }
             },
+            op_i32_clz, op_i32_ctz, op_i32_popcnt => {
+                // WebAssembly Core §4.3.2. BSF/BSR are baseline x86_64, but
+                // leave their destination undefined for zero, so the shared
+                // lowering handles zero explicitly. POPCNT is optional on
+                // x86_64; use a fixed SWAR sequence rather than raising
+                // Cynic's minimum CPU feature set.
+                if (sp == 0) return null;
+                const depth = sp - 1;
+                try materialize(&m, stack[depth], num_locals, depth);
+                try m.load32Disp32(.rax, .r12, scratchOffset(num_locals, depth));
+                switch (op) {
+                    op_i32_clz => try emitBitScanCount(&m, false, true),
+                    op_i32_ctz => try emitBitScanCount(&m, false, false),
+                    else => try emitPopcnt(&m, false),
+                }
+                try m.store64Disp32(.r12, scratchOffset(num_locals, depth), .rax);
+                stack[depth] = .runtime;
+            },
             op_i32_eq,
             op_i32_ne,
             op_i32_lt_s,
@@ -736,6 +804,19 @@ pub fn compile(
                     },
                 }
             },
+            op_i64_clz, op_i64_ctz, op_i64_popcnt => {
+                if (sp == 0) return null;
+                const depth = sp - 1;
+                try materialize(&m, stack[depth], num_locals, depth);
+                try m.load64Disp32(.rax, .r12, scratchOffset(num_locals, depth));
+                switch (op) {
+                    op_i64_clz => try emitBitScanCount(&m, true, true),
+                    op_i64_ctz => try emitBitScanCount(&m, true, false),
+                    else => try emitPopcnt(&m, true),
+                }
+                try m.store64Disp32(.r12, scratchOffset(num_locals, depth), .rax);
+                stack[depth] = .runtime;
+            },
             op_i64_eq,
             op_i64_ne,
             op_i64_lt_s,
@@ -875,6 +956,41 @@ pub fn compile(
                 }
                 try m.store64Disp32(.r12, scratchOffset(num_locals, sp - 1), .rax);
                 stack[sp - 1] = .runtime;
+            },
+            op_i32_extend8_s,
+            op_i32_extend16_s,
+            op_i64_extend8_s,
+            op_i64_extend16_s,
+            op_i64_extend32_s,
+            => {
+                // §4.3.2 sign-extension operators. Shift pairs keep the
+                // lowering on the baseline ISA; MOVSXD handles the i64/i32
+                // case directly. A 32-bit destination zeroes the Cell's high
+                // word, which is Cynic's canonical i32 representation.
+                if (sp == 0) return null;
+                const depth = sp - 1;
+                try materialize(&m, stack[depth], num_locals, depth);
+                if (op == op_i32_extend8_s or op == op_i32_extend16_s) {
+                    try m.load32Disp32(.rax, .r12, scratchOffset(num_locals, depth));
+                    const shift: u8 = if (op == op_i32_extend8_s) 24 else 16;
+                    try m.movImm64(.rcx, shift);
+                    try m.shlReg32Cl(.rax);
+                    try m.movImm64(.rcx, shift);
+                    try m.sarReg32Cl(.rax);
+                } else {
+                    try m.load64Disp32(.rax, .r12, scratchOffset(num_locals, depth));
+                    if (op == op_i64_extend32_s) {
+                        try m.signExtendReg32To64(.rax, .rax);
+                    } else {
+                        const shift: u8 = if (op == op_i64_extend8_s) 56 else 48;
+                        try m.movImm64(.rcx, shift);
+                        try m.shlReg64Cl(.rax);
+                        try m.movImm64(.rcx, shift);
+                        try m.sarReg64Cl(.rax);
+                    }
+                }
+                try m.store64Disp32(.r12, scratchOffset(num_locals, depth), .rax);
+                stack[depth] = .runtime;
             },
             op_f32_add,
             op_f32_sub,
@@ -1360,6 +1476,10 @@ pub fn compile(
             },
             op_misc_prefix => {
                 const sub = readUleb32(body, &i) orelse return null;
+                if (config.diagnostics) |diagnostics| {
+                    diagnostics.subopcode = sub;
+                    diagnostics.has_subopcode = true;
+                }
                 if (sub <= 7) {
                     // §4.3.3 saturating float-to-int truncations. Explicit
                     // branches implement NaN -> 0 and clamp both bounds;
@@ -1551,19 +1671,17 @@ pub fn compile(
                 const depth = readUleb32(body, &i) orelse return null;
                 if (depth >= ctrl_len) return null;
                 const target = &ctrl[ctrl_len - 1 - depth];
-                if (sp != target.height + target.branch_arity) return null;
-                if (!(try materializeRange(&m, stack[0..], num_locals, target.height, target.branch_arity))) return null;
+                if (!(try emitBranchValues(&m, stack[0..], num_locals, sp, target.height, target.branch_arity))) return null;
                 if (target.kind == .loop) {
                     try emitExecutionPoll(&m, &epilogue, config.execution_poll_helper, config.wake_flag_offset);
                 }
                 try m.jump(&target.label);
 
-                // The first x86 slice accepts an unconditional terminator only
-                // when it is immediately followed by the current frame's end.
-                // This covers canonical loop backedges without duplicating the
-                // mature AArch64 dead-code skipper.
-                if (ctrl_len == 0 or i >= body.len or body[i] != op_end) return null;
-                i += 1;
+                // The remainder of the current frame is unreachable. Parse
+                // instruction widths until its matching end; unknown forms
+                // refuse rather than desynchronize the bytecode cursor.
+                if (ctrl_len == 0) return null;
+                dead_code.skipToFrameEnd(body, &i) orelse return null;
                 const current = &ctrl[ctrl_len - 1];
                 if (current.kind == .if_then or current.kind == .if_else) return null;
                 if (current.kind == .block) try m.bind(&current.label);
@@ -1580,21 +1698,85 @@ pub fn compile(
                 sp -= 1;
                 const condition = stack[sp];
                 const target = &ctrl[ctrl_len - 1 - depth];
-                if (sp != target.height + target.branch_arity) return null;
-                if (!(try materializeRange(&m, stack[0..], num_locals, target.height, target.branch_arity))) return null;
                 try materialize(&m, condition, num_locals, sp);
                 try m.load32Disp32(.rax, .r12, scratchOffset(num_locals, sp));
                 try m.cmpRegImm32(.rax, 0);
+
+                var not_taken: x64.Masm.Label = .{};
+                defer not_taken.deinit(gpa);
+                try m.jumpCond(.equal, &not_taken);
+                if (!(try emitBranchValues(&m, stack[0..], num_locals, sp, target.height, target.branch_arity))) return null;
                 if (target.kind == .loop) {
-                    var not_taken: x64.Masm.Label = .{};
-                    defer not_taken.deinit(gpa);
-                    try m.jumpCond(.equal, &not_taken);
                     try emitExecutionPoll(&m, &epilogue, config.execution_poll_helper, config.wake_flag_offset);
-                    try m.jump(&target.label);
-                    try m.bind(&not_taken);
-                } else {
-                    try m.jumpCond(.not_equal, &target.label);
                 }
+                try m.jump(&target.label);
+                try m.bind(&not_taken);
+            },
+            op_br_table => {
+                // §3.3.8: dispatch to one structured target, carrying the
+                // common branch-result arity and unwinding intervening stack
+                // operands. A linear chain matches the AArch64 baseline's
+                // compact first-tier lowering.
+                if (sp == 0) return null;
+                sp -= 1;
+                try materialize(&m, stack[sp], num_locals, sp);
+                try m.load32Disp32(.r10, .r12, scratchOffset(num_locals, sp));
+
+                const count = readUleb32(body, &i) orelse return null;
+                var case_index: u32 = 0;
+                while (case_index < count) : (case_index += 1) {
+                    const depth = readUleb32(body, &i) orelse return null;
+                    if (depth >= ctrl_len) return null;
+                    const target = &ctrl[ctrl_len - 1 - depth];
+                    var next_case: x64.Masm.Label = .{};
+                    defer next_case.deinit(gpa);
+                    try m.cmpReg32Imm32(.r10, case_index);
+                    try m.jumpCond(.not_equal, &next_case);
+                    if (!(try emitBranchValues(&m, stack[0..], num_locals, sp, target.height, target.branch_arity))) return null;
+                    if (target.kind == .loop) {
+                        try emitExecutionPoll(&m, &epilogue, config.execution_poll_helper, config.wake_flag_offset);
+                    }
+                    try m.jump(&target.label);
+                    try m.bind(&next_case);
+                }
+
+                const default_depth = readUleb32(body, &i) orelse return null;
+                if (default_depth >= ctrl_len) return null;
+                const default_target = &ctrl[ctrl_len - 1 - default_depth];
+                if (!(try emitBranchValues(&m, stack[0..], num_locals, sp, default_target.height, default_target.branch_arity))) return null;
+                if (default_target.kind == .loop) {
+                    try emitExecutionPoll(&m, &epilogue, config.execution_poll_helper, config.wake_flag_offset);
+                }
+                try m.jump(&default_target.label);
+
+                if (ctrl_len == 0) return null;
+                dead_code.skipToFrameEnd(body, &i) orelse return null;
+                const current = &ctrl[ctrl_len - 1];
+                if (current.kind == .if_then or current.kind == .if_else) return null;
+                if (current.kind == .block) try m.bind(&current.label);
+                current.label.deinit(gpa);
+                current.else_label.deinit(gpa);
+                sp = current.height + current.result_arity;
+                var result_depth = current.height;
+                while (result_depth < sp) : (result_depth += 1) stack[result_depth] = .runtime;
+                ctrl_len -= 1;
+            },
+            op_return => {
+                // A top-level explicit return has no alternative structured
+                // path that must compile after it. Canonicalize the function
+                // results, skip validated dead code, and join the ordinary
+                // success epilogue. Nested returns remain a normal fallback
+                // until the compiler tracks unreachable arms explicitly.
+                if (ctrl_len != 0) return null;
+                const result_arity: u32 = @intCast(ftype.results.len);
+                if (!(try emitBranchValues(&m, stack[0..], num_locals, sp, 0, result_arity))) return null;
+                var result_depth: usize = 0;
+                while (result_depth < result_arity) : (result_depth += 1) stack[result_depth] = .runtime;
+                try m.jump(&success);
+                dead_code.skipToFrameEnd(body, &i) orelse return null;
+                sp = result_arity;
+                function_ended = true;
+                break :body_loop;
             },
             op_end => {
                 if (ctrl_len == 0) {
@@ -1621,6 +1803,7 @@ pub fn compile(
     }
 
     if (!function_ended or ctrl_len != 0 or sp != ftype.results.len) return null;
+    try m.bind(&success);
     for (ftype.results, 0..) |_, result_index| {
         try materialize(&m, stack[result_index], num_locals, result_index);
         try m.load64Disp32(.rax, .r12, scratchOffset(num_locals, result_index));
@@ -1748,6 +1931,43 @@ fn materializeRange(
         stack[depth] = .runtime;
     }
     return true;
+}
+
+/// Copy the top `arity` operands into a structured target's canonical Cell
+/// depths, discarding any intervening values. Destination depths are never
+/// above their corresponding sources, so the forward copy is overlap-safe.
+/// Stack metadata is intentionally unchanged: conditional branches emit this
+/// only on the taken machine path, while compilation continues down the
+/// not-taken path with its original constants and locations.
+fn emitBranchValues(
+    m: *x64.Masm,
+    stack: []const Loc,
+    num_locals: usize,
+    sp: usize,
+    target_height: usize,
+    arity: u32,
+) Error!bool {
+    const count: usize = arity;
+    if (sp > stack.len or sp < count) return false;
+    const source_start = sp - count;
+    if (target_height > source_start) return false;
+    const target_end = std.math.add(usize, target_height, count) catch return false;
+    if (target_end > stack.len) return false;
+
+    var value_index: usize = 0;
+    while (value_index < count) : (value_index += 1) {
+        const source_depth = source_start + value_index;
+        const target_depth = target_height + value_index;
+        try materialize(m, stack[source_depth], num_locals, source_depth);
+        if (source_depth == target_depth) continue;
+        try m.load64Disp32(.rax, .r12, scratchOffset(num_locals, source_depth));
+        try m.store64Disp32(.r12, scratchOffset(num_locals, target_depth), .rax);
+    }
+    return true;
+}
+
+fn isScalarTypeByte(byte: u8) bool {
+    return byte == 0x7f or byte == 0x7e or byte == 0x7d or byte == 0x7c;
 }
 
 fn roundF32Bits(bits: u32, mode: u32) callconv(.c) u32 {
@@ -2004,6 +2224,122 @@ fn emitConvertU64ToFloat(m: *x64.Masm, output_f32: bool) Error!void {
     try m.bind(&done);
 }
 
+/// Lower clz/ctz from baseline BSF/BSR while preserving Wasm's defined zero
+/// result. Both x86 instructions leave the destination undefined for zero.
+fn emitBitScanCount(
+    m: *x64.Masm,
+    comptime wide: bool,
+    comptime leading: bool,
+) Error!void {
+    var zero: x64.Masm.Label = .{};
+    var done: x64.Masm.Label = .{};
+    defer zero.deinit(m.gpa);
+    defer done.deinit(m.gpa);
+
+    if (wide)
+        try m.cmpRegImm32(.rax, 0)
+    else
+        try m.cmpReg32Imm32(.rax, 0);
+    try m.jumpCond(.equal, &zero);
+
+    if (wide) {
+        if (leading)
+            try m.bitScanReverse64(.rax, .rax)
+        else
+            try m.bitScanForward64(.rax, .rax);
+    } else {
+        if (leading)
+            try m.bitScanReverse32(.rax, .rax)
+        else
+            try m.bitScanForward32(.rax, .rax);
+    }
+    if (leading) {
+        try m.movImm64(.rcx, if (wide) 63 else 31);
+        try subScalar(m, wide, .rcx, .rax);
+        try moveScalar(m, wide, .rax, .rcx);
+    }
+    try m.jump(&done);
+
+    try m.bind(&zero);
+    try m.movImm64(.rax, if (wide) 64 else 32);
+    try m.bind(&done);
+}
+
+/// Branch-free SWAR population count. Native POPCNT is not part of Cynic's
+/// baseline x86_64 contract, so the JIT must not emit it without a feature
+/// guard. Input and output are in rax; rcx/r10/r11 are scratch.
+fn emitPopcnt(m: *x64.Masm, comptime wide: bool) Error!void {
+    try moveScalar(m, wide, .r10, .rax);
+    try shiftRightScalar(m, wide, .r10, 1);
+    try m.movImm64(.r11, if (wide) 0x5555_5555_5555_5555 else 0x5555_5555);
+    try andScalar(m, wide, .r10, .r11);
+    try subScalar(m, wide, .rax, .r10);
+
+    try moveScalar(m, wide, .r10, .rax);
+    try shiftRightScalar(m, wide, .r10, 2);
+    try m.movImm64(.r11, if (wide) 0x3333_3333_3333_3333 else 0x3333_3333);
+    try andScalar(m, wide, .rax, .r11);
+    try andScalar(m, wide, .r10, .r11);
+    try addScalar(m, wide, .rax, .r10);
+
+    try moveScalar(m, wide, .r10, .rax);
+    try shiftRightScalar(m, wide, .r10, 4);
+    try addScalar(m, wide, .rax, .r10);
+    try m.movImm64(.r11, if (wide) 0x0f0f_0f0f_0f0f_0f0f else 0x0f0f_0f0f);
+    try andScalar(m, wide, .rax, .r11);
+
+    try moveScalar(m, wide, .r10, .rax);
+    try shiftRightScalar(m, wide, .r10, 8);
+    try addScalar(m, wide, .rax, .r10);
+    try moveScalar(m, wide, .r10, .rax);
+    try shiftRightScalar(m, wide, .r10, 16);
+    try addScalar(m, wide, .rax, .r10);
+    if (wide) {
+        try moveScalar(m, true, .r10, .rax);
+        try shiftRightScalar(m, true, .r10, 32);
+        try addScalar(m, true, .rax, .r10);
+    }
+
+    try m.movImm64(.r11, if (wide) 0x7f else 0x3f);
+    try andScalar(m, wide, .rax, .r11);
+}
+
+fn moveScalar(m: *x64.Masm, comptime wide: bool, destination: x64.Reg, source: x64.Reg) Error!void {
+    if (wide)
+        try m.movReg64(destination, source)
+    else
+        try m.movReg32(destination, source);
+}
+
+fn addScalar(m: *x64.Masm, comptime wide: bool, destination: x64.Reg, source: x64.Reg) Error!void {
+    if (wide)
+        try m.addReg64(destination, source)
+    else
+        try m.addReg32(destination, source);
+}
+
+fn subScalar(m: *x64.Masm, comptime wide: bool, destination: x64.Reg, source: x64.Reg) Error!void {
+    if (wide)
+        try m.subReg64(destination, source)
+    else
+        try m.subReg32(destination, source);
+}
+
+fn andScalar(m: *x64.Masm, comptime wide: bool, destination: x64.Reg, source: x64.Reg) Error!void {
+    if (wide)
+        try m.andReg64(destination, source)
+    else
+        try m.andReg32(destination, source);
+}
+
+fn shiftRightScalar(m: *x64.Masm, comptime wide: bool, destination: x64.Reg, amount: u8) Error!void {
+    try m.movImm64(.rcx, amount);
+    if (wide)
+        try m.shrReg64Cl(destination)
+    else
+        try m.shrReg32Cl(destination);
+}
+
 fn compareCondition(op: u8) x64.Cond {
     return switch (op) {
         op_i32_eq => .equal,
@@ -2035,11 +2371,17 @@ fn compareCondition64(op: u8) x64.Cond {
 }
 
 fn refuse(config: Config, stage: RefusalStage, opcode: u8) ?[]const u8 {
-    if (config.diagnostics) |diagnostics| diagnostics.* = .{
-        .stage = stage,
-        .opcode = opcode,
-        .has_opcode = stage == .bytecode or stage == .unsupported_opcode,
-    };
+    if (config.diagnostics) |diagnostics| {
+        const preserve_subopcode = diagnostics.has_subopcode and diagnostics.opcode == opcode;
+        const subopcode = diagnostics.subopcode;
+        diagnostics.* = .{
+            .stage = stage,
+            .opcode = opcode,
+            .has_opcode = stage == .bytecode or stage == .unsupported_opcode,
+            .subopcode = if (preserve_subopcode) subopcode else 0,
+            .has_subopcode = preserve_subopcode,
+        };
+    }
     return null;
 }
 

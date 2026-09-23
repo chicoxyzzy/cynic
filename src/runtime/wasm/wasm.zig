@@ -58,6 +58,7 @@ pub const validateModule = validator.validateModule;
 pub const Instance = interpreter.Instance;
 pub const SpasmRefusalStage = @import("spasm.zig").RefusalStage;
 pub const spasm_refusal_stage_count = @import("spasm.zig").refusal_stage_count;
+pub const spasm_refusal_misc_subopcode_count = @import("spasm.zig").refusal_misc_subopcode_count;
 pub const spasm_refused_opcode_capacity = interpreter.spasm_refused_opcode_capacity;
 pub const instantiate = interpreter.instantiate;
 pub const invoke = interpreter.invoke;

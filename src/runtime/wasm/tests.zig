@@ -601,9 +601,10 @@ test "wasm spasm: x86 cold gate preserves interpreter fallback for a refused cal
     const a = arena.allocator();
 
     // Both functions have the x86-qualified i32 signature. The caller is
-    // emittable, while the callee's i32.clz remains outside the x86 subset.
-    // Its cold stable gate must resolve through Sarcasm without publishing a
-    // bogus native entry or changing the result.
+    // emittable, while the callee returns from inside a structured block --
+    // an intentionally unsupported x86 control shape until unreachable-arm
+    // state is tracked. Its cold stable gate must resolve through Sarcasm
+    // without publishing a bogus native entry or changing the result.
     const tbody = [_]u8{ 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f };
     const fbody = [_]u8{ 0x02, 0x00, 0x00 };
     const xbody = [_]u8{ 0x01, 0x04, 'm', 'a', 'i', 'n', 0x00, 0x00 };
@@ -616,11 +617,14 @@ test "wasm spasm: x86 cold gate preserves interpreter fallback for a refused cal
         0x10,
         0x01,
         0x0b,
-        0x05,
+        0x08,
         0x00,
+        0x02,
+        0x7f,
         0x20,
         0x00,
-        0x67,
+        0x0f,
+        0x0b,
         0x0b,
     };
     const bytes = try assemble(a, &.{
@@ -647,13 +651,13 @@ test "wasm spasm: x86 cold gate preserves interpreter fallback for a refused cal
     while (invocation < 2) : (invocation += 1) {
         const result = try interp.invoke(&instance, testing.allocator, fidx, cells);
         defer testing.allocator.free(result);
-        try testing.expectEqual(@as(u32, 27), @as(u32, @truncate(result[0])));
+        try testing.expectEqual(@as(u32, 21), @as(u32, @truncate(result[0])));
     }
     try testing.expectEqual(@as(u32, 2), instance.spasm_runs);
     try testing.expectEqual(@as(u32, 1), instance.spasm_compiles);
     try testing.expectEqual(@as(u32, 0), instance.spasm_native_calls);
     try testing.expectEqual(@as(u32, 1), instance.spasm_refusals);
-    try testing.expectEqual(@as(u8, 0x67), instance.spasm_last_refused_opcode);
+    try testing.expectEqual(@as(u8, 0x0f), instance.spasm_last_refused_opcode);
 }
 
 test "wasm spasm: warm mutually recursive calls use same-instance native links" {

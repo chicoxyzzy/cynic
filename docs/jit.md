@@ -45,12 +45,12 @@ qualification and module ownership are recorded in
 [ohaimark.md](ohaimark.md) "x86_64 architecture-parity closure."
 Generalized JS-reentrant helpers, native post-call continuations, remaining
 opcode families, and additional codegen targets remain future work. Spasm now
-also has a qualified x86_64 SysV backend for the full f32/f64 scalar ALU and
-conversion family, the i32/i64 binary/comparison core, scalar globals and
-memory access, and memory size/grow/fill/copy, alongside catchable
-numeric/memory/stack traps, Realm safe points, guarded self-links, and stable
-cross-function gates. Unsupported functions retain transactional fallback to
-Sarcasm. Spasm's delivery state is tracked below. This document
+also has a qualified x86_64 SysV backend for the complete scalar numeric ISA,
+scalar globals and memory access, memory size/grow/fill/copy, and broad scalar
+structured control, alongside catchable numeric/memory/stack traps, Realm safe
+points, guarded self-links, and stable cross-function gates. Unsupported
+functions retain transactional fallback to Sarcasm. Spasm's delivery state is
+tracked below. This document
 doubles as the design record
 that pinned the architecture before the first emitter was written and as the
 delivery ledger (the "Delivery order" section tracks what each increment
@@ -740,7 +740,9 @@ src/runtime/bistromath/     T1 JS baseline (per AGENTS.md repo map)
 src/runtime/ohaimark/       T2 (M6; ADR first)
 src/runtime/wasm/spasm.zig  Spasm public ABI + mature AArch64 backend (§6)
 src/runtime/wasm/spasm_x86_64.zig
-                            qualified SysV i32/control/call backend
+                            qualified SysV scalar/control/call backend
+src/runtime/wasm/spasm_dead_code.zig
+                            shared validated-bytecode dead-code scanner
 ```
 
 ### 7.1 The JS↔wasm call boundary
@@ -1319,11 +1321,19 @@ useful:
    split-at-2^63 lowerings. Float comparisons follow
    [V8 Liftoff's x64 lowering](https://chromium.googlesource.com/v8/v8.git/+/6a8e79d4df27354a2446b75a7c7916bce1c6844e/src/wasm/baseline/x64/liftoff-assembler-x64-inl.h):
    UCOMIS plus an explicit parity branch keeps unordered NaN semantics out of
-   ordinary SETcc conditions. The full differential remains 58,779/58,779 and now
-   executes 23,667 native entries across 2,320 compiled functions. The 3,220
-   remaining refusals are 8 limits, 1,401 non-scalar signatures, 745 unsupported
-   bytecode shapes, and 1,066 unsupported opcodes, with zero emission or install
-   failures.
+   ordinary SETcc conditions. At that checkpoint the full differential remained
+   58,779/58,779 and executed 23,667 native entries across 2,320 compiled
+   functions, with 3,220 intentional refusals.
+   The 2026-09-23 scalar/control closure adds baseline-safe `clz`/`ctz`, a SWAR
+   `popcnt` that does not assume the optional x86 instruction, all five
+   sign-extension operations, full-width scalar `select`, value-carrying
+   branches, `br_table`, and top-level explicit `return`. A shared dead-code
+   scanner keeps both backends synchronized after unconditional transfers.
+   The exact differential now executes 24,412 native entries across 2,743
+   compiled functions. The 2,806 remaining refusals are 8 limits, 1,401
+   non-scalar signatures, 720 unsupported bytecode shapes, and 677 unsupported
+   opcodes, with zero emission or install failures. Prefix telemetry names
+   `table.copy` (99) and `memory.init` (52) as the largest `0xfc` groups.
    The **per-function code cache**
    now ships (`spasmEntryFor`): each emittable function compiles once on
    its first Spasm-enabled invoke and the cached `EntryFn` runs every
@@ -1390,10 +1400,12 @@ useful:
    The same backend emits scalar globals; every scalar load and store width with
    explicit overflow-safe software bounds checks; and
    `memory.size`, helper-backed `memory.grow` with base/length refresh, plus
-   overlap-safe inline `memory.fill` / `memory.copy`. Memory64 access/grow,
-   integer bit counts and sign-extension ops, passive bulk-memory operations,
-   tables/references, SIMD, `call_indirect`, and imported-call native lowering
-   remain transactional refusals.
+   overlap-safe inline `memory.fill` / `memory.copy`. Its complete scalar ALU
+   includes integer bit counts and sign extension; scalar `select`,
+   value-carrying structured branches, `br_table`, and top-level explicit
+   `return` share the Cell merge discipline. Memory64 access/grow, passive
+   bulk-memory operations, tables/references, SIMD, `call_indirect`, nested
+   return arms, and imported-call native lowering remain transactional refusals.
    Non-gated calls retain the checked helper and per-function Sarcasm fallback.
    Imports, `call_indirect`, cross-instance calls, overlarge frames, and bodies
    Spasm cannot compile keep the generic helper / `invoke` fallback. Operands

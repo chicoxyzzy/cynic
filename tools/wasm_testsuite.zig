@@ -35,6 +35,8 @@ const Counts = struct {
     spasm_refusal_stages: [wasm.spasm_refusal_stage_count]u64 = std.mem.zeroes([wasm.spasm_refusal_stage_count]u64),
     spasm_refused_opcodes: [256]u64 = std.mem.zeroes([256]u64),
     spasm_refused_opcode_overflow: u64 = 0,
+    spasm_refused_misc_subopcodes: [wasm.spasm_refusal_misc_subopcode_count]u64 = std.mem.zeroes([wasm.spasm_refusal_misc_subopcode_count]u64),
+    spasm_refused_misc_subopcode_other: u64 = 0,
 
     fn add(self: *Counts, other: Counts) void {
         self.pass += other.pass;
@@ -46,6 +48,8 @@ const Counts = struct {
         for (&self.spasm_refusal_stages, other.spasm_refusal_stages) |*total, count| total.* += count;
         for (&self.spasm_refused_opcodes, other.spasm_refused_opcodes) |*total, count| total.* += count;
         self.spasm_refused_opcode_overflow += other.spasm_refused_opcode_overflow;
+        for (&self.spasm_refused_misc_subopcodes, other.spasm_refused_misc_subopcodes) |*total, count| total.* += count;
+        self.spasm_refused_misc_subopcode_other += other.spasm_refused_misc_subopcode_other;
     }
 };
 
@@ -272,6 +276,8 @@ fn runManifest(arena: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, json_path:
             if (entry.count != 0) counts.spasm_refused_opcodes[entry.opcode] += entry.count;
         }
         counts.spasm_refused_opcode_overflow += instance.spasm_refused_opcode_overflow;
+        for (&counts.spasm_refused_misc_subopcodes, instance.spasm_refused_misc_subopcodes) |*total, count| total.* += count;
+        counts.spasm_refused_misc_subopcode_other += instance.spasm_refused_misc_subopcode_other;
     }
     return counts;
 }
@@ -312,6 +318,64 @@ fn writeSpasmRefusalSummary(io: std.Io, counts: Counts) !void {
         );
         try std.Io.File.stdout().writeStreamingAll(io, overflow);
     }
+    try writeSpasmMiscSubopcodeSummary(io, counts);
+}
+
+fn writeSpasmMiscSubopcodeSummary(io: std.Io, counts: Counts) !void {
+    var remaining = counts.spasm_refused_misc_subopcodes;
+    var rank: usize = 0;
+    while (rank < 5) : (rank += 1) {
+        var best_subopcode: ?usize = null;
+        var best_count: u64 = 0;
+        for (remaining, 0..) |count, subopcode| {
+            if (count > best_count) {
+                best_subopcode = subopcode;
+                best_count = count;
+            }
+        }
+        const subopcode = best_subopcode orelse break;
+        remaining[subopcode] = 0;
+        var line: [128]u8 = undefined;
+        const text = try std.fmt.bufPrint(
+            &line,
+            "  refused 0xfc subopcode {d} ({s}): {d}\n",
+            .{ subopcode, miscSubopcodeName(subopcode), best_count },
+        );
+        try std.Io.File.stdout().writeStreamingAll(io, text);
+    }
+    if (counts.spasm_refused_misc_subopcode_other != 0) {
+        var line: [96]u8 = undefined;
+        const text = try std.fmt.bufPrint(
+            &line,
+            "  refused 0xfc untracked subopcodes: {d}\n",
+            .{counts.spasm_refused_misc_subopcode_other},
+        );
+        try std.Io.File.stdout().writeStreamingAll(io, text);
+    }
+}
+
+fn miscSubopcodeName(subopcode: usize) []const u8 {
+    return switch (subopcode) {
+        0 => "i32.trunc_sat_f32_s",
+        1 => "i32.trunc_sat_f32_u",
+        2 => "i32.trunc_sat_f64_s",
+        3 => "i32.trunc_sat_f64_u",
+        4 => "i64.trunc_sat_f32_s",
+        5 => "i64.trunc_sat_f32_u",
+        6 => "i64.trunc_sat_f64_s",
+        7 => "i64.trunc_sat_f64_u",
+        8 => "memory.init",
+        9 => "data.drop",
+        10 => "memory.copy",
+        11 => "memory.fill",
+        12 => "table.init",
+        13 => "elem.drop",
+        14 => "table.copy",
+        15 => "table.grow",
+        16 => "table.size",
+        17 => "table.fill",
+        else => "unknown",
+    };
 }
 
 const Loaded = struct { instance: *wasm.Instance, module: *wasm.Module };

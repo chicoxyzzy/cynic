@@ -30,6 +30,7 @@ const builtin = @import("builtin");
 const code_alloc = @import("../jit/code_alloc.zig");
 const masm_mod = @import("../jit/masm.zig");
 const a64 = @import("../jit/asm_aarch64.zig");
+const dead_code = @import("spasm_dead_code.zig");
 const spasm_x86_64 = @import("spasm_x86_64.zig");
 const CompiledFunc = @import("code.zig").CompiledFunc;
 const FuncType = @import("types.zig").FuncType;
@@ -52,6 +53,7 @@ pub const full_coverage_supported = code_alloc.supported and builtin.cpu.arch ==
 pub const RefusalStage = spasm_x86_64.RefusalStage;
 pub const CompileDiagnostics = spasm_x86_64.Diagnostics;
 pub const refusal_stage_count = spasm_x86_64.refusal_stage_count;
+pub const refusal_misc_subopcode_count = spasm_x86_64.misc_subopcode_count;
 
 /// The interpreter's value cell — a 16-byte slot holding any wasm
 /// scalar (low bits) or a `v128`.
@@ -3489,7 +3491,7 @@ fn compileAarch64(
                 // inside an `if` arm degrades for now.
                 const cur = &ctrl[ctrl_len - 1];
                 if (cur.kind == .if_then or cur.kind == .if_else) return null;
-                skipToFrameEnd(body, &i) orelse return null;
+                dead_code.skipToFrameEnd(body, &i) orelse return null;
                 // The skipper consumed the current frame's `end`. No
                 // fall-through reaches it, so bind the label (resolving
                 // any forward branch that targeted it) without
@@ -3595,7 +3597,7 @@ fn compileAarch64(
                 // frame is unreachable. Close it exactly as `br` does.
                 const cur = &ctrl[ctrl_len - 1];
                 if (cur.kind == .if_then or cur.kind == .if_else) return null;
-                skipToFrameEnd(body, &i) orelse return null;
+                dead_code.skipToFrameEnd(body, &i) orelse return null;
                 if (cur.kind == .block) try m.bind(&cur.label);
                 cur.label.deinit(gpa);
                 cur.else_label.deinit(gpa);
@@ -4482,135 +4484,6 @@ fn emitTruncTrap(
     }
 }
 
-/// Skip the unreachable code following an unconditional `br` (or
-/// `return`) up to and including the `end` that closes the current
-/// control frame, advancing `i` past it. Tracks structured nesting so a
-/// nested `block`/`loop`/`if` inside the dead region is skipped whole.
-/// Returns null — degrading the whole function to the interpreter, which
-/// is always correct — on any opcode whose immediate width this baseline
-/// doesn't know, rather than risk misreading an immediate byte as an
-/// opcode.
-fn skipToFrameEnd(body: []const u8, i: *usize) ?void {
-    var depth: usize = 0;
-    while (i.* < body.len) {
-        const op = body[i.*];
-        i.* += 1;
-        switch (op) {
-            op_block, op_loop, op_if => {
-                _ = readSleb32(body, i) orelse return null; // block type
-                depth += 1;
-            },
-            op_end => {
-                if (depth == 0) return; // closes the current frame
-                depth -= 1;
-            },
-            op_else => {}, // stays within the enclosing `if`'s nesting
-            op_select_t => { // typed select: a result-type vector immediate
-                const n = readUleb32(body, i) orelse return null;
-                var k: u32 = 0;
-                while (k < n) : (k += 1) skipValType(body, i) orelse return null;
-            },
-            op_br, op_br_if, op_local_get, op_local_set, op_local_tee, op_global_get, op_global_set, op_memory_size, op_memory_grow, op_call, op_ref_func, op_table_get, op_table_set => {
-                _ = readUleb32(body, i) orelse return null;
-            },
-            op_call_indirect => { // type index + table index
-                _ = readUleb32(body, i) orelse return null;
-                _ = readUleb32(body, i) orelse return null;
-            },
-            op_br_table => {
-                const n = readUleb32(body, i) orelse return null;
-                var k: u32 = 0;
-                while (k <= n) : (k += 1) { // n table labels + 1 default
-                    _ = readUleb32(body, i) orelse return null;
-                }
-            },
-            op_i32_const => {
-                _ = readSleb32(body, i) orelse return null;
-            },
-            op_i64_const => {
-                _ = readSleb64(body, i) orelse return null;
-            },
-            op_ref_null => { // §5.4.2 — heap type, an s33
-                _ = readSleb64(body, i) orelse return null;
-            },
-            op_misc_prefix => {
-                // Saturating truncations (sub 0..7) take no further immediate;
-                // memory.init (sub 8) takes a data index + memory index;
-                // data.drop (sub 9) takes a data index; memory.copy (sub 10)
-                // two memory indices; memory.fill (sub 11) one; table.init
-                // (sub 12) an element index + table index; elem.drop (sub 13)
-                // an element index; table.copy (sub 14) two table indices;
-                // table.grow (sub 15) one table index; table.size (sub 16) one
-                // table index; table.fill (sub 17) one table index. Any other
-                // 0xFC op degrades.
-                const sub = readUleb32(body, i) orelse return null;
-                if (sub <= 7) {
-                    // no further immediate
-                } else if (sub == 8) {
-                    _ = readUleb32(body, i) orelse return null; // data index
-                    _ = readUleb32(body, i) orelse return null; // memory index
-                } else if (sub == 9) {
-                    _ = readUleb32(body, i) orelse return null; // data index
-                } else if (sub == 11) {
-                    _ = readUleb32(body, i) orelse return null; // memory index
-                } else if (sub == 10) {
-                    _ = readUleb32(body, i) orelse return null; // dst memory index
-                    _ = readUleb32(body, i) orelse return null; // src memory index
-                } else if (sub == 12) {
-                    _ = readUleb32(body, i) orelse return null; // element index
-                    _ = readUleb32(body, i) orelse return null; // table index
-                } else if (sub == 13) {
-                    _ = readUleb32(body, i) orelse return null; // element index
-                } else if (sub == 14) {
-                    _ = readUleb32(body, i) orelse return null; // dst table index
-                    _ = readUleb32(body, i) orelse return null; // src table index
-                } else if (sub == 15) {
-                    _ = readUleb32(body, i) orelse return null; // table index
-                } else if (sub == 16) {
-                    _ = readUleb32(body, i) orelse return null; // table index
-                } else if (sub == 17) {
-                    _ = readUleb32(body, i) orelse return null; // table index
-                } else return null;
-            },
-            op_simd_prefix => {
-                // §4.4 SIMD — v128.const (sub 12) carries 16 raw immediate
-                // bytes; v128.load (sub 0) / v128.store (sub 11) carry a memarg
-                // (align + offset ULEBs); i32x4.add (sub 174) takes no further
-                // immediate. Every other SIMD sub-op (lane immediates,
-                // load/store_lane, shuffle, …) has an immediate width this
-                // baseline doesn't model, so degrade rather than risk misreading
-                // a following byte as an opcode.
-                const sub = readUleb32(body, i) orelse return null;
-                if (sub == simd_i32x4_add) {
-                    // no further immediate
-                } else if (sub == simd_v128_const) {
-                    if (i.* + 16 > body.len) return null;
-                    i.* += 16; // 16 raw immediate bytes
-                } else if (sub == simd_v128_load or sub == simd_v128_store) {
-                    const flags = readUleb32(body, i) orelse return null;
-                    if (flags & 0x40 != 0) return null; // multi-memory — degrade
-                    _ = readUleb32(body, i) orelse return null; // offset
-                } else return null;
-            },
-            op_f64_const => {
-                _ = readF64Bits(body, i) orelse return null; // 8 raw bytes
-            },
-            op_f32_const => {
-                _ = readF32Bits(body, i) orelse return null; // 4 raw bytes
-            },
-            op_i32_load, op_i32_load8_s, op_i32_load8_u, op_i32_load16_s, op_i32_load16_u, op_i32_store, op_i32_store8, op_i32_store16, op_i64_load, op_i64_load8_s, op_i64_load8_u, op_i64_load16_s, op_i64_load16_u, op_i64_load32_s, op_i64_load32_u, op_i64_store, op_i64_store8, op_i64_store16, op_i64_store32, op_f32_load, op_f64_load, op_f32_store, op_f64_store => {
-                const flags = readUleb32(body, i) orelse return null;
-                if (flags & 0x40 != 0) return null; // multi-memory — degrade
-                _ = readUleb32(body, i) orelse return null; // offset
-            },
-            // No-immediate opcodes in the baseline's set.
-            op_nop, op_drop, op_select, op_return, op_i32_eqz, op_i32_clz, op_i32_ctz, op_i64_clz, op_i64_ctz, op_i32_eq, op_i32_ne, op_i32_lt_s, op_i32_lt_u, op_i32_gt_s, op_i32_gt_u, op_i32_le_s, op_i32_le_u, op_i32_ge_s, op_i32_ge_u, op_i32_add, op_i32_sub, op_i32_mul, op_i32_and, op_i32_or, op_i32_xor, op_i32_shl, op_i32_shr_s, op_i32_shr_u, op_i32_rotl, op_i32_rotr, op_i64_rotl, op_i64_rotr, op_i32_div_s, op_i32_div_u, op_i32_rem_s, op_i32_rem_u, op_i64_add, op_i64_sub, op_i64_mul, op_i64_and, op_i64_or, op_i64_xor, op_i64_shl, op_i64_shr_s, op_i64_shr_u, op_i64_eqz, op_i64_eq, op_i64_ne, op_i64_lt_s, op_i64_lt_u, op_i64_gt_s, op_i64_gt_u, op_i64_le_s, op_i64_le_u, op_i64_ge_s, op_i64_ge_u, op_i64_div_s, op_i64_div_u, op_i64_rem_s, op_i64_rem_u, op_i32_wrap_i64, op_i64_extend_i32_s, op_i64_extend_i32_u, op_i32_trunc_f32_s, op_i32_trunc_f32_u, op_i32_trunc_f64_s, op_i32_trunc_f64_u, op_i64_trunc_f32_s, op_i64_trunc_f32_u, op_i64_trunc_f64_s, op_i64_trunc_f64_u, op_f32_convert_i32_s, op_f32_convert_i32_u, op_f32_convert_i64_s, op_f32_convert_i64_u, op_f32_demote_f64, op_f64_convert_i32_s, op_f64_convert_i32_u, op_f64_convert_i64_s, op_f64_convert_i64_u, op_f64_promote_f32, op_i32_reinterpret_f32, op_i64_reinterpret_f64, op_f32_reinterpret_i32, op_f64_reinterpret_i64, op_f64_abs, op_f64_neg, op_f64_ceil, op_f64_floor, op_f64_trunc, op_f64_nearest, op_f64_sqrt, op_f64_add, op_f64_sub, op_f64_mul, op_f64_div, op_f64_min, op_f64_max, op_f64_copysign, op_f64_eq, op_f64_ne, op_f64_lt, op_f64_gt, op_f64_le, op_f64_ge, op_f32_abs, op_f32_neg, op_f32_ceil, op_f32_floor, op_f32_trunc, op_f32_nearest, op_f32_sqrt, op_f32_add, op_f32_sub, op_f32_mul, op_f32_div, op_f32_min, op_f32_max, op_f32_copysign, op_f32_eq, op_f32_ne, op_f32_lt, op_f32_gt, op_f32_le, op_f32_ge, op_i32_extend8_s, op_i32_extend16_s, op_i64_extend8_s, op_i64_extend16_s, op_i64_extend32_s, op_i32_popcnt, op_i64_popcnt, op_ref_is_null => {},
-            else => return null, // unknown immediate width — degrade
-        }
-    }
-    return null; // ran off the body without closing the frame — degrade
-}
-
 /// Parse a block type (§5.3.6) and return the block's result arity,
 /// advancing `i` past it. The empty type (`0x40`) carries nothing; a
 /// single `i32` value type carries one result. Any other value type,
@@ -4807,6 +4680,196 @@ test "spasm: x86_64 native entry returns an i32 constant" {
     try testing.expectEqual(@as(u32, 42), @as(u32, @truncate(results[0])));
 }
 
+test "spasm: x86_64 integer unary operations preserve wasm edge semantics" {
+    if (comptime builtin.cpu.arch != .x86_64 or !supported) {
+        return error.SkipZigTest;
+    }
+
+    const Case = struct {
+        op: u8,
+        value_type: ValType,
+        input: u64,
+        expected: u64,
+    };
+    const cases = [_]Case{
+        .{ .op = op_i32_clz, .value_type = .i32, .input = 0, .expected = 32 },
+        .{ .op = op_i32_clz, .value_type = .i32, .input = 0x10, .expected = 27 },
+        .{ .op = op_i32_ctz, .value_type = .i32, .input = 0, .expected = 32 },
+        .{ .op = op_i32_ctz, .value_type = .i32, .input = 0x10, .expected = 4 },
+        .{ .op = op_i32_popcnt, .value_type = .i32, .input = 0xf0f0_f0f0, .expected = 16 },
+        .{ .op = op_i64_clz, .value_type = .i64, .input = @as(u64, 1) << 40, .expected = 23 },
+        .{ .op = op_i64_ctz, .value_type = .i64, .input = 0, .expected = 64 },
+        .{ .op = op_i64_ctz, .value_type = .i64, .input = @as(u64, 1) << 40, .expected = 40 },
+        .{ .op = op_i64_popcnt, .value_type = .i64, .input = 0xf0f0_f0f0_f0f0_f0f0, .expected = 32 },
+        .{ .op = op_i32_extend8_s, .value_type = .i32, .input = 0x80, .expected = 0xffff_ff80 },
+        .{ .op = op_i32_extend16_s, .value_type = .i32, .input = 0x8000, .expected = 0xffff_8000 },
+        .{ .op = op_i64_extend8_s, .value_type = .i64, .input = 0x80, .expected = 0xffff_ffff_ffff_ff80 },
+        .{ .op = op_i64_extend16_s, .value_type = .i64, .input = 0x8000, .expected = 0xffff_ffff_ffff_8000 },
+        .{ .op = op_i64_extend32_s, .value_type = .i64, .input = 0x8000_0000, .expected = 0xffff_ffff_8000_0000 },
+    };
+
+    var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
+    defer ca.deinit();
+
+    for (cases) |case| {
+        const body = [_]u8{ op_local_get, 0x00, case.op, op_end };
+        const value_types: []const ValType = if (case.value_type == .i32) &.{.i32} else &.{.i64};
+        const func: CompiledFunc = .{
+            .type_index = 0,
+            .local_types = value_types,
+            .body = &body,
+            .side_table = &.{},
+            .max_stack = 1,
+        };
+        const ftype: FuncType = .{ .params = value_types, .results = value_types };
+        const entry = (try compileT(&ca, &func, &ftype)) orelse return error.SpasmRefused;
+
+        var frame: [1 + operand_reg_count]Cell = @splat(0);
+        frame[0] = case.input;
+        var results: [1]Cell = .{0};
+        const status = entry(&frame, &results, @ptrCast(&frame), 0, @ptrCast(&frame), @ptrCast(&frame), 0, null);
+        try testing.expectEqual(trap_ok, status);
+        try testing.expectEqual(case.expected, results[0]);
+    }
+}
+
+test "spasm: x86_64 scalar select preserves full-width values" {
+    if (comptime builtin.cpu.arch != .x86_64 or !supported) {
+        return error.SkipZigTest;
+    }
+    var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
+    defer ca.deinit();
+
+    const body = [_]u8{
+        op_local_get, 0x00,
+        op_local_get, 0x01,
+        op_local_get, 0x02,
+        op_select,    op_end,
+    };
+    const local_types: []const ValType = &.{ .i64, .i64, .i32 };
+    const func: CompiledFunc = .{
+        .type_index = 0,
+        .local_types = local_types,
+        .body = &body,
+        .side_table = &.{},
+        .max_stack = 3,
+    };
+    const ftype: FuncType = .{ .params = local_types, .results = &.{.i64} };
+    const entry = (try compileT(&ca, &func, &ftype)) orelse return error.SpasmRefused;
+
+    const true_value: Cell = 0x1234_5678_9abc_def0;
+    const false_value: Cell = 0xfedc_ba98_7654_3210;
+    inline for (.{ .{ 1, true_value }, .{ 0, false_value } }) |case| {
+        var frame: [3 + operand_reg_count]Cell = .{ true_value, false_value, case[0], 0, 0, 0, 0, 0, 0, 0 };
+        var results: [1]Cell = .{0};
+        try testing.expectEqual(trap_ok, entry(&frame, &results, @ptrCast(&frame), 0, @ptrCast(&frame), @ptrCast(&frame), 0, null));
+        try testing.expectEqual(@as(u64, case[1]), results[0]);
+    }
+}
+
+test "spasm: x86_64 explicit return discards lower operands and dead code" {
+    if (comptime builtin.cpu.arch != .x86_64 or !supported) {
+        return error.SkipZigTest;
+    }
+    var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
+    defer ca.deinit();
+
+    const body = [_]u8{
+        op_i32_const, 0xe3, 0x00, // 99, discarded by return
+        op_i32_const, 42,   op_return,
+        op_block, 0x40, op_i32_const, 7, op_drop, op_end, // dead nested block
+        op_i32_const, 5, // dead function result
+        op_end,
+    };
+    const func: CompiledFunc = .{
+        .type_index = 0,
+        .local_types = &.{},
+        .body = &body,
+        .side_table = &.{},
+        .max_stack = 2,
+    };
+    const ftype: FuncType = .{ .params = &.{}, .results = &.{.i32} };
+    const entry = (try compileT(&ca, &func, &ftype)) orelse return error.SpasmRefused;
+
+    var frame: [operand_reg_count]Cell = @splat(0);
+    var results: [1]Cell = .{0};
+    try testing.expectEqual(trap_ok, entry(&frame, &results, @ptrCast(&frame), 0, @ptrCast(&frame), @ptrCast(&frame), 0, null));
+    try testing.expectEqual(@as(u32, 42), @as(u32, @truncate(results[0])));
+}
+
+test "spasm: x86_64 branches carry values while unwinding operands" {
+    if (comptime builtin.cpu.arch != .x86_64 or !supported) {
+        return error.SkipZigTest;
+    }
+    var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
+    defer ca.deinit();
+
+    // Taken: unwind 99 and carry 42 to the block result. Not taken: discard
+    // both values explicitly and produce 20 on the fall-through path.
+    const body = [_]u8{
+        op_block,     0x7f,
+        op_i32_const, 0xe3,
+        0x00,         op_i32_const,
+        42,           op_local_get,
+        0x00,         op_br_if,
+        0x00,         op_drop,
+        op_drop,      op_i32_const,
+        20,           op_end,
+        op_end,
+    };
+    const func: CompiledFunc = .{
+        .type_index = 0,
+        .local_types = &.{.i32},
+        .body = &body,
+        .side_table = &.{},
+        .max_stack = 3,
+    };
+    const ftype: FuncType = .{ .params = &.{.i32}, .results = &.{.i32} };
+    const entry = (try compileT(&ca, &func, &ftype)) orelse return error.SpasmRefused;
+
+    inline for (.{ .{ 1, 42 }, .{ 0, 20 } }) |case| {
+        var frame: [1 + operand_reg_count]Cell = @splat(0);
+        frame[0] = case[0];
+        var results: [1]Cell = .{0};
+        try testing.expectEqual(trap_ok, entry(&frame, &results, @ptrCast(&frame), 0, @ptrCast(&frame), @ptrCast(&frame), 0, null));
+        try testing.expectEqual(@as(u32, case[1]), @as(u32, @truncate(results[0])));
+    }
+}
+
+test "spasm: x86_64 br_table dispatches to distinct block exits" {
+    if (comptime builtin.cpu.arch != .x86_64 or !supported) {
+        return error.SkipZigTest;
+    }
+    var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
+    defer ca.deinit();
+
+    const body = [_]u8{
+        op_i32_const, 7,            op_local_set, 0x01,
+        op_block,     0x40,         op_block,     0x40,
+        op_local_get, 0x00,         op_br_table,  0x01,
+        0x00,         0x01,         op_end,       op_i32_const,
+        10,           op_local_set, 0x01,         op_end,
+        op_local_get, 0x01,         op_end,
+    };
+    const func: CompiledFunc = .{
+        .type_index = 0,
+        .local_types = &.{ .i32, .i32 },
+        .body = &body,
+        .side_table = &.{},
+        .max_stack = 1,
+    };
+    const ftype: FuncType = .{ .params = &.{.i32}, .results = &.{.i32} };
+    const entry = (try compileT(&ca, &func, &ftype)) orelse return error.SpasmRefused;
+
+    inline for (.{ .{ 0, 10 }, .{ 1, 7 }, .{ 3, 7 } }) |case| {
+        var frame: [2 + operand_reg_count]Cell = @splat(0);
+        frame[0] = case[0];
+        var results: [1]Cell = .{0};
+        try testing.expectEqual(trap_ok, entry(&frame, &results, @ptrCast(&frame), 0, @ptrCast(&frame), @ptrCast(&frame), 0, null));
+        try testing.expectEqual(@as(u32, case[1]), @as(u32, @truncate(results[0])));
+    }
+}
+
 test "spasm: x86_64 diagnostics distinguish emission OOM" {
     if (comptime builtin.cpu.arch != .x86_64 or !supported) {
         return error.SkipZigTest;
@@ -4848,6 +4911,48 @@ test "spasm: x86_64 diagnostics distinguish emission OOM" {
     );
     try testing.expectEqual(RefusalStage.emission, diagnostics.stage);
     try testing.expectEqual(@as(u8, 0), diagnostics.opcode);
+}
+
+test "spasm: x86_64 diagnostics retain unsupported 0xfc subopcodes" {
+    if (comptime builtin.cpu.arch != .x86_64 or !supported) {
+        return error.SkipZigTest;
+    }
+    var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
+    defer ca.deinit();
+
+    const body = [_]u8{ op_misc_prefix, 0x08, 0x00, 0x00, op_end }; // memory.init 0 0
+    const func: CompiledFunc = .{
+        .type_index = 0,
+        .local_types = &.{},
+        .body = &body,
+        .side_table = &.{},
+        .max_stack = 0,
+    };
+    const ftype: FuncType = .{ .params = &.{}, .results = &.{} };
+    const types_arr = [_]FuncType{ftype};
+    const funcs_arr = [_]CompiledFunc{func};
+    const module: Module = .{ .types = &types_arr, .funcs = &.{0} };
+    var diagnostics: CompileDiagnostics = .{};
+
+    const compiled = try compileWithDiagnostics(
+        testing.allocator,
+        &ca,
+        &func,
+        &ftype,
+        &module,
+        &funcs_arr,
+        0,
+        &.{},
+        null,
+        .{},
+        testExecutionPoll,
+        &diagnostics,
+    );
+    try testing.expect(compiled == null);
+    try testing.expectEqual(RefusalStage.unsupported_opcode, diagnostics.stage);
+    try testing.expectEqual(op_misc_prefix, diagnostics.opcode);
+    try testing.expect(diagnostics.has_subopcode);
+    try testing.expectEqual(@as(u32, 8), diagnostics.subopcode);
 }
 
 test "spasm: diagnostics keep intentional unsupported operations out of emission failures" {
