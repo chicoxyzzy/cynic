@@ -1639,18 +1639,22 @@ pub fn compile(
             op_i64_load32_s,
             op_i64_load32_u,
             => {
-                const offset = readMemArg(body, &i) orelse return null;
-                if (memoryIs64(module, 0) != false or sp == 0) return null;
+                const memory64 = memoryIs64(module, 0) orelse return null;
+                const offset = readMemArg(body, &i, memory64) orelse return null;
+                if (sp == 0) return null;
                 const depth = sp - 1;
                 try materialize(&m, stack[depth], num_locals, depth);
-                try m.load32Disp32(.r10, .r12, scratchOffset(num_locals, depth));
+                if (memory64)
+                    try m.load64Disp32(.r10, .r12, scratchOffset(num_locals, depth))
+                else
+                    try m.load32Disp32(.r10, .r12, scratchOffset(num_locals, depth));
                 const width: u32 = switch (op) {
                     op_i32_load8_s, op_i32_load8_u, op_i64_load8_s, op_i64_load8_u => 1,
                     op_i32_load16_s, op_i32_load16_u, op_i64_load16_s, op_i64_load16_u => 2,
                     op_i32_load, op_f32_load, op_i64_load32_s, op_i64_load32_u => 4,
                     else => 8,
                 };
-                try emitMemAddress(&m, offset, width, &trap_oob);
+                try emitMemAddress(&m, offset, width, memory64, &trap_oob);
                 trap_oob_used = true;
                 switch (op) {
                     op_i32_load, op_f32_load => try m.load32Disp32(.rax, .r11, 0),
@@ -1679,13 +1683,17 @@ pub fn compile(
             op_i64_store16,
             op_i64_store32,
             => {
-                const offset = readMemArg(body, &i) orelse return null;
-                if (memoryIs64(module, 0) != false or sp < 2) return null;
+                const memory64 = memoryIs64(module, 0) orelse return null;
+                const offset = readMemArg(body, &i, memory64) orelse return null;
+                if (sp < 2) return null;
                 const addr_depth = sp - 2;
                 const value_depth = sp - 1;
                 try materialize(&m, stack[addr_depth], num_locals, addr_depth);
                 try materialize(&m, stack[value_depth], num_locals, value_depth);
-                try m.load32Disp32(.r10, .r12, scratchOffset(num_locals, addr_depth));
+                if (memory64)
+                    try m.load64Disp32(.r10, .r12, scratchOffset(num_locals, addr_depth))
+                else
+                    try m.load32Disp32(.r10, .r12, scratchOffset(num_locals, addr_depth));
                 try m.load64Disp32(.rax, .r12, scratchOffset(num_locals, value_depth));
                 const width: u32 = switch (op) {
                     op_i32_store8, op_i64_store8 => 1,
@@ -1693,7 +1701,7 @@ pub fn compile(
                     op_i32_store, op_f32_store, op_i64_store32 => 4,
                     else => 8,
                 };
-                try emitMemAddress(&m, offset, width, &trap_oob);
+                try emitMemAddress(&m, offset, width, memory64, &trap_oob);
                 trap_oob_used = true;
                 switch (op) {
                     op_i32_store8, op_i64_store8 => try m.store8Disp32(.r11, 0, .rax),
@@ -1714,12 +1722,16 @@ pub fn compile(
             },
             op_memory_grow => {
                 const memory_index = readUleb32(body, &i) orelse return null;
-                if (memory_index != 0 or memoryIs64(module, memory_index) != false or config.mem_grow_helper == null or sp == 0) return null;
+                const memory64 = memoryIs64(module, memory_index) orelse return null;
+                if (memory_index != 0 or config.mem_grow_helper == null or sp == 0) return null;
                 const depth = sp - 1;
                 try materialize(&m, stack[depth], num_locals, depth);
                 try m.load64Disp32(.rdi, .rsp, 0); // Instance*, before rsp moves
                 try m.movImm64(.rsi, memory_index);
-                try m.load32Disp32(.rdx, .r12, scratchOffset(num_locals, depth));
+                if (memory64)
+                    try m.load64Disp32(.rdx, .r12, scratchOffset(num_locals, depth))
+                else
+                    try m.load32Disp32(.rdx, .r12, scratchOffset(num_locals, depth));
                 // A 16-byte out-region keeps the helper call aligned. The
                 // helper always writes the live base/length, on success or
                 // failure, so the cached callee-saved pair is refreshed.
@@ -1730,7 +1742,7 @@ pub fn compile(
                 try m.load64Disp32(.r14, .rsp, 0);
                 try m.load64Disp32(.r15, .rsp, 8);
                 try m.addRegImm32(.rsp, 16);
-                try m.movReg32(.rax, .rax);
+                if (!memory64) try m.movReg32(.rax, .rax);
                 try m.store64Disp32(.r12, scratchOffset(num_locals, depth), .rax);
                 stack[depth] = .runtime;
             },
@@ -1775,7 +1787,8 @@ pub fn compile(
                     const helper = config.mem_init_helper orelse return null;
                     const data_index = readUleb32(body, &i) orelse return null;
                     const memory_index = readUleb32(body, &i) orelse return null;
-                    if (memory_index != 0 or memoryIs64(module, memory_index) != false or sp < 3) return null;
+                    const memory64 = memoryIs64(module, memory_index) orelse return null;
+                    if (memory_index != 0 or sp < 3) return null;
                     const below = sp - 3;
                     try materialize(&m, stack[below], num_locals, below);
                     try materialize(&m, stack[below + 1], num_locals, below + 1);
@@ -1784,7 +1797,10 @@ pub fn compile(
                     try m.load64Disp32(.rdi, .rsp, 0);
                     try m.movImm64(.rsi, data_index);
                     try m.movImm64(.rdx, memory_index);
-                    try m.load32Disp32(.rcx, .r12, scratchOffset(num_locals, below));
+                    if (memory64)
+                        try m.load64Disp32(.rcx, .r12, scratchOffset(num_locals, below))
+                    else
+                        try m.load32Disp32(.rcx, .r12, scratchOffset(num_locals, below));
                     try m.load32Disp32(.r8, .r12, scratchOffset(num_locals, below + 1));
                     try m.load32Disp32(.r9, .r12, scratchOffset(num_locals, below + 2));
                     try m.movImm64(.r11, helper);
@@ -1807,14 +1823,21 @@ pub fn compile(
                     try m.callReg(.r11);
                 } else if (sub == 11) {
                     const memory_index = readUleb32(body, &i) orelse return null;
-                    if (memory_index != 0 or memoryIs64(module, memory_index) != false or sp < 3) return null;
+                    const memory64 = memoryIs64(module, memory_index) orelse return null;
+                    if (memory_index != 0 or sp < 3) return null;
                     const below = sp - 3;
                     try materialize(&m, stack[below], num_locals, below);
                     try materialize(&m, stack[below + 1], num_locals, below + 1);
                     try materialize(&m, stack[below + 2], num_locals, below + 2);
-                    try m.load32Disp32(.rax, .r12, scratchOffset(num_locals, below)); // dst
+                    if (memory64)
+                        try m.load64Disp32(.rax, .r12, scratchOffset(num_locals, below))
+                    else
+                        try m.load32Disp32(.rax, .r12, scratchOffset(num_locals, below)); // dst
                     try m.load32Disp32(.rcx, .r12, scratchOffset(num_locals, below + 1)); // value
-                    try m.load32Disp32(.rdx, .r12, scratchOffset(num_locals, below + 2)); // count
+                    if (memory64)
+                        try m.load64Disp32(.rdx, .r12, scratchOffset(num_locals, below + 2))
+                    else
+                        try m.load32Disp32(.rdx, .r12, scratchOffset(num_locals, below + 2)); // count
                     try emitRangeBounds(&m, .rax, .rdx, &trap_oob);
                     trap_oob_used = true;
                     try m.movReg64(.r11, .r14);
@@ -1849,14 +1872,21 @@ pub fn compile(
                 } else if (sub == 10) {
                     const destination_memory = readUleb32(body, &i) orelse return null;
                     const source_memory = readUleb32(body, &i) orelse return null;
-                    if (destination_memory != 0 or source_memory != 0 or memoryIs64(module, 0) != false or sp < 3) return null;
+                    const memory64 = memoryIs64(module, 0) orelse return null;
+                    if (destination_memory != 0 or source_memory != 0 or sp < 3) return null;
                     const below = sp - 3;
                     try materialize(&m, stack[below], num_locals, below);
                     try materialize(&m, stack[below + 1], num_locals, below + 1);
                     try materialize(&m, stack[below + 2], num_locals, below + 2);
-                    try m.load32Disp32(.rax, .r12, scratchOffset(num_locals, below)); // dst
-                    try m.load32Disp32(.rcx, .r12, scratchOffset(num_locals, below + 1)); // src
-                    try m.load32Disp32(.rdx, .r12, scratchOffset(num_locals, below + 2)); // count
+                    if (memory64) {
+                        try m.load64Disp32(.rax, .r12, scratchOffset(num_locals, below)); // dst
+                        try m.load64Disp32(.rcx, .r12, scratchOffset(num_locals, below + 1)); // src
+                        try m.load64Disp32(.rdx, .r12, scratchOffset(num_locals, below + 2)); // count
+                    } else {
+                        try m.load32Disp32(.rax, .r12, scratchOffset(num_locals, below)); // dst
+                        try m.load32Disp32(.rcx, .r12, scratchOffset(num_locals, below + 1)); // src
+                        try m.load32Disp32(.rdx, .r12, scratchOffset(num_locals, below + 2)); // count
+                    }
                     try emitRangeBounds(&m, .rcx, .rdx, &trap_oob);
                     try emitRangeBounds(&m, .rax, .rdx, &trap_oob);
                     trap_oob_used = true;
@@ -2867,9 +2897,7 @@ fn globalValType(module: *const Module, index: u32) ?ValType {
     return module.globals[local].type.val;
 }
 
-/// Resolve one memory's address width in the memory index space. This x86
-/// increment emits memory32 accesses only; a memory64 body refuses before any
-/// machine code is installed.
+/// Resolve one memory's address width in the memory index space.
 fn memoryIs64(module: *const Module, index: u32) ?bool {
     var seen: u32 = 0;
     for (module.imports) |import| {
@@ -2883,18 +2911,22 @@ fn memoryIs64(module: *const Module, index: u32) ?bool {
     return module.mems[local].limits.is_64;
 }
 
-/// §4.4.7 effective address and explicit software bounds check. The address
-/// arrives zero-extended from an i32 Cell, so adding the u32 static offset in
-/// u64 cannot wrap. r10 enters as the dynamic address; r11 returns as the host
-/// pointer. r9 is scratch. Host faults are never part of the trap contract.
+/// §4.4.7 effective address and explicit software bounds check. Memory32
+/// addresses arrive zero-extended; memory64 addresses and static offsets can
+/// span all of u64, so the add's carry traps before a wrapped effective
+/// address can pass the length check. r10 enters as the dynamic address; r11
+/// returns as the host pointer. r9 is scratch. Host faults are never part of
+/// the trap contract.
 fn emitMemAddress(
     m: *x64.Masm,
-    offset: u32,
+    offset: u64,
     width: u32,
+    memory64: bool,
     trap_oob: *x64.Masm.Label,
 ) Error!void {
     try m.movImm64(.r11, offset);
     try m.addReg64(.r10, .r11);
+    if (memory64) try m.jumpCond(.below, trap_oob); // address + offset wrapped
     try m.cmpReg64(.r10, .r15);
     try m.jumpCond(.above, trap_oob);
     try m.movReg64(.r9, .r15);
@@ -3100,8 +3132,29 @@ fn readF64Bits(body: []const u8, index: *usize) ?u64 {
     return bits;
 }
 
-fn readMemArg(body: []const u8, index: *usize) ?u32 {
+fn readMemArg(body: []const u8, index: *usize, memory64: bool) ?u64 {
     const flags = readUleb32(body, index) orelse return null;
     if (flags & 0x40 != 0) return null; // explicit memory index
-    return readUleb32(body, index);
+    if (memory64) return readUleb64(body, index);
+    return readUleb32(body, index) orelse return null;
+}
+
+fn readUleb64(body: []const u8, index: *usize) ?u64 {
+    var result: u64 = 0;
+    var shift: u32 = 0;
+    var byte_index: usize = 0;
+    while (byte_index < 10 and index.* < body.len) : (byte_index += 1) {
+        const byte = body[index.*];
+        index.* += 1;
+        const low = byte & 0x7f;
+        if (byte_index == 9) {
+            if (low > 1 or byte & 0x80 != 0) return null;
+            result |= @as(u64, low) << 63;
+            return result;
+        }
+        result |= @as(u64, low) << @as(u6, @intCast(shift));
+        if (byte & 0x80 == 0) return result;
+        shift += 7;
+    }
+    return null;
 }

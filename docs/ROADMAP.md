@@ -2303,8 +2303,9 @@ and the per-builtin checklist; this section tracks status.
   family, the first SIMD data path, and Realm fuel/interrupt safe points at
   native entry plus taken structured-loop backedges ship and are default-on
   for wasm. A qualified SysV x86_64 backend now covers the complete scalar
-  numeric ISA, scalar globals and memory access, memory size/grow/fill/copy,
-  memory32 `memory.init` / `data.drop`, scalar select, value-carrying branches,
+  numeric ISA, scalar globals and memory32/memory64 access,
+  memory size/grow/fill/copy/init plus `data.drop`, scalar select,
+  value-carrying branches,
   `br_table`, nested explicit return, catchable `unreachable`, explicit
   numeric/memory/stack traps, entry/backedge execution polls,
   guarded self-links, W^X-safe stable cross-function gates, scalar
@@ -2318,14 +2319,22 @@ and the per-builtin checklist; this section tracks status.
   The remaining 2,290 refusals include zero emission or install failures;
   prefix telemetry names `memory.init` (32), `memory.copy` (20), and
   `memory.fill` (18) as the largest remaining `0xfc` groups.
+  The follow-on memory64 checkpoint adds i64-addressed scalar loads/stores,
+  size/grow, and init/copy/fill to x86_64, including full-u64 memargs and an
+  explicit carry trap before bounds checking. It also widens the shared
+  `memory.init` helper destination to u64, closing an AArch64 ABI truncation;
+  AArch64 now decodes full-u64 memargs with the same carry trap and compiles
+  memory64 grow as well.
+  The exact x86 sweep now reaches 120,331 native entries / 3,970 compiled
+  functions, with 2,000 refusals (8 limits, 1,401 signatures, 452 bytecode,
+  139 opcode) and zero emission/install failures.
   SSE2-only hosts use
   raw-bit rounding helpers instead of assuming SSE4.1. The forced sweep is
   fail-closed on native engagement via
   `--require-spasm-entry`, and the shared instance/cache, recursive stack,
   cold-gate fallback, and post-entry interrupt tests now execute on both
   architectures. Remaining x86 reference-typed signatures/locals/select,
-  SIMD, memory64 parity (including bulk-memory variants), remaining SIMD lane
-  operations generally, and the
+  SIMD and remaining SIMD lane operations generally, and the
   native-register/imported-call ABI remain next.
 
   The architecture for all three tiers — the shared codegen
