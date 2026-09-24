@@ -5836,7 +5836,8 @@ test "wasm validator: table64 accepts the core u64 maximum" {
     try loadErr(bytes);
 }
 
-test "wasm interp: a memory64 store/load round-trips with i64 addressing" {
+test "wasm spasm: a memory64 store/load round-trips with i64 addressing" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     // (memory i64 1)
@@ -5862,12 +5863,161 @@ test "wasm interp: a memory64 store/load round-trips with i64 addressing" {
         .{ .id = 7, .body = &xbody },
         .{ .id = 10, .body = &cbody },
     });
-    const res = try runRaw(bytes, "f", &.{});
+    const instance = try instOf(arena.allocator(), bytes, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true;
+    instance.spasm_diagnostics = true;
+
+    const fidx = funcExport(instance.module, "f") orelse return error.NoSuchExport;
+    const res = try interp.invoke(instance, testing.allocator, fidx, &.{});
     defer testing.allocator.free(res);
     try testing.expectEqual(@as(i64, 42), asI64(res[0]));
+    try testing.expect(instance.spasm_runs >= 1);
+    try testing.expectEqual(@as(u32, 1), instance.spasm_compiles);
+    try testing.expectEqual(@as(u32, 0), instance.spasm_refusals);
 }
 
-test "wasm interp: overflowing memory64 grow delta returns -1" {
+test "wasm spasm: a memory64 memarg preserves u64 offset overflow" {
+    const spasm = @import("spasm.zig");
+    if (comptime !spasm.supported) return error.SkipZigTest;
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // (memory i64 1)
+    // (func (export "f") (param i64) (result i32)
+    //   local.get 0
+    //   i32.load8_u offset=0xffffffffffffffff)
+    // The dynamic address 1 makes address+offset wrap to zero. The native
+    // effective-address check must trap on the carry rather than read byte 0.
+    const tbody = [_]u8{ 0x01, 0x60, 0x01, 0x7e, 0x01, 0x7f };
+    const fbody = [_]u8{ 0x01, 0x00 };
+    const mbody = [_]u8{ 0x01, 0x04, 0x01 };
+    const xbody = [_]u8{ 0x01, 0x01, 0x66, 0x00, 0x00 };
+    const cbody = [_]u8{
+        0x01, 0x10, 0x00,
+        0x20, 0x00, 0x2d,
+        0x00, 0xff, 0xff,
+        0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff,
+        0xff, 0x01, 0x0b,
+    };
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 5, .body = &mbody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 10, .body = &cbody },
+    });
+    const instance = try instOf(a, bytes, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true;
+    instance.spasm_diagnostics = true;
+
+    const fidx = funcExport(instance.module, "f") orelse return error.NoSuchExport;
+    try testing.expectError(error.OutOfBoundsMemoryAccess, interp.invoke(instance, testing.allocator, fidx, &.{1}));
+    try testing.expect(instance.spasm_runs >= 1);
+    try testing.expectEqual(@as(u32, 1), instance.spasm_compiles);
+    try testing.expectEqual(@as(u32, 0), instance.spasm_refusals);
+}
+
+test "wasm spasm: memory64 bulk memory operations preserve 64-bit operands" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // memory.init [8,12), memory.fill [16,20), memory.copy [8,12) to
+    // [24,28), then load byte 25. All memory offsets and bulk lengths are i64.
+    const tbody = [_]u8{ 0x01, 0x60, 0x00, 0x01, 0x7f };
+    const fbody = [_]u8{ 0x01, 0x00 };
+    const mbody = [_]u8{ 0x01, 0x04, 0x01 };
+    const xbody = [_]u8{ 0x01, 0x01, 0x66, 0x00, 0x00 };
+    const dcbody = [_]u8{0x01};
+    const cbody = [_]u8{
+        0x01, 0x25, 0x00,
+        0x42, 0x08, 0x41,
+        0x00, 0x41, 0x04,
+        0xfc, 0x08, 0x00,
+        0x00, 0x42, 0x10,
+        0x41, 0xaa, 0x01,
+        0x42, 0x04, 0xfc,
+        0x0b, 0x00, 0x42,
+        0x18, 0x42, 0x08,
+        0x42, 0x04, 0xfc,
+        0x0a, 0x00, 0x00,
+        0x42, 0x19, 0x2d,
+        0x00, 0x00, 0x0b,
+    };
+    const dbody = [_]u8{ 0x01, 0x01, 0x04, 0x11, 0x22, 0x33, 0x44 };
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 5, .body = &mbody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 12, .body = &dcbody },
+        .{ .id = 10, .body = &cbody },
+        .{ .id = 11, .body = &dbody },
+    });
+    const instance = try instOf(a, bytes, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true;
+    instance.spasm_diagnostics = true;
+
+    const fidx = funcExport(instance.module, "f") orelse return error.NoSuchExport;
+    const res = try interp.invoke(instance, testing.allocator, fidx, &.{});
+    defer testing.allocator.free(res);
+    try testing.expectEqual(@as(i32, 0x22), asI32(res[0]));
+    try testing.expectEqualSlices(u8, &.{ 0xaa, 0xaa, 0xaa, 0xaa }, instance.memories[0].data[16..20]);
+    try testing.expect(instance.spasm_runs >= 1);
+    try testing.expectEqual(@as(u32, 1), instance.spasm_compiles);
+    try testing.expectEqual(@as(u32, 0), instance.spasm_refusals);
+}
+
+test "wasm spasm: memory64 memory.init passes the full destination to its helper" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tbody = [_]u8{ 0x01, 0x60, 0x01, 0x7e, 0x00 };
+    const fbody = [_]u8{ 0x01, 0x00 };
+    const mbody = [_]u8{ 0x01, 0x04, 0x01 };
+    const xbody = [_]u8{ 0x01, 0x01, 0x66, 0x00, 0x00 };
+    const dcbody = [_]u8{0x01};
+    const cbody = [_]u8{
+        0x01, 0x0c, 0x00,
+        0x20, 0x00, 0x41,
+        0x00, 0x41, 0x01,
+        0xfc, 0x08, 0x00,
+        0x00, 0x0b,
+    };
+    const dbody = [_]u8{ 0x01, 0x01, 0x01, 0x7f };
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &tbody },
+        .{ .id = 3, .body = &fbody },
+        .{ .id = 5, .body = &mbody },
+        .{ .id = 7, .body = &xbody },
+        .{ .id = 12, .body = &dcbody },
+        .{ .id = 10, .body = &cbody },
+        .{ .id = 11, .body = &dbody },
+    });
+    const instance = try instOf(a, bytes, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true;
+    instance.spasm_diagnostics = true;
+
+    const fidx = funcExport(instance.module, "f") orelse return error.NoSuchExport;
+    try testing.expectError(error.OutOfBoundsMemoryAccess, interp.invoke(instance, testing.allocator, fidx, &.{0x1_0000_0000}));
+    try testing.expect(instance.spasm_runs >= 1);
+    try testing.expectEqual(@as(u32, 1), instance.spasm_compiles);
+    try testing.expectEqual(@as(u32, 0), instance.spasm_refusals);
+}
+
+test "wasm spasm: overflowing memory64 grow delta returns i64 minus one" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -5883,9 +6033,18 @@ test "wasm interp: overflowing memory64 grow delta returns -1" {
         .{ .id = 7, .body = &xbody },
         .{ .id = 10, .body = &cbody },
     });
-    const res = try runRaw(bytes, "f", &.{std.math.maxInt(u64)});
+    const instance = try instOf(a, bytes, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true;
+    instance.spasm_diagnostics = true;
+
+    const fidx = funcExport(instance.module, "f") orelse return error.NoSuchExport;
+    const res = try interp.invoke(instance, testing.allocator, fidx, &.{std.math.maxInt(u64)});
     defer testing.allocator.free(res);
     try testing.expectEqual(@as(i64, -1), asI64(res[0]));
+    try testing.expect(instance.spasm_runs >= 1);
+    try testing.expectEqual(@as(u32, 1), instance.spasm_compiles);
+    try testing.expectEqual(@as(u32, 0), instance.spasm_refusals);
 }
 
 test "wasm interp: overflowing table64 grow delta returns -1" {

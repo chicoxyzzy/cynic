@@ -1993,7 +1993,7 @@ fn spasmMemoryInit(
     instance_opaque: *anyopaque,
     data_idx: u32,
     mem_idx: u32,
-    dst: u32,
+    dst: u64,
     src: u32,
     len: u32,
 ) callconv(.c) u32 {
