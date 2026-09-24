@@ -533,8 +533,9 @@ the measured design space:
   The complete opcode surface above is the mature AArch64 backend. The
   qualified x86_64 SysV backend emits the complete scalar numeric family --
   including integer bit counts and sign-extension -- scalar globals, every
-  scalar memory load/store width, memory size/grow/fill/copy/init plus
-  `data.drop`, catchable numeric/memory/native-stack traps, Realm
+  scalar memory load/store width for memory32 and memory64,
+  memory size/grow/fill/copy/init plus `data.drop`, catchable
+  numeric/memory/native-stack traps, Realm
   entry/backedge polls, guarded local
   self-links, scalar `select`, value-carrying structured branches, `br_table`,
   nested explicit `return`, catchable `unreachable`, stable W^X-safe
@@ -542,18 +543,18 @@ the measured design space:
   scalar `call_indirect`, `ref.null` / `ref.func` / `ref.is_null`, and the
   table get/set/size/copy/init/grow/fill family plus `elem.drop`. Runtime
   references use their full 128-bit scratch Cell across the helper boundary.
-  Reference-typed signatures/locals/select, SIMD, memory64
-  access/grow/bulk-memory, and other unsupported x86 bodies refuse before
+  Reference-typed signatures/locals/select, SIMD, and other unsupported x86
+  bodies refuse before
   code publication and run in Sarcasm.
   This is a coverage difference, not a semantic one: forced-Spasm sweeps on
   both architectures pass all 58,779 scored spec commands. The 2026-09-24
-  x86 sweep exercised 119,144 native entries / 3,671 compiled functions and
+  x86 sweep exercised 120,331 native entries / 3,970 compiled functions and
   recorded zero emission or install failures. Its scalar rounding fallback is
   deliberately helper-based on SSE2-only targets rather than assuming SSE4.1;
-  the remaining 2,290 refusals are non-scalar signatures, unsupported bytecode
-  shapes/opcodes, and eight size limits. `0xfc` telemetry now separates prefix
-  suboperations; `memory.init` (32), `memory.copy` (20), and `memory.fill` (18)
-  lead the remaining memory64/unsupported-shape family. CI pairs
+  the remaining 2,000 refusals are non-scalar signatures, unsupported bytecode
+  shapes/opcodes, and eight size limits. The memory64 closure retains u64
+  memarg offsets, traps effective-address carry, and covers grow plus the bulk
+  memory family without changing the exact pass set. CI pairs
   `--spasm` with `--require-spasm-entry`, and the focused x86 instance/cache,
   trap, safe-point, self-link, and stable-gate tests require actual native
   entry, so the differential gate cannot be satisfied by fallback alone.

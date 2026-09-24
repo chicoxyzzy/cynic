@@ -1355,6 +1355,19 @@ useful:
    58,779/58,779 while reaching 119,144 native entries across 3,671 compiled
    functions. Refusals fall again to 2,290 (8 limits, 1,401 signatures, 742
    bytecode shapes, 139 opcodes), with zero emission or install failures.
+   The 2026-09-24 memory64 closure extends the x86_64 scalar memory family to
+   i64-addressed loads/stores, `memory.size` / `memory.grow`, and
+   `memory.init` / `memory.copy` / `memory.fill`. Memory64 memargs retain their
+   full u64 offset, and effective-address addition traps on unsigned carry
+   before the ordinary overflow-safe bounds check. The shared `memory.init`
+   helper now takes a u64 destination as well, fixing an AArch64 ABI truncation
+   that could turn a destination above 4 GiB into an in-bounds write. AArch64
+   now also decodes full-u64 memargs with the same carry trap and compiles
+   memory64 grow. The exact x86 differential reaches 120,331 native entries
+   across 3,970 compiled functions. Refusals fall to 2,000 (8 limits, 1,401
+   signatures, 452 bytecode shapes, 139 opcodes), still with zero emission or
+   install failures; AArch64 reaches 53,747 / 3,646 with one intentional
+   bytecode refusal.
    The **per-function code cache**
    now ships (`spasmEntryFor`): each emittable function compiles once on
    its first Spasm-enabled invoke and the cached `EntryFn` runs every
@@ -1374,7 +1387,7 @@ useful:
    interpret it). A red-first `wasm_js_test` (a JS export runs
    Spasm-compiled native code, `spasm_runs >= 1`) plus the full JS-wasm
    suite run under the jit-on posture gate it; non-emittable bodies
-   (reference-typed signatures/locals, SIMD, memory64 operations)
+   (reference-typed signatures/locals, SIMD, and other unsupported shapes)
    degrade, so the suite still covers the interpreter through that fallback. The scalar ALU now spans
    the i32/i64 and f32/f64 arithmetic and comparisons, the full float unary
    set (incl. min/max/copysign), the integer bit-counts (clz/ctz/popcnt)
@@ -1422,7 +1435,7 @@ useful:
    explicit overflow-safe software bounds checks; and
    `memory.size`, helper-backed `memory.grow` with base/length refresh,
    overlap-safe inline `memory.fill` / `memory.copy`, and helper-backed
-   memory32 `memory.init` / `data.drop`. Its complete scalar ALU
+   memory32/memory64 `memory.init` / `data.drop`. Its complete scalar ALU
    includes integer bit counts and sign extension; scalar `select`,
    value-carrying structured branches, `br_table`, nested explicit `return`,
    and catchable `unreachable` share the Cell merge discipline. Scalar
@@ -1430,9 +1443,9 @@ useful:
    shared resolver/type-check helper and the same staged Cell buffer as direct
    calls. `ref.null`, `ref.func`, and `ref.is_null` plus table
    get/set/grow/fill use full 128-bit depth-keyed Cells for runtime references;
-   table size/copy/init and `elem.drop` use scalar helper ABIs. Memory64
-   access/grow/bulk-memory operations, reference-typed signatures/locals/select,
-   SIMD, and imported-call native lowering remain transactional refusals.
+   table size/copy/init and `elem.drop` use scalar helper ABIs.
+   Reference-typed signatures/locals/select, SIMD, and imported-call native
+   lowering remain transactional refusals.
    Non-gated calls retain the checked helper and per-function Sarcasm fallback.
    Imports, cross-instance calls, overlarge frames, and bodies
    Spasm cannot compile keep the generic helper / `invoke` fallback. Operands
@@ -1444,7 +1457,8 @@ useful:
    thread-local depth backstop while the linked lane uses the shared native
    stack cutoff); and
    `memory.init` / `data.drop` (the passive-segment ops, via the same
-   helper-call shape) — so the whole memory32 bulk-memory family now compiles.
+   helper-call shape) — so the whole single-memory bulk-memory family now
+   compiles for both address widths.
    The reference types open with `ref.null` / `ref.func` / `ref.is_null`: both ref
    sources are compile-time-known (a `ref.null` is always `REF_NULL`; a
    `ref.func`'s funcref is `makeFuncRef(x19, f)`, fixed by the immediate since
