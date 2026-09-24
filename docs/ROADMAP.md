@@ -2306,22 +2306,24 @@ and the per-builtin checklist; this section tracks status.
   numeric ISA, scalar globals and memory access, memory size/grow/fill/copy,
   scalar select, value-carrying branches, `br_table`, top-level explicit
   return, explicit numeric/memory/stack traps, entry/backedge execution polls,
-  guarded self-links, and W^X-safe stable
-  cross-function gates. Unsupported x86 functions refuse
+  guarded self-links, W^X-safe stable cross-function gates, scalar
+  `call_indirect`, the core reference constants/null test, and
+  table get/set/size/copy/init/grow/fill plus `elem.drop`. Unsupported x86
+  functions refuse
   transactionally and stay in Sarcasm; the forced-tier spec sweep is exact at
-  58,779/58,779 on both x86_64 and AArch64. The 2026-09-23 x86 scalar/control
-  checkpoint reached 24,412 native entries and 2,743 compiled functions, up
-  from 23,667/2,320 at the scalar-float checkpoint. The remaining 2,806
+  58,779/58,779 on both x86_64 and AArch64. The 2026-09-24 x86 table/indirect
+  checkpoint reached 118,903 native entries and 3,511 compiled functions, up
+  from 24,412/2,743 at the scalar/control checkpoint. The remaining 2,450
   refusals include zero emission or install failures; prefix telemetry names
-  `table.copy` (99) and `memory.init` (52) as the largest `0xfc` groups.
+  `memory.init` (52) and `memory.copy` (20) as the largest `0xfc` groups.
   SSE2-only hosts use
   raw-bit rounding helpers instead of assuming SSE4.1. The forced sweep is
   fail-closed on native engagement via
   `--require-spasm-entry`, and the shared instance/cache, recursive stack,
   cold-gate fallback, and post-entry interrupt tests now execute on both
-  architectures. Remaining x86 table/reference, passive bulk-memory, SIMD,
-  indirect-call, nested-return control arms, and memory64 parity, remaining
-  SIMD lane operations generally, and the
+  architectures. Remaining x86 reference-typed signatures/locals/select,
+  passive bulk-memory, SIMD, nested-return control arms, memory64 parity,
+  remaining SIMD lane operations generally, and the
   native-register/imported-call ABI remain next.
 
   The architecture for all three tiers — the shared codegen

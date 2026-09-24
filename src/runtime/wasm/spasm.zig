@@ -893,6 +893,7 @@ pub fn compileWithDiagnostics(
             .{
                 .execution_poll_helper = @intFromPtr(execution_poll_helper),
                 .call_helper = if (helpers.call) |helper| @intFromPtr(helper) else null,
+                .call_indirect_helper = if (helpers.call_indirect) |helper| @intFromPtr(helper) else null,
                 .call_gate_stub = if (call_gate_stub) |stub| @intFromPtr(stub) else null,
                 .call_gates_base = if (call_gates.len == 0) null else @intFromPtr(call_gates.ptr),
                 .call_gates_len = call_gates.len,
@@ -905,6 +906,14 @@ pub fn compileWithDiagnostics(
                 .trap_call_stack_exhausted = trap_call_stack_exhausted,
                 .mem_view_helper = if (helpers.mem_view) |helper| @intFromPtr(helper) else null,
                 .mem_grow_helper = if (helpers.mem_grow) |helper| @intFromPtr(helper) else null,
+                .table_size_helper = if (helpers.table_size) |helper| @intFromPtr(helper) else null,
+                .table_copy_helper = if (helpers.table_copy) |helper| @intFromPtr(helper) else null,
+                .table_init_helper = if (helpers.table_init) |helper| @intFromPtr(helper) else null,
+                .elem_drop_helper = if (helpers.elem_drop) |helper| @intFromPtr(helper) else null,
+                .table_get_helper = if (helpers.table_get) |helper| @intFromPtr(helper) else null,
+                .table_set_helper = if (helpers.table_set) |helper| @intFromPtr(helper) else null,
+                .table_grow_helper = if (helpers.table_grow) |helper| @intFromPtr(helper) else null,
+                .table_fill_helper = if (helpers.table_fill) |helper| @intFromPtr(helper) else null,
                 .diagnostics = diagnostics,
             },
         ) catch |err| {

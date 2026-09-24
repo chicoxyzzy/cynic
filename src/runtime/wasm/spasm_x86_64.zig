@@ -24,6 +24,7 @@ pub const Error = error{
     LabelAlreadyBound,
     InvalidLabel,
     BranchOutOfRange,
+    UnsupportedOp,
 };
 
 /// Why one x86_64 compilation attempt degraded to Sarcasm. The compiler
@@ -54,6 +55,7 @@ pub const Diagnostics = struct {
 pub const Config = struct {
     execution_poll_helper: usize,
     call_helper: ?usize,
+    call_indirect_helper: ?usize,
     call_gate_stub: ?usize,
     call_gates_base: ?usize,
     call_gates_len: usize,
@@ -66,6 +68,14 @@ pub const Config = struct {
     trap_call_stack_exhausted: u32,
     mem_view_helper: ?usize,
     mem_grow_helper: ?usize,
+    table_size_helper: ?usize,
+    table_copy_helper: ?usize,
+    table_init_helper: ?usize,
+    elem_drop_helper: ?usize,
+    table_get_helper: ?usize,
+    table_set_helper: ?usize,
+    table_grow_helper: ?usize,
+    table_fill_helper: ?usize,
     diagnostics: ?*Diagnostics = null,
 };
 
@@ -95,6 +105,7 @@ const op_br_if: u8 = 0x0d;
 const op_br_table: u8 = 0x0e;
 const op_return: u8 = 0x0f;
 const op_call: u8 = 0x10;
+const op_call_indirect: u8 = 0x11;
 const op_drop: u8 = 0x1a;
 const op_select: u8 = 0x1b;
 const op_select_t: u8 = 0x1c;
@@ -103,6 +114,8 @@ const op_local_set: u8 = 0x21;
 const op_local_tee: u8 = 0x22;
 const op_global_get: u8 = 0x23;
 const op_global_set: u8 = 0x24;
+const op_table_get: u8 = 0x25;
+const op_table_set: u8 = 0x26;
 const op_i32_load: u8 = 0x28;
 const op_i64_load: u8 = 0x29;
 const op_f32_load: u8 = 0x2a;
@@ -260,11 +273,17 @@ const op_i32_extend16_s: u8 = 0xc1;
 const op_i64_extend8_s: u8 = 0xc2;
 const op_i64_extend16_s: u8 = 0xc3;
 const op_i64_extend32_s: u8 = 0xc4;
+const op_ref_null: u8 = 0xd0;
+const op_ref_is_null: u8 = 0xd1;
+const op_ref_func: u8 = 0xd2;
 const op_misc_prefix: u8 = 0xfc;
 
 const Loc = union(enum) {
     const_i32: i32,
     const_i64: i64,
+    ref_null,
+    ref_func: u32,
+    ref,
     runtime,
 };
 
@@ -445,6 +464,42 @@ pub fn compile(
                 stack[result_depth] = .runtime;
                 sp -= 2;
             },
+            op_ref_null => {
+                // §5.4.2: every reference type shares the all-ones null
+                // encoding. Keep the value folded until a consumer needs its
+                // full 128-bit Cell.
+                _ = readSleb64(body, &i) orelse return null; // heap type: s33
+                if (sp >= operand_stack_capacity) return null;
+                stack[sp] = .ref_null;
+                sp += 1;
+            },
+            op_ref_func => {
+                const function_ref = readUleb32(body, &i) orelse return null;
+                if (sp >= operand_stack_capacity) return null;
+                stack[sp] = .{ .ref_func = function_ref };
+                sp += 1;
+            },
+            op_ref_is_null => {
+                if (sp == 0) return null;
+                const depth = sp - 1;
+                switch (stack[depth]) {
+                    .ref_null => stack[depth] = .{ .const_i32 = 1 },
+                    .ref_func => stack[depth] = .{ .const_i32 = 0 },
+                    .ref => {
+                        // REF_NULL is all ones in both halves. Their AND is
+                        // all ones iff the complete 128-bit reference is null.
+                        try m.load64Disp32(.rax, .r12, scratchOffset(num_locals, depth));
+                        try m.load64Disp32(.r10, .r12, scratchOffset(num_locals, depth) + 8);
+                        try m.andReg64(.rax, .r10);
+                        try m.movImm64(.r10, std.math.maxInt(u64));
+                        try m.cmpReg64(.rax, .r10);
+                        try m.setCond32(.rax, .equal);
+                        try m.store64Disp32(.r12, scratchOffset(num_locals, depth), .rax);
+                        stack[depth] = .runtime;
+                    },
+                    .const_i32, .const_i64, .runtime => return null,
+                }
+            },
             op_call => {
                 const callee_index = readUleb32(body, &i) orelse return null;
                 const callee = calleeFuncType(module, callee_index) orelse return null;
@@ -557,6 +612,90 @@ pub fn compile(
                 try m.addRegImm32(.rsp, call_frame_bytes);
                 sp = below + result_count;
             },
+            op_call_indirect => {
+                // §5.4.1: [below..., args..., element_index] -> results.
+                // The shared helper performs table bounds/null/type checks and
+                // invokes the resolved function in its defining instance.
+                const helper = config.call_indirect_helper orelse return null;
+                const type_index = readUleb32(body, &i) orelse return null;
+                const table_index = readUleb32(body, &i) orelse return null;
+                if (type_index >= module.types.len) return null;
+                const callee = &module.types[type_index];
+                for (callee.params) |param_type| if (!isScalar(param_type)) return null;
+                for (callee.results) |result_type| if (!isScalar(result_type)) return null;
+
+                const param_count = callee.params.len;
+                const result_count = callee.results.len;
+                const required = std.math.add(usize, param_count, 1) catch return null;
+                if (sp < required) return null;
+                const index_depth = sp - 1;
+                const below = index_depth - param_count;
+                if (below + result_count > operand_stack_capacity) return null;
+                const buffer_capacity = @max(param_count, result_count);
+                const call_frame_bytes = callFrameBytes(buffer_capacity) orelse return null;
+                const refresh_memory = memoryIs64(module, 0) != null;
+                if (refresh_memory and config.mem_view_helper == null) return null;
+
+                var param_index: usize = 0;
+                while (param_index < param_count) : (param_index += 1) {
+                    const depth = below + param_index;
+                    try materialize(&m, stack[depth], num_locals, depth);
+                }
+                try materialize(&m, stack[index_depth], num_locals, index_depth);
+
+                // The helper may recurse through the interpreter. Guard the
+                // staging frame itself before moving RSP; the helper retains
+                // the generic recursion-depth backstop for its callee.
+                if (!(try emitCallStackGuard(&m, &trap_stack_exhausted, call_frame_bytes))) return null;
+                trap_stack_exhausted_used = true;
+                try m.subRegImm32(.rsp, call_frame_bytes);
+
+                param_index = 0;
+                while (param_index < param_count) : (param_index += 1) {
+                    const depth = below + param_index;
+                    try m.load64Disp32(.rax, .r12, scratchOffset(num_locals, depth));
+                    try m.store64Disp32(.rsp, callBufferOffset(param_index), .rax);
+                    try m.movImm64(.rax, 0);
+                    try m.store64Disp32(.rsp, callBufferOffset(param_index) + 8, .rax);
+                }
+
+                // SysV's six register arguments fit this boundary exactly.
+                try m.load64Disp32(.rdi, .rsp, @intCast(call_frame_bytes));
+                try m.movImm64(.rsi, type_index);
+                try m.movImm64(.rdx, table_index);
+                try m.load32Disp32(.rcx, .r12, scratchOffset(num_locals, index_depth));
+                try m.leaDisp32(.r8, .rsp, @intCast(call_stack_args_size));
+                try m.movReg64(.r9, .rbx);
+                try m.movImm64(.r11, helper);
+                try m.callReg(.r11);
+
+                try m.cmpReg32Imm32(.rax, 0);
+                var call_ok: x64.Masm.Label = .{};
+                defer call_ok.deinit(gpa);
+                try m.jumpCond(.equal, &call_ok);
+                try m.addRegImm32(.rsp, call_frame_bytes);
+                try m.jump(&epilogue);
+                try m.bind(&call_ok);
+
+                if (refresh_memory) {
+                    try m.load64Disp32(.rdi, .rsp, @intCast(call_frame_bytes));
+                    try m.movImm64(.rsi, 0);
+                    try m.leaDisp32(.rdx, .rsp, 16);
+                    try m.movImm64(.r11, config.mem_view_helper.?);
+                    try m.callReg(.r11);
+                    try m.load64Disp32(.r14, .rsp, 16);
+                    try m.load64Disp32(.r15, .rsp, 24);
+                }
+
+                var result_index: usize = 0;
+                while (result_index < result_count) : (result_index += 1) {
+                    try m.load64Disp32(.rax, .rsp, callBufferOffset(result_index));
+                    try m.store64Disp32(.r12, scratchOffset(num_locals, below + result_index), .rax);
+                    stack[below + result_index] = .runtime;
+                }
+                try m.addRegImm32(.rsp, call_frame_bytes);
+                sp = below + result_count;
+            },
             op_local_get => {
                 const index = readUleb32(body, &i) orelse return null;
                 if (index >= num_locals or sp >= operand_stack_capacity) return null;
@@ -615,12 +754,64 @@ pub fn compile(
                 try m.store64Disp32(.r10, 0, .rax);
                 sp -= 1;
             },
+            op_table_get => {
+                // §4.4.x: replace the i32 element index with the table's
+                // 128-bit reference. The shared helper writes directly into
+                // the operand's home Cell and reports an OOB trap via eax.
+                const helper = config.table_get_helper orelse return null;
+                const table_index = readUleb32(body, &i) orelse return null;
+                if (sp == 0) return null;
+                const depth = sp - 1;
+                try materialize(&m, stack[depth], num_locals, depth);
+
+                try m.load64Disp32(.rdi, .rsp, 0);
+                try m.movImm64(.rsi, table_index);
+                try m.load32Disp32(.rdx, .r12, scratchOffset(num_locals, depth));
+                try m.leaDisp32(.rcx, .r12, scratchOffset(num_locals, depth));
+                try m.movImm64(.r11, helper);
+                try m.callReg(.r11);
+
+                try m.cmpReg32Imm32(.rax, 0);
+                var get_ok: x64.Masm.Label = .{};
+                defer get_ok.deinit(gpa);
+                try m.jumpCond(.equal, &get_ok);
+                try m.jump(&epilogue);
+                try m.bind(&get_ok);
+                stack[depth] = .ref;
+            },
+            op_table_set => {
+                // §4.4.x: [index, reference] -> []. Normalize either a
+                // folded reference or a runtime one into its 128-bit home
+                // Cell, then let the shared helper bounds-check and store it.
+                const helper = config.table_set_helper orelse return null;
+                const table_index = readUleb32(body, &i) orelse return null;
+                if (sp < 2) return null;
+                const index_depth = sp - 2;
+                const ref_depth = sp - 1;
+                try materialize(&m, stack[index_depth], num_locals, index_depth);
+                try emitRefIntoSlot(&m, stack[ref_depth], num_locals, ref_depth);
+
+                try m.load64Disp32(.rdi, .rsp, 0);
+                try m.movImm64(.rsi, table_index);
+                try m.load32Disp32(.rdx, .r12, scratchOffset(num_locals, index_depth));
+                try m.leaDisp32(.rcx, .r12, scratchOffset(num_locals, ref_depth));
+                try m.movImm64(.r11, helper);
+                try m.callReg(.r11);
+
+                try m.cmpReg32Imm32(.rax, 0);
+                var set_ok: x64.Masm.Label = .{};
+                defer set_ok.deinit(gpa);
+                try m.jumpCond(.equal, &set_ok);
+                try m.jump(&epilogue);
+                try m.bind(&set_ok);
+                sp -= 2;
+            },
             op_i32_eqz => {
                 if (sp == 0) return null;
                 const depth = sp - 1;
                 switch (stack[depth]) {
                     .const_i32 => |value| stack[depth] = .{ .const_i32 = @intFromBool(value == 0) },
-                    .const_i64 => return null,
+                    .const_i64, .ref_null, .ref_func, .ref => return null,
                     .runtime => {
                         try m.load32Disp32(.rax, .r12, scratchOffset(num_locals, depth));
                         try m.cmpRegImm32(.rax, 0);
@@ -1627,6 +1818,133 @@ pub fn compile(
                     try m.jump(&forward_loop);
                     try m.bind(&copy_done);
                     sp = below;
+                } else if (sub == 12) {
+                    // §4.4.x table.init: [dst, src, len] -> []. References
+                    // remain inside the element segment and table, so all six
+                    // helper arguments fit the SysV register ABI directly.
+                    const helper = config.table_init_helper orelse return null;
+                    const element_index = readUleb32(body, &i) orelse return null;
+                    const table_index = readUleb32(body, &i) orelse return null;
+                    if (sp < 3) return null;
+                    const below = sp - 3;
+                    try materialize(&m, stack[below], num_locals, below);
+                    try materialize(&m, stack[below + 1], num_locals, below + 1);
+                    try materialize(&m, stack[below + 2], num_locals, below + 2);
+
+                    try m.load64Disp32(.rdi, .rsp, 0);
+                    try m.movImm64(.rsi, element_index);
+                    try m.movImm64(.rdx, table_index);
+                    try m.load32Disp32(.rcx, .r12, scratchOffset(num_locals, below));
+                    try m.load32Disp32(.r8, .r12, scratchOffset(num_locals, below + 1));
+                    try m.load32Disp32(.r9, .r12, scratchOffset(num_locals, below + 2));
+                    try m.movImm64(.r11, helper);
+                    try m.callReg(.r11);
+
+                    try m.cmpReg32Imm32(.rax, 0);
+                    var init_ok: x64.Masm.Label = .{};
+                    defer init_ok.deinit(gpa);
+                    try m.jumpCond(.equal, &init_ok);
+                    try m.jump(&epilogue);
+                    try m.bind(&init_ok);
+                    sp = below;
+                } else if (sub == 13) {
+                    // §4.4.x elem.drop has no stack effect and cannot trap.
+                    const helper = config.elem_drop_helper orelse return null;
+                    const element_index = readUleb32(body, &i) orelse return null;
+                    try m.load64Disp32(.rdi, .rsp, 0);
+                    try m.movImm64(.rsi, element_index);
+                    try m.movImm64(.r11, helper);
+                    try m.callReg(.r11);
+                } else if (sub == 14) {
+                    // §4.4.x table.copy: [dst, src, len] -> []. The helper is
+                    // overlap-safe and reports OOB through the shared trap
+                    // channel.
+                    const helper = config.table_copy_helper orelse return null;
+                    const destination_table = readUleb32(body, &i) orelse return null;
+                    const source_table = readUleb32(body, &i) orelse return null;
+                    if (sp < 3) return null;
+                    const below = sp - 3;
+                    try materialize(&m, stack[below], num_locals, below);
+                    try materialize(&m, stack[below + 1], num_locals, below + 1);
+                    try materialize(&m, stack[below + 2], num_locals, below + 2);
+
+                    try m.load64Disp32(.rdi, .rsp, 0);
+                    try m.movImm64(.rsi, destination_table);
+                    try m.movImm64(.rdx, source_table);
+                    try m.load32Disp32(.rcx, .r12, scratchOffset(num_locals, below));
+                    try m.load32Disp32(.r8, .r12, scratchOffset(num_locals, below + 1));
+                    try m.load32Disp32(.r9, .r12, scratchOffset(num_locals, below + 2));
+                    try m.movImm64(.r11, helper);
+                    try m.callReg(.r11);
+
+                    try m.cmpReg32Imm32(.rax, 0);
+                    var copy_ok: x64.Masm.Label = .{};
+                    defer copy_ok.deinit(gpa);
+                    try m.jumpCond(.equal, &copy_ok);
+                    try m.jump(&epilogue);
+                    try m.bind(&copy_ok);
+                    sp = below;
+                } else if (sub == 15) {
+                    // §4.4.x table.grow: [init_ref, delta] -> old_size. The
+                    // helper reads the complete reference from its home Cell;
+                    // growth failure returns i32 -1 and never traps.
+                    const helper = config.table_grow_helper orelse return null;
+                    const table_index = readUleb32(body, &i) orelse return null;
+                    if (table_index >= module.tables.len or module.tables[table_index].limits.is_64) return null;
+                    if (sp < 2) return null;
+                    const below = sp - 2;
+                    if (below + 1 > operand_stack_capacity) return null;
+                    try materialize(&m, stack[below + 1], num_locals, below + 1);
+                    try emitRefIntoSlot(&m, stack[below], num_locals, below);
+
+                    try m.load64Disp32(.rdi, .rsp, 0);
+                    try m.movImm64(.rsi, table_index);
+                    try m.leaDisp32(.rdx, .r12, scratchOffset(num_locals, below));
+                    try m.load32Disp32(.rcx, .r12, scratchOffset(num_locals, below + 1));
+                    try m.movImm64(.r11, helper);
+                    try m.callReg(.r11);
+                    try m.movReg32(.rax, .rax);
+                    try m.store64Disp32(.r12, scratchOffset(num_locals, below), .rax);
+                    stack[below] = .runtime;
+                    sp = below + 1;
+                } else if (sub == 16) {
+                    // §4.4.x table.size: [] -> current element count.
+                    const helper = config.table_size_helper orelse return null;
+                    const table_index = readUleb32(body, &i) orelse return null;
+                    if (sp >= operand_stack_capacity) return null;
+                    try m.load64Disp32(.rdi, .rsp, 0);
+                    try m.movImm64(.rsi, table_index);
+                    try m.movImm64(.r11, helper);
+                    try m.callReg(.r11);
+                    try m.movReg32(.rax, .rax);
+                    try m.store64Disp32(.r12, scratchOffset(num_locals, sp), .rax);
+                    stack[sp] = .runtime;
+                    sp += 1;
+                } else if (sub == 17) {
+                    // §4.4.x table.fill: [index, reference, count] -> [].
+                    const helper = config.table_fill_helper orelse return null;
+                    const table_index = readUleb32(body, &i) orelse return null;
+                    if (sp < 3) return null;
+                    const below = sp - 3;
+                    try materialize(&m, stack[below], num_locals, below);
+                    try emitRefIntoSlot(&m, stack[below + 1], num_locals, below + 1);
+                    try materialize(&m, stack[below + 2], num_locals, below + 2);
+
+                    try m.load64Disp32(.rdi, .rsp, 0);
+                    try m.movImm64(.rsi, table_index);
+                    try m.load32Disp32(.rdx, .r12, scratchOffset(num_locals, below));
+                    try m.leaDisp32(.rcx, .r12, scratchOffset(num_locals, below + 1));
+                    try m.load32Disp32(.r8, .r12, scratchOffset(num_locals, below + 2));
+                    try m.movImm64(.r11, helper);
+                    try m.callReg(.r11);
+
+                    try m.cmpReg32Imm32(.rax, 0);
+                    var fill_ok: x64.Masm.Label = .{};
+                    defer fill_ok.deinit(gpa);
+                    try m.jumpCond(.equal, &fill_ok);
+                    try m.jump(&epilogue);
+                    try m.bind(&fill_ok);
+                    sp = below;
                 } else {
                     return refuse(config, .unsupported_opcode, op_misc_prefix);
                 }
@@ -1912,6 +2230,30 @@ fn materialize(m: *x64.Masm, loc: Loc, num_locals: usize, depth: usize) Error!vo
             try m.movImm64(.rax, @bitCast(value));
             try m.store64Disp32(.r12, scratchOffset(num_locals, depth), .rax);
         },
+        .ref_null, .ref_func, .ref => return error.UnsupportedOp,
+    }
+}
+
+/// Ensure the reference operand's 16-byte home Cell contains its complete
+/// runtime representation. A `table.get` result is already there; folded
+/// references are materialized as either all-ones null or the function index
+/// paired with this body's defining instance.
+fn emitRefIntoSlot(m: *x64.Masm, loc: Loc, num_locals: usize, depth: usize) Error!void {
+    const off = scratchOffset(num_locals, depth);
+    switch (loc) {
+        .ref => {},
+        .ref_func => |function_index| {
+            try m.movImm64(.rax, function_index);
+            try m.store64Disp32(.r12, off, .rax);
+            try m.load64Disp32(.rax, .rsp, 0);
+            try m.store64Disp32(.r12, off + 8, .rax);
+        },
+        .ref_null => {
+            try m.movImm64(.rax, std.math.maxInt(u64));
+            try m.store64Disp32(.r12, off, .rax);
+            try m.store64Disp32(.r12, off + 8, .rax);
+        },
+        .const_i32, .const_i64, .runtime => return error.UnsupportedOp,
     }
 }
 

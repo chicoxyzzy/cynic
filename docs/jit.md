@@ -1334,6 +1334,16 @@ useful:
    non-scalar signatures, 720 unsupported bytecode shapes, and 677 unsupported
    opcodes, with zero emission or install failures. Prefix telemetry names
    `table.copy` (99) and `memory.init` (52) as the largest `0xfc` groups.
+   The 2026-09-24 table/indirect closure adds scalar `call_indirect`,
+   `ref.null` / `ref.func` / `ref.is_null`, full-width runtime-reference
+   scratch Cells, table get/set/size/copy/init/grow/fill, and `elem.drop` to
+   x86_64.
+   The exact differential now executes 118,903 native entries across 3,511
+   compiled functions. Refusals fall to 2,450 (8 limits, 1,401 signatures,
+   746 bytecode shapes, 295 opcodes), again with zero emission or install
+   failures. The module-sized code reservation keeps its 64 KiB minimum and
+   4 MiB cap but carries 12.5% headroom for helper-heavy bodies; this prevents
+   an exact-fit estimate from rejecting newly reachable tail functions.
    The **per-function code cache**
    now ships (`spasmEntryFor`): each emittable function compiles once on
    its first Spasm-enabled invoke and the cached `EntryFn` runs every
@@ -1353,7 +1363,7 @@ useful:
    interpret it). A red-first `wasm_js_test` (a JS export runs
    Spasm-compiled native code, `spasm_runs >= 1`) plus the full JS-wasm
    suite run under the jit-on posture gate it; non-emittable bodies
-   (tables, most of bulk memory, SIMD)
+   (reference-typed signatures/locals, passive bulk memory, SIMD)
    degrade, so the suite still covers the interpreter through that fallback. The scalar ALU now spans
    the i32/i64 and f32/f64 arithmetic and comparisons, the full float unary
    set (incl. min/max/copysign), the integer bit-counts (clz/ctz/popcnt)
@@ -1403,9 +1413,14 @@ useful:
    overlap-safe inline `memory.fill` / `memory.copy`. Its complete scalar ALU
    includes integer bit counts and sign extension; scalar `select`,
    value-carrying structured branches, `br_table`, and top-level explicit
-   `return` share the Cell merge discipline. Memory64 access/grow, passive
-   bulk-memory operations, tables/references, SIMD, `call_indirect`, nested
-   return arms, and imported-call native lowering remain transactional refusals.
+   `return` share the Cell merge discipline. Scalar `call_indirect` uses the
+   shared resolver/type-check helper and the same staged Cell buffer as direct
+   calls. `ref.null`, `ref.func`, and `ref.is_null` plus table
+   get/set/grow/fill use full 128-bit depth-keyed Cells for runtime references;
+   table size/copy/init and `elem.drop` use scalar helper ABIs. Memory64
+   access/grow, passive bulk-memory operations,
+   reference-typed signatures/locals/select, SIMD, nested return arms, and
+   imported-call native lowering remain transactional refusals.
    Non-gated calls retain the checked helper and per-function Sarcasm fallback.
    Imports, `call_indirect`, cross-instance calls, overlarge frames, and bodies
    Spasm cannot compile keep the generic helper / `invoke` fallback. Operands

@@ -959,7 +959,7 @@ test "wasm spasm: call_indirect dispatches through a table, runs Spasm-compiled"
     // `add10`, so main(x) == x + 10. The index is the top operand (consumed);
     // the arg sits under it. A Spasm `call_indirect` resolves the element +
     // type via a native helper, then dispatches like a direct call.
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -1001,6 +1001,7 @@ test "wasm spasm: call_indirect dispatches through a table, runs Spasm-compiled"
     try interp.instantiate(&instance, a, testing.allocator, mp, .{});
     defer instance.deinit();
     instance.spasm_enabled = true; // force the baseline tier
+    instance.spasm_diagnostics = true;
 
     const fidx = funcExport(mp, "main") orelse return error.NoSuchExport;
     const cells = try a.alloc(u128, 1);
@@ -1012,6 +1013,7 @@ test "wasm spasm: call_indirect dispatches through a table, runs Spasm-compiled"
     try testing.expectEqual(@as(u32, 15), @as(u32, @truncate(res[0])));
     // ...and "main" (a `call_indirect`) ran Spasm-compiled, not degraded.
     try testing.expect(instance.spasm_runs >= 1);
+    try testing.expectEqual(@as(u32, 0), instance.spasm_refusals);
 }
 
 test "wasm spasm: ref.is_null folds ref.null to 1 and ref.func to 0, runs Spasm-compiled" {
@@ -1024,7 +1026,7 @@ test "wasm spasm: ref.is_null folds ref.null to 1 and ref.func to 0, runs Spasm-
     // reference value materialized. Both functions return i32, so the body
     // never has to place a reference into a runtime location; the slice
     // stays inside the scalar operand bank.
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -1092,6 +1094,7 @@ test "wasm spasm: ref.is_null folds ref.null to 1 and ref.func to 0, runs Spasm-
     try interp.instantiate(&instance, a, testing.allocator, mp, .{});
     defer instance.deinit();
     instance.spasm_enabled = true; // force the baseline tier
+    instance.spasm_diagnostics = true;
 
     const null_idx = funcExport(mp, "is_null_null") orelse return error.NoSuchExport;
     const func_idx = funcExport(mp, "is_null_func") orelse return error.NoSuchExport;
@@ -1106,6 +1109,7 @@ test "wasm spasm: ref.is_null folds ref.null to 1 and ref.func to 0, runs Spasm-
     try testing.expectEqual(@as(u32, 0), @as(u32, @truncate(r_func[0])));
     // Both ran Spasm-compiled (the fold emitted real native code), not degraded.
     try testing.expect(instance.spasm_runs >= 1);
+    try testing.expectEqual(@as(u32, 0), instance.spasm_refusals);
 }
 
 test "wasm spasm: a self-recursive call traps CallStackExhausted, never crashes" {
@@ -1567,7 +1571,7 @@ test "wasm spasm: table.size returns the table length" {
     // table 0 as i32. The module declares a funcref table with min 3 and
     // no element segment, so the size is exactly 3. "sz"() must run
     // Spasm-compiled (spasm_runs counts each compiled entry).
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -1605,6 +1609,7 @@ test "wasm spasm: table.size returns the table length" {
     try interp.instantiate(&instance, a, testing.allocator, mp, .{});
     defer instance.deinit();
     instance.spasm_enabled = true; // force the baseline tier
+    instance.spasm_diagnostics = true;
 
     const fidx = funcExport(mp, "sz") orelse return error.NoSuchExport;
     const res = try interp.invoke(&instance, testing.allocator, fidx, &.{});
@@ -1614,6 +1619,7 @@ test "wasm spasm: table.size returns the table length" {
     try testing.expectEqual(@as(u32, 3), @as(u32, @truncate(res[0])));
     // ...and "sz" (a `table.size`) ran Spasm-compiled, not degraded.
     try testing.expect(instance.spasm_runs >= 1);
+    try testing.expectEqual(@as(u32, 0), instance.spasm_refusals);
 }
 
 test "wasm spasm: table.init then table.copy populate the table, then elem.drop empties the segment" {
@@ -1629,7 +1635,7 @@ test "wasm spasm: table.init then table.copy populate the table, then elem.drop 
     //   "again"(): a fresh table.init of length 2 — after "go" dropped the
     //           segment it now traps OutOfBoundsTableAccess, proving the drop.
     // Both must run Spasm-compiled (spasm_runs counts each compiled entry).
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -1703,6 +1709,7 @@ test "wasm spasm: table.init then table.copy populate the table, then elem.drop 
     try interp.instantiate(&instance, a, testing.allocator, mp, .{});
     defer instance.deinit();
     instance.spasm_enabled = true; // force the baseline tier
+    instance.spasm_diagnostics = true;
 
     // go(): table.init + table.copy place add10 at table[2]; the trailing
     // call_indirect dispatches through it. add10(5) == 15, the same the
@@ -1721,6 +1728,7 @@ test "wasm spasm: table.init then table.copy populate the table, then elem.drop 
 
     // Every compiled entry (go + again) ran Spasm-compiled, not degraded.
     try testing.expect(instance.spasm_runs >= 1);
+    try testing.expectEqual(@as(u32, 0), instance.spasm_refusals);
 }
 
 test "wasm spasm: table.get reads a runtime funcref, ref.is_null inspects it" {
@@ -1736,7 +1744,7 @@ test "wasm spasm: table.get reads a runtime funcref, ref.is_null inspects it" {
     // filling table[0] with `ref.func 0` (the defined function `dummy`),
     // leaving table[1] null. So main(0) == 0 (populated, non-null) and
     // main(1) == 1 (null) — the same the interpreter gives.
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -1778,6 +1786,7 @@ test "wasm spasm: table.get reads a runtime funcref, ref.is_null inspects it" {
     try interp.instantiate(&instance, a, testing.allocator, mp, .{});
     defer instance.deinit();
     instance.spasm_enabled = true; // force the baseline tier
+    instance.spasm_diagnostics = true;
 
     const fidx = funcExport(mp, "main") orelse return error.NoSuchExport;
 
@@ -1798,6 +1807,7 @@ test "wasm spasm: table.get reads a runtime funcref, ref.is_null inspects it" {
     // "main" (a `table.get` feeding `ref.is_null`) ran Spasm-compiled, not
     // degraded — the runtime reference crossed the operand stack natively.
     try testing.expect(instance.spasm_runs >= 1);
+    try testing.expectEqual(@as(u32, 0), instance.spasm_refusals);
 }
 
 test "wasm spasm: table.set writes a funcref, then call_indirect dispatches through it" {
@@ -1812,7 +1822,7 @@ test "wasm spasm: table.set writes a funcref, then call_indirect dispatches thro
     //       table[1] with table.set, then call_indirect table[1](5) == 15 —
     //       proving the runtime-.ref write path too.
     // Both must run Spasm-compiled (spasm_runs counts each compiled entry).
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -1887,6 +1897,7 @@ test "wasm spasm: table.set writes a funcref, then call_indirect dispatches thro
     try interp.instantiate(&instance, a, testing.allocator, mp, .{});
     defer instance.deinit();
     instance.spasm_enabled = true; // force the baseline tier
+    instance.spasm_diagnostics = true;
 
     // setcall: a compile-time `ref.func` written by table.set, then dispatched
     // through. add10(5) == 15, the same the interpreter gives.
@@ -1903,6 +1914,7 @@ test "wasm spasm: table.set writes a funcref, then call_indirect dispatches thro
     try testing.expectEqual(@as(u32, 15), @as(u32, @truncate(r_setrt[0])));
 
     try testing.expect(instance.spasm_runs >= 1);
+    try testing.expectEqual(@as(u32, 0), instance.spasm_refusals);
 }
 
 test "wasm spasm: reference locals round-trip through local.get/set/tee, declared ref local defaults to null" {
@@ -2194,7 +2206,7 @@ test "wasm spasm: table.set out of bounds raises a catchable trap" {
     // §4.4.x table.set traps OutOfBoundsTableAccess when the index is past the
     // table — the same the interpreter gives. "oob"() writes ref.func 0 at
     // index 9 of a min-2 table.
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -2231,9 +2243,11 @@ test "wasm spasm: table.set out of bounds raises a catchable trap" {
     try interp.instantiate(&instance, a, testing.allocator, mp, .{});
     defer instance.deinit();
     instance.spasm_enabled = true;
+    instance.spasm_diagnostics = true;
 
     const fidx = funcExport(mp, "oob") orelse return error.NoSuchExport;
     try testing.expectError(error.OutOfBoundsTableAccess, interp.invoke(&instance, testing.allocator, fidx, &.{}));
+    try testing.expectEqual(@as(u32, 0), instance.spasm_refusals);
 }
 
 test "wasm spasm: table.grow grows the table and returns the previous size" {
@@ -2247,7 +2261,7 @@ test "wasm spasm: table.grow grows the table and returns the previous size" {
     // leaf (no call), so `spasm_runs >= 1` is a true signal that `table.grow`
     // compiled — not an unrelated function inflating the counter. The grown
     // slot's content (the `init` funcref) is checked directly from Zig.
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -2286,6 +2300,7 @@ test "wasm spasm: table.grow grows the table and returns the previous size" {
     try interp.instantiate(&instance, a, testing.allocator, mp, .{});
     defer instance.deinit();
     instance.spasm_enabled = true;
+    instance.spasm_diagnostics = true;
 
     // grow returns the previous size (4) and grows the table to 5 — the same
     // the interpreter gives.
@@ -2302,6 +2317,7 @@ test "wasm spasm: table.grow grows the table and returns the previous size" {
     try testing.expectEqual(interp.makeFuncRef(&instance, 0), instance.tables[0].elems[4]);
 
     try testing.expect(instance.spasm_runs >= 1);
+    try testing.expectEqual(@as(u32, 0), instance.spasm_refusals);
 }
 
 test "wasm spasm: table.fill fills a range, observed via call_indirect" {
@@ -2312,7 +2328,7 @@ test "wasm spasm: table.fill fills a range, observed via call_indirect" {
     //   "fill"(): i32.const 1; ref.func 0; i32.const 2; table.fill 0 — fills
     //       table[1] and table[2] with add10; then call_indirect through
     //       table[2] with arg 5 → add10(5) == 15, observing the fill landed.
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -2352,6 +2368,7 @@ test "wasm spasm: table.fill fills a range, observed via call_indirect" {
     try interp.instantiate(&instance, a, testing.allocator, mp, .{});
     defer instance.deinit();
     instance.spasm_enabled = true;
+    instance.spasm_diagnostics = true;
 
     // table.fill places add10 at table[1..3]; dispatching through table[2]
     // gives add10(5) == 15, the same the interpreter gives.
@@ -2360,6 +2377,7 @@ test "wasm spasm: table.fill fills a range, observed via call_indirect" {
     defer testing.allocator.free(res);
     try testing.expectEqual(@as(u32, 15), @as(u32, @truncate(res[0])));
     try testing.expect(instance.spasm_runs >= 1);
+    try testing.expectEqual(@as(u32, 0), instance.spasm_refusals);
 }
 
 // A one-page-memory module whose `()->i32` export "sz" returns the current
