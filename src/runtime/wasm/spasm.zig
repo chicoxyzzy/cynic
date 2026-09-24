@@ -205,6 +205,7 @@ pub const trap_call_stack_exhausted: u32 = 6;
 pub const trap_step_budget_exhausted: u32 = 7;
 pub const trap_execution_interrupted: u32 = 8;
 pub const trap_execution_terminated: u32 = 9;
+pub const trap_unreachable: u32 = 10;
 
 pub const CompileError = error{
     OutOfMemory,
@@ -904,8 +905,11 @@ pub fn compileWithDiagnostics(
                 .trap_invalid_conversion = trap_invalid_conversion,
                 .trap_out_of_bounds = trap_out_of_bounds,
                 .trap_call_stack_exhausted = trap_call_stack_exhausted,
+                .trap_unreachable = trap_unreachable,
                 .mem_view_helper = if (helpers.mem_view) |helper| @intFromPtr(helper) else null,
                 .mem_grow_helper = if (helpers.mem_grow) |helper| @intFromPtr(helper) else null,
+                .mem_init_helper = if (helpers.mem_init) |helper| @intFromPtr(helper) else null,
+                .data_drop_helper = if (helpers.data_drop) |helper| @intFromPtr(helper) else null,
                 .table_size_helper = if (helpers.table_size) |helper| @intFromPtr(helper) else null,
                 .table_copy_helper = if (helpers.table_copy) |helper| @intFromPtr(helper) else null,
                 .table_init_helper = if (helpers.table_init) |helper| @intFromPtr(helper) else null,
@@ -4806,6 +4810,104 @@ test "spasm: x86_64 explicit return discards lower operands and dead code" {
     try testing.expectEqual(@as(u32, 42), @as(u32, @truncate(results[0])));
 }
 
+test "spasm: x86_64 nested return preserves reachable structured alternatives" {
+    if (comptime builtin.cpu.arch != .x86_64 or !supported) {
+        return error.SkipZigTest;
+    }
+    var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
+    defer ca.deinit();
+
+    const block_body = [_]u8{
+        op_block,     0x7f,
+        op_local_get, 0x00,
+        op_return,    op_end,
+        op_end,
+    };
+    const ftype: FuncType = .{ .params = &.{.i32}, .results = &.{.i32} };
+    const block_func: CompiledFunc = .{
+        .type_index = 0,
+        .local_types = ftype.params,
+        .body = &block_body,
+        .side_table = &.{},
+        .max_stack = 1,
+    };
+    const block_entry = (try compileT(&ca, &block_func, &ftype)) orelse return error.SpasmRefused;
+    var block_frame: [1 + operand_reg_count]Cell = @splat(0);
+    block_frame[0] = 37;
+    var block_results: [1]Cell = .{0};
+    try testing.expectEqual(trap_ok, block_entry(&block_frame, &block_results, @ptrCast(&block_frame), 0, @ptrCast(&block_frame), @ptrCast(&block_frame), 0, null));
+    try testing.expectEqual(@as(u32, 37), @as(u32, @truncate(block_results[0])));
+
+    const then_return_body = [_]u8{
+        op_local_get, 0x00,
+        op_if,        0x7f,
+        op_i32_const, 11,
+        op_return,    op_else,
+        op_i32_const, 22,
+        op_end,       op_end,
+    };
+    const then_func: CompiledFunc = .{
+        .type_index = 0,
+        .local_types = ftype.params,
+        .body = &then_return_body,
+        .side_table = &.{},
+        .max_stack = 1,
+    };
+    const then_entry = (try compileT(&ca, &then_func, &ftype)) orelse return error.SpasmRefused;
+    inline for (.{ .{ 1, 11 }, .{ 0, 22 } }) |case| {
+        var frame: [1 + operand_reg_count]Cell = @splat(0);
+        frame[0] = case[0];
+        var results: [1]Cell = .{0};
+        try testing.expectEqual(trap_ok, then_entry(&frame, &results, @ptrCast(&frame), 0, @ptrCast(&frame), @ptrCast(&frame), 0, null));
+        try testing.expectEqual(@as(u32, case[1]), @as(u32, @truncate(results[0])));
+    }
+
+    const else_return_body = [_]u8{
+        op_local_get, 0x00,
+        op_if,        0x7f,
+        op_i32_const, 22,
+        op_else,      op_i32_const,
+        11,           op_return,
+        op_end,       op_end,
+    };
+    const else_func: CompiledFunc = .{
+        .type_index = 0,
+        .local_types = ftype.params,
+        .body = &else_return_body,
+        .side_table = &.{},
+        .max_stack = 1,
+    };
+    const else_entry = (try compileT(&ca, &else_func, &ftype)) orelse return error.SpasmRefused;
+    inline for (.{ .{ 1, 22 }, .{ 0, 11 } }) |case| {
+        var frame: [1 + operand_reg_count]Cell = @splat(0);
+        frame[0] = case[0];
+        var results: [1]Cell = .{0};
+        try testing.expectEqual(trap_ok, else_entry(&frame, &results, @ptrCast(&frame), 0, @ptrCast(&frame), @ptrCast(&frame), 0, null));
+        try testing.expectEqual(@as(u32, case[1]), @as(u32, @truncate(results[0])));
+    }
+
+    const post_merge_body = [_]u8{
+        op_block,     0x40,
+        op_i32_const, 11,
+        op_return,    op_end,
+        op_i32_const, 22,
+        op_end,
+    };
+    const post_merge_func: CompiledFunc = .{
+        .type_index = 0,
+        .local_types = &.{},
+        .body = &post_merge_body,
+        .side_table = &.{},
+        .max_stack = 1,
+    };
+    const no_param_ftype: FuncType = .{ .params = &.{}, .results = &.{.i32} };
+    const post_merge_entry = (try compileT(&ca, &post_merge_func, &no_param_ftype)) orelse return error.SpasmRefused;
+    var post_merge_frame: [operand_reg_count]Cell = @splat(0);
+    var post_merge_results: [1]Cell = .{0};
+    try testing.expectEqual(trap_ok, post_merge_entry(&post_merge_frame, &post_merge_results, @ptrCast(&post_merge_frame), 0, @ptrCast(&post_merge_frame), @ptrCast(&post_merge_frame), 0, null));
+    try testing.expectEqual(@as(u32, 11), @as(u32, @truncate(post_merge_results[0])));
+}
+
 test "spasm: x86_64 branches carry values while unwinding operands" {
     if (comptime builtin.cpu.arch != .x86_64 or !supported) {
         return error.SkipZigTest;
@@ -4929,7 +5031,7 @@ test "spasm: x86_64 diagnostics retain unsupported 0xfc subopcodes" {
     var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
     defer ca.deinit();
 
-    const body = [_]u8{ op_misc_prefix, 0x08, 0x00, 0x00, op_end }; // memory.init 0 0
+    const body = [_]u8{ op_misc_prefix, 0x12, op_end }; // unsupported misc subopcode 18
     const func: CompiledFunc = .{
         .type_index = 0,
         .local_types = &.{},
@@ -4961,7 +5063,7 @@ test "spasm: x86_64 diagnostics retain unsupported 0xfc subopcodes" {
     try testing.expectEqual(RefusalStage.unsupported_opcode, diagnostics.stage);
     try testing.expectEqual(op_misc_prefix, diagnostics.opcode);
     try testing.expect(diagnostics.has_subopcode);
-    try testing.expectEqual(@as(u32, 8), diagnostics.subopcode);
+    try testing.expectEqual(@as(u32, 18), diagnostics.subopcode);
 }
 
 test "spasm: diagnostics keep intentional unsupported operations out of emission failures" {

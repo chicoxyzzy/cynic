@@ -9,9 +9,25 @@ const Op = @import("opcodes.zig").Op;
 const ValType = @import("types.zig").ValType;
 const std = @import("std");
 
+pub const FrameBoundary = enum { else_arm, end };
+
 /// Advance `index` through the `end` that closes the current control frame.
-/// Nested block/loop/if frames are consumed in full.
+/// Nested block/loop/if frames are consumed in full. An outer `else` is part
+/// of the frame and therefore skipped rather than returned to the caller.
 pub fn skipToFrameEnd(body: []const u8, index: *usize) ?void {
+    while (true) {
+        switch (skipToFrameBoundary(body, index) orelse return null) {
+            .else_arm => {},
+            .end => return,
+        }
+    }
+}
+
+/// Advance to the next boundary of the current structured arm. Unlike
+/// `skipToFrameEnd`, this exposes an outer `else` so a baseline compiler can
+/// resume emission for the reachable alternative after a terminating
+/// instruction in the then-arm.
+pub fn skipToFrameBoundary(body: []const u8, index: *usize) ?FrameBoundary {
     var depth: usize = 0;
     while (index.* < body.len) {
         const op: Op = @enumFromInt(body[index.*]);
@@ -22,10 +38,10 @@ pub fn skipToFrameEnd(body: []const u8, index: *usize) ?void {
                 depth += 1;
             },
             .end => {
-                if (depth == 0) return;
+                if (depth == 0) return .end;
                 depth -= 1;
             },
-            .@"else" => {},
+            .@"else" => if (depth == 0) return .else_arm,
             .select_t => {
                 const count = readUleb32(body, index) orelse return null;
                 var item: u32 = 0;
@@ -318,5 +334,20 @@ test "skipToFrameEnd refuses a truncated immediate" {
     const body = [_]u8{ @intFromEnum(Op.i64_const), 0x80 };
     var index: usize = 0;
     try std.testing.expect(skipToFrameEnd(&body, &index) == null);
+    try std.testing.expectEqual(body.len, index);
+}
+
+test "skipToFrameBoundary stops at the current if arm" {
+    const body = [_]u8{
+        @intFromEnum(Op.block),     0x40,
+        @intFromEnum(Op.i32_const), 0x05,
+        @intFromEnum(Op.end),       @intFromEnum(Op.@"else"),
+        @intFromEnum(Op.i32_const), 0x0b,
+        @intFromEnum(Op.end),
+    };
+    var index: usize = 0;
+    try std.testing.expectEqual(FrameBoundary.else_arm, skipToFrameBoundary(&body, &index).?);
+    try std.testing.expectEqual(@as(usize, 6), index);
+    try std.testing.expectEqual(FrameBoundary.end, skipToFrameBoundary(&body, &index).?);
     try std.testing.expectEqual(body.len, index);
 }
