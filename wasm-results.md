@@ -31,12 +31,12 @@ proposal's `(ref exn)` text syntax, so its `.wast` files don't lower
 
 The forced-Spasm differential posture (`--spasm`) produces this exact score on
 both qualified code-generation targets: native AArch64 and x86_64-macos under
-Rosetta (2026-09-23). Gating runs add `--require-spasm-entry`; focused target
+Rosetta (2026-09-24). Gating runs add `--require-spasm-entry`; focused target
 tests additionally require generated x86 instance/cache, trap, safe-point,
 self-link, and stable-gate execution. Unsupported x86 opcode families fall
 back per function and therefore remain covered by the same semantic sweep.
-The fail-closed witness observed 24,412 native entries / 2,743 compiled
-functions on x86_64 and 53,709 / 3,639 on AArch64. The x86 sweep recorded
-2,806 transactional refusals (8 limits, 1,401 signatures, 720 bytecode shapes,
-677 opcodes) and zero emission or install failures. Prefix telemetry identifies
-`table.copy` (99) and `memory.init` (52) as the largest `0xfc` fallback groups.
+The fail-closed witness observed 118,903 native entries / 3,511 compiled
+functions on x86_64 and 53,710 / 3,640 on AArch64. The x86 sweep recorded
+2,450 transactional refusals (8 limits, 1,401 signatures, 746 bytecode shapes,
+295 opcodes) and zero emission or install failures. Prefix telemetry identifies
+`memory.init` (52) and `memory.copy` (20) as the largest `0xfc` fallback groups.

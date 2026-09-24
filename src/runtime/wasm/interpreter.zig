@@ -379,7 +379,11 @@ fn spasmX86CodeReserve(body_bytes: usize, func_count: usize) usize {
     const body_code = std.math.mul(usize, body_bytes, 64) catch std.math.maxInt(usize);
     const func_code = std.math.mul(usize, func_count, 256) catch std.math.maxInt(usize);
     const estimate = std.math.add(usize, body_code, func_code) catch std.math.maxInt(usize);
-    return @min(@max(estimate, spasm_code_reserve_min), spasm_code_reserve_max);
+    // Helper-heavy bodies can sit above the average byte-expansion estimate.
+    // Leave bounded headroom so newly emittable tail functions do not fall
+    // back merely because earlier entries consumed an exact-fit reservation.
+    const provisioned = std.math.add(usize, estimate, estimate / 8) catch std.math.maxInt(usize);
+    return @min(@max(provisioned, spasm_code_reserve_min), spasm_code_reserve_max);
 }
 
 fn spasmCodeReserve(funcs: []const CompiledFunc) usize {
@@ -397,7 +401,8 @@ test "wasm spasm: x86 code reserve scales and stays bounded" {
 
     try testing.expectEqual(@as(usize, 64 * 1024), spasmX86CodeReserve(0, 0));
     try testing.expectEqual(@as(usize, 64 * 1024), spasmX86CodeReserve(128, 1));
-    try testing.expect(spasmX86CodeReserve(4 * 1024, 64) > 64 * 1024);
+    const call_heavy_estimate = 4 * 1024 * 64 + 64 * 256;
+    try testing.expect(spasmX86CodeReserve(4 * 1024, 64) >= call_heavy_estimate + call_heavy_estimate / 8);
     try testing.expectEqual(@as(usize, 4 * 1024 * 1024), spasmX86CodeReserve(std.math.maxInt(usize), std.math.maxInt(usize)));
 }
 
