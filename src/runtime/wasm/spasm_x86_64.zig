@@ -66,8 +66,11 @@ pub const Config = struct {
     trap_invalid_conversion: u32,
     trap_out_of_bounds: u32,
     trap_call_stack_exhausted: u32,
+    trap_unreachable: u32,
     mem_view_helper: ?usize,
     mem_grow_helper: ?usize,
+    mem_init_helper: ?usize,
+    data_drop_helper: ?usize,
     table_size_helper: ?usize,
     table_copy_helper: ?usize,
     table_init_helper: ?usize,
@@ -94,6 +97,7 @@ const native_entry_stack_bytes: u32 = frame_size + 8; // return address + target
 const call_stack_args_size: usize = 32;
 const max_call_frame_bytes: usize = 64 * 1024;
 
+const op_unreachable: u8 = 0x00;
 const op_nop: u8 = 0x01;
 const op_block: u8 = 0x02;
 const op_loop: u8 = 0x03;
@@ -300,6 +304,54 @@ const Ctrl = struct {
 
 const max_ctrl_depth = 64;
 
+const TerminatedArmClose = enum { continue_compilation, function_end };
+
+/// Resume compilation at the first reachable boundary after a terminating
+/// instruction. A then-arm may expose a reachable `else`; an `end` closes the
+/// current frame and restores its canonical result Cells for any branch that
+/// targets the merge. At function depth the closing `end` finishes the body.
+fn closeTerminatedArm(
+    m: *x64.Masm,
+    gpa: std.mem.Allocator,
+    body: []const u8,
+    index: *usize,
+    stack: *[operand_stack_capacity]Loc,
+    sp: *usize,
+    ctrl: *[max_ctrl_depth]Ctrl,
+    ctrl_len: *usize,
+) Error!?TerminatedArmClose {
+    const boundary = dead_code.skipToFrameBoundary(body, index) orelse return null;
+    if (ctrl_len.* == 0) {
+        if (boundary != .end) return null;
+        return .function_end;
+    }
+
+    const current = &ctrl[ctrl_len.* - 1];
+    if (boundary == .else_arm) {
+        if (current.kind != .if_then) return null;
+        try m.bind(&current.else_label);
+        current.kind = .if_else;
+        sp.* = current.height;
+        return .continue_compilation;
+    }
+
+    switch (current.kind) {
+        .block, .if_else => try m.bind(&current.label),
+        .loop => {},
+        .if_then => {
+            try m.bind(&current.label);
+            try m.bind(&current.else_label);
+        },
+    }
+    current.label.deinit(gpa);
+    current.else_label.deinit(gpa);
+    sp.* = current.height + current.result_arity;
+    var result_depth = current.height;
+    while (result_depth < sp.*) : (result_depth += 1) stack[result_depth] = .runtime;
+    ctrl_len.* -= 1;
+    return .continue_compilation;
+}
+
 /// Install the SysV half of Spasm's stable call gate. Generated callers pass
 /// the gate as a private ninth argument; the hot path tail-jumps to its current
 /// EntryFn, while the cold path tail-jumps to the existing checked resolver.
@@ -361,6 +413,7 @@ pub fn compile(
 
     var entry: x64.Masm.Label = .{};
     var success: x64.Masm.Label = .{};
+    var explicit_return: x64.Masm.Label = .{};
     var epilogue: x64.Masm.Label = .{};
     var trap_div0: x64.Masm.Label = .{};
     var trap_overflow: x64.Masm.Label = .{};
@@ -369,6 +422,7 @@ pub fn compile(
     var trap_stack_exhausted: x64.Masm.Label = .{};
     defer entry.deinit(gpa);
     defer success.deinit(gpa);
+    defer explicit_return.deinit(gpa);
     defer epilogue.deinit(gpa);
     defer trap_div0.deinit(gpa);
     defer trap_overflow.deinit(gpa);
@@ -408,6 +462,21 @@ pub fn compile(
             diagnostics.has_subopcode = false;
         }
         switch (op) {
+            op_unreachable => {
+                // §4.4.9 unreachable always traps. Continue parsing only at a
+                // structured boundary that another machine path can reach.
+                try m.movImm64(.rax, config.trap_unreachable);
+                try m.jump(&epilogue);
+                switch ((try closeTerminatedArm(&m, gpa, body, &i, &stack, &sp, &ctrl, &ctrl_len)) orelse return null) {
+                    .continue_compilation => {},
+                    .function_end => {
+                        sp = ftype.results.len;
+                        for (stack[0..sp]) |*loc| loc.* = .runtime;
+                        function_ended = true;
+                        break :body_loop;
+                    },
+                }
+            },
             op_nop => {},
             op_i32_const => {
                 const value = readSleb32(body, &i) orelse return null;
@@ -1698,6 +1767,44 @@ pub fn compile(
                     }
                     try m.store64Disp32(.r12, scratchOffset(num_locals, depth), .rax);
                     stack[depth] = .runtime;
+                } else if (sub == 8) {
+                    // §4.4.7 memory.init: [dst, src, len] -> []. The shared
+                    // helper owns the segment + memory bounds checks and
+                    // reports a stashed OutOfBoundsMemoryAccess through the
+                    // ordinary native trap-status channel.
+                    const helper = config.mem_init_helper orelse return null;
+                    const data_index = readUleb32(body, &i) orelse return null;
+                    const memory_index = readUleb32(body, &i) orelse return null;
+                    if (memory_index != 0 or memoryIs64(module, memory_index) != false or sp < 3) return null;
+                    const below = sp - 3;
+                    try materialize(&m, stack[below], num_locals, below);
+                    try materialize(&m, stack[below + 1], num_locals, below + 1);
+                    try materialize(&m, stack[below + 2], num_locals, below + 2);
+
+                    try m.load64Disp32(.rdi, .rsp, 0);
+                    try m.movImm64(.rsi, data_index);
+                    try m.movImm64(.rdx, memory_index);
+                    try m.load32Disp32(.rcx, .r12, scratchOffset(num_locals, below));
+                    try m.load32Disp32(.r8, .r12, scratchOffset(num_locals, below + 1));
+                    try m.load32Disp32(.r9, .r12, scratchOffset(num_locals, below + 2));
+                    try m.movImm64(.r11, helper);
+                    try m.callReg(.r11);
+
+                    try m.cmpReg32Imm32(.rax, 0);
+                    var init_ok: x64.Masm.Label = .{};
+                    defer init_ok.deinit(gpa);
+                    try m.jumpCond(.equal, &init_ok);
+                    try m.jump(&epilogue);
+                    try m.bind(&init_ok);
+                    sp = below;
+                } else if (sub == 9) {
+                    // §4.4.7 data.drop has no stack effect and cannot trap.
+                    const helper = config.data_drop_helper orelse return null;
+                    const data_index = readUleb32(body, &i) orelse return null;
+                    try m.load64Disp32(.rdi, .rsp, 0);
+                    try m.movImm64(.rsi, data_index);
+                    try m.movImm64(.r11, helper);
+                    try m.callReg(.r11);
                 } else if (sub == 11) {
                     const memory_index = readUleb32(body, &i) orelse return null;
                     if (memory_index != 0 or memoryIs64(module, memory_index) != false or sp < 3) return null;
@@ -2080,21 +2187,22 @@ pub fn compile(
                 ctrl_len -= 1;
             },
             op_return => {
-                // A top-level explicit return has no alternative structured
-                // path that must compile after it. Canonicalize the function
-                // results, skip validated dead code, and join the ordinary
-                // success epilogue. Nested returns remain a normal fallback
-                // until the compiler tracks unreachable arms explicitly.
-                if (ctrl_len != 0) return null;
+                // Canonicalize the function results and join the success
+                // epilogue. Parsing resumes only where another structured
+                // path can reach: an else-arm or a frame merge.
                 const result_arity: u32 = @intCast(ftype.results.len);
                 if (!(try emitBranchValues(&m, stack[0..], num_locals, sp, 0, result_arity))) return null;
                 var result_depth: usize = 0;
                 while (result_depth < result_arity) : (result_depth += 1) stack[result_depth] = .runtime;
-                try m.jump(&success);
-                dead_code.skipToFrameEnd(body, &i) orelse return null;
-                sp = result_arity;
-                function_ended = true;
-                break :body_loop;
+                try m.jump(&explicit_return);
+                switch ((try closeTerminatedArm(&m, gpa, body, &i, &stack, &sp, &ctrl, &ctrl_len)) orelse return null) {
+                    .continue_compilation => {},
+                    .function_end => {
+                        sp = result_arity;
+                        function_ended = true;
+                        break :body_loop;
+                    },
+                }
             },
             op_end => {
                 if (ctrl_len == 0) {
@@ -2124,12 +2232,16 @@ pub fn compile(
     try m.bind(&success);
     for (ftype.results, 0..) |_, result_index| {
         try materialize(&m, stack[result_index], num_locals, result_index);
-        try m.load64Disp32(.rax, .r12, scratchOffset(num_locals, result_index));
-        try m.store64Disp32(.r13, resultOffset(result_index), .rax);
-        try m.movImm64(.rcx, 0);
-        try m.store64Disp32(.r13, resultOffset(result_index) + 8, .rcx);
     }
+    try emitResultsFromCells(&m, num_locals, ftype.results.len);
+    try m.movImm64(.rax, 0);
+    try m.jump(&epilogue);
 
+    // Explicit returns already canonicalized their values into Cell depths
+    // 0..result_count. Copy those runtime Cells directly: the fallthrough
+    // path's final Loc metadata may describe different constants.
+    try m.bind(&explicit_return);
+    try emitResultsFromCells(&m, num_locals, ftype.results.len);
     try m.movImm64(.rax, 0);
     try m.jump(&epilogue);
     if (trap_div0_used) {
@@ -2193,6 +2305,15 @@ fn emitEpilogue(m: *x64.Masm) Error!void {
     try m.load64Disp32(.rbp, .rsp, saved_rbp_off);
     try m.addRegImm32(.rsp, frame_size);
     try m.ret();
+}
+
+fn emitResultsFromCells(m: *x64.Masm, num_locals: usize, result_count: usize) Error!void {
+    for (0..result_count) |result_index| {
+        try m.load64Disp32(.rax, .r12, scratchOffset(num_locals, result_index));
+        try m.store64Disp32(.r13, resultOffset(result_index), .rax);
+        try m.movImm64(.rcx, 0);
+        try m.store64Disp32(.r13, resultOffset(result_index) + 8, .rcx);
+    }
 }
 
 fn emitExecutionPoll(

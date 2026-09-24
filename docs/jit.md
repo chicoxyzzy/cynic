@@ -46,9 +46,11 @@ qualification and module ownership are recorded in
 Generalized JS-reentrant helpers, native post-call continuations, remaining
 opcode families, and additional codegen targets remain future work. Spasm now
 also has a qualified x86_64 SysV backend for the complete scalar numeric ISA,
-scalar globals and memory access, memory size/grow/fill/copy, and broad scalar
-structured control, alongside catchable numeric/memory/stack traps, Realm safe
-points, guarded self-links, and stable cross-function gates. Unsupported
+scalar globals and memory access, memory size/grow/fill/copy/init plus
+`data.drop`, and broad scalar structured control including nested returns and
+`unreachable`, alongside
+catchable numeric/memory/stack traps, Realm safe points, guarded self-links,
+and stable cross-function gates. Unsupported
 functions retain transactional fallback to Sarcasm. Spasm's delivery state is
 tracked below. This document
 doubles as the design record
@@ -1344,6 +1346,15 @@ useful:
    failures. The module-sized code reservation keeps its 64 KiB minimum and
    4 MiB cap but carries 12.5% headroom for helper-heavy bodies; this prevents
    an exact-fit estimate from rejecting newly reachable tail functions.
+   The 2026-09-24 passive-bulk/control closure adds helper-backed memory32
+   `memory.init` / `data.drop`, a fixed catchable `unreachable` trap status,
+   and boundary-aware dead-code scanning so `return` compiles at nested block,
+   loop, and either `if` arm depth. Explicit returns copy their canonical
+   result Cells through a path-independent exit, so later fallthrough metadata
+   cannot overwrite the returned values. The exact differential remains
+   58,779/58,779 while reaching 119,144 native entries across 3,671 compiled
+   functions. Refusals fall again to 2,290 (8 limits, 1,401 signatures, 742
+   bytecode shapes, 139 opcodes), with zero emission or install failures.
    The **per-function code cache**
    now ships (`spasmEntryFor`): each emittable function compiles once on
    its first Spasm-enabled invoke and the cached `EntryFn` runs every
@@ -1363,7 +1374,7 @@ useful:
    interpret it). A red-first `wasm_js_test` (a JS export runs
    Spasm-compiled native code, `spasm_runs >= 1`) plus the full JS-wasm
    suite run under the jit-on posture gate it; non-emittable bodies
-   (reference-typed signatures/locals, passive bulk memory, SIMD)
+   (reference-typed signatures/locals, SIMD, memory64 operations)
    degrade, so the suite still covers the interpreter through that fallback. The scalar ALU now spans
    the i32/i64 and f32/f64 arithmetic and comparisons, the full float unary
    set (incl. min/max/copysign), the integer bit-counts (clz/ctz/popcnt)
@@ -1409,20 +1420,21 @@ useful:
    changes, and every trapping/saturating signed/unsigned float-int conversion.
    The same backend emits scalar globals; every scalar load and store width with
    explicit overflow-safe software bounds checks; and
-   `memory.size`, helper-backed `memory.grow` with base/length refresh, plus
-   overlap-safe inline `memory.fill` / `memory.copy`. Its complete scalar ALU
+   `memory.size`, helper-backed `memory.grow` with base/length refresh,
+   overlap-safe inline `memory.fill` / `memory.copy`, and helper-backed
+   memory32 `memory.init` / `data.drop`. Its complete scalar ALU
    includes integer bit counts and sign extension; scalar `select`,
-   value-carrying structured branches, `br_table`, and top-level explicit
-   `return` share the Cell merge discipline. Scalar `call_indirect` uses the
+   value-carrying structured branches, `br_table`, nested explicit `return`,
+   and catchable `unreachable` share the Cell merge discipline. Scalar
+   `call_indirect` uses the
    shared resolver/type-check helper and the same staged Cell buffer as direct
    calls. `ref.null`, `ref.func`, and `ref.is_null` plus table
    get/set/grow/fill use full 128-bit depth-keyed Cells for runtime references;
    table size/copy/init and `elem.drop` use scalar helper ABIs. Memory64
-   access/grow, passive bulk-memory operations,
-   reference-typed signatures/locals/select, SIMD, nested return arms, and
-   imported-call native lowering remain transactional refusals.
+   access/grow/bulk-memory operations, reference-typed signatures/locals/select,
+   SIMD, and imported-call native lowering remain transactional refusals.
    Non-gated calls retain the checked helper and per-function Sarcasm fallback.
-   Imports, `call_indirect`, cross-instance calls, overlarge frames, and bodies
+   Imports, cross-instance calls, overlarge frames, and bodies
    Spasm cannot compile keep the generic helper / `invoke` fallback. Operands
    live below the args are spilled across either helper call and reloaded after
    — a constant one stays a
@@ -1432,8 +1444,8 @@ useful:
    thread-local depth backstop while the linked lane uses the shared native
    stack cutoff); and
    `memory.init` / `data.drop` (the passive-segment ops, via the same
-   helper-call shape) — so the whole bulk-memory family now compiles. The
-   reference types open with `ref.null` / `ref.func` / `ref.is_null`: both ref
+   helper-call shape) — so the whole memory32 bulk-memory family now compiles.
+   The reference types open with `ref.null` / `ref.func` / `ref.is_null`: both ref
    sources are compile-time-known (a `ref.null` is always `REF_NULL`; a
    `ref.func`'s funcref is `makeFuncRef(x19, f)`, fixed by the immediate since
    the instance is the body-constant x19), so two compile-time-constant `Loc`

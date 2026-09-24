@@ -1706,6 +1706,7 @@ fn runSpasmEntry(
         spasm.trap_step_budget_exhausted => return error.StepBudgetExhausted,
         spasm.trap_execution_interrupted => return error.ExecutionInterrupted,
         spasm.trap_execution_terminated => return error.ExecutionTerminated,
+        spasm.trap_unreachable => return error.Unreachable,
         // A nested call stashed its concrete error on this entry's instance.
         spasm.trap_pending => return instance.spasm_call_trap orelse error.UnsupportedImportCall,
         // A generated body can only return the statuses above. Do not execute

@@ -35,8 +35,11 @@ Rosetta (2026-09-24). Gating runs add `--require-spasm-entry`; focused target
 tests additionally require generated x86 instance/cache, trap, safe-point,
 self-link, and stable-gate execution. Unsupported x86 opcode families fall
 back per function and therefore remain covered by the same semantic sweep.
-The fail-closed witness observed 118,903 native entries / 3,511 compiled
+The fail-closed witness observed 119,144 native entries / 3,671 compiled
 functions on x86_64 and 53,710 / 3,640 on AArch64. The x86 sweep recorded
-2,450 transactional refusals (8 limits, 1,401 signatures, 746 bytecode shapes,
-295 opcodes) and zero emission or install failures. Prefix telemetry identifies
-`memory.init` (52) and `memory.copy` (20) as the largest `0xfc` fallback groups.
+2,290 transactional refusals (8 limits, 1,401 signatures, 742 bytecode shapes,
+139 opcodes) and zero emission or install failures. The x86 backend now covers
+memory32 `memory.init` / `data.drop`, nested `return`, and catchable
+`unreachable`; the remaining `0xfc` telemetry starts with `memory.init` (32),
+`memory.copy` (20), and `memory.fill` (18), principally memory64 variants or
+bodies that reach another unsupported shape.
