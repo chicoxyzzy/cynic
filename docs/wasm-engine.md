@@ -557,13 +557,14 @@ the measured design space:
   bodies refuse before
   code publication and run in Sarcasm.
   This is a coverage difference, not a semantic one: forced-Spasm sweeps on
-  both architectures pass all 58,779 scored spec commands. The 2026-09-28
-  x86 sweep exercised 120,482 native entries / 4,008 compiled functions and
-  recorded zero emission or install failures. Its scalar rounding fallback is
+  both architectures pass all 58,779 scored spec commands. Current native
+  coverage and per-opcode refusals are in [wasm-results.md](../wasm-results.md).
+  AArch64 diagnostics now expose capacity fallbacks from its fixed 64 KiB
+  code arena; x86 retains its bounded module-sized reservation.
+  The x86 scalar rounding fallback is
   deliberately helper-based on SSE2-only targets rather than assuming SSE4.1;
-  the remaining 1,971 refusals are vector signatures, unsupported bytecode
-  shapes/opcodes, and eight size limits. AArch64 reaches 121,135 entries /
-  4,098 compiled functions. Both targets reject native table64 compilation
+  remaining refusals are unsupported bytecode shapes/opcodes and resource
+  limits, not vector signatures. Both targets reject native table64 compilation
   before a wide index can reach a 32-bit helper; imported and defined tables
   use the same module-index lookup. The memory64 closure retains u64
   memarg offsets, traps effective-address carry, and covers grow plus the bulk

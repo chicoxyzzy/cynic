@@ -2349,8 +2349,12 @@ and the per-builtin checklist; this section tracks status.
   AArch64 table64 index-truncation bug with transactional fallback.
   The exact score stays unchanged: 121,135 native entries / 4,098 compiled
   functions on AArch64; 120,482 / 4,008 and 1,971 refusals on x86_64.
-  Native table64, x86 SIMD, remaining SIMD lane operations and call
-  signatures on AArch64, and the
+  The SIMD foundation adds full vector transport and calls on both targets,
+  plus x86 SSE2 `v128.const/load/store` and `i32x4.add`. Both targets now report
+  per-SIMD-opcode refusals. The full corpus still passes, with 4,257 x86 and
+  4,124 AArch64 functions compiled; vector-signature refusals are gone.
+  Native table64, remaining SIMD lane operations, AArch64's fixed native-code
+  reservation (99 capacity fallbacks now visible in diagnostics), and the
   native-register/imported-call ABI remain next.
 
   The architecture for all three tiers — the shared codegen
