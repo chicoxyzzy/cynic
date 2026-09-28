@@ -486,6 +486,34 @@ pub fn build(b: *std.Build) void {
     const t262_step = b.step("test262", "Run the test262 conformance suite (parser-only)");
     t262_step.dependOn(&run_t262.step);
 
+    // WPT's shell-capable Wasm JS API slice. Python only imports the pinned
+    // corpus and supervises isolated processes; every test runs in Cynic.
+    // Keep a distinct executor so conformance never clobbers the CLI build.
+    const wpt_mod = b.createModule(.{
+        .root_source_file = b.path("tools/wpt/case.zig"),
+        .target = target,
+        .optimize = t262_optimize,
+        .link_libc = true,
+    });
+    wpt_mod.addImport("cynic", lib_mod_fast);
+    const wpt_exe = b.addExecutable(.{ .name = "cynic-wpt-case", .root_module = wpt_mod });
+    const install_wpt = b.addInstallArtifact(wpt_exe, .{});
+    b.step("wpt-build", "Build the isolated WPT shell executor").dependOn(&install_wpt.step);
+    const run_wpt = b.addSystemCommand(&.{ "python3", "tools/wpt/run.py", "--binary" });
+    run_wpt.addArtifactArg(wpt_exe);
+    run_wpt.step.dependOn(&install_wpt.step);
+    run_wpt.addPassthruArgs();
+    b.step("wpt", "Run the pinned WPT Wasm JavaScript API slice").dependOn(&run_wpt.step);
+
+    const wpt_test_step = b.step("test-wpt", "Test WPT import, reporting, and real-engine completion semantics");
+    for ([_][]const u8{ "tools/wpt/test_runner.py", "tools/wpt/test_import_corpus.py" }) |script| {
+        const wpt_unit = b.addSystemCommand(&.{ "python3", script });
+        wpt_test_step.dependOn(&wpt_unit.step);
+    }
+    const wpt_integration = b.addSystemCommand(&.{ "python3", "tools/wpt/test_case.py", "--binary" });
+    wpt_integration.addArtifactArg(wpt_exe);
+    wpt_test_step.dependOn(&wpt_integration.step);
+
     // `zig build wasm-testsuite` — Sarcasm conformance against the
     // official WebAssembly spec testsuite. The `.wast` corpus is
     // preprocessed to JSON + `.wasm` by wast2json

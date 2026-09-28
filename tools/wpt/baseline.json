@@ -1,0 +1,3738 @@
+{
+  "schema_version": 1,
+  "corpus_revision": "9ee707c850996c8d124809570c3ff855d67301b9",
+  "manifest_sha256": "08cb08d11574c249ecb6d0991327704b08bf76a70725096d29cb4781b8559480",
+  "adapter_sha256": {
+    "run.py": "4fa854df736112128209bbc71f57d234425e8eb1284b472fa06f36951c67be71",
+    "case.zig": "3886e2d75f6529014f66a5c130b1829e9c836f12038b0c85515da3e675272c35",
+    "bootstrap.js": "2a7fc46fe66723bd90812a3274aa6f5695e72cf0cbe8a451d6e19b7dcdf7ff4d",
+    "reporter.js": "3bf240776c67cc9fa239b450bc5406056d3c1d14dda74139b4eeeeb71b2ef1a2",
+    "finish.js": "6c174bed116d8d8e1c96caf0e6a01e7c80f7a2a97c1edba81e845c9a5fb1d072",
+    "testharness.js (patched)": "fbe2e52e029bbeea3fecdedf963b69589526a8a1e3ceb18947120667443147f7",
+    "wasm/jsapi/wasm-module-builder.js (patched)": "83a83b12adc7d51533c818b23fd37936d03a7203e7015356f9e6852b8625964d"
+  },
+  "binary_sha256": "58522e8581bd5d33b0c4216e173abb32bf142595f84c3046919315f470c7447a",
+  "provenance": {
+    "generated_at_utc": "2026-09-28T22:45:47Z",
+    "platform": "Darwin",
+    "architecture": "arm64",
+    "engine_git_head": "39619d43d32d89c2bb1f6b7105636cf8e97bf857",
+    "engine_git_dirty": true
+  },
+  "configuration": {
+    "timeout": 10.0,
+    "long_timeout": 60.0,
+    "fuel": 50000000,
+    "memory_limit": 268435456,
+    "gc_threshold": null
+  },
+  "filter": "",
+  "excluded": [
+    {
+      "path": "wasm/jsapi/esm-integration/exports.tentative.any.js",
+      "reason": "Wasm ES module integration and module-host loading are outside the initial shell scope"
+    },
+    {
+      "path": "wasm/jsapi/esm-integration/global-exports-live-bindings.tentative.any.js",
+      "reason": "Wasm ES module integration and module-host loading are outside the initial shell scope"
+    },
+    {
+      "path": "wasm/jsapi/esm-integration/global-exports.tentative.any.js",
+      "reason": "Wasm ES module integration and module-host loading are outside the initial shell scope"
+    },
+    {
+      "path": "wasm/jsapi/esm-integration/js-wasm-cycle.tentative.any.js",
+      "reason": "Wasm ES module integration and module-host loading are outside the initial shell scope"
+    },
+    {
+      "path": "wasm/jsapi/esm-integration/mutable-global-sharing.tentative.any.js",
+      "reason": "Wasm ES module integration and module-host loading are outside the initial shell scope"
+    },
+    {
+      "path": "wasm/jsapi/esm-integration/namespace-instance.tentative.any.js",
+      "reason": "Wasm ES module integration and module-host loading are outside the initial shell scope"
+    },
+    {
+      "path": "wasm/jsapi/esm-integration/reserved-import-names.tentative.any.js",
+      "reason": "Wasm ES module integration and module-host loading are outside the initial shell scope"
+    },
+    {
+      "path": "wasm/jsapi/esm-integration/resolve-export.tentative.any.js",
+      "reason": "Wasm ES module integration and module-host loading are outside the initial shell scope"
+    },
+    {
+      "path": "wasm/jsapi/esm-integration/source-phase-string-builtins.tentative.any.js",
+      "reason": "Wasm ES module integration and module-host loading are outside the initial shell scope"
+    },
+    {
+      "path": "wasm/jsapi/esm-integration/source-phase-string-constants.tentative.any.js",
+      "reason": "Wasm ES module integration and module-host loading are outside the initial shell scope"
+    },
+    {
+      "path": "wasm/jsapi/esm-integration/source-phase.tentative.any.js",
+      "reason": "Wasm ES module integration and module-host loading are outside the initial shell scope"
+    },
+    {
+      "path": "wasm/jsapi/esm-integration/string-builtins.tentative.any.js",
+      "reason": "Wasm ES module integration and module-host loading are outside the initial shell scope"
+    },
+    {
+      "path": "wasm/jsapi/esm-integration/string-constants.tentative.any.js",
+      "reason": "Wasm ES module integration and module-host loading are outside the initial shell scope"
+    },
+    {
+      "path": "wasm/jsapi/esm-integration/v128-tdz.tentative.any.js",
+      "reason": "Wasm ES module integration and module-host loading are outside the initial shell scope"
+    },
+    {
+      "path": "wasm/jsapi/esm-integration/wasm-import-wasm-export.tentative.any.js",
+      "reason": "Wasm ES module integration and module-host loading are outside the initial shell scope"
+    },
+    {
+      "path": "wasm/jsapi/exception/identity.tentative.any.js",
+      "reason": "Fixture uses detached Promise assertions inside synchronous test(); shell lacks host rejection tracking and could falsely pass"
+    },
+    {
+      "path": "wasm/jsapi/function/call.tentative.any.js",
+      "reason": "WebAssembly.Function proposal API is outside the initial stable API scope"
+    },
+    {
+      "path": "wasm/jsapi/function/constructor.tentative.any.js",
+      "reason": "WebAssembly.Function proposal API is outside the initial stable API scope"
+    },
+    {
+      "path": "wasm/jsapi/function/table.tentative.any.js",
+      "reason": "WebAssembly.Function proposal API is outside the initial stable API scope"
+    },
+    {
+      "path": "wasm/jsapi/function/type.tentative.any.js",
+      "reason": "WebAssembly.Function proposal API is outside the initial stable API scope"
+    },
+    {
+      "path": "wasm/jsapi/gc/casts.tentative.any.js",
+      "reason": "Wasm GC is outside the initial shipped-feature scope"
+    },
+    {
+      "path": "wasm/jsapi/gc/exported-object.tentative.any.js",
+      "reason": "Wasm GC is outside the initial shipped-feature scope"
+    },
+    {
+      "path": "wasm/jsapi/gc/i31.tentative.any.js",
+      "reason": "Wasm GC is outside the initial shipped-feature scope"
+    },
+    {
+      "path": "wasm/jsapi/global/type.tentative.any.js",
+      "reason": "Wasm JS type reflection proposal (type methods/minimum descriptors) is outside the shipped API scope"
+    },
+    {
+      "path": "wasm/jsapi/idlharness.any.js",
+      "reason": "WebIDL harness requires browser fetch/IDL resources and does not declare jsshell"
+    },
+    {
+      "path": "wasm/jsapi/js-string/basic.any.js",
+      "reason": "Wasm JS string builtins are outside the initial shipped-feature scope"
+    },
+    {
+      "path": "wasm/jsapi/js-string/constants.any.js",
+      "reason": "Wasm JS string builtins are outside the initial shipped-feature scope"
+    },
+    {
+      "path": "wasm/jsapi/js-string/imports.any.js",
+      "reason": "Wasm JS string builtins are outside the initial shipped-feature scope"
+    },
+    {
+      "path": "wasm/jsapi/jspi/js-promise-integration.any.js",
+      "reason": "Wasm JS Promise Integration is outside the initial shipped-feature scope"
+    },
+    {
+      "path": "wasm/jsapi/jspi/notraps.any.js",
+      "reason": "Wasm JS Promise Integration is outside the initial shipped-feature scope"
+    },
+    {
+      "path": "wasm/jsapi/jspi/rejects.any.js",
+      "reason": "Wasm JS Promise Integration is outside the initial shipped-feature scope"
+    },
+    {
+      "path": "wasm/jsapi/memory/constructor-shared.tentative.any.js",
+      "reason": "Shared Wasm memory and threads are outside the initial shell scope"
+    },
+    {
+      "path": "wasm/jsapi/memory/constructor-types.tentative.any.js",
+      "reason": "Wasm JS type reflection proposal (type methods/minimum descriptors) is outside the shipped API scope"
+    },
+    {
+      "path": "wasm/jsapi/memory/to-fixed-length-buffer-shared.any.js",
+      "reason": "Shared Wasm memory and threads are outside the initial shell scope"
+    },
+    {
+      "path": "wasm/jsapi/memory/to-resizable-buffer-shared.any.js",
+      "reason": "Shared Wasm memory and threads are outside the initial shell scope"
+    },
+    {
+      "path": "wasm/jsapi/memory/type.tentative.any.js",
+      "reason": "Wasm JS type reflection proposal (type methods/minimum descriptors) is outside the shipped API scope"
+    },
+    {
+      "path": "wasm/jsapi/module/moduleSource.tentative.any.js",
+      "reason": "Wasm source-phase imports and AbstractModuleSource are outside the shipped API scope"
+    },
+    {
+      "path": "wasm/jsapi/table/constructor-types.tentative.any.js",
+      "reason": "Wasm JS type reflection proposal (type methods/minimum descriptors) is outside the shipped API scope"
+    },
+    {
+      "path": "wasm/jsapi/table/type.tentative.any.js",
+      "reason": "Wasm JS type reflection proposal (type methods/minimum descriptors) is outside the shipped API scope"
+    },
+    {
+      "path": "wasm/jsapi/tag/type.tentative.any.js",
+      "reason": "Wasm JS type reflection proposal (type methods/minimum descriptors) is outside the shipped API scope"
+    }
+  ],
+  "summary": {
+    "files": {
+      "execution_error": 2,
+      "fail": 24,
+      "pass": 14
+    },
+    "subtests": {
+      "FAIL": 330,
+      "PASS": 266
+    },
+    "excluded_files": 40
+  },
+  "results": [
+    {
+      "status": "fail",
+      "subtests": [
+        {
+          "name": "Promise type",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Missing argument",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Invalid arguments",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Branding",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Empty buffer",
+          "status": 1,
+          "message": "promise_rejects_js: function \"function CompileError() { [native code] }\" is not an Error subtype"
+        },
+        {
+          "name": "Invalid code",
+          "status": 1,
+          "message": "promise_rejects_js: function \"function CompileError() { [native code] }\" is not an Error subtype"
+        },
+        {
+          "name": "Result type",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Stray argument",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Changing the buffer",
+          "status": 0,
+          "message": null
+        }
+      ],
+      "harness": {
+        "status": 0,
+        "message": null
+      },
+      "returncode": 0,
+      "message": null,
+      "id": "wasm/jsapi/constructor/compile.any.js",
+      "path": "wasm/jsapi/constructor/compile.any.js",
+      "variant": ""
+    },
+    {
+      "status": "execution_error",
+      "subtests": [],
+      "harness": null,
+      "returncode": 1,
+      "message": "process exited with 1",
+      "id": "wasm/jsapi/constructor/instantiate-bad-imports.any.js",
+      "path": "wasm/jsapi/constructor/instantiate-bad-imports.any.js",
+      "variant": ""
+    },
+    {
+      "status": "fail",
+      "subtests": [
+        {
+          "name": "Promise type",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Missing arguments",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Branding",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "Invalid arguments",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Empty module without imports argument: BufferSource argument",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "Empty module without imports argument: Module argument",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "Empty module with undefined imports argument: BufferSource argument",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "Empty module with undefined imports argument: Module argument",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "Empty module with empty imports argument: BufferSource argument",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "Empty module with empty imports argument: Module argument",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "getter order for imports object: BufferSource argument",
+          "status": 1,
+          "message": "promise_test: Unhandled rejection with value: object \"LinkError: WebAssembly.Instance: import module namespace is not an object\""
+        },
+        {
+          "name": "getter order for imports object: Module argument",
+          "status": 1,
+          "message": "promise_test: Unhandled rejection with value: object \"LinkError: WebAssembly.Instance: import module namespace is not an object\""
+        },
+        {
+          "name": "imports: BufferSource argument",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "imports: Module argument",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "imports with empty module names: BufferSource argument",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "imports with empty module names: Module argument",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "imports with empty names: BufferSource argument",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "imports with empty names: Module argument",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "exports with empty name: function: BufferSource argument",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "exports with empty name: function: Module argument",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "exports with empty name: table: BufferSource argument",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "exports with empty name: table: Module argument",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "exports with empty name: global: BufferSource argument",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "exports with empty name: global: Module argument",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "No imports: BufferSource argument",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "No imports: Module argument",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "exports and imports: BufferSource argument",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "exports and imports: Module argument",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "i64 exports and imports: BufferSource argument",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "i64 exports and imports: Module argument",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "import with i32-returning function: BufferSource argument",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "import with i32-returning function: Module argument",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "import with function that takes and returns i32: BufferSource argument",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "import with function that takes and returns i32: Module argument",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "import with i64-returning function: BufferSource argument",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "import with i64-returning function: Module argument",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "import with function that takes and returns i64: BufferSource argument",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "import with function that takes and returns i64: Module argument",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "import with i32-taking function: BufferSource argument",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "import with i32-taking function: Module argument",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "import with i64-taking function: BufferSource argument",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "import with i64-taking function: Module argument",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "export i64-returning function: BufferSource argument",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "export i64-returning function: Module argument",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "i32 mutable WebAssembly.Global import: BufferSource argument",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "i32 mutable WebAssembly.Global import: Module argument",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "i64 mutable WebAssembly.Global import: BufferSource argument",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "i64 mutable WebAssembly.Global import: Module argument",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "Multiple i64 arguments: BufferSource argument",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "Multiple i64 arguments: Module argument",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "stray argument: BufferSource argument",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "stray argument: Module argument",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "Synchronous options handling: Buffer argument",
+          "status": 1,
+          "message": "promise_test: Unhandled rejection with value: object \"LinkError: WebAssembly.Instance: import module namespace is not an object\""
+        },
+        {
+          "name": "Synchronous options handling: Module argument",
+          "status": 1,
+          "message": "assert_array_equals: lengths differ, expected array [\"module getter\", \"global getter\"] length 2, got [] length 0"
+        },
+        {
+          "name": "Empty buffer",
+          "status": 1,
+          "message": "promise_rejects_js: function \"function CompileError() { [native code] }\" is not an Error subtype"
+        },
+        {
+          "name": "Invalid code",
+          "status": 1,
+          "message": "promise_rejects_js: function \"function CompileError() { [native code] }\" is not an Error subtype"
+        },
+        {
+          "name": "Changing the buffer",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        }
+      ],
+      "harness": {
+        "status": 0,
+        "message": null
+      },
+      "returncode": 0,
+      "message": null,
+      "id": "wasm/jsapi/constructor/instantiate.any.js",
+      "path": "wasm/jsapi/constructor/instantiate.any.js",
+      "variant": ""
+    },
+    {
+      "status": "fail",
+      "subtests": [
+        {
+          "name": "multiple return values from wasm to js",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "multiple return values inside wasm",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "multiple return values from js to wasm",
+          "status": 1,
+          "message": "promise_test: Unhandled rejection with value: object \"TypeError: WebAssembly.Instance: host import arity is not supported\""
+        }
+      ],
+      "harness": {
+        "status": 0,
+        "message": null
+      },
+      "returncode": 0,
+      "message": null,
+      "id": "wasm/jsapi/constructor/multi-value.any.js",
+      "path": "wasm/jsapi/constructor/multi-value.any.js",
+      "variant": ""
+    },
+    {
+      "status": "pass",
+      "subtests": [
+        {
+          "name": "@@toStringTag exists on the namespace object with the appropriate descriptor",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Object.prototype.toString applied to the namespace object",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Object.prototype.toString applied after modifying the namespace object's @@toStringTag",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Object.prototype.toString applied after deleting @@toStringTag",
+          "status": 0,
+          "message": null
+        }
+      ],
+      "harness": {
+        "status": 0,
+        "message": null
+      },
+      "returncode": 0,
+      "message": null,
+      "id": "wasm/jsapi/constructor/toStringTag.any.js",
+      "path": "wasm/jsapi/constructor/toStringTag.any.js",
+      "variant": ""
+    },
+    {
+      "status": "pass",
+      "subtests": [
+        {
+          "name": "Missing argument",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Invalid arguments",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Branding",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [] in Uint8Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [] in Int8Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [] in Uint16Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [] in Int16Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [] in Uint32Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [] in Int32Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [0] in Uint8Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [0] in Int8Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [0 61] in Uint8Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [0 61] in Int8Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [0 61] in Uint16Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [0 61] in Int16Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [0 61 73] in Uint8Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [0 61 73] in Int8Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [0 61 73 6d] in Uint8Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [0 61 73 6d] in Int8Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [0 61 73 6d] in Uint16Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [0 61 73 6d] in Int16Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [0 61 73 6d] in Uint32Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [0 61 73 6d] in Int32Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [0 61 73 6d 1] in Uint8Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [0 61 73 6d 1] in Int8Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [0 61 73 6d 1 0] in Uint8Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [0 61 73 6d 1 0] in Int8Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [0 61 73 6d 1 0] in Uint16Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [0 61 73 6d 1 0] in Int16Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [0 61 73 6d 1 0 0] in Uint8Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [0 61 73 6d 1 0 0] in Int8Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [0 61 73 6d 1 0 0 0] in Uint8Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [0 61 73 6d 1 0 0 0] in Int8Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [0 61 73 6d 1 0 0 0] in Uint16Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [0 61 73 6d 1 0 0 0] in Int16Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [0 61 73 6d 1 0 0 0] in Uint32Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [0 61 73 6d 1 0 0 0] in Int32Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [0 61 73 6d 0 0 0 0] in Uint8Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [0 61 73 6d 0 0 0 0] in Int8Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [0 61 73 6d 0 0 0 0] in Uint16Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [0 61 73 6d 0 0 0 0] in Int16Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [0 61 73 6d 0 0 0 0] in Uint32Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [0 61 73 6d 0 0 0 0] in Int32Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [0 61 73 6d 2 0 0 0] in Uint8Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [0 61 73 6d 2 0 0 0] in Int8Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [0 61 73 6d 2 0 0 0] in Uint16Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [0 61 73 6d 2 0 0 0] in Int16Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [0 61 73 6d 2 0 0 0] in Uint32Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [0 61 73 6d 2 0 0 0] in Int32Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [0 61 73 6d 1 0 0 0 0 0] in Uint8Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [0 61 73 6d 1 0 0 0 0 0] in Int8Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [0 61 73 6d 1 0 0 0 0 0] in Uint16Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [0 61 73 6d 1 0 0 0 0 0] in Int16Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [0 61 73 6d 1 0 0 0 0 1 0] in Uint8Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [0 61 73 6d 1 0 0 0 0 1 0] in Int8Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [0 61 73 6d 1 0 0 0 0 2 1 61] in Uint8Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [0 61 73 6d 1 0 0 0 0 2 1 61] in Int8Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [0 61 73 6d 1 0 0 0 0 2 1 61] in Uint16Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [0 61 73 6d 1 0 0 0 0 2 1 61] in Int16Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [0 61 73 6d 1 0 0 0 0 2 1 61] in Uint32Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Validating module [0 61 73 6d 1 0 0 0 0 2 1 61] in Int32Array",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Stray argument",
+          "status": 0,
+          "message": null
+        }
+      ],
+      "harness": {
+        "status": 0,
+        "message": null
+      },
+      "returncode": 0,
+      "message": null,
+      "id": "wasm/jsapi/constructor/validate.any.js",
+      "path": "wasm/jsapi/constructor/validate.any.js",
+      "variant": ""
+    },
+    {
+      "status": "fail",
+      "subtests": [
+        {
+          "name": "Wasm function throws argument",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Wasm function throws null",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Wasm function throws integer",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Imported JS function throws",
+          "status": 1,
+          "message": "promise_test: Unhandled rejection with value: object \"CompileError: WebAssembly.Module: invalid module\""
+        },
+        {
+          "name": "Imported JS function throws, Wasm catches and rethrows",
+          "status": 1,
+          "message": "promise_test: Unhandled rejection with value: object \"CompileError: WebAssembly.Module: invalid module\""
+        }
+      ],
+      "harness": {
+        "status": 0,
+        "message": null
+      },
+      "returncode": 0,
+      "message": null,
+      "id": "wasm/jsapi/exception/basic.tentative.any.js",
+      "path": "wasm/jsapi/exception/basic.tentative.any.js",
+      "variant": ""
+    },
+    {
+      "status": "pass",
+      "subtests": [
+        {
+          "name": "name",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "length",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "No arguments",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Calling",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Invalid descriptor argument",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Invalid exception argument",
+          "status": 0,
+          "message": null
+        }
+      ],
+      "harness": {
+        "status": 0,
+        "message": null
+      },
+      "returncode": 0,
+      "message": null,
+      "id": "wasm/jsapi/exception/constructor.tentative.any.js",
+      "path": "wasm/jsapi/exception/constructor.tentative.any.js",
+      "variant": ""
+    },
+    {
+      "status": "fail",
+      "subtests": [
+        {
+          "name": "Missing arguments",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => exn.getArg(tag)\" threw object \"RangeError: WebAssembly.Exception.prototype.getArg: index out of range\" (\"RangeError\") expected instance of function \"function TypeError() { [native code] }\" (\"TypeError\")"
+        },
+        {
+          "name": "Invalid exception argument",
+          "status": 1,
+          "message": "argument"
+        },
+        {
+          "name": "Index out of bounds",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Getting out-of-range argument",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "getArg",
+          "status": 0,
+          "message": null
+        }
+      ],
+      "harness": {
+        "status": 0,
+        "message": null
+      },
+      "returncode": 0,
+      "message": null,
+      "id": "wasm/jsapi/exception/getArg.tentative.any.js",
+      "path": "wasm/jsapi/exception/getArg.tentative.any.js",
+      "variant": ""
+    },
+    {
+      "status": "fail",
+      "subtests": [
+        {
+          "name": "Missing arguments",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => exn.is()\" did not throw"
+        },
+        {
+          "name": "Invalid exception argument",
+          "status": 1,
+          "message": "argument"
+        },
+        {
+          "name": "is",
+          "status": 0,
+          "message": null
+        }
+      ],
+      "harness": {
+        "status": 0,
+        "message": null
+      },
+      "returncode": 0,
+      "message": null,
+      "id": "wasm/jsapi/exception/is.tentative.any.js",
+      "path": "wasm/jsapi/exception/is.tentative.any.js",
+      "variant": ""
+    },
+    {
+      "status": "pass",
+      "subtests": [
+        {
+          "name": "Object.prototype.toString on an Exception",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "@@toStringTag exists on the prototype with the appropriate descriptor",
+          "status": 0,
+          "message": null
+        }
+      ],
+      "harness": {
+        "status": 0,
+        "message": null
+      },
+      "returncode": 0,
+      "message": null,
+      "id": "wasm/jsapi/exception/toString.tentative.any.js",
+      "path": "wasm/jsapi/exception/toString.tentative.any.js",
+      "variant": ""
+    },
+    {
+      "status": "fail",
+      "subtests": [
+        {
+          "name": "name",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "length",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "No arguments",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Calling",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Order of evaluation",
+          "status": 1,
+          "message": "WebAssembly.Global: invalid value type"
+        },
+        {
+          "name": "Invalid descriptor argument",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Invalid type argument",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Construct v128 global",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "i64 with default",
+          "status": 1,
+          "message": "assert_equals: valueOf expected (bigint) 0n but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Default value for type i32",
+          "status": 1,
+          "message": "assert_equals: valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Explicit value undefined for type i32",
+          "status": 1,
+          "message": "assert_equals: valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Explicit value null for type i32",
+          "status": 1,
+          "message": "assert_equals: valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Explicit value true for type i32",
+          "status": 1,
+          "message": "assert_equals: valueOf expected (number) 1 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Explicit value false for type i32",
+          "status": 1,
+          "message": "assert_equals: valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Explicit value 2 for type i32",
+          "status": 1,
+          "message": "assert_equals: valueOf expected (number) 2 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Explicit value \"3\" for type i32",
+          "status": 1,
+          "message": "assert_equals: valueOf expected (number) 3 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Explicit value object with toString returning string for type i32",
+          "status": 1,
+          "message": "assert_equals: value expected 5 but got 0"
+        },
+        {
+          "name": "Explicit value object with valueOf returning string for type i32",
+          "status": 1,
+          "message": "assert_equals: value expected 8 but got 0"
+        },
+        {
+          "name": "Explicit value object with toString returning number for type i32",
+          "status": 1,
+          "message": "assert_equals: value expected 6 but got 0"
+        },
+        {
+          "name": "Explicit value object with valueOf returning number for type i32",
+          "status": 1,
+          "message": "assert_equals: value expected 9 but got 0"
+        },
+        {
+          "name": "BigInt value for type i32",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => new WebAssembly.Global(argument, 0n)\" did not throw"
+        },
+        {
+          "name": "Default value for type f32",
+          "status": 1,
+          "message": "assert_equals: valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Explicit value undefined for type f32",
+          "status": 1,
+          "message": "assert_equals: value expected 0 but got NaN"
+        },
+        {
+          "name": "Explicit value null for type f32",
+          "status": 1,
+          "message": "assert_equals: valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Explicit value true for type f32",
+          "status": 1,
+          "message": "assert_equals: valueOf expected (number) 1 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Explicit value false for type f32",
+          "status": 1,
+          "message": "assert_equals: valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Explicit value 2 for type f32",
+          "status": 1,
+          "message": "assert_equals: valueOf expected (number) 2 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Explicit value \"3\" for type f32",
+          "status": 1,
+          "message": "assert_equals: valueOf expected (number) 3 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Explicit value object with toString returning string for type f32",
+          "status": 1,
+          "message": "assert_equals: value expected 5 but got NaN"
+        },
+        {
+          "name": "Explicit value object with valueOf returning string for type f32",
+          "status": 1,
+          "message": "assert_equals: value expected 8 but got NaN"
+        },
+        {
+          "name": "Explicit value object with toString returning number for type f32",
+          "status": 1,
+          "message": "assert_equals: value expected 6 but got NaN"
+        },
+        {
+          "name": "Explicit value object with valueOf returning number for type f32",
+          "status": 1,
+          "message": "assert_equals: value expected 9 but got NaN"
+        },
+        {
+          "name": "BigInt value for type f32",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => new WebAssembly.Global(argument, 0n)\" did not throw"
+        },
+        {
+          "name": "Default value for type f64",
+          "status": 1,
+          "message": "assert_equals: valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Explicit value undefined for type f64",
+          "status": 1,
+          "message": "assert_equals: value expected 0 but got NaN"
+        },
+        {
+          "name": "Explicit value null for type f64",
+          "status": 1,
+          "message": "assert_equals: valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Explicit value true for type f64",
+          "status": 1,
+          "message": "assert_equals: valueOf expected (number) 1 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Explicit value false for type f64",
+          "status": 1,
+          "message": "assert_equals: valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Explicit value 2 for type f64",
+          "status": 1,
+          "message": "assert_equals: valueOf expected (number) 2 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Explicit value \"3\" for type f64",
+          "status": 1,
+          "message": "assert_equals: valueOf expected (number) 3 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Explicit value object with toString returning string for type f64",
+          "status": 1,
+          "message": "assert_equals: value expected 5 but got NaN"
+        },
+        {
+          "name": "Explicit value object with valueOf returning string for type f64",
+          "status": 1,
+          "message": "assert_equals: value expected 8 but got NaN"
+        },
+        {
+          "name": "Explicit value object with toString returning number for type f64",
+          "status": 1,
+          "message": "assert_equals: value expected 6 but got NaN"
+        },
+        {
+          "name": "Explicit value object with valueOf returning number for type f64",
+          "status": 1,
+          "message": "assert_equals: value expected 9 but got NaN"
+        },
+        {
+          "name": "BigInt value for type f64",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => new WebAssembly.Global(argument, 0n)\" did not throw"
+        },
+        {
+          "name": "Explicit value undefined for type i64",
+          "status": 1,
+          "message": "WebAssembly: an i64 value must be a BigInt"
+        },
+        {
+          "name": "Explicit value true for type i64",
+          "status": 1,
+          "message": "WebAssembly: an i64 value must be a BigInt"
+        },
+        {
+          "name": "Explicit value false for type i64",
+          "status": 1,
+          "message": "WebAssembly: an i64 value must be a BigInt"
+        },
+        {
+          "name": "Explicit value \"3\" for type i64",
+          "status": 1,
+          "message": "WebAssembly: an i64 value must be a BigInt"
+        },
+        {
+          "name": "Explicit value 123n for type i64",
+          "status": 1,
+          "message": "assert_equals: valueOf expected (bigint) 123n but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Explicit value object with toString returning string for type i64",
+          "status": 1,
+          "message": "WebAssembly: an i64 value must be a BigInt"
+        },
+        {
+          "name": "Explicit value object with valueOf returning string for type i64",
+          "status": 1,
+          "message": "WebAssembly: an i64 value must be a BigInt"
+        },
+        {
+          "name": "Explicit value object with toString returning bigint for type i64",
+          "status": 1,
+          "message": "WebAssembly: an i64 value must be a BigInt"
+        },
+        {
+          "name": "Explicit value object with valueOf returning bigint for type i64",
+          "status": 1,
+          "message": "WebAssembly: an i64 value must be a BigInt"
+        },
+        {
+          "name": "Pass non-bigint as i64 Global value: null",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Pass non-bigint as i64 Global value: 666",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Pass non-bigint as i64 Global value: object \"5\"",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Pass non-bigint as i64 Global value: object \"[object Object]\"",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Pass non-bigint as i64 Global value: symbol \"Symbol()\"",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Stray argument",
+          "status": 1,
+          "message": "assert_equals: valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        }
+      ],
+      "harness": {
+        "status": 0,
+        "message": null
+      },
+      "returncode": 0,
+      "message": null,
+      "id": "wasm/jsapi/global/constructor.any.js",
+      "path": "wasm/jsapi/global/constructor.any.js",
+      "variant": ""
+    },
+    {
+      "status": "pass",
+      "subtests": [
+        {
+          "name": "Object.prototype.toString on an Global",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "@@toStringTag exists on the prototype with the appropriate descriptor",
+          "status": 0,
+          "message": null
+        }
+      ],
+      "harness": {
+        "status": 0,
+        "message": null
+      },
+      "returncode": 0,
+      "message": null,
+      "id": "wasm/jsapi/global/toString.any.js",
+      "path": "wasm/jsapi/global/toString.any.js",
+      "variant": ""
+    },
+    {
+      "status": "fail",
+      "subtests": [
+        {
+          "name": "Branding",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Immutable i32 (missing)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Immutable i32 with ToNumber side-effects (missing)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Immutable i32 (undefined)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Immutable i32 with ToNumber side-effects (undefined)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Immutable i32 (null)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Immutable i32 with ToNumber side-effects (null)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Immutable i32 (false)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Immutable i32 with ToNumber side-effects (false)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Immutable i32 (empty string)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Immutable i32 with ToNumber side-effects (empty string)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Immutable i32 (zero)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Immutable i32 with ToNumber side-effects (zero)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Mutable i32 (true)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Mutable i32 (one)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Mutable i32 (string)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Mutable i32 (true on prototype)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Immutable i64 (missing)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (bigint) 0n but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Immutable i64 with ToNumber side-effects (missing)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (bigint) 0n but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Immutable i64 (undefined)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (bigint) 0n but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Immutable i64 with ToNumber side-effects (undefined)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (bigint) 0n but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Immutable i64 (null)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (bigint) 0n but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Immutable i64 with ToNumber side-effects (null)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (bigint) 0n but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Immutable i64 (false)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (bigint) 0n but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Immutable i64 with ToNumber side-effects (false)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (bigint) 0n but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Immutable i64 (empty string)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (bigint) 0n but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Immutable i64 with ToNumber side-effects (empty string)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (bigint) 0n but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Immutable i64 (zero)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (bigint) 0n but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Immutable i64 with ToNumber side-effects (zero)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (bigint) 0n but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Mutable i64 (true)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (bigint) 0n but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Mutable i64 (one)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (bigint) 0n but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Mutable i64 (string)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (bigint) 0n but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Mutable i64 (true on prototype)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (bigint) 0n but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Immutable f32 (missing)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Immutable f32 with ToNumber side-effects (missing)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Immutable f32 (undefined)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Immutable f32 with ToNumber side-effects (undefined)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Immutable f32 (null)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Immutable f32 with ToNumber side-effects (null)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Immutable f32 (false)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Immutable f32 with ToNumber side-effects (false)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Immutable f32 (empty string)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Immutable f32 with ToNumber side-effects (empty string)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Immutable f32 (zero)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Immutable f32 with ToNumber side-effects (zero)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Mutable f32 (true)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Mutable f32 (one)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Mutable f32 (string)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Mutable f32 (true on prototype)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Immutable f64 (missing)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Immutable f64 with ToNumber side-effects (missing)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Immutable f64 (undefined)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Immutable f64 with ToNumber side-effects (undefined)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Immutable f64 (null)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Immutable f64 with ToNumber side-effects (null)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Immutable f64 (false)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Immutable f64 with ToNumber side-effects (false)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Immutable f64 (empty string)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Immutable f64 with ToNumber side-effects (empty string)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Immutable f64 (zero)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Immutable f64 with ToNumber side-effects (zero)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Mutable f64 (true)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Mutable f64 (one)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Mutable f64 (string)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Mutable f64 (true on prototype)",
+          "status": 1,
+          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "i64 mutability",
+          "status": 1,
+          "message": "assert_equals: post-set valueOf expected (bigint) 123n but got (object) object \"[object WebAssembly.Global]\""
+        },
+        {
+          "name": "Calling setter without argument",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Stray argument",
+          "status": 0,
+          "message": null
+        }
+      ],
+      "harness": {
+        "status": 0,
+        "message": null
+      },
+      "returncode": 0,
+      "message": null,
+      "id": "wasm/jsapi/global/value-get-set.any.js",
+      "path": "wasm/jsapi/global/value-get-set.any.js",
+      "variant": ""
+    },
+    {
+      "status": "fail",
+      "subtests": [
+        {
+          "name": "Branding",
+          "status": 1,
+          "message": "assert_throws_js: this=true function \"() => fn.call(thisValue)\" did not throw"
+        },
+        {
+          "name": "Stray argument",
+          "status": 1,
+          "message": "assert_equals: expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+        }
+      ],
+      "harness": {
+        "status": 0,
+        "message": null
+      },
+      "returncode": 0,
+      "message": null,
+      "id": "wasm/jsapi/global/valueOf.any.js",
+      "path": "wasm/jsapi/global/valueOf.any.js",
+      "variant": ""
+    },
+    {
+      "status": "execution_error",
+      "subtests": [],
+      "harness": null,
+      "returncode": 1,
+      "message": "process exited with 1",
+      "id": "wasm/jsapi/instance/constructor-bad-imports.any.js",
+      "path": "wasm/jsapi/instance/constructor-bad-imports.any.js",
+      "variant": ""
+    },
+    {
+      "status": "fail",
+      "subtests": [
+        {
+          "name": "Untitled",
+          "status": 1,
+          "message": "assert_equals: expected function \"function fn() { [native code] }\" but got function \"function exportedFunction() { [native code] }\""
+        }
+      ],
+      "harness": {
+        "status": 0,
+        "message": null
+      },
+      "returncode": 0,
+      "message": null,
+      "id": "wasm/jsapi/instance/constructor-caching.any.js",
+      "path": "wasm/jsapi/instance/constructor-caching.any.js",
+      "variant": ""
+    },
+    {
+      "status": "fail",
+      "subtests": [
+        {
+          "name": "name",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "length",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "No arguments",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Non-Module arguments",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Calling",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Empty module without imports argument",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "Empty module with undefined imports argument",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "Empty module with empty imports argument",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "getter order for imports object",
+          "status": 1,
+          "message": "WebAssembly.Instance: import module namespace is not an object"
+        },
+        {
+          "name": "imports",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "imports with empty module names",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "imports with empty names",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "exports with empty name: function",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "exports with empty name: table",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "exports with empty name: global",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "No imports",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "exports and imports",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "i64 exports and imports",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "import with i32-returning function",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "import with function that takes and returns i32",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "import with i64-returning function",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "import with function that takes and returns i64",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "import with i32-taking function",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "import with i64-taking function",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "export i64-returning function",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "i32 mutable WebAssembly.Global import",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "i64 mutable WebAssembly.Global import",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "Multiple i64 arguments",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        },
+        {
+          "name": "stray argument",
+          "status": 1,
+          "message": "assert_false: extensible exports expected false got true"
+        }
+      ],
+      "harness": {
+        "status": 0,
+        "message": null
+      },
+      "returncode": 0,
+      "message": null,
+      "id": "wasm/jsapi/instance/constructor.any.js",
+      "path": "wasm/jsapi/instance/constructor.any.js",
+      "variant": ""
+    },
+    {
+      "status": "fail",
+      "subtests": [
+        {
+          "name": "Branding",
+          "status": 1,
+          "message": "assert_equals: expected \"object\" but got \"undefined\""
+        },
+        {
+          "name": "Stray argument",
+          "status": 1,
+          "message": "assert_equals: expected \"object\" but got \"undefined\""
+        },
+        {
+          "name": "Setting (sloppy mode)",
+          "status": 1,
+          "message": "Cannot assign to read-only property"
+        },
+        {
+          "name": "Setting (strict mode)",
+          "status": 0,
+          "message": null
+        }
+      ],
+      "harness": {
+        "status": 0,
+        "message": null
+      },
+      "returncode": 0,
+      "message": null,
+      "id": "wasm/jsapi/instance/exports.any.js",
+      "path": "wasm/jsapi/instance/exports.any.js",
+      "variant": ""
+    },
+    {
+      "status": "pass",
+      "subtests": [
+        {
+          "name": "Object.prototype.toString on an Instance",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "@@toStringTag exists on the prototype with the appropriate descriptor",
+          "status": 0,
+          "message": null
+        }
+      ],
+      "harness": {
+        "status": 0,
+        "message": null
+      },
+      "returncode": 0,
+      "message": null,
+      "id": "wasm/jsapi/instance/toString.any.js",
+      "path": "wasm/jsapi/instance/toString.any.js",
+      "variant": ""
+    },
+    {
+      "status": "fail",
+      "subtests": [
+        {
+          "name": "WebAssembly: property descriptor",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "WebAssembly: calling",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "WebAssembly: constructing",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "WebAssembly.Module: property descriptor",
+          "status": 1,
+          "message": "assert_false: enumerable expected false got true"
+        },
+        {
+          "name": "WebAssembly.Module: prototype",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "WebAssembly.Module: prototype.constructor",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "WebAssembly.Instance: property descriptor",
+          "status": 1,
+          "message": "assert_false: enumerable expected false got true"
+        },
+        {
+          "name": "WebAssembly.Instance: prototype",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "WebAssembly.Instance: prototype.constructor",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "WebAssembly.Memory: property descriptor",
+          "status": 1,
+          "message": "assert_false: enumerable expected false got true"
+        },
+        {
+          "name": "WebAssembly.Memory: prototype",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "WebAssembly.Memory: prototype.constructor",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "WebAssembly.Table: property descriptor",
+          "status": 1,
+          "message": "assert_false: enumerable expected false got true"
+        },
+        {
+          "name": "WebAssembly.Table: prototype",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "WebAssembly.Table: prototype.constructor",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "WebAssembly.Global: property descriptor",
+          "status": 1,
+          "message": "assert_false: enumerable expected false got true"
+        },
+        {
+          "name": "WebAssembly.Global: prototype",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "WebAssembly.Global: prototype.constructor",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "WebAssembly.CompileError: property descriptor",
+          "status": 1,
+          "message": "assert_false: enumerable expected false got true"
+        },
+        {
+          "name": "WebAssembly.CompileError: prototype",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "WebAssembly.CompileError: prototype.constructor",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "WebAssembly.LinkError: property descriptor",
+          "status": 1,
+          "message": "assert_false: enumerable expected false got true"
+        },
+        {
+          "name": "WebAssembly.LinkError: prototype",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "WebAssembly.LinkError: prototype.constructor",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "WebAssembly.RuntimeError: property descriptor",
+          "status": 1,
+          "message": "assert_false: enumerable expected false got true"
+        },
+        {
+          "name": "WebAssembly.RuntimeError: prototype",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "WebAssembly.RuntimeError: prototype.constructor",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "WebAssembly.validate",
+          "status": 1,
+          "message": "assert_true: enumerable expected true got false"
+        },
+        {
+          "name": "WebAssembly.validate: name",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "WebAssembly.validate: length",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "WebAssembly.compile",
+          "status": 1,
+          "message": "assert_true: enumerable expected true got false"
+        },
+        {
+          "name": "WebAssembly.compile: name",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "WebAssembly.compile: length",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "WebAssembly.instantiate",
+          "status": 1,
+          "message": "assert_true: enumerable expected true got false"
+        },
+        {
+          "name": "WebAssembly.instantiate: name",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "WebAssembly.instantiate: length",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "WebAssembly.Module.exports",
+          "status": 1,
+          "message": "assert_true: enumerable expected true got false"
+        },
+        {
+          "name": "WebAssembly.Module.exports: name",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "WebAssembly.Module.exports: length",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "WebAssembly.Module.imports",
+          "status": 1,
+          "message": "assert_true: enumerable expected true got false"
+        },
+        {
+          "name": "WebAssembly.Module.imports: name",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "WebAssembly.Module.imports: length",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "WebAssembly.Module.customSections",
+          "status": 1,
+          "message": "assert_true: enumerable expected true got false"
+        },
+        {
+          "name": "WebAssembly.Module.customSections: name",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "WebAssembly.Module.customSections: length",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "WebAssembly.Instance.exports",
+          "status": 1,
+          "message": "assert_equals: expected \"object\" but got \"undefined\""
+        },
+        {
+          "name": "WebAssembly.Instance.exports: getter",
+          "status": 1,
+          "message": "assert_equals: expected \"object\" but got \"undefined\""
+        },
+        {
+          "name": "WebAssembly.Instance.exports: setter",
+          "status": 1,
+          "message": "assert_equals: expected \"object\" but got \"undefined\""
+        },
+        {
+          "name": "WebAssembly.Memory.grow",
+          "status": 1,
+          "message": "assert_true: enumerable expected true got false"
+        },
+        {
+          "name": "WebAssembly.Memory.grow: name",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "WebAssembly.Memory.grow: length",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "WebAssembly.Memory.buffer",
+          "status": 1,
+          "message": "assert_true: enumerable expected true got false"
+        },
+        {
+          "name": "WebAssembly.Memory.buffer: getter",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "WebAssembly.Memory.buffer: setter",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "WebAssembly.Table.grow",
+          "status": 1,
+          "message": "assert_true: enumerable expected true got false"
+        },
+        {
+          "name": "WebAssembly.Table.grow: name",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "WebAssembly.Table.grow: length",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "WebAssembly.Table.get",
+          "status": 1,
+          "message": "assert_true: enumerable expected true got false"
+        },
+        {
+          "name": "WebAssembly.Table.get: name",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "WebAssembly.Table.get: length",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "WebAssembly.Table.set",
+          "status": 1,
+          "message": "assert_true: enumerable expected true got false"
+        },
+        {
+          "name": "WebAssembly.Table.set: name",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "WebAssembly.Table.set: length",
+          "status": 1,
+          "message": "assert_equals: WebAssembly.Table.set length should be 1 expected 1 but got 2"
+        },
+        {
+          "name": "WebAssembly.Table.length",
+          "status": 1,
+          "message": "assert_true: enumerable expected true got false"
+        },
+        {
+          "name": "WebAssembly.Table.length: getter",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "WebAssembly.Table.length: setter",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "WebAssembly.Global.valueOf",
+          "status": 1,
+          "message": "assert_equals: expected \"object\" but got \"undefined\""
+        },
+        {
+          "name": "WebAssembly.Global.valueOf: name",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "WebAssembly.Global.valueOf: length",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "WebAssembly.Global.value",
+          "status": 1,
+          "message": "assert_true: enumerable expected true got false"
+        },
+        {
+          "name": "WebAssembly.Global.value: getter",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "WebAssembly.Global.value: setter",
+          "status": 0,
+          "message": null
+        }
+      ],
+      "harness": {
+        "status": 0,
+        "message": null
+      },
+      "returncode": 0,
+      "message": null,
+      "id": "wasm/jsapi/interface.any.js",
+      "path": "wasm/jsapi/interface.any.js",
+      "variant": ""
+    },
+    {
+      "status": "fail",
+      "subtests": [
+        {
+          "name": "Branding",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Stray argument",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Setting (sloppy mode)",
+          "status": 1,
+          "message": "Cannot set property which has only a getter"
+        },
+        {
+          "name": "Setting (strict mode)",
+          "status": 0,
+          "message": null
+        }
+      ],
+      "harness": {
+        "status": 0,
+        "message": null
+      },
+      "returncode": 0,
+      "message": null,
+      "id": "wasm/jsapi/memory/buffer.any.js",
+      "path": "wasm/jsapi/memory/buffer.any.js",
+      "variant": ""
+    },
+    {
+      "status": "fail",
+      "subtests": [
+        {
+          "name": "name",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "length",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "No arguments",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Calling",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Invalid descriptor argument",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Undefined initial value in descriptor",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Out-of-range initial value in descriptor: NaN",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => new WebAssembly.Memory({ \"initial\": value })\" did not throw"
+        },
+        {
+          "name": "Out-of-range maximum value in descriptor: NaN",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => new WebAssembly.Memory({ \"initial\": 0, \"maximum\": value })\" did not throw"
+        },
+        {
+          "name": "Out-of-range initial value in descriptor: Infinity",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => new WebAssembly.Memory({ \"initial\": value })\" did not throw"
+        },
+        {
+          "name": "Out-of-range maximum value in descriptor: Infinity",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => new WebAssembly.Memory({ \"initial\": 0, \"maximum\": value })\" did not throw"
+        },
+        {
+          "name": "Out-of-range initial value in descriptor: -Infinity",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => new WebAssembly.Memory({ \"initial\": value })\" did not throw"
+        },
+        {
+          "name": "Out-of-range maximum value in descriptor: -Infinity",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => new WebAssembly.Memory({ \"initial\": 0, \"maximum\": value })\" did not throw"
+        },
+        {
+          "name": "Out-of-range initial value in descriptor: -1",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => new WebAssembly.Memory({ \"initial\": value })\" threw object \"RangeError: WebAssembly: length must be non-negative\" (\"RangeError\") expected instance of function \"function TypeError() { [native code] }\" (\"TypeError\")"
+        },
+        {
+          "name": "Out-of-range maximum value in descriptor: -1",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => new WebAssembly.Memory({ \"initial\": 0, \"maximum\": value })\" threw object \"RangeError: WebAssembly: length must be non-negative\" (\"RangeError\") expected instance of function \"function TypeError() { [native code] }\" (\"TypeError\")"
+        },
+        {
+          "name": "Out-of-range initial value in descriptor: 4294967296",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => new WebAssembly.Memory({ \"initial\": value })\" did not throw"
+        },
+        {
+          "name": "Out-of-range maximum value in descriptor: 4294967296",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => new WebAssembly.Memory({ \"initial\": 0, \"maximum\": value })\" did not throw"
+        },
+        {
+          "name": "Out-of-range initial value in descriptor: 68719476736",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => new WebAssembly.Memory({ \"initial\": value })\" did not throw"
+        },
+        {
+          "name": "Out-of-range maximum value in descriptor: 68719476736",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => new WebAssembly.Memory({ \"initial\": 0, \"maximum\": value })\" did not throw"
+        },
+        {
+          "name": "Initial value exceeds maximum",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Proxy descriptor",
+          "status": 1,
+          "message": "WebAssembly.Memory: missing required 'initial'"
+        },
+        {
+          "name": "Order of evaluation for descriptor",
+          "status": 1,
+          "message": "WebAssembly.Memory: missing required 'initial'"
+        },
+        {
+          "name": "Zero initial",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Non-zero initial",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Stray argument",
+          "status": 0,
+          "message": null
+        }
+      ],
+      "harness": {
+        "status": 0,
+        "message": null
+      },
+      "returncode": 0,
+      "message": null,
+      "id": "wasm/jsapi/memory/constructor.any.js",
+      "path": "wasm/jsapi/memory/constructor.any.js",
+      "variant": ""
+    },
+    {
+      "status": "fail",
+      "subtests": [
+        {
+          "name": "Missing arguments",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => memory.grow()\" did not throw"
+        },
+        {
+          "name": "Branding",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Zero initial",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Zero initial with valueOf",
+          "status": 1,
+          "message": "assert_equals: New buffer after growing: size expected 131072 but got 0"
+        },
+        {
+          "name": "Non-zero initial",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Zero initial with respected maximum",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Zero initial with respected maximum grown twice",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Zero initial growing too much",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Out-of-range argument: undefined",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => memory.grow(value)\" did not throw"
+        },
+        {
+          "name": "Out-of-range argument: NaN",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => memory.grow(value)\" did not throw"
+        },
+        {
+          "name": "Out-of-range argument: Infinity",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => memory.grow(value)\" did not throw"
+        },
+        {
+          "name": "Out-of-range argument: -Infinity",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => memory.grow(value)\" did not throw"
+        },
+        {
+          "name": "Out-of-range argument: -1",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => memory.grow(value)\" threw object \"RangeError: WebAssembly: length must be non-negative\" (\"RangeError\") expected instance of function \"function TypeError() { [native code] }\" (\"TypeError\")"
+        },
+        {
+          "name": "Out-of-range argument: 4294967296",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => memory.grow(value)\" did not throw"
+        },
+        {
+          "name": "Out-of-range argument: 68719476736",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => memory.grow(value)\" did not throw"
+        },
+        {
+          "name": "Out-of-range argument: \"0x100000000\"",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => memory.grow(value)\" did not throw"
+        },
+        {
+          "name": "Out-of-range argument: object \"[object Object]\"",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => memory.grow(value)\" did not throw"
+        },
+        {
+          "name": "Stray argument",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Growing shared memory does not detach old buffer",
+          "status": 1,
+          "message": "assert_equals: buffer frozen expected true but got false"
+        }
+      ],
+      "harness": {
+        "status": 0,
+        "message": null
+      },
+      "returncode": 0,
+      "message": null,
+      "id": "wasm/jsapi/memory/grow.any.js",
+      "path": "wasm/jsapi/memory/grow.any.js",
+      "variant": ""
+    },
+    {
+      "status": "fail",
+      "subtests": [
+        {
+          "name": "API surface",
+          "status": 1,
+          "message": "assert_equals: expected \"object\" but got \"undefined\""
+        },
+        {
+          "name": "toFixedLengthBuffer caching behavior",
+          "status": 1,
+          "message": "value is not callable"
+        }
+      ],
+      "harness": {
+        "status": 0,
+        "message": null
+      },
+      "returncode": 0,
+      "message": null,
+      "id": "wasm/jsapi/memory/to-fixed-length-buffer.any.js",
+      "path": "wasm/jsapi/memory/to-fixed-length-buffer.any.js",
+      "variant": ""
+    },
+    {
+      "status": "fail",
+      "subtests": [
+        {
+          "name": "API surface",
+          "status": 1,
+          "message": "assert_equals: expected \"object\" but got \"undefined\""
+        },
+        {
+          "name": "toResizableBuffer caching behavior",
+          "status": 1,
+          "message": "value is not callable"
+        },
+        {
+          "name": "toResizableBuffer max size",
+          "status": 1,
+          "message": "value is not callable"
+        },
+        {
+          "name": "Resizing a Memory's resizable buffer",
+          "status": 1,
+          "message": "value is not callable"
+        },
+        {
+          "name": "Resizable buffers from Memory cannot be detached by JS",
+          "status": 1,
+          "message": "value is not callable"
+        }
+      ],
+      "harness": {
+        "status": 0,
+        "message": null
+      },
+      "returncode": 0,
+      "message": null,
+      "id": "wasm/jsapi/memory/to-resizable-buffer.any.js",
+      "path": "wasm/jsapi/memory/to-resizable-buffer.any.js",
+      "variant": ""
+    },
+    {
+      "status": "pass",
+      "subtests": [
+        {
+          "name": "Object.prototype.toString on an Memory",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "@@toStringTag exists on the prototype with the appropriate descriptor",
+          "status": 0,
+          "message": null
+        }
+      ],
+      "harness": {
+        "status": 0,
+        "message": null
+      },
+      "returncode": 0,
+      "message": null,
+      "id": "wasm/jsapi/memory/toString.any.js",
+      "path": "wasm/jsapi/memory/toString.any.js",
+      "variant": ""
+    },
+    {
+      "status": "fail",
+      "subtests": [
+        {
+          "name": "name",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "length",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "No arguments",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Calling",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Invalid arguments",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Empty buffer",
+          "status": 1,
+          "message": "assert_throws_js: function \"function CompileError() { [native code] }\" is not an Error subtype"
+        },
+        {
+          "name": "Invalid code",
+          "status": 1,
+          "message": "assert_throws_js: function \"function CompileError() { [native code] }\" is not an Error subtype"
+        },
+        {
+          "name": "Prototype",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Extensibility",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Stray argument",
+          "status": 0,
+          "message": null
+        }
+      ],
+      "harness": {
+        "status": 0,
+        "message": null
+      },
+      "returncode": 0,
+      "message": null,
+      "id": "wasm/jsapi/module/constructor.any.js",
+      "path": "wasm/jsapi/module/constructor.any.js",
+      "variant": ""
+    },
+    {
+      "status": "fail",
+      "subtests": [
+        {
+          "name": "Missing arguments",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => WebAssembly.Module.customSections(module)\" did not throw"
+        },
+        {
+          "name": "Non-Module arguments",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Branding",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Empty module",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Empty module: array caching",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Custom sections",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Custom sections with surrogate pairs",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Custom sections with U+FFFD",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Stray argument",
+          "status": 0,
+          "message": null
+        }
+      ],
+      "harness": {
+        "status": 0,
+        "message": null
+      },
+      "returncode": 0,
+      "message": null,
+      "id": "wasm/jsapi/module/customSections.any.js",
+      "path": "wasm/jsapi/module/customSections.any.js",
+      "variant": ""
+    },
+    {
+      "status": "pass",
+      "subtests": [
+        {
+          "name": "Missing arguments",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Non-Module arguments",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Branding",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Return type",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Empty module",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Empty module: array caching",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "exports",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "exports with empty name: function",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "exports with empty name: table",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "exports with empty name: global",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Stray argument",
+          "status": 0,
+          "message": null
+        }
+      ],
+      "harness": {
+        "status": 0,
+        "message": null
+      },
+      "returncode": 0,
+      "message": null,
+      "id": "wasm/jsapi/module/exports.any.js",
+      "path": "wasm/jsapi/module/exports.any.js",
+      "variant": ""
+    },
+    {
+      "status": "pass",
+      "subtests": [
+        {
+          "name": "Missing arguments",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Non-Module arguments",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Branding",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Return type",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Empty module",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Empty module: array caching",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "imports",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "imports with empty module name",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "imports with empty names",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "imports with empty module names and names",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Stray argument",
+          "status": 0,
+          "message": null
+        }
+      ],
+      "harness": {
+        "status": 0,
+        "message": null
+      },
+      "returncode": 0,
+      "message": null,
+      "id": "wasm/jsapi/module/imports.any.js",
+      "path": "wasm/jsapi/module/imports.any.js",
+      "variant": ""
+    },
+    {
+      "status": "pass",
+      "subtests": [
+        {
+          "name": "Object.prototype.toString on an Module",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "@@toStringTag exists on the prototype with the appropriate descriptor",
+          "status": 0,
+          "message": null
+        }
+      ],
+      "harness": {
+        "status": 0,
+        "message": null
+      },
+      "returncode": 0,
+      "message": null,
+      "id": "wasm/jsapi/module/toString.any.js",
+      "path": "wasm/jsapi/module/toString.any.js",
+      "variant": ""
+    },
+    {
+      "status": "pass",
+      "subtests": [
+        {
+          "name": "_Module",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "_Instance",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "_Memory",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "_Table",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "_Global",
+          "status": 0,
+          "message": null
+        }
+      ],
+      "harness": {
+        "status": 0,
+        "message": null
+      },
+      "returncode": 0,
+      "message": null,
+      "id": "wasm/jsapi/prototypes.any.js",
+      "path": "wasm/jsapi/prototypes.any.js",
+      "variant": ""
+    },
+    {
+      "status": "fail",
+      "subtests": [
+        {
+          "name": "name",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "length",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "No arguments",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Calling",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Empty descriptor",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Invalid descriptor argument",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Undefined initial value in descriptor",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Undefined element value in descriptor",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Out-of-range initial value in descriptor: NaN",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => new WebAssembly.Table({ \"element\": \"anyfunc\", \"initial\": value })\" did not throw"
+        },
+        {
+          "name": "Out-of-range maximum value in descriptor: NaN",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => new WebAssembly.Table({ \"element\": \"anyfunc\", \"initial\": 0, \"maximum\": value })\" did not throw"
+        },
+        {
+          "name": "Out-of-range initial value in descriptor: Infinity",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => new WebAssembly.Table({ \"element\": \"anyfunc\", \"initial\": value })\" did not throw"
+        },
+        {
+          "name": "Out-of-range maximum value in descriptor: Infinity",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => new WebAssembly.Table({ \"element\": \"anyfunc\", \"initial\": 0, \"maximum\": value })\" did not throw"
+        },
+        {
+          "name": "Out-of-range initial value in descriptor: -Infinity",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => new WebAssembly.Table({ \"element\": \"anyfunc\", \"initial\": value })\" did not throw"
+        },
+        {
+          "name": "Out-of-range maximum value in descriptor: -Infinity",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => new WebAssembly.Table({ \"element\": \"anyfunc\", \"initial\": 0, \"maximum\": value })\" did not throw"
+        },
+        {
+          "name": "Out-of-range initial value in descriptor: -1",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => new WebAssembly.Table({ \"element\": \"anyfunc\", \"initial\": value })\" threw object \"RangeError: WebAssembly: length must be non-negative\" (\"RangeError\") expected instance of function \"function TypeError() { [native code] }\" (\"TypeError\")"
+        },
+        {
+          "name": "Out-of-range maximum value in descriptor: -1",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => new WebAssembly.Table({ \"element\": \"anyfunc\", \"initial\": 0, \"maximum\": value })\" threw object \"RangeError: WebAssembly: length must be non-negative\" (\"RangeError\") expected instance of function \"function TypeError() { [native code] }\" (\"TypeError\")"
+        },
+        {
+          "name": "Out-of-range initial value in descriptor: 4294967296",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => new WebAssembly.Table({ \"element\": \"anyfunc\", \"initial\": value })\" did not throw"
+        },
+        {
+          "name": "Out-of-range maximum value in descriptor: 4294967296",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => new WebAssembly.Table({ \"element\": \"anyfunc\", \"initial\": 0, \"maximum\": value })\" did not throw"
+        },
+        {
+          "name": "Out-of-range initial value in descriptor: 68719476736",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => new WebAssembly.Table({ \"element\": \"anyfunc\", \"initial\": value })\" did not throw"
+        },
+        {
+          "name": "Out-of-range maximum value in descriptor: 68719476736",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => new WebAssembly.Table({ \"element\": \"anyfunc\", \"initial\": 0, \"maximum\": value })\" did not throw"
+        },
+        {
+          "name": "Initial value exceeds maximum",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Basic (zero)",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Basic (non-zero)",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Stray argument",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Proxy descriptor",
+          "status": 1,
+          "message": "WebAssembly.Table: invalid element type"
+        },
+        {
+          "name": "Type conversion for descriptor.element",
+          "status": 1,
+          "message": "WebAssembly.Table: invalid element type"
+        },
+        {
+          "name": "Order of evaluation for descriptor",
+          "status": 1,
+          "message": "WebAssembly.Table: invalid element type"
+        },
+        {
+          "name": "initialize externref table with default value",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "initialize table with a wrong element value",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "initialize anyfunc table with default value",
+          "status": 1,
+          "message": "assert_equals: expected function \"function fn() { [native code] }\" but got function \"function () { [native code] }\""
+        },
+        {
+          "name": "initialize anyfunc table with a bad default value",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "initialize anyfunc table with a bad default value and a bad descriptor",
+          "status": 0,
+          "message": null
+        }
+      ],
+      "harness": {
+        "status": 0,
+        "message": null
+      },
+      "returncode": 0,
+      "message": null,
+      "id": "wasm/jsapi/table/constructor.any.js",
+      "path": "wasm/jsapi/table/constructor.any.js",
+      "variant": ""
+    },
+    {
+      "status": "fail",
+      "subtests": [
+        {
+          "name": "Missing arguments: get",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => table.get()\" did not throw"
+        },
+        {
+          "name": "Branding: get",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Missing arguments: set",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => table.set()\" did not throw"
+        },
+        {
+          "name": "Branding: set",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Basic",
+          "status": 1,
+          "message": "assert_throws_js: undefined: table.get(-1) function \"() => table.get(-1)\" threw object \"RangeError: WebAssembly.Table index is out of bounds\" (\"RangeError\") expected instance of function \"function TypeError() { [native code] }\" (\"TypeError\")"
+        },
+        {
+          "name": "Growing",
+          "status": 1,
+          "message": "assert_throws_js: undefined: table.get(-1) function \"() => table.get(-1)\" threw object \"RangeError: WebAssembly.Table index is out of bounds\" (\"RangeError\") expected instance of function \"function TypeError() { [native code] }\" (\"TypeError\")"
+        },
+        {
+          "name": "Setting out-of-bounds",
+          "status": 1,
+          "message": "assert_throws_js: undefined: table.get(-1) function \"() => table.get(-1)\" threw object \"RangeError: WebAssembly.Table index is out of bounds\" (\"RangeError\") expected instance of function \"function TypeError() { [native code] }\" (\"TypeError\")"
+        },
+        {
+          "name": "Setting non-function",
+          "status": 1,
+          "message": "assert_throws_js: undefined: table.get(-1) function \"() => table.get(-1)\" threw object \"RangeError: WebAssembly.Table index is out of bounds\" (\"RangeError\") expected instance of function \"function TypeError() { [native code] }\" (\"TypeError\")"
+        },
+        {
+          "name": "Setting non-wasm function",
+          "status": 1,
+          "message": "assert_throws_js: undefined: table.get(-1) function \"() => table.get(-1)\" threw object \"RangeError: WebAssembly.Table index is out of bounds\" (\"RangeError\") expected instance of function \"function TypeError() { [native code] }\" (\"TypeError\")"
+        },
+        {
+          "name": "Setting non-wasm arrow function",
+          "status": 1,
+          "message": "assert_throws_js: undefined: table.get(-1) function \"() => table.get(-1)\" threw object \"RangeError: WebAssembly.Table index is out of bounds\" (\"RangeError\") expected instance of function \"function TypeError() { [native code] }\" (\"TypeError\")"
+        },
+        {
+          "name": "Getting out-of-range argument: undefined",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => table.get(value)\" did not throw"
+        },
+        {
+          "name": "Setting out-of-range argument: undefined",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => table.set(value, null)\" did not throw"
+        },
+        {
+          "name": "Getting out-of-range argument: NaN",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => table.get(value)\" did not throw"
+        },
+        {
+          "name": "Setting out-of-range argument: NaN",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => table.set(value, null)\" did not throw"
+        },
+        {
+          "name": "Getting out-of-range argument: Infinity",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => table.get(value)\" did not throw"
+        },
+        {
+          "name": "Setting out-of-range argument: Infinity",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => table.set(value, null)\" did not throw"
+        },
+        {
+          "name": "Getting out-of-range argument: -Infinity",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => table.get(value)\" did not throw"
+        },
+        {
+          "name": "Setting out-of-range argument: -Infinity",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => table.set(value, null)\" did not throw"
+        },
+        {
+          "name": "Getting out-of-range argument: -1",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => table.get(value)\" threw object \"RangeError: WebAssembly.Table index is out of bounds\" (\"RangeError\") expected instance of function \"function TypeError() { [native code] }\" (\"TypeError\")"
+        },
+        {
+          "name": "Setting out-of-range argument: -1",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => table.set(value, null)\" threw object \"RangeError: WebAssembly.Table index is out of bounds\" (\"RangeError\") expected instance of function \"function TypeError() { [native code] }\" (\"TypeError\")"
+        },
+        {
+          "name": "Getting out-of-range argument: 4294967296",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => table.get(value)\" did not throw"
+        },
+        {
+          "name": "Setting out-of-range argument: 4294967296",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => table.set(value, null)\" did not throw"
+        },
+        {
+          "name": "Getting out-of-range argument: 68719476736",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => table.get(value)\" did not throw"
+        },
+        {
+          "name": "Setting out-of-range argument: 68719476736",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => table.set(value, null)\" did not throw"
+        },
+        {
+          "name": "Getting out-of-range argument: \"0x100000000\"",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => table.get(value)\" did not throw"
+        },
+        {
+          "name": "Setting out-of-range argument: \"0x100000000\"",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => table.set(value, null)\" did not throw"
+        },
+        {
+          "name": "Getting out-of-range argument: object \"[object Object]\"",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => table.get(value)\" did not throw"
+        },
+        {
+          "name": "Setting out-of-range argument: object \"[object Object]\"",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => table.set(value, null)\" did not throw"
+        },
+        {
+          "name": "Order of argument conversion",
+          "status": 1,
+          "message": "assert_equals: expected 1 but got 0"
+        },
+        {
+          "name": "Stray argument",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Arguments for anyfunc table set",
+          "status": 1,
+          "message": "assert_equals: expected function \"function fn() { [native code] }\" but got function \"function () { [native code] }\""
+        },
+        {
+          "name": "Arguments for externref table set",
+          "status": 1,
+          "message": "assert_equals: expected (undefined) undefined but got (object) null"
+        }
+      ],
+      "harness": {
+        "status": 0,
+        "message": null
+      },
+      "returncode": 0,
+      "message": null,
+      "id": "wasm/jsapi/table/get-set.any.js",
+      "path": "wasm/jsapi/table/get-set.any.js",
+      "variant": ""
+    },
+    {
+      "status": "fail",
+      "subtests": [
+        {
+          "name": "Missing arguments",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => table.grow()\" did not throw"
+        },
+        {
+          "name": "Branding",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Basic",
+          "status": 1,
+          "message": "assert_throws_js: before: table.get(-1) function \"() => table.get(-1)\" threw object \"RangeError: WebAssembly.Table index is out of bounds\" (\"RangeError\") expected instance of function \"function TypeError() { [native code] }\" (\"TypeError\")"
+        },
+        {
+          "name": "Reached maximum",
+          "status": 1,
+          "message": "assert_throws_js: before: table.get(-1) function \"() => table.get(-1)\" threw object \"RangeError: WebAssembly.Table index is out of bounds\" (\"RangeError\") expected instance of function \"function TypeError() { [native code] }\" (\"TypeError\")"
+        },
+        {
+          "name": "Exceeded maximum",
+          "status": 1,
+          "message": "assert_throws_js: before: table.get(-1) function \"() => table.get(-1)\" threw object \"RangeError: WebAssembly.Table index is out of bounds\" (\"RangeError\") expected instance of function \"function TypeError() { [native code] }\" (\"TypeError\")"
+        },
+        {
+          "name": "Out-of-range argument: undefined",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => table.grow(value)\" did not throw"
+        },
+        {
+          "name": "Out-of-range argument: NaN",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => table.grow(value)\" did not throw"
+        },
+        {
+          "name": "Out-of-range argument: Infinity",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => table.grow(value)\" did not throw"
+        },
+        {
+          "name": "Out-of-range argument: -Infinity",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => table.grow(value)\" did not throw"
+        },
+        {
+          "name": "Out-of-range argument: -1",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => table.grow(value)\" threw object \"RangeError: WebAssembly: length must be non-negative\" (\"RangeError\") expected instance of function \"function TypeError() { [native code] }\" (\"TypeError\")"
+        },
+        {
+          "name": "Out-of-range argument: 4294967296",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => table.grow(value)\" did not throw"
+        },
+        {
+          "name": "Out-of-range argument: 68719476736",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => table.grow(value)\" did not throw"
+        },
+        {
+          "name": "Out-of-range argument: \"0x100000000\"",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => table.grow(value)\" did not throw"
+        },
+        {
+          "name": "Out-of-range argument: object \"[object Object]\"",
+          "status": 1,
+          "message": "assert_throws_js: function \"() => table.grow(value)\" did not throw"
+        },
+        {
+          "name": "Stray argument",
+          "status": 1,
+          "message": "assert_throws_js: before: table.get(-1) function \"() => table.get(-1)\" threw object \"RangeError: WebAssembly.Table index is out of bounds\" (\"RangeError\") expected instance of function \"function TypeError() { [native code] }\" (\"TypeError\")"
+        },
+        {
+          "name": "Grow with exported-function argument",
+          "status": 1,
+          "message": "assert_equals: expected function \"function fn() { [native code] }\" but got function \"function () { [native code] }\""
+        },
+        {
+          "name": "Grow with non-function argument",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Grow with JS-function argument",
+          "status": 0,
+          "message": null
+        }
+      ],
+      "harness": {
+        "status": 0,
+        "message": null
+      },
+      "returncode": 0,
+      "message": null,
+      "id": "wasm/jsapi/table/grow.any.js",
+      "path": "wasm/jsapi/table/grow.any.js",
+      "variant": ""
+    },
+    {
+      "status": "fail",
+      "subtests": [
+        {
+          "name": "Branding",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Stray argument",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Setting (sloppy mode)",
+          "status": 1,
+          "message": "Cannot set property which has only a getter"
+        },
+        {
+          "name": "Setting (strict mode)",
+          "status": 0,
+          "message": null
+        }
+      ],
+      "harness": {
+        "status": 0,
+        "message": null
+      },
+      "returncode": 0,
+      "message": null,
+      "id": "wasm/jsapi/table/length.any.js",
+      "path": "wasm/jsapi/table/length.any.js",
+      "variant": ""
+    },
+    {
+      "status": "pass",
+      "subtests": [
+        {
+          "name": "Object.prototype.toString on an Table",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "@@toStringTag exists on the prototype with the appropriate descriptor",
+          "status": 0,
+          "message": null
+        }
+      ],
+      "harness": {
+        "status": 0,
+        "message": null
+      },
+      "returncode": 0,
+      "message": null,
+      "id": "wasm/jsapi/table/toString.any.js",
+      "path": "wasm/jsapi/table/toString.any.js",
+      "variant": ""
+    },
+    {
+      "status": "pass",
+      "subtests": [
+        {
+          "name": "name",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "length",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "No arguments",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Calling",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Invalid descriptor argument",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Invalid type parameter",
+          "status": 0,
+          "message": null
+        }
+      ],
+      "harness": {
+        "status": 0,
+        "message": null
+      },
+      "returncode": 0,
+      "message": null,
+      "id": "wasm/jsapi/tag/constructor.tentative.any.js",
+      "path": "wasm/jsapi/tag/constructor.tentative.any.js",
+      "variant": ""
+    },
+    {
+      "status": "pass",
+      "subtests": [
+        {
+          "name": "Object.prototype.toString on a Tag",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "@@toStringTag exists on the prototype with the appropriate descriptor",
+          "status": 0,
+          "message": null
+        }
+      ],
+      "harness": {
+        "status": 0,
+        "message": null
+      },
+      "returncode": 0,
+      "message": null,
+      "id": "wasm/jsapi/tag/toString.tentative.any.js",
+      "path": "wasm/jsapi/tag/toString.tentative.any.js",
+      "variant": ""
+    }
+  ]
+}
