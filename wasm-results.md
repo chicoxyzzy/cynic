@@ -31,15 +31,24 @@ proposal's `(ref exn)` text syntax, so its `.wast` files don't lower
 
 The forced-Spasm differential posture (`--spasm`) produces this exact score on
 both qualified code-generation targets: native AArch64 and x86_64-macos under
-Rosetta (2026-09-24). Gating runs add `--require-spasm-entry`; focused target
+Rosetta (2026-09-28). Gating runs add `--require-spasm-entry`; focused target
 tests additionally require generated x86 instance/cache, trap, safe-point,
 self-link, and stable-gate execution. Unsupported x86 opcode families fall
 back per function and therefore remain covered by the same semantic sweep.
-The fail-closed witness observed 120,331 native entries / 3,970 compiled
+The fail-closed witness observed 120,469 native entries / 4,001 compiled
 functions on x86_64 and 53,747 / 3,646 on AArch64. The x86 sweep recorded
-2,000 transactional refusals (8 limits, 1,401 signatures, 452 bytecode shapes,
-139 opcodes) and zero emission or install failures. The x86 backend now covers
+1,978 transactional refusals (8 limits, 1,349 signatures, 473 bytecode shapes,
+148 opcodes) and zero emission or install failures. The x86 backend now covers
 memory32 and memory64 scalar access/grow/bulk-memory, `data.drop`, nested
-`return`, and catchable `unreachable`. The remaining `0xfc` telemetry is
-`table.grow` (5), `memory.init` (4), `memory.copy` (2), and `memory.fill` (2)
-in bodies that reach another unsupported shape.
+`return`, catchable `unreachable`, and full-width reference parameters,
+results, locals, typed select, calls, and single-result control-flow merges.
+The reference increment adds 31 compiled functions and 138 native entries,
+reducing refusals by 22. It also refuses table64 operations whose native
+helpers still use u32 indices, preventing truncation above 2^32; this safety
+check intentionally moves previously compiled bodies back to Sarcasm.
+Before it, the 1,401 signature refusals split into 52 reference and 1,349
+vector cases; afterward all 1,349 are vector cases.
+These counts classify the first rejected type in each function, not every
+type it contains. The largest remaining `0xfc` groups are
+`table.copy` (22), `table.grow` (5), `table.size` (5), `memory.init` (4),
+and `memory.copy` (2).

@@ -32,6 +32,8 @@ const Counts = struct {
     spasm_runs: u64 = 0,
     spasm_compiles: u64 = 0,
     spasm_refusals: u64 = 0,
+    spasm_refused_reference_signatures: u64 = 0,
+    spasm_refused_vector_signatures: u64 = 0,
     spasm_refusal_stages: [wasm.spasm_refusal_stage_count]u64 = std.mem.zeroes([wasm.spasm_refusal_stage_count]u64),
     spasm_refused_opcodes: [256]u64 = std.mem.zeroes([256]u64),
     spasm_refused_opcode_overflow: u64 = 0,
@@ -45,6 +47,8 @@ const Counts = struct {
         self.spasm_runs += other.spasm_runs;
         self.spasm_compiles += other.spasm_compiles;
         self.spasm_refusals += other.spasm_refusals;
+        self.spasm_refused_reference_signatures += other.spasm_refused_reference_signatures;
+        self.spasm_refused_vector_signatures += other.spasm_refused_vector_signatures;
         for (&self.spasm_refusal_stages, other.spasm_refusal_stages) |*total, count| total.* += count;
         for (&self.spasm_refused_opcodes, other.spasm_refused_opcodes) |*total, count| total.* += count;
         self.spasm_refused_opcode_overflow += other.spasm_refused_opcode_overflow;
@@ -271,6 +275,8 @@ fn runManifest(arena: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, json_path:
         counts.spasm_runs += instance.spasm_runs;
         counts.spasm_compiles += instance.spasm_compiles;
         counts.spasm_refusals += instance.spasm_refusals;
+        counts.spasm_refused_reference_signatures += instance.spasm_refused_reference_signatures;
+        counts.spasm_refused_vector_signatures += instance.spasm_refused_vector_signatures;
         for (&counts.spasm_refusal_stages, instance.spasm_refusal_stages) |*total, count| total.* += count;
         for (instance.spasm_refused_opcodes) |entry| {
             if (entry.count != 0) counts.spasm_refused_opcodes[entry.opcode] += entry.count;
@@ -291,6 +297,15 @@ fn writeSpasmRefusalSummary(io: std.Io, counts: Counts) !void {
         .{ counts.spasm_refusals, stages[0], stages[1], stages[2], stages[3], stages[4], stages[5] },
     );
     try std.Io.File.stdout().writeStreamingAll(io, summary);
+
+    if (stages[1] != 0) {
+        const signatures = try std.fmt.bufPrint(
+            &line,
+            "  signature types: reference {d}, vector {d}, other {d} (first rejected type per function)\n",
+            .{ counts.spasm_refused_reference_signatures, counts.spasm_refused_vector_signatures, stages[1] - counts.spasm_refused_reference_signatures - counts.spasm_refused_vector_signatures },
+        );
+        try std.Io.File.stdout().writeStreamingAll(io, signatures);
+    }
 
     var selected = std.mem.zeroes([256]bool);
     var rank: usize = 0;

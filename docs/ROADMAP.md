@@ -2333,8 +2333,19 @@ and the per-builtin checklist; this section tracks status.
   fail-closed on native engagement via
   `--require-spasm-entry`, and the shared instance/cache, recursive stack,
   cold-gate fallback, and post-entry interrupt tests now execute on both
-  architectures. Remaining x86 reference-typed signatures/locals/select,
-  SIMD and remaining SIMD lane operations generally, and the
+  architectures. The 2026-09-28 x86 reference increment adds full-Cell
+  parameters/results/locals, typed select, single-result branch merges, and
+  direct/indirect calls, including hot/cold gates and checked host/fallback
+  calls. Declared reference locals use the null default; cross-instance
+  funcref identity and GC across host callbacks have native-entry tests.
+  Table64 operations conservatively fall back while native table helpers use
+  u32 indices; a regression test pins a formerly truncated index above 2^32.
+  The exact sweep reaches 120,469 native entries / 4,001 compiled functions,
+  with 1,978 refusals (8 limits, 1,349 signatures, 473 bytecode, 148 opcode).
+  The prior signature bucket split into 52 reference and 1,349 vector cases;
+  all remaining signature refusals are vectors. Remaining x86 reference
+  globals, native table64, AArch64 reference results/calls, SIMD and remaining
+  SIMD lane operations generally, and the
   native-register/imported-call ABI remain next.
 
   The architecture for all three tiers — the shared codegen

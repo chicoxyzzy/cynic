@@ -543,15 +543,20 @@ the measured design space:
   scalar `call_indirect`, `ref.null` / `ref.func` / `ref.is_null`, and the
   table get/set/size/copy/init/grow/fill family plus `elem.drop`. Runtime
   references use their full 128-bit scratch Cell across the helper boundary.
-  Reference-typed signatures/locals/select, SIMD, and other unsupported x86
+  Reference parameters/results/locals, typed select (including constructed
+  types), single-result branches, and direct/indirect calls now preserve both
+  halves throughout. Native call gates initialize reference locals to null;
+  host calls and refused callees keep the checked helper boundary.
+  Reference globals, table64 operations (the helper ABI still uses u32
+  indices), SIMD, and other unsupported x86
   bodies refuse before
   code publication and run in Sarcasm.
   This is a coverage difference, not a semantic one: forced-Spasm sweeps on
-  both architectures pass all 58,779 scored spec commands. The 2026-09-24
-  x86 sweep exercised 120,331 native entries / 3,970 compiled functions and
+  both architectures pass all 58,779 scored spec commands. The 2026-09-28
+  x86 sweep exercised 120,469 native entries / 4,001 compiled functions and
   recorded zero emission or install failures. Its scalar rounding fallback is
   deliberately helper-based on SSE2-only targets rather than assuming SSE4.1;
-  the remaining 2,000 refusals are non-scalar signatures, unsupported bytecode
+  the remaining 1,978 refusals are vector signatures, unsupported bytecode
   shapes/opcodes, and eight size limits. The memory64 closure retains u64
   memarg offsets, traps effective-address carry, and covers grow plus the bulk
   memory family without changing the exact pass set. CI pairs
