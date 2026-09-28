@@ -17,6 +17,47 @@ run against the previous section with the *same host*.
 
 ## History
 
+### 2026-09-29, SIMD foundation, cynic `86b1f968`, host `Darwin 27.2.0 arm64`
+
+Three ReleaseFast ABBA samples per target, including two new workloads:
+inline `i32x4.add` and vector-valued same-instance calls. Each uses 200,000
+iterations and checks the high result lane against 800,000. All five workloads
+matched interpreter/bare/wake checksums, stayed native in both Spasm modes,
+and reported `helper 0/0` in every sample.
+
+**Host contention limits these timings.** Other applications and an unrelated
+compiler were active. These are engagement/correctness samples with observed
+timing ranges, not a quiet-machine performance baseline or evidence of a
+before/after speedup. In particular, the wide wake/bare spread cannot isolate
+interrupt-probe overhead. The host OS also differs from earlier records, so
+do not compare absolute times with the `Darwin 25.6.0` sections below.
+
+#### Native AArch64
+
+| bench | interpreter ms/rep | Spasm bare ms/rep | Spasm wake ms/rep | paired speedup | wake / bare |
+|---|---:|---:|---:|---:|---:|
+| loop `sum(i*i)`, n=2,000,000 | 179.783-197.692 | 8.120-9.585 | 8.584-9.090 | 20.42-22.14x | 0.906-1.103x |
+| `fib(32)` self-recursive | 636.224-651.717 | 49.127-72.294 | 53.036-79.767 | 8.80-13.03x | 0.791-1.368x |
+| `fib(32)` cross-recursive | 604.104-670.450 | 53.839-57.716 | 57.272-59.889 | 10.47-11.81x | 0.994-1.064x |
+| SIMD add loop, n=200,000 | 13.357-19.706 | 1.957-2.237 | 1.948-2.112 | 6.70-9.28x | 0.918-1.025x |
+| SIMD call loop, n=200,000 | 24.195-27.703 | 4.043-4.988 | 4.105-4.794 | 5.21-6.02x | 0.823-1.186x |
+
+#### x86_64-macos Under Rosetta
+
+These are same-binary interpreter/Spasm ratios with Rosetta in both modes,
+not native Linux throughput. The vector-call row measures 3.70-4.41x, below
+the existing 5x target; native execution is verified, but this workload does
+not establish that performance gate. Re-measure on a quiet host before tuning
+the full-width call path or attributing a cost to the wake probe.
+
+| bench | interpreter ms/rep | Spasm bare ms/rep | Spasm wake ms/rep | paired speedup | wake / bare |
+|---|---:|---:|---:|---:|---:|
+| loop `sum(i*i)`, n=2,000,000 | 217.267-362.021 | 23.201-26.149 | 22.628-28.576 | 9.36-13.84x | 0.895-1.093x |
+| `fib(32)` self-recursive | 845.482-1103.204 | 100.046-118.992 | 108.512-132.361 | 8.19-9.27x | 0.942-1.117x |
+| `fib(32)` cross-recursive | 935.401-1049.304 | 143.804-164.568 | 149.553-178.072 | 6.12-6.50x | 1.005-1.082x |
+| SIMD add loop, n=200,000 | 20.817-23.247 | 3.406-4.122 | 3.323-4.238 | 5.64-6.11x | 0.926-1.040x |
+| SIMD call loop, n=200,000 | 31.215-35.291 | 7.071-8.743 | 6.921-8.628 | 3.70-4.41x | 0.929-1.022x |
+
 ### 2026-09-23, x86_64 scalar/control closure, target `x86_64-macos` under Rosetta on `Darwin 25.6.0 arm64`
 
 Three ReleaseFast ABBA samples after completing integer bit-count and

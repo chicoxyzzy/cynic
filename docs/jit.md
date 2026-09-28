@@ -1398,9 +1398,11 @@ useful:
    The exact sweep reaches 121,135 native entries / 4,098 compiled functions
    on AArch64 and 120,482 / 4,008 on x86_64. The latter records 1,971 refusals
    (8 limits, 1,349 vector signatures, 445 bytecode shapes, 169 opcodes),
-   with no emission/install failures. AArch64 refusal diagnostics remain
-   incomplete; native-entry and compiled-function counts are the comparable
-   coverage signals.
+   with no x86 emission/install failures. At that checkpoint AArch64 refusal
+   diagnostics were incomplete. The SIMD foundation now records stages and
+   prefix subopcodes on both backends; its 99 AArch64 installation refusals
+   exhaust the existing fixed 64 KiB code arena. The current native coverage
+   and refusal breakdown are in [wasm-results.md](../wasm-results.md).
    The **per-function code cache**
    now ships (`spasmEntryFor`): each emittable function compiles once on
    its first Spasm-enabled invoke and the cached `EntryFn` runs every
@@ -1519,8 +1521,8 @@ useful:
    128-bit slot against `REF_NULL`. Reference locals (`local.get` / `set` /
    `tee` of a ref type — `spasmRun` re-seeds a declared ref local to `REF_NULL`
    per §4.4.10, since `@memset(0)` is wrong for a reference) and `select t` of
-   a ref close out the reference family. The whole
-   scalar/control/calls/memory/table/ref surface baseline-compiles. **SIMD
+   a ref close out the reference family. Broad scalar, control, call, memory,
+   table, and reference support now baseline-compiles. **SIMD
    (`v128`) is now under way**: a `v128` is one `Cell`, so it reuses the same
    depth-keyed heap-cell storage as references (a `.v128` Loc; default all-zero,
    not `REF_NULL`), giving the data path — `v128.const`, `v128.load` / `store`,
