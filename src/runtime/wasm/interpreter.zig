@@ -525,6 +525,8 @@ pub const Instance = struct {
     spasm_refused_opcode_overflow: u32 = 0,
     spasm_refused_misc_subopcodes: [spasm.refusal_misc_subopcode_count]u32 = std.mem.zeroes([spasm.refusal_misc_subopcode_count]u32),
     spasm_refused_misc_subopcode_other: u32 = 0,
+    spasm_refused_simd_subopcodes: [spasm.refusal_simd_subopcode_count]u32 = @splat(0),
+    spasm_refused_simd_subopcode_other: u32 = 0,
     /// Nested helper-mediated direct `call`s that entered a cached Spasm
     /// `EntryFn` without re-entering `invoke`. Hot local and same-instance
     /// gate links do not update this per-call diagnostic counter. The top-level
@@ -673,6 +675,14 @@ pub const Instance = struct {
         }
 
         if (!diagnostics.has_opcode) return;
+
+        if (diagnostics.has_subopcode and diagnostics.opcode == 0xfd) {
+            if (diagnostics.subopcode < self.spasm_refused_simd_subopcodes.len) {
+                self.spasm_refused_simd_subopcodes[diagnostics.subopcode] +%= 1;
+            } else {
+                self.spasm_refused_simd_subopcode_other +%= 1;
+            }
+        }
 
         for (&self.spasm_refused_opcodes) |*entry| {
             if (entry.count != 0 and entry.opcode != diagnostics.opcode) continue;

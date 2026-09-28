@@ -592,17 +592,16 @@ test "wasm spasm: a direct call to a leaf function runs Spasm-compiled" {
     try testing.expectEqual(native_calls_before, instance.spasm_native_calls);
 }
 
-test "wasm spasm: x86 cold gate preserves interpreter fallback for a SIMD-refused callee" {
+test "wasm spasm: SIMD cold gate preserves interpreter fallback for a refused callee" {
     const spasm = @import("spasm.zig");
-    if (comptime !spasm.supported or spasm.full_coverage_supported) return error.SkipZigTest;
+    if (comptime !spasm.supported) return error.SkipZigTest;
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
 
-    // Both functions have the x86-qualified i32 signature. The caller is
-    // emittable, while the callee contains a dropped v128 constant, which is
-    // intentionally outside the x86 scalar baseline. Its cold stable gate
+    // The caller is emittable; the callee contains a dropped v128.not,
+    // which is intentionally outside the current SIMD baseline. Its cold gate
     // must resolve through Sarcasm without publishing a bogus native entry or
     // changing the scalar result.
     const tbody = [_]u8{ 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f };
@@ -617,7 +616,7 @@ test "wasm spasm: x86 cold gate preserves interpreter fallback for a SIMD-refuse
         0x10,
         0x01,
         0x0b,
-        0x17,
+        0x19,
         0x00,
         0x20,
         0x00,
@@ -639,6 +638,8 @@ test "wasm spasm: x86 cold gate preserves interpreter fallback for a SIMD-refuse
         0x00,
         0x00,
         0x00,
+        0xfd,
+        0x4d,
         0x1a,
         0x0b,
     };
@@ -2236,6 +2237,276 @@ test "wasm spasm: typed select picks a reference operand by the condition" {
     // selt/seltrt ran Spasm-compiled (the typed-select ref path emitted native
     // code), not degraded to the interpreter.
     try testing.expect(instance.spasm_runs >= 1);
+}
+
+test "wasm spasm: SIMD locals select branches and returns preserve full vectors" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const bodies = [_][]const u8{
+        // Untyped and typed select, followed by local.tee and explicit return.
+        &.{ 1, 1, 0x7b, 0x20, 0, 0x21, 3, 0x20, 3, 0x20, 1, 0x20, 2, 0x1b, 0x22, 3, 0x0f, 0x0b },
+        &.{ 0, 0x20, 0, 0x20, 1, 0x20, 2, 0x1c, 1, 0x7b, 0x0b },
+        &.{ 0, 0x02, 0x7b, 0x41, 42, 0x20, 0, 0x20, 2, 0x0d, 0, 0x1a, 0x1a, 0x20, 1, 0x0b, 0x0b },
+        &.{ 0, 0x20, 2, 0x04, 0x7b, 0x20, 0, 0x0f, 0x05, 0x20, 1, 0x0b, 0x0b },
+        &.{ 0, 0x02, 0x7b, 0x41, 42, 0x20, 0, 0x20, 2, 0x0e, 1, 0, 0, 0x0b, 0x0b },
+        &.{ 0, 0x03, 0x7b, 0x20, 0, 0x0b, 0x0b },
+    };
+    const left: u128 = 0x1234_5678_9abc_def0_ffff_ffff_ffff_ffff;
+    const right: u128 = 0xfedc_ba98_7654_3210_0123_4567_89ab_cdef;
+    for (bodies, 0..) |body, index| {
+        const bytes = try buildFunc(a, &.{ 0x7b, 0x7b, 0x7f }, &.{0x7b}, body, "vector");
+        const module = try wasm.decode(a, bytes);
+        var instance: interp.Instance = undefined;
+        try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+        defer instance.deinit();
+        instance.spasm_enabled = true;
+        for ([_]u128{ 0, 1 }) |condition| {
+            const before = instance.spasm_runs;
+            const result = try interp.invoke(&instance, testing.allocator, 0, &.{ left, right, condition });
+            defer testing.allocator.free(result);
+            try testing.expectEqual(if (index >= 4 or condition != 0) left else right, result[0]);
+            try testing.expect(instance.spasm_runs > before);
+        }
+    }
+}
+
+test "wasm spasm: SIMD native calls preserve vectors and zero local defaults" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const bodies = [_][]const u8{
+        &.{ 1, 1, 0x7b, 0x20, 0, 0x20, 2, 0x20, 1, 0x1b, 0x0b },
+        &.{ 0, 0x20, 0, 0x20, 1, 0x10, 0, 0x0b },
+        &.{ 0, 0x20, 0, 0x20, 1, 0x41, 0, 0x11, 0, 0, 0x0b },
+        &.{ 0, 0x20, 1, 0x45, 0x04, 0x7b, 0x20, 0, 0x05, 0x20, 0, 0x20, 1, 0x41, 1, 0x6b, 0x10, 3, 0x0b, 0x0b },
+    };
+    var code: List = .empty;
+    try uleb(a, &code, bodies.len);
+    for (bodies) |body| {
+        try uleb(a, &code, body.len);
+        try code.appendSlice(a, body);
+    }
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &.{ 1, 0x60, 2, 0x7b, 0x7f, 1, 0x7b } },
+        .{ .id = 3, .body = &.{ 4, 0, 0, 0, 0 } },
+        .{ .id = 4, .body = &.{ 1, 0x70, 0, 1 } },
+        .{ .id = 9, .body = &.{ 1, 0, 0x41, 0, 0x0b, 1, 0 } },
+        .{ .id = 10, .body = code.items },
+    });
+    const module = try wasm.decode(a, bytes);
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true;
+    const vector: u128 = 0x1234_5678_9abc_def0_ffff_ffff_ffff_ffff;
+    for ([_]u32{ 1, 1, 2, 3 }) |index| {
+        for ([_]u128{ 0, 3 }) |condition| {
+            const result = try interp.invoke(&instance, testing.allocator, index, &.{ vector, condition });
+            defer testing.allocator.free(result);
+            try testing.expectEqual(if (index == 3 or condition != 0) vector else 0, result[0]);
+        }
+    }
+    try testing.expectEqual(@as(u32, 4), instance.spasm_compiles);
+}
+
+test "wasm spasm: SIMD live vector crosses armed loop polls" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const bytes = try buildFunc(a, &.{ 0x7b, 0x7f }, &.{0x7b}, &.{
+        0, 0x20, 0, 0x03, 0x40, 0x20, 1, 0x41, 1, 0x6b, 0x22, 1, 0x0d, 0, 0x0b, 0x0b,
+    }, "loop");
+    const module = try wasm.decode(a, bytes);
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true;
+    var control: CountingExecutionControl = .{};
+    instance.execution_control = control.control();
+    const vector: u128 = 0x1234_5678_9abc_def0_ffff_ffff_ffff_ffff;
+    const result = try interp.invoke(&instance, testing.allocator, 0, &.{ vector, 3 });
+    defer testing.allocator.free(result);
+    try testing.expectEqual(vector, result[0]);
+    try testing.expectEqual(@as(u32, 3), control.polls);
+    try testing.expectEqual(@as(u32, 1), instance.spasm_runs);
+}
+
+test "wasm spasm: SIMD globals preserve imported and defined vectors" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &.{ 1, 0x60, 1, 0x7b, 1, 0x7b } },
+        .{ .id = 2, .body = &.{ 1, 1, 'h', 1, 'g', 3, 0x7b, 1 } },
+        .{ .id = 3, .body = &.{ 1, 0 } },
+        .{ .id = 6, .body = &([_]u8{ 1, 0x7b, 1, 0xfd, 12 } ++ @as([16]u8, @splat(0)) ++ [_]u8{0x0b}) },
+        .{ .id = 10, .body = &.{ 1, 12, 0, 0x20, 0, 0x24, 0, 0x23, 0, 0x24, 1, 0x23, 1, 0x0b } },
+    });
+    const module = try wasm.decode(a, bytes);
+    var imported: interp.Global = .{ .value = 0, .mutable = true };
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, &module, .{ .globals = &.{&imported} });
+    defer instance.deinit();
+    instance.spasm_enabled = true;
+    for ([_]u128{ 0x1234_5678_9abc_def0_ffff_ffff_ffff_ffff, 0, std.math.maxInt(u128) }) |vector| {
+        const result = try interp.invoke(&instance, testing.allocator, 0, &.{vector});
+        defer testing.allocator.free(result);
+        try testing.expectEqual(vector, result[0]);
+        try testing.expectEqual(vector, imported.value);
+        try testing.expectEqual(vector, instance.globals[1].value);
+    }
+    try testing.expectEqual(@as(u32, 1), instance.spasm_compiles);
+}
+
+test "wasm spasm: SIMD lane addition wraps independently and memory is unaligned" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const body = [_]u8{ 0, 0x20, 2, 0x20, 0, 0x20, 1, 0xfd, 0xae, 1, 0xfd, 11, 0, 0, 0x20, 2, 0xfd, 0, 0, 0, 0x0b };
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &.{ 1, 0x60, 3, 0x7b, 0x7b, 0x7f, 1, 0x7b } },
+        .{ .id = 3, .body = &.{ 1, 0 } },
+        .{ .id = 5, .body = &.{ 1, 0, 1 } },
+        .{ .id = 10, .body = &([_]u8{ 1, body.len } ++ body) },
+    });
+    const module = try wasm.decode(a, bytes);
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true;
+    const left: u128 = 0x7fff_ffff_ffff_ffff_0000_0000_ffff_ffff;
+    const right: u128 = 0x0000_0001_0000_0002_ffff_ffff_0000_0001;
+    const expected: u128 = 0x8000_0000_0000_0001_ffff_ffff_0000_0000;
+    for ([_]u128{ 1, 65520 }) |address| {
+        const result = try interp.invoke(&instance, testing.allocator, 0, &.{ left, right, address });
+        defer testing.allocator.free(result);
+        try testing.expectEqual(expected, result[0]);
+    }
+    try testing.expectError(error.OutOfBoundsMemoryAccess, interp.invoke(&instance, testing.allocator, 0, &.{ left, right, 65521 }));
+    try testing.expectEqual(@as(u32, 1), instance.spasm_compiles);
+}
+
+test "wasm spasm: SIMD unsupported operations report the exact prefix and subopcode" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // i8x16.swizzle remains interpreted, but must be counted as SIMD, not
+    // mistaken for a signature refusal or a failure to install native code.
+    const bytes = try buildFunc(a, &.{ 0x7b, 0x7b }, &.{0x7b}, &.{ 0, 0x20, 0, 0x20, 1, 0xfd, 14, 0x0b }, "fallback");
+    const module = try wasm.decode(a, bytes);
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true;
+    instance.spasm_diagnostics = true;
+    const result = try interp.invoke(&instance, testing.allocator, 0, &.{ 0, 0 });
+    defer testing.allocator.free(result);
+    try testing.expectEqual(@as(u128, 0), result[0]);
+    try testing.expectEqual(@as(u32, 1), instance.spasm_refusals);
+    try testing.expectEqual(@import("spasm.zig").RefusalStage.unsupported_opcode, instance.spasm_last_refusal_stage);
+    try testing.expectEqual(@as(u8, 0xfd), instance.spasm_last_refused_opcode);
+    try testing.expect(instance.spasm_last_refusal_has_subopcode);
+    try testing.expectEqual(@as(u32, 14), instance.spasm_last_refused_subopcode);
+    try testing.expectEqual(@as(u32, 1), instance.spasm_refused_simd_subopcodes[14]);
+    try testing.expectEqual(@as(u32, 0), instance.spasm_refused_vector_signatures);
+}
+
+test "wasm spasm: SIMD vectors survive host calls fallback and aliased multi-results" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    const Host = struct {
+        fn call(_: ?*anyopaque, args: []const u128, results: []u128) wasm.TrapError!void {
+            if (args[0] == std.math.maxInt(u128)) return error.Unreachable;
+            results[0] = ~args[0];
+        }
+    };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    inline for (.{ true, false }) |host_call| {
+        const types = [_]u8{ 2, 0x60, 1, 0x7b, 1, 0x7b, 0x60, 2, 0x7b, 0x7b, 2, 0x7b, 0x7b };
+        const wrapper = [_]u8{ 8, 0, 0x20, 0, 0x20, 1, 0x10, 0, 0x0b };
+        const sections = if (host_call) &[_]Section{
+            .{ .id = 1, .body = &types },
+            .{ .id = 2, .body = &.{ 1, 1, 'h', 1, 'f', 0, 0 } },
+            .{ .id = 3, .body = &.{ 1, 1 } },
+            .{ .id = 10, .body = &([_]u8{1} ++ wrapper) },
+        } else &[_]Section{
+            .{ .id = 1, .body = &types },
+            .{ .id = 3, .body = &.{ 2, 0, 1 } },
+            .{ .id = 10, .body = &([_]u8{ 2, 6, 0, 0x20, 0, 0xfd, 77, 0x0b } ++ wrapper) },
+        };
+        const bytes = try assemble(a, sections);
+        const module = try wasm.decode(a, bytes);
+        const host: wasm.FuncRef = .{ .host = .{ .fn_ptr = Host.call, .params = 1, .results = 1 } };
+        var instance: interp.Instance = undefined;
+        try interp.instantiate(&instance, a, testing.allocator, &module, if (host_call) .{ .funcs = &.{host} } else .{});
+        defer instance.deinit();
+        instance.spasm_enabled = true;
+        const args = [_]u128{ 0x1234_5678_9abc_def0_ffff_ffff_ffff_ffff, 0xabcd_ef01_2345_6789_0123_4567_89ab_cdef };
+        for (0..2) |_| {
+            const before = instance.spasm_runs;
+            const results = try interp.invoke(&instance, testing.allocator, 1, &args);
+            defer testing.allocator.free(results);
+            try testing.expectEqualSlices(u128, &.{ args[0], ~args[1] }, results);
+            try testing.expect(instance.spasm_runs > before);
+        }
+        if (host_call) try testing.expectError(error.Unreachable, interp.invoke(&instance, testing.allocator, 1, &.{ args[0], std.math.maxInt(u128) }));
+        try testing.expectEqual(@as(u32, 1), instance.spasm_compiles);
+    }
+}
+
+test "wasm spasm: SIMD memory32 and memory64 bounds preserve full addresses" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    inline for (.{ false, true }) |memory64| {
+        inline for (.{ false, true }) |store| {
+            for ([_]u64{ 0, 8, 0x1_0000_0000, std.math.maxInt(u64) }) |offset| {
+                if (!memory64 and offset > std.math.maxInt(u32)) continue;
+                var body: List = .empty;
+                try body.appendSlice(a, &.{ 0, 0x20, 0 });
+                if (store) try body.appendSlice(a, &.{ 0x20, 1 });
+                try body.appendSlice(a, &.{ 0xfd, if (store) 11 else 0, 0 });
+                try uleb(a, &body, @intCast(offset));
+                try body.append(a, 0x0b);
+                var code: List = .empty;
+                try uleb(a, &code, 1);
+                try uleb(a, &code, body.items.len);
+                try code.appendSlice(a, body.items);
+                const types = [_]u8{ 1, 0x60, 2, if (memory64) 0x7e else 0x7f, 0x7b } ++
+                    (if (store) [_]u8{0} else [_]u8{ 1, 0x7b });
+                const bytes = try assemble(a, &.{
+                    .{ .id = 1, .body = &types },
+                    .{ .id = 3, .body = &.{ 1, 0 } },
+                    .{ .id = 5, .body = &.{ 1, if (memory64) 4 else 0, 1 } },
+                    .{ .id = 10, .body = code.items },
+                });
+                const module = try wasm.decode(a, bytes);
+                var instance: interp.Instance = undefined;
+                try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+                defer instance.deinit();
+                instance.spasm_enabled = true;
+                for ([_]u64{ 1, 65520, 65521, if (memory64) 0x1_0000_0000 else 0xffff_ffff }) |address| {
+                    const result = interp.invoke(&instance, testing.allocator, 0, &.{ address, 0x1234_5678_9abc_def0_ffff_ffff_ffff_ffff });
+                    defer if (result) |values| testing.allocator.free(values) else |_| {};
+                    if (offset <= 65520 and address <= 65520 - offset) {
+                        _ = try result;
+                    } else {
+                        try testing.expectError(error.OutOfBoundsMemoryAccess, result);
+                    }
+                }
+                try testing.expectEqual(@as(u32, 1), instance.spasm_compiles);
+            }
+        }
+    }
 }
 
 test "wasm spasm: reference values preserve both halves through locals select and returns" {
@@ -7675,7 +7946,7 @@ test "wasm locals: a reference-typed local defaults to null" {
     try testing.expectEqual(@as(i32, 1), try runI32(bytes, "f", &.{}));
 }
 
-test "wasm spasm: i32x4.add of two v128.const vectors, stored and lane-read, runs Spasm-compiled" {
+test "wasm spasm: SIMD i32x4.add constants stored and lane-read run natively" {
     // §4.4 SIMD — the v128 data path plus the first NEON compute op. "f"
     // builds two i32x4 vectors with `v128.const`, lane-wise adds them with
     // `i32x4.add` (the NEON `ADD Vd.4S`), stores the 128-bit result to
@@ -7683,7 +7954,7 @@ test "wasm spasm: i32x4.add of two v128.const vectors, stored and lane-read, run
     // `i32.load` and returns it. `i32x4.extract_lane` is out of scope, so
     // the store+scalar-load round-trip is how the test observes one lane.
     // [1,2,3,4] + [10,20,30,40] = [11,22,33,44]; lane 1 = 2+20 = 22.
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -7761,14 +8032,14 @@ test "wasm spasm: i32x4.add of two v128.const vectors, stored and lane-read, run
     try testing.expect(instance.spasm_runs >= 1);
 }
 
-test "wasm spasm: a v128 param flows through a local and out as the result, Spasm-compiled" {
+test "wasm spasm: SIMD parameter flows through a local and out as the result" {
     // §4.4 SIMD — exercises a v128 parameter, a 128-bit operand on the
     // stack, and a v128 result, all of which reuse the depth-keyed cell
     // machinery. "id" is `(param v128) (result v128) local.get 0` — the
     // whole 128-bit value must round-trip unchanged. A v128 param seeds its
     // cell from the args buffer; `local.get` copies cell→operand-slot; the
     // epilogue copies the result operand's cell back to the results buffer.
-    if (comptime !@import("spasm.zig").full_coverage_supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();

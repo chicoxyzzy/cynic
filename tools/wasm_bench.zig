@@ -1,8 +1,8 @@
 //! Standalone micro-benchmark for the Sarcasm WebAssembly interpreter.
 //!
-//! Times three interpretation-bound workloads — a tight arithmetic loop
+//! Times interpretation-bound workloads — a tight arithmetic loop
 //! (local.get/set, i32 mul/add, compare, br_if/br), self-recursive `fib`,
-//! and mutually-recursive `fib` (cross-function call gates) — so a
+//! mutually-recursive `fib` (cross-function call gates), and SIMD loops — so a
 //! dispatch-loop or native-link change can be measured against a fixed
 //! baseline. The absolute numbers are not portable; the before/after delta
 //! on one machine is the signal. Build/run
@@ -163,7 +163,46 @@ const cross_fib_b_body = [_]u8{
     0x0b,
 };
 
-const BenchKind = enum { single, cross_fib };
+fn buildSimdLoop(a: std.mem.Allocator, call: bool) ![]const u8 {
+    var out: List = .empty;
+    try out.appendSlice(a, &preamble);
+    try section(a, &out, 1, &.{ 2, 0x60, 1, 0x7f, 1, 0x7f, 0x60, 2, 0x7b, 0x7b, 1, 0x7b });
+    try section(a, &out, 3, &.{ 2, 0, 1 });
+    try section(a, &out, 5, &.{ 1, 0, 1 });
+    try section(a, &out, 7, &.{ 1, 1, 'f', 0, 0 });
+    var body: List = .empty;
+    try body.appendSlice(a, &.{
+        1, 1, 0x7b, // zero-initialized accumulator
+        0x03, 0x40, // loop
+        0x20, 1, 0xfd, 12, // accumulator, constant i32x4(1, 2, 3, 4)
+        1,    0, 0,    0,
+        2,    0, 0,    0,
+        3,    0, 0,    0,
+        4,    0, 0,    0,
+    });
+    try body.appendSlice(a, if (call) &.{ 0x10, 1 } else &.{ 0xfd, 0xae, 1 });
+    try body.appendSlice(a, &.{
+        0x21, 1, // accumulator = add(accumulator, constant)
+        0x20, 0,
+        0x41, 1,
+        0x6b, 0x22,
+        0,    0x0d,
+        0,    0x0b,
+        0x41, 0, 0x20, 1, 0xfd, 11, 0, 0, // store full vector
+        0x41, 0, 0x28, 2, 12, 0x0b, // return high lane, 4 * n
+    });
+    const add = [_]u8{ 0, 0x20, 0, 0x20, 1, 0xfd, 0xae, 1, 0x0b };
+    var code: List = .empty;
+    try uleb(a, &code, 2);
+    try uleb(a, &code, body.items.len);
+    try code.appendSlice(a, body.items);
+    try uleb(a, &code, add.len);
+    try code.appendSlice(a, &add);
+    try section(a, &out, 10, code.items);
+    return out.items;
+}
+
+const BenchKind = enum { single, cross_fib, simd, simd_call };
 
 const Bench = struct {
     name: []const u8,
@@ -171,6 +210,7 @@ const Bench = struct {
     body: []const u8 = &.{},
     arg: i32,
     reps: u32,
+    expected: ?u32 = null,
 };
 
 const Timing = struct {
@@ -242,12 +282,15 @@ pub fn main(init: std.process.Init) !void {
         .{ .name = "loop   sum(i*i), n=2_000_000", .body = &sum_body, .arg = 2_000_000, .reps = 20 },
         .{ .name = "fib(32) recursive", .body = &fib_body, .arg = 32, .reps = 8 },
         .{ .name = "fib(32) cross-recursive", .kind = .cross_fib, .arg = 32, .reps = 8 },
+        .{ .name = "SIMD add loop, n=200_000", .kind = .simd, .arg = 200_000, .reps = 20, .expected = 800_000 },
+        .{ .name = "SIMD call loop, n=200_000", .kind = .simd_call, .arg = 200_000, .reps = 20, .expected = 800_000 },
     };
 
     for (benches) |bench| {
         const bytes = switch (bench.kind) {
             .single => try buildFunc(a, bench.body),
             .cross_fib => try buildTwoFuncs(a, &cross_fib_a_body, &cross_fib_b_body),
+            .simd, .simd_call => try buildSimdLoop(a, bench.kind == .simd_call),
         };
         const m = try wasm.decode(a, bytes);
         const mp = try a.create(wasm.Module);
@@ -279,6 +322,10 @@ pub fn main(init: std.process.Init) !void {
         const ts_second = try timeReps(inst_s, a, io, &args, bench.reps);
         const ts = faster(ts_first, ts_second);
         const tw = faster(tw_first, tw_second);
+        if (ti.checksum != ts.checksum or ti.checksum != tw.checksum) return error.ChecksumMismatch;
+        if (bench.expected) |expected| {
+            if (ti.checksum != @as(u64, expected) * bench.reps) return error.ChecksumMismatch;
+        }
 
         const interp_per = @as(f64, @floatFromInt(ti.us)) / @as(f64, @floatFromInt(bench.reps));
         const spasm_per = @as(f64, @floatFromInt(ts.us)) / @as(f64, @floatFromInt(bench.reps));

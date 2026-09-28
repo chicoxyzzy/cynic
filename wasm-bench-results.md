@@ -2,8 +2,9 @@
 
 Wall-time on the WebAssembly interpreter's dispatch-bound
 micro-benchmarks. Produced by `zig build wasm-bench` — a dedicated
-ReleaseFast harness over three fixed workloads (a tight arithmetic loop,
-self-recursive `fib`, and cross-recursive `fib`, fixed rep counts, checksums
+ReleaseFast harness over five fixed workloads (a tight arithmetic loop,
+self-recursive `fib`, cross-recursive `fib`, inline SIMD addition, and a
+vector-call loop, fixed rep counts, checksums
 asserted) so hot-loop and native-link changes stay measured against a baseline, per
 [`docs/wasm-engine.md`](docs/wasm-engine.md) §10.
 

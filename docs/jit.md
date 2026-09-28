@@ -1420,7 +1420,7 @@ useful:
    interpret it). A red-first `wasm_js_test` (a JS export runs
    Spasm-compiled native code, `spasm_runs >= 1`) plus the full JS-wasm
    suite run under the jit-on posture gate it; non-emittable bodies
-   (reference-typed signatures/locals, SIMD, and other unsupported shapes)
+   (unsupported SIMD operations, type-index blocks, and other unsupported shapes)
    degrade, so the suite still covers the interpreter through that fallback. The scalar ALU now spans
    the i32/i64 and f32/f64 arithmetic and comparisons, the full float unary
    set (incl. min/max/copysign), the integer bit-counts (clz/ctz/popcnt)
@@ -1477,11 +1477,11 @@ useful:
    calls. `ref.null`, `ref.func`, and `ref.is_null` plus table
    get/set/grow/fill use full 128-bit depth-keyed Cells for runtime references;
    table size/copy/init and `elem.drop` use scalar helper ABIs.
-   Both backends carry reference parameters/results/locals/globals and typed
-   select through full 128-bit Cells. Single-result branch merges retain the
-   reference kind; reference call arguments/results use both halves of the
-   staged buffer, and native gates initialize declared reference locals to
-   null. Table64 operations, x86 SIMD, AArch64 SIMD call signatures, and other
+   Both backends carry reference and `v128` parameters/results/locals/globals
+   and select through full 128-bit Cells. Single-result branch merges retain
+   the value kind; wide call arguments/results use both halves of the staged
+   buffer. Native gates initialize declared reference locals to null and
+   vector locals to zero. Table64 operations, unsupported SIMD operations, and other
    unsupported instructions retain transactional fallback; a dedicated native-register
    imported-call ABI is still deferred.
    Non-gated calls retain the checked helper and per-function Sarcasm fallback.
@@ -1525,9 +1525,19 @@ useful:
    depth-keyed heap-cell storage as references (a `.v128` Loc; default all-zero,
    not `REF_NULL`), giving the data path — `v128.const`, `v128.load` / `store`,
    v128 locals / params / results — for free as 128-bit cell moves; the first
-   lane-compute op `i32x4.add` establishes the NEON substrate (the `ldr`/`str`
-   Q-reg + `add Vd.4S` encoders in `asm_aarch64.zig`: load both operand cells
-   into v0/v1, `add.4s`, store the result cell). The rest of the v128 lane-op
+   lane-compute op `i32x4.add` uses NEON on AArch64 and baseline SSE2 on x86_64
+   (`MOVDQU` plus `PADDD`, with no raised CPU requirement). Both memory paths
+   check all 16 bytes before access, including memory64 carry, and accept
+   unaligned addresses. Calls, globals, and single-result control merges now
+   preserve vectors on both targets without changing the staged-Cell ABI.
+   This follows the existing [Liftoff](https://v8.dev/blog/liftoff) /
+   [Wizard-SPC](https://arxiv.org/abs/2305.13241) typed-stack design and
+   [Core value and vector semantics](https://webassembly.github.io/spec/core/exec/instructions.html).
+   Diagnostics record the first refused opcode and `0xfd` subopcode on both
+   targets; a function getting past its vector signature can still refuse at
+   an unsupported lane operation. `tools/wasm_bench.zig` covers inline vector
+   addition and vector-valued calls with checked high-lane checksums.
+   The rest of the v128 lane-op
    surface (the other arithmetic/compare/convert/shuffle/lane families) is the
    remaining frontier, along with the side-table-as-control-oracle wiring (§6)
    that would make multi-target `br_table` cheap.
