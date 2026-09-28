@@ -57,6 +57,7 @@ pub const RefusalStage = spasm_x86_64.RefusalStage;
 pub const CompileDiagnostics = spasm_x86_64.Diagnostics;
 pub const refusal_stage_count = spasm_x86_64.refusal_stage_count;
 pub const refusal_misc_subopcode_count = spasm_x86_64.misc_subopcode_count;
+pub const refusal_simd_subopcode_count = 276; // through relaxed SIMD subopcode 275
 
 /// The interpreter's value cell — a 16-byte slot holding any wasm
 /// scalar (low bits) or a `v128`.
@@ -941,6 +942,7 @@ pub fn compileWithDiagnostics(
         call_gate_stub,
         helpers,
         execution_poll_helper,
+        diagnostics,
     ) catch |err| {
         if (diagnostics) |out| out.* = diagnosticsForCompileError(err);
         return err;
@@ -959,8 +961,10 @@ fn compileAarch64(
     call_gate_stub: ?CallGateStubFn,
     helpers: Helpers,
     execution_poll_helper: ExecutionPollHelperFn,
+    diagnostics: ?*CompileDiagnostics,
 ) CompileError!?EntryFn {
     if (comptime builtin.cpu.arch != .aarch64 or !code_alloc.supported) return null;
+    if (diagnostics) |out| out.* = .{ .stage = .limits };
     // The operand-stack bank is fixed (regForDepth); a deeper body
     // tiers down.
     if (func.max_stack > operand_reg_count) return null;
@@ -1061,6 +1065,7 @@ fn compileAarch64(
     while (i < body.len) {
         const op = body[i];
         i += 1;
+        if (diagnostics) |out| out.* = .{ .stage = .bytecode, .opcode = op, .has_opcode = true };
         switch (op) {
             op_i32_const => {
                 const v = readSleb32(body, &i) orelse return null;
@@ -1571,13 +1576,12 @@ fn compileAarch64(
                 // so the 64-bit read zero-extends an i32/f32.
                 const idx = readUleb32(body, &i) orelse return null;
                 const global_type = globalValType(module, idx) orelse return null;
-                if (global_type == .v128) return null;
                 if (@as(u64, idx) * 8 > 32760) return null; // ldrImm scaled-imm ceiling
                 if (sp >= operand_reg_count) return null;
-                if (global_type.isRef()) {
+                if (global_type.isRef() or global_type == .v128) {
                     try m.emit(a64.ldrImm(.x17, .x4, @intCast(idx * 8)));
                     try emitCopyCell(&m, .x17, 0, .x0, refSlotOff(num_locals, sp));
-                    stack[sp] = .ref;
+                    stack[sp] = runtimeLoc(global_type, sp);
                     sp += 1;
                     continue;
                 }
@@ -1597,14 +1601,13 @@ fn compileAarch64(
                 if (@as(u64, idx) * 8 > 32760) return null;
                 if (sp < 1) return null;
                 const global_type = globalValType(module, idx) orelse return null;
-                if (global_type.isRef()) {
+                if (global_type.isRef() or global_type == .v128) {
                     try emitRefIntoSlot(&m, stack[sp - 1], sp - 1, num_locals);
                     try m.emit(a64.ldrImm(.x17, .x4, @intCast(idx * 8)));
                     try emitCopyCell(&m, .x0, refSlotOff(num_locals, sp - 1), .x17, 0);
                     sp -= 1;
                     continue;
                 }
-                if (global_type == .v128) return null;
                 const reg = switch (stack[sp - 1]) {
                     .reg => |r| r,
                     .const_i32 => |v| blk: {
@@ -2544,6 +2547,10 @@ fn compileAarch64(
                 // table.grow; 16 table.size; 17 table.fill. Anything else (SIMD,
                 // GC) degrades.
                 const sub = readUleb32(body, &i) orelse return null;
+                if (diagnostics) |out| {
+                    out.subopcode = sub;
+                    out.has_subopcode = true;
+                }
                 if (sub <= 7) {
                     // §4.3.3 saturating truncations. FCVTZS/FCVTZU round toward
                     // zero and, on NaN or out-of-range, yield 0 / saturate to
@@ -3333,7 +3340,10 @@ fn compileAarch64(
                     }
                     try m.emit(a64.addSpImm(framebytes));
                     sp = below; // 3 consumed (index + val + count), 0 pushed
-                } else return null;
+                } else {
+                    if (diagnostics) |out| out.stage = .unsupported_opcode;
+                    return null;
+                }
             },
             op_simd_prefix => {
                 // §4.4 SIMD — the 0xFD prefix. The baseline compiles the v128
@@ -3344,6 +3354,10 @@ fn compileAarch64(
                 // const/load/store/add move the 128-bit cell with GP halves or
                 // a NEON quad, never the GP operand bank.
                 const sub = readUleb32(body, &i) orelse return null;
+                if (diagnostics) |out| {
+                    out.subopcode = sub;
+                    out.has_subopcode = true;
+                }
                 if (sub == simd_v128_const) {
                     // §4.4 v128.const — 16 immediate bytes (NOT LEB; raw little-
                     // endian). Write the two 64-bit halves into the depth's cell
@@ -3420,7 +3434,10 @@ fn compileAarch64(
                     try m.emit(a64.strQImm(.x0, .x0, off_a)); // result -> a's cell
                     sp -= 1; // pop 2, push 1; the v128 result lives in a's slot
                     stack[sp - 1] = .v128;
-                } else return null; // other SIMD ops — stay interpreted
+                } else {
+                    if (diagnostics) |out| out.stage = .unsupported_opcode;
+                    return null;
+                }
             },
             op_f32_demote_f64 => {
                 // §4.3.5 f32.demote_f64 — narrow the double to single via FCVT,
@@ -3563,8 +3580,7 @@ fn compileAarch64(
                 const nresults: usize = callee.results.len;
                 const refresh_memory = moduleHasMemory(module);
                 if (refresh_memory and helpers.mem_view == null) return null;
-                // References travel as complete Cells; SIMD call signatures
-                // remain outside this backend's call lowering.
+                // References and vectors travel as complete Cells.
                 for (callee.params) |t| if (!isCallValue(t)) return null;
                 for (callee.results) |t| if (!isCallValue(t)) return null;
                 const direct_self = directSelfCallEligible(func_index, fidx, func, ftype);
@@ -3927,13 +3943,16 @@ fn compileAarch64(
                 c.label.deinit(gpa);
                 c.else_label.deinit(gpa);
             },
-            else => return null, // not yet emittable — stay interpreted
+            else => {
+                if (diagnostics) |out| out.stage = .unsupported_opcode;
+                return null;
+            },
         }
     }
 
     const results = ftype.results;
     if (sp != results.len) return null;
-    for (results) |rt| if (!isCallValue(rt) and rt != .v128) return null;
+    for (results) |rt| if (!isCallValue(rt)) return null;
     try emitFunctionResults(&m, &stack, num_locals, 0, results);
     // Normal return: w0 = trap_ok; results are already written to x1.
     // x0 (the now-dead locals pointer) carries the status back. Fall
@@ -3982,7 +4001,9 @@ fn compileAarch64(
         try m.jump(&epilogue);
     }
 
+    if (diagnostics) |out| out.* = .{ .stage = .install };
     const installed = m.install(ca) catch return null;
+    if (diagnostics) |out| out.* = .{};
     return code_alloc.asFn(EntryFn, installed);
 }
 
@@ -4152,7 +4173,7 @@ fn runtimeLoc(value_type: ValType, depth: usize) Loc {
 }
 
 fn isCallValue(value_type: ValType) bool {
-    return value_type.isRef() or value_type == .i32 or value_type == .i64 or value_type == .f32 or value_type == .f64;
+    return value_type.isRef() or value_type == .v128 or value_type == .i32 or value_type == .i64 or value_type == .f32 or value_type == .f64;
 }
 
 /// Copy a complete Cell without disturbing operand-bank or boundary registers.
@@ -4200,7 +4221,7 @@ fn emitCallArguments(m: *masm_mod.Masm, stack: []const Loc, num_locals: usize, b
     for (params, 0..) |value_type, k| {
         const depth = below + k;
         const target: u15 = @intCast(k * @sizeOf(Cell));
-        if (value_type.isRef()) {
+        if (value_type.isRef() or value_type == .v128) {
             try emitRefIntoSlot(m, stack[depth], depth, num_locals);
             try emitCopyCell(m, .x0, refSlotOff(num_locals, depth), .x6, target);
         } else {
@@ -4216,7 +4237,7 @@ fn emitCallResults(m: *masm_mod.Masm, stack: []Loc, num_locals: usize, below: us
     for (results, 0..) |value_type, r| {
         const depth = below + r;
         const source: u15 = @intCast(r * @sizeOf(Cell));
-        if (value_type.isRef()) {
+        if (value_type.isRef() or value_type == .v128) {
             try emitCopyCell(m, .x6, source, .x0, refSlotOff(num_locals, depth));
         } else {
             try m.emit(a64.ldrImm(regForDepth(depth), .x6, source));
@@ -4998,8 +5019,8 @@ test "spasm: x86_64 diagnostics distinguish emission OOM" {
     try testing.expectEqual(@as(u8, 0), diagnostics.opcode);
 }
 
-test "spasm: x86_64 diagnostics identify a refused vector signature" {
-    if (comptime builtin.cpu.arch != .x86_64 or !supported) return error.SkipZigTest;
+test "spasm: SIMD signatures compile and clear refusal diagnostics" {
+    if (comptime !supported) return error.SkipZigTest;
     var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
     defer ca.deinit();
     const func: CompiledFunc = .{
@@ -5011,8 +5032,8 @@ test "spasm: x86_64 diagnostics identify a refused vector signature" {
     };
     const ftype: FuncType = .{ .params = &.{.v128}, .results = &.{} };
     const module: Module = .{ .types = &.{ftype}, .funcs = &.{0} };
-    var diagnostics: CompileDiagnostics = .{};
-    try testing.expectEqual(null, try compileWithDiagnostics(
+    var diagnostics: CompileDiagnostics = .{ .stage = .signature, .signature_type = .v128 };
+    try testing.expect((try compileWithDiagnostics(
         testing.allocator,
         &ca,
         &func,
@@ -5025,9 +5046,9 @@ test "spasm: x86_64 diagnostics identify a refused vector signature" {
         .{},
         testExecutionPoll,
         &diagnostics,
-    ));
-    try testing.expectEqual(RefusalStage.signature, diagnostics.stage);
-    try testing.expectEqual(ValType.v128, diagnostics.signature_type.?);
+    )) != null);
+    try testing.expectEqual(RefusalStage.none, diagnostics.stage);
+    try testing.expectEqual(null, diagnostics.signature_type);
 }
 
 test "spasm: x86_64 diagnostics retain unsupported 0xfc subopcodes" {

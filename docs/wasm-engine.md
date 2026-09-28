@@ -547,10 +547,13 @@ the measured design space:
   types), single-result branches, and direct/indirect calls now preserve both
   halves throughout. Native call gates initialize reference locals to null;
   host calls and refused callees keep the checked helper boundary.
-  Reference globals now preserve full Cells on both targets; AArch64 also
-  supports reference call signatures, results, and single-result merges.
+  References and vectors preserve full Cells on both targets, including
+  parameters/results, locals/globals, select, calls, and single-result merges.
+  The shared SIMD foundation includes `v128.const/load/store` and `i32x4.add`
+  (NEON on AArch64, baseline SSE2 on x86_64); memory accesses check the whole
+  16-byte range before reading or writing, including memory64 overflow.
   Table64 operations (the helper ABI still uses u32
-  indices), SIMD, and other unsupported x86
+  indices), the remaining SIMD operations, and other unsupported x86
   bodies refuse before
   code publication and run in Sarcasm.
   This is a coverage difference, not a semantic one: forced-Spasm sweeps on

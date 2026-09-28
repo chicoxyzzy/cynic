@@ -1,6 +1,6 @@
 //! x86_64 Spasm backend.
 //!
-//! This backend keeps scalar operands in the existing trailing
+//! This backend keeps operands in the existing trailing
 //! `Cell` scratch area rather than trying to project AArch64's seven-register
 //! cache onto the smaller SysV register file. The validated-bytecode compiler
 //! remains one pass, constants still fold, and unsupported instructions refuse
@@ -31,7 +31,7 @@ pub const Error = error{
     UnsupportedOp,
 };
 
-/// Why one x86_64 compilation attempt degraded to Sarcasm. The compiler
+/// Why one Spasm compilation attempt degraded to Sarcasm. The compiler
 /// records one terminal reason before returning null; executable code is never
 /// published for a refused body.
 pub const RefusalStage = enum(u8) {
@@ -286,6 +286,7 @@ const op_ref_null: u8 = 0xd0;
 const op_ref_is_null: u8 = 0xd1;
 const op_ref_func: u8 = 0xd2;
 const op_misc_prefix: u8 = 0xfc;
+const op_simd_prefix: u8 = 0xfd;
 
 const Loc = union(enum) {
     const_i32: i32,
@@ -293,6 +294,7 @@ const Loc = union(enum) {
     ref_null,
     ref_func: u32,
     ref,
+    v128,
     runtime,
 
     fn isRef(self: Loc) bool {
@@ -303,7 +305,11 @@ const Loc = union(enum) {
     }
 
     fn materialized(self: Loc) Loc {
-        return if (self.isRef()) .ref else .runtime;
+        return if (self.isRef()) .ref else if (self == .v128) .v128 else .runtime;
+    }
+
+    fn isWide(self: Loc) bool {
+        return self.isRef() or self == .v128;
     }
 };
 
@@ -418,8 +424,8 @@ pub fn compile(
     const highest_slot = std.math.add(usize, num_locals, operand_stack_capacity) catch return refuse(config, .limits, 0);
     if (highest_slot > @as(usize, std.math.maxInt(i32)) / 16) return refuse(config, .limits, 0);
 
-    // Numeric values use the low 64 bits; references preserve the complete
-    // Cell, including a funcref's defining instance in the upper half.
+    // Scalar numbers use the low 64 bits; references and vectors preserve
+    // the complete Cell, including a funcref's defining instance.
     for (func.local_types) |local_type| if (!isSupportedValue(local_type)) return refuseSignature(config, local_type);
     for (ftype.params) |param_type| if (!isSupportedValue(param_type)) return refuseSignature(config, param_type);
     for (ftype.results) |result_type| if (!isSupportedValue(result_type)) return refuseSignature(config, result_type);
@@ -524,15 +530,17 @@ pub fn compile(
             },
             op_select, op_select_t => {
                 // §4.2.4: [v1, v2, condition] -> condition ? v1 : v2.
-                var is_ref = false;
+                var result_loc: Loc = .runtime;
                 if (op == op_select_t) {
                     const type_count = readUleb32(body, &i) orelse return null;
                     if (type_count != 1) return null;
                     const value_type = readSupportedValType(body, &i) orelse return null;
-                    is_ref = value_type.isRef();
+                    result_loc = runtimeLoc(value_type);
                 }
                 if (sp < 3) return null;
                 const result_depth = sp - 3;
+                if (stack[result_depth] == .v128) result_loc = .v128;
+                const is_wide = result_loc.isWide();
                 try materialize(&m, stack[result_depth], num_locals, result_depth);
                 try materialize(&m, stack[result_depth + 1], num_locals, result_depth + 1);
                 try materialize(&m, stack[result_depth + 2], num_locals, result_depth + 2);
@@ -541,15 +549,15 @@ pub fn compile(
                 defer selected.deinit(gpa);
                 try m.load32Disp32(.r10, .r12, scratchOffset(num_locals, result_depth + 2));
                 try m.load64Disp32(.rax, .r12, scratchOffset(num_locals, result_depth));
-                if (is_ref) try m.load64Disp32(.rcx, .r12, scratchOffset(num_locals, result_depth) + 8);
+                if (is_wide) try m.load64Disp32(.rcx, .r12, scratchOffset(num_locals, result_depth) + 8);
                 try m.cmpReg32Imm32(.r10, 0);
                 try m.jumpCond(.not_equal, &selected);
                 try m.load64Disp32(.rax, .r12, scratchOffset(num_locals, result_depth + 1));
-                if (is_ref) try m.load64Disp32(.rcx, .r12, scratchOffset(num_locals, result_depth + 1) + 8);
+                if (is_wide) try m.load64Disp32(.rcx, .r12, scratchOffset(num_locals, result_depth + 1) + 8);
                 try m.bind(&selected);
                 try m.store64Disp32(.r12, scratchOffset(num_locals, result_depth), .rax);
-                if (is_ref) try m.store64Disp32(.r12, scratchOffset(num_locals, result_depth) + 8, .rcx);
-                stack[result_depth] = if (is_ref) .ref else .runtime;
+                if (is_wide) try m.store64Disp32(.r12, scratchOffset(num_locals, result_depth) + 8, .rcx);
+                stack[result_depth] = result_loc;
                 sp -= 2;
             },
             op_ref_null => {
@@ -585,7 +593,7 @@ pub fn compile(
                         try m.store64Disp32(.r12, scratchOffset(num_locals, depth), .rax);
                         stack[depth] = .runtime;
                     },
-                    .const_i32, .const_i64, .runtime => return null,
+                    .const_i32, .const_i64, .runtime, .v128 => return null,
                 }
             },
             op_call => {
@@ -768,7 +776,7 @@ pub fn compile(
                     .i32, .f32 => try m.load32Disp32(.rax, .r12, localOffset(index)),
                     .i64, .f64 => try m.load64Disp32(.rax, .r12, localOffset(index)),
                     else => {
-                        if (!func.local_types[index].isRef()) return null;
+                        if (!isWideValue(func.local_types[index])) return null;
                         try m.load64Disp32(.rax, .r12, localOffset(index));
                         try m.load64Disp32(.rcx, .r12, localOffset(index) + 8);
                         try m.store64Disp32(.r12, scratchOffset(num_locals, sp) + 8, .rcx);
@@ -785,7 +793,7 @@ pub fn compile(
                 try materialize(&m, stack[depth], num_locals, depth);
                 try m.load64Disp32(.rax, .r12, scratchOffset(num_locals, depth));
                 try m.store64Disp32(.r12, localOffset(index), .rax);
-                if (func.local_types[index].isRef()) {
+                if (isWideValue(func.local_types[index])) {
                     try m.load64Disp32(.rax, .r12, scratchOffset(num_locals, depth) + 8);
                     try m.store64Disp32(.r12, localOffset(index) + 8, .rax);
                 }
@@ -809,7 +817,7 @@ pub fn compile(
                 else
                     try m.load64Disp32(.rax, .r10, 0);
                 try m.store64Disp32(.r12, scratchOffset(num_locals, sp), .rax);
-                if (global_type.isRef()) {
+                if (isWideValue(global_type)) {
                     try m.load64Disp32(.rax, .r10, 8);
                     try m.store64Disp32(.r12, scratchOffset(num_locals, sp) + 8, .rax);
                 }
@@ -830,7 +838,7 @@ pub fn compile(
                 try m.load64Disp32(.rax, .r12, scratchOffset(num_locals, depth));
                 try m.load64Disp32(.r10, .rbp, @intCast(pointer_offset));
                 try m.store64Disp32(.r10, 0, .rax);
-                if (global_type.isRef()) {
+                if (isWideValue(global_type)) {
                     try m.load64Disp32(.rax, .r12, scratchOffset(num_locals, depth) + 8);
                     try m.store64Disp32(.r10, 8, .rax);
                 }
@@ -895,7 +903,7 @@ pub fn compile(
                 const depth = sp - 1;
                 switch (stack[depth]) {
                     .const_i32 => |value| stack[depth] = .{ .const_i32 = @intFromBool(value == 0) },
-                    .const_i64, .ref_null, .ref_func, .ref => return null,
+                    .const_i64, .ref_null, .ref_func, .ref, .v128 => return null,
                     .runtime => {
                         try m.load32Disp32(.rax, .r12, scratchOffset(num_locals, depth));
                         try m.cmpRegImm32(.rax, 0);
@@ -1761,6 +1769,62 @@ pub fn compile(
                 try m.store64Disp32(.r12, scratchOffset(num_locals, depth), .rax);
                 stack[depth] = .runtime;
             },
+            op_simd_prefix => {
+                const sub = readUleb32(body, &i) orelse return null;
+                if (config.diagnostics) |diagnostics| {
+                    diagnostics.subopcode = sub;
+                    diagnostics.has_subopcode = true;
+                }
+                switch (sub) {
+                    12 => {
+                        if (body.len - i < 16 or sp >= operand_stack_capacity) return null;
+                        const target = scratchOffset(num_locals, sp);
+                        try m.movImm64(.rax, std.mem.readInt(u64, body[i..][0..8], .little));
+                        try m.store64Disp32(.r12, target, .rax);
+                        try m.movImm64(.rax, std.mem.readInt(u64, body[i + 8 ..][0..8], .little));
+                        try m.store64Disp32(.r12, target + 8, .rax);
+                        i += 16;
+                        stack[sp] = .v128;
+                        sp += 1;
+                    },
+                    0, 11 => {
+                        const memory64 = memoryIs64(module, 0) orelse return null;
+                        const offset = readMemArg(body, &i, memory64) orelse return null;
+                        const store = sub == 11;
+                        const consumed: usize = if (store) 2 else 1;
+                        if (sp < consumed) return null;
+                        if (store and stack[sp - 1] != .v128) return null;
+                        const depth = sp - consumed;
+                        try materialize(&m, stack[depth], num_locals, depth);
+                        if (memory64)
+                            try m.load64Disp32(.r10, .r12, scratchOffset(num_locals, depth))
+                        else
+                            try m.load32Disp32(.r10, .r12, scratchOffset(num_locals, depth));
+                        try emitMemAddress(&m, offset, 16, memory64, &trap_oob);
+                        trap_oob_used = true;
+                        if (store) {
+                            try m.loadVector128(.xmm0, .r12, scratchOffset(num_locals, sp - 1));
+                            try m.storeVector128(.r11, 0, .xmm0);
+                            sp -= 2;
+                        } else {
+                            try m.loadVector128(.xmm0, .r11, 0);
+                            try m.storeVector128(.r12, scratchOffset(num_locals, depth), .xmm0);
+                            stack[depth] = .v128;
+                        }
+                    },
+                    174 => {
+                        if (sp < 2 or stack[sp - 1] != .v128 or stack[sp - 2] != .v128) return null;
+                        const target = scratchOffset(num_locals, sp - 2);
+                        try m.loadVector128(.xmm0, .r12, target);
+                        try m.loadVector128(.xmm1, .r12, scratchOffset(num_locals, sp - 1));
+                        try m.addPackedI32(.xmm0, .xmm1);
+                        try m.storeVector128(.r12, target, .xmm0);
+                        sp -= 1;
+                        stack[sp - 1] = .v128;
+                    },
+                    else => return refuse(config, .unsupported_opcode, op),
+                }
+            },
             op_misc_prefix => {
                 const sub = readUleb32(body, &i) orelse return null;
                 if (config.diagnostics) |diagnostics| {
@@ -2360,7 +2424,7 @@ fn emitResultsFromCells(m: *x64.Masm, num_locals: usize, results: []const ValTyp
     for (results, 0..) |value_type, result_index| {
         try m.load64Disp32(.rax, .r12, scratchOffset(num_locals, result_index));
         try m.store64Disp32(.r13, resultOffset(result_index), .rax);
-        if (value_type.isRef())
+        if (isWideValue(value_type))
             try m.load64Disp32(.rcx, .r12, scratchOffset(num_locals, result_index) + 8)
         else
             try m.movImm64(.rcx, 0);
@@ -2374,7 +2438,7 @@ fn emitCallArguments(m: *x64.Masm, num_locals: usize, below: usize, params: []co
         const target = callBufferOffset(index);
         try m.load64Disp32(.rax, .r12, source);
         try m.store64Disp32(.rsp, target, .rax);
-        if (value_type.isRef())
+        if (isWideValue(value_type))
             try m.load64Disp32(.rax, .r12, source + 8)
         else
             try m.movImm64(.rax, 0);
@@ -2388,7 +2452,7 @@ fn emitCallResults(m: *x64.Masm, stack: []Loc, num_locals: usize, below: usize, 
         const target = scratchOffset(num_locals, below + index);
         try m.load64Disp32(.rax, .rsp, source);
         try m.store64Disp32(.r12, target, .rax);
-        if (value_type.isRef()) {
+        if (isWideValue(value_type)) {
             try m.load64Disp32(.rax, .rsp, source + 8);
             try m.store64Disp32(.r12, target + 8, .rax);
         }
@@ -2422,7 +2486,7 @@ fn emitExecutionPoll(
 
 fn materialize(m: *x64.Masm, loc: Loc, num_locals: usize, depth: usize) Error!void {
     switch (loc) {
-        .runtime => {},
+        .runtime, .v128 => {},
         .const_i32 => |value| {
             try m.movImm64(.rax, @as(u32, @bitCast(value)));
             try m.store64Disp32(.r12, scratchOffset(num_locals, depth), .rax);
@@ -2454,7 +2518,7 @@ fn emitRefIntoSlot(m: *x64.Masm, loc: Loc, num_locals: usize, depth: usize) Erro
             try m.store64Disp32(.r12, off, .rax);
             try m.store64Disp32(.r12, off + 8, .rax);
         },
-        .const_i32, .const_i64, .runtime => return error.UnsupportedOp,
+        .const_i32, .const_i64, .runtime, .v128 => return error.UnsupportedOp,
     }
 }
 
@@ -2505,7 +2569,7 @@ fn emitBranchValues(
         if (source_depth == target_depth) continue;
         try m.load64Disp32(.rax, .r12, scratchOffset(num_locals, source_depth));
         try m.store64Disp32(.r12, scratchOffset(num_locals, target_depth), .rax);
-        if (stack[source_depth].isRef()) {
+        if (stack[source_depth].isWide()) {
             try m.load64Disp32(.rax, .r12, scratchOffset(num_locals, source_depth) + 8);
             try m.store64Disp32(.r12, scratchOffset(num_locals, target_depth) + 8, .rax);
         }
@@ -2939,11 +3003,15 @@ fn isScalar(value_type: ValType) bool {
 }
 
 fn isSupportedValue(value_type: ValType) bool {
-    return isScalar(value_type) or value_type.isRef();
+    return isScalar(value_type) or isWideValue(value_type);
+}
+
+fn isWideValue(value_type: ValType) bool {
+    return value_type.isRef() or value_type == .v128;
 }
 
 fn runtimeLoc(value_type: ValType) Loc {
-    return if (value_type.isRef()) .ref else .runtime;
+    return if (value_type.isRef()) .ref else if (value_type == .v128) .v128 else .runtime;
 }
 
 /// Resolve one memory's address width in the memory index space.

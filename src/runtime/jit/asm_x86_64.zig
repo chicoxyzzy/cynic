@@ -682,6 +682,27 @@ pub const Masm = struct {
         try self.emitByte(0xC0 | (lowBitsXmm(source) << 3) | lowBits(destination));
     }
 
+    pub fn loadVector128(self: *Masm, destination: Xmm, base: Reg, displacement: i32) error{OutOfMemory}!void {
+        try self.emitVectorMemory(0x6f, destination, base, displacement);
+    }
+
+    pub fn storeVector128(self: *Masm, base: Reg, displacement: i32, source: Xmm) error{OutOfMemory}!void {
+        try self.emitVectorMemory(0x7f, source, base, displacement);
+    }
+
+    pub fn addPackedI32(self: *Masm, destination: Xmm, source: Xmm) error{OutOfMemory}!void {
+        try self.emitXmmReg(0x66, 0xfe, destination, source);
+    }
+
+    fn emitVectorMemory(self: *Masm, opcode: u8, vector: Xmm, base: Reg, displacement: i32) error{OutOfMemory}!void {
+        // SSE2 MOVDQU accepts unaligned linear-memory and Cell addresses.
+        try self.emitByte(0xf3);
+        try self.emitByte(rex(false, isExtendedXmm(vector), false, isExtended(base)));
+        try self.emitByte(0x0f);
+        try self.emitByte(opcode);
+        try self.emitDisp32ModRm(lowBitsXmm(vector), base, displacement);
+    }
+
     pub fn addFloat(self: *Masm, destination: Xmm, source: Xmm) error{OutOfMemory}!void {
         try self.emitXmmReg(0xF3, 0x58, destination, source);
     }
@@ -1147,6 +1168,19 @@ test "jit asm_x86_64: encodes i64 division, narrow memory, and CL shifts" {
         0x49, 0xD3,
         0xC2, 0x41,
         0xD3, 0xEA,
+    }, machine.code.items);
+}
+
+test "jit asm_x86_64: encodes unaligned SIMD moves and packed i32 addition" {
+    var machine = Masm.init(std.testing.allocator);
+    defer machine.deinit();
+    try machine.loadVector128(.xmm9, .r12, 16);
+    try machine.addPackedI32(.xmm9, .xmm10);
+    try machine.storeVector128(.r13, -16, .xmm9);
+    try std.testing.expectEqualSlices(u8, &.{
+        0xf3, 0x45, 0x0f, 0x6f, 0x8c, 0x24, 0x10, 0,    0,    0,
+        0x66, 0x45, 0x0f, 0xfe, 0xca, 0xf3, 0x45, 0x0f, 0x7f, 0x8d,
+        0xf0, 0xff, 0xff, 0xff,
     }, machine.code.items);
 }
 

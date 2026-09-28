@@ -39,6 +39,8 @@ const Counts = struct {
     spasm_refused_opcode_overflow: u64 = 0,
     spasm_refused_misc_subopcodes: [wasm.spasm_refusal_misc_subopcode_count]u64 = std.mem.zeroes([wasm.spasm_refusal_misc_subopcode_count]u64),
     spasm_refused_misc_subopcode_other: u64 = 0,
+    spasm_refused_simd_subopcodes: [wasm.spasm_refusal_simd_subopcode_count]u64 = @splat(0),
+    spasm_refused_simd_subopcode_other: u64 = 0,
 
     fn add(self: *Counts, other: Counts) void {
         self.pass += other.pass;
@@ -54,6 +56,8 @@ const Counts = struct {
         self.spasm_refused_opcode_overflow += other.spasm_refused_opcode_overflow;
         for (&self.spasm_refused_misc_subopcodes, other.spasm_refused_misc_subopcodes) |*total, count| total.* += count;
         self.spasm_refused_misc_subopcode_other += other.spasm_refused_misc_subopcode_other;
+        for (&self.spasm_refused_simd_subopcodes, other.spasm_refused_simd_subopcodes) |*total, count| total.* += count;
+        self.spasm_refused_simd_subopcode_other += other.spasm_refused_simd_subopcode_other;
     }
 };
 
@@ -284,6 +288,8 @@ fn runManifest(arena: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, json_path:
         counts.spasm_refused_opcode_overflow += instance.spasm_refused_opcode_overflow;
         for (&counts.spasm_refused_misc_subopcodes, instance.spasm_refused_misc_subopcodes) |*total, count| total.* += count;
         counts.spasm_refused_misc_subopcode_other += instance.spasm_refused_misc_subopcode_other;
+        for (&counts.spasm_refused_simd_subopcodes, instance.spasm_refused_simd_subopcodes) |*total, count| total.* += count;
+        counts.spasm_refused_simd_subopcode_other += instance.spasm_refused_simd_subopcode_other;
     }
     return counts;
 }
@@ -333,11 +339,12 @@ fn writeSpasmRefusalSummary(io: std.Io, counts: Counts) !void {
         );
         try std.Io.File.stdout().writeStreamingAll(io, overflow);
     }
-    try writeSpasmMiscSubopcodeSummary(io, counts);
+    try writeSpasmSubopcodeSummary(io, 0xfc, counts.spasm_refused_misc_subopcodes, counts.spasm_refused_misc_subopcode_other);
+    try writeSpasmSubopcodeSummary(io, 0xfd, counts.spasm_refused_simd_subopcodes, counts.spasm_refused_simd_subopcode_other);
 }
 
-fn writeSpasmMiscSubopcodeSummary(io: std.Io, counts: Counts) !void {
-    var remaining = counts.spasm_refused_misc_subopcodes;
+fn writeSpasmSubopcodeSummary(io: std.Io, comptime prefix: u8, counts: anytype, other: u64) !void {
+    var remaining = counts;
     var rank: usize = 0;
     while (rank < 5) : (rank += 1) {
         var best_subopcode: ?usize = null;
@@ -353,17 +360,17 @@ fn writeSpasmMiscSubopcodeSummary(io: std.Io, counts: Counts) !void {
         var line: [128]u8 = undefined;
         const text = try std.fmt.bufPrint(
             &line,
-            "  refused 0xfc subopcode {d} ({s}): {d}\n",
-            .{ subopcode, miscSubopcodeName(subopcode), best_count },
+            "  refused 0x{x} subopcode {d} ({s}): {d}\n",
+            .{ prefix, subopcode, if (prefix == 0xfc) miscSubopcodeName(subopcode) else "SIMD", best_count },
         );
         try std.Io.File.stdout().writeStreamingAll(io, text);
     }
-    if (counts.spasm_refused_misc_subopcode_other != 0) {
+    if (other != 0) {
         var line: [96]u8 = undefined;
         const text = try std.fmt.bufPrint(
             &line,
-            "  refused 0xfc untracked subopcodes: {d}\n",
-            .{counts.spasm_refused_misc_subopcode_other},
+            "  refused 0x{x} untracked subopcodes: {d}\n",
+            .{ prefix, other },
         );
         try std.Io.File.stdout().writeStreamingAll(io, text);
     }
