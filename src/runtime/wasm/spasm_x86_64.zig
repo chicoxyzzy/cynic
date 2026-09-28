@@ -7,6 +7,9 @@
 //! transactionally so Sarcasm remains the semantic fallback.
 
 const std = @import("std");
+const metadata = @import("spasm_metadata.zig");
+const globalValType = metadata.globalValType;
+const tableIs32 = metadata.tableIs32;
 
 const x64 = @import("../jit/asm_x86_64.zig");
 const code_alloc = @import("../jit/code_alloc.zig");
@@ -797,7 +800,7 @@ pub fn compile(
                 // the scalar payload starts at offset zero in each Global.
                 const index = readUleb32(body, &i) orelse return null;
                 const global_type = globalValType(module, index) orelse return null;
-                if (!isScalar(global_type) or sp >= operand_stack_capacity) return null;
+                if (!isSupportedValue(global_type) or sp >= operand_stack_capacity) return null;
                 const pointer_offset = std.math.mul(u32, index, 8) catch return null;
                 if (pointer_offset > std.math.maxInt(i32)) return null;
                 try m.load64Disp32(.r10, .rbp, @intCast(pointer_offset));
@@ -806,7 +809,11 @@ pub fn compile(
                 else
                     try m.load64Disp32(.rax, .r10, 0);
                 try m.store64Disp32(.r12, scratchOffset(num_locals, sp), .rax);
-                stack[sp] = .runtime;
+                if (global_type.isRef()) {
+                    try m.load64Disp32(.rax, .r10, 8);
+                    try m.store64Disp32(.r12, scratchOffset(num_locals, sp) + 8, .rax);
+                }
+                stack[sp] = runtimeLoc(global_type);
                 sp += 1;
             },
             op_global_set => {
@@ -815,7 +822,7 @@ pub fn compile(
                 // registers so a folded constant cannot clobber either.
                 const index = readUleb32(body, &i) orelse return null;
                 const global_type = globalValType(module, index) orelse return null;
-                if (!isScalar(global_type) or sp == 0) return null;
+                if (!isSupportedValue(global_type) or sp == 0) return null;
                 const pointer_offset = std.math.mul(u32, index, 8) catch return null;
                 if (pointer_offset > std.math.maxInt(i32)) return null;
                 const depth = sp - 1;
@@ -823,6 +830,10 @@ pub fn compile(
                 try m.load64Disp32(.rax, .r12, scratchOffset(num_locals, depth));
                 try m.load64Disp32(.r10, .rbp, @intCast(pointer_offset));
                 try m.store64Disp32(.r10, 0, .rax);
+                if (global_type.isRef()) {
+                    try m.load64Disp32(.rax, .r12, scratchOffset(num_locals, depth) + 8);
+                    try m.store64Disp32(.r10, 8, .rax);
+                }
                 sp -= 1;
             },
             op_table_get => {
@@ -2933,35 +2944,6 @@ fn isSupportedValue(value_type: ValType) bool {
 
 fn runtimeLoc(value_type: ValType) Loc {
     return if (value_type.isRef()) .ref else .runtime;
-}
-
-/// The table helper ABI and generated index/result moves currently use u32.
-/// Table64 operations must fall back before any index can be truncated.
-fn tableIs32(module: *const Module, index: u32) bool {
-    var imported: u32 = 0;
-    for (module.imports) |import| {
-        if (import.desc != .table) continue;
-        if (index == imported) return !import.desc.table.limits.is_64;
-        imported += 1;
-    }
-    if (index < imported) return false;
-    const local: usize = index - imported;
-    return local < module.tables.len and !module.tables[local].limits.is_64;
-}
-
-/// Resolve the global index space (imports first, then definitions) without
-/// borrowing interpreter state into the compiler.
-fn globalValType(module: *const Module, index: u32) ?ValType {
-    var seen: u32 = 0;
-    for (module.imports) |import| {
-        if (import.desc != .global) continue;
-        if (seen == index) return import.desc.global.val;
-        seen += 1;
-    }
-    if (index < seen) return null;
-    const local: usize = index - seen;
-    if (local >= module.globals.len) return null;
-    return module.globals[local].type.val;
 }
 
 /// Resolve one memory's address width in the memory index space.

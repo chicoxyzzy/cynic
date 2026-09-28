@@ -35,19 +35,20 @@ Rosetta (2026-09-28). Gating runs add `--require-spasm-entry`; focused target
 tests additionally require generated x86 instance/cache, trap, safe-point,
 self-link, and stable-gate execution. Unsupported x86 opcode families fall
 back per function and therefore remain covered by the same semantic sweep.
-The fail-closed witness observed 120,469 native entries / 4,001 compiled
-functions on x86_64 and 53,747 / 3,646 on AArch64. The x86 sweep recorded
-1,978 transactional refusals (8 limits, 1,349 signatures, 473 bytecode shapes,
-148 opcodes) and zero emission or install failures. The x86 backend now covers
+The fail-closed witness observed 120,482 native entries / 4,008 compiled
+functions on x86_64 and 121,135 / 4,098 on AArch64. The x86 sweep recorded
+1,971 transactional refusals (8 limits, 1,349 signatures, 445 bytecode shapes,
+169 opcodes) and zero emission or install failures. The x86 backend now covers
 memory32 and memory64 scalar access/grow/bulk-memory, `data.drop`, nested
 `return`, catchable `unreachable`, and full-width reference parameters,
-results, locals, typed select, calls, and single-result control-flow merges.
-The reference increment adds 31 compiled functions and 138 native entries,
-reducing refusals by 22. It also refuses table64 operations whose native
-helpers still use u32 indices, preventing truncation above 2^32; this safety
-check intentionally moves previously compiled bodies back to Sarcasm.
-Before it, the 1,401 signature refusals split into 52 reference and 1,349
-vector cases; afterward all 1,349 are vector cases.
+results, locals/globals, typed select, calls, and single-result control-flow
+merges. The reference-parity follow-up adds 7 compiled functions on x86_64
+and 452 on AArch64, where reference calls/results/merges and explicit returns
+now compile too. Both backends refuse table64 operations whose native helpers
+still use u32 indices, preventing truncation above 2^32. Tests cover defined
+and imported tables. AArch64 refusal diagnostics remain incomplete; do not
+interpret a missing refusal tally as complete native coverage.
+All 1,349 remaining x86 signature refusals are vector cases.
 These counts classify the first rejected type in each function, not every
 type it contains. The largest remaining `0xfc` groups are
 `table.copy` (22), `table.grow` (5), `table.size` (5), `memory.init` (4),

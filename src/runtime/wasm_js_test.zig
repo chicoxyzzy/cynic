@@ -632,7 +632,7 @@ test "an externref round-trips JS -> wasm -> host -> wasm -> JS" {
 }
 
 test "a native externref call retains its JS object across host GC" {
-    if (comptime @import("builtin").cpu.arch != .x86_64 or !@import("wasm/spasm.zig").supported) return error.SkipZigTest;
+    if (comptime !@import("wasm/spasm.zig").supported) return error.SkipZigTest;
     var realm = Realm.init(testing.allocator);
     defer realm.deinit();
     realm.allow_wasm_compile = true;
@@ -653,6 +653,42 @@ test "a native externref call retains its JS object across host GC" {
     try testing.expectEqual(@as(usize, 1), realm.wasm_instances.items.len);
     try testing.expect(realm.wasm_instances.items[0].spasm_runs > 0);
     try testing.expectEqual(@as(u32, 0), realm.wasm_instances.items[0].spasm_refusals);
+}
+
+test "a native externref global retains its JS object across host GC" {
+    if (comptime !@import("wasm/spasm.zig").supported) return error.SkipZigTest;
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.allow_wasm_compile = true;
+    realm.jit_enabled = true;
+    try realm.installBuiltins();
+    try realm.installTestGlobals();
+    const src =
+        "const bytes = new Uint8Array([" ++
+        "0,97,115,109,1,0,0,0," ++
+        "1,12,3,96,0,0,96,1,111,0,96,0,1,111," ++
+        "2,7,1,1,104,1,103,0,0," ++
+        "3,3,2,1,2," ++
+        "6,6,1,111,1,208,111,11," ++
+        "7,13,2,3,115,101,116,0,1,3,103,101,116,0,2," ++
+        "10,15,2,8,0,32,0,36,0,16,0,11,4,0,35,0,11]);" ++
+        "const inst = new WebAssembly.Instance(new WebAssembly.Module(bytes)," ++
+        "{ h: { g: () => { __collectGarbage(); } } });" ++
+        "inst.exports.set({ id: 7 });" ++
+        "__collectGarbage();" ++
+        "const result = inst.exports.get();" ++
+        "inst.exports.set(null);" ++
+        "__collectGarbage();" ++
+        "result.id === 7 && inst.exports.get() === null ? 1 : 0;";
+    const outcome = try lantern.evaluateScript(testing.allocator, &realm, src);
+    const value = switch (outcome) {
+        .value => |v| v,
+        else => return error.WasmThrewUnexpectedly,
+    };
+    try testing.expectEqual(@as(i32, 1), value.asInt32());
+    try testing.expectEqual(@as(usize, 1), realm.wasm_instances.items.len);
+    try testing.expect(realm.wasm_instances.items[0].spasm_runs >= 4);
+    try testing.expectEqual(@as(u32, 2), realm.wasm_instances.items[0].spasm_compiles);
 }
 
 test "an exported table is a WebAssembly.Table over the live table" {

@@ -31,6 +31,9 @@ const code_alloc = @import("../jit/code_alloc.zig");
 const masm_mod = @import("../jit/masm.zig");
 const a64 = @import("../jit/asm_aarch64.zig");
 const dead_code = @import("spasm_dead_code.zig");
+const metadata = @import("spasm_metadata.zig");
+const globalValType = metadata.globalValType;
+const tableIs32 = metadata.tableIs32;
 const spasm_x86_64 = @import("spasm_x86_64.zig");
 const CompiledFunc = @import("code.zig").CompiledFunc;
 const FuncType = @import("types.zig").FuncType;
@@ -630,30 +633,27 @@ const Loc = union(enum) {
     reg: a64.Reg,
     /// §5.4.2 — a statically-known null reference (`ref.null t`), always
     /// `interpreter.REF_NULL`. Like `const_i32`, it is recomputable and so
-    /// never spilled or mutated; it survives calls and control flow. The
-    /// only consumer this slice emits is `ref.is_null` (which folds it to
-    /// the constant 1); any op that would need the 128-bit value in a
-    /// runtime location degrades via `materialize`.
+    /// never spilled or mutated; full-Cell consumers materialize it through
+    /// `emitRefIntoSlot`, while `ref.is_null` folds it to 1.
     ref_null,
     /// §5.4.2 — a statically-known function reference (`ref.func f`),
     /// `makeFuncRef(instance, f)`. The instance is the body-constant x19,
     /// so the funcref is fully determined by the immediate `f`, and it is
     /// always non-null. Carries the function index. `ref.is_null` folds it
-    /// to the constant 0; any runtime-location consumer degrades.
+    /// to 0; full-Cell consumers retain both the index and defining instance.
     ref_func: u32,
     /// §5.4.2 — a 128-bit runtime reference (e.g. a `table.get` result)
     /// whose value is not statically known. It does NOT live in a register
     /// (the operand bank is 64-bit); it lives in a depth-keyed cell appended
     /// to the heap locals buffer — the cell at byte offset
     /// `(num_locals + depth) * @sizeOf(Cell)` off x0 (see `refSlotOff`). A
-    /// stack-machine operand never changes depth once pushed, so the home
-    /// slot is fully determined by the operand's depth and needs no payload.
+    /// home is determined by the operand's depth. Branches explicitly move
+    /// carried Cells down to the target frame's result depth.
     /// Because the data is in the heap buffer (not a register), a `.ref`
     /// operand survives calls and SP moves for free, and the spill guards
     /// (`if (stack[d] != .reg) continue;`) correctly skip it (nothing to
     /// spill). `materialize` on a `.ref` degrades — the 128-bit value can't
-    /// fit a single GP register; only the consumers that read the slot
-    /// directly (`ref.is_null`) handle it, everything else returns null.
+    /// fit a single GP register; reference consumers read the complete Cell.
     ref,
     /// §4.4 SIMD — a 128-bit `v128` operand. Like `.ref`, it is too wide
     /// for the 64-bit operand bank, so it lives in the depth-keyed cell at
@@ -741,6 +741,7 @@ const Ctrl = struct {
     /// fall-through (the result arity). Equals `branch_arity` for a
     /// `block`/`if`; a `loop` differs (params vs results).
     result_arity: u32,
+    result_type: ?ValType = null,
     kind: Kind,
 
     /// `if_then`/`if_else` track which arm of an `if` is being compiled
@@ -974,7 +975,7 @@ fn compileAarch64(
     // emit an out-of-range load); a body with no ref op never touches these
     // slots, but the guard is cheap and uniform.
     const num_locals = func.local_types.len;
-    if ((num_locals + operand_reg_count - 1) * @sizeOf(Cell) > 32760) return null;
+    if ((num_locals + operand_reg_count - 1) * @sizeOf(Cell) > 32752) return null;
 
     var m = masm_mod.Masm.init(gpa);
     defer m.deinit();
@@ -1234,6 +1235,7 @@ fn compileAarch64(
                 // instance, so it is materialized into x3 just before the call.
                 if (helpers.table_get == null) return null; // helper not wired
                 const table_idx = readUleb32(body, &i) orelse return null;
+                if (!tableIs32(module, table_idx)) return null;
                 if (sp < 1) return null;
                 const below = sp - 1; // operands beneath the index
                 if (below > operand_reg_count) return null;
@@ -1348,6 +1350,7 @@ fn compileAarch64(
                 // then reload.
                 if (helpers.table_set == null) return null; // helper not wired
                 const table_idx = readUleb32(body, &i) orelse return null;
+                if (!tableIs32(module, table_idx)) return null;
                 if (sp < 2) return null;
                 const below = sp - 2; // operands beneath the index
                 if (below > operand_reg_count) return null;
@@ -1567,16 +1570,17 @@ fn compileAarch64(
                 // offset 0); a scalar global's high word is canonically zero,
                 // so the 64-bit read zero-extends an i32/f32.
                 const idx = readUleb32(body, &i) orelse return null;
-                // §4.4 — a v128 global holds 128 bits; the scalar load below
-                // would truncate it to the low 64. Now that v128 results /
-                // operands are compilable, the truncated value could reach a
-                // result or a SIMD op, so degrade a v128 global to the
-                // interpreter rather than load a partial value. (A ref-typed
-                // global likewise has no scalar consumer; it degrades at the op
-                // that would use it.)
-                if (globalValType(module, idx) == .v128) return null;
+                const global_type = globalValType(module, idx) orelse return null;
+                if (global_type == .v128) return null;
                 if (@as(u64, idx) * 8 > 32760) return null; // ldrImm scaled-imm ceiling
                 if (sp >= operand_reg_count) return null;
+                if (global_type.isRef()) {
+                    try m.emit(a64.ldrImm(.x17, .x4, @intCast(idx * 8)));
+                    try emitCopyCell(&m, .x17, 0, .x0, refSlotOff(num_locals, sp));
+                    stack[sp] = .ref;
+                    sp += 1;
+                    continue;
+                }
                 const ra = regForDepth(sp);
                 try m.emit(a64.ldrImm(.x16, .x4, @intCast(idx * 8))); // *Global
                 try m.emit(a64.ldrImm(ra, .x16, 0)); // .value low 64
@@ -1592,6 +1596,15 @@ fn compileAarch64(
                 const idx = readUleb32(body, &i) orelse return null;
                 if (@as(u64, idx) * 8 > 32760) return null;
                 if (sp < 1) return null;
+                const global_type = globalValType(module, idx) orelse return null;
+                if (global_type.isRef()) {
+                    try emitRefIntoSlot(&m, stack[sp - 1], sp - 1, num_locals);
+                    try m.emit(a64.ldrImm(.x17, .x4, @intCast(idx * 8)));
+                    try emitCopyCell(&m, .x0, refSlotOff(num_locals, sp - 1), .x17, 0);
+                    sp -= 1;
+                    continue;
+                }
+                if (global_type == .v128) return null;
                 const reg = switch (stack[sp - 1]) {
                     .reg => |r| r,
                     .const_i32 => |v| blk: {
@@ -2837,6 +2850,7 @@ fn compileAarch64(
                     // call, capture w0 into the result slot, then reload.
                     if (helpers.table_size == null) return null; // helper not wired
                     const table_idx = readUleb32(body, &i) orelse return null;
+                    if (!tableIs32(module, table_idx)) return null;
                     // Pushes a result, consumes nothing.
                     const below = sp;
                     if (below + 1 > operand_reg_count) return null;
@@ -2913,6 +2927,7 @@ fn compileAarch64(
                     if (helpers.table_copy == null) return null; // helper not wired
                     const dst_t = readUleb32(body, &i) orelse return null;
                     const src_t = readUleb32(body, &i) orelse return null;
+                    if (!tableIs32(module, dst_t) or !tableIs32(module, src_t)) return null;
                     if (sp < 3) return null;
                     const below = sp - 3;
                     if (below + 0 > operand_reg_count) return null;
@@ -2996,6 +3011,7 @@ fn compileAarch64(
                     if (helpers.table_init == null) return null; // helper not wired
                     const elem_idx = readUleb32(body, &i) orelse return null;
                     const table_idx = readUleb32(body, &i) orelse return null;
+                    if (!tableIs32(module, table_idx)) return null;
                     if (sp < 3) return null;
                     const below = sp - 3;
                     if (below + 0 > operand_reg_count) return null;
@@ -3140,8 +3156,7 @@ fn compileAarch64(
                     // A table64's result is i64, not i32 (a different width than
                     // this arm produces) — degrade rather than special-case it,
                     // exactly as `memory.grow` does for memory64.
-                    if (table_idx >= module.tables.len) return null;
-                    if (module.tables[table_idx].limits.is_64) return null;
+                    if (!tableIs32(module, table_idx)) return null;
                     if (sp < 2) return null;
                     const below = sp - 2; // operands beneath init+delta
                     // Post-op stack = survivors + 1 result; it must fit the bank.
@@ -3237,6 +3252,7 @@ fn compileAarch64(
                     // call, reload. table.fill never resizes memory.
                     if (helpers.table_fill == null) return null; // helper not wired
                     const table_idx = readUleb32(body, &i) orelse return null;
+                    if (!tableIs32(module, table_idx)) return null;
                     if (sp < 3) return null;
                     const below = sp - 3; // operands beneath index/val/count
                     if (below > operand_reg_count) return null;
@@ -3425,209 +3441,113 @@ fn compileAarch64(
                 try m.emit(a64.fmovDtoX(ra, .x16));
                 stack[sp - 1] = .{ .reg = ra };
             },
-            op_block => {
-                // §3.3.5 — push a control frame. The block's result
-                // arity comes from its block type; a `block` consumes no
-                // operand values (only multi-value param blocks would,
-                // and those degrade), so the merge base is the current
-                // height. The label binds forward, at the block's `end`.
-                const arity = readBlockArity(body, &i) orelse return null;
+            op_block, op_loop, op_if => {
+                const result = readBlockResult(body, &i) orelse return null;
                 if (ctrl_len >= max_ctrl_depth) return null;
-                ctrl[ctrl_len] = .{ .label = .{}, .else_label = .{}, .height = sp, .branch_arity = arity, .result_arity = arity, .kind = .block };
+                if (op == op_if) {
+                    if (sp == 0) return null;
+                    sp -= 1;
+                }
+                const c = &ctrl[ctrl_len];
+                c.* = .{
+                    .label = .{},
+                    .else_label = .{},
+                    .height = sp,
+                    .branch_arity = if (op == op_loop) 0 else result.arity,
+                    .result_arity = result.arity,
+                    .result_type = result.value_type,
+                    .kind = if (op == op_loop) .loop else if (op == op_if) .if_then else .block,
+                };
+                // Track the frame before emitting fixups so failure cleans it up.
                 ctrl_len += 1;
-            },
-            op_loop => {
-                // §3.3.5 — a loop's branch target is its header, so the
-                // label binds here, at the back-edge destination, before
-                // the body. The compilable block types have no params, so
-                // a back-edge carries nothing (branch_arity 0) and the
-                // header merge stays register-resident: the operand
-                // registers below `height` are frozen across the loop
-                // (validation forbids the body reaching beneath its base)
-                // and nothing is carried in, so entry and every back-edge
-                // agree with no spill.
-                const arity = readBlockArity(body, &i) orelse return null;
-                if (ctrl_len >= max_ctrl_depth) return null;
-                ctrl[ctrl_len] = .{ .label = .{}, .else_label = .{}, .height = sp, .branch_arity = 0, .result_arity = arity, .kind = .loop };
-                try m.bind(&ctrl[ctrl_len].label);
-                ctrl_len += 1;
-            },
-            op_if => {
-                // §3.3.5 — pop the condition; when it is zero, branch to
-                // the `else` arm (or, for an `if` with no `else`, straight
-                // to the `end`). The then-arm runs on the fall-through.
-                if (sp < 1) return null;
-                sp -= 1;
-                const cond = stack[sp];
-                const arity = readBlockArity(body, &i) orelse return null;
-                if (ctrl_len >= max_ctrl_depth) return null;
-                const rc = try materialize(&m, cond, sp);
-                ctrl[ctrl_len] = .{ .label = .{}, .else_label = .{}, .height = sp, .branch_arity = arity, .result_arity = arity, .kind = .if_then };
-                try m.jumpCbz(rc, &ctrl[ctrl_len].else_label);
-                ctrl_len += 1;
+                if (op == op_loop) {
+                    try m.bind(&c.label);
+                } else if (op == op_if) {
+                    const condition = try materialize(&m, stack[sp], sp);
+                    try m.jumpCbz(condition, &c.else_label);
+                }
             },
             op_else => {
-                // §3.3.5 — end of the then-arm: canonicalize its results,
-                // jump past the else-arm to the merge, then bind the
-                // else label so a false condition lands at the else-arm.
                 if (ctrl_len == 0) return null;
                 const c = &ctrl[ctrl_len - 1];
-                if (c.kind != .if_then) return null;
-                if (sp != c.height + c.result_arity) return null;
-                var d: usize = c.height;
-                while (d < c.height + c.result_arity) : (d += 1) {
-                    const r = try materialize(&m, stack[d], d);
-                    stack[d] = .{ .reg = r };
+                if (c.kind != .if_then or sp != c.height + c.result_arity) return null;
+                for (c.height..sp) |d| {
+                    const loc = try canonicalize(&m, stack[d], d, num_locals);
+                    stack[d] = loc;
                 }
                 try m.jump(&c.label);
                 try m.bind(&c.else_label);
                 c.kind = .if_else;
-                sp = c.height; // the else-arm starts with a fresh stack
+                sp = c.height;
             },
             op_br => {
-                // §3.3.8 — unconditional branch. Canonicalize the carried
-                // values into the target frame's merge registers, jump,
-                // then skip the now-unreachable rest of the current frame.
                 const depth = readUleb32(body, &i) orelse return null;
                 if (depth >= ctrl_len) return null;
                 const target = &ctrl[ctrl_len - 1 - depth];
-                const arity = target.branch_arity;
-                if (sp < arity) return null;
-                // v1 register-resident merge (pop_count == 0), as br_if.
-                if (sp != target.height + arity) return null;
-                var d: usize = target.height;
-                while (d < target.height + arity) : (d += 1) {
-                    const r = try materialize(&m, stack[d], d);
-                    stack[d] = .{ .reg = r };
-                }
+                if (!(try emitBranchValues(&m, &stack, num_locals, sp, target.height, target.branch_arity))) return null;
                 if (target.kind == .loop) {
                     try emitExecutionPoll(&m, gpa, stack[0..sp], &epilogue, execution_poll_helper);
                 }
                 try m.jump(&target.label);
-                // The rest of the current frame is dead (§3.3 — code
-                // after an unconditional branch is unreachable until the
-                // frame closes). The terminator is the frame's `end` for
-                // a block/loop; for an `if`'s then-arm it is the `else`,
-                // which the skipper doesn't track — so a `br` directly
-                // inside an `if` arm degrades for now.
-                const cur = &ctrl[ctrl_len - 1];
-                if (cur.kind == .if_then or cur.kind == .if_else) return null;
-                dead_code.skipToFrameEnd(body, &i) orelse return null;
-                // The skipper consumed the current frame's `end`. No
-                // fall-through reaches it, so bind the label (resolving
-                // any forward branch that targeted it) without
-                // materializing, then restore the stack to the frame's
-                // result type for the continuation — those result values
-                // were placed in the canonical registers by whatever
-                // branch reaches the merge.
-                if (cur.kind == .block) try m.bind(&cur.label);
-                cur.label.deinit(gpa);
-                cur.else_label.deinit(gpa); // `.empty` for block/loop — safe
-                sp = cur.height + cur.result_arity;
-                var r: usize = cur.height;
-                while (r < cur.height + cur.result_arity) : (r += 1) {
-                    stack[r] = .{ .reg = regForDepth(r) };
-                }
-                ctrl_len -= 1;
+                _ = (try closeTerminatedArm(&m, gpa, body, &i, &stack, &sp, &ctrl, &ctrl_len)) orelse return null;
             },
             op_br_if => {
-                // §3.3.8 — pop the condition, branch to the target
-                // frame's merge label when it is non-zero, else fall
-                // through (always reachable — no dead code follows).
                 const depth = readUleb32(body, &i) orelse return null;
-                if (sp < 1) return null;
+                if (sp == 0 or depth >= ctrl_len) return null;
                 sp -= 1;
-                const cond = stack[sp];
-                if (depth >= ctrl_len) return null;
+                const condition = try materialize(&m, stack[sp], sp);
                 const target = &ctrl[ctrl_len - 1 - depth];
-                const arity = target.branch_arity;
-                // v1 keeps the merge entirely register-resident: require
-                // the stack to sit exactly at the target's base + arity
-                // (pop_count == 0), so the carried values already occupy
-                // their canonical depth registers. Live values beneath
-                // the carried set degrade to the interpreter.
-                if (sp != target.height + arity) return null;
-                // Canonicalize the carried values (materialize folded
-                // constants; a `.reg` is already in place by the
-                // depth→register invariant). The register is hoisted out
-                // of the union initializer on purpose: writing
-                // `stack[d] = .{ .reg = materialize(.., stack[d], ..) }`
-                // would let result-location semantics stamp the `.reg` tag
-                // onto stack[d] before `materialize` reads it, turning a
-                // folded constant into a garbage register.
-                var d: usize = target.height;
-                while (d < target.height + arity) : (d += 1) {
-                    const r = try materialize(&m, stack[d], d);
-                    stack[d] = .{ .reg = r };
-                }
-                // The condition lands in its own register, disjoint and
-                // above the carried set; branch when non-zero.
-                const rc = try materialize(&m, cond, sp);
+                var not_taken: masm_mod.Masm.Label = .{};
+                defer not_taken.deinit(gpa);
+                try m.jumpCbz(condition, &not_taken);
+                if (!(try emitBranchValues(&m, &stack, num_locals, sp, target.height, target.branch_arity))) return null;
                 if (target.kind == .loop) {
-                    // Poll only on the taken backedge. The false path skips
-                    // both the outlined helper and the unconditional jump.
-                    var not_taken: masm_mod.Masm.Label = .{};
-                    defer not_taken.deinit(gpa);
-                    try m.jumpCbz(rc, &not_taken);
                     try emitExecutionPoll(&m, gpa, stack[0..sp], &epilogue, execution_poll_helper);
-                    try m.jump(&target.label);
-                    try m.bind(&not_taken);
-                } else {
-                    try m.jumpCbnz(rc, &target.label);
                 }
+                try m.jump(&target.label);
+                try m.bind(&not_taken);
             },
             op_br_table => {
-                // §3.3.8 — pop the index and dispatch: a linear compare
-                // chain branches to table[index] for index < n, else to
-                // the default label. v1 requires every target to carry no
-                // values (the common switch shape — a switch dispatches on
-                // a scalar, carrying no operands), so the targets' differing
-                // merge bases need no register shuffle.
-                if (sp < 1) return null;
+                if (sp == 0) return null;
                 sp -= 1;
                 const index_reg = try materialize(&m, stack[sp], sp);
-                const n = readUleb32(body, &i) orelse return null;
+                const count = readUleb32(body, &i) orelse return null;
                 var j: u32 = 0;
-                while (j < n) : (j += 1) {
-                    const lbl = readUleb32(body, &i) orelse return null;
-                    if (lbl >= ctrl_len) return null;
-                    const t = &ctrl[ctrl_len - 1 - lbl];
-                    if (t.branch_arity != 0) return null;
-                    if (j > std.math.maxInt(u12)) return null; // cmpImm imm12 ceiling
+                while (j < count) : (j += 1) {
+                    const depth = readUleb32(body, &i) orelse return null;
+                    if (depth >= ctrl_len or j > std.math.maxInt(u12)) return null;
+                    const target = &ctrl[ctrl_len - 1 - depth];
+                    var next_case: masm_mod.Masm.Label = .{};
+                    defer next_case.deinit(gpa);
                     try m.emit(a64.cmpImm(index_reg, @intCast(j), false));
-                    if (t.kind == .loop) {
-                        var next_case: masm_mod.Masm.Label = .{};
-                        defer next_case.deinit(gpa);
-                        try m.jumpCond(.ne, &next_case);
+                    try m.jumpCond(.ne, &next_case);
+                    if (!(try emitBranchValues(&m, &stack, num_locals, sp, target.height, target.branch_arity))) return null;
+                    if (target.kind == .loop) {
                         try emitExecutionPoll(&m, gpa, stack[0..sp], &epilogue, execution_poll_helper);
-                        try m.jump(&t.label);
-                        try m.bind(&next_case);
-                    } else {
-                        try m.jumpCond(.eq, &t.label);
                     }
+                    try m.jump(&target.label);
+                    try m.bind(&next_case);
                 }
-                const def = readUleb32(body, &i) orelse return null;
-                if (def >= ctrl_len) return null;
-                const dt = &ctrl[ctrl_len - 1 - def];
-                if (dt.branch_arity != 0) return null;
-                if (dt.kind == .loop) {
+                const depth = readUleb32(body, &i) orelse return null;
+                if (depth >= ctrl_len) return null;
+                const target = &ctrl[ctrl_len - 1 - depth];
+                if (!(try emitBranchValues(&m, &stack, num_locals, sp, target.height, target.branch_arity))) return null;
+                if (target.kind == .loop) {
                     try emitExecutionPoll(&m, gpa, stack[0..sp], &epilogue, execution_poll_helper);
                 }
-                try m.jump(&dt.label);
-                // An unconditional multi-branch — the rest of the current
-                // frame is unreachable. Close it exactly as `br` does.
-                const cur = &ctrl[ctrl_len - 1];
-                if (cur.kind == .if_then or cur.kind == .if_else) return null;
-                dead_code.skipToFrameEnd(body, &i) orelse return null;
-                if (cur.kind == .block) try m.bind(&cur.label);
-                cur.label.deinit(gpa);
-                cur.else_label.deinit(gpa);
-                sp = cur.height + cur.result_arity;
-                var r: usize = cur.height;
-                while (r < cur.height + cur.result_arity) : (r += 1) {
-                    stack[r] = .{ .reg = regForDepth(r) };
+                try m.jump(&target.label);
+                _ = (try closeTerminatedArm(&m, gpa, body, &i, &stack, &sp, &ctrl, &ctrl_len)) orelse return null;
+            },
+            op_return => {
+                if (sp < ftype.results.len) return null;
+                try emitFunctionResults(&m, &stack, num_locals, sp - ftype.results.len, ftype.results);
+                try m.movImm64(.x0, trap_ok);
+                try m.jump(&epilogue);
+                if ((try closeTerminatedArm(&m, gpa, body, &i, &stack, &sp, &ctrl, &ctrl_len)) orelse return null) {
+                    sp = ftype.results.len;
+                    for (ftype.results, 0..) |rt, r| stack[r] = runtimeLoc(rt, r);
+                    break;
                 }
-                ctrl_len -= 1;
             },
             op_call => {
                 // §5.4.1 call — read the callee index and its signature,
@@ -3643,11 +3563,10 @@ fn compileAarch64(
                 const nresults: usize = callee.results.len;
                 const refresh_memory = moduleHasMemory(module);
                 if (refresh_memory and helpers.mem_view == null) return null;
-                // Increment 1: only scalar params/results travel through
-                // the cell buffer (the low 64 bits carry the value; an i32
-                // is zero-extended). A v128/ref operand degrades.
-                for (callee.params) |t| if (t != .i32 and t != .i64 and t != .f32 and t != .f64) return null;
-                for (callee.results) |t| if (t != .i32 and t != .i64 and t != .f32 and t != .f64) return null;
+                // References travel as complete Cells; SIMD call signatures
+                // remain outside this backend's call lowering.
+                for (callee.params) |t| if (!isCallValue(t)) return null;
+                for (callee.results) |t| if (!isCallValue(t)) return null;
                 const direct_self = directSelfCallEligible(func_index, fidx, func, ftype);
                 const static_callee = definedCallee(module, funcs, fidx);
                 // Operands live *below* the args (a call whose result feeds
@@ -3656,8 +3575,8 @@ fn compileAarch64(
                 // the caller-saved boundary scratch. `below` is how many,
                 // spilled into the frame alongside the boundary registers and
                 // reloaded after. Validation guarantees sp >= nparams; every
-                // live operand is a scalar (a v128/ref producer degraded
-                // upstream), so each fits one 8-byte slot.
+                // register operand fits one 8-byte slot. Wide operands stay
+                // in their depth-keyed Cells and need no native-stack spill.
                 if (sp < nparams) return null;
                 const below = sp - nparams;
                 // The post-call stack is the survivors plus the results; it
@@ -3711,17 +3630,6 @@ fn compileAarch64(
                 const spill_off: u15 = @intCast(bufcells * @sizeOf(Cell));
                 const op_spill_off: u15 = spill_off + 40;
 
-                // Materialize the args into their slot registers (a
-                // `.const_i32` arg becomes regForDepth(below+k); a `.reg` arg
-                // already is) before any boundary shuffle clobbers the
-                // scratch. Args are the top `nparams`: depth below..sp-1.
-                // Below-operands are handled separately — a constant one is
-                // never put in a register (see the spill below).
-                {
-                    var k: usize = 0;
-                    while (k < nparams) : (k += 1) _ = try materialize(&m, stack[below + k], below + k);
-                }
-
                 // Every native link must enforce the same stack-safety
                 // contract as `spasmCall` before reserving another native
                 // frame. x20 holds the per-entry cutoff passed by
@@ -3767,15 +3675,8 @@ fn compileAarch64(
                     }
                 }
 
-                // Stage each arg as a full cell: low 64 = the value
-                // (an i32 is zero-extended in its register), high 64 = 0.
-                // Arg k is the operand at depth below+k (the top `nparams`).
-                var k: usize = 0;
-                while (k < nparams) : (k += 1) {
-                    const cell_off: u15 = @intCast(k * @sizeOf(Cell));
-                    try m.emit(a64.strImm(regForDepth(below + k), .x6, cell_off));
-                    try m.emit(a64.strZeroImm(.x6, cell_off + 8));
-                }
+                // Stage full reference Cells; scalar Cells clear the high half.
+                try emitCallArguments(&m, &stack, num_locals, below, callee.params);
 
                 if (direct_self_link) {
                     // The callee reuses the staged Cell buffer for both its
@@ -3852,17 +3753,10 @@ fn compileAarch64(
                     try m.callAbs(.x16, @intFromPtr(helpers.mem_view.?));
                     try m.emit(a64.addRegSp(.x6, 0));
                 }
-                // Reload the results onto the operand bank *above* the
-                // survivors (low 64 bits per cell): result r lands at depth
-                // below+r. Then restore the spilled boundary registers, the
-                // survivors (regForDepth(0..below)), and release the frame.
-                var r: usize = 0;
-                while (r < nresults) : (r += 1) {
-                    const cell_off: u15 = @intCast(r * @sizeOf(Cell));
-                    try m.emit(a64.ldrImm(regForDepth(below + r), .x6, cell_off));
-                    stack[below + r] = .{ .reg = regForDepth(below + r) };
-                }
+                // Restore the locals base before copying reference results
+                // into the caller's scratch Cells above surviving operands.
                 try m.emit(a64.ldrImm(.x0, .x6, spill_off));
+                try emitCallResults(&m, &stack, num_locals, below, callee.results);
                 try m.emit(a64.ldrImm(.x1, .x6, spill_off + 8));
                 try m.emit(a64.ldrImm(.x2, .x6, spill_off + 16));
                 try m.emit(a64.ldrImm(.x3, .x6, spill_off + 24));
@@ -3889,14 +3783,15 @@ fn compileAarch64(
                 if (helpers.call_indirect == null) return null; // helper not wired
                 const type_idx = readUleb32(body, &i) orelse return null;
                 const table_idx = readUleb32(body, &i) orelse return null;
+                if (!tableIs32(module, table_idx)) return null;
                 if (type_idx >= module.types.len) return null;
                 const callee = &module.types[type_idx];
                 const nparams: usize = callee.params.len;
                 const nresults: usize = callee.results.len;
                 const refresh_memory = moduleHasMemory(module);
                 if (refresh_memory and helpers.mem_view == null) return null;
-                for (callee.params) |t| if (t != .i32 and t != .i64 and t != .f32 and t != .f64) return null;
-                for (callee.results) |t| if (t != .i32 and t != .i64 and t != .f32 and t != .f64) return null;
+                for (callee.params) |t| if (!isCallValue(t)) return null;
+                for (callee.results) |t| if (!isCallValue(t)) return null;
                 // Stack at entry: [below..., args..., index]. Validation
                 // guarantees sp >= 1 + nparams (index + args). The index is
                 // depth sp-1; the args are the next `nparams` down.
@@ -3913,15 +3808,10 @@ fn compileAarch64(
                 const raw_frame = @as(usize, bufcells) * @sizeOf(Cell) + 40 + below * 8;
                 const framebytes: u12 = @intCast((raw_frame + 15) & ~@as(usize, 15));
 
-                // Materialize the index (top) and the args into their home
-                // registers. `idx_reg` is regForDepth(idx_depth) (x9..x15),
+                // Materialize the index (top). `idx_reg` is x9..x15,
                 // never a boundary register, so the helper-arg setup below
                 // does not clobber it.
                 const idx_reg = try materialize(&m, stack[idx_depth], idx_depth);
-                {
-                    var k: usize = 0;
-                    while (k < nparams) : (k += 1) _ = try materialize(&m, stack[below + k], below + k);
-                }
 
                 try m.emit(a64.subSpImm(framebytes));
                 try m.emit(a64.addRegSp(.x6, 0));
@@ -3945,12 +3835,7 @@ fn compileAarch64(
                 }
 
                 // Stage each arg as a full cell (arg k at depth below+k).
-                var k: usize = 0;
-                while (k < nparams) : (k += 1) {
-                    const cell_off: u15 = @intCast(k * @sizeOf(Cell));
-                    try m.emit(a64.strImm(regForDepth(below + k), .x6, cell_off));
-                    try m.emit(a64.strZeroImm(.x6, cell_off + 8));
-                }
+                try emitCallArguments(&m, &stack, num_locals, below, callee.params);
 
                 // Helper ABI: x0 = instance (x19), x1 = type index, x2 =
                 // table index, x3 = element index (the popped top operand),
@@ -3989,13 +3874,8 @@ fn compileAarch64(
                     try m.callAbs(.x16, @intFromPtr(helpers.mem_view.?));
                     try m.emit(a64.addRegSp(.x6, 0));
                 }
-                var r: usize = 0;
-                while (r < nresults) : (r += 1) {
-                    const cell_off: u15 = @intCast(r * @sizeOf(Cell));
-                    try m.emit(a64.ldrImm(regForDepth(below + r), .x6, cell_off));
-                    stack[below + r] = .{ .reg = regForDepth(below + r) };
-                }
                 try m.emit(a64.ldrImm(.x0, .x6, spill_off));
+                try emitCallResults(&m, &stack, num_locals, below, callee.results);
                 try m.emit(a64.ldrImm(.x1, .x6, spill_off + 8));
                 try m.emit(a64.ldrImm(.x2, .x6, spill_off + 16));
                 try m.emit(a64.ldrImm(.x3, .x6, spill_off + 24));
@@ -4026,8 +3906,8 @@ fn compileAarch64(
                 if (sp != c.height + c.result_arity) return null;
                 var d: usize = c.height;
                 while (d < c.height + c.result_arity) : (d += 1) {
-                    const r = try materialize(&m, stack[d], d);
-                    stack[d] = .{ .reg = r };
+                    const loc = try canonicalize(&m, stack[d], d, num_locals);
+                    stack[d] = loc;
                 }
                 switch (c.kind) {
                     // A `block`/`if` `end` is a forward-branch merge —
@@ -4053,48 +3933,8 @@ fn compileAarch64(
 
     const results = ftype.results;
     if (sp != results.len) return null;
-    // A scalar result stores from the slot register's low bytes (an i32 is
-    // zero-extended in its register), high cell word cleared. §4.4 SIMD — a
-    // v128 result is the full 128-bit cell (both halves real), copied from
-    // the operand's depth-keyed slot. A reference result still degrades (no
-    // emittable producer puts a reference at a result slot today).
-    for (results) |rt| if (rt != .i32 and rt != .i64 and rt != .f64 and rt != .f32 and rt != .v128) return null;
-
-    // Materialize the residual stack into result cells. Wasm results
-    // map bottom-of-stack → results[0]; an i32 cell is the value
-    // zero-extended into the low 64 bits with the high 64 cleared.
-    try m.movImm64(.x17, 0); // reused zero for every scalar cell's high half
-    for (results, 0..) |_, ri| {
-        const cell_off: u15 = @intCast(ri * @sizeOf(Cell));
-        switch (stack[ri]) {
-            .const_i32 => |v| {
-                try m.movImm64(.x16, @as(u32, @bitCast(v)));
-                try m.emit(a64.strImm(.x16, .x1, cell_off));
-                try m.emit(a64.strImm(.x17, .x1, cell_off + 8)); // clear high half
-            },
-            .reg => |r| {
-                try m.emit(a64.strImm(r, .x1, cell_off));
-                try m.emit(a64.strImm(.x17, .x1, cell_off + 8)); // clear high half
-            },
-            // §4.4 SIMD — a v128 result lives in its depth-keyed cell (depth
-            // ri, since result ri maps to stack depth ri). Copy BOTH 64-bit
-            // halves slot→results — the high half is real here, NOT zero, so
-            // it is written from the slot, not from x17. x16 is the scratch.
-            .v128 => {
-                const src = refSlotOff(num_locals, ri);
-                try m.emit(a64.ldrImm(.x16, .x0, src));
-                try m.emit(a64.strImm(.x16, .x1, cell_off));
-                try m.emit(a64.ldrImm(.x16, .x0, src + 8));
-                try m.emit(a64.strImm(.x16, .x1, cell_off + 8));
-            },
-            // §5.4.2 — a reference result would need its full 128 bits in
-            // the result cell. The result-type guard above rejects a
-            // reference result type, so a reference Loc cannot reach a
-            // result slot; degrade defensively rather than truncate
-            // (a runtime `.ref`, or a static `.ref_null`/`.ref_func`).
-            .ref_null, .ref_func, .ref => return null,
-        }
-    }
+    for (results) |rt| if (!isCallValue(rt) and rt != .v128) return null;
+    try emitFunctionResults(&m, &stack, num_locals, 0, results);
     // Normal return: w0 = trap_ok; results are already written to x1.
     // x0 (the now-dead locals pointer) carries the status back. Fall
     // through into the shared epilogue, which restores the frame and
@@ -4290,24 +4130,6 @@ fn nativeLinkStackBytes(framebytes: u12) ?u12 {
     return std.math.add(u12, framebytes, native_entry_prologue_bytes) catch null;
 }
 
-/// Resolve a global's value type (§4.4.5/§4.4.6) by walking the global
-/// index space: imported globals first (`imp.desc.global.val`), then the
-/// module's own defined globals (`module.globals[local].type.val`).
-/// Returns null on an out-of-range index — the function then degrades.
-/// Used to keep a v128-typed global off the scalar `global.get`/`global.set`
-/// fast path (those carry only 64 bits, so a v128 must stay interpreted).
-fn globalValType(module: *const Module, idx: u32) ?ValType {
-    var seen: u32 = 0;
-    for (module.imports) |imp| {
-        if (imp.desc != .global) continue;
-        if (seen == idx) return imp.desc.global.val;
-        seen += 1;
-    }
-    const local = idx - seen;
-    if (local >= module.globals.len) return null;
-    return module.globals[local].type.val;
-}
-
 /// Place `loc`'s value into the register for stack `depth`, emitting a
 /// `movz`/`movk` sequence for a folded constant (a `reg` value is
 /// already in its slot register by the depth invariant). Returns the
@@ -4320,26 +4142,131 @@ fn materialize(m: *masm_mod.Masm, loc: Loc, depth: usize) CompileError!a64.Reg {
             try m.movImm64(reg, @as(u32, @bitCast(v)));
             return reg;
         },
-        // §5.4.2 — a reference is 128-bit; the 64-bit operand bank can't
-        // hold it. A `.ref_null` / `.ref_func` is statically known but still
-        // 128-bit; a `.ref` is a runtime reference living in its depth-keyed
-        // heap cell, not a register. None can be coerced into one GP slot
-        // register, so any op that would force a reference into a runtime
-        // register (a ref result, a ref call param, a ref-typed block merge,
-        // `select`/`local`/`table.set` on a ref) degrades the whole function
-        // to the interpreter via this error, which is always correct (the
-        // host is never aborted on a surprising shape — AGENTS.md robustness
-        // contract). The consumers that read a reference *without* needing it
-        // in a single register (`ref.is_null` folds `.ref_null`/`.ref_func`
-        // statically and reads a `.ref` slot directly) never call here.
-        //
-        // §4.4 SIMD — a `.v128` is 128-bit too; it lives in its depth-keyed
-        // cell, not a register, and can't be coerced into one GP slot. Any
-        // op that would force a v128 into a runtime register degrades here;
-        // the SIMD consumers that read the slot directly (`i32x4.add`, the
-        // store, a local copy) never call `materialize` on a `.v128`.
+        // Wide consumers use full-Cell paths, never a single GP register.
         .ref_null, .ref_func, .ref, .v128 => return error.UnsupportedOp,
     }
+}
+
+fn runtimeLoc(value_type: ValType, depth: usize) Loc {
+    return if (value_type.isRef()) .ref else if (value_type == .v128) .v128 else .{ .reg = regForDepth(depth) };
+}
+
+fn isCallValue(value_type: ValType) bool {
+    return value_type.isRef() or value_type == .i32 or value_type == .i64 or value_type == .f32 or value_type == .f64;
+}
+
+/// Copy a complete Cell without disturbing operand-bank or boundary registers.
+/// x16 is scratch; neither base may use it.
+fn emitCopyCell(m: *masm_mod.Masm, src: a64.Reg, src_off: u15, dst: a64.Reg, dst_off: u15) CompileError!void {
+    try m.emit(a64.ldrImm(.x16, src, src_off));
+    try m.emit(a64.strImm(.x16, dst, dst_off));
+    try m.emit(a64.ldrImm(.x16, src, src_off + 8));
+    try m.emit(a64.strImm(.x16, dst, dst_off + 8));
+}
+
+fn canonicalize(m: *masm_mod.Masm, loc: Loc, depth: usize, num_locals: usize) CompileError!Loc {
+    switch (loc) {
+        .ref_null, .ref_func, .ref, .v128 => {
+            try emitRefIntoSlot(m, loc, depth, num_locals);
+            return if (loc == .v128) .v128 else .ref;
+        },
+        else => {
+            const reg = try materialize(m, loc, depth);
+            return .{ .reg = reg };
+        },
+    }
+}
+
+/// Taken branches discard intervening operands and move their results down
+/// to the label's homes. Do not mutate the untaken path's abstract stack.
+fn emitBranchValues(m: *masm_mod.Masm, stack: []const Loc, num_locals: usize, sp: usize, height: usize, arity: u32) CompileError!bool {
+    if (sp < arity or height > sp - arity) return false;
+    const start = sp - arity;
+    for (0..arity) |r| {
+        const src = start + r;
+        const dst = height + r;
+        const loc = try canonicalize(m, stack[src], src, num_locals);
+        if (src == dst) continue;
+        switch (loc) {
+            .ref, .v128 => try emitCopyCell(m, .x0, refSlotOff(num_locals, src), .x0, refSlotOff(num_locals, dst)),
+            .reg => |reg| try m.emit(a64.movReg(regForDepth(dst), reg)),
+            else => return error.UnsupportedOp,
+        }
+    }
+    return true;
+}
+
+fn emitCallArguments(m: *masm_mod.Masm, stack: []const Loc, num_locals: usize, below: usize, params: []const ValType) CompileError!void {
+    for (params, 0..) |value_type, k| {
+        const depth = below + k;
+        const target: u15 = @intCast(k * @sizeOf(Cell));
+        if (value_type.isRef()) {
+            try emitRefIntoSlot(m, stack[depth], depth, num_locals);
+            try emitCopyCell(m, .x0, refSlotOff(num_locals, depth), .x6, target);
+        } else {
+            const reg = try materialize(m, stack[depth], depth);
+            try m.emit(a64.strImm(reg, .x6, target));
+            try m.emit(a64.strZeroImm(.x6, target + 8));
+        }
+    }
+}
+
+/// x0 must already be restored to the caller's locals; x6 is the staged buffer.
+fn emitCallResults(m: *masm_mod.Masm, stack: []Loc, num_locals: usize, below: usize, results: []const ValType) CompileError!void {
+    for (results, 0..) |value_type, r| {
+        const depth = below + r;
+        const source: u15 = @intCast(r * @sizeOf(Cell));
+        if (value_type.isRef()) {
+            try emitCopyCell(m, .x6, source, .x0, refSlotOff(num_locals, depth));
+        } else {
+            try m.emit(a64.ldrImm(regForDepth(depth), .x6, source));
+        }
+        stack[depth] = runtimeLoc(value_type, depth);
+    }
+}
+
+/// Results may alias the locals buffer, so copy from low to high Cell indices.
+fn emitFunctionResults(m: *masm_mod.Masm, stack: []const Loc, num_locals: usize, start: usize, results: []const ValType) CompileError!void {
+    for (results, 0..) |value_type, r| {
+        const depth = start + r;
+        const target: u15 = @intCast(r * @sizeOf(Cell));
+        if (value_type.isRef() or value_type == .v128) {
+            try emitRefIntoSlot(m, stack[depth], depth, num_locals);
+            try emitCopyCell(m, .x0, refSlotOff(num_locals, depth), .x1, target);
+        } else {
+            const reg = try materialize(m, stack[depth], depth);
+            try m.emit(a64.strImm(reg, .x1, target));
+            try m.emit(a64.strZeroImm(.x1, target + 8));
+        }
+    }
+}
+
+/// Return true at function end, false at a reachable else or frame merge.
+fn closeTerminatedArm(m: *masm_mod.Masm, gpa: std.mem.Allocator, body: []const u8, index: *usize, stack: []Loc, sp: *usize, ctrl: []Ctrl, ctrl_len: *usize) CompileError!?bool {
+    const boundary = dead_code.skipToFrameBoundary(body, index) orelse return null;
+    if (ctrl_len.* == 0) return if (boundary == .end) true else null;
+    const current = &ctrl[ctrl_len.* - 1];
+    if (boundary == .else_arm) {
+        if (current.kind != .if_then) return null;
+        try m.bind(&current.else_label);
+        current.kind = .if_else;
+        sp.* = current.height;
+        return false;
+    }
+    switch (current.kind) {
+        .block, .if_else => try m.bind(&current.label),
+        .loop => {},
+        .if_then => {
+            try m.bind(&current.label);
+            try m.bind(&current.else_label);
+        },
+    }
+    current.label.deinit(gpa);
+    current.else_label.deinit(gpa);
+    sp.* = current.height + current.result_arity;
+    if (current.result_type) |rt| stack[current.height] = runtimeLoc(rt, current.height);
+    ctrl_len.* -= 1;
+    return false;
 }
 
 /// Ensure the depth-keyed reference cell at `refSlotOff(num_locals, depth)`
@@ -4529,27 +4456,21 @@ fn emitTruncTrap(
     }
 }
 
-/// Parse a block type (§5.3.6) and return the block's result arity,
-/// advancing `i` past it. The empty type (`0x40`) carries nothing; a
-/// single `i32` value type carries one result. Any other value type,
-/// or a (positive sLEB128) type-index block — which can take params and
-/// return many — degrades the whole function to the interpreter by
-/// returning null, keeping this increment's merges single-i32 and
-/// param-free.
-fn readBlockArity(body: []const u8, i: *usize) ?u32 {
+const BlockResult = struct { arity: u32, value_type: ?ValType = null };
+
+/// Single-value block types include constructed references. Type-index
+/// blocks with parameters or multiple results still fall back transactionally.
+fn readBlockResult(body: []const u8, i: *usize) ?BlockResult {
     if (i.* >= body.len) return null;
-    const b = body[i.*];
-    switch (b) {
-        0x40 => {
-            i.* += 1;
-            return 0;
-        },
-        0x7f => {
-            i.* += 1;
-            return 1;
-        },
-        else => return null,
+    if (body[i.*] == 0x40) {
+        i.* += 1;
+        return .{ .arity = 0 };
     }
+    var reader: @import("reader.zig").Reader = .{ .bytes = body, .pos = i.* };
+    const value_type = @import("types.zig").readValType(&reader) catch return null;
+    if (!isCallValue(value_type)) return null;
+    i.* = reader.pos;
+    return .{ .arity = 1, .value_type = value_type };
 }
 
 /// Read a load/store memarg (§5.4.7): the align/flags uleb followed by the
@@ -4833,8 +4754,8 @@ test "spasm: x86_64 scalar select preserves full-width values" {
     }
 }
 
-test "spasm: x86_64 explicit return discards lower operands and dead code" {
-    if (comptime builtin.cpu.arch != .x86_64 or !supported) {
+test "spasm: explicit return discards lower operands and dead code" {
+    if (comptime !supported) {
         return error.SkipZigTest;
     }
     var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
@@ -4863,8 +4784,8 @@ test "spasm: x86_64 explicit return discards lower operands and dead code" {
     try testing.expectEqual(@as(u32, 42), @as(u32, @truncate(results[0])));
 }
 
-test "spasm: x86_64 nested return preserves reachable structured alternatives" {
-    if (comptime builtin.cpu.arch != .x86_64 or !supported) {
+test "spasm: nested return preserves reachable structured alternatives" {
+    if (comptime !supported) {
         return error.SkipZigTest;
     }
     var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
@@ -4961,8 +4882,8 @@ test "spasm: x86_64 nested return preserves reachable structured alternatives" {
     try testing.expectEqual(@as(u32, 11), @as(u32, @truncate(post_merge_results[0])));
 }
 
-test "spasm: x86_64 branches carry values while unwinding operands" {
-    if (comptime builtin.cpu.arch != .x86_64 or !supported) {
+test "spasm: branches carry values while unwinding operands" {
+    if (comptime !supported) {
         return error.SkipZigTest;
     }
     var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
@@ -5000,8 +4921,8 @@ test "spasm: x86_64 branches carry values while unwinding operands" {
     }
 }
 
-test "spasm: x86_64 br_table dispatches to distinct block exits" {
-    if (comptime builtin.cpu.arch != .x86_64 or !supported) {
+test "spasm: br_table dispatches to distinct block exits" {
+    if (comptime !supported) {
         return error.SkipZigTest;
     }
     var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);

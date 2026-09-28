@@ -2343,9 +2343,14 @@ and the per-builtin checklist; this section tracks status.
   The exact sweep reaches 120,469 native entries / 4,001 compiled functions,
   with 1,978 refusals (8 limits, 1,349 signatures, 473 bytecode, 148 opcode).
   The prior signature bucket split into 52 reference and 1,349 vector cases;
-  all remaining signature refusals are vectors. Remaining x86 reference
-  globals, native table64, AArch64 reference results/calls, SIMD and remaining
-  SIMD lane operations generally, and the
+  all remaining signature refusals are vectors. The reference-parity
+  follow-up adds globals on both architectures, AArch64 reference
+  results/calls/merges and explicit returns, and closes the reproduced
+  AArch64 table64 index-truncation bug with transactional fallback.
+  The exact score stays unchanged: 121,135 native entries / 4,098 compiled
+  functions on AArch64; 120,482 / 4,008 and 1,971 refusals on x86_64.
+  Native table64, x86 SIMD, remaining SIMD lane operations and call
+  signatures on AArch64, and the
   native-register/imported-call ABI remain next.
 
   The architecture for all three tiers — the shared codegen
