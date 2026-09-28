@@ -50,7 +50,9 @@ scalar globals and memory access, memory size/grow/fill/copy/init plus
 `data.drop`, and broad scalar structured control including nested returns and
 `unreachable`, alongside
 catchable numeric/memory/stack traps, Realm safe points, guarded self-links,
-and stable cross-function gates. Unsupported
+and stable cross-function gates. Reference parameters, results, locals,
+typed select, calls, and single-result branch merges preserve full Cells on
+x86_64. Unsupported
 functions retain transactional fallback to Sarcasm. Spasm's delivery state is
 tracked below. This document
 doubles as the design record
@@ -1368,6 +1370,24 @@ useful:
    signatures, 452 bytecode shapes, 139 opcodes), still with zero emission or
    install failures; AArch64 reaches 53,747 / 3,646 with one intentional
    bytecode refusal.
+   The 2026-09-28 x86 reference increment preserves both halves of a Cell
+   through parameters/results, local get/set/tee, typed select (including
+   constructed reference types), single-result blocks/loops/ifs, branches,
+   and explicit returns. Direct self-links, cold/hot stable gates, indirect
+   calls, host imports, and interpreter fallback use the same complete-value
+   transfer; declared reference locals start at all-ones null. Tests pin
+   cross-instance funcref identity, upper-half preservation, traps, and GC
+   across a JS host callback. A reproduced table64 index-truncation bug also
+   requires conservative fallback for table64 operations while the helper
+   ABI uses u32 indices. The exact sweep reaches 120,469 native entries
+   / 4,001 compiled functions with 1,978 refusals. Signature diagnostics split
+   the previous 1,401 into 52 reference and 1,349 vector cases; all remaining
+   signature refusals are vectors. This keeps the existing
+   [Liftoff](https://v8.dev/blog/liftoff) /
+   [Wizard-SPC](https://arxiv.org/abs/2305.13241) typed-stack approach and
+   follows [Core execution semantics](https://webassembly.github.io/spec/core/exec/instructions.html)
+   for value-preserving select, locals, branches, and calls. AArch64 reference
+   results/call signatures remain a separate coverage gap.
    The **per-function code cache**
    now ships (`spasmEntryFor`): each emittable function compiles once on
    its first Spasm-enabled invoke and the cached `EntryFn` runs every
@@ -1444,8 +1464,13 @@ useful:
    calls. `ref.null`, `ref.func`, and `ref.is_null` plus table
    get/set/grow/fill use full 128-bit depth-keyed Cells for runtime references;
    table size/copy/init and `elem.drop` use scalar helper ABIs.
-   Reference-typed signatures/locals/select, SIMD, and imported-call native
-   lowering remain transactional refusals.
+   The x86 backend also carries reference parameters/results/locals and typed
+   select through full 128-bit Cells. Single-result branch merges retain the
+   reference kind; reference call arguments/results use both halves of the
+   staged buffer, and native gates initialize declared reference locals to
+   null. Reference globals, table64 operations, SIMD, and other unsupported
+   instructions retain transactional fallback; a dedicated native-register
+   imported-call ABI is still deferred.
    Non-gated calls retain the checked helper and per-function Sarcasm fallback.
    Imports, cross-instance calls, overlarge frames, and bodies
    Spasm cannot compile keep the generic helper / `invoke` fallback. Operands

@@ -16,6 +16,7 @@ const CompiledFunc = @import("code.zig").CompiledFunc;
 const Module = @import("module.zig").Module;
 const FuncType = @import("types.zig").FuncType;
 const ValType = @import("types.zig").ValType;
+const Reader = @import("reader.zig").Reader;
 
 pub const operand_stack_capacity = 7;
 
@@ -46,6 +47,7 @@ pub const misc_subopcode_count: usize = 18;
 
 pub const Diagnostics = struct {
     stage: RefusalStage = .none,
+    signature_type: ?ValType = null,
     opcode: u8 = 0,
     has_opcode: bool = false,
     subopcode: u32 = 0,
@@ -289,6 +291,17 @@ const Loc = union(enum) {
     ref_func: u32,
     ref,
     runtime,
+
+    fn isRef(self: Loc) bool {
+        return switch (self) {
+            .ref_null, .ref_func, .ref => true,
+            else => false,
+        };
+    }
+
+    fn materialized(self: Loc) Loc {
+        return if (self.isRef()) .ref else .runtime;
+    }
 };
 
 const Ctrl = struct {
@@ -297,6 +310,7 @@ const Ctrl = struct {
     height: usize,
     branch_arity: u32,
     result_arity: u32,
+    result_loc: Loc = .runtime,
     kind: Kind,
 
     const Kind = enum { block, loop, if_then, if_else };
@@ -347,7 +361,7 @@ fn closeTerminatedArm(
     current.else_label.deinit(gpa);
     sp.* = current.height + current.result_arity;
     var result_depth = current.height;
-    while (result_depth < sp.*) : (result_depth += 1) stack[result_depth] = .runtime;
+    while (result_depth < sp.*) : (result_depth += 1) stack[result_depth] = current.result_loc;
     ctrl_len.* -= 1;
     return .continue_compilation;
 }
@@ -401,12 +415,11 @@ pub fn compile(
     const highest_slot = std.math.add(usize, num_locals, operand_stack_capacity) catch return refuse(config, .limits, 0);
     if (highest_slot > @as(usize, std.math.maxInt(i32)) / 16) return refuse(config, .limits, 0);
 
-    // Scalar Cells share the same low-64-bit representation at this boundary;
-    // floats cross as their raw IEEE-754 bits. Vector and reference signatures
-    // remain transactional refusals.
-    for (func.local_types) |local_type| if (!isScalar(local_type)) return refuse(config, .signature, 0);
-    for (ftype.params) |param_type| if (!isScalar(param_type)) return refuse(config, .signature, 0);
-    for (ftype.results) |result_type| if (!isScalar(result_type)) return refuse(config, .signature, 0);
+    // Numeric values use the low 64 bits; references preserve the complete
+    // Cell, including a funcref's defining instance in the upper half.
+    for (func.local_types) |local_type| if (!isSupportedValue(local_type)) return refuseSignature(config, local_type);
+    for (ftype.params) |param_type| if (!isSupportedValue(param_type)) return refuseSignature(config, param_type);
+    for (ftype.results) |result_type| if (!isSupportedValue(result_type)) return refuseSignature(config, result_type);
 
     var m = x64.Masm.init(gpa);
     defer m.deinit();
@@ -508,12 +521,12 @@ pub fn compile(
             },
             op_select, op_select_t => {
                 // §4.2.4: [v1, v2, condition] -> condition ? v1 : v2.
-                // Scalar Cells share one low-64-bit representation, so the
-                // same branch preserves i32/i64/f32/f64 payloads exactly.
+                var is_ref = false;
                 if (op == op_select_t) {
                     const type_count = readUleb32(body, &i) orelse return null;
-                    if (type_count != 1 or i >= body.len or !isScalarTypeByte(body[i])) return null;
-                    i += 1;
+                    if (type_count != 1) return null;
+                    const value_type = readSupportedValType(body, &i) orelse return null;
+                    is_ref = value_type.isRef();
                 }
                 if (sp < 3) return null;
                 const result_depth = sp - 3;
@@ -525,12 +538,15 @@ pub fn compile(
                 defer selected.deinit(gpa);
                 try m.load32Disp32(.r10, .r12, scratchOffset(num_locals, result_depth + 2));
                 try m.load64Disp32(.rax, .r12, scratchOffset(num_locals, result_depth));
+                if (is_ref) try m.load64Disp32(.rcx, .r12, scratchOffset(num_locals, result_depth) + 8);
                 try m.cmpReg32Imm32(.r10, 0);
                 try m.jumpCond(.not_equal, &selected);
                 try m.load64Disp32(.rax, .r12, scratchOffset(num_locals, result_depth + 1));
+                if (is_ref) try m.load64Disp32(.rcx, .r12, scratchOffset(num_locals, result_depth + 1) + 8);
                 try m.bind(&selected);
                 try m.store64Disp32(.r12, scratchOffset(num_locals, result_depth), .rax);
-                stack[result_depth] = .runtime;
+                if (is_ref) try m.store64Disp32(.r12, scratchOffset(num_locals, result_depth) + 8, .rcx);
+                stack[result_depth] = if (is_ref) .ref else .runtime;
                 sp -= 2;
             },
             op_ref_null => {
@@ -572,8 +588,8 @@ pub fn compile(
             op_call => {
                 const callee_index = readUleb32(body, &i) orelse return null;
                 const callee = calleeFuncType(module, callee_index) orelse return null;
-                for (callee.params) |param_type| if (!isScalar(param_type)) return null;
-                for (callee.results) |result_type| if (!isScalar(result_type)) return null;
+                for (callee.params) |param_type| if (!isSupportedValue(param_type)) return null;
+                for (callee.results) |result_type| if (!isSupportedValue(result_type)) return null;
 
                 const param_count = callee.params.len;
                 const result_count = callee.results.len;
@@ -606,20 +622,13 @@ pub fn compile(
                 try m.store64Disp32(.rsp, 0, .r11);
                 try m.store64Disp32(.rsp, 8, .rbx);
 
-                param_index = 0;
-                while (param_index < param_count) : (param_index += 1) {
-                    const depth = below + param_index;
-                    try m.load64Disp32(.rax, .r12, scratchOffset(num_locals, depth));
-                    try m.store64Disp32(.rsp, callBufferOffset(param_index), .rax);
-                    try m.movImm64(.rax, 0);
-                    try m.store64Disp32(.rsp, callBufferOffset(param_index) + 8, .rax);
-                }
+                try emitCallArguments(&m, num_locals, below, callee.params);
 
                 if (gate_address) |gate| {
                     const defined = defined_callee.?;
                     var local_index = defined.ftype.params.len;
                     while (local_index < defined.func.local_types.len) : (local_index += 1) {
-                        try m.movImm64(.rax, 0);
+                        try m.movImm64(.rax, if (defined.func.local_types[local_index].isRef()) std.math.maxInt(u64) else 0);
                         try m.store64Disp32(.rsp, callBufferOffset(local_index), .rax);
                         try m.store64Disp32(.rsp, callBufferOffset(local_index) + 8, .rax);
                     }
@@ -672,12 +681,7 @@ pub fn compile(
                     try m.load64Disp32(.r15, .rsp, 24);
                 }
 
-                var result_index: usize = 0;
-                while (result_index < result_count) : (result_index += 1) {
-                    try m.load64Disp32(.rax, .rsp, callBufferOffset(result_index));
-                    try m.store64Disp32(.r12, scratchOffset(num_locals, below + result_index), .rax);
-                    stack[below + result_index] = .runtime;
-                }
+                try emitCallResults(&m, &stack, num_locals, below, callee.results);
                 try m.addRegImm32(.rsp, call_frame_bytes);
                 sp = below + result_count;
             },
@@ -688,10 +692,11 @@ pub fn compile(
                 const helper = config.call_indirect_helper orelse return null;
                 const type_index = readUleb32(body, &i) orelse return null;
                 const table_index = readUleb32(body, &i) orelse return null;
+                if (!tableIs32(module, table_index)) return null;
                 if (type_index >= module.types.len) return null;
                 const callee = &module.types[type_index];
-                for (callee.params) |param_type| if (!isScalar(param_type)) return null;
-                for (callee.results) |result_type| if (!isScalar(result_type)) return null;
+                for (callee.params) |param_type| if (!isSupportedValue(param_type)) return null;
+                for (callee.results) |result_type| if (!isSupportedValue(result_type)) return null;
 
                 const param_count = callee.params.len;
                 const result_count = callee.results.len;
@@ -719,14 +724,7 @@ pub fn compile(
                 trap_stack_exhausted_used = true;
                 try m.subRegImm32(.rsp, call_frame_bytes);
 
-                param_index = 0;
-                while (param_index < param_count) : (param_index += 1) {
-                    const depth = below + param_index;
-                    try m.load64Disp32(.rax, .r12, scratchOffset(num_locals, depth));
-                    try m.store64Disp32(.rsp, callBufferOffset(param_index), .rax);
-                    try m.movImm64(.rax, 0);
-                    try m.store64Disp32(.rsp, callBufferOffset(param_index) + 8, .rax);
-                }
+                try emitCallArguments(&m, num_locals, below, callee.params);
 
                 // SysV's six register arguments fit this boundary exactly.
                 try m.load64Disp32(.rdi, .rsp, @intCast(call_frame_bytes));
@@ -756,12 +754,7 @@ pub fn compile(
                     try m.load64Disp32(.r15, .rsp, 24);
                 }
 
-                var result_index: usize = 0;
-                while (result_index < result_count) : (result_index += 1) {
-                    try m.load64Disp32(.rax, .rsp, callBufferOffset(result_index));
-                    try m.store64Disp32(.r12, scratchOffset(num_locals, below + result_index), .rax);
-                    stack[below + result_index] = .runtime;
-                }
+                try emitCallResults(&m, &stack, num_locals, below, callee.results);
                 try m.addRegImm32(.rsp, call_frame_bytes);
                 sp = below + result_count;
             },
@@ -771,10 +764,15 @@ pub fn compile(
                 switch (func.local_types[index]) {
                     .i32, .f32 => try m.load32Disp32(.rax, .r12, localOffset(index)),
                     .i64, .f64 => try m.load64Disp32(.rax, .r12, localOffset(index)),
-                    else => return null,
+                    else => {
+                        if (!func.local_types[index].isRef()) return null;
+                        try m.load64Disp32(.rax, .r12, localOffset(index));
+                        try m.load64Disp32(.rcx, .r12, localOffset(index) + 8);
+                        try m.store64Disp32(.r12, scratchOffset(num_locals, sp) + 8, .rcx);
+                    },
                 }
                 try m.store64Disp32(.r12, scratchOffset(num_locals, sp), .rax);
-                stack[sp] = .runtime;
+                stack[sp] = runtimeLoc(func.local_types[index]);
                 sp += 1;
             },
             op_local_set, op_local_tee => {
@@ -784,10 +782,14 @@ pub fn compile(
                 try materialize(&m, stack[depth], num_locals, depth);
                 try m.load64Disp32(.rax, .r12, scratchOffset(num_locals, depth));
                 try m.store64Disp32(.r12, localOffset(index), .rax);
+                if (func.local_types[index].isRef()) {
+                    try m.load64Disp32(.rax, .r12, scratchOffset(num_locals, depth) + 8);
+                    try m.store64Disp32(.r12, localOffset(index) + 8, .rax);
+                }
                 if (op == op_local_set) {
                     sp -= 1;
                 } else {
-                    stack[depth] = .runtime;
+                    stack[depth] = runtimeLoc(func.local_types[index]);
                 }
             },
             op_global_get => {
@@ -829,6 +831,7 @@ pub fn compile(
                 // the operand's home Cell and reports an OOB trap via eax.
                 const helper = config.table_get_helper orelse return null;
                 const table_index = readUleb32(body, &i) orelse return null;
+                if (!tableIs32(module, table_index)) return null;
                 if (sp == 0) return null;
                 const depth = sp - 1;
                 try materialize(&m, stack[depth], num_locals, depth);
@@ -854,6 +857,7 @@ pub fn compile(
                 // Cell, then let the shared helper bounds-check and store it.
                 const helper = config.table_set_helper orelse return null;
                 const table_index = readUleb32(body, &i) orelse return null;
+                if (!tableIs32(module, table_index)) return null;
                 if (sp < 2) return null;
                 const index_depth = sp - 2;
                 const ref_depth = sp - 1;
@@ -1962,6 +1966,7 @@ pub fn compile(
                     const helper = config.table_init_helper orelse return null;
                     const element_index = readUleb32(body, &i) orelse return null;
                     const table_index = readUleb32(body, &i) orelse return null;
+                    if (!tableIs32(module, table_index)) return null;
                     if (sp < 3) return null;
                     const below = sp - 3;
                     try materialize(&m, stack[below], num_locals, below);
@@ -1999,6 +2004,7 @@ pub fn compile(
                     const helper = config.table_copy_helper orelse return null;
                     const destination_table = readUleb32(body, &i) orelse return null;
                     const source_table = readUleb32(body, &i) orelse return null;
+                    if (!tableIs32(module, destination_table) or !tableIs32(module, source_table)) return null;
                     if (sp < 3) return null;
                     const below = sp - 3;
                     try materialize(&m, stack[below], num_locals, below);
@@ -2027,7 +2033,7 @@ pub fn compile(
                     // growth failure returns i32 -1 and never traps.
                     const helper = config.table_grow_helper orelse return null;
                     const table_index = readUleb32(body, &i) orelse return null;
-                    if (table_index >= module.tables.len or module.tables[table_index].limits.is_64) return null;
+                    if (!tableIs32(module, table_index)) return null;
                     if (sp < 2) return null;
                     const below = sp - 2;
                     if (below + 1 > operand_stack_capacity) return null;
@@ -2048,6 +2054,7 @@ pub fn compile(
                     // §4.4.x table.size: [] -> current element count.
                     const helper = config.table_size_helper orelse return null;
                     const table_index = readUleb32(body, &i) orelse return null;
+                    if (!tableIs32(module, table_index)) return null;
                     if (sp >= operand_stack_capacity) return null;
                     try m.load64Disp32(.rdi, .rsp, 0);
                     try m.movImm64(.rsi, table_index);
@@ -2061,6 +2068,7 @@ pub fn compile(
                     // §4.4.x table.fill: [index, reference, count] -> [].
                     const helper = config.table_fill_helper orelse return null;
                     const table_index = readUleb32(body, &i) orelse return null;
+                    if (!tableIs32(module, table_index)) return null;
                     if (sp < 3) return null;
                     const below = sp - 3;
                     try materialize(&m, stack[below], num_locals, below);
@@ -2087,15 +2095,15 @@ pub fn compile(
                 }
             },
             op_block => {
-                const arity = readBlockArity(body, &i) orelse return null;
+                const result = readBlockResult(body, &i) orelse return null;
                 if (ctrl_len >= max_ctrl_depth) return null;
-                ctrl[ctrl_len] = .{ .height = sp, .branch_arity = arity, .result_arity = arity, .kind = .block };
+                ctrl[ctrl_len] = .{ .height = sp, .branch_arity = result.arity, .result_arity = result.arity, .result_loc = result.loc, .kind = .block };
                 ctrl_len += 1;
             },
             op_loop => {
-                const arity = readBlockArity(body, &i) orelse return null;
+                const result = readBlockResult(body, &i) orelse return null;
                 if (ctrl_len >= max_ctrl_depth) return null;
-                ctrl[ctrl_len] = .{ .height = sp, .branch_arity = 0, .result_arity = arity, .kind = .loop };
+                ctrl[ctrl_len] = .{ .height = sp, .branch_arity = 0, .result_arity = result.arity, .result_loc = result.loc, .kind = .loop };
                 try m.bind(&ctrl[ctrl_len].label);
                 ctrl_len += 1;
             },
@@ -2103,12 +2111,12 @@ pub fn compile(
                 if (sp == 0) return null;
                 sp -= 1;
                 const condition = stack[sp];
-                const arity = readBlockArity(body, &i) orelse return null;
+                const result = readBlockResult(body, &i) orelse return null;
                 if (ctrl_len >= max_ctrl_depth) return null;
                 try materialize(&m, condition, num_locals, sp);
                 try m.load32Disp32(.rax, .r12, scratchOffset(num_locals, sp));
                 try m.cmpRegImm32(.rax, 0);
-                ctrl[ctrl_len] = .{ .height = sp, .branch_arity = arity, .result_arity = arity, .kind = .if_then };
+                ctrl[ctrl_len] = .{ .height = sp, .branch_arity = result.arity, .result_arity = result.arity, .result_loc = result.loc, .kind = .if_then };
                 try m.jumpCond(.equal, &ctrl[ctrl_len].else_label);
                 ctrl_len += 1;
             },
@@ -2144,7 +2152,7 @@ pub fn compile(
                 current.else_label.deinit(gpa);
                 sp = current.height + current.result_arity;
                 var result_depth = current.height;
-                while (result_depth < sp) : (result_depth += 1) stack[result_depth] = .runtime;
+                while (result_depth < sp) : (result_depth += 1) stack[result_depth] = current.result_loc;
                 ctrl_len -= 1;
             },
             op_br_if => {
@@ -2213,7 +2221,7 @@ pub fn compile(
                 current.else_label.deinit(gpa);
                 sp = current.height + current.result_arity;
                 var result_depth = current.height;
-                while (result_depth < sp) : (result_depth += 1) stack[result_depth] = .runtime;
+                while (result_depth < sp) : (result_depth += 1) stack[result_depth] = current.result_loc;
                 ctrl_len -= 1;
             },
             op_return => {
@@ -2223,7 +2231,7 @@ pub fn compile(
                 const result_arity: u32 = @intCast(ftype.results.len);
                 if (!(try emitBranchValues(&m, stack[0..], num_locals, sp, 0, result_arity))) return null;
                 var result_depth: usize = 0;
-                while (result_depth < result_arity) : (result_depth += 1) stack[result_depth] = .runtime;
+                while (result_depth < result_arity) : (result_depth += 1) stack[result_depth] = runtimeLoc(ftype.results[result_depth]);
                 try m.jump(&explicit_return);
                 switch ((try closeTerminatedArm(&m, gpa, body, &i, &stack, &sp, &ctrl, &ctrl_len)) orelse return null) {
                     .continue_compilation => {},
@@ -2263,7 +2271,7 @@ pub fn compile(
     for (ftype.results, 0..) |_, result_index| {
         try materialize(&m, stack[result_index], num_locals, result_index);
     }
-    try emitResultsFromCells(&m, num_locals, ftype.results.len);
+    try emitResultsFromCells(&m, num_locals, ftype.results);
     try m.movImm64(.rax, 0);
     try m.jump(&epilogue);
 
@@ -2271,7 +2279,7 @@ pub fn compile(
     // 0..result_count. Copy those runtime Cells directly: the fallthrough
     // path's final Loc metadata may describe different constants.
     try m.bind(&explicit_return);
-    try emitResultsFromCells(&m, num_locals, ftype.results.len);
+    try emitResultsFromCells(&m, num_locals, ftype.results);
     try m.movImm64(.rax, 0);
     try m.jump(&epilogue);
     if (trap_div0_used) {
@@ -2337,12 +2345,43 @@ fn emitEpilogue(m: *x64.Masm) Error!void {
     try m.ret();
 }
 
-fn emitResultsFromCells(m: *x64.Masm, num_locals: usize, result_count: usize) Error!void {
-    for (0..result_count) |result_index| {
+fn emitResultsFromCells(m: *x64.Masm, num_locals: usize, results: []const ValType) Error!void {
+    for (results, 0..) |value_type, result_index| {
         try m.load64Disp32(.rax, .r12, scratchOffset(num_locals, result_index));
         try m.store64Disp32(.r13, resultOffset(result_index), .rax);
-        try m.movImm64(.rcx, 0);
+        if (value_type.isRef())
+            try m.load64Disp32(.rcx, .r12, scratchOffset(num_locals, result_index) + 8)
+        else
+            try m.movImm64(.rcx, 0);
         try m.store64Disp32(.r13, resultOffset(result_index) + 8, .rcx);
+    }
+}
+
+fn emitCallArguments(m: *x64.Masm, num_locals: usize, below: usize, params: []const ValType) Error!void {
+    for (params, 0..) |value_type, index| {
+        const source = scratchOffset(num_locals, below + index);
+        const target = callBufferOffset(index);
+        try m.load64Disp32(.rax, .r12, source);
+        try m.store64Disp32(.rsp, target, .rax);
+        if (value_type.isRef())
+            try m.load64Disp32(.rax, .r12, source + 8)
+        else
+            try m.movImm64(.rax, 0);
+        try m.store64Disp32(.rsp, target + 8, .rax);
+    }
+}
+
+fn emitCallResults(m: *x64.Masm, stack: []Loc, num_locals: usize, below: usize, results: []const ValType) Error!void {
+    for (results, 0..) |value_type, index| {
+        const source = callBufferOffset(index);
+        const target = scratchOffset(num_locals, below + index);
+        try m.load64Disp32(.rax, .rsp, source);
+        try m.store64Disp32(.r12, target, .rax);
+        if (value_type.isRef()) {
+            try m.load64Disp32(.rax, .rsp, source + 8);
+            try m.store64Disp32(.r12, target + 8, .rax);
+        }
+        stack[below + index] = runtimeLoc(value_type);
     }
 }
 
@@ -2381,7 +2420,7 @@ fn materialize(m: *x64.Masm, loc: Loc, num_locals: usize, depth: usize) Error!vo
             try m.movImm64(.rax, @bitCast(value));
             try m.store64Disp32(.r12, scratchOffset(num_locals, depth), .rax);
         },
-        .ref_null, .ref_func, .ref => return error.UnsupportedOp,
+        .ref_null, .ref_func, .ref => try emitRefIntoSlot(m, loc, num_locals, depth),
     }
 }
 
@@ -2421,7 +2460,7 @@ fn materializeRange(
     if (end > stack.len) return false;
     while (depth < end) : (depth += 1) {
         try materialize(m, stack[depth], num_locals, depth);
-        stack[depth] = .runtime;
+        stack[depth] = stack[depth].materialized();
     }
     return true;
 }
@@ -2455,12 +2494,12 @@ fn emitBranchValues(
         if (source_depth == target_depth) continue;
         try m.load64Disp32(.rax, .r12, scratchOffset(num_locals, source_depth));
         try m.store64Disp32(.r12, scratchOffset(num_locals, target_depth), .rax);
+        if (stack[source_depth].isRef()) {
+            try m.load64Disp32(.rax, .r12, scratchOffset(num_locals, source_depth) + 8);
+            try m.store64Disp32(.r12, scratchOffset(num_locals, target_depth) + 8, .rax);
+        }
     }
     return true;
-}
-
-fn isScalarTypeByte(byte: u8) bool {
-    return byte == 0x7f or byte == 0x7e or byte == 0x7d or byte == 0x7c;
 }
 
 fn roundF32Bits(bits: u32, mode: u32) callconv(.c) u32 {
@@ -2878,8 +2917,36 @@ fn refuse(config: Config, stage: RefusalStage, opcode: u8) ?[]const u8 {
     return null;
 }
 
+fn refuseSignature(config: Config, value_type: ValType) ?[]const u8 {
+    _ = refuse(config, .signature, 0);
+    if (config.diagnostics) |diagnostics| diagnostics.signature_type = value_type;
+    return null;
+}
+
 fn isScalar(value_type: ValType) bool {
     return value_type == .i32 or value_type == .i64 or value_type == .f32 or value_type == .f64;
+}
+
+fn isSupportedValue(value_type: ValType) bool {
+    return isScalar(value_type) or value_type.isRef();
+}
+
+fn runtimeLoc(value_type: ValType) Loc {
+    return if (value_type.isRef()) .ref else .runtime;
+}
+
+/// The table helper ABI and generated index/result moves currently use u32.
+/// Table64 operations must fall back before any index can be truncated.
+fn tableIs32(module: *const Module, index: u32) bool {
+    var imported: u32 = 0;
+    for (module.imports) |import| {
+        if (import.desc != .table) continue;
+        if (index == imported) return !import.desc.table.limits.is_64;
+        imported += 1;
+    }
+    if (index < imported) return false;
+    const local: usize = index - imported;
+    return local < module.tables.len and !module.tables[local].limits.is_64;
 }
 
 /// Resolve the global index space (imports first, then definitions) without
@@ -3045,24 +3112,29 @@ fn callGateAddress(config: Config, callee: DefinedCallee) ?usize {
     _ = stub;
     const base = config.call_gates_base orelse return null;
     if (callee.local_index >= config.call_gates_len) return null;
-    for (callee.func.local_types) |local_type| if (!isScalar(local_type)) return null;
+    for (callee.func.local_types) |local_type| if (!isSupportedValue(local_type)) return null;
     const offset = std.math.mul(usize, callee.local_index, config.call_gate_stride) catch return null;
     return std.math.add(usize, base, offset) catch null;
 }
 
-fn readBlockArity(body: []const u8, index: *usize) ?u32 {
+fn readSupportedValType(body: []const u8, index: *usize) ?ValType {
+    var reader: Reader = .{ .bytes = body, .pos = index.* };
+    const value_type = @import("types.zig").readValType(&reader) catch return null;
+    if (!isSupportedValue(value_type)) return null;
+    index.* = reader.pos;
+    return value_type;
+}
+
+const BlockResult = struct { arity: u32, loc: Loc = .runtime };
+
+fn readBlockResult(body: []const u8, index: *usize) ?BlockResult {
     if (index.* >= body.len) return null;
-    return switch (body[index.*]) {
-        0x40 => blk: {
-            index.* += 1;
-            break :blk 0;
-        },
-        0x7f, 0x7e, 0x7d, 0x7c => blk: {
-            index.* += 1;
-            break :blk 1;
-        },
-        else => null,
-    };
+    if (body[index.*] == 0x40) {
+        index.* += 1;
+        return .{ .arity = 0 };
+    }
+    const value_type = readSupportedValType(body, index) orelse return null;
+    return .{ .arity = 1, .loc = runtimeLoc(value_type) };
 }
 
 fn readUleb32(body: []const u8, index: *usize) ?u32 {

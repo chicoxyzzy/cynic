@@ -5077,6 +5077,38 @@ test "spasm: x86_64 diagnostics distinguish emission OOM" {
     try testing.expectEqual(@as(u8, 0), diagnostics.opcode);
 }
 
+test "spasm: x86_64 diagnostics identify a refused vector signature" {
+    if (comptime builtin.cpu.arch != .x86_64 or !supported) return error.SkipZigTest;
+    var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
+    defer ca.deinit();
+    const func: CompiledFunc = .{
+        .type_index = 0,
+        .local_types = &.{.v128},
+        .body = &.{op_end},
+        .side_table = &.{},
+        .max_stack = 0,
+    };
+    const ftype: FuncType = .{ .params = &.{.v128}, .results = &.{} };
+    const module: Module = .{ .types = &.{ftype}, .funcs = &.{0} };
+    var diagnostics: CompileDiagnostics = .{};
+    try testing.expectEqual(null, try compileWithDiagnostics(
+        testing.allocator,
+        &ca,
+        &func,
+        &ftype,
+        &module,
+        &.{func},
+        0,
+        &.{},
+        null,
+        .{},
+        testExecutionPoll,
+        &diagnostics,
+    ));
+    try testing.expectEqual(RefusalStage.signature, diagnostics.stage);
+    try testing.expectEqual(ValType.v128, diagnostics.signature_type.?);
+}
+
 test "spasm: x86_64 diagnostics retain unsupported 0xfc subopcodes" {
     if (comptime builtin.cpu.arch != .x86_64 or !supported) {
         return error.SkipZigTest;

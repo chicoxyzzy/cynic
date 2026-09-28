@@ -514,6 +514,8 @@ pub const Instance = struct {
     /// The compact opcode table is populated only while diagnostics are on;
     /// production does not scan or mutate it.
     spasm_refusals: u32 = 0,
+    spasm_refused_reference_signatures: u32 = 0,
+    spasm_refused_vector_signatures: u32 = 0,
     spasm_last_refusal_stage: spasm.RefusalStage = .none,
     spasm_last_refused_opcode: u8 = 0,
     spasm_last_refused_subopcode: u32 = 0,
@@ -657,6 +659,10 @@ pub const Instance = struct {
 
         const stage_index = @intFromEnum(diagnostics.stage) - 1;
         self.spasm_refusal_stages[stage_index] +%= 1;
+        if (diagnostics.signature_type) |value_type| {
+            if (value_type.isRef()) self.spasm_refused_reference_signatures +%= 1;
+            if (value_type.isVec()) self.spasm_refused_vector_signatures +%= 1;
+        }
 
         if (diagnostics.has_subopcode and diagnostics.opcode == 0xfc) {
             if (diagnostics.subopcode < self.spasm_refused_misc_subopcodes.len) {
