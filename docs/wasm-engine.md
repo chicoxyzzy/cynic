@@ -547,17 +547,22 @@ the measured design space:
   types), single-result branches, and direct/indirect calls now preserve both
   halves throughout. Native call gates initialize reference locals to null;
   host calls and refused callees keep the checked helper boundary.
-  Reference globals, table64 operations (the helper ABI still uses u32
+  Reference globals now preserve full Cells on both targets; AArch64 also
+  supports reference call signatures, results, and single-result merges.
+  Table64 operations (the helper ABI still uses u32
   indices), SIMD, and other unsupported x86
   bodies refuse before
   code publication and run in Sarcasm.
   This is a coverage difference, not a semantic one: forced-Spasm sweeps on
   both architectures pass all 58,779 scored spec commands. The 2026-09-28
-  x86 sweep exercised 120,469 native entries / 4,001 compiled functions and
+  x86 sweep exercised 120,482 native entries / 4,008 compiled functions and
   recorded zero emission or install failures. Its scalar rounding fallback is
   deliberately helper-based on SSE2-only targets rather than assuming SSE4.1;
-  the remaining 1,978 refusals are vector signatures, unsupported bytecode
-  shapes/opcodes, and eight size limits. The memory64 closure retains u64
+  the remaining 1,971 refusals are vector signatures, unsupported bytecode
+  shapes/opcodes, and eight size limits. AArch64 reaches 121,135 entries /
+  4,098 compiled functions. Both targets reject native table64 compilation
+  before a wide index can reach a 32-bit helper; imported and defined tables
+  use the same module-index lookup. The memory64 closure retains u64
   memarg offsets, traps effective-address carry, and covers grow plus the bulk
   memory family without changing the exact pass set. CI pairs
   `--spasm` with `--require-spasm-entry`, and the focused x86 instance/cache,

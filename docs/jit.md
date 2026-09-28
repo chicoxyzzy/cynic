@@ -1386,8 +1386,21 @@ useful:
    [Liftoff](https://v8.dev/blog/liftoff) /
    [Wizard-SPC](https://arxiv.org/abs/2305.13241) typed-stack approach and
    follows [Core execution semantics](https://webassembly.github.io/spec/core/exec/instructions.html)
-   for value-preserving select, locals, branches, and calls. AArch64 reference
-   results/call signatures remain a separate coverage gap.
+   for value-preserving select, locals, branches, and calls.
+   The reference-parity follow-up adds reference globals on both targets and
+   AArch64 reference results/call signatures, single-result merges, and
+   explicit returns. Typed result homes preserve full Cells across branches,
+   while scalar operands retain their register homes. Imported/defined table
+   lookup is shared: the same above-2^32 truncation reproduced on AArch64, so
+   both backends now refuse table64 operations before code publication.
+   Tests cover all eight table helper paths, imported tables, cross-instance
+   funcrefs, aliased mixed-result buffers, and GC during native host calls.
+   The exact sweep reaches 121,135 native entries / 4,098 compiled functions
+   on AArch64 and 120,482 / 4,008 on x86_64. The latter records 1,971 refusals
+   (8 limits, 1,349 vector signatures, 445 bytecode shapes, 169 opcodes),
+   with no emission/install failures. AArch64 refusal diagnostics remain
+   incomplete; native-entry and compiled-function counts are the comparable
+   coverage signals.
    The **per-function code cache**
    now ships (`spasmEntryFor`): each emittable function compiles once on
    its first Spasm-enabled invoke and the cached `EntryFn` runs every
@@ -1464,12 +1477,12 @@ useful:
    calls. `ref.null`, `ref.func`, and `ref.is_null` plus table
    get/set/grow/fill use full 128-bit depth-keyed Cells for runtime references;
    table size/copy/init and `elem.drop` use scalar helper ABIs.
-   The x86 backend also carries reference parameters/results/locals and typed
+   Both backends carry reference parameters/results/locals/globals and typed
    select through full 128-bit Cells. Single-result branch merges retain the
    reference kind; reference call arguments/results use both halves of the
    staged buffer, and native gates initialize declared reference locals to
-   null. Reference globals, table64 operations, SIMD, and other unsupported
-   instructions retain transactional fallback; a dedicated native-register
+   null. Table64 operations, x86 SIMD, AArch64 SIMD call signatures, and other
+   unsupported instructions retain transactional fallback; a dedicated native-register
    imported-call ABI is still deferred.
    Non-gated calls retain the checked helper and per-function Sarcasm fallback.
    Imports, cross-instance calls, overlarge frames, and bodies

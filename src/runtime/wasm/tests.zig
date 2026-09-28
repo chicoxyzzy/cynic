@@ -2239,7 +2239,7 @@ test "wasm spasm: typed select picks a reference operand by the condition" {
 }
 
 test "wasm spasm: reference values preserve both halves through locals select and returns" {
-    if (comptime @import("builtin").cpu.arch != .x86_64 or !@import("spasm.zig").supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -2273,7 +2273,7 @@ test "wasm spasm: reference values preserve both halves through locals select an
 }
 
 test "wasm spasm: reference branch merges preserve complete cells" {
-    if (comptime @import("builtin").cpu.arch != .x86_64 or !@import("spasm.zig").supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -2308,8 +2308,38 @@ test "wasm spasm: reference branch merges preserve complete cells" {
     }
 }
 
+test "wasm spasm: reference loop results and survivors cross execution polls" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const bodies = [_][]const u8{
+        // Reference result produced after the final backedge.
+        &.{ 0x00, 0x03, 0x6f, 0x20, 0x01, 0x41, 0x01, 0x6b, 0x22, 0x01, 0x0d, 0x00, 0x20, 0x00, 0x0b, 0x0b },
+        // A reference stays live below the loop frame throughout every poll.
+        &.{ 0x00, 0x20, 0x00, 0x03, 0x40, 0x20, 0x01, 0x41, 0x01, 0x6b, 0x22, 0x01, 0x0d, 0x00, 0x0b, 0x0b },
+    };
+    for (bodies) |body| {
+        const bytes = try buildFunc(a, &.{ 0x6f, 0x7f }, &.{0x6f}, body, "loop");
+        const module = try wasm.decode(a, bytes);
+        var instance: interp.Instance = undefined;
+        try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+        defer instance.deinit();
+        instance.spasm_enabled = true;
+        var control: CountingExecutionControl = .{};
+        instance.execution_control = control.control();
+        const reference: u128 = 0x1234_5678_9abc_def0_ffff_ffff_ffff_ffff;
+        const results = try interp.invoke(&instance, testing.allocator, 0, &.{ reference, 3 });
+        defer testing.allocator.free(results);
+        try testing.expectEqual(reference, results[0]);
+        try testing.expectEqual(@as(u32, 3), control.polls);
+        try testing.expectEqual(@as(u32, 1), instance.spasm_compiles);
+        try testing.expectEqual(@as(u32, 1), instance.spasm_runs);
+    }
+}
+
 test "wasm spasm: reference calls preserve arguments results and null local defaults" {
-    if (comptime @import("builtin").cpu.arch != .x86_64 or !@import("spasm.zig").supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -2356,7 +2386,7 @@ test "wasm spasm: reference calls preserve arguments results and null local defa
 }
 
 test "wasm spasm: reference table roundtrip retains a foreign function instance" {
-    if (comptime @import("builtin").cpu.arch != .x86_64 or !@import("spasm.zig").supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -2400,7 +2430,7 @@ test "wasm spasm: reference table roundtrip retains a foreign function instance"
 }
 
 test "wasm spasm: reference host calls preserve live operands and propagate traps" {
-    if (comptime @import("builtin").cpu.arch != .x86_64 or !@import("spasm.zig").supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     const Host = struct {
         fn call(_: ?*anyopaque, args: []const u128, results: []u128) wasm.TrapError!void {
             if (args[0] == interp.REF_NULL) return error.Unreachable;
@@ -2432,7 +2462,7 @@ test "wasm spasm: reference host calls preserve live operands and propagate trap
 }
 
 test "wasm spasm: reference calls preserve values through interpreter fallback" {
-    if (comptime @import("builtin").cpu.arch != .x86_64 or !@import("spasm.zig").supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -2464,12 +2494,15 @@ test "wasm spasm: reference calls preserve values through interpreter fallback" 
     }
     try testing.expectError(error.NullReference, interp.invoke(&instance, testing.allocator, 1, &.{interp.REF_NULL}));
     try testing.expectEqual(@as(u32, 1), instance.spasm_compiles);
-    try testing.expectEqual(@as(u32, 1), instance.spasm_refusals);
-    try testing.expectEqual(@as(u8, 0xd4), instance.spasm_last_refused_opcode);
+    try testing.expect(instance.spasm_cache.?.slots[0] == .failed);
+    if (comptime @import("builtin").cpu.arch == .x86_64) {
+        try testing.expectEqual(@as(u32, 1), instance.spasm_refusals);
+        try testing.expectEqual(@as(u8, 0xd4), instance.spasm_last_refused_opcode);
+    }
 }
 
 test "wasm spasm: reference select and blocks decode constructed value types" {
-    if (comptime @import("builtin").cpu.arch != .x86_64 or !@import("spasm.zig").supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -2509,15 +2542,15 @@ test "wasm spasm: reference select and blocks decode constructed value types" {
 }
 
 test "wasm spasm: reference table64 access cannot truncate an i64 index" {
-    if (comptime @import("builtin").cpu.arch != .x86_64 or !@import("spasm.zig").supported) return error.SkipZigTest;
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     const bytes = try assemble(a, &.{
-        .{ .id = 1, .body = &.{ 0x01, 0x60, 0x01, 0x7e, 0x01, 0x6f } },
+        .{ .id = 1, .body = &.{ 0x01, 0x60, 0x01, 0x7e, 0x01, 0x7f } },
         .{ .id = 3, .body = &.{ 0x01, 0x00 } },
         .{ .id = 4, .body = &.{ 0x01, 0x6f, 0x04, 0x01 } },
-        .{ .id = 10, .body = &.{ 0x01, 0x06, 0x00, 0x20, 0x00, 0x25, 0x00, 0x0b } },
+        .{ .id = 10, .body = &.{ 0x01, 0x07, 0x00, 0x20, 0x00, 0x25, 0x00, 0xd1, 0x0b } },
     });
     const module = try wasm.decode(a, bytes);
     var instance: interp.Instance = undefined;
@@ -2528,7 +2561,206 @@ test "wasm spasm: reference table64 access cannot truncate an i64 index" {
     defer if (result) |values| testing.allocator.free(values) else |_| {};
     try testing.expectError(error.OutOfBoundsTableAccess, result);
     try testing.expectEqual(@as(u32, 0), instance.spasm_runs);
-    try testing.expectEqual(@as(u32, 1), instance.spasm_refusals);
+    try testing.expect(instance.spasm_cache.?.slots[0] == .failed);
+}
+
+test "wasm spasm: reference globals preserve imported and defined cells" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &.{ 0x01, 0x60, 0x01, 0x6f, 0x01, 0x6f } },
+        .{ .id = 2, .body = &.{ 0x01, 0x01, 'h', 0x01, 'g', 0x03, 0x6f, 0x01 } },
+        .{ .id = 3, .body = &.{ 0x01, 0x00 } },
+        .{ .id = 6, .body = &.{ 0x01, 0x6f, 0x01, 0xd0, 0x6f, 0x0b } },
+        .{
+            .id = 10,
+            .body = &.{
+                0x01, 0x0c, 0x00,
+                0x20, 0x00, 0x24, 0x00, // imported global = argument
+                0x23, 0x00, 0x24, 0x01, // defined global = imported global
+                0x23, 0x01, 0x0b,
+            },
+        },
+    });
+    const module = try wasm.decode(a, bytes);
+    var imported: interp.Global = .{ .value = interp.REF_NULL, .mutable = true };
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, &module, .{ .globals = &.{&imported} });
+    defer instance.deinit();
+    instance.spasm_enabled = true;
+    for ([_]u128{ 0x1234_5678_9abc_def0_ffff_ffff_ffff_ffff, interp.REF_NULL, 0 }) |reference| {
+        const before = instance.spasm_runs;
+        const results = try interp.invoke(&instance, testing.allocator, 0, &.{reference});
+        defer testing.allocator.free(results);
+        try testing.expectEqual(reference, results[0]);
+        try testing.expectEqual(reference, imported.value);
+        try testing.expectEqual(reference, instance.globals[1].value);
+        try testing.expect(instance.spasm_runs > before);
+    }
+    try testing.expectEqual(@as(u32, 0), instance.spasm_refusals);
+}
+
+test "wasm spasm: reference globals preserve null constants and foreign function identity" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &.{ 0x02, 0x60, 0x00, 0x01, 0x70, 0x60, 0x01, 0x70, 0x01, 0x70 } },
+        .{ .id = 3, .body = &.{ 0x03, 0x00, 0x01, 0x00 } },
+        .{ .id = 6, .body = &.{ 0x01, 0x70, 0x01, 0xd0, 0x70, 0x0b } },
+        .{ .id = 9, .body = &.{ 0x01, 0x03, 0x00, 0x01, 0x00 } },
+        .{ .id = 10, .body = &.{
+            0x03,
+            0x08,
+            0x00,
+            0xd2,
+            0x00,
+            0x24,
+            0x00,
+            0x23,
+            0x00,
+            0x0b,
+            0x08,
+            0x00,
+            0x20,
+            0x00,
+            0x24,
+            0x00,
+            0x23,
+            0x00,
+            0x0b,
+            0x08,
+            0x00,
+            0xd0,
+            0x70,
+            0x24,
+            0x00,
+            0x23,
+            0x00,
+            0x0b,
+        } },
+    });
+    const module = try wasm.decode(a, bytes);
+    var provider: interp.Instance = undefined;
+    try interp.instantiate(&provider, a, testing.allocator, &module, .{});
+    defer provider.deinit();
+    provider.spasm_enabled = true;
+    var consumer: interp.Instance = undefined;
+    try interp.instantiate(&consumer, a, testing.allocator, &module, .{});
+    defer consumer.deinit();
+    consumer.spasm_enabled = true;
+    const reference = try interp.invoke(&provider, testing.allocator, 0, &.{});
+    defer testing.allocator.free(reference);
+    try testing.expectEqual(interp.makeFuncRef(&provider, 0), reference[0]);
+    const copied = try interp.invoke(&consumer, testing.allocator, 1, reference);
+    defer testing.allocator.free(copied);
+    try testing.expectEqual(reference[0], copied[0]);
+    try testing.expectEqual(reference[0], consumer.globals[0].value);
+    const cleared = try interp.invoke(&consumer, testing.allocator, 2, &.{});
+    defer testing.allocator.free(cleared);
+    try testing.expectEqual(interp.REF_NULL, cleared[0]);
+    try testing.expectEqual(interp.REF_NULL, consumer.globals[0].value);
+    try testing.expectEqual(@as(u32, 1), provider.spasm_compiles);
+    try testing.expectEqual(@as(u32, 2), consumer.spasm_compiles);
+}
+
+test "wasm spasm: reference and scalar multi-results survive aliased call buffers" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const bytes = try assemble(a, &.{
+        .{ .id = 1, .body = &.{ 0x01, 0x60, 0x00, 0x03, 0x6f, 0x7e, 0x6f } },
+        .{ .id = 3, .body = &.{ 0x02, 0x00, 0x00 } },
+        .{ .id = 10, .body = &.{
+            0x02,
+            0x09,
+            0x00,
+            0xd0,
+            0x6f,
+            0x42,
+            0x2a,
+            0xd0,
+            0x6f,
+            0x0f,
+            0x0b,
+            0x04,
+            0x00,
+            0x10,
+            0x00,
+            0x0b,
+        } },
+    });
+    const module = try wasm.decode(a, bytes);
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true;
+    for (0..2) |_| {
+        const results = try interp.invoke(&instance, testing.allocator, 1, &.{});
+        defer testing.allocator.free(results);
+        try testing.expectEqualSlices(u128, &.{ interp.REF_NULL, 42, interp.REF_NULL }, results);
+    }
+    try testing.expectEqual(@as(u32, 2), instance.spasm_compiles);
+}
+
+test "wasm spasm: reference table64 helpers refuse defined and imported wide tables" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const table = [_]u8{ 0x01, 0x70, 0x04, 0x01 };
+    const provider_bytes = try assemble(a, &.{.{ .id = 4, .body = &table }});
+    const provider_module = try wasm.decode(a, provider_bytes);
+    var provider: interp.Instance = undefined;
+    try interp.instantiate(&provider, a, testing.allocator, &provider_module, .{});
+    defer provider.deinit();
+    const Case = struct { body: []const u8, traps: bool = true, trap: wasm.TrapError = error.OutOfBoundsTableAccess };
+    const cases = [_]Case{
+        .{ .body = &.{ 0x00, 0x20, 0x00, 0x25, 0x00, 0xd1, 0x0b } }, // get
+        .{ .body = &.{ 0x00, 0x20, 0x00, 0xd0, 0x70, 0x26, 0x00, 0x41, 0x00, 0x0b } }, // set
+        .{ .body = &.{ 0x00, 0x20, 0x00, 0xd0, 0x70, 0x42, 0x01, 0xfc, 0x11, 0x00, 0x41, 0x00, 0x0b } }, // fill
+        .{ .body = &.{ 0x00, 0x20, 0x00, 0x42, 0x00, 0x42, 0x01, 0xfc, 0x0e, 0x00, 0x00, 0x41, 0x00, 0x0b } }, // copy
+        .{ .body = &.{ 0x00, 0x20, 0x00, 0x41, 0x00, 0x41, 0x01, 0xfc, 0x0c, 0x00, 0x00, 0x41, 0x00, 0x0b } }, // init
+        .{ .body = &.{ 0x00, 0x20, 0x00, 0x11, 0x01, 0x00, 0x0b }, .trap = error.UndefinedElement }, // indirect call
+        .{ .body = &.{ 0x00, 0xd0, 0x70, 0x20, 0x00, 0xfc, 0x0f, 0x00, 0x42, 0x7f, 0x51, 0x0b }, .traps = false }, // grow
+        .{ .body = &.{ 0x00, 0xfc, 0x10, 0x00, 0xa7, 0x0b }, .traps = false }, // size
+    };
+    for ([_]bool{ false, true }) |imported| {
+        for (cases) |case| {
+            var code: List = .empty;
+            try uleb(a, &code, 1);
+            try uleb(a, &code, case.body.len);
+            try code.appendSlice(a, case.body);
+            const bytes = try assemble(a, &.{
+                .{ .id = 1, .body = &.{ 0x02, 0x60, 0x01, 0x7e, 0x01, 0x7f, 0x60, 0x00, 0x01, 0x7f } },
+                .{ .id = 2, .body = if (imported) &.{ 0x01, 0x01, 'h', 0x01, 't', 0x01, 0x70, 0x04, 0x01 } else &.{0x00} },
+                .{ .id = 3, .body = &.{ 0x01, 0x00 } },
+                .{ .id = 4, .body = if (imported) &.{0x00} else &table },
+                .{ .id = 9, .body = &.{ 0x01, 0x01, 0x00, 0x01, 0x00 } }, // passive elem segment
+                .{ .id = 10, .body = code.items },
+            });
+            const module = try wasm.decode(a, bytes);
+            var instance: interp.Instance = undefined;
+            try interp.instantiate(&instance, a, testing.allocator, &module, .{
+                .tables = if (imported) &.{provider.tables[0]} else &.{},
+            });
+            defer instance.deinit();
+            instance.spasm_enabled = true;
+            const result = interp.invoke(&instance, testing.allocator, 0, &.{0x1_0000_0000});
+            defer if (result) |values| testing.allocator.free(values) else |_| {};
+            if (case.traps) {
+                try testing.expectError(case.trap, result);
+            } else {
+                try testing.expectEqual(@as(u128, 1), (try result)[0]);
+            }
+            try testing.expectEqual(@as(u32, 0), instance.spasm_runs);
+            try testing.expect(instance.spasm_cache.?.slots[0] == .failed);
+        }
+    }
 }
 
 test "wasm spasm: table.set out of bounds raises a catchable trap" {
