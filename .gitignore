@@ -59,3 +59,6 @@ tools/bench/.remote.env
 # Raw per-run output from tools/bench/remote-bench.sh (head/base/cross
 # dirs + the rendered A/B report). Regenerated every run; never tracked.
 bench-results-remote/
+
+# WPT importer / supervisor bytecode caches.
+tools/wpt/__pycache__/

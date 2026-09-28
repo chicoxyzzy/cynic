@@ -13,7 +13,7 @@ the complete command reference stay in [AGENTS.md](../AGENTS.md).
 | How do the major components fit together? | [ARCHITECTURE.md](ARCHITECTURE.md) |
 | What has shipped and what remains? | [ROADMAP.md](ROADMAP.md) |
 | What engineering workflow should I follow? | [Engineering handbook](handbook/README.md) |
-| What are the current conformance scores? | [ECMAScript](../test262-results.md) and [WebAssembly](../wasm-results.md) results |
+| What are the current conformance scores? | [ECMAScript](../test262-results.md), [WebAssembly core](../wasm-results.md), and [WPT Wasm JS API](../wpt-results.md) results |
 | What are the current cross-engine measurements? | [bench-cross-results.md](../bench-cross-results.md) |
 
 Documents use four roles:
@@ -70,6 +70,7 @@ shape exists.
 | [Benchmarking](benchmarking.md) | Local and cross-engine measurement protocol |
 | [Fuzzing](fuzzing.md) | Fuzzilli setup, triage, and continuous-fuzzing gate |
 | [Differential fuzzing](fuzz-differential.md) | Native and external-oracle differential strategy |
+| [Web Platform Tests](wpt.md) | Pinned Wasm JavaScript API scope, runner, results, and regression gate |
 | [Fuzz carve-outs](fuzz-carveouts.md) | Machine-consumed ledger of intentional divergences |
 | [test262 gap audit](test262-gap-audit.md) | Classification of body-only, by-design failures |
 | [test262 upstream gaps](test262-upstream-gaps.md) | Fixture proposals for bugs not covered upstream |

@@ -236,6 +236,42 @@ jobs:
       - name: zig build wasm
         run: zig build wasm
 
+  wpt-wasm-jsapi:
+    name: WPT Wasm JavaScript API (scoped regression gate)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: build-and-test
+    steps:
+      - name: Audit egress (advisory)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411  # v2
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - name: Set up Zig
+        uses: xyzzylabs/setup-zig@ab632f9cc6f98d89d3b8f2c2e1577a929d0e70f3  # v1.0.4
+        with:
+          cache-key: wpt-wasm-jsapi
+
+      - name: Verify pinned WPT sources
+        run: python3 tools/wpt/import_corpus.py --verify
+
+      - name: Verify WPT runner and real-engine completion
+        run: zig build test-wpt
+
+      - name: Score WPT and protect every previously passing subtest
+        run: zig build wpt -- --quiet --baseline=tools/wpt/baseline.json --json-out=wpt-run.json
+
+      - name: Preserve complete WPT results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: wpt-wasm-jsapi-results
+          path: wpt-run.json
+          if-no-files-found: ignore
+
   wasm-testsuite:
     name: WASM spec testsuite (Sarcasm + x86_64 Spasm)
     runs-on: ubuntu-latest

@@ -1,0 +1,1836 @@
+{
+  "schema_version": 1,
+  "upstream": {
+    "repository": "https://github.com/web-platform-tests/wpt",
+    "revision": "9ee707c850996c8d124809570c3ff855d67301b9"
+  },
+  "files": {
+    "LICENSE.md": {
+      "sha256": "5fac07febb0e2a97fb0d7b0def149ec08b642e1ba4b9c345283ab1cbd2af6570",
+      "size": 1500
+    },
+    "resources/testharness.js": {
+      "sha256": "7a108d7cfa98ac413ddb38f82fd509fb2037dfcc25ccf466567520cbb6bdf1fa",
+      "size": 198420
+    },
+    "wasm/jsapi/META.yml": {
+      "sha256": "314ae864c94dfa68860de2f1cf769b39d9005a6a38eb9b9c301c75bba3b278fa",
+      "size": 49
+    },
+    "wasm/jsapi/WEB_FEATURES.yml": {
+      "sha256": "231f1a3ab4f07501a2d3507880be96af3f4abd75f240b45c5a49b31f74e0c494",
+      "size": 21
+    },
+    "wasm/jsapi/assertions.js": {
+      "sha256": "797868004d4d224eb015c9619255aaa6de25c381c20896d55550b901a5102e8a",
+      "size": 5464
+    },
+    "wasm/jsapi/bad-imports.js": {
+      "sha256": "4ced6177bbadcc5e5fa34fab989bcf4f5bb041a5bb1473922959b3ed4f459de5",
+      "size": 5410
+    },
+    "wasm/jsapi/constructor/WEB_FEATURES.yml": {
+      "sha256": "23c4535ea17ff90f46993a87f8c5e0b6bf0e9155eb62e38e022f0aaf024b27e0",
+      "size": 62
+    },
+    "wasm/jsapi/constructor/compile.any.js": {
+      "sha256": "6aff3892f95aff5bd1a159f833905bc03e49ba27e90c789e973ea9ef9f1b423f",
+      "size": 2332
+    },
+    "wasm/jsapi/constructor/instantiate-bad-imports.any.js": {
+      "sha256": "fcc2e9252f80e673dd43281048d1f18fbceb347d49ea264fd2b457dccc63c6d7",
+      "size": 844
+    },
+    "wasm/jsapi/constructor/instantiate.any.js": {
+      "sha256": "56f3a2cc68761d87015248347bc80c7f19c5a031a4b5d39197bd620f1dad909f",
+      "size": 4201
+    },
+    "wasm/jsapi/constructor/multi-value.any.js": {
+      "sha256": "9dfbc86b6d862a3c4de9e7348d44d9273d26f095b9a224e6e0d859b3ad7f82c5",
+      "size": 4164
+    },
+    "wasm/jsapi/constructor/toStringTag.any.js": {
+      "sha256": "ff68060329e0736fbf6e9019fc1e2d11db5ceda00d26721bd7b4009275801c9f",
+      "size": 1941
+    },
+    "wasm/jsapi/constructor/validate.any.js": {
+      "sha256": "2ec5e14635b3ac3bf90699d4cda676a451de67a2167fa19aa0e08044f35678ee",
+      "size": 2586
+    },
+    "wasm/jsapi/error-interfaces-no-symbol-tostringtag.js": {
+      "sha256": "d6d856597b02459eb90ac48ee5c696392a1c52505dc21e5bf368db67f30906e7",
+      "size": 405
+    },
+    "wasm/jsapi/esm-integration/WEB_FEATURES.yml": {
+      "sha256": "4ce8dc2bd2d856441c4631d65de3316f0d82bb056ef9d3198a91c3f8cdd8a6a5",
+      "size": 276
+    },
+    "wasm/jsapi/esm-integration/exports.tentative.any.js": {
+      "sha256": "a13c1054b2f5977321d00128ba8c6bbd269d7e66a2ef24c2b2f5339641308d5a",
+      "size": 1017
+    },
+    "wasm/jsapi/esm-integration/global-exports-live-bindings.tentative.any.js": {
+      "sha256": "322e5a927f90080f00fc39cf91b39e0af78c6e2cf0907723d3c6ee5e05eab918",
+      "size": 1807
+    },
+    "wasm/jsapi/esm-integration/global-exports.tentative.any.js": {
+      "sha256": "7685793f2170ccd2474d9c643764bf81abdce0e0c16f95417bf3ee78bbe38890",
+      "size": 5079
+    },
+    "wasm/jsapi/esm-integration/js-wasm-cycle.tentative.any.js": {
+      "sha256": "fcca8ff2440d0bc615559bd929ab84682858000fe0dd8270727f007508119e99",
+      "size": 234
+    },
+    "wasm/jsapi/esm-integration/mutable-global-sharing.tentative.any.js": {
+      "sha256": "ce33b1a1dcd524278566109d4e75ec31254a3cb50bf91a6e267196125ce9bbd3",
+      "size": 3142
+    },
+    "wasm/jsapi/esm-integration/namespace-instance.tentative.any.js": {
+      "sha256": "dc52341865e67ababcf6603c33c25b96cfb02d8a27f4dbc1ad1257a2962e78dd",
+      "size": 2465
+    },
+    "wasm/jsapi/esm-integration/reserved-import-names.tentative.any.js": {
+      "sha256": "806ef0953e6dd97a35db8fce5c05f907d731c283ce6615b4f3395178c4288331",
+      "size": 1194
+    },
+    "wasm/jsapi/esm-integration/resolve-export.tentative.any.js": {
+      "sha256": "f7682a166923fa73132b67fe4c6d883fe9ed9e3a8275b2c0866f3e903df0dc7c",
+      "size": 236
+    },
+    "wasm/jsapi/esm-integration/resources/dep.wasm": {
+      "sha256": "d6b573e58c84eb3c0b9b9d005c953f6e60403687a35016eefdc038e682befbdc",
+      "size": 529
+    },
+    "wasm/jsapi/esm-integration/resources/exports.wasm": {
+      "sha256": "ff7b8e735b3cc7ca50d31a4f383287c35cf92ebf6cdce61bc49acb20d7fad12a",
+      "size": 226
+    },
+    "wasm/jsapi/esm-integration/resources/globals.js": {
+      "sha256": "c4dceacf8ee73a79e2b785ed00819b8f32785e93c4f498f49f46e2244d1d3099",
+      "size": 817
+    },
+    "wasm/jsapi/esm-integration/resources/globals.wasm": {
+      "sha256": "f156605f4e159af2ed7915e67f74f0494b9590a50374cc80a1b7b5855d256d9d",
+      "size": 2973
+    },
+    "wasm/jsapi/esm-integration/resources/invalid-export-name-wasm-js.wasm": {
+      "sha256": "58fd23c94fab27de34d0e3656258882bf457ee3c1c4a699424e6220ef5a31776",
+      "size": 64
+    },
+    "wasm/jsapi/esm-integration/resources/invalid-export-name.wasm": {
+      "sha256": "749bce1bf70b890b96f9ee03ae2d8049e6cf368028d386209ee5385fc9e5c3e1",
+      "size": 61
+    },
+    "wasm/jsapi/esm-integration/resources/invalid-import-module.wasm": {
+      "sha256": "8c8f7842514764b9e5bd6e10da69a0cb88cf3a27d5bf642963b355c883e677bd",
+      "size": 94
+    },
+    "wasm/jsapi/esm-integration/resources/invalid-import-name-wasm-js.wasm": {
+      "sha256": "860dfb4eb46d200f446bfd72f631fde2cd6839a05ba62ba5406c8f2ff63addbf",
+      "size": 94
+    },
+    "wasm/jsapi/esm-integration/resources/invalid-import-name.wasm": {
+      "sha256": "53c68511708b8f68a6d82755cb6c0bf17fb047581493304dc3bd23d8508815a1",
+      "size": 91
+    },
+    "wasm/jsapi/esm-integration/resources/js-string-builtins.wasm": {
+      "sha256": "d3180e970bf70c9809adce7f8d31b855019fdd389f731d7be3fefa78acafc7be",
+      "size": 401
+    },
+    "wasm/jsapi/esm-integration/resources/js-string-constants.wasm": {
+      "sha256": "bef5edd202d243e15d2f95e6475c4094bedd867a31b6110a1c92c4debbc7a0fd",
+      "size": 217
+    },
+    "wasm/jsapi/esm-integration/resources/js-string-constants.wat": {
+      "sha256": "41c12bfad7add32f38ca5175075ffb102be71e90ba940db49531d776fdecf777",
+      "size": 450
+    },
+    "wasm/jsapi/esm-integration/resources/js-wasm-cycle.js": {
+      "sha256": "558c533731991556758388164961c420859a41804e28e1864b28c8449e542f63",
+      "size": 474
+    },
+    "wasm/jsapi/esm-integration/resources/js-wasm-cycle.wasm": {
+      "sha256": "0bdcf98331b5203a4ab38d40f3750491a93831206ee7cacd58adc02aefe75e8a",
+      "size": 101
+    },
+    "wasm/jsapi/esm-integration/resources/log.js": {
+      "sha256": "ce2e9b9526aec72f1f611d8ef8442d317f68e0c8dc0f40151fd073452315d200",
+      "size": 52
+    },
+    "wasm/jsapi/esm-integration/resources/mutable-global-export.wasm": {
+      "sha256": "d28e55dc7159d5922dc5de9629d1c3aaa460556c851c2173baebc14bf843a0cb",
+      "size": 378
+    },
+    "wasm/jsapi/esm-integration/resources/mutable-global-reexport.wasm": {
+      "sha256": "ac9b22cdd33263bd016e96e17f972ec8eaedb43cede0b57f6dc03df242075fd8",
+      "size": 428
+    },
+    "wasm/jsapi/esm-integration/resources/resolve-export.js": {
+      "sha256": "44a4eac8309bf9e831ab510328014d2345dd6e9db83308f05c086dfdadc743f1",
+      "size": 43
+    },
+    "wasm/jsapi/esm-integration/resources/resolve-export.wasm": {
+      "sha256": "93a44bbb96c751218e4c00d479e4c14358122a389acca16205b1e4d0dc5f9476",
+      "size": 8
+    },
+    "wasm/jsapi/esm-integration/resources/source-phase-identity.js": {
+      "sha256": "e303e2ae043b8e3e34bbfb630ab6b2b9bee306efa06560328d8d7f9ae3f4e364",
+      "size": 199
+    },
+    "wasm/jsapi/esm-integration/resources/wasm-export-to-wasm.wasm": {
+      "sha256": "c8d874a9c9e8d29aeb7529b5403b93dfd63154e9a8b7f5b48a4fbab8fbb3f8be",
+      "size": 45
+    },
+    "wasm/jsapi/esm-integration/resources/wasm-import-from-wasm.wasm": {
+      "sha256": "4aaea92e4595103c90122b38e1e5761bb6f24c6b8dc0e361810f20ccb17d0264",
+      "size": 75
+    },
+    "wasm/jsapi/esm-integration/source-phase-string-builtins.tentative.any.js": {
+      "sha256": "6add6e46fdacd8e6c6e19315b519171d82ec8335804f9fce6665d62d50e82ecf",
+      "size": 1588
+    },
+    "wasm/jsapi/esm-integration/source-phase-string-constants.tentative.any.js": {
+      "sha256": "261c96c0c47096e30e868f23a0075b65094367e3292ba7949b4891666425a521",
+      "size": 1355
+    },
+    "wasm/jsapi/esm-integration/source-phase.tentative.any.js": {
+      "sha256": "d9e39a2e81ea726d09d0df8aa1daa9e97582ebf6c7b9158fa2a6d4da9a9f3a5e",
+      "size": 1421
+    },
+    "wasm/jsapi/esm-integration/string-builtins.tentative.any.js": {
+      "sha256": "ec9e099fa916f6d72985eebd4b8f43e71a915552a7f0572928a4d51e72a3b238",
+      "size": 582
+    },
+    "wasm/jsapi/esm-integration/string-constants.tentative.any.js": {
+      "sha256": "2aec43f0ea92b241dc350c0355225d4bd20f324de1f59095fb15c150d429a797",
+      "size": 419
+    },
+    "wasm/jsapi/esm-integration/v128-tdz.tentative.any.js": {
+      "sha256": "266e58662c4b843a08157656e0cace6765e6aa4c8a9476ef5fc3b60c034dec48",
+      "size": 451
+    },
+    "wasm/jsapi/esm-integration/wasm-import-wasm-export.tentative.any.js": {
+      "sha256": "2c9555af08b95ff1a4d225373362519a001d05e0c69fffb071e6bac66e0bc825",
+      "size": 410
+    },
+    "wasm/jsapi/exception/WEB_FEATURES.yml": {
+      "sha256": "61e3dafb31349f6408c84457e8381b6855c433380cd48ff51535bfede42d05f6",
+      "size": 41
+    },
+    "wasm/jsapi/exception/basic.tentative.any.js": {
+      "sha256": "b619232e5cb32423e254fe93518c1dbcdf332a036b09e02e23fdc4cec2ff78ec",
+      "size": 3884
+    },
+    "wasm/jsapi/exception/constructor.tentative.any.js": {
+      "sha256": "4afc53050396988b389053e32990126da61c11c8c4ee8302d4a83b5fc32b85bd",
+      "size": 1374
+    },
+    "wasm/jsapi/exception/getArg.tentative.any.js": {
+      "sha256": "3f8d69fa896bfb0c07ef6df271a58bd37936edc4d8a2e4198e7e30281762a966",
+      "size": 1541
+    },
+    "wasm/jsapi/exception/identity.tentative.any.js": {
+      "sha256": "98144ed5a9680aa6cd7e848de6a40808aa6fc1e14095d6cfebfacea62a3e62b4",
+      "size": 1700
+    },
+    "wasm/jsapi/exception/is.tentative.any.js": {
+      "sha256": "d5ac026ebb36c2375cc9d2136795582a8cc7b7f4b5b25e1ce7a133cecca2ac0a",
+      "size": 865
+    },
+    "wasm/jsapi/exception/toString.tentative.any.js": {
+      "sha256": "0dcec5d5476b5f73a2f924bdd4415f4a89498717aa1da34d73a3a021c1f077cf",
+      "size": 825
+    },
+    "wasm/jsapi/function/call.tentative.any.js": {
+      "sha256": "803bc34a54c4a170e28fcd861f3328e86097019b05b4e783dfcbb0c41c09b8cf",
+      "size": 498
+    },
+    "wasm/jsapi/function/constructor.tentative.any.js": {
+      "sha256": "3a7e6c15f38b16386a814c6ac3b2409287d357c98b4e9ea42d148767c571661d",
+      "size": 2865
+    },
+    "wasm/jsapi/function/table.tentative.any.js": {
+      "sha256": "a4fe2cec8ed6b15605a4d64a3551f6e9780b9020331629f80421527582781bcd",
+      "size": 1143
+    },
+    "wasm/jsapi/function/type.tentative.any.js": {
+      "sha256": "acf53ad1f1eea0ed8416244ba70281507e9c263c3bec4eb62229935daf63b6cf",
+      "size": 947
+    },
+    "wasm/jsapi/functions/WEB_FEATURES.yml": {
+      "sha256": "f7c5d2f365c7c0efeac62ccfb9a9c65c53239d2890b54194679218f89e8eb0ee",
+      "size": 22
+    },
+    "wasm/jsapi/functions/entry-different-function-realm.html": {
+      "sha256": "2da119c453dcab1442b3559770b94a4551c40d9a70520f7f06b4c2640bc1c11e",
+      "size": 1683
+    },
+    "wasm/jsapi/functions/entry.html": {
+      "sha256": "1de0cb34fc4947c9c0d332b466f4c6bd4fd6cb988a6c2ef29ce961183d2f4bcc",
+      "size": 1374
+    },
+    "wasm/jsapi/functions/helper.js": {
+      "sha256": "8e9fbdd40a5d47e79106334624e8e96fc8748e6875326b942477b6ec3d1a9fd2",
+      "size": 303
+    },
+    "wasm/jsapi/functions/incumbent.html": {
+      "sha256": "7de2a3258569b7d5633f4a08eb7f376357bfcca05f7c48319202d9f0fa8fe567",
+      "size": 1437
+    },
+    "wasm/jsapi/functions/resources/README.md": {
+      "sha256": "1211602b16af34a1e9d3a768d25599c106b2736674150638a895a2298c5f2303",
+      "size": 487
+    },
+    "wasm/jsapi/functions/resources/current/current.html": {
+      "sha256": "f23008ae121fe7aebb7aa08fe127f42c07aad77ff9f695ed35445343c2942d18",
+      "size": 90
+    },
+    "wasm/jsapi/functions/resources/current/resources/window-to-open.html": {
+      "sha256": "e749a2828d8f4f18ea72cb194fbcfbe655faf4296bf429543d514a59935ea607",
+      "size": 118
+    },
+    "wasm/jsapi/functions/resources/entry-incumbent.html": {
+      "sha256": "282bb779eab39c1f60e5f501eaac360195c32a7b7f41f7ebd4038452ca203092",
+      "size": 442
+    },
+    "wasm/jsapi/functions/resources/function/function.html": {
+      "sha256": "3f798bd5d908653cd9631a42159950d03d5171b4719e0ac05a2bf494870c7ae5",
+      "size": 102
+    },
+    "wasm/jsapi/functions/resources/function/resources/window-to-open.html": {
+      "sha256": "4827b248f51ed408d4ed7e33c816c4c09cc4f7423c770bb8f17d8d09b6bd1d38",
+      "size": 121
+    },
+    "wasm/jsapi/functions/resources/incumbent-incumbent.html": {
+      "sha256": "b9a458790bd28760ac4f87b0aa5e37faa5a1df5b45f4f32616c7df5481be3bfc",
+      "size": 900
+    },
+    "wasm/jsapi/functions/resources/relevant/relevant.html": {
+      "sha256": "2ff468af73177eceb5f1f427c54f319f3e3454a2743ce63f6e556b6d5444571c",
+      "size": 396
+    },
+    "wasm/jsapi/functions/resources/relevant/resources/window-to-open.html": {
+      "sha256": "e7603cd39ad729ce217de53e36a92e7dc0e37565f02cd9e96356d67c106ead66",
+      "size": 119
+    },
+    "wasm/jsapi/functions/resources/resources/window-to-open.html": {
+      "sha256": "d81e56286695166cd77cb477ac32a55cc9ecda15a6b4c16a21e72b6e270042e4",
+      "size": 120
+    },
+    "wasm/jsapi/functions/resources/window-to-open.html": {
+      "sha256": "f6eb255a0434e777a2517b6e44134527e59f8ae7330ec599249dbe818dd211ba",
+      "size": 116
+    },
+    "wasm/jsapi/gc/casts.tentative.any.js": {
+      "sha256": "b478d277171f7d76c4080f110b3d94a46bfa32aa980bacd17565c8004273ee00",
+      "size": 15571
+    },
+    "wasm/jsapi/gc/exported-object.tentative.any.js": {
+      "sha256": "cbc959718b4faebba8117955bab4c52a9f079e028c668d614c48cf45852a4c5b",
+      "size": 6379
+    },
+    "wasm/jsapi/gc/i31.tentative.any.js": {
+      "sha256": "5a3de742282bb609f5fd65586e405d738d214dd37c2538beca58db34d8064697",
+      "size": 3460
+    },
+    "wasm/jsapi/global/WEB_FEATURES.yml": {
+      "sha256": "f7c5d2f365c7c0efeac62ccfb9a9c65c53239d2890b54194679218f89e8eb0ee",
+      "size": 22
+    },
+    "wasm/jsapi/global/constructor.any.js": {
+      "sha256": "abefc31a7d7f4125a357fee3321c20ef77c64402cdafacc08e2dab4d530f1e15",
+      "size": 4795
+    },
+    "wasm/jsapi/global/toString.any.js": {
+      "sha256": "9945af5b3b21b0fa5ff4ef122e0f3c70ff0e528c3151d3bebdb5f4ae7ba684df",
+      "size": 757
+    },
+    "wasm/jsapi/global/type.tentative.any.js": {
+      "sha256": "af7534331847fecdd12430caca329921d23819297d6ec474a08636f5cfbf59ea",
+      "size": 1700
+    },
+    "wasm/jsapi/global/value-get-set.any.js": {
+      "sha256": "be8f7867365b9671d066ae424ec49339914092eabdd725f0cb18ba80eea3b28d",
+      "size": 4877
+    },
+    "wasm/jsapi/global/valueOf.any.js": {
+      "sha256": "b60a4727f723e8a53d47abaa90466599a0bb11e91bc6c2c26352f8613034b456",
+      "size": 634
+    },
+    "wasm/jsapi/idlharness.any.js": {
+      "sha256": "ef475d86c6f34dc47abcc22c260de8bac497ec98d659f07de73f03a8bb50f55b",
+      "size": 543
+    },
+    "wasm/jsapi/instance/WEB_FEATURES.yml": {
+      "sha256": "f7c5d2f365c7c0efeac62ccfb9a9c65c53239d2890b54194679218f89e8eb0ee",
+      "size": 22
+    },
+    "wasm/jsapi/instance/constructor-bad-imports.any.js": {
+      "sha256": "4d36118761dd7221ee1160b322b0536c815bf8a49d28728360a1aed8d7d1c80c",
+      "size": 507
+    },
+    "wasm/jsapi/instance/constructor-caching.any.js": {
+      "sha256": "3376cf3c0c3c76056cf47b55cdcbf76dee01bfa5c5081232459c97fc9705c213",
+      "size": 1763
+    },
+    "wasm/jsapi/instance/constructor.any.js": {
+      "sha256": "bcb08e6bacdebfdfaad6293a5506ab9ddfb0b1e686573fde8f6a492fce3c8f37",
+      "size": 1458
+    },
+    "wasm/jsapi/instance/exports.any.js": {
+      "sha256": "a015825d9555dbd677e490a20ce64db54ea0e3a13bc9425737262155b5b6c21a",
+      "size": 1880
+    },
+    "wasm/jsapi/instance/toString.any.js": {
+      "sha256": "e8dd8a863bea0490478c51b414419939c185210bb2f163bb55feb4dea45a1e4a",
+      "size": 907
+    },
+    "wasm/jsapi/instanceTestFactory.js": {
+      "sha256": "497fb487f1b76b600266e7d149db4155ef8641538ffe6ce9d7663b94be2a333d",
+      "size": 17726
+    },
+    "wasm/jsapi/interface.any.js": {
+      "sha256": "308d866d0532827d779604b74da50b138a649a6e633761ecf181685d30525a61",
+      "size": 5115
+    },
+    "wasm/jsapi/js-string/WEB_FEATURES.yml": {
+      "sha256": "7ee880fe8f694d38e3be536e38eafcef5f08038aeef999b38d6a47a19f168b7d",
+      "size": 38
+    },
+    "wasm/jsapi/js-string/basic.any.js": {
+      "sha256": "640ed20c0486a458986e627d2033f45ec83574aa97a784d14d8fce7f25805562",
+      "size": 10107
+    },
+    "wasm/jsapi/js-string/constants.any.js": {
+      "sha256": "3629ff2586570192d050999dfbb98bdcb4cbf1c5d73f8e9992c6a017b839238a",
+      "size": 1697
+    },
+    "wasm/jsapi/js-string/imports.any.js": {
+      "sha256": "1c1349a08e5f598599c60b6c2cc806a3538e78ca0323e265537423a8abd2ad1d",
+      "size": 747
+    },
+    "wasm/jsapi/js-string/polyfill.js": {
+      "sha256": "9eaf751d2a33afd97d897139b2e0885b0b50f2cb1152f1fa258299a9bdfe6655",
+      "size": 4451
+    },
+    "wasm/jsapi/jspi/README.txt": {
+      "sha256": "1a970b1c5d2c195ded47f21bd84dd0669ca819cee936d8130c1ea4085391c362",
+      "size": 64
+    },
+    "wasm/jsapi/jspi/js-promise-integration.any.js": {
+      "sha256": "1b7e2a8b3dc0d411154dfd5dabfa53d4eb03f4a6fe90496c7199df68f2d214aa",
+      "size": 11766
+    },
+    "wasm/jsapi/jspi/notraps.any.js": {
+      "sha256": "fb2757d27dcf39dbe678dd5ca00fc6f848eb75539cbc2dbb1f0e82211d2916ea",
+      "size": 2684
+    },
+    "wasm/jsapi/jspi/rejects.any.js": {
+      "sha256": "d90aad006caa3e5dd425fb3d6d57a4effee1e7744f8484e9b88dabbf54c44773",
+      "size": 4665
+    },
+    "wasm/jsapi/jspi/testharness-additions.js": {
+      "sha256": "38f45ce2e03b6caf10012158aaada6319707ae21ecd19a00e44cc10d0acb07b7",
+      "size": 831
+    },
+    "wasm/jsapi/memory/WEB_FEATURES.yml": {
+      "sha256": "25aed843b189bf9e3ebbf207572666ff43c1724b92c7a808014a2d5156cb6aba",
+      "size": 182
+    },
+    "wasm/jsapi/memory/assertions.js": {
+      "sha256": "d4dc69460051084231deb33f8510713c77925d8c4d27762cd3dd044327d04127",
+      "size": 1831
+    },
+    "wasm/jsapi/memory/buffer.any.js": {
+      "sha256": "04e08bb6912965468b4e3772e989d6c60943b7f70bfaa67e77ecab1ba4b0934b",
+      "size": 1889
+    },
+    "wasm/jsapi/memory/constructor-shared.tentative.any.js": {
+      "sha256": "eaaac606f1fb6e04b288e4dcba0e56433b3f2b815839d7ccf5845fdb2ff84f32",
+      "size": 1237
+    },
+    "wasm/jsapi/memory/constructor-types.tentative.any.js": {
+      "sha256": "0d7209293d2b7c955091aa81e343273bc30cf26a8e44f51096612a4bb84ff222",
+      "size": 664
+    },
+    "wasm/jsapi/memory/constructor.any.js": {
+      "sha256": "ebb1281bd97fcb55d9f3b87d0031ad8f138782135e78cd7438bff4ac4b57f5a0",
+      "size": 3359
+    },
+    "wasm/jsapi/memory/grow.any.js": {
+      "sha256": "b42ad03dab15d082cfaafeaced531b3621ee1191053fb2d9f033392aa6c3e1cf",
+      "size": 6547
+    },
+    "wasm/jsapi/memory/to-fixed-length-buffer-shared.any.js": {
+      "sha256": "7d58617ec601cdb8257314486b4b95a2d6a75a4a6101b575aa46b73d25c962e9",
+      "size": 699
+    },
+    "wasm/jsapi/memory/to-fixed-length-buffer.any.js": {
+      "sha256": "f1ac0ed289af5f7ccb09f1995514a0e70b2f7794e3254d426e2bd5b86fdd433f",
+      "size": 1268
+    },
+    "wasm/jsapi/memory/to-resizable-buffer-shared.any.js": {
+      "sha256": "0d3ac77df790bdad31bdadc2cc9b70751e21ce89159d9398e104d1c41b7be251",
+      "size": 1543
+    },
+    "wasm/jsapi/memory/to-resizable-buffer.any.js": {
+      "sha256": "76f9ff3b64e6523f59e17d808ead12712524866a3f153dcf39b7f228fde82ede",
+      "size": 2497
+    },
+    "wasm/jsapi/memory/toString.any.js": {
+      "sha256": "13a6ed5de5f809f46cae575bc9877eefa6f2f0362a6166a5b9cd9701ababe40d",
+      "size": 755
+    },
+    "wasm/jsapi/memory/type.tentative.any.js": {
+      "sha256": "e2977f114edc7dd6fec7f99eeceb441850bced207f8d48008035b8c0a7a66864",
+      "size": 979
+    },
+    "wasm/jsapi/module/WEB_FEATURES.yml": {
+      "sha256": "f7c5d2f365c7c0efeac62ccfb9a9c65c53239d2890b54194679218f89e8eb0ee",
+      "size": 22
+    },
+    "wasm/jsapi/module/constructor.any.js": {
+      "sha256": "fbb71743e9d71c3292c854a547f78e5f479f2a20d8fdf268da0059006868a661",
+      "size": 1900
+    },
+    "wasm/jsapi/module/customSections.any.js": {
+      "sha256": "8349005d22f79cc6d7187d3d1a409f9cd8db5488668d7c527aedd0c0cc50eb07",
+      "size": 4512
+    },
+    "wasm/jsapi/module/exports.any.js": {
+      "sha256": "7e708e1ede4b4fde5bdb651e203ea8b3a0c300a03886ea0964a35f7941fb8842",
+      "size": 5233
+    },
+    "wasm/jsapi/module/imports.any.js": {
+      "sha256": "190c33e14201bc561fb362cc755b094f5c3dfc38cbed5a728bb6e684e7760e7b",
+      "size": 6112
+    },
+    "wasm/jsapi/module/moduleSource.tentative.any.js": {
+      "sha256": "a532abf6a530b3da64fabe06835aaa89c63d9820a97893b151865b4f50ae6603",
+      "size": 1398
+    },
+    "wasm/jsapi/module/toString.any.js": {
+      "sha256": "b4542915022b1e0eaafd95e87352f8a03ac627e1f3b00e4e74c3f9640fd937bb",
+      "size": 842
+    },
+    "wasm/jsapi/proto-from-ctor-realm.html": {
+      "sha256": "924ec47b89991b76f87d9a7a765448a77b94388fb0b2db4a6091c60d7f192f82",
+      "size": 3533
+    },
+    "wasm/jsapi/prototypes.any.js": {
+      "sha256": "acd887436238f3c73db52a70b61e5dcc7968678d9f49b0a0889880772800d158",
+      "size": 1755
+    },
+    "wasm/jsapi/table/WEB_FEATURES.yml": {
+      "sha256": "f7c5d2f365c7c0efeac62ccfb9a9c65c53239d2890b54194679218f89e8eb0ee",
+      "size": 22
+    },
+    "wasm/jsapi/table/assertions.js": {
+      "sha256": "5128c0a79196caef4757b914de2a26dbda6c81a1d2d0f25f32eecfb096cd2405",
+      "size": 1291
+    },
+    "wasm/jsapi/table/constructor-types.tentative.any.js": {
+      "sha256": "bdaef1c4cd1f0a2faec82605bf3d3994fd3569ca01ad0513c28c2b03ab4fe29f",
+      "size": 712
+    },
+    "wasm/jsapi/table/constructor.any.js": {
+      "sha256": "c719300ad7a0057ee78c122b51fe8b17ba692f5fd2438d090037d0bec51b7a5b",
+      "size": 5941
+    },
+    "wasm/jsapi/table/get-set.any.js": {
+      "sha256": "4a92d1341fef7a9f26abb7251401de3b549f9e22e967d12dd1dcf294254ccbf7",
+      "size": 7112
+    },
+    "wasm/jsapi/table/grow.any.js": {
+      "sha256": "30e1b030a1b741089f56c108b5b601375fa5e71b1e41a0cff68b76a8e949525f",
+      "size": 3661
+    },
+    "wasm/jsapi/table/length.any.js": {
+      "sha256": "a340af87d9770c06e9d5bc791416f8ce96e34575662f76ec4a0be4fb4724de4b",
+      "size": 1707
+    },
+    "wasm/jsapi/table/toString.any.js": {
+      "sha256": "9568a90181fcc2a111111884aecca7f4ea195d16aa042085d8255861811ce9bd",
+      "size": 769
+    },
+    "wasm/jsapi/table/type.tentative.any.js": {
+      "sha256": "3882dfd51085b786aa40e9f597405a26c756ec746de69f63603a60add9679ad4",
+      "size": 806
+    },
+    "wasm/jsapi/tag/WEB_FEATURES.yml": {
+      "sha256": "61e3dafb31349f6408c84457e8381b6855c433380cd48ff51535bfede42d05f6",
+      "size": 41
+    },
+    "wasm/jsapi/tag/constructor.tentative.any.js": {
+      "sha256": "55e81abce2ad4a71dd3c08c15dbeb605a3906b592e561a32a3f53820b6f201c0",
+      "size": 1170
+    },
+    "wasm/jsapi/tag/toString.tentative.any.js": {
+      "sha256": "e7197d2ecfce4a0a8d371608faa9faff61893085135e0196f147898b2fa260a8",
+      "size": 744
+    },
+    "wasm/jsapi/tag/type.tentative.any.js": {
+      "sha256": "8e82215d7f3e28762712d8c22fe31cddc1dc731ce4438d567a6b4df2feb36658",
+      "size": 502
+    },
+    "wasm/jsapi/wasm-module-builder.js": {
+      "sha256": "8eabf2c5fc2595dedc1fa5c1c53c548de6608300687938e409670dcecec86fd4",
+      "size": 53833
+    }
+  },
+  "tests": [
+    {
+      "path": "wasm/jsapi/constructor/compile.any.js",
+      "scripts": [
+        "wasm/jsapi/wasm-module-builder.js"
+      ],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": null
+    },
+    {
+      "path": "wasm/jsapi/constructor/instantiate-bad-imports.any.js",
+      "scripts": [
+        "wasm/jsapi/wasm-module-builder.js",
+        "wasm/jsapi/bad-imports.js"
+      ],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": null
+    },
+    {
+      "path": "wasm/jsapi/constructor/instantiate.any.js",
+      "scripts": [
+        "wasm/jsapi/wasm-module-builder.js",
+        "wasm/jsapi/assertions.js",
+        "wasm/jsapi/instanceTestFactory.js"
+      ],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": null
+    },
+    {
+      "path": "wasm/jsapi/constructor/multi-value.any.js",
+      "scripts": [
+        "wasm/jsapi/wasm-module-builder.js",
+        "wasm/jsapi/assertions.js"
+      ],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": null
+    },
+    {
+      "path": "wasm/jsapi/constructor/toStringTag.any.js",
+      "scripts": [],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": null
+    },
+    {
+      "path": "wasm/jsapi/constructor/validate.any.js",
+      "scripts": [
+        "wasm/jsapi/wasm-module-builder.js"
+      ],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": null
+    },
+    {
+      "path": "wasm/jsapi/esm-integration/exports.tentative.any.js",
+      "scripts": [],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": "Wasm ES module integration and module-host loading are outside the initial shell scope"
+    },
+    {
+      "path": "wasm/jsapi/esm-integration/global-exports-live-bindings.tentative.any.js",
+      "scripts": [],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": "Wasm ES module integration and module-host loading are outside the initial shell scope"
+    },
+    {
+      "path": "wasm/jsapi/esm-integration/global-exports.tentative.any.js",
+      "scripts": [],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": "Wasm ES module integration and module-host loading are outside the initial shell scope"
+    },
+    {
+      "path": "wasm/jsapi/esm-integration/js-wasm-cycle.tentative.any.js",
+      "scripts": [],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": "Wasm ES module integration and module-host loading are outside the initial shell scope"
+    },
+    {
+      "path": "wasm/jsapi/esm-integration/mutable-global-sharing.tentative.any.js",
+      "scripts": [],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": "Wasm ES module integration and module-host loading are outside the initial shell scope"
+    },
+    {
+      "path": "wasm/jsapi/esm-integration/namespace-instance.tentative.any.js",
+      "scripts": [],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": "Wasm ES module integration and module-host loading are outside the initial shell scope"
+    },
+    {
+      "path": "wasm/jsapi/esm-integration/reserved-import-names.tentative.any.js",
+      "scripts": [],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker"
+      ],
+      "timeout": "normal",
+      "excluded_reason": "Wasm ES module integration and module-host loading are outside the initial shell scope"
+    },
+    {
+      "path": "wasm/jsapi/esm-integration/resolve-export.tentative.any.js",
+      "scripts": [],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": "Wasm ES module integration and module-host loading are outside the initial shell scope"
+    },
+    {
+      "path": "wasm/jsapi/esm-integration/source-phase-string-builtins.tentative.any.js",
+      "scripts": [],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": "Wasm ES module integration and module-host loading are outside the initial shell scope"
+    },
+    {
+      "path": "wasm/jsapi/esm-integration/source-phase-string-constants.tentative.any.js",
+      "scripts": [],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": "Wasm ES module integration and module-host loading are outside the initial shell scope"
+    },
+    {
+      "path": "wasm/jsapi/esm-integration/source-phase.tentative.any.js",
+      "scripts": [],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": "Wasm ES module integration and module-host loading are outside the initial shell scope"
+    },
+    {
+      "path": "wasm/jsapi/esm-integration/string-builtins.tentative.any.js",
+      "scripts": [],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": "Wasm ES module integration and module-host loading are outside the initial shell scope"
+    },
+    {
+      "path": "wasm/jsapi/esm-integration/string-constants.tentative.any.js",
+      "scripts": [],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": "Wasm ES module integration and module-host loading are outside the initial shell scope"
+    },
+    {
+      "path": "wasm/jsapi/esm-integration/v128-tdz.tentative.any.js",
+      "scripts": [],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": "Wasm ES module integration and module-host loading are outside the initial shell scope"
+    },
+    {
+      "path": "wasm/jsapi/esm-integration/wasm-import-wasm-export.tentative.any.js",
+      "scripts": [],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": "Wasm ES module integration and module-host loading are outside the initial shell scope"
+    },
+    {
+      "path": "wasm/jsapi/exception/basic.tentative.any.js",
+      "scripts": [
+        "wasm/jsapi/wasm-module-builder.js"
+      ],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "worker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": null
+    },
+    {
+      "path": "wasm/jsapi/exception/constructor.tentative.any.js",
+      "scripts": [
+        "wasm/jsapi/assertions.js"
+      ],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": null
+    },
+    {
+      "path": "wasm/jsapi/exception/getArg.tentative.any.js",
+      "scripts": [
+        "wasm/jsapi/memory/assertions.js"
+      ],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": null
+    },
+    {
+      "path": "wasm/jsapi/exception/identity.tentative.any.js",
+      "scripts": [
+        "wasm/jsapi/assertions.js",
+        "wasm/jsapi/wasm-module-builder.js"
+      ],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": "Fixture uses detached Promise assertions inside synchronous test(); shell lacks host rejection tracking and could falsely pass"
+    },
+    {
+      "path": "wasm/jsapi/exception/is.tentative.any.js",
+      "scripts": [
+        "wasm/jsapi/memory/assertions.js"
+      ],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": null
+    },
+    {
+      "path": "wasm/jsapi/exception/toString.tentative.any.js",
+      "scripts": [],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": null
+    },
+    {
+      "path": "wasm/jsapi/function/call.tentative.any.js",
+      "scripts": [
+        "wasm/jsapi/assertions.js"
+      ],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": "WebAssembly.Function proposal API is outside the initial stable API scope"
+    },
+    {
+      "path": "wasm/jsapi/function/constructor.tentative.any.js",
+      "scripts": [
+        "wasm/jsapi/assertions.js"
+      ],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": "WebAssembly.Function proposal API is outside the initial stable API scope"
+    },
+    {
+      "path": "wasm/jsapi/function/table.tentative.any.js",
+      "scripts": [
+        "wasm/jsapi/assertions.js"
+      ],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": "WebAssembly.Function proposal API is outside the initial stable API scope"
+    },
+    {
+      "path": "wasm/jsapi/function/type.tentative.any.js",
+      "scripts": [
+        "wasm/jsapi/assertions.js"
+      ],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": "WebAssembly.Function proposal API is outside the initial stable API scope"
+    },
+    {
+      "path": "wasm/jsapi/gc/casts.tentative.any.js",
+      "scripts": [
+        "wasm/jsapi/wasm-module-builder.js"
+      ],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": "Wasm GC is outside the initial shipped-feature scope"
+    },
+    {
+      "path": "wasm/jsapi/gc/exported-object.tentative.any.js",
+      "scripts": [
+        "wasm/jsapi/wasm-module-builder.js"
+      ],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": "Wasm GC is outside the initial shipped-feature scope"
+    },
+    {
+      "path": "wasm/jsapi/gc/i31.tentative.any.js",
+      "scripts": [
+        "wasm/jsapi/wasm-module-builder.js"
+      ],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": "Wasm GC is outside the initial shipped-feature scope"
+    },
+    {
+      "path": "wasm/jsapi/global/constructor.any.js",
+      "scripts": [
+        "wasm/jsapi/assertions.js"
+      ],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": null
+    },
+    {
+      "path": "wasm/jsapi/global/toString.any.js",
+      "scripts": [],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": null
+    },
+    {
+      "path": "wasm/jsapi/global/type.tentative.any.js",
+      "scripts": [
+        "wasm/jsapi/assertions.js"
+      ],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": "Wasm JS type reflection proposal (type methods/minimum descriptors) is outside the shipped API scope"
+    },
+    {
+      "path": "wasm/jsapi/global/value-get-set.any.js",
+      "scripts": [],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": null
+    },
+    {
+      "path": "wasm/jsapi/global/valueOf.any.js",
+      "scripts": [],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": null
+    },
+    {
+      "path": "wasm/jsapi/idlharness.any.js",
+      "scripts": [
+        "resources/WebIDLParser.js",
+        "resources/idlharness.js",
+        "wasm/resources/load_wasm.js"
+      ],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker"
+      ],
+      "timeout": "normal",
+      "excluded_reason": "WebIDL harness requires browser fetch/IDL resources and does not declare jsshell"
+    },
+    {
+      "path": "wasm/jsapi/instance/constructor-bad-imports.any.js",
+      "scripts": [
+        "wasm/jsapi/wasm-module-builder.js",
+        "wasm/jsapi/bad-imports.js"
+      ],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": null
+    },
+    {
+      "path": "wasm/jsapi/instance/constructor-caching.any.js",
+      "scripts": [
+        "wasm/jsapi/wasm-module-builder.js"
+      ],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": null
+    },
+    {
+      "path": "wasm/jsapi/instance/constructor.any.js",
+      "scripts": [
+        "wasm/jsapi/wasm-module-builder.js",
+        "wasm/jsapi/assertions.js",
+        "wasm/jsapi/instanceTestFactory.js"
+      ],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": null
+    },
+    {
+      "path": "wasm/jsapi/instance/exports.any.js",
+      "scripts": [
+        "wasm/jsapi/wasm-module-builder.js"
+      ],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": null
+    },
+    {
+      "path": "wasm/jsapi/instance/toString.any.js",
+      "scripts": [
+        "wasm/jsapi/wasm-module-builder.js"
+      ],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": null
+    },
+    {
+      "path": "wasm/jsapi/interface.any.js",
+      "scripts": [
+        "wasm/jsapi/assertions.js"
+      ],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": null
+    },
+    {
+      "path": "wasm/jsapi/js-string/basic.any.js",
+      "scripts": [
+        "wasm/jsapi/assertions.js",
+        "wasm/jsapi/wasm-module-builder.js",
+        "wasm/jsapi/js-string/polyfill.js"
+      ],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": "Wasm JS string builtins are outside the initial shipped-feature scope"
+    },
+    {
+      "path": "wasm/jsapi/js-string/constants.any.js",
+      "scripts": [
+        "wasm/jsapi/wasm-module-builder.js"
+      ],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": "Wasm JS string builtins are outside the initial shipped-feature scope"
+    },
+    {
+      "path": "wasm/jsapi/js-string/imports.any.js",
+      "scripts": [
+        "wasm/jsapi/wasm-module-builder.js"
+      ],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": "Wasm JS string builtins are outside the initial shipped-feature scope"
+    },
+    {
+      "path": "wasm/jsapi/jspi/js-promise-integration.any.js",
+      "scripts": [
+        "wasm/jsapi/wasm-module-builder.js"
+      ],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": "Wasm JS Promise Integration is outside the initial shipped-feature scope"
+    },
+    {
+      "path": "wasm/jsapi/jspi/notraps.any.js",
+      "scripts": [
+        "wasm/jsapi/wasm-module-builder.js",
+        "wasm/jsapi/jspi/testharness-additions.js"
+      ],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": "Wasm JS Promise Integration is outside the initial shipped-feature scope"
+    },
+    {
+      "path": "wasm/jsapi/jspi/rejects.any.js",
+      "scripts": [
+        "wasm/jsapi/wasm-module-builder.js",
+        "wasm/jsapi/jspi/testharness-additions.js"
+      ],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": "Wasm JS Promise Integration is outside the initial shipped-feature scope"
+    },
+    {
+      "path": "wasm/jsapi/memory/buffer.any.js",
+      "scripts": [],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": null
+    },
+    {
+      "path": "wasm/jsapi/memory/constructor-shared.tentative.any.js",
+      "scripts": [
+        "wasm/jsapi/assertions.js",
+        "wasm/jsapi/memory/assertions.js"
+      ],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": "Shared Wasm memory and threads are outside the initial shell scope"
+    },
+    {
+      "path": "wasm/jsapi/memory/constructor-types.tentative.any.js",
+      "scripts": [
+        "wasm/jsapi/assertions.js",
+        "wasm/jsapi/memory/assertions.js"
+      ],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": "Wasm JS type reflection proposal (type methods/minimum descriptors) is outside the shipped API scope"
+    },
+    {
+      "path": "wasm/jsapi/memory/constructor.any.js",
+      "scripts": [
+        "wasm/jsapi/assertions.js",
+        "wasm/jsapi/memory/assertions.js"
+      ],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": null
+    },
+    {
+      "path": "wasm/jsapi/memory/grow.any.js",
+      "scripts": [
+        "wasm/jsapi/memory/assertions.js"
+      ],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": null
+    },
+    {
+      "path": "wasm/jsapi/memory/to-fixed-length-buffer-shared.any.js",
+      "scripts": [
+        "wasm/jsapi/wasm-module-builder.js"
+      ],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": "Shared Wasm memory and threads are outside the initial shell scope"
+    },
+    {
+      "path": "wasm/jsapi/memory/to-fixed-length-buffer.any.js",
+      "scripts": [
+        "wasm/jsapi/wasm-module-builder.js"
+      ],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": null
+    },
+    {
+      "path": "wasm/jsapi/memory/to-resizable-buffer-shared.any.js",
+      "scripts": [
+        "wasm/jsapi/wasm-module-builder.js"
+      ],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": "Shared Wasm memory and threads are outside the initial shell scope"
+    },
+    {
+      "path": "wasm/jsapi/memory/to-resizable-buffer.any.js",
+      "scripts": [
+        "wasm/jsapi/wasm-module-builder.js"
+      ],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": null
+    },
+    {
+      "path": "wasm/jsapi/memory/toString.any.js",
+      "scripts": [],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": null
+    },
+    {
+      "path": "wasm/jsapi/memory/type.tentative.any.js",
+      "scripts": [
+        "wasm/jsapi/assertions.js"
+      ],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": "Wasm JS type reflection proposal (type methods/minimum descriptors) is outside the shipped API scope"
+    },
+    {
+      "path": "wasm/jsapi/module/constructor.any.js",
+      "scripts": [
+        "wasm/jsapi/wasm-module-builder.js",
+        "wasm/jsapi/assertions.js"
+      ],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": null
+    },
+    {
+      "path": "wasm/jsapi/module/customSections.any.js",
+      "scripts": [
+        "wasm/jsapi/wasm-module-builder.js"
+      ],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": null
+    },
+    {
+      "path": "wasm/jsapi/module/exports.any.js",
+      "scripts": [
+        "wasm/jsapi/wasm-module-builder.js"
+      ],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": null
+    },
+    {
+      "path": "wasm/jsapi/module/imports.any.js",
+      "scripts": [
+        "wasm/jsapi/wasm-module-builder.js"
+      ],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": null
+    },
+    {
+      "path": "wasm/jsapi/module/moduleSource.tentative.any.js",
+      "scripts": [
+        "wasm/jsapi/wasm-module-builder.js",
+        "wasm/jsapi/assertions.js"
+      ],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": "Wasm source-phase imports and AbstractModuleSource are outside the shipped API scope"
+    },
+    {
+      "path": "wasm/jsapi/module/toString.any.js",
+      "scripts": [
+        "wasm/jsapi/wasm-module-builder.js"
+      ],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": null
+    },
+    {
+      "path": "wasm/jsapi/prototypes.any.js",
+      "scripts": [
+        "wasm/jsapi/assertions.js",
+        "wasm/jsapi/wasm-module-builder.js"
+      ],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": null
+    },
+    {
+      "path": "wasm/jsapi/table/constructor-types.tentative.any.js",
+      "scripts": [
+        "wasm/jsapi/assertions.js",
+        "wasm/jsapi/table/assertions.js"
+      ],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": "Wasm JS type reflection proposal (type methods/minimum descriptors) is outside the shipped API scope"
+    },
+    {
+      "path": "wasm/jsapi/table/constructor.any.js",
+      "scripts": [
+        "wasm/jsapi/wasm-module-builder.js",
+        "wasm/jsapi/assertions.js",
+        "wasm/jsapi/table/assertions.js"
+      ],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": null
+    },
+    {
+      "path": "wasm/jsapi/table/get-set.any.js",
+      "scripts": [
+        "wasm/jsapi/wasm-module-builder.js",
+        "wasm/jsapi/table/assertions.js"
+      ],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": null
+    },
+    {
+      "path": "wasm/jsapi/table/grow.any.js",
+      "scripts": [
+        "wasm/jsapi/wasm-module-builder.js",
+        "wasm/jsapi/table/assertions.js"
+      ],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": null
+    },
+    {
+      "path": "wasm/jsapi/table/length.any.js",
+      "scripts": [],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": null
+    },
+    {
+      "path": "wasm/jsapi/table/toString.any.js",
+      "scripts": [],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": null
+    },
+    {
+      "path": "wasm/jsapi/table/type.tentative.any.js",
+      "scripts": [
+        "wasm/jsapi/assertions.js"
+      ],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": "Wasm JS type reflection proposal (type methods/minimum descriptors) is outside the shipped API scope"
+    },
+    {
+      "path": "wasm/jsapi/tag/constructor.tentative.any.js",
+      "scripts": [
+        "wasm/jsapi/assertions.js"
+      ],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": null
+    },
+    {
+      "path": "wasm/jsapi/tag/toString.tentative.any.js",
+      "scripts": [],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": null
+    },
+    {
+      "path": "wasm/jsapi/tag/type.tentative.any.js",
+      "scripts": [
+        "wasm/jsapi/assertions.js"
+      ],
+      "variants": [
+        ""
+      ],
+      "globals": [
+        "window",
+        "dedicatedworker",
+        "jsshell"
+      ],
+      "timeout": "normal",
+      "excluded_reason": "Wasm JS type reflection proposal (type methods/minimum descriptors) is outside the shipped API scope"
+    }
+  ]
+}
