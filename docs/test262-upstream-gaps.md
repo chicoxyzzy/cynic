@@ -38,6 +38,42 @@ the corpus under the relevant section's directory before adding.
 
 ## Entries
 
+
+### Wasm instantiation lost promise wrappers and imported callbacks across collection
+
+- **Fixed in:** TBD (WPT Wasm JS API correction pass)
+- **Spec:** [Wasm JS API §5.2 Instance](https://webassembly.github.io/spec/js-api/#instances),
+  §4.6 Exported Functions, and ECMA-262 §27.2.1.5 NewPromiseCapability.
+  The Wasm API is outside test262's ECMAScript scope; these belong in WPT
+  or an engine's GC-stress suite.
+- **Reproducer:**
+  ```js
+  // Module: a defined start/export function calling imported m.f.
+  const bytes = new Uint8Array([0,97,115,109,1,0,0,0,
+    1,4,1,96,0,0,2,7,1,1,109,1,102,0,0,3,2,1,0,
+    7,5,1,1,102,0,1,8,1,1,10,6,1,4,0,16,0,11]);
+  WebAssembly.instantiate(bytes, {m: {f() { __collectGarbage(); }}})
+    .then(({module, instance}) => {
+      __collectGarbage();
+      instance.exports.f();
+      if (!(module instanceof WebAssembly.Module)) throw new Error('lost module');
+    });
+  ```
+- **Before fix:** Under allocation-pressure GC, async instantiation could
+  crash while its capability or intermediate Module wrapper was unrooted.
+  Imported JS callbacks were also retained as native pointers without GC
+  roots. A function published by a start callback could outlive store backing
+  that was incorrectly released when start subsequently trapped.
+- **After fix:** Native handle scopes retain intermediate wrappers; imported
+  callbacks have registered roots; instances that may have escaped during
+  start retain their store and roots until realm teardown. Pre-start failures
+  still roll back their registrations.
+- **Suggested fixture shape:** WPT `promise_test` for collecting start
+  callbacks and exception identity, with engine-specific GC hooks or stress
+  flags. The local `wasm_wpt_instance_test.zig` and `wasm_wpt_global_test.zig`
+  cover these paths, including an escaped function that reads its original
+  memory and invokes its imported closure after a trapping start.
+
 ### Runtime StringToBigInt accepted source-only numeric separators
 
 - **Fixed in:** TBD

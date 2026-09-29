@@ -2191,6 +2191,7 @@ pub const Heap = struct {
                         self.enqueue(zi.pad);
                     }
                 }
+                if (o.getWasmInstanceExports()) |exports| self.enqueue(taggedObject(exports));
                 if (o.getCapabilityRecord()) |c| {
                     self.enqueue(c.resolve);
                     self.enqueue(c.reject);
@@ -4080,6 +4081,7 @@ pub const Heap = struct {
                 self.markValue(zi.pad);
             }
         }
+        if (o.getWasmInstanceExports()) |exports| self.markValue(taggedObject(exports));
         if (o.getCapabilityRecord()) |c| {
             self.markValue(c.resolve);
             self.markValue(c.reject);
@@ -4228,6 +4230,7 @@ pub const Heap = struct {
                     isYoungHeapValue(zi.key) or isYoungHeapValue(zi.pad)) return "iter_helper.zip_inputs";
             }
         }
+        if (o.getWasmInstanceExports()) |exports| if (exports.generation == .young) return "wasm_instance_exports";
         if (o.getCapabilityRecord()) |c| {
             if (isYoungHeapValue(c.resolve) or isYoungHeapValue(c.reject)) return "capability_record";
         }
