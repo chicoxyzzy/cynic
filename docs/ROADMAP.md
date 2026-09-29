@@ -2371,6 +2371,11 @@ and the per-builtin checklist; this section tracks status.
   and SSE2 baseline. Integer `abs`/`neg` across all lane widths plus unsigned
   rounded averages add 73 compiled functions and 229 native entries per
   target, again with all 58,779 assertions passing and SSE2 unchanged.
+  Floating-point min/max adds 58 compiled functions and 1,518 native
+  entries per target with the same corpus score; bit-based tests enforce
+  signed-zero and quiet/canonical NaN rules beyond the harness's current
+  any-NaN matching. The interpreter min/max fallback now quiets signaling
+  NaNs too. Tightening the harness's scalar/vector NaN checks is next.
   Native table64, remaining SIMD
   arithmetic/compare/convert/shuffle operations, and the
   native-register/imported-call ABI remain next.

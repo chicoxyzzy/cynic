@@ -270,7 +270,8 @@ fn skipSimdImmediate(body: []const u8, index: *usize) ?void {
         },
         15...20, 77...83, 174 => {}, // splats / bitwise / any_true / i32x4.add
         else => if (simd.reductionOp(sub) == null and simd.integerMinMaxOp(sub) == null and
-            simd.integerUnaryOp(sub) == null and simd.roundingAverageWidth(sub) == null) return null,
+            simd.integerUnaryOp(sub) == null and simd.roundingAverageWidth(sub) == null and
+            simd.floatMinMaxOp(sub) == null) return null,
     }
 }
 

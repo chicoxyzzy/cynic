@@ -3921,16 +3921,15 @@ fn readF64(body: []const u8, pc: *usize) f64 {
 
 /// wasm min: NaN-propagating, with min(-0, +0) = -0 (§4.3.3).
 fn fmin(comptime T: type, a: T, b: T) T {
-    if (a != a) return a;
-    if (b != b) return b;
+    // Core nans requires an arithmetic (quiet) NaN, not an unchanged sNaN.
+    if (a != a or b != b) return a + b;
     if (a == 0 and b == 0) return if (std.math.signbit(a) or std.math.signbit(b)) -@as(T, 0) else @as(T, 0);
     return if (a < b) a else b;
 }
 
 /// wasm max: NaN-propagating, with max(-0, +0) = +0 (§4.3.3).
 fn fmax(comptime T: type, a: T, b: T) T {
-    if (a != a) return a;
-    if (b != b) return b;
+    if (a != a or b != b) return a + b;
     if (a == 0 and b == 0) return if (std.math.signbit(a) and std.math.signbit(b)) -@as(T, 0) else @as(T, 0);
     return if (a > b) a else b;
 }

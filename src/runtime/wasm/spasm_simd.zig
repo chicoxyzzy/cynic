@@ -65,6 +65,16 @@ pub fn roundingAverageWidth(sub: u32) ?u4 {
     };
 }
 
+pub const FloatMinMaxOp = struct { double_precision: bool, maximum: bool };
+
+pub fn floatMinMaxOp(sub: u32) ?FloatMinMaxOp {
+    return switch (sub) {
+        232, 233 => .{ .double_precision = false, .maximum = sub == 233 },
+        244, 245 => .{ .double_precision = true, .maximum = sub == 245 },
+        else => null,
+    };
+}
+
 pub const MinMaxOp = struct { width: u4, signed: bool, maximum: bool };
 
 pub fn integerMinMaxOp(sub: u32) ?MinMaxOp {

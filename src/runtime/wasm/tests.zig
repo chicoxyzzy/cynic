@@ -2743,6 +2743,178 @@ test "wasm spasm: SIMD reductions are skipped after a terminating branch" {
     }
 }
 
+fn expectFloatMinMaxLane(comptime U: type, left: U, right: U, actual: U, maximum: bool) !void {
+    const sign: U = @as(U, 1) << (@bitSizeOf(U) - 1);
+    const exponent: U = if (U == u32) 0x7f80_0000 else 0x7ff0_0000_0000_0000;
+    const fraction = (sign - 1) & ~exponent;
+    const quiet = (fraction + 1) / 2;
+    const left_nan = (left & ~sign) > exponent;
+    const right_nan = (right & ~sign) > exponent;
+    if (left_nan or right_nan) {
+        // Core nans: canonical inputs require a canonical output; otherwise
+        // any arithmetic NaN is valid, but its quiet bit must be set.
+        try testing.expectEqual(exponent | quiet, actual & (exponent | quiet));
+        if ((!left_nan or (left & fraction) == quiet) and (!right_nan or (right & fraction) == quiet)) {
+            try testing.expectEqual(exponent | quiet, actual & ~sign);
+        }
+        return;
+    }
+    if ((left & ~sign) == 0 and (right & ~sign) == 0) {
+        try testing.expectEqual(if (maximum) left & right else left | right, actual);
+        return;
+    }
+    // IEEE bit ordering after sign normalization, independent of host FP
+    // comparisons (especially flush-to-zero behavior for subnormal inputs).
+    const left_key = if (left & sign != 0) ~left else left ^ sign;
+    const right_key = if (right & sign != 0) ~right else right ^ sign;
+    const choose_left = if (maximum) left_key > right_key else left_key < right_key;
+    try testing.expectEqual(if (choose_left) left else right, actual);
+}
+
+fn expectSimdFloatMinMax(comptime U: type, instance: *interp.Instance, maximum: bool, left: u128, right: u128) !void {
+    const before = instance.spasm_runs;
+    const result = try interp.invoke(instance, testing.allocator, 0, &.{ 37, simd_live_vector, left, right });
+    defer testing.allocator.free(result);
+    try testing.expectEqual(@as(usize, 3), result.len);
+    try testing.expectEqual(@as(u128, 37), result[0]);
+    try testing.expectEqual(simd_live_vector, result[1]);
+    for (0..128 / @bitSizeOf(U)) |lane| {
+        const shift: u7 = @intCast(lane * @bitSizeOf(U));
+        try expectFloatMinMaxLane(U, @truncate(left >> shift), @truncate(right >> shift), @truncate(result[2] >> shift), maximum);
+    }
+    try testing.expectEqual(before + 1, instance.spasm_runs);
+}
+
+fn testSimdFloatMinMax(comptime U: type) !void {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const sign: U = @as(U, 1) << (@bitSizeOf(U) - 1);
+    const exponent: U = if (U == u32) 0x7f80_0000 else 0x7ff0_0000_0000_0000;
+    const quiet: U = if (U == u32) 0x0040_0000 else 0x0008_0000_0000_0000;
+    const one: U = if (U == u32) 0x3f80_0000 else 0x3ff0_0000_0000_0000;
+    const values = [_]U{
+        0,                    sign,                            1,            sign | 1,            quiet * 2 - 1,          sign | (quiet * 2 - 1),
+        quiet * 2,            sign | (quiet * 2),              one - 1,      one,                 one + 1,                sign | one,
+        exponent - 1,         sign | (exponent - 1),           exponent,     sign | exponent,     exponent | quiet,       sign | exponent | quiet,
+        exponent | quiet | 1, sign | exponent | quiet | 0x123, exponent | 1, sign | exponent | 1, exponent | (quiet - 1), sign | exponent | (quiet - 1),
+    };
+    for ([_]bool{ false, true }) |maximum| {
+        const sub: u32 = if (U == u32) (if (maximum) 233 else 232) else (if (maximum) 245 else 244);
+        const module = try wasm.decode(a, try buildSimdMinMaxFunc(a, sub));
+        var instance: interp.Instance = undefined;
+        try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+        defer instance.deinit();
+        instance.spasm_enabled = true;
+        for (0..values.len) |li| {
+            for (0..values.len) |ri| {
+                var left: u128 = 0;
+                var right: u128 = 0;
+                for (0..128 / @bitSizeOf(U)) |lane| {
+                    const shift: u7 = @intCast(lane * @bitSizeOf(U));
+                    left |= @as(u128, values[(li + lane * 3) % values.len]) << shift;
+                    right |= @as(u128, values[(ri + lane * 5) % values.len]) << shift;
+                }
+                try expectSimdFloatMinMax(U, &instance, maximum, left, right);
+                try expectSimdFloatMinMax(U, &instance, maximum, right, left);
+                try expectSimdFloatMinMax(U, &instance, maximum, left, left);
+            }
+        }
+        // Sweep payload bits with quiet/signaling NaNs, including the last
+        // payload bit, without requiring an implementation-specific payload.
+        for (0..@bitSizeOf(U) - (if (U == u32) @as(usize, 9) else 12)) |bit| {
+            const payload = @as(U, 1) << @as(std.math.Log2Int(U), @intCast(bit));
+            var left: u128 = 0;
+            var right: u128 = 0;
+            for (0..128 / @bitSizeOf(U)) |lane| {
+                const shift: u7 = @intCast(lane * @bitSizeOf(U));
+                left |= @as(u128, exponent | payload | (if (lane % 2 == 0) @as(U, 0) else sign)) << shift;
+                right |= @as(u128, values[lane]) << shift;
+            }
+            try expectSimdFloatMinMax(U, &instance, maximum, left, right);
+            try expectSimdFloatMinMax(U, &instance, maximum, right, left);
+        }
+        try testing.expectEqual(@as(u32, 1), instance.spasm_compiles);
+    }
+}
+
+test "wasm spasm: SIMD float minmax f32 handles NaNs zeros subnormals and live lanes" {
+    try testSimdFloatMinMax(u32);
+}
+
+test "wasm spasm: SIMD float minmax f64 handles NaNs zeros subnormals and live lanes" {
+    try testSimdFloatMinMax(u64);
+}
+
+test "wasm spasm: SIMD float minmax skips unreachable code" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_]u32{ 232, 233, 244, 245 }) |sub| {
+        var body: List = .empty;
+        try body.appendSlice(a, &.{ 0, 0x02, 0x7b, 0x20, 0, 0x0c, 0, 0x20, 0, 0x20, 0, 0xfd });
+        try uleb(a, &body, sub);
+        try body.appendSlice(a, &.{ 0x0b, 0x0b });
+        const module = try wasm.decode(a, try buildFunc(a, &.{0x7b}, &.{0x7b}, body.items, "dead"));
+        var instance: interp.Instance = undefined;
+        try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+        defer instance.deinit();
+        instance.spasm_enabled = true;
+        const result = try interp.invoke(&instance, testing.allocator, 0, &.{simd_live_vector});
+        defer testing.allocator.free(result);
+        try testing.expectEqualSlices(u128, &.{simd_live_vector}, result);
+        try testing.expectEqual(@as(u32, 1), instance.spasm_compiles);
+        try testing.expectEqual(@as(u32, 1), instance.spasm_runs);
+    }
+}
+
+test "wasm interp: scalar float minmax quiets signaling NaNs" {
+    inline for (.{ u32, u64 }) |U| {
+        const exponent: U = if (U == u32) 0x7f80_0000 else 0x7ff0_0000_0000_0000;
+        const one: U = if (U == u32) 0x3f80_0000 else 0x3ff0_0000_0000_0000;
+        const snan = exponent | 1;
+        const ty: u8 = if (U == u32) 0x7d else 0x7c;
+        for ([_]bool{ false, true }) |maximum| {
+            const op: u8 = if (U == u32) (if (maximum) 0x97 else 0x96) else (if (maximum) 0xa5 else 0xa4);
+            for ([_]bool{ false, true }) |swap| {
+                const left = if (swap) one else snan;
+                const right = if (swap) snan else one;
+                const actual = try callCells(&.{ ty, ty }, &.{ty}, &.{ 0, 0x20, 0, 0x20, 1, op, 0x0b }, "f", null, &.{ left, right });
+                try expectFloatMinMaxLane(U, left, right, @truncate(actual), maximum);
+            }
+        }
+    }
+}
+
+test "wasm interp: SIMD float minmax quiets signaling NaNs" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    inline for (.{ u32, u64 }) |U| {
+        const exponent: U = if (U == u32) 0x7f80_0000 else 0x7ff0_0000_0000_0000;
+        const one: U = if (U == u32) 0x3f80_0000 else 0x3ff0_0000_0000_0000;
+        const snan = exponent | 1;
+        for ([_]bool{ false, true }) |maximum| {
+            const sub: u32 = if (U == u32) (if (maximum) 233 else 232) else (if (maximum) 245 else 244);
+            const module = try wasm.decode(a, try buildSimdMinMaxFunc(a, sub));
+            var instance: interp.Instance = undefined;
+            try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+            defer instance.deinit();
+            instance.spasm_enabled = false;
+            for ([_]bool{ false, true }) |swap| {
+                const left = if (swap) one else snan;
+                const right = if (swap) snan else one;
+                const result = try interp.invoke(&instance, testing.allocator, 0, &.{ 37, simd_live_vector, left, right });
+                defer testing.allocator.free(result);
+                try expectFloatMinMaxLane(U, left, right, @truncate(result[2]), maximum);
+            }
+            try testing.expectEqual(@as(u32, 0), instance.spasm_runs);
+        }
+    }
+}
+
 const SimdIntegerCase = struct { sub: u32, bits: usize, op: enum { abs, neg, average } };
 const simd_integer_cases = [_]SimdIntegerCase{
     .{ .sub = 96, .bits = 8, .op = .abs },

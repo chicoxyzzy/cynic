@@ -1939,6 +1939,17 @@ pub fn compile(
                         sp -= 1;
                         stack[sp - 1] = .v128;
                     },
+                    232, 233, 244, 245 => {
+                        if (sp < 2 or stack[sp - 2] != .v128 or stack[sp - 1] != .v128) return null;
+                        const minmax = simd.floatMinMaxOp(sub) orelse return null;
+                        const target = scratchOffset(num_locals, sp - 2);
+                        try m.loadVector128(.xmm0, .r12, target);
+                        try m.loadVector128(.xmm1, .r12, scratchOffset(num_locals, sp - 1));
+                        try emitSimdFloatMinMax(&m, minmax);
+                        try m.storeVector128(.r12, target, .xmm2);
+                        sp -= 1;
+                        stack[sp - 1] = .v128;
+                    },
                     77...82 => {
                         const consumed: usize = if (sub == 77) 1 else if (sub == 82) 3 else 2;
                         if (sp < consumed) return null;
@@ -2773,6 +2784,27 @@ fn emitSimdIntegerUnary(m: *x64.Masm, op: simd.IntegerUnaryOp) Error!x64.Xmm {
     try m.xorPacked128(.xmm0, .xmm1);
     try m.subtractPackedInteger(.xmm0, .xmm1, size);
     return .xmm0;
+}
+
+/// Inputs are xmm0/xmm1; xmm2/xmm3 are scratch; the result is xmm2.
+fn emitSimdFloatMinMax(m: *x64.Masm, op: simd.FloatMinMaxOp) Error!void {
+    // Core fmin/fmax: SSE picks its second operand on NaN or equal zeros.
+    // Save the NaN mask before combining both orders for signed-zero ties.
+    try m.movVector128(.xmm2, .xmm0);
+    try m.compareUnorderedPackedFloat128(.xmm2, .xmm1, op.double_precision);
+    try m.movVector128(.xmm3, .xmm0);
+    try m.minMaxPackedFloat128(.xmm3, .xmm1, op.double_precision, op.maximum);
+    try m.minMaxPackedFloat128(.xmm1, .xmm0, op.double_precision, op.maximum);
+    if (op.maximum)
+        try m.andPacked128(.xmm3, .xmm1)
+    else
+        try m.orPacked128(.xmm3, .xmm1);
+    // NaN lanes become all ones, then clear their payload below the quiet
+    // bit. Ordered lanes have a zero mask and remain bit-exact, including
+    // subnormals. The resulting negative canonical NaN is allowed by Core.
+    try m.orPacked128(.xmm3, .xmm2);
+    try m.shiftRightLogicalPacked128(.xmm2, if (op.double_precision) 13 else 10, op.double_precision);
+    try m.andNotPacked128(.xmm2, .xmm3);
 }
 
 fn materialize(m: *x64.Masm, loc: Loc, num_locals: usize, depth: usize) Error!void {
