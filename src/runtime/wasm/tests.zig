@@ -2496,7 +2496,9 @@ test "wasm spasm: SIMD lane addition wraps independently and memory is unaligned
     try testing.expectEqual(@as(u32, 1), instance.spasm_compiles);
 }
 
-const SimdWideningLoadConfig = struct {
+const simd_memory_load_ops = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 92, 93 };
+
+const SimdMemoryLoadConfig = struct {
     sub: u8,
     memory64: bool = false,
     offset: u64 = 0,
@@ -2504,7 +2506,7 @@ const SimdWideningLoadConfig = struct {
     memory_index: ?u32 = null,
 };
 
-fn buildSimdWideningLoadFunc(a: std.mem.Allocator, config: SimdWideningLoadConfig) ![]const u8 {
+fn buildSimdMemoryLoadFunc(a: std.mem.Allocator, config: SimdMemoryLoadConfig) ![]const u8 {
     var body: List = .empty;
     // Keep scalar/vector neighbors live, with enough locals to exercise
     // full-Cell offsets beyond the short x86 displacement range.
@@ -2528,7 +2530,24 @@ fn buildSimdWideningLoadFunc(a: std.mem.Allocator, config: SimdWideningLoadConfi
     });
 }
 
-fn expectedSimdWideningLoad(sub: u8, source: u64) u128 {
+fn simdMemoryLoadWidth(sub: u8) usize {
+    return switch (sub) {
+        7...10 => @as(usize, 1) << @as(u3, @intCast(sub - 7)),
+        92 => 4,
+        else => 8,
+    };
+}
+
+fn expectedSimdMemoryLoad(sub: u8, source: u64) u128 {
+    if (sub == 92) return @as(u32, @truncate(source));
+    if (sub == 93) return source;
+    if (sub >= 7 and sub <= 10) {
+        const bits: u7 = @intCast(simdMemoryLoadWidth(sub) * 8);
+        const lane = source & ((@as(u128, 1) << bits) - 1);
+        var result: u128 = 0;
+        for (0..128 / @as(usize, bits)) |i| result |= lane << @as(u7, @intCast(i * bits));
+        return result;
+    }
     const bits: u7 = @as(u7, 8) << @as(u3, @intCast((sub - 1) / 2));
     const mask = (@as(u128, 1) << bits) - 1;
     const wide_mask = (@as(u128, 1) << (bits * 2)) - 1;
@@ -2541,14 +2560,14 @@ fn expectedSimdWideningLoad(sub: u8, source: u64) u128 {
     return result;
 }
 
-test "wasm spasm: SIMD widening loads extend lanes and preserve live neighbors" {
+test "wasm spasm: SIMD memory loads preserve lane bits and live neighbors" {
     if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     for ([_]bool{ false, true }) |memory64| {
-        for (1..7) |sub| {
-            const module = try wasm.decode(a, try buildSimdWideningLoadFunc(a, .{ .sub = @intCast(sub), .memory64 = memory64, .offset = 3 }));
+        for (simd_memory_load_ops) |sub| {
+            const module = try wasm.decode(a, try buildSimdMemoryLoadFunc(a, .{ .sub = sub, .memory64 = memory64, .offset = 3 }));
             var instance: interp.Instance = undefined;
             try interp.instantiate(&instance, a, testing.allocator, &module, .{});
             defer instance.deinit();
@@ -2568,7 +2587,7 @@ test "wasm spasm: SIMD widening loads extend lanes and preserve live neighbors" 
                     const before = instance.spasm_runs;
                     const result = try interp.invoke(&instance, testing.allocator, 0, &.{ 37, simd_live_vector, address });
                     defer testing.allocator.free(result);
-                    try testing.expectEqualSlices(u128, &.{ 37, simd_live_vector, expectedSimdWideningLoad(@intCast(sub), source) }, result);
+                    try testing.expectEqualSlices(u128, &.{ 37, simd_live_vector, expectedSimdMemoryLoad(sub, source) }, result);
                     try testing.expectEqual(before + 1, instance.spasm_runs);
                     try testing.expectEqual(source, std.mem.readInt(u64, memory[address + 3 ..][0..8], .little));
                     try testing.expect(std.mem.allEqual(u8, memory[0 .. address + 3], 0x5a));
@@ -2580,17 +2599,17 @@ test "wasm spasm: SIMD widening loads extend lanes and preserve live neighbors" 
     }
 }
 
-test "wasm spasm: SIMD widening loads check exactly eight bytes without overflow" {
+test "wasm spasm: SIMD memory loads check exact widths without overflow" {
     if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const limit = 65536 - 8;
     for ([_]bool{ false, true }) |memory64| {
-        for (1..7) |sub| {
+        for (simd_memory_load_ops) |sub| {
+            const limit = 65536 - simdMemoryLoadWidth(sub);
             for ([_]u64{ 0, 8, 0xffff_ffff, 0x1_0000_0000, std.math.maxInt(u64) }) |offset| {
                 if (!memory64 and offset > std.math.maxInt(u32)) continue;
-                const module = try wasm.decode(a, try buildSimdWideningLoadFunc(a, .{ .sub = @intCast(sub), .memory64 = memory64, .offset = offset }));
+                const module = try wasm.decode(a, try buildSimdMemoryLoadFunc(a, .{ .sub = sub, .memory64 = memory64, .offset = offset }));
                 var instance: interp.Instance = undefined;
                 try interp.instantiate(&instance, a, testing.allocator, &module, .{});
                 defer instance.deinit();
@@ -2602,7 +2621,7 @@ test "wasm spasm: SIMD widening loads check exactly eight bytes without overflow
                     const result = interp.invoke(&instance, testing.allocator, 0, &.{ 37, simd_live_vector, address });
                     defer if (result) |values| testing.allocator.free(values) else |_| {};
                     if (offset <= limit and address <= limit - offset) {
-                        try testing.expectEqualSlices(u128, &.{ 37, simd_live_vector, expectedSimdWideningLoad(@intCast(sub), 0x5a5a5a5a5a5a5a5a) }, try result);
+                        try testing.expectEqualSlices(u128, &.{ 37, simd_live_vector, expectedSimdMemoryLoad(sub, 0x5a5a5a5a5a5a5a5a) }, try result);
                     } else {
                         try testing.expectError(error.OutOfBoundsMemoryAccess, result);
                     }
@@ -2615,14 +2634,14 @@ test "wasm spasm: SIMD widening loads check exactly eight bytes without overflow
     }
 }
 
-test "wasm spasm: SIMD widening loads skip unreachable memory64 immediates" {
+test "wasm spasm: SIMD memory loads skip unreachable memory64 immediates" {
     if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    for (1..7) |sub| {
+    for (simd_memory_load_ops) |sub| {
         for ([_]u64{ 11, std.math.maxInt(u64) }) |offset| {
-            const module = try wasm.decode(a, try buildSimdWideningLoadFunc(a, .{ .sub = @intCast(sub), .memory64 = true, .offset = offset, .dead = true }));
+            const module = try wasm.decode(a, try buildSimdMemoryLoadFunc(a, .{ .sub = sub, .memory64 = true, .offset = offset, .dead = true }));
             var instance: interp.Instance = undefined;
             try interp.instantiate(&instance, a, testing.allocator, &module, .{});
             defer instance.deinit();
@@ -2635,12 +2654,12 @@ test "wasm spasm: SIMD widening loads skip unreachable memory64 immediates" {
     }
 }
 
-test "wasm spasm: SIMD widening loads on a nonzero memory fall back safely" {
+test "wasm spasm: SIMD memory loads on a nonzero memory fall back safely" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    for (1..7) |sub| {
-        const module = try wasm.decode(a, try buildSimdWideningLoadFunc(a, .{ .sub = @intCast(sub), .memory_index = 1 }));
+    for (simd_memory_load_ops) |sub| {
+        const module = try wasm.decode(a, try buildSimdMemoryLoadFunc(a, .{ .sub = sub, .memory_index = 1 }));
         var instance: interp.Instance = undefined;
         try interp.instantiate(&instance, a, testing.allocator, &module, .{});
         defer instance.deinit();
@@ -2649,7 +2668,7 @@ test "wasm spasm: SIMD widening loads on a nonzero memory fall back safely" {
         @memset(instance.memories[1].data, 0x81);
         const result = try interp.invoke(&instance, testing.allocator, 0, &.{ 37, simd_live_vector, 0 });
         defer testing.allocator.free(result);
-        try testing.expectEqualSlices(u128, &.{ 37, simd_live_vector, expectedSimdWideningLoad(@intCast(sub), 0x8181818181818181) }, result);
+        try testing.expectEqualSlices(u128, &.{ 37, simd_live_vector, expectedSimdMemoryLoad(sub, 0x8181818181818181) }, result);
         try testing.expectEqual(@as(u32, 0), instance.spasm_runs);
     }
 }
@@ -2960,7 +2979,7 @@ fn testSimdFloatMinMax(comptime U: type) !void {
     };
     for ([_]bool{ false, true }) |maximum| {
         const sub: u32 = if (U == u32) (if (maximum) 233 else 232) else (if (maximum) 245 else 244);
-        const module = try wasm.decode(a, try buildSimdMinMaxFunc(a, sub));
+        const module = try wasm.decode(a, try buildSimdBinaryFunc(a, sub));
         var instance: interp.Instance = undefined;
         try interp.instantiate(&instance, a, testing.allocator, &module, .{});
         defer instance.deinit();
@@ -3056,7 +3075,7 @@ test "wasm interp: SIMD float minmax quiets signaling NaNs" {
         const snan = exponent | 1;
         for ([_]bool{ false, true }) |maximum| {
             const sub: u32 = if (U == u32) (if (maximum) 233 else 232) else (if (maximum) 245 else 244);
-            const module = try wasm.decode(a, try buildSimdMinMaxFunc(a, sub));
+            const module = try wasm.decode(a, try buildSimdBinaryFunc(a, sub));
             var instance: interp.Instance = undefined;
             try interp.instantiate(&instance, a, testing.allocator, &module, .{});
             defer instance.deinit();
@@ -3229,6 +3248,143 @@ test "wasm spasm: SIMD integer unary and average skip unreachable code" {
     }
 }
 
+const simd_comparison_ops = blk: {
+    var ops: [48]u32 = undefined;
+    for (0..42) |i| ops[i] = @intCast(35 + i);
+    for (0..6) |i| ops[42 + i] = @intCast(214 + i);
+    break :blk ops;
+};
+
+fn expectedSimdComparison(sub: u32, left: u128, right: u128) u128 {
+    const floating = sub >= 65 and sub <= 76;
+    const bits: u7 = if (sub >= 214) 64 else if (sub < 45) 8 else if (sub < 55) 16 else if (sub < 71) 32 else 64;
+    const index = if (sub >= 214) sub - 214 else if (floating) (sub - 65) % 6 else (sub - 35) % 10;
+    const mask = (@as(u128, 1) << bits) - 1;
+    const sign = @as(u128, 1) << (bits - 1);
+    const signed = sub >= 214 or (!floating and index >= 2 and index % 2 == 0);
+    const relation = if (floating or sub >= 214) index else if (index < 2) index else 2 + (index - 2) / 2;
+    var expected: u128 = 0;
+    for (0..128 / @as(usize, bits)) |lane| {
+        const shift: u7 = @intCast(lane * bits);
+        const l = (left >> shift) & mask;
+        const r = (right >> shift) & mask;
+        var equal = l == r;
+        var less = (l ^ (if (signed) sign else 0)) < (r ^ (if (signed) sign else 0));
+        var greater = (l ^ (if (signed) sign else 0)) > (r ^ (if (signed) sign else 0));
+        if (floating) {
+            const infinity: u128 = if (bits == 32) 0x7f800000 else 0x7ff0000000000000;
+            const unordered = l & (sign - 1) > infinity or r & (sign - 1) > infinity;
+            const both_zero = (l | r) & (sign - 1) == 0;
+            equal = !unordered and (l == r or both_zero);
+            const lk = if (l & sign != 0) l ^ mask else l ^ sign;
+            const rk = if (r & sign != 0) r ^ mask else r ^ sign;
+            less = !unordered and !both_zero and lk < rk;
+            greater = !unordered and !both_zero and lk > rk;
+        }
+        const selected = switch (relation) {
+            0 => equal,
+            1 => !equal,
+            2 => less,
+            3 => greater,
+            4 => less or equal,
+            5 => greater or equal,
+            else => unreachable,
+        };
+        if (selected) expected |= mask << shift;
+    }
+    return expected;
+}
+
+fn expectSimdComparison(instance: *interp.Instance, sub: u32, left: u128, right: u128) !void {
+    const before = instance.spasm_runs;
+    const result = try interp.invoke(instance, testing.allocator, 0, &.{ 37, simd_live_vector, left, right });
+    defer testing.allocator.free(result);
+    try testing.expectEqualSlices(u128, &.{ 37, simd_live_vector, expectedSimdComparison(sub, left, right) }, result);
+    try testing.expectEqual(before + 1, instance.spasm_runs);
+}
+
+test "wasm spasm: SIMD comparisons cover boundaries NaNs and mixed live lanes" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (simd_comparison_ops) |sub| {
+        const module = try wasm.decode(a, try buildSimdBinaryFunc(a, sub));
+        var instance: interp.Instance = undefined;
+        try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+        defer instance.deinit();
+        instance.spasm_enabled = true;
+        const bits: u7 = if (sub >= 214) 64 else if (sub < 45) 8 else if (sub < 55) 16 else if (sub < 71) 32 else 64;
+        const mask = (@as(u128, 1) << bits) - 1;
+        const sign = @as(u128, 1) << (bits - 1);
+        const infinity: u128 = if (bits == 32) 0x7f800000 else 0x7ff0000000000000;
+        const quiet: u128 = if (bits == 32) 0x400000 else 0x8000000000000;
+        const patterns = [_]u128{ 0, 1, mask, sign, sign - 1, sign + 1, sign - 2, 0xffffffff, 0x100000000, 0x7fffffff, infinity, infinity | sign, infinity | 1, infinity | quiet, infinity | quiet | sign | 42, infinity - 1, 0x3f800000, 0x3ff0000000000000 };
+        for (0..patterns.len) |l| {
+            for (0..patterns.len) |r| {
+                var left: u128 = 0;
+                var right: u128 = 0;
+                for (0..128 / @as(usize, bits)) |lane| {
+                    const shift: u7 = @intCast(lane * bits);
+                    left |= (patterns[(l + lane) % patterns.len] & mask) << shift;
+                    right |= (patterns[(r + lane * 3) % patterns.len] & mask) << shift;
+                }
+                try expectSimdComparison(&instance, sub, left, right);
+                try expectSimdComparison(&instance, sub, right, left);
+                try expectSimdComparison(&instance, sub, left, left);
+            }
+        }
+        try testing.expectEqual(@as(u32, 1), instance.spasm_compiles);
+    }
+}
+
+test "wasm spasm: SIMD comparisons exhaust all byte pairs" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (simd_comparison_ops[0..10]) |sub| {
+        const module = try wasm.decode(a, try buildSimdBinaryFunc(a, sub));
+        var instance: interp.Instance = undefined;
+        try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+        defer instance.deinit();
+        instance.spasm_enabled = true;
+        for (0..256) |l| {
+            for (0..16) |group| {
+                var left: u128 = 0;
+                var right: u128 = 0;
+                for (0..16) |lane| {
+                    left |= @as(u128, l) << @as(u7, @intCast(lane * 8));
+                    right |= @as(u128, group * 16 + lane) << @as(u7, @intCast(lane * 8));
+                }
+                try expectSimdComparison(&instance, sub, left, right);
+            }
+        }
+    }
+}
+
+test "wasm spasm: SIMD comparisons skip unreachable code" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (simd_comparison_ops) |sub| {
+        var body: List = .empty;
+        try body.appendSlice(a, &.{ 0, 0x02, 0x7b, 0x20, 0, 0x0c, 0, 0x20, 0, 0x20, 0, 0xfd });
+        try uleb(a, &body, sub);
+        try body.appendSlice(a, &.{ 0x0b, 0x0b });
+        const module = try wasm.decode(a, try buildFunc(a, &.{0x7b}, &.{0x7b}, body.items, "dead"));
+        var instance: interp.Instance = undefined;
+        try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+        defer instance.deinit();
+        instance.spasm_enabled = true;
+        const result = try interp.invoke(&instance, testing.allocator, 0, &.{simd_live_vector});
+        defer testing.allocator.free(result);
+        try testing.expectEqualSlices(u128, &.{simd_live_vector}, result);
+        try testing.expectEqual(@as(u32, 1), instance.spasm_runs);
+    }
+}
+
 const SimdMinMaxCase = struct { sub: u32, bits: usize, signed: bool, maximum: bool };
 const simd_minmax_cases = [_]SimdMinMaxCase{
     .{ .sub = 118, .bits = 8, .signed = true, .maximum = false },
@@ -3245,12 +3401,12 @@ const simd_minmax_cases = [_]SimdMinMaxCase{
     .{ .sub = 185, .bits = 32, .signed = false, .maximum = true },
 };
 
-fn buildSimdMinMaxFunc(a: std.mem.Allocator, sub: u32) ![]const u8 {
+fn buildSimdBinaryFunc(a: std.mem.Allocator, sub: u32) ![]const u8 {
     var body: List = .empty;
     try body.appendSlice(a, &.{ 1, 32, 0x7f, 0x20, 0, 0x20, 1, 0x20, 2, 0x20, 3, 0xfd });
     try uleb(a, &body, sub);
     try body.append(a, 0x0b);
-    return buildFunc(a, &.{ 0x7e, 0x7b, 0x7b, 0x7b }, &.{ 0x7e, 0x7b, 0x7b }, body.items, "minmax");
+    return buildFunc(a, &.{ 0x7e, 0x7b, 0x7b, 0x7b }, &.{ 0x7e, 0x7b, 0x7b }, body.items, "binary");
 }
 
 fn expectSimdMinMax(instance: *interp.Instance, op: SimdMinMaxCase, left: u128, right: u128) !void {
@@ -3283,7 +3439,7 @@ test "wasm spasm: SIMD integer minmax handles boundaries and mixed live lanes" {
     defer arena.deinit();
     const a = arena.allocator();
     for (simd_minmax_cases) |op| {
-        const module = try wasm.decode(a, try buildSimdMinMaxFunc(a, op.sub));
+        const module = try wasm.decode(a, try buildSimdBinaryFunc(a, op.sub));
         var instance: interp.Instance = undefined;
         try interp.instantiate(&instance, a, testing.allocator, &module, .{});
         defer instance.deinit();
@@ -3321,7 +3477,7 @@ test "wasm spasm: SIMD integer minmax exhausts all byte pairs" {
     defer arena.deinit();
     const a = arena.allocator();
     for (simd_minmax_cases[0..4]) |op| {
-        const module = try wasm.decode(a, try buildSimdMinMaxFunc(a, op.sub));
+        const module = try wasm.decode(a, try buildSimdBinaryFunc(a, op.sub));
         var instance: interp.Instance = undefined;
         try interp.instantiate(&instance, a, testing.allocator, &module, .{});
         defer instance.deinit();

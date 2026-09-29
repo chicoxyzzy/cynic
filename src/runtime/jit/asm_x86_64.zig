@@ -741,6 +741,13 @@ pub const Masm = struct {
         try self.emitXmmReg(if (double_precision) 0x66 else null, if (maximum) 0x5f else 0x5d, destination, source);
     }
 
+    pub const PackedFloatComparison = enum(u8) { eq = 0, lt = 1, le = 2, ne = 4 };
+
+    pub fn comparePackedFloat128(self: *Masm, destination: Xmm, source: Xmm, double_precision: bool, relation: PackedFloatComparison) error{OutOfMemory}!void {
+        try self.emitXmmReg(if (double_precision) @as(u8, 0x66) else null, 0xc2, destination, source);
+        try self.emitByte(@intFromEnum(relation));
+    }
+
     pub fn compareUnorderedPackedFloat128(self: *Masm, destination: Xmm, source: Xmm, double_precision: bool) error{OutOfMemory}!void {
         try self.emitXmmReg(if (double_precision) 0x66 else null, 0xc2, destination, source);
         try self.emitByte(3); // CMPUNORDPS/PD
@@ -1310,6 +1317,25 @@ test "jit asm_x86_64: encodes unaligned SIMD moves and packed i32 addition" {
         0xf3, 0x45, 0x0f, 0x6f, 0x8c, 0x24, 0x10, 0,    0,    0,
         0x66, 0x45, 0x0f, 0xfe, 0xca, 0xf3, 0x45, 0x0f, 0x7f, 0x8d,
         0xf0, 0xff, 0xff, 0xff,
+    }, machine.code.items);
+}
+
+test "jit asm_x86_64: SIMD comparison encodings retain SSE2" {
+    var machine = Masm.init(std.testing.allocator);
+    defer machine.deinit();
+    for ([_]bool{ false, true }) |double| {
+        for ([_]Masm.PackedFloatComparison{ .eq, .lt, .le, .ne }) |relation| try machine.comparePackedFloat128(.xmm9, .xmm10, double, relation);
+    }
+    try std.testing.expectEqualSlices(u8, &.{
+        0x45, 0x0f, 0xc2, 0xca, 0x00,
+        0x45, 0x0f, 0xc2, 0xca, 0x01,
+        0x45, 0x0f, 0xc2, 0xca, 0x02,
+        0x45, 0x0f, 0xc2, 0xca, 0x04,
+        0x66, 0x45, 0x0f, 0xc2, 0xca,
+        0x00, 0x66, 0x45, 0x0f, 0xc2,
+        0xca, 0x01, 0x66, 0x45, 0x0f,
+        0xc2, 0xca, 0x02, 0x66, 0x45,
+        0x0f, 0xc2, 0xca, 0x04,
     }, machine.code.items);
 }
 

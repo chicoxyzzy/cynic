@@ -12,6 +12,16 @@ pub fn wideningLoadOp(sub: u32) ?WideningLoadOp {
     };
 }
 
+pub const ScalarLoadOp = struct { width: u4, splat: bool };
+
+pub fn scalarLoadOp(sub: u32) ?ScalarLoadOp {
+    return switch (sub) {
+        7...10 => .{ .width = @as(u4, 1) << @as(u2, @intCast(sub - 7)), .splat = true },
+        92, 93 => .{ .width = if (sub == 92) 4 else 8, .splat = false },
+        else => null,
+    };
+}
+
 pub fn splatWidth(sub: u32) ?u4 {
     return switch (sub) {
         15 => 1,
@@ -45,6 +55,52 @@ pub fn laneOp(sub: u32) ?LaneOp {
 }
 
 pub const ReductionOp = struct { width: u4, bitmask: bool };
+
+pub const Comparison = enum { eq, ne, lt, gt, le, ge };
+pub const ComparisonOp = struct {
+    width: u4,
+    relation: Comparison,
+    signed: bool = false,
+    floating: bool = false,
+};
+
+pub fn comparisonOp(sub: u32) ?ComparisonOp {
+    if (sub >= 35 and sub <= 64) {
+        const index = (sub - 35) % 10;
+        return .{
+            .width = @as(u4, 1) << @as(u2, @intCast((sub - 35) / 10)),
+            .relation = switch (index) {
+                0 => .eq,
+                1 => .ne,
+                2, 3 => .lt,
+                4, 5 => .gt,
+                6, 7 => .le,
+                8, 9 => .ge,
+                else => return null,
+            },
+            .signed = index >= 2 and index % 2 == 0,
+        };
+    }
+    if ((sub >= 65 and sub <= 76) or (sub >= 214 and sub <= 219)) {
+        const floating = sub < 214;
+        const index = if (floating) (sub - 65) % 6 else sub - 214;
+        return .{
+            .width = if (sub <= 70) 4 else 8,
+            .relation = switch (index) {
+                0 => .eq,
+                1 => .ne,
+                2 => .lt,
+                3 => .gt,
+                4 => .le,
+                5 => .ge,
+                else => return null,
+            },
+            .signed = !floating,
+            .floating = floating,
+        };
+    }
+    return null;
+}
 
 pub fn reductionOp(sub: u32) ?ReductionOp {
     return switch (sub) {

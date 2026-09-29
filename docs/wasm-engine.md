@@ -703,6 +703,10 @@ the measured design space:
   exactly eight bytes before widening to a full vector, using NEON
   SXTL/UXTL or SSE2 unpacking with zero/sign masks. Memory64 overflow traps
   before access; nonzero-memory operands still fall back.
+  Memory splats and zero loads use exact-width reads and preserve raw bits.
+  All 48 integer/floating comparisons compile, including unsigned sign-boundary
+  handling and NaN-aware floating ordering. The x86 i64 forms use scalar
+  comparisons to retain the SSE2 baseline.
   Table64 operations (the helper ABI still uses u32
   indices), the remaining SIMD operations, and other unsupported x86
   bodies refuse before

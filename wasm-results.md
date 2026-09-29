@@ -43,18 +43,18 @@ self-link, and stable-gate execution. Unsupported x86 opcode families fall
 back per function and therefore remain covered by the same semantic sweep.
 The SIMD foundation preserves full `v128` values across calls, locals/globals,
 select, and single-result merges on both targets. Both compile
-`v128.const/load/store`, all six signed/unsigned widening loads, all eight
-lane loads/stores, scalar splats,
+`v128.const/load/store`, all six signed/unsigned widening loads, all four
+memory splats, both zero loads, all eight lane loads/stores, scalar splats,
 extract/replace-lane, vector bitwise operations, `v128.any_true`, all integer
 `all_true`/`bitmask` reductions, all 12 integer min/max operations, integer
 `abs`/`neg` at every lane width, unsigned rounded averages, floating-point
-min/max at both lane widths, and `i32x4.add`;
+min/max at both lane widths, all 48 integer/floating comparisons, and `i32x4.add`;
 other SIMD instructions still fall back.
 
 | target | native entries | compiled functions | refusals |
 |---|---:|---:|---:|
-| x86_64-macos (Rosetta) | 123,926 | 4,991 | 992 |
-| AArch64-macos | 129,493 | 4,965 | 1,018 |
+| x86_64-macos (Rosetta) | 130,693 | 5,172 | 811 |
+| AArch64-macos | 136,260 | 5,146 | 837 |
 
 The SIMD foundation added 249 compiled functions on x86_64 and 26 on AArch64
 over the reference-parity checkpoint. The bounded AArch64 code-reservation
@@ -73,11 +73,13 @@ Floating-point min/max adds 58 compiled functions and 1,518 native entries
 per target, removing another 58 SIMD refusals apiece.
 The six widening loads add 66 compiled functions and 84 native entries per
 target, removing another 66 SIMD refusals apiece.
+Memory splats/zero loads and all comparisons add 181 compiled functions and
+6,767 native entries per target, removing another 181 SIMD refusals apiece.
 These are coverage counts, not speedups.
 
-- x86: 8 limits, 0 signatures, 397 bytecode shapes, 587 unsupported opcodes,
+- x86: 8 limits, 0 signatures, 397 bytecode shapes, 406 unsupported opcodes,
   0 emission failures, and 0 installation refusals.
-- AArch64: 8 limits, 0 signatures, 335 bytecode shapes, 675 unsupported
+- AArch64: 8 limits, 0 signatures, 335 bytecode shapes, 494 unsupported
   opcodes, 0 emission failures, and 0 installation refusals. Reusing x86's
   module-sized reservation removes all 99 installation refusals from the
   previous fixed 64 KiB arena. Both targets retain the 64 KiB minimum and
@@ -85,13 +87,31 @@ These are coverage counts, not speedups.
   back to Sarcasm if reservation or installation is refused.
 
 The x86 vector-signature bucket falls from 1,349 to zero, but many functions
-then encounter unsupported instructions: both targets record 516 refusals
+then encounter unsupported instructions: both targets record 335 refusals
 at `0xfd`. The largest reported subopcode groups are `i8x16.popcnt` (98: 15),
-`i8x16.shuffle` (13: 11), `v128.load64_zero` (93: 11),
-`v128.load8_splat` (7: 10), and `v128.load16_splat` (8: 10).
+`i8x16.shuffle` (13: 11), `f32x4.sqrt` (227: 8),
+`i8x16.swizzle` (14: 7), and `i32x4.sub` (177: 6).
 Counts classify the first refusal per attempted function, not every operation
 it contains. Both sweeps also report 7 overflows of the compact per-instance
 top-level opcode table; the fixed subopcode counters are tracked separately.
+
+The source inventory accounts for all 256 SIMD opcodes accepted by the
+validator: 133 have lowering paths on both targets; 123 still need them.
+This is an opcode count, not the first-refusal-per-function count above.
+Existing nonzero-memory and control-shape fallback restrictions still apply.
+
+| Remaining family | Opcodes |
+|---|---:|
+| Shuffle / swizzle / popcount | 3 |
+| Wrapping integer arithmetic | 10 |
+| Saturating arithmetic | 8 |
+| Shifts | 12 |
+| Narrow / extend / pairwise add | 20 |
+| Extended multiply / dot / Q15 | 14 |
+| Floating unary / arithmetic | 14 |
+| Floating rounding / pseudo-min/max | 12 |
+| Conversions | 10 |
+| Relaxed SIMD | 20 |
 
 Both backends still refuse native table64 operations while their helpers use
 u32 indices, preventing truncation above 2^32. The largest remaining `0xfc` groups are

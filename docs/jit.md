@@ -1626,6 +1626,16 @@ useful:
    scalar/vector neighbors, and cover unaligned access, exact end-of-memory
    bounds, memory64 overflow, unreachable immediates, and nonzero-memory
    fallback. No new runtime allocations, helper calls, or policy changes.
+   Memory splats and zero loads now compile with exact-width scalar reads.
+   Splats reuse the raw-bit replication path; zero loads clear every other
+   vector bit. All 48 integer/floating comparisons also compile, following
+   [Liftoff's ARM64 comparisons](https://github.com/v8/v8/blob/main/src/wasm/baseline/arm64/liftoff-assembler-arm64-inl.h)
+   and [x64 comparisons](https://github.com/v8/v8/blob/main/src/wasm/baseline/x64/liftoff-assembler-x64-inl.h).
+   ARM uses NEON comparisons; x86 retains SSE2 by biasing unsigned lane sign
+   bits and using scalar i64 comparisons. Floating gt/ge swap operands
+   instead of negating an ordered comparison, preserving NaN behavior.
+   Tests exhaust byte comparison pairs and check mixed wider lanes, signed
+   zero, infinities, subnormals, signaling/quiet NaNs, and dead-code skipping.
    This follows the existing [Liftoff](https://v8.dev/blog/liftoff) /
    [Wizard-SPC](https://arxiv.org/abs/2305.13241) typed-stack design and
    [Core value and vector semantics](https://webassembly.github.io/spec/core/exec/instructions.html).
@@ -1634,7 +1644,7 @@ useful:
    an unsupported lane operation. `tools/wasm_bench.zig` covers inline vector
    addition and vector-valued calls with checked high-lane checksums.
    The rest of the v128 lane-op
-   surface (the other arithmetic/compare/convert/shuffle families) is the
+   surface (the other arithmetic/convert/shuffle and relaxed families) is the
    remaining frontier, along with the side-table-as-control-oracle wiring (§6)
    that would make multi-target `br_table` cheap.
 5. **Ohaimark** — the ADR plus bytecode/feedback/SSA, initial specialization,
