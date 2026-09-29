@@ -262,6 +262,19 @@ pub fn addV4s(vd: Reg, vn: Reg, vm: Reg) u32 {
 
 pub const VectorLaneSize = enum(u2) { byte, half, word };
 
+pub const VectorIntegerSize = enum(u2) { byte, half, word, double };
+
+/// ABS/NEG Vd.16B/8H/4S/2D, Vn; wrapping, not saturating.
+pub fn integerUnaryV128(vd: Reg, vn: Reg, size: VectorIntegerSize, negate: bool) u32 {
+    const base: u32 = if (negate) 0x6E20B800 else 0x4E20B800;
+    return base | (@as(u32, @intFromEnum(size)) << 22) | (r(vn) << 5) | r(vd);
+}
+
+/// URHADD Vd.16B/8H, Vn, Vm: unsigned (a + b + 1) / 2.
+pub fn roundingAverageUnsignedV128(vd: Reg, vn: Reg, vm: Reg, halfword: bool) u32 {
+    return 0x6E201400 | (@as(u32, @intFromBool(halfword)) << 22) | (r(vm) << 16) | (r(vn) << 5) | r(vd);
+}
+
 /// SMIN/UMIN/SMAX/UMAX Vd.16B/8H/4S, Vn, Vm.
 pub fn minMaxV128(vd: Reg, vn: Reg, vm: Reg, size: VectorLaneSize, signed: bool, maximum: bool) u32 {
     const base: u32 = if (maximum) 0x4E206400 else 0x4E206C00;
@@ -992,6 +1005,21 @@ pub fn brk(imm16: u16) u32 {
 // Byte-exact encodings, cross-checked against `llvm-mc -triple
 // arm64 -show-encoding` output. These pin the bit layouts; the
 // execution tests in masm.zig prove them on hardware.
+
+test "jit asm_aarch64: SIMD integer unary and average encodings" {
+    const expectEqual = std.testing.expectEqual;
+    // Golden words from clang, including a high vector source register.
+    try expectEqual(@as(u32, 0x4e20ba23), integerUnaryV128(.x3, .x17, .byte, false));
+    try expectEqual(@as(u32, 0x6e20ba23), integerUnaryV128(.x3, .x17, .byte, true));
+    try expectEqual(@as(u32, 0x4e60ba23), integerUnaryV128(.x3, .x17, .half, false));
+    try expectEqual(@as(u32, 0x6e60ba23), integerUnaryV128(.x3, .x17, .half, true));
+    try expectEqual(@as(u32, 0x4ea0ba23), integerUnaryV128(.x3, .x17, .word, false));
+    try expectEqual(@as(u32, 0x6ea0ba23), integerUnaryV128(.x3, .x17, .word, true));
+    try expectEqual(@as(u32, 0x4ee0ba23), integerUnaryV128(.x3, .x17, .double, false));
+    try expectEqual(@as(u32, 0x6ee0ba23), integerUnaryV128(.x3, .x17, .double, true));
+    try expectEqual(@as(u32, 0x6e3114a3), roundingAverageUnsignedV128(.x3, .x5, .x17, false));
+    try expectEqual(@as(u32, 0x6e7114a3), roundingAverageUnsignedV128(.x3, .x5, .x17, true));
+}
 
 test "jit asm_aarch64: SIMD integer minmax encodings" {
     const expectEqual = std.testing.expectEqual;

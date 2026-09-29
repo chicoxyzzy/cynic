@@ -45,6 +45,26 @@ pub fn reductionOp(sub: u32) ?ReductionOp {
     };
 }
 
+pub const IntegerUnaryOp = struct { width: u4, negate: bool };
+
+pub fn integerUnaryOp(sub: u32) ?IntegerUnaryOp {
+    return switch (sub) {
+        96, 97 => .{ .width = 1, .negate = sub == 97 },
+        128, 129 => .{ .width = 2, .negate = sub == 129 },
+        160, 161 => .{ .width = 4, .negate = sub == 161 },
+        192, 193 => .{ .width = 8, .negate = sub == 193 },
+        else => null,
+    };
+}
+
+pub fn roundingAverageWidth(sub: u32) ?u4 {
+    return switch (sub) {
+        123 => 1,
+        155 => 2,
+        else => null,
+    };
+}
+
 pub const MinMaxOp = struct { width: u4, signed: bool, maximum: bool };
 
 pub fn integerMinMaxOp(sub: u32) ?MinMaxOp {

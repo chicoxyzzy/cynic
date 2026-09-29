@@ -39,13 +39,14 @@ The SIMD foundation preserves full `v128` values across calls, locals/globals,
 select, and single-result merges on both targets. Both compile
 `v128.const/load/store`, all eight lane loads/stores, scalar splats,
 extract/replace-lane, vector bitwise operations, `v128.any_true`, all integer
-`all_true`/`bitmask` reductions, all 12 integer min/max operations, and
-`i32x4.add`; other SIMD instructions still fall back.
+`all_true`/`bitmask` reductions, all 12 integer min/max operations, integer
+`abs`/`neg` at every lane width, unsigned rounded averages, and `i32x4.add`;
+other SIMD instructions still fall back.
 
 | target | native entries | compiled functions | refusals |
 |---|---:|---:|---:|
-| x86_64-macos (Rosetta) | 122,095 | 4,794 | 1,189 |
-| AArch64-macos | 127,662 | 4,768 | 1,215 |
+| x86_64-macos (Rosetta) | 122,324 | 4,867 | 1,116 |
+| AArch64-macos | 127,891 | 4,841 | 1,142 |
 
 The SIMD foundation added 249 compiled functions on x86_64 and 26 on AArch64
 over the reference-parity checkpoint. The bounded AArch64 code-reservation
@@ -58,11 +59,13 @@ refusals apiece. All eight integer reductions add another 46 compiled
 functions and 143 native entries per target, removing 46 SIMD refusals
 apiece. The 12 integer min/max operations add 108 compiled functions and
 276 native entries per target, removing another 108 SIMD refusals apiece.
+Integer `abs`/`neg` and unsigned rounded averages add 73 compiled functions
+and 229 native entries per target, removing 73 more SIMD refusals apiece.
 These are coverage counts, not speedups.
 
-- x86: 8 limits, 0 signatures, 397 bytecode shapes, 784 unsupported opcodes,
+- x86: 8 limits, 0 signatures, 397 bytecode shapes, 711 unsupported opcodes,
   0 emission failures, and 0 installation refusals.
-- AArch64: 8 limits, 0 signatures, 335 bytecode shapes, 872 unsupported
+- AArch64: 8 limits, 0 signatures, 335 bytecode shapes, 799 unsupported
   opcodes, 0 emission failures, and 0 installation refusals. Reusing x86's
   module-sized reservation removes all 99 installation refusals from the
   previous fixed 64 KiB arena. Both targets retain the 64 KiB minimum and
@@ -70,10 +73,10 @@ These are coverage counts, not speedups.
   back to Sarcasm if reservation or installation is refused.
 
 The x86 vector-signature bucket falls from 1,349 to zero, but many functions
-then encounter unsupported instructions: both targets record 713 refusals
+then encounter unsupported instructions: both targets record 640 refusals
 at `0xfd`. The largest subopcode groups are `f64x2.min` (244: 18),
-`f64x2.max` (245: 18), `i8x16.avgr_u` (123: 16), `i16x8.avgr_u` (155: 15),
-and `i8x16.abs` (96: 13).
+`f64x2.max` (245: 18), `i8x16.popcnt` (98: 15), `f32x4.min` (232: 12),
+and `v128.load8x8_s` (1: 11).
 Counts classify the first refusal per attempted function, not every operation
 it contains. Both sweeps also report 7 overflows of the compact per-instance
 top-level opcode table; the fixed subopcode counters are tracked separately.
