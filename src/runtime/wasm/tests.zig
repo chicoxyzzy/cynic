@@ -2636,6 +2636,113 @@ const simd_scalar_bits = [_]u64{
 };
 const simd_live_vector: u128 = 0x0123_4567_89ab_cdef_fedc_ba98_7654_3210;
 
+const simd_reduction_cases = [_]struct { all_true: u32, bitmask: u32, bits: usize }{
+    .{ .all_true = 99, .bitmask = 100, .bits = 8 },
+    .{ .all_true = 131, .bitmask = 132, .bits = 16 },
+    .{ .all_true = 163, .bitmask = 164, .bits = 32 },
+    .{ .all_true = 195, .bitmask = 196, .bits = 64 },
+};
+
+fn buildSimdReductionFunc(a: std.mem.Allocator, sub: u32) ![]const u8 {
+    var body: List = .empty;
+    // Extra locals exercise nonzero vector-home offsets as well as live
+    // scalar/vector values below the operand being reduced.
+    try body.appendSlice(a, &.{ 1, 32, 0x7f, 0x20, 0, 0x20, 1, 0x20, 2, 0xfd });
+    try uleb(a, &body, sub);
+    try body.append(a, 0x0b);
+    return buildFunc(a, &.{ 0x7e, 0x7b, 0x7b }, &.{ 0x7e, 0x7b, 0x7f }, body.items, "reduce");
+}
+
+fn expectSimdReduction(instance: *interp.Instance, input: u128, expected: u128) !void {
+    const before = instance.spasm_runs;
+    const result = try interp.invoke(instance, testing.allocator, 0, &.{ 37, simd_live_vector, input });
+    defer testing.allocator.free(result);
+    try testing.expectEqualSlices(u128, &.{ 37, simd_live_vector, expected }, result);
+    try testing.expectEqual(before + 1, instance.spasm_runs);
+}
+
+test "wasm spasm: SIMD reductions all_true checks every bit and every zero lane" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (simd_reduction_cases) |op| {
+        const module = try wasm.decode(a, try buildSimdReductionFunc(a, op.all_true));
+        var instance: interp.Instance = undefined;
+        try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+        defer instance.deinit();
+        instance.spasm_enabled = true;
+        try expectSimdReduction(&instance, 0, 0);
+        try expectSimdReduction(&instance, std.math.maxInt(u128), 1);
+        const lanes = 128 / op.bits;
+        const lane_mask = (@as(u128, 1) << @as(u7, @intCast(op.bits))) - 1;
+        for (0..op.bits) |bit| {
+            var vector: u128 = 0;
+            for (0..lanes) |lane| vector |= @as(u128, 1) << @as(u7, @intCast(lane * op.bits + bit));
+            try expectSimdReduction(&instance, vector, 1);
+            for (0..lanes) |lane| {
+                const mask = lane_mask << @as(u7, @intCast(lane * op.bits));
+                try expectSimdReduction(&instance, vector & ~mask, 0);
+                try expectSimdReduction(&instance, vector & mask, 0);
+            }
+        }
+        try testing.expectEqual(@as(u32, 1), instance.spasm_compiles);
+    }
+}
+
+test "wasm spasm: SIMD reductions bitmask exhausts sign combinations with lower bit noise" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (simd_reduction_cases) |op| {
+        const module = try wasm.decode(a, try buildSimdReductionFunc(a, op.bitmask));
+        var instance: interp.Instance = undefined;
+        try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+        defer instance.deinit();
+        instance.spasm_enabled = true;
+        const lanes = 128 / op.bits;
+        const combinations = @as(usize, 1) << @as(u6, @intCast(lanes));
+        var sign_bits: u128 = 0;
+        for (0..lanes) |lane| sign_bits |= @as(u128, 1) << @as(u7, @intCast((lane + 1) * op.bits - 1));
+        for (0..combinations) |mask| {
+            var vector: u128 = 0;
+            for (0..lanes) |lane| {
+                if ((mask & (@as(usize, 1) << @as(u6, @intCast(lane)))) != 0)
+                    vector |= @as(u128, 1) << @as(u7, @intCast((lane + 1) * op.bits - 1));
+            }
+            try expectSimdReduction(&instance, vector, mask);
+            try expectSimdReduction(&instance, vector | ~sign_bits, mask);
+        }
+        try testing.expectEqual(@as(u32, 1), instance.spasm_compiles);
+    }
+}
+
+test "wasm spasm: SIMD reductions are skipped after a terminating branch" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (simd_reduction_cases) |op| {
+        for ([_]u32{ op.all_true, op.bitmask }) |sub| {
+            var body: List = .empty;
+            try body.appendSlice(a, &.{ 0, 0x02, 0x7f, 0x41, 37, 0x0c, 0, 0x20, 0, 0xfd });
+            try uleb(a, &body, sub);
+            try body.appendSlice(a, &.{ 0x0b, 0x0b });
+            const module = try wasm.decode(a, try buildFunc(a, &.{0x7b}, &.{0x7f}, body.items, "dead"));
+            var instance: interp.Instance = undefined;
+            try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+            defer instance.deinit();
+            instance.spasm_enabled = true;
+            const result = try interp.invoke(&instance, testing.allocator, 0, &.{simd_live_vector});
+            defer testing.allocator.free(result);
+            try testing.expectEqualSlices(u128, &.{37}, result);
+            try testing.expectEqual(@as(u32, 1), instance.spasm_compiles);
+            try testing.expectEqual(@as(u32, 1), instance.spasm_runs);
+        }
+    }
+}
+
 test "wasm spasm: SIMD splats truncate integers and preserve floating bit patterns" {
     if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);

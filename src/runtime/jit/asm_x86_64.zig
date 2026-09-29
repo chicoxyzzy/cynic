@@ -694,6 +694,40 @@ pub const Masm = struct {
         try self.emitXmmReg(0x66, 0xfe, destination, source);
     }
 
+    pub fn xorPacked128(self: *Masm, destination: Xmm, source: Xmm) error{OutOfMemory}!void {
+        try self.emitXmmReg(0x66, 0xef, destination, source);
+    }
+
+    pub const PackedIntSize = enum(u8) { byte = 0x74, half = 0x75, word = 0x76 };
+
+    pub fn compareEqualPacked(self: *Masm, destination: Xmm, source: Xmm, size: PackedIntSize) error{OutOfMemory}!void {
+        try self.emitXmmReg(0x66, @intFromEnum(size), destination, source);
+    }
+
+    pub fn packSigned16To8(self: *Masm, destination: Xmm, source: Xmm) error{OutOfMemory}!void {
+        try self.emitXmmReg(0x66, 0x63, destination, source);
+    }
+
+    pub fn movByteMask(self: *Masm, destination: Reg, source: Xmm) error{OutOfMemory}!void {
+        try self.emitVectorMask(0x66, 0xd7, destination, source);
+    }
+
+    pub fn movFloatMask(self: *Masm, destination: Reg, source: Xmm) error{OutOfMemory}!void {
+        try self.emitVectorMask(null, 0x50, destination, source);
+    }
+
+    pub fn movDoubleMask(self: *Masm, destination: Reg, source: Xmm) error{OutOfMemory}!void {
+        try self.emitVectorMask(0x66, 0x50, destination, source);
+    }
+
+    fn emitVectorMask(self: *Masm, prefix: ?u8, opcode: u8, destination: Reg, source: Xmm) error{OutOfMemory}!void {
+        if (prefix) |byte| try self.emitByte(byte);
+        try self.emitByte(rex(false, isExtended(destination), false, isExtendedXmm(source)));
+        try self.emitByte(0x0f);
+        try self.emitByte(opcode);
+        try self.emitByte(0xc0 | (lowBits(destination) << 3) | lowBitsXmm(source));
+    }
+
     fn emitVectorMemory(self: *Masm, opcode: u8, vector: Xmm, base: Reg, displacement: i32) error{OutOfMemory}!void {
         // SSE2 MOVDQU accepts unaligned linear-memory and Cell addresses.
         try self.emitByte(0xf3);
@@ -1181,6 +1215,29 @@ test "jit asm_x86_64: encodes unaligned SIMD moves and packed i32 addition" {
         0xf3, 0x45, 0x0f, 0x6f, 0x8c, 0x24, 0x10, 0,    0,    0,
         0x66, 0x45, 0x0f, 0xfe, 0xca, 0xf3, 0x45, 0x0f, 0x7f, 0x8d,
         0xf0, 0xff, 0xff, 0xff,
+    }, machine.code.items);
+}
+
+test "jit asm_x86_64: SIMD reduction encodings retain SSE2" {
+    var machine = Masm.init(std.testing.allocator);
+    defer machine.deinit();
+    try machine.xorPacked128(.xmm9, .xmm10);
+    try machine.compareEqualPacked(.xmm9, .xmm10, .byte);
+    try machine.compareEqualPacked(.xmm9, .xmm10, .half);
+    try machine.compareEqualPacked(.xmm9, .xmm10, .word);
+    try machine.packSigned16To8(.xmm9, .xmm10);
+    try machine.movByteMask(.r9, .xmm10);
+    try machine.movFloatMask(.r9, .xmm10);
+    try machine.movDoubleMask(.r9, .xmm10);
+    try std.testing.expectEqualSlices(u8, &.{
+        0x66, 0x45, 0x0f, 0xef, 0xca,
+        0x66, 0x45, 0x0f, 0x74, 0xca,
+        0x66, 0x45, 0x0f, 0x75, 0xca,
+        0x66, 0x45, 0x0f, 0x76, 0xca,
+        0x66, 0x45, 0x0f, 0x63, 0xca,
+        0x66, 0x45, 0x0f, 0xd7, 0xca,
+        0x45, 0x0f, 0x50, 0xca, 0x66,
+        0x45, 0x0f, 0x50, 0xca,
     }, machine.code.items);
 }
 

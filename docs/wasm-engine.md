@@ -582,6 +582,9 @@ the measured design space:
   Scalar splats, every extract/replace-lane variant, and vector
   not/and/andnot/or/xor/bitselect also compile, preserving raw floating bits
   and signed/unsigned integer extraction through shared lane metadata.
+  All four integer `all_true` and `bitmask` reductions compile with canonical
+  i32 results, using baseline NEON/scalar operations on ARM and SSE2/scalar
+  operations on x86. No optional SIMD extensions are required.
   Table64 operations (the helper ABI still uses u32
   indices), the remaining SIMD operations, and other unsupported x86
   bodies refuse before

@@ -260,6 +260,41 @@ pub fn addV4s(vd: Reg, vn: Reg, vm: Reg) u32 {
     return 0x4EA08400 | (r(vm) << 16) | (r(vn) << 5) | r(vd);
 }
 
+pub const VectorLaneSize = enum(u2) { byte, half, word };
+
+/// UMINV Bd/Hd/Sd, Vn.16B/8H/4S; the scalar result clears all other bits.
+pub fn uminv128(vd: Reg, vn: Reg, size: VectorLaneSize) u32 {
+    return 0x6E31A800 | (@as(u32, @intFromEnum(size)) << 22) | (r(vn) << 5) | r(vd);
+}
+
+/// SSHR by lane_bits - 1 broadcasts each lane's sign into all its bits.
+pub fn sshrSign128(vd: Reg, vn: Reg, size: VectorLaneSize) u32 {
+    const lane_bits = @as(u32, 8) << @intFromEnum(size);
+    return 0x4F000400 | ((lane_bits + 1) << 16) | (r(vn) << 5) | r(vd);
+}
+
+pub fn andV16b(vd: Reg, vn: Reg, vm: Reg) u32 {
+    return 0x4E201C00 | (r(vm) << 16) | (r(vn) << 5) | r(vd);
+}
+
+/// EXT Vd.16B, Vn.16B, Vm.16B, #byte_offset.
+pub fn extV16b(vd: Reg, vn: Reg, vm: Reg, byte_offset: u4) u32 {
+    return 0x6E000000 | (r(vm) << 16) | (@as(u32, byte_offset) << 11) | (r(vn) << 5) | r(vd);
+}
+
+pub fn zip1V16b(vd: Reg, vn: Reg, vm: Reg) u32 {
+    return 0x4E003800 | (r(vm) << 16) | (r(vn) << 5) | r(vd);
+}
+
+/// ADDV Hd, Vn.8H; the scalar result clears all other bits.
+pub fn addv8h(vd: Reg, vn: Reg) u32 {
+    return 0x4E71B800 | (r(vn) << 5) | r(vd);
+}
+
+pub fn insDFromX(vd: Reg, lane: u1, xn: Reg) u32 {
+    return 0x4E081C00 | (@as(u32, lane) << 20) | (r(xn) << 5) | r(vd);
+}
+
 /// ORR Wd, Wn, Wm
 pub fn orrRegW(rd: Reg, rn: Reg, rm: Reg) u32 {
     return 0x2A000000 | (r(rm) << 16) | (r(rn) << 5) | r(rd);
@@ -950,6 +985,21 @@ pub fn brk(imm16: u16) u32 {
 // Byte-exact encodings, cross-checked against `llvm-mc -triple
 // arm64 -show-encoding` output. These pin the bit layouts; the
 // execution tests in masm.zig prove them on hardware.
+
+test "jit asm_aarch64: SIMD reduction encodings" {
+    const expectEqual = std.testing.expectEqual;
+    // Cross-checked with clang's AArch64 assembler, including high registers.
+    try expectEqual(@as(u32, 0x6e31a8a3), uminv128(.x3, .x5, .byte));
+    try expectEqual(@as(u32, 0x6e71aaf1), uminv128(.x17, .x23, .half));
+    try expectEqual(@as(u32, 0x6eb1abbe), uminv128(.lr, .fp, .word));
+    try expectEqual(@as(u32, 0x4f0904a3), sshrSign128(.x3, .x5, .byte));
+    try expectEqual(@as(u32, 0x4f1106f1), sshrSign128(.x17, .x23, .half));
+    try expectEqual(@as(u32, 0x4e311ca3), andV16b(.x3, .x5, .x17));
+    try expectEqual(@as(u32, 0x6e1d42f1), extV16b(.x17, .x23, .fp, 8));
+    try expectEqual(@as(u32, 0x4e1138a3), zip1V16b(.x3, .x5, .x17));
+    try expectEqual(@as(u32, 0x4e71baf1), addv8h(.x17, .x23));
+    try expectEqual(@as(u32, 0x4e181e23), insDFromX(.x3, 1, .x17));
+}
 
 test "jit asm_aarch64: golden encodings" {
     const expectEqual = std.testing.expectEqual;
