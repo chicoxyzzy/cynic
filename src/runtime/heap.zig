@@ -4571,6 +4571,7 @@ pub const Heap = struct {
     /// While open, every value pushed via `scope.push` is a GC root.
     pub fn openScope(self: *Heap) !*HandleScope {
         const scope = try self.allocator.create(HandleScope);
+        errdefer self.allocator.destroy(scope);
         scope.* = .{ .heap = self };
         try self.handle_scopes.append(self.allocator, scope);
         return scope;
