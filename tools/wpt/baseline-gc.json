@@ -11,21 +11,21 @@
     "testharness.js (patched)": "fbe2e52e029bbeea3fecdedf963b69589526a8a1e3ceb18947120667443147f7",
     "wasm/jsapi/wasm-module-builder.js (patched)": "83a83b12adc7d51533c818b23fd37936d03a7203e7015356f9e6852b8625964d"
   },
-  "binary_sha256": "3a1dbc12b4dbe9d578bac64e6d2aa814ef96f48d67294ff9d529ebe97ed30c77",
+  "binary_sha256": "934b80d7e8dfad1894808445b2deba01b4c773be31b4c29918ad7149a9da2164",
   "provenance": {
-    "generated_at_utc": "2026-09-29T07:22:21Z",
+    "generated_at_utc": "2026-09-29T07:22:24Z",
     "platform": "Darwin",
     "architecture": "arm64",
     "engine_git_head": "c63be52b548a8602f1ec98b5ac0b062f211fa63e",
     "engine_git_dirty": false
   },
   "configuration": {
-    "build_mode": "ReleaseFast",
+    "build_mode": "ReleaseSafe",
     "timeout": 10.0,
     "long_timeout": 60.0,
     "fuel": 50000000,
     "memory_limit": 268435456,
-    "gc_threshold": null
+    "gc_threshold": 1
   },
   "filter": "",
   "excluded": [

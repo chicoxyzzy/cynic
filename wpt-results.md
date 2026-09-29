@@ -21,23 +21,29 @@ and 10 additional files pass completely; no previously passing subtest was lost.
 This measures a selected Wasm JavaScript API slice, not browser conformance or
 the Wasm core instruction suite. See [the integration guide](docs/wpt.md),
 [scope and exclusions](vendor/wpt/README.md), and the complete
-[named-result baseline](tools/wpt/baseline.json).
+[normal named-result baseline](tools/wpt/baseline.json) and
+[ReleaseSafe GC-pressure baseline](tools/wpt/baseline-gc.json).
 
 ## Measurement
 
 | Input | Value |
 | --- | --- |
-| Captured | 2026-09-29T06:53:49Z |
+| Captured | 2026-09-29T07:22:21Z (normal); 2026-09-29T07:22:24Z (GC pressure) |
 | WPT revision | [`9ee707c850996c8d124809570c3ff855d67301b9`](https://github.com/web-platform-tests/wpt/tree/9ee707c850996c8d124809570c3ff855d67301b9/wasm/jsapi) |
-| Engine checkout | `3ba77e56b6b68005936006e3962fd4bb711f6bbb` (clean runtime source) |
+| Engine checkout | `c63be52b548a8602f1ec98b5ac0b062f211fa63e` (clean source for both profiles) |
 | Host | macOS arm64 |
+| Profiles | ReleaseFast / default GC; ReleaseSafe / `--gc-threshold=1` |
 | Posture | Strict-only, mutable primordials, eval and Wasm compilation enabled; JS and Wasm JITs off |
 | Limits | 50 million fuel units; 256 MiB engine memory; 10-second normal / 60-second long timeout |
 
-The machine-readable baseline records corpus, adapter, and executable hashes.
+Both machine-readable baselines record corpus, adapter, and executable hashes,
+plus the compile mode queried from each executor.
 Reproduce the score with `zig build wpt`. It exits nonzero while any included
 file fails. `zig build wpt -- --baseline=tools/wpt/baseline.json` gates named
-regressions in CI while continuing to report existing failures as failures.
+regressions in CI while continuing to report existing failures as failures. The
+required ReleaseSafe run uses `zig build wpt-safe -- --gc-threshold=1
+--baseline=tools/wpt/baseline-gc.json`; CI also compares all named results
+between the two profiles, including known failures.
 
 ## Results by family
 
@@ -72,7 +78,10 @@ now also passes the compound `instance/constructor-caching` test: Global,
 Memory, and Table imports retain their original wrappers, properties, and
 subclass prototypes. Duplicate exports and cross-realm reexports share identity.
 
-All file and named-subtest outcomes match under `--gc-threshold=1`. Unit
+All file, process-exit, harness, and named-subtest outcomes match between
+ReleaseFast with default GC and ReleaseSafe with `--gc-threshold=1`. The latter
+keeps GC verifiers and memory poisoning enabled, and both profiles are required
+in CI. No verifier failure, crash, or timeout occurred in either run. Unit
 regressions cover hardened and unhardened realms, cache-only collection,
 child-realm access, and allocation-failure rollback. A separate GC regression
 also prevents a stale cached Memory.buffer pointer after growth: without a
