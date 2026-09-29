@@ -369,13 +369,11 @@ const SpasmCache = struct {
 const spasm_code_reserve_min: usize = 64 * 1024;
 const spasm_code_reserve_max: usize = 4 * 1024 * 1024;
 
-fn spasmX86CodeReserve(body_bytes: usize, func_count: usize) usize {
-    // The x86_64 backend deliberately spills each operand to a Cell, so its
-    // native expansion is materially larger than AArch64's register-cached
-    // code. Keep tiny instances at the historical footprint, but size larger
-    // modules once up front because installed entry pointers make relocating a
-    // full CodeAllocator unsafe. Saturating arithmetic keeps hostile module
-    // sizes inside the hard reservation cap.
+fn spasmCodeReserveEstimate(body_bytes: usize, func_count: usize) usize {
+    // Both backends keep installed entry and call-gate addresses stable: size
+    // the arena once rather than relocating live code. Retain x86's conservative
+    // Cell-spill expansion estimate on AArch64 too, with the same small-module
+    // floor and saturating hard cap. The Realm ledger charges the full mapping.
     const body_code = std.math.mul(usize, body_bytes, 64) catch std.math.maxInt(usize);
     const func_code = std.math.mul(usize, func_count, 256) catch std.math.maxInt(usize);
     const estimate = std.math.add(usize, body_code, func_code) catch std.math.maxInt(usize);
@@ -387,23 +385,36 @@ fn spasmX86CodeReserve(body_bytes: usize, func_count: usize) usize {
 }
 
 fn spasmCodeReserve(funcs: []const CompiledFunc) usize {
-    if (comptime builtin.cpu.arch != .x86_64) return spasm_code_reserve_min;
-
     var body_bytes: usize = 0;
     for (funcs) |func| {
         body_bytes = std.math.add(usize, body_bytes, func.body.len) catch std.math.maxInt(usize);
     }
-    return spasmX86CodeReserve(body_bytes, funcs.len);
+    return spasmCodeReserveEstimate(body_bytes, funcs.len);
 }
 
-test "wasm spasm: x86 code reserve scales and stays bounded" {
+test "wasm spasm: code reserve scales and stays bounded" {
     const testing = std.testing;
 
-    try testing.expectEqual(@as(usize, 64 * 1024), spasmX86CodeReserve(0, 0));
-    try testing.expectEqual(@as(usize, 64 * 1024), spasmX86CodeReserve(128, 1));
+    try testing.expectEqual(@as(usize, 64 * 1024), spasmCodeReserveEstimate(0, 0));
+    try testing.expectEqual(@as(usize, 64 * 1024), spasmCodeReserveEstimate(128, 1));
     const call_heavy_estimate = 4 * 1024 * 64 + 64 * 256;
-    try testing.expect(spasmX86CodeReserve(4 * 1024, 64) >= call_heavy_estimate + call_heavy_estimate / 8);
-    try testing.expectEqual(@as(usize, 4 * 1024 * 1024), spasmX86CodeReserve(std.math.maxInt(usize), std.math.maxInt(usize)));
+    try testing.expect(spasmCodeReserveEstimate(4 * 1024, 64) >= call_heavy_estimate + call_heavy_estimate / 8);
+    try testing.expectEqual(@as(usize, 4 * 1024 * 1024), spasmCodeReserveEstimate(std.math.maxInt(usize), 0));
+    try testing.expectEqual(@as(usize, 4 * 1024 * 1024), spasmCodeReserveEstimate(0, std.math.maxInt(usize)));
+    try testing.expectEqual(@as(usize, 4 * 1024 * 1024), spasmCodeReserveEstimate(std.math.maxInt(usize), std.math.maxInt(usize)));
+}
+
+test "wasm spasm: code reserve accounts for module bodies on every backend" {
+    var body: [4096]u8 = undefined;
+    const funcs = [_]CompiledFunc{.{
+        .type_index = 0,
+        .local_types = &.{},
+        .body = &body,
+        .side_table = &.{},
+        .max_stack = 0,
+    }};
+    try std.testing.expectEqual(spasm_code_reserve_min, spasmCodeReserve(&.{}));
+    try std.testing.expectEqual(spasmCodeReserveEstimate(body.len, funcs.len), spasmCodeReserve(&funcs));
 }
 
 pub const SpasmRefusedOpcode = struct {

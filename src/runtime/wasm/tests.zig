@@ -262,6 +262,110 @@ fn runMemFunc(
 /// `\0asm\x01\x00\x00\x00` (magic + version 1, little-endian).
 const preamble = [_]u8{ 0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00 };
 
+fn buildSpasmCapacityModule(a: std.mem.Allocator) ![]const u8 {
+    var functions: List = .empty;
+    var code: List = .empty;
+    const function_count = 256;
+    try uleb(a, &functions, function_count);
+    try functions.appendNTimes(a, 0, function_count);
+    try uleb(a, &code, function_count);
+    for (0..function_count) |index| {
+        var body: List = .empty;
+        try body.appendSlice(a, &.{ 0, 0x20, 0 }); // local.get 0
+        for (0..128) |_| try body.appendSlice(a, &.{ 0x41, 1, 0x6a }); // add 1
+        if (index == 0) try body.appendSlice(a, &.{ 0x10, 1 }); // cold/warm gate to function 1
+        try body.append(a, 0x0b);
+        try uleb(a, &code, body.items.len);
+        try code.appendSlice(a, body.items);
+    }
+    return assemble(a, &.{
+        .{ .id = 1, .body = &.{ 1, 0x60, 1, 0x7f, 1, 0x7f } },
+        .{ .id = 3, .body = functions.items },
+        .{ .id = 10, .body = code.items },
+    });
+}
+
+test "wasm spasm: code reserve grows without moving live entries or call gates" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const bytes = try buildSpasmCapacityModule(a);
+    const module = try a.create(wasm.Module);
+    module.* = try wasm.decode(a, bytes);
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, module, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true;
+    instance.spasm_diagnostics = true;
+
+    const first = try interp.invoke(&instance, a, 0, &.{7});
+    try testing.expectEqual(@as(u128, 263), first[0]);
+    const cache = &(instance.spasm_cache orelse return error.TestUnexpectedResult);
+    const region = cache.ca.region.ptr;
+    const entry = cache.gates[0].entry;
+    const gates = cache.gates.ptr;
+    for (1..instance.funcs.len) |index| {
+        const result = try interp.invoke(&instance, a, @intCast(index), &.{7});
+        try testing.expectEqual(@as(u128, 135), result[0]);
+    }
+    try testing.expectEqual(@as(u32, @intCast(instance.funcs.len)), instance.spasm_compiles);
+    try testing.expectEqual(@as(u32, 0), instance.spasm_refusals);
+    try testing.expect(instance.spasm_cache.?.ca.top > 64 * 1024);
+    try testing.expect(instance.spasm_cache.?.ca.region.len <= 4 * 1024 * 1024);
+    try testing.expectEqual(region, instance.spasm_cache.?.ca.region.ptr);
+    try testing.expectEqual(entry, instance.spasm_cache.?.gates[0].entry);
+    try testing.expectEqual(gates, instance.spasm_cache.?.gates.ptr);
+    const helper_calls = instance.spasm_native_calls;
+    const warm = try interp.invoke(&instance, a, 0, &.{9});
+    try testing.expectEqual(@as(u128, 265), warm[0]);
+    try testing.expectEqual(helper_calls, instance.spasm_native_calls);
+    try testing.expectEqual(@as(u32, @intCast(instance.funcs.len)), instance.spasm_compiles);
+}
+
+test "wasm spasm: code reserve obeys Realm limits and releases its full charge" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const bytes = try buildSpasmCapacityModule(a);
+    const module = try a.create(wasm.Module);
+    module.* = try wasm.decode(a, bytes);
+    var realm = @import("../realm.zig").Realm.init(testing.allocator);
+    defer realm.deinit();
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, module, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true;
+    instance.spasm_diagnostics = true;
+    instance.spasm_memory_ledger = realm.wasmCodeMemoryLedger();
+    const baseline = realm.heap.bytes_live;
+    realm.setMemoryLimit(baseline + 64 * 1024);
+
+    // Refusing the larger mapping must retain interpreter execution and charge nothing.
+    const fallback = try interp.invoke(&instance, a, 0, &.{7});
+    try testing.expectEqual(@as(u128, 263), fallback[0]);
+    try testing.expectEqual(@as(u32, 0), instance.spasm_runs);
+    try testing.expect(instance.spasm_cache == null);
+    try testing.expectEqual(@as(usize, 0), realm.wasm_code_bytes_live);
+    try testing.expectEqual(baseline, realm.heap.bytes_live);
+    try testing.expectEqual(@as(u64, 0), realm.wasm_code_reservations_total);
+
+    realm.setMemoryLimit(baseline + 4 * 1024 * 1024);
+    const native = try interp.invoke(&instance, a, 0, &.{7});
+    try testing.expectEqual(@as(u128, 263), native[0]);
+    try testing.expect(instance.spasm_runs > 0);
+    const mapped = instance.spasm_cache.?.ca.region.len;
+    try testing.expect(mapped > 64 * 1024);
+    try testing.expectEqual(mapped, realm.wasm_code_bytes_live);
+    try testing.expectEqual(baseline + mapped, realm.heap.bytes_live);
+    try testing.expectEqual(@as(u64, 1), realm.wasm_code_reservations_total);
+    instance.releaseExecutableCode();
+    instance.releaseExecutableCode();
+    try testing.expectEqual(@as(usize, 0), realm.wasm_code_bytes_live);
+    try testing.expectEqual(baseline, realm.heap.bytes_live);
+}
+
 /// Concatenate the preamble with `body` into an owned buffer.
 fn withPreamble(buf: []u8, body: []const u8) []const u8 {
     @memcpy(buf[0..8], &preamble);

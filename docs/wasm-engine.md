@@ -559,8 +559,10 @@ the measured design space:
   This is a coverage difference, not a semantic one: forced-Spasm sweeps on
   both architectures pass all 58,779 scored spec commands. Current native
   coverage and per-opcode refusals are in [wasm-results.md](../wasm-results.md).
-  AArch64 diagnostics now expose capacity fallbacks from its fixed 64 KiB
-  code arena; x86 retains its bounded module-sized reservation.
+  Both backends use the same bounded module-sized code reservation (64 KiB
+  minimum, 4 MiB maximum), charged in full to a Realm's memory budget. The
+  arena never relocates published code; allocation refusal or exhaustion
+  still falls back to Sarcasm.
   The x86 scalar rounding fallback is
   deliberately helper-based on SSE2-only targets rather than assuming SSE4.1;
   remaining refusals are unsupported bytecode shapes/opcodes and resource
