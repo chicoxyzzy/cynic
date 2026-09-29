@@ -699,7 +699,22 @@ pub const Masm = struct {
     }
 
     pub fn subtractPackedI16(self: *Masm, destination: Xmm, source: Xmm) error{OutOfMemory}!void {
-        try self.emitXmmReg(0x66, 0xf9, destination, source);
+        try self.subtractPackedInteger(destination, source, .half);
+    }
+
+    pub const PackedSubtractSize = enum(u8) { byte = 0xf8, half = 0xf9, word = 0xfa, double = 0xfb };
+
+    pub fn subtractPackedInteger(self: *Masm, destination: Xmm, source: Xmm, size: PackedSubtractSize) error{OutOfMemory}!void {
+        try self.emitXmmReg(0x66, @intFromEnum(size), destination, source);
+    }
+
+    pub fn roundingAverageUnsigned128(self: *Masm, destination: Xmm, source: Xmm, halfword: bool) error{OutOfMemory}!void {
+        try self.emitXmmReg(0x66, if (halfword) 0xe3 else 0xe0, destination, source);
+    }
+
+    pub fn shufflePackedI32(self: *Masm, destination: Xmm, source: Xmm, order: u8) error{OutOfMemory}!void {
+        try self.emitXmmReg(0x66, 0x70, destination, source);
+        try self.emitByte(order);
     }
 
     pub fn subtractSaturatingPackedU16(self: *Masm, destination: Xmm, source: Xmm) error{OutOfMemory}!void {
@@ -1259,6 +1274,28 @@ test "jit asm_x86_64: encodes unaligned SIMD moves and packed i32 addition" {
         0xf3, 0x45, 0x0f, 0x6f, 0x8c, 0x24, 0x10, 0,    0,    0,
         0x66, 0x45, 0x0f, 0xfe, 0xca, 0xf3, 0x45, 0x0f, 0x7f, 0x8d,
         0xf0, 0xff, 0xff, 0xff,
+    }, machine.code.items);
+}
+
+test "jit asm_x86_64: SIMD integer unary and average encodings retain SSE2" {
+    var machine = Masm.init(std.testing.allocator);
+    defer machine.deinit();
+    try machine.subtractPackedInteger(.xmm9, .xmm10, .byte);
+    try machine.subtractPackedInteger(.xmm9, .xmm10, .half);
+    try machine.subtractPackedInteger(.xmm9, .xmm10, .word);
+    try machine.subtractPackedInteger(.xmm9, .xmm10, .double);
+    try machine.roundingAverageUnsigned128(.xmm9, .xmm10, false);
+    try machine.roundingAverageUnsigned128(.xmm9, .xmm10, true);
+    try machine.shufflePackedI32(.xmm9, .xmm10, 0xf5);
+    try std.testing.expectEqualSlices(u8, &.{
+        0x66, 0x45, 0x0f, 0xf8, 0xca,
+        0x66, 0x45, 0x0f, 0xf9, 0xca,
+        0x66, 0x45, 0x0f, 0xfa, 0xca,
+        0x66, 0x45, 0x0f, 0xfb, 0xca,
+        0x66, 0x45, 0x0f, 0xe0, 0xca,
+        0x66, 0x45, 0x0f, 0xe3, 0xca,
+        0x66, 0x45, 0x0f, 0x70, 0xca,
+        0xf5,
     }, machine.code.items);
 }
 

@@ -613,6 +613,9 @@ the measured design space:
   Signed/unsigned integer min/max for 8/16/32-bit lanes also compile on
   both targets. ARM uses direct NEON instructions; x86 combines the SSE2
   min/max forms, saturated subtraction, and compare/select sequences.
+  Integer `abs`/`neg` for 8/16/32/64-bit lanes and unsigned rounded averages
+  for 8/16-bit lanes compile too. ARM uses direct NEON instructions; x86
+  retains SSE2 with lane-width subtraction, sign masks, and `PAVGB/PAVGW`.
   Table64 operations (the helper ABI still uses u32
   indices), the remaining SIMD operations, and other unsupported x86
   bodies refuse before

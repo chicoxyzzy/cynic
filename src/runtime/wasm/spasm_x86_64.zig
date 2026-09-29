@@ -1909,6 +1909,25 @@ pub fn compile(
                         try m.store64Disp32(.r12, target, .rax);
                         stack[sp - 1] = .runtime;
                     },
+                    96, 97, 128, 129, 160, 161, 192, 193 => {
+                        if (sp < 1 or stack[sp - 1] != .v128) return null;
+                        const unary = simd.integerUnaryOp(sub) orelse return null;
+                        const target = scratchOffset(num_locals, sp - 1);
+                        try m.loadVector128(.xmm0, .r12, target);
+                        const result = try emitSimdIntegerUnary(&m, unary);
+                        try m.storeVector128(.r12, target, result);
+                    },
+                    123, 155 => {
+                        if (sp < 2 or stack[sp - 2] != .v128 or stack[sp - 1] != .v128) return null;
+                        const width = simd.roundingAverageWidth(sub) orelse return null;
+                        const target = scratchOffset(num_locals, sp - 2);
+                        try m.loadVector128(.xmm0, .r12, target);
+                        try m.loadVector128(.xmm1, .r12, scratchOffset(num_locals, sp - 1));
+                        try m.roundingAverageUnsigned128(.xmm0, .xmm1, width == 2);
+                        try m.storeVector128(.r12, target, .xmm0);
+                        sp -= 1;
+                        stack[sp - 1] = .v128;
+                    },
                     118...121, 150...153, 182...185 => {
                         if (sp < 2 or stack[sp - 2] != .v128 or stack[sp - 1] != .v128) return null;
                         const minmax = simd.integerMinMaxOp(sub) orelse return null;
@@ -2724,6 +2743,35 @@ fn emitSimdMinMax(m: *x64.Masm, op: simd.MinMaxOp) Error!x64.Xmm {
     try m.xorPacked128(.xmm1, .xmm0);
     try m.andPacked128(.xmm1, .xmm2);
     try m.xorPacked128(.xmm0, .xmm1); // a ^ ((a ^ b) & mask)
+    return .xmm0;
+}
+
+/// Input is xmm0; xmm1 is scratch. Core iabs/ineg wrap at the lane width.
+fn emitSimdIntegerUnary(m: *x64.Masm, op: simd.IntegerUnaryOp) Error!x64.Xmm {
+    const size: x64.Masm.PackedSubtractSize = switch (op.width) {
+        1 => .byte,
+        2 => .half,
+        4 => .word,
+        8 => .double,
+        else => return error.UnsupportedOp,
+    };
+    if (op.negate) {
+        try m.xorPacked128(.xmm1, .xmm1);
+        try m.subtractPackedInteger(.xmm1, .xmm0, size);
+        return .xmm1;
+    }
+    if (op.width == 8) {
+        // Duplicate each qword's high dword, then broadcast its sign bit.
+        // The low dword's sign must not affect the 64-bit lane's mask.
+        try m.shufflePackedI32(.xmm1, .xmm0, 0xf5);
+        try m.shiftRightArithmeticPackedI32(.xmm1, 31);
+    } else {
+        try m.xorPacked128(.xmm1, .xmm1);
+        try m.compareGreaterSignedPacked(.xmm1, .xmm0, if (op.width == 1) .byte else if (op.width == 2) .half else .word);
+    }
+    // (x ^ sign_mask) - sign_mask, including the unchanged signed minimum.
+    try m.xorPacked128(.xmm0, .xmm1);
+    try m.subtractPackedInteger(.xmm0, .xmm1, size);
     return .xmm0;
 }
 

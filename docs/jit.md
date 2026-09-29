@@ -1585,6 +1585,19 @@ useful:
    Tests cover all byte pairs, wider sign boundaries, equality, mixed lanes,
    live scalar/vector neighbors, and dead-code skipping; no new runtime
    allocations or host calls are introduced.
+   Integer `abs`/`neg` now compile for all four lane widths, as do unsigned
+   rounded averages for 8/16-bit lanes. The
+   [Core numeric semantics](https://webassembly.github.io/spec/core/exec/numerics.html#op-iabs)
+   require wrapping, not saturation, at the signed minimum. ARM emits
+   `ABS/NEG/URHADD`; x86 uses SSE2 `PAVGB/PAVGW` for averages, as in
+   [Liftoff](https://github.com/v8/v8/blob/main/src/wasm/baseline/x64/liftoff-assembler-x64-inl.h),
+   but keeps absolute value at SSE2 rather than using SSSE3 `PABS*`.
+   Its `(x ^ sign_mask) - sign_mask` sequence broadcasts each 64-bit lane's
+   high-dword sign via `PSHUFD/PSRAD`; negation subtracts from zero at the
+   lane width. Tests exhaust byte/halfword unary inputs and byte average
+   pairs, plus wider sign boundaries, odd-sum rounding, live neighbors,
+   and unreachable code. These operations keep the existing full-Cell ABI
+   and add no runtime allocations, host calls, or JS/SES policy changes.
    This follows the existing [Liftoff](https://v8.dev/blog/liftoff) /
    [Wizard-SPC](https://arxiv.org/abs/2305.13241) typed-stack design and
    [Core value and vector semantics](https://webassembly.github.io/spec/core/exec/instructions.html).
