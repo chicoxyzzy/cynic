@@ -166,3 +166,163 @@ test "WPT compile: promises fulfill and reject under allocation pressure" {
         \\});
     );
 }
+
+// Two () -> i32 definitions return 7 and 42. Exports a/b alias index 1;
+// `other` names index 0. A second module imports that signature at index 0
+// and exports it twice, letting tests distinguish store identity from index.
+const identity_modules =
+    \\const sourceModule = new WebAssembly.Module(new Uint8Array([0,97,115,109,1,0,0,0,1,5,1,96,0,1,127,3,3,2,0,0,7,17,3,1,97,0,1,1,98,0,1,5,111,116,104,101,114,0,0,10,11,2,4,0,65,7,11,4,0,65,42,11]));
+    \\const reexportModule = new WebAssembly.Module(new Uint8Array([0,97,115,109,1,0,0,0,1,5,1,96,0,1,127,2,7,1,1,109,1,102,0,0,7,9,2,1,120,0,0,1,121,0,0]));
+;
+
+test "WPT function identity: duplicate exports share one function per instance" {
+    for ([_]bool{ false, true }) |hardened| {
+        try expectTrue(identity_modules ++
+            \\const first = new WebAssembly.Instance(sourceModule).exports;
+            \\const second = new WebAssembly.Instance(sourceModule).exports;
+            \\first.a === first.b && second.a === second.b && first.a !== first.other &&
+            \\  first.a !== second.a && first.a.name === '1' && first.a.length === 0 &&
+            \\  first.a() === 42 && first.other() === 7
+        , hardened, false);
+    }
+}
+
+test "WPT function identity: tables and funcref globals preserve exported wrappers" {
+    for ([_]bool{ false, true }) |hardened| {
+        try expectTrue(identity_modules ++
+            \\const f = new WebAssembly.Instance(sourceModule).exports.a;
+            \\const table = new WebAssembly.Table({element: 'anyfunc', initial: 2, maximum: 4}, f);
+            \\let correct = table.get(0) === f && table.get(1) === f && table.get(0) === table.get(0);
+            \\table.set(0, null);
+            \\correct = correct && table.get(0) === null;
+            \\table.set(0, f);
+            \\correct = correct && table.grow(2, f) === 2;
+            \\const global = new WebAssembly.Global({value: 'anyfunc', mutable: true}, f);
+            \\correct = correct && global.value === f && global.valueOf() === f;
+            \\global.value = null;
+            \\global.value = f;
+            \\for (let i = 0; i < table.length; i++) correct = table.get(i) === f && correct;
+            \\correct && global.value === f && table.get(3)() === 42
+        , hardened, false);
+    }
+}
+
+test "WPT function identity: Wasm reexports and import chains preserve the original wrapper" {
+    for ([_]bool{ false, true }) |hardened| {
+        try expectTrue(identity_modules ++
+            \\const original = new WebAssembly.Instance(sourceModule).exports.a;
+            \\const first = new WebAssembly.Instance(reexportModule, {m: {f: original}}).exports;
+            \\const second = new WebAssembly.Instance(reexportModule, {m: {f: first.x}}).exports;
+            \\const third = new WebAssembly.Instance(reexportModule, {m: {f: second.y}}).exports;
+            \\first.x === original && first.y === original && second.x === original &&
+            \\  third.y === original && third.y.name === '1' && third.y.length === 0 && third.y() === 42
+        , hardened, false);
+    }
+}
+
+test "WPT function identity: a table alone retains the wrapper and its properties across GC" {
+    for ([_]bool{ false, true }) |hardened| {
+        try expectTrue(identity_modules ++
+            \\const table = (() => {
+            \\  const f = new WebAssembly.Instance(sourceModule).exports.a;
+            \\  f.marker = {answer: 19};
+            \\  return new WebAssembly.Table({element: 'anyfunc', initial: 1}, f);
+            \\})();
+            \\__collectGarbage();
+            \\for (let i = 0; i < 100; i++) { const temporary = {i}; }
+            \\__collectGarbage();
+            \\const f = table.get(0);
+            \\f.marker !== undefined && f.marker.answer === 19 && f === table.get(0) && f() === 42
+        , hardened, true);
+    }
+}
+
+test "WPT function identity: a function alone survives GC and later reexport" {
+    for ([_]bool{ false, true }) |hardened| {
+        try expectTrue(identity_modules ++
+            \\const f = (() => {
+            \\  const source = new WebAssembly.Instance(sourceModule).exports.a;
+            \\  source.marker = {answer: 23};
+            \\  return new WebAssembly.Instance(reexportModule, {m: {f: source}}).exports.x;
+            \\})();
+            \\__collectGarbage();
+            \\for (let i = 0; i < 100; i++) { const temporary = {i}; }
+            \\__collectGarbage();
+            \\const again = new WebAssembly.Instance(reexportModule, {m: {f}}).exports.y;
+            \\again === f && again.marker !== undefined && again.marker.answer === 23 && again() === 42
+        , hardened, true);
+    }
+}
+
+test "WPT function identity: JS import wrappers use Wasm function identity" {
+    for ([_]bool{ false, true }) |hardened| {
+        try expectTrue(identity_modules ++
+            \\function callback() { return 43; }
+            \\const first = new WebAssembly.Instance(reexportModule, {m: {f: callback}}).exports;
+            \\const second = new WebAssembly.Instance(reexportModule, {m: {f: callback}}).exports;
+            \\const chain = new WebAssembly.Instance(reexportModule, {m: {f: first.x}}).exports;
+            \\const table = new WebAssembly.Table({element: 'anyfunc', initial: 1}, first.x);
+            \\first.x === first.y && first.x !== second.x && second.x === second.y &&
+            \\  chain.x === first.x && chain.y === first.x && table.get(0) === first.x
+        , hardened, false);
+    }
+}
+
+test "WPT function identity: start exposure and later export share the first wrapper" {
+    // Start publishes ref.func 1 to a JS import before buildExports runs.
+    const source =
+        \\const bytes = new Uint8Array([0,97,115,109,1,0,0,0,1,12,3,96,1,112,0,96,0,1,127,96,0,0,2,10,1,1,109,4,115,97,118,101,0,0,3,3,2,1,2,7,5,1,1,102,0,1,8,1,2,9,5,1,3,0,1,1,10,13,2,4,0,65,42,11,6,0,210,1,16,0,11]);
+        \\let captured;
+        \\const instance = new WebAssembly.Instance(new WebAssembly.Module(bytes), {m: {
+        \\  save(f) { captured = f; f.marker = {answer: 29}; __collectGarbage(); }
+        \\}});
+        \\__collectGarbage();
+        \\captured === instance.exports.f && instance.exports.f.marker !== undefined &&
+        \\  instance.exports.f.marker.answer === 29 && captured() === 42
+    ;
+    for ([_]bool{ false, true }) |hardened| {
+        try expectTrue(source, hardened, true);
+    }
+}
+
+test "WPT function identity: child realm tables and reexports preserve a parent wrapper" {
+    // The function is already materialized in the parent. This asserts its
+    // identity survives use through another realm's intrinsics, without
+    // prescribing the allocation realm of a never-before-exposed function.
+    for ([_]bool{ false, true }) |hardened| {
+        var parent = Realm.init(std.testing.allocator);
+        defer parent.deinit();
+        parent.hardened = hardened;
+        parent.allow_wasm_compile = true;
+        parent.jit_enabled = true;
+        try parent.installBuiltins();
+        const scope = try parent.heap.openScope();
+        defer scope.close();
+        const created = try lantern.evaluateScript(std.testing.allocator, &parent, identity_modules ++ "new WebAssembly.Instance(sourceModule).exports.a");
+        const original = switch (created) {
+            .value, .yielded => |value| value,
+            .thrown => return error.UnexpectedJavaScriptException,
+        };
+        try scope.push(original);
+
+        var child = Realm.initChild(&parent);
+        defer child.deinit();
+        try child.installBuiltins();
+        try child.installTestGlobals();
+        child.heap.setGcThreshold(1);
+        try child.globals.put(child.allocator, "parentFunction", original);
+        const observed = try lantern.evaluateScript(std.testing.allocator, &child, identity_modules ++
+            \\const table = new WebAssembly.Table({element: 'anyfunc', initial: 1, maximum: 2}, parentFunction);
+            \\const imported = new WebAssembly.Instance(reexportModule, {m: {f: parentFunction}}).exports;
+            \\__collectGarbage();
+            \\table.grow(1, imported.x);
+            \\__collectGarbage();
+            \\table.get(0) === parentFunction && table.get(1) === parentFunction &&
+            \\  imported.x === parentFunction && imported.y === parentFunction && imported.x() === 42
+        );
+        switch (observed) {
+            .value, .yielded => |value| try std.testing.expect(value.isBool() and value.asBool()),
+            .thrown => return error.UnexpectedJavaScriptException,
+        }
+    }
+}
