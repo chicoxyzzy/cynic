@@ -4728,7 +4728,7 @@ fn execSimd(ip: *Interp, sub: u32, body: []const u8, pc: *usize) TrapError!void 
             const bb: [8]i16 = @bitCast(b);
             var r: [4]i32 = undefined;
             inline for (0..4) |j| {
-                r[j] = @as(i32, aa[2 * j]) * @as(i32, bb[2 * j]) + @as(i32, aa[2 * j + 1]) * @as(i32, bb[2 * j + 1]);
+                r[j] = @as(i32, aa[2 * j]) * @as(i32, bb[2 * j]) +% @as(i32, aa[2 * j + 1]) * @as(i32, bb[2 * j + 1]);
             }
             try ip.pushV128(@bitCast(r));
         },

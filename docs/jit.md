@@ -1662,6 +1662,20 @@ useful:
    multipliers. Tests exhaust narrow halfword and extended byte/halfword
    inputs and pairwise byte pairs, plus wider boundaries, mixed lane order,
    live neighbors, and unreachable code. No runtime helpers are added.
+   All 12 low/high signed/unsigned extended multiplications, the signed
+   halfword dot product, and saturating Q15 multiplication now compile.
+   ARM follows Liftoff's `SMULL/UMULL`, `ADDP`, and `SQRDMULH` lowering.
+   x86 retains SSE2: unpacked bytes use `PMULLW`; halfword products combine
+   `PMULLW` with signed/unsigned high halves; word products use `PMULUDQ`
+   with explicit sign corrections. Dot products use `PMADDWD`; Q15 rounds
+   full i32 products before signed packing, including the signed-minimum
+   squared saturation case. The
+   [Core integer numeric rules](https://webassembly.github.io/spec/core/exec/numerics.html)
+   require wrapping dot sums, including in the interpreter fallback; its
+   previous checked addition could panic on two signed-minimum products.
+   Native-entry tests exhaust byte product pairs and Q15 inputs against
+   rounding-sensitive multipliers, plus wider bit patterns, live neighbors,
+   and unreachable code. No new ISA requirement or runtime helper is added.
    Both floating lane widths now compile `abs/neg/sqrt` and `add/sub/mul/div`.
    Like Liftoff's ARM64 and x64 lowerings linked above, ARM uses direct NEON
    operations; x86 uses packed SSE/SSE2 arithmetic and sign masks for abs/neg.

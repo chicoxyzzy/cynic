@@ -702,6 +702,10 @@ the measured design space:
   sums compile too. ARM uses direct NEON instructions; x86 uses SSE2 pack,
   unpack, shift, and multiply-add sequences. Unsigned i32-to-i16 narrowing
   explicitly clamps negative source lanes before biasing and signed packing.
+  All low/high extended multiplications, signed halfword dot products, and
+  saturating Q15 products compile on both targets as well. x86 reconstructs
+  wider products using SSE2, with explicit signed corrections for i32 inputs.
+  Dot sums wrap at 32 bits in native code and the interpreter fallback.
   Both floating lane widths also compile `abs/neg/sqrt` and `add/sub/mul/div`:
   direct NEON or packed SSE/SSE2 arithmetic, with bit-preserving sign masks
   for abs/neg on x86.

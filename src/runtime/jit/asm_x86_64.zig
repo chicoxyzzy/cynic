@@ -713,6 +713,10 @@ pub const Masm = struct {
         try self.emitXmmReg(0x66, 0xd5, destination, source);
     }
 
+    pub fn multiplyHighPacked16(self: *Masm, destination: Xmm, source: Xmm, signed: bool) error{OutOfMemory}!void {
+        try self.emitXmmReg(0x66, if (signed) 0xe5 else 0xe4, destination, source);
+    }
+
     pub fn multiplyEvenPackedU32(self: *Masm, destination: Xmm, source: Xmm) error{OutOfMemory}!void {
         try self.emitXmmReg(0x66, 0xf4, destination, source);
     }
@@ -1411,6 +1415,17 @@ test "jit asm_x86_64: SIMD widening encodings retain SSE2" {
         0x66, 0x45, 0x0f, 0x61, 0xca,
         0x66, 0x45, 0x0f, 0x62, 0xca,
     }, machine.code.items);
+}
+
+test "jit asm_x86_64: SIMD product encodings retain SSE2" {
+    var m = Masm.init(std.testing.allocator);
+    defer m.deinit();
+    try m.multiplyHighPacked16(.xmm9, .xmm11, true);
+    try m.multiplyHighPacked16(.xmm9, .xmm11, false);
+    try std.testing.expectEqualSlices(u8, &.{
+        0x66, 0x45, 0x0f, 0xe5, 0xcb,
+        0x66, 0x45, 0x0f, 0xe4, 0xcb,
+    }, m.code.items);
 }
 
 test "jit asm_x86_64: SIMD lane conversion encodings retain SSE2" {

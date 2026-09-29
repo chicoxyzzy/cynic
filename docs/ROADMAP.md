@@ -2387,9 +2387,11 @@ and the per-builtin checklist; this section tracks status.
   Integer arithmetic, saturation, shifts, and byte popcount remove another
   138 per target. Floating abs/neg/sqrt and arithmetic remove another 67
   per target, with the same full corpus score. Narrowing, low/high extension,
-  and pairwise extended sums remove another 36 per target (94 SIMD refusals
-  remain), retaining SSE2 and all 58,779 passing assertions.
-  The opcode inventory in `wasm-results.md` tracks the remaining 58 accepted
+  and pairwise extended sums remove another 36 per target. Extended multiply,
+  dot products, and Q15 remove another 14 (80 SIMD refusals remain), retaining
+  SSE2 and all 58,779 passing assertions. Dot sums also wrap safely in the
+  interpreter, closing a safety-check overflow panic.
+  The opcode inventory in `wasm-results.md` tracks the remaining 44 accepted
   SIMD operations without native lowering, including the relaxed family.
   Native table64, remaining SIMD
   arithmetic/convert/shuffle operations, and the

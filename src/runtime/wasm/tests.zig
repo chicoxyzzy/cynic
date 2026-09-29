@@ -3101,6 +3101,202 @@ test "wasm interp: SIMD float minmax quiets signaling NaNs" {
     }
 }
 
+const SimdProductCase = struct {
+    sub: u32,
+    bits: u7,
+    kind: enum { extmul, dot, q15 },
+    signed: bool = true,
+    high: bool = false,
+};
+
+const simd_product_cases = [_]SimdProductCase{
+    .{ .sub = 156, .bits = 8, .kind = .extmul },
+    .{ .sub = 157, .bits = 8, .kind = .extmul, .high = true },
+    .{ .sub = 158, .bits = 8, .kind = .extmul, .signed = false },
+    .{ .sub = 159, .bits = 8, .kind = .extmul, .signed = false, .high = true },
+    .{ .sub = 188, .bits = 16, .kind = .extmul },
+    .{ .sub = 189, .bits = 16, .kind = .extmul, .high = true },
+    .{ .sub = 190, .bits = 16, .kind = .extmul, .signed = false },
+    .{ .sub = 191, .bits = 16, .kind = .extmul, .signed = false, .high = true },
+    .{ .sub = 220, .bits = 32, .kind = .extmul },
+    .{ .sub = 221, .bits = 32, .kind = .extmul, .high = true },
+    .{ .sub = 222, .bits = 32, .kind = .extmul, .signed = false },
+    .{ .sub = 223, .bits = 32, .kind = .extmul, .signed = false, .high = true },
+    .{ .sub = 186, .bits = 16, .kind = .dot },
+    .{ .sub = 130, .bits = 16, .kind = .q15 },
+};
+
+fn expectedSimdProduct(op: SimdProductCase, left: u128, right: u128) u128 {
+    const out_bits: u7 = if (op.kind == .q15) 16 else op.bits * 2;
+    const out_lanes = 128 / @as(usize, out_bits);
+    const mask = (@as(u128, 1) << out_bits) - 1;
+    var expected: u128 = 0;
+    for (0..out_lanes) |lane| {
+        const source = if (op.kind == .dot) lane * 2 else lane + (if (op.high) out_lanes else 0);
+        var value = simdLaneInteger(left, op.bits, source, op.signed) * simdLaneInteger(right, op.bits, source, op.signed);
+        if (op.kind == .dot) value += simdLaneInteger(left, op.bits, source + 1, true) * simdLaneInteger(right, op.bits, source + 1, true);
+        if (op.kind == .q15) value = std.math.clamp(@divFloor(value + 16384, 32768), -32768, 32767);
+        expected |= (@as(u128, @bitCast(value)) & mask) << @as(u7, @intCast(lane * out_bits));
+    }
+    return expected;
+}
+
+fn expectSimdProduct(instance: *interp.Instance, op: SimdProductCase, left: u128, right: u128) !void {
+    const before = instance.spasm_runs;
+    const result = try interp.invoke(instance, testing.allocator, 0, &.{ 37, simd_live_vector, left, right });
+    defer testing.allocator.free(result);
+    try testing.expectEqualSlices(u128, &.{ 37, simd_live_vector, expectedSimdProduct(op, left, right) }, result);
+    try testing.expectEqual(before + 1, instance.spasm_runs);
+}
+
+test "wasm spasm: SIMD products preserve overflow rounding order and live lanes" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (simd_product_cases) |op| {
+        const module = try wasm.decode(a, try buildSimdBinaryFunc(a, op.sub));
+        var instance: interp.Instance = undefined;
+        try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+        defer instance.deinit();
+        instance.spasm_enabled = true;
+        const sign = @as(u128, 1) << (op.bits - 1);
+        const mask = sign * 2 - 1;
+        const values = [_]u128{ 0, 1, 2, 3, sign - 1, sign, sign + 1, mask - 1, mask, sign / 2 - 1, sign / 2, sign / 2 + 1, 0x55555555 & mask, 0xaaaaaaaa & mask };
+        for (0..values.len) |li| {
+            for (0..values.len) |ri| {
+                for ([_]bool{ false, true }) |mixed| {
+                    var left: u128 = 0;
+                    var right: u128 = 0;
+                    for (0..128 / @as(usize, op.bits)) |lane| {
+                        const shift: u7 = @intCast(lane * op.bits);
+                        left |= values[(li + (if (mixed) lane * 3 else 0)) % values.len] << shift;
+                        right |= values[(ri + (if (mixed) lane * 5 else 0)) % values.len] << shift;
+                    }
+                    try expectSimdProduct(&instance, op, left, right);
+                }
+            }
+        }
+        for (0..128) |bit| {
+            const single = @as(u128, 1) << @as(u7, @intCast(bit));
+            try expectSimdProduct(&instance, op, single, ~single);
+            try expectSimdProduct(&instance, op, ~single, single);
+        }
+        try testing.expectEqual(@as(u32, 1), instance.spasm_compiles);
+    }
+}
+
+test "wasm spasm: SIMD products exhaust extended byte pairs" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (simd_product_cases[0..4]) |op| {
+        const module = try wasm.decode(a, try buildSimdBinaryFunc(a, op.sub));
+        var instance: interp.Instance = undefined;
+        try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+        defer instance.deinit();
+        instance.spasm_enabled = true;
+        for (0..256) |lhs| {
+            for (0..32) |batch| {
+                var left: u128 = 0;
+                var right: u128 = 0;
+                for (0..16) |lane| {
+                    const lv: u8 = @truncate(lhs + lane * 17);
+                    const rv: u8 = @intCast(batch * 8 + lane % 8);
+                    left |= @as(u128, lv) << @as(u7, @intCast(lane * 8));
+                    right |= @as(u128, rv) << @as(u7, @intCast(lane * 8));
+                }
+                try expectSimdProduct(&instance, op, left, right);
+            }
+        }
+    }
+}
+
+test "wasm spasm: SIMD products exhaust Q15 inputs against rounding multipliers" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const op: SimdProductCase = .{ .sub = 130, .bits = 16, .kind = .q15 };
+    const module = try wasm.decode(a, try buildSimdBinaryFunc(a, op.sub));
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true;
+    for ([_]u16{ 0, 1, 0x3fff, 0x4000, 0x4001, 0x7fff, 0x8000, 0x8001, 0xc000, 0xffff }) |multiplier| {
+        for (0..8192) |batch| {
+            var left: u128 = 0;
+            var right: u128 = 0;
+            for (0..8) |lane| {
+                const shift: u7 = @intCast(lane * 16);
+                left |= @as(u128, batch * 8 + lane) << shift;
+                right |= @as(u128, multiplier) << shift;
+            }
+            try expectSimdProduct(&instance, op, left, right);
+        }
+    }
+}
+
+test "wasm spasm: SIMD products cover mixed wide multiplication bits" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var state: u128 = 0x92d68ca2f73edabc94d049bb133111eb;
+    for (simd_product_cases[4..]) |op| {
+        const module = try wasm.decode(a, try buildSimdBinaryFunc(a, op.sub));
+        var instance: interp.Instance = undefined;
+        try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+        defer instance.deinit();
+        instance.spasm_enabled = true;
+        for (0..1024) |_| {
+            state = state *% 0x2360ed051fc65da44385df649fccf645 +% 0xda3e39cb94b95bdb;
+            const left = state;
+            state = state *% 0x2360ed051fc65da44385df649fccf645 +% 0xda3e39cb94b95bdb;
+            try expectSimdProduct(&instance, op, left, state);
+        }
+    }
+}
+
+test "wasm spasm: SIMD products skip unreachable operations" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (simd_product_cases) |op| {
+        var body: List = .empty;
+        try body.appendSlice(a, &.{ 1, 32, 0x7f, 0x20, 0, 0x20, 1, 0x02, 0x7b, 0x20, 2, 0x0c, 0, 0x20, 2, 0x20, 3, 0xfd });
+        try uleb(a, &body, op.sub);
+        try body.appendSlice(a, &.{ 0x0b, 0x0b });
+        const module = try wasm.decode(a, try buildFunc(a, &.{ 0x7e, 0x7b, 0x7b, 0x7b }, &.{ 0x7e, 0x7b, 0x7b }, body.items, "product"));
+        var instance: interp.Instance = undefined;
+        try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+        defer instance.deinit();
+        instance.spasm_enabled = true;
+        const result = try interp.invoke(&instance, testing.allocator, 0, &.{ 37, simd_live_vector, ~simd_live_vector, 0 });
+        defer testing.allocator.free(result);
+        try testing.expectEqualSlices(u128, &.{ 37, simd_live_vector, ~simd_live_vector }, result);
+        try testing.expectEqual(@as(u32, 1), instance.spasm_runs);
+    }
+}
+
+test "wasm: SIMD dot fallback wraps its pairwise sum" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const module = try wasm.decode(a, try buildSimdBinaryFunc(a, 186));
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = false;
+    const minima: u128 = 0x80008000800080008000800080008000;
+    const result = try interp.invoke(&instance, testing.allocator, 0, &.{ 37, simd_live_vector, minima, minima });
+    defer testing.allocator.free(result);
+    try testing.expectEqualSlices(u128, &.{ 37, simd_live_vector, 0x80000000800000008000000080000000 }, result);
+    try testing.expectEqual(@as(u32, 0), instance.spasm_runs);
+}
+
 const SimdLaneConversionCase = struct {
     sub: u32,
     bits: u7,

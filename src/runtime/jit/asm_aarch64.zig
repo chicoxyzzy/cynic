@@ -297,6 +297,22 @@ pub fn multiplyV128(vd: Reg, vn: Reg, vm: Reg, size: VectorLaneSize) u32 {
     return 0x4e209c00 | (@as(u32, @intFromEnum(size)) << 22) | (r(vm) << 16) | (r(vn) << 5) | r(vd);
 }
 
+/// SMULL/UMULL (+2): selected half-width inputs, double-width products.
+pub fn multiplyLongV128(vd: Reg, vn: Reg, vm: Reg, size: VectorLaneSize, signed: bool, high: bool) u32 {
+    return 0x0e20c000 | (if (signed) @as(u32, 0) else 0x20000000) |
+        (if (high) @as(u32, 0x40000000) else 0) |
+        (@as(u32, @intFromEnum(size)) << 22) | (r(vm) << 16) | (r(vn) << 5) | r(vd);
+}
+
+pub fn addPairwiseV4s(vd: Reg, vn: Reg, vm: Reg) u32 {
+    return 0x4ea0bc00 | (r(vm) << 16) | (r(vn) << 5) | r(vd);
+}
+
+/// SQRDMULH Vd.8H, Vn.8H, Vm.8H: rounded, saturating Q15 products.
+pub fn multiplyQ15V8h(vd: Reg, vn: Reg, vm: Reg) u32 {
+    return 0x6e60b400 | (r(vm) << 16) | (r(vn) << 5) | r(vd);
+}
+
 pub fn saturatingAddSubtractV128(vd: Reg, vn: Reg, vm: Reg, size: VectorIntegerSize, signed: bool, subtract: bool) u32 {
     return 0x4e200c00 | (if (signed) @as(u32, 0) else 0x20000000) |
         (if (subtract) @as(u32, 0x2000) else 0) |
@@ -1126,6 +1142,21 @@ test "jit asm_aarch64: SIMD widening encodings" {
     try std.testing.expectEqual(@as(u32, 0x2f10a623), widenLowV128(.x3, .x17, .half, false));
     try std.testing.expectEqual(@as(u32, 0x0f20a623), widenLowV128(.x3, .x17, .word, true));
     try std.testing.expectEqual(@as(u32, 0x2f20a623), widenLowV128(.x3, .x17, .word, false));
+}
+
+test "jit asm_aarch64: SIMD product encodings" {
+    const expected = [_]u32{ 0x0e3dc223, 0x4e3dc223, 0x2e3dc223, 0x6e3dc223, 0x0e7dc223, 0x4e7dc223, 0x2e7dc223, 0x6e7dc223, 0x0ebdc223, 0x4ebdc223, 0x2ebdc223, 0x6ebdc223 };
+    var index: usize = 0;
+    for ([_]VectorLaneSize{ .byte, .half, .word }) |size| {
+        for ([_]bool{ true, false }) |signed| {
+            for ([_]bool{ false, true }) |high| {
+                try std.testing.expectEqual(expected[index], multiplyLongV128(.x3, .x17, .fp, size, signed, high));
+                index += 1;
+            }
+        }
+    }
+    try std.testing.expectEqual(@as(u32, 0x4ebdbe23), addPairwiseV4s(.x3, .x17, .fp));
+    try std.testing.expectEqual(@as(u32, 0x6e7db623), multiplyQ15V8h(.x3, .x17, .fp));
 }
 
 test "jit asm_aarch64: SIMD lane conversion encodings" {
