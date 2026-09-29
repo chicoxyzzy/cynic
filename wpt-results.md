@@ -1,15 +1,15 @@
 # WPT Wasm JavaScript API results
 
-Measured baseline after store-object identity and buffer-GC corrections: **24 of 40
-included files pass completely**. The remaining files are 14 assertion-failure files
-and 2 strict-mode parse errors. Across files that execute, **576 subtests pass
-and 20 fail** (596 observed subtests). The two unparsed files contribute no
+Measured baseline after memory-buffer conversion and ownership corrections: **27 of 40
+included files pass completely**. The remaining files are 11 assertion-failure files
+and 2 strict-mode parse errors. Across files that execute, **584 subtests pass
+and 12 fail** (596 observed subtests). The two unparsed files contribute no
 observed subtests; 596 is not the complete potential subtest denominator.
 No fixture crashed, timed out, or ended without a harness result except those
 two explicit parse errors. Another 40 files are explicitly excluded.
 
-Compared with the initial measurement, **310 additional named subtests pass**
-and 10 additional files pass completely; no previously passing subtest was lost.
+Compared with the initial measurement, **318 additional named subtests pass**
+and 13 additional files pass completely; no previously passing subtest was lost.
 
 | Measurement | Passing files | Failing files | Parse errors | Passing subtests | Failing subtests |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -17,6 +17,7 @@ and 10 additional files pass completely; no previously passing subtest was lost.
 | API corrections | 22 | 16 | 2 | 570 | 26 |
 | Function identity | 23 | 15 | 2 | 575 | 21 |
 | Store-object identity / buffer GC | 24 | 14 | 2 | 576 | 20 |
+| Memory-buffer conversion / ownership | 27 | 11 | 2 | 584 | 12 |
 
 This measures a selected Wasm JavaScript API slice, not browser conformance or
 the Wasm core instruction suite. See [the integration guide](docs/wpt.md),
@@ -28,9 +29,9 @@ the Wasm core instruction suite. See [the integration guide](docs/wpt.md),
 
 | Input | Value |
 | --- | --- |
-| Captured | 2026-09-29T07:22:21Z (normal); 2026-09-29T07:22:24Z (GC pressure) |
+| Captured | 2026-09-29T20:02:04Z (normal); 2026-09-29T19:54:29Z (GC pressure) |
 | WPT revision | [`9ee707c850996c8d124809570c3ff855d67301b9`](https://github.com/web-platform-tests/wpt/tree/9ee707c850996c8d124809570c3ff855d67301b9/wasm/jsapi) |
-| Engine checkout | `c63be52b548a8602f1ec98b5ac0b062f211fa63e` (clean source for both profiles) |
+| Engine checkout | `ac93c078fda7b523b89f074e4aec3c58c652d210` (clean source for both profiles) |
 | Host | macOS arm64 |
 | Profiles | ReleaseFast / default GC; ReleaseSafe / `--gc-threshold=1` |
 | Posture | Strict-only, mutable primordials, eval and Wasm compilation enabled; JS and Wasm JITs off |
@@ -54,12 +55,12 @@ between the two profiles, including known failures.
 | Global | 4 | 0 | 0 | 132 | 0 |
 | Instance | 3 | 1 | 1 | 35 | 1 |
 | Interface | 1 | 0 | 0 | 72 | 0 |
-| Memory | 1 | 5 | 0 | 46 | 10 |
+| Memory | 4 | 2 | 0 | 54 | 2 |
 | Module | 5 | 0 | 0 | 43 | 0 |
 | Prototypes | 1 | 0 | 0 | 5 | 0 |
 | Table | 2 | 3 | 0 | 85 | 3 |
 | Tag | 2 | 0 | 0 | 8 | 0 |
-| **Total** | **24** | **14** | **2** | **576** | **20** |
+| **Total** | **27** | **11** | **2** | **584** | **12** |
 
 ## Corrections and remaining failures
 
@@ -88,12 +89,17 @@ also prevents a stale cached Memory.buffer pointer after growth: without a
 strong reference to the old buffer, collection and address reuse previously
 made the getter return an unrelated ArrayBuffer. JS and Wasm growth are covered.
 
-The remaining 20 assertions fall into these observed categories:
+The memory-buffer correction passes eight more named subtests. Both conversion
+methods preserve cached identity, resizable buffers follow JS and Wasm growth,
+and shared wrappers are frozen without detaching their storage. Focused tests
+also protect borrowed storage from transfer, reentrant coercion, overlapping
+copies across shared wrappers, failed allocations, and unreachable-wrapper
+cleanup.
+
+The remaining 12 assertions fall into these observed categories:
 
 | Category | Assertions | Status |
 | --- | ---: | --- |
-| Fixed-length/resizable memory-buffer methods | 7 | Missing API |
-| Shared-memory buffer freezing | 1 | Engine gap in an included basic assertion |
 | BufferSource instantiate import-lookup timing | 1 | Engine currently instantiates synchronously |
 | Multiple return values from JS imports | 1 | Unsupported host-call result arity |
 | Exception fixture binaries rejected by the decoder | 2 | Wasm encoding support gap |
