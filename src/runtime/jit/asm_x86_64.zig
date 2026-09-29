@@ -859,6 +859,18 @@ pub const Masm = struct {
         try self.emitXmmReg(0x66, 0x63, destination, source);
     }
 
+    pub fn packUnsigned16To8(self: *Masm, destination: Xmm, source: Xmm) error{OutOfMemory}!void {
+        try self.emitXmmReg(0x66, 0x67, destination, source);
+    }
+
+    pub fn packSigned32To16(self: *Masm, destination: Xmm, source: Xmm) error{OutOfMemory}!void {
+        try self.emitXmmReg(0x66, 0x6b, destination, source);
+    }
+
+    pub fn multiplyAddPackedI16(self: *Masm, destination: Xmm, source: Xmm) error{OutOfMemory}!void {
+        try self.emitXmmReg(0x66, 0xf5, destination, source);
+    }
+
     pub fn movByteMask(self: *Masm, destination: Reg, source: Xmm) error{OutOfMemory}!void {
         try self.emitVectorMask(0x66, 0xd7, destination, source);
     }
@@ -1399,6 +1411,19 @@ test "jit asm_x86_64: SIMD widening encodings retain SSE2" {
         0x66, 0x45, 0x0f, 0x61, 0xca,
         0x66, 0x45, 0x0f, 0x62, 0xca,
     }, machine.code.items);
+}
+
+test "jit asm_x86_64: SIMD lane conversion encodings retain SSE2" {
+    var m = Masm.init(std.testing.allocator);
+    defer m.deinit();
+    try m.packUnsigned16To8(.xmm9, .xmm11);
+    try m.packSigned32To16(.xmm9, .xmm11);
+    try m.multiplyAddPackedI16(.xmm9, .xmm11);
+    try std.testing.expectEqualSlices(u8, &.{
+        0x66, 0x45, 0x0f, 0x67, 0xcb,
+        0x66, 0x45, 0x0f, 0x6b, 0xcb,
+        0x66, 0x45, 0x0f, 0xf5, 0xcb,
+    }, m.code.items);
 }
 
 test "jit asm_x86_64: SIMD packed float arithmetic encodings retain SSE2" {

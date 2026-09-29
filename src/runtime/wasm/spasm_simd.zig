@@ -12,6 +12,40 @@ pub fn wideningLoadOp(sub: u32) ?WideningLoadOp {
     };
 }
 
+/// Width is the destination lane width in bytes; sources are always signed.
+pub const NarrowOp = struct { width: u4, signed: bool };
+
+pub fn narrowOp(sub: u32) ?NarrowOp {
+    return switch (sub) {
+        101, 102 => .{ .width = 1, .signed = sub == 101 },
+        133, 134 => .{ .width = 2, .signed = sub == 133 },
+        else => null,
+    };
+}
+
+/// Width is the source lane width in bytes.
+pub const ExtendOp = struct { width: u4, signed: bool, high: bool };
+
+pub fn extendOp(sub: u32) ?ExtendOp {
+    return switch (sub) {
+        135...138, 167...170, 199...202 => .{
+            .width = @as(u4, 1) << @as(u2, @intCast((sub - 135) / 32)),
+            .signed = (sub - 135) % 32 < 2,
+            .high = (sub - 135) % 2 == 1,
+        },
+        else => null,
+    };
+}
+
+pub const PairwiseAddOp = struct { width: u4, signed: bool };
+
+pub fn pairwiseAddOp(sub: u32) ?PairwiseAddOp {
+    return switch (sub) {
+        124...127 => .{ .width = if (sub < 126) 1 else 2, .signed = sub % 2 == 0 },
+        else => null,
+    };
+}
+
 pub const ScalarLoadOp = struct { width: u4, splat: bool };
 
 pub fn scalarLoadOp(sub: u32) ?ScalarLoadOp {

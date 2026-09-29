@@ -1830,17 +1830,7 @@ pub fn compile(
                         trap_oob_used = true;
                         try m.load64Disp32(.rax, .r11, 0);
                         try m.movQXmmFromReg(.xmm0, .rax);
-                        const size: x64.Masm.PackedIntSize = switch (load.width) {
-                            1 => .byte,
-                            2 => .half,
-                            4 => .word,
-                            else => return null,
-                        };
-                        // Zero > signed lane yields all ones for negative
-                        // lanes. Interleave those extension bits using SSE2.
-                        try m.xorPacked128(.xmm1, .xmm1);
-                        if (load.signed) try m.compareGreaterSignedPacked(.xmm1, .xmm0, size);
-                        try m.unpackLowPackedInteger(.xmm0, .xmm1, size);
+                        try emitSimdExtend(&m, .{ .width = load.width, .signed = load.signed, .high = false });
                         try m.storeVector128(.r12, target, .xmm0);
                         stack[depth] = .v128;
                     },
@@ -1976,6 +1966,32 @@ pub fn compile(
                         try m.loadVector128(.xmm0, .r12, target);
                         const result = try emitSimdIntegerUnary(&m, unary);
                         try m.storeVector128(.r12, target, result);
+                    },
+                    101, 102, 133, 134 => {
+                        if (sp < 2 or stack[sp - 2] != .v128 or stack[sp - 1] != .v128) return null;
+                        const narrow = simd.narrowOp(sub) orelse return null;
+                        const target = scratchOffset(num_locals, sp - 2);
+                        try m.loadVector128(.xmm0, .r12, target);
+                        try m.loadVector128(.xmm1, .r12, scratchOffset(num_locals, sp - 1));
+                        try emitSimdNarrow(&m, narrow);
+                        try m.storeVector128(.r12, target, .xmm0);
+                        sp -= 1;
+                    },
+                    135...138, 167...170, 199...202 => {
+                        if (sp == 0 or stack[sp - 1] != .v128) return null;
+                        const extend = simd.extendOp(sub) orelse return null;
+                        const target = scratchOffset(num_locals, sp - 1);
+                        try m.loadVector128(.xmm0, .r12, target);
+                        try emitSimdExtend(&m, extend);
+                        try m.storeVector128(.r12, target, .xmm0);
+                    },
+                    124...127 => {
+                        if (sp == 0 or stack[sp - 1] != .v128) return null;
+                        const pairwise = simd.pairwiseAddOp(sub) orelse return null;
+                        const target = scratchOffset(num_locals, sp - 1);
+                        try m.loadVector128(.xmm0, .r12, target);
+                        try emitSimdPairwiseAdd(&m, pairwise);
+                        try m.storeVector128(.r12, target, .xmm0);
                     },
                     123, 155 => {
                         if (sp < 2 or stack[sp - 2] != .v128 or stack[sp - 1] != .v128) return null;
@@ -2894,6 +2910,74 @@ fn emitSimdSplat(m: *x64.Masm, width: u4, target: i32) Error!void {
     }
     try m.store64Disp32(.r12, target, .rax);
     try m.store64Disp32(.r12, target + 8, .rax);
+}
+
+fn emitSimdExtend(m: *x64.Masm, op: simd.ExtendOp) Error!void {
+    const size: x64.Masm.PackedIntSize = switch (op.width) {
+        1 => .byte,
+        2 => .half,
+        4 => .word,
+        else => return error.UnsupportedOp,
+    };
+    // Zero > signed lane supplies the sign-extension bits for PUNPCK.
+    try m.xorPacked128(.xmm1, .xmm1);
+    if (op.signed) try m.compareGreaterSignedPacked(.xmm1, .xmm0, size);
+    if (op.high)
+        try m.unpackHighPackedInteger(.xmm0, .xmm1, size)
+    else
+        try m.unpackLowPackedInteger(.xmm0, .xmm1, size);
+}
+
+fn emitSimdNarrow(m: *x64.Masm, op: simd.NarrowOp) Error!void {
+    if (op.width == 1) {
+        if (op.signed) try m.packSigned16To8(.xmm0, .xmm1) else try m.packUnsigned16To8(.xmm0, .xmm1);
+    } else if (op.signed) {
+        try m.packSigned32To16(.xmm0, .xmm1);
+    } else {
+        // PACKUSDW needs SSE4.1. Clamp negatives first, bias by -32768,
+        // PACKSSDW, then flip each output sign bit to recover unsigned lanes.
+        try m.movImm64(.rax, 0x0000800000008000);
+        try m.movQXmmFromReg(.xmm3, .rax);
+        try m.shufflePackedI32(.xmm3, .xmm3, 0x44);
+        for ([_]x64.Xmm{ .xmm0, .xmm1 }) |input| {
+            try m.xorPacked128(.xmm2, .xmm2);
+            try m.compareGreaterSignedPacked(.xmm2, input, .word);
+            try m.andNotPacked128(.xmm2, input);
+            try m.movVector128(input, .xmm2);
+            try m.subtractPackedInteger(input, .xmm3, .word);
+        }
+        try m.packSigned32To16(.xmm0, .xmm1);
+        try m.movImm64(.rax, 0x8000800080008000);
+        try m.movQXmmFromReg(.xmm1, .rax);
+        try m.shufflePackedI32(.xmm1, .xmm1, 0x44);
+        try m.xorPacked128(.xmm0, .xmm1);
+    }
+}
+
+fn emitSimdPairwiseAdd(m: *x64.Masm, op: simd.PairwiseAddOp) Error!void {
+    if (op.signed and op.width == 2) {
+        try m.movImm64(.rax, 0x0001000100010001);
+        try m.movQXmmFromReg(.xmm1, .rax);
+        try m.shufflePackedI32(.xmm1, .xmm1, 0x44);
+        try m.multiplyAddPackedI16(.xmm0, .xmm1);
+        return;
+    }
+    try m.movVector128(.xmm1, .xmm0);
+    if (op.signed) {
+        try m.movImm64(.rax, 8);
+        try m.movDXmmFromReg(.xmm2, .rax);
+        try m.shiftPackedInteger(.xmm0, .xmm2, .shl16);
+        try m.shiftPackedInteger(.xmm0, .xmm2, .sar16);
+        try m.shiftPackedInteger(.xmm1, .xmm2, .sar16);
+    } else {
+        try m.shiftRightLogicalPacked128(.xmm1, @as(u8, op.width) * 8, false);
+        try m.movImm64(.rax, if (op.width == 1) 0x00ff00ff00ff00ff else 0x0000ffff0000ffff);
+        try m.movQXmmFromReg(.xmm2, .rax);
+        try m.shufflePackedI32(.xmm2, .xmm2, 0x44);
+        try m.andPacked128(.xmm0, .xmm2);
+        if (op.width == 1) try m.andPacked128(.xmm1, .xmm2);
+    }
+    try m.addPackedInteger(.xmm0, .xmm1, if (op.width == 1) .half else .word);
 }
 
 fn emitSimdFloatArithmetic(m: *x64.Masm, op: simd.FloatArithmeticOp) Error!void {

@@ -269,6 +269,23 @@ pub fn widenLowV128(vd: Reg, vn: Reg, size: VectorLaneSize, signed: bool) u32 {
     return base | (immh << 16) | (r(vn) << 5) | r(vd);
 }
 
+pub fn extendIntegerV128(vd: Reg, vn: Reg, size: VectorLaneSize, signed: bool, high: bool) u32 {
+    return widenLowV128(vd, vn, size, signed) | (if (high) @as(u32, 0x40000000) else 0);
+}
+
+/// SQXTN/SQXTUN (+2): signed input, signed/unsigned saturating output.
+pub fn narrowIntegerV128(vd: Reg, vn: Reg, size: VectorLaneSize, signed: bool, high: bool) u32 {
+    const base: u32 = if (signed) 0x0e214800 else 0x2e212800;
+    return base | (if (high) @as(u32, 0x40000000) else 0) |
+        (@as(u32, @intFromEnum(size)) << 22) | (r(vn) << 5) | r(vd);
+}
+
+/// SADDLP/UADDLP: adjacent source lanes summed into double-width lanes.
+pub fn pairwiseAddLongV128(vd: Reg, vn: Reg, size: VectorLaneSize, signed: bool) u32 {
+    const base: u32 = if (signed) 0x4e202800 else 0x6e202800;
+    return base | (@as(u32, @intFromEnum(size)) << 22) | (r(vn) << 5) | r(vd);
+}
+
 pub const VectorIntegerSize = enum(u2) { byte, half, word, double };
 
 pub fn addSubtractV128(vd: Reg, vn: Reg, vm: Reg, size: VectorIntegerSize, subtract: bool) u32 {
@@ -1109,6 +1126,26 @@ test "jit asm_aarch64: SIMD widening encodings" {
     try std.testing.expectEqual(@as(u32, 0x2f10a623), widenLowV128(.x3, .x17, .half, false));
     try std.testing.expectEqual(@as(u32, 0x0f20a623), widenLowV128(.x3, .x17, .word, true));
     try std.testing.expectEqual(@as(u32, 0x2f20a623), widenLowV128(.x3, .x17, .word, false));
+}
+
+test "jit asm_aarch64: SIMD lane conversion encodings" {
+    const expected = [_]u32{ 0x0e214a23, 0x4e214a23, 0x2e212a23, 0x6e212a23, 0x0e614a23, 0x4e614a23, 0x2e612a23, 0x6e612a23 };
+    var index: usize = 0;
+    for ([_]VectorLaneSize{ .byte, .half }) |size| {
+        for ([_]bool{ true, false }) |signed| {
+            for ([_]bool{ false, true }) |high| {
+                try std.testing.expectEqual(expected[index], narrowIntegerV128(.x3, .x17, size, signed, high));
+                index += 1;
+            }
+        }
+    }
+    try std.testing.expectEqual(@as(u32, 0x4f08a623), extendIntegerV128(.x3, .x17, .byte, true, true));
+    try std.testing.expectEqual(@as(u32, 0x6f10a623), extendIntegerV128(.x3, .x17, .half, false, true));
+    try std.testing.expectEqual(@as(u32, 0x4f20a623), extendIntegerV128(.x3, .x17, .word, true, true));
+    try std.testing.expectEqual(@as(u32, 0x4e202a23), pairwiseAddLongV128(.x3, .x17, .byte, true));
+    try std.testing.expectEqual(@as(u32, 0x6e202a23), pairwiseAddLongV128(.x3, .x17, .byte, false));
+    try std.testing.expectEqual(@as(u32, 0x4e602a23), pairwiseAddLongV128(.x3, .x17, .half, true));
+    try std.testing.expectEqual(@as(u32, 0x6e602a23), pairwiseAddLongV128(.x3, .x17, .half, false));
 }
 
 test "jit asm_aarch64: SIMD packed float arithmetic encodings" {
