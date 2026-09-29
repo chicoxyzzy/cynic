@@ -271,6 +271,32 @@ pub fn widenLowV128(vd: Reg, vn: Reg, size: VectorLaneSize, signed: bool) u32 {
 
 pub const VectorIntegerSize = enum(u2) { byte, half, word, double };
 
+pub const VectorComparison = enum { eq, gt, ge };
+
+/// CMEQ / CMGT / CMGE / CMHI / CMHS, one all-ones mask per true lane.
+pub fn compareIntegerV128(vd: Reg, vn: Reg, vm: Reg, size: VectorIntegerSize, relation: VectorComparison, signed: bool) u32 {
+    const base: u32 = switch (relation) {
+        .eq => 0x6E208C00,
+        .gt => if (signed) 0x4E203400 else 0x6E203400,
+        .ge => if (signed) 0x4E203C00 else 0x6E203C00,
+    };
+    return base | (@as(u32, @intFromEnum(size)) << 22) | (r(vm) << 16) | (r(vn) << 5) | r(vd);
+}
+
+/// FCMEQ / FCMGT / FCMGE. Unordered lanes yield zero.
+pub fn compareFloatV128(vd: Reg, vn: Reg, vm: Reg, double_precision: bool, relation: VectorComparison) u32 {
+    const base: u32 = switch (relation) {
+        .eq => 0x4E20E400,
+        .gt => 0x6EA0E400,
+        .ge => 0x6E20E400,
+    };
+    return base | (@as(u32, @intFromBool(double_precision)) << 22) | (r(vm) << 16) | (r(vn) << 5) | r(vd);
+}
+
+pub fn notV128(vd: Reg, vn: Reg) u32 {
+    return 0x6E205800 | (r(vn) << 5) | r(vd);
+}
+
 /// NaN-propagating FMIN/FMAX Vd.4S/2D, Vn, Vm (not FMINNM/FMAXNM).
 pub fn minMaxFloatV128(vd: Reg, vn: Reg, vm: Reg, double_precision: bool, maximum: bool) u32 {
     const base: u32 = if (maximum) 0x4E20F400 else 0x4EA0F400;
@@ -1018,6 +1044,22 @@ pub fn brk(imm16: u16) u32 {
 // Byte-exact encodings, cross-checked against `llvm-mc -triple
 // arm64 -show-encoding` output. These pin the bit layouts; the
 // execution tests in masm.zig prove them on hardware.
+
+test "jit asm_aarch64: SIMD comparison encodings" {
+    const expected = [_]u32{ 0x6e318ca3, 0x6e718ca3, 0x6eb18ca3, 0x6ef18ca3 };
+    for (expected, 0..) |word, size| try std.testing.expectEqual(word, compareIntegerV128(.x3, .x5, .x17, @enumFromInt(size), .eq, true));
+    try std.testing.expectEqual(@as(u32, 0x4e3134a3), compareIntegerV128(.x3, .x5, .x17, .byte, .gt, true));
+    try std.testing.expectEqual(@as(u32, 0x4e713ca3), compareIntegerV128(.x3, .x5, .x17, .half, .ge, true));
+    try std.testing.expectEqual(@as(u32, 0x6eb134a3), compareIntegerV128(.x3, .x5, .x17, .word, .gt, false));
+    try std.testing.expectEqual(@as(u32, 0x6ef13ca3), compareIntegerV128(.x3, .x5, .x17, .double, .ge, false));
+    try std.testing.expectEqual(@as(u32, 0x4e31e4a3), compareFloatV128(.x3, .x5, .x17, false, .eq));
+    try std.testing.expectEqual(@as(u32, 0x6eb1e4a3), compareFloatV128(.x3, .x5, .x17, false, .gt));
+    try std.testing.expectEqual(@as(u32, 0x6e31e4a3), compareFloatV128(.x3, .x5, .x17, false, .ge));
+    try std.testing.expectEqual(@as(u32, 0x4e71e4a3), compareFloatV128(.x3, .x5, .x17, true, .eq));
+    try std.testing.expectEqual(@as(u32, 0x6ef1e4a3), compareFloatV128(.x3, .x5, .x17, true, .gt));
+    try std.testing.expectEqual(@as(u32, 0x6e71e4a3), compareFloatV128(.x3, .x5, .x17, true, .ge));
+    try std.testing.expectEqual(@as(u32, 0x6e205a23), notV128(.x3, .x17));
+}
 
 test "jit asm_aarch64: SIMD widening encodings" {
     try std.testing.expectEqual(@as(u32, 0x0f08a623), widenLowV128(.x3, .x17, .byte, true));

@@ -3419,6 +3419,30 @@ fn compileAarch64(
                     try m.emit(a64.widenLowV128(.x0, .x0, size, load.signed));
                     try m.emit(a64.strQImm(.x0, .x0, refSlotOff(num_locals, sp - 1)));
                     stack[sp - 1] = .v128;
+                } else if (simd.scalarLoadOp(sub)) |load| {
+                    const memory64 = memoryIs64(module, 0) orelse return null;
+                    const offset = readMemArg(body, &i, memory64) orelse return null;
+                    if (sp == 0) return null;
+                    const source = try materialize(&m, stack[sp - 1], sp - 1);
+                    try emitMemBounds(&m, source, offset, load.width, memory64, &trap_oob);
+                    trap_oob_used = true;
+                    try m.emit(switch (load.width) {
+                        1 => a64.ldrbRegW(.x17, .x2, .x16),
+                        2 => a64.ldrhRegW(.x17, .x2, .x16),
+                        4 => a64.ldrRegW(.x17, .x2, .x16),
+                        8 => a64.ldrReg(.x17, .x2, .x16),
+                        else => return null,
+                    });
+                    const target = refSlotOff(num_locals, sp - 1);
+                    if (load.splat) {
+                        try m.emit(a64.movReg(.x16, .x17));
+                        try emitSimdSplat(&m, load.width, target);
+                    } else {
+                        // FMOV clears the upper vector bits for both widths.
+                        try m.emit(a64.fmovXtoD(.x0, .x17));
+                        try m.emit(a64.strQImm(.x0, .x0, target));
+                    }
+                    stack[sp - 1] = .v128;
                 } else if (sub == simd_v128_store) {
                     // §4.4.7 v128.store — operands [addr, v128] (v128 on top);
                     // bounds-check the 16-byte access, then copy the v128 cell
@@ -3452,16 +3476,7 @@ fn compileAarch64(
                         try m.movImm64(.x17, (@as(u64, 1) << @as(u6, @intCast(@as(u8, width) * 8))) - 1);
                         try m.emit(a64.andReg(.x16, source, .x17));
                     }
-                    // Repeat the raw lane bits within one half, then copy both
-                    // halves. Float splats must not quiet NaNs or change -0.
-                    var shift: u8 = @as(u8, width) * 8;
-                    while (shift < 64) : (shift *= 2) {
-                        try m.emit(a64.lslImm(.x17, .x16, @intCast(shift)));
-                        try m.emit(a64.orrReg(.x16, .x16, .x17));
-                    }
-                    const target = refSlotOff(num_locals, sp - 1);
-                    try m.emit(a64.strImm(.x16, .x0, target));
-                    try m.emit(a64.strImm(.x16, .x0, target + 8));
+                    try emitSimdSplat(&m, width, refSlotOff(num_locals, sp - 1));
                     stack[sp - 1] = .v128;
                 } else if (simd.laneOp(sub)) |lane_op| {
                     if (i >= body.len or body[i] >= @as(u8, 16) / lane_op.width) return null;
@@ -3499,6 +3514,15 @@ fn compileAarch64(
                     const result = regForDepth(sp - 1);
                     try emitSimdReduction(&m, refSlotOff(num_locals, sp - 1), result, reduction);
                     stack[sp - 1] = .{ .reg = result };
+                } else if (simd.comparisonOp(sub)) |comparison| {
+                    if (sp < 2 or stack[sp - 2] != .v128 or stack[sp - 1] != .v128) return null;
+                    const target = refSlotOff(num_locals, sp - 2);
+                    try m.emit(a64.ldrQImm(.x0, .x0, target));
+                    try m.emit(a64.ldrQImm(.x1, .x0, refSlotOff(num_locals, sp - 1)));
+                    try emitSimdComparison(&m, comparison);
+                    try m.emit(a64.strQImm(.x0, .x0, target));
+                    sp -= 1;
+                    stack[sp - 1] = .v128;
                 } else if (simd.integerUnaryOp(sub)) |unary| {
                     if (sp < 1 or stack[sp - 1] != .v128) return null;
                     const size: a64.VectorIntegerSize = switch (unary.width) {
@@ -4360,6 +4384,42 @@ fn callFrameBytes(bufcells: usize, below: usize) ?u12 {
 /// the checked helper path rather than narrowing an AArch64 immediate.
 fn nativeLinkStackBytes(framebytes: u12) ?u12 {
     return std.math.add(u12, framebytes, native_entry_prologue_bytes) catch null;
+}
+
+/// Inputs are v0/v1; v0 receives complete per-lane comparison masks.
+fn emitSimdComparison(m: *masm_mod.Masm, op: simd.ComparisonOp) CompileError!void {
+    const reverse = op.relation == .lt or op.relation == .le;
+    const left: a64.Reg = if (reverse) .x1 else .x0;
+    const right: a64.Reg = if (reverse) .x0 else .x1;
+    const relation: a64.VectorComparison = switch (op.relation) {
+        .eq, .ne => .eq,
+        .lt, .gt => .gt,
+        .le, .ge => .ge,
+    };
+    if (op.floating) {
+        try m.emit(a64.compareFloatV128(.x0, left, right, op.width == 8, relation));
+    } else {
+        const size: a64.VectorIntegerSize = switch (op.width) {
+            1 => .byte,
+            2 => .half,
+            4 => .word,
+            8 => .double,
+            else => return error.UnsupportedOp,
+        };
+        try m.emit(a64.compareIntegerV128(.x0, left, right, size, relation, op.signed));
+    }
+    if (op.relation == .ne) try m.emit(a64.notV128(.x0, .x0));
+}
+
+/// Repeat the zero-extended lane in x16 without interpreting float bits.
+fn emitSimdSplat(m: *masm_mod.Masm, width: u4, target: u15) CompileError!void {
+    var shift: u8 = @as(u8, width) * 8;
+    while (shift < 64) : (shift *= 2) {
+        try m.emit(a64.lslImm(.x17, .x16, @intCast(shift)));
+        try m.emit(a64.orrReg(.x16, .x16, .x17));
+    }
+    try m.emit(a64.strImm(.x16, .x0, target));
+    try m.emit(a64.strImm(.x16, .x0, target + 8));
 }
 
 fn emitSimdReduction(m: *masm_mod.Masm, src: u15, result: a64.Reg, op: simd.ReductionOp) CompileError!void {

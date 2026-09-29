@@ -1844,6 +1844,35 @@ pub fn compile(
                         try m.storeVector128(.r12, target, .xmm0);
                         stack[depth] = .v128;
                     },
+                    7...10, 92, 93 => {
+                        const load = simd.scalarLoadOp(sub) orelse return null;
+                        const memory64 = memoryIs64(module, 0) orelse return null;
+                        const offset = readMemArg(body, &i, memory64) orelse return null;
+                        if (sp == 0) return null;
+                        const depth = sp - 1;
+                        const target = scratchOffset(num_locals, depth);
+                        try materialize(&m, stack[depth], num_locals, depth);
+                        if (memory64)
+                            try m.load64Disp32(.r10, .r12, target)
+                        else
+                            try m.load32Disp32(.r10, .r12, target);
+                        try emitMemAddress(&m, offset, load.width, memory64, &trap_oob);
+                        trap_oob_used = true;
+                        switch (load.width) {
+                            1 => try m.load8Disp32(.rax, .r11, 0),
+                            2 => try m.load16Disp32(.rax, .r11, 0),
+                            4 => try m.load32Disp32(.rax, .r11, 0),
+                            8 => try m.load64Disp32(.rax, .r11, 0),
+                            else => return null,
+                        }
+                        if (load.splat) {
+                            try emitSimdSplat(&m, load.width, target);
+                        } else {
+                            try m.movQXmmFromReg(.xmm0, .rax);
+                            try m.storeVector128(.r12, target, .xmm0);
+                        }
+                        stack[depth] = .v128;
+                    },
                     15...20 => {
                         if (sp == 0) return null;
                         const width = simd.splatWidth(sub) orelse return null;
@@ -1856,14 +1885,7 @@ pub fn compile(
                             8 => try m.load64Disp32(.rax, .r12, target),
                             else => return null,
                         }
-                        var shift: u8 = @as(u8, width) * 8;
-                        while (shift < 64) : (shift *= 2) {
-                            try m.movReg64(.rcx, .rax);
-                            try m.shlImm8(.rcx, shift);
-                            try m.orReg64(.rax, .rcx);
-                        }
-                        try m.store64Disp32(.r12, target, .rax);
-                        try m.store64Disp32(.r12, target + 8, .rax);
+                        try emitSimdSplat(&m, width, target);
                         stack[sp - 1] = .v128;
                     },
                     21...34 => {
@@ -1898,6 +1920,13 @@ pub fn compile(
                             try m.store64Disp32(.r12, target, .rax);
                             stack[depth] = .runtime;
                         }
+                    },
+                    35...76, 214...219 => {
+                        const comparison = simd.comparisonOp(sub) orelse return null;
+                        if (sp < 2 or stack[sp - 2] != .v128 or stack[sp - 1] != .v128) return null;
+                        try emitSimdComparison(&m, comparison, scratchOffset(num_locals, sp - 2), scratchOffset(num_locals, sp - 1));
+                        sp -= 1;
+                        stack[sp - 1] = .v128;
                     },
                     99, 100, 131, 132, 163, 164, 195, 196 => {
                         if (sp == 0 or stack[sp - 1] != .v128) return null;
@@ -2742,6 +2771,88 @@ fn emitExecutionPoll(
     try m.cmpReg32Imm32(.rax, 0);
     try m.jumpCond(.not_equal, epilogue);
     try m.bind(&done);
+}
+
+fn emitSimdComparison(m: *x64.Masm, op: simd.ComparisonOp, target: i32, right_offset: i32) Error!void {
+    if (!op.floating and op.width == 8) {
+        // SSE2 lacks PCMPGTQ/PCMPEQQ. Scalar comparisons still produce full
+        // qword masks and never confuse the signs of the two 32-bit halves.
+        for ([_]i32{ 0, 8 }) |half| {
+            try m.load64Disp32(.rax, .r12, target + half);
+            try m.load64Disp32(.rcx, .r12, right_offset + half);
+            try m.cmpReg64(.rax, .rcx);
+            try m.setCond32(.rax, switch (op.relation) {
+                .eq => .equal,
+                .ne => .not_equal,
+                .lt => .less,
+                .gt => .greater,
+                .le => .less_or_equal,
+                .ge => .greater_or_equal,
+            });
+            try m.movImm64(.rcx, 0);
+            try m.subReg64(.rcx, .rax);
+            try m.store64Disp32(.r12, target + half, .rcx);
+        }
+        return;
+    }
+    try m.loadVector128(.xmm0, .r12, target);
+    try m.loadVector128(.xmm1, .r12, right_offset);
+    var result: x64.Xmm = .xmm0;
+    if (op.floating) {
+        // Swap operands for gt/ge: negating lt/le would accept unordered
+        // lanes. CMPNEQ alone is true for a NaN in either operand.
+        const reverse = op.relation == .gt or op.relation == .ge;
+        result = if (reverse) .xmm1 else .xmm0;
+        try m.comparePackedFloat128(result, if (reverse) .xmm0 else .xmm1, op.width == 8, switch (op.relation) {
+            .eq => .eq,
+            .ne => .ne,
+            .lt, .gt => .lt,
+            .le, .ge => .le,
+        });
+    } else {
+        const size: x64.Masm.PackedIntSize = switch (op.width) {
+            1 => .byte,
+            2 => .half,
+            4 => .word,
+            else => return error.UnsupportedOp,
+        };
+        if (op.relation == .eq or op.relation == .ne) {
+            try m.compareEqualPacked(.xmm0, .xmm1, size);
+        } else {
+            if (!op.signed) {
+                // Flipping every lane's sign bit maps unsigned ordering to
+                // signed ordering for all three SSE2 comparison widths.
+                var sign_bits: u64 = 0;
+                var bit: u8 = @as(u8, op.width) * 8 - 1;
+                while (bit < 64) : (bit += @as(u8, op.width) * 8) sign_bits |= @as(u64, 1) << @as(u6, @intCast(bit));
+                try m.movImm64(.rax, sign_bits);
+                try m.movQXmmFromReg(.xmm2, .rax);
+                try m.shufflePackedI32(.xmm2, .xmm2, 0x44);
+                try m.xorPacked128(.xmm0, .xmm2);
+                try m.xorPacked128(.xmm1, .xmm2);
+            }
+            const reverse = op.relation == .lt or op.relation == .ge;
+            result = if (reverse) .xmm1 else .xmm0;
+            try m.compareGreaterSignedPacked(result, if (reverse) .xmm0 else .xmm1, size);
+        }
+        if (op.relation == .ne or op.relation == .le or op.relation == .ge) {
+            try m.compareEqualPacked(.xmm2, .xmm2, .word);
+            try m.xorPacked128(result, .xmm2);
+        }
+    }
+    try m.storeVector128(.r12, target, result);
+}
+
+/// Repeat the zero-extended lane in rax without interpreting float bits.
+fn emitSimdSplat(m: *x64.Masm, width: u4, target: i32) Error!void {
+    var shift: u8 = @as(u8, width) * 8;
+    while (shift < 64) : (shift *= 2) {
+        try m.movReg64(.rcx, .rax);
+        try m.shlImm8(.rcx, shift);
+        try m.orReg64(.rax, .rcx);
+    }
+    try m.store64Disp32(.r12, target, .rax);
+    try m.store64Disp32(.r12, target + 8, .rax);
 }
 
 /// Inputs are xmm0/xmm1; xmm2/xmm3 are scratch. Only SSE2 is required.
