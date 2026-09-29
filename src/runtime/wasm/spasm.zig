@@ -3540,6 +3540,22 @@ fn compileAarch64(
                     try m.emit(a64.ldrQImm(.x0, .x0, target));
                     try m.emit(a64.pairwiseAddLongV128(.x0, .x0, size, pairwise.signed));
                     try m.emit(a64.strQImm(.x0, .x0, target));
+                } else if (simd.productOp(sub)) |product| {
+                    if (sp < 2 or stack[sp - 2] != .v128 or stack[sp - 1] != .v128) return null;
+                    const target = refSlotOff(num_locals, sp - 2);
+                    try m.emit(a64.ldrQImm(.x0, .x0, target));
+                    try m.emit(a64.ldrQImm(.x1, .x0, refSlotOff(num_locals, sp - 1)));
+                    switch (product.kind) {
+                        .extmul => try m.emit(a64.multiplyLongV128(.x0, .x0, .x1, @enumFromInt(std.math.log2_int(u4, product.width)), product.signed, product.high)),
+                        .dot => {
+                            try m.emit(a64.multiplyLongV128(.x2, .x0, .x1, .half, true, false));
+                            try m.emit(a64.multiplyLongV128(.x0, .x0, .x1, .half, true, true));
+                            try m.emit(a64.addPairwiseV4s(.x0, .x2, .x0));
+                        },
+                        .q15 => try m.emit(a64.multiplyQ15V8h(.x0, .x0, .x1)),
+                    }
+                    try m.emit(a64.strQImm(.x0, .x0, target));
+                    sp -= 1;
                 } else if (simd.integerBinaryOp(sub)) |binary| {
                     if (sp < 2 or stack[sp - 2] != .v128 or stack[sp - 1] != .v128) return null;
                     const target = refSlotOff(num_locals, sp - 2);

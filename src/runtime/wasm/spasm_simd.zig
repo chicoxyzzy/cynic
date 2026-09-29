@@ -46,6 +46,27 @@ pub fn pairwiseAddOp(sub: u32) ?PairwiseAddOp {
     };
 }
 
+pub const ProductOp = struct {
+    width: u4,
+    kind: enum { extmul, dot, q15 },
+    signed: bool = true,
+    high: bool = false,
+};
+
+pub fn productOp(sub: u32) ?ProductOp {
+    return switch (sub) {
+        156...159, 188...191, 220...223 => .{
+            .width = @as(u4, 1) << @as(u2, @intCast((sub - 156) / 32)),
+            .kind = .extmul,
+            .signed = (sub - 156) % 32 < 2,
+            .high = sub % 2 == 1,
+        },
+        186 => .{ .width = 2, .kind = .dot },
+        130 => .{ .width = 2, .kind = .q15 },
+        else => null,
+    };
+}
+
 pub const ScalarLoadOp = struct { width: u4, splat: bool };
 
 pub fn scalarLoadOp(sub: u32) ?ScalarLoadOp {

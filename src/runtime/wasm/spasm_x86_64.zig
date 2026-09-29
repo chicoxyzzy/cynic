@@ -1993,6 +1993,16 @@ pub fn compile(
                         try emitSimdPairwiseAdd(&m, pairwise);
                         try m.storeVector128(.r12, target, .xmm0);
                     },
+                    130, 156...159, 186, 188...191, 220...223 => {
+                        if (sp < 2 or stack[sp - 2] != .v128 or stack[sp - 1] != .v128) return null;
+                        const product = simd.productOp(sub) orelse return null;
+                        const target = scratchOffset(num_locals, sp - 2);
+                        try m.loadVector128(.xmm0, .r12, target);
+                        try m.loadVector128(.xmm1, .r12, scratchOffset(num_locals, sp - 1));
+                        try emitSimdProduct(&m, product);
+                        try m.storeVector128(.r12, target, .xmm0);
+                        sp -= 1;
+                    },
                     123, 155 => {
                         if (sp < 2 or stack[sp - 2] != .v128 or stack[sp - 1] != .v128) return null;
                         const width = simd.roundingAverageWidth(sub) orelse return null;
@@ -2978,6 +2988,75 @@ fn emitSimdPairwiseAdd(m: *x64.Masm, op: simd.PairwiseAddOp) Error!void {
         if (op.width == 1) try m.andPacked128(.xmm1, .xmm2);
     }
     try m.addPackedInteger(.xmm0, .xmm1, if (op.width == 1) .half else .word);
+}
+
+/// xmm0/xmm1 -> xmm0, using xmm2/xmm3 scratch and only SSE2.
+fn emitSimdProduct(m: *x64.Masm, op: simd.ProductOp) Error!void {
+    if (op.kind == .dot) {
+        try m.multiplyAddPackedI16(.xmm0, .xmm1);
+        return;
+    }
+    if (op.kind == .q15) {
+        // Reconstruct exact signed i32 products, add the rounding bias,
+        // shift arithmetically, then saturate the one positive overflow.
+        try m.movVector128(.xmm2, .xmm0);
+        try m.multiplyHighPacked16(.xmm2, .xmm1, true);
+        try m.multiplyLowPackedI16(.xmm0, .xmm1);
+        try m.movVector128(.xmm1, .xmm0);
+        try m.unpackLowPackedInteger(.xmm0, .xmm2, .half);
+        try m.unpackHighPackedInteger(.xmm1, .xmm2, .half);
+        try m.movImm64(.rax, 0x0000400000004000);
+        try m.movQXmmFromReg(.xmm2, .rax);
+        try m.shufflePackedI32(.xmm2, .xmm2, 0x44);
+        try m.addPackedInteger(.xmm0, .xmm2, .word);
+        try m.addPackedInteger(.xmm1, .xmm2, .word);
+        try m.shiftRightArithmeticPackedI32(.xmm0, 15);
+        try m.shiftRightArithmeticPackedI32(.xmm1, 15);
+        try m.packSigned32To16(.xmm0, .xmm1);
+        return;
+    }
+    switch (op.width) {
+        1 => {
+            const extend: simd.ExtendOp = .{ .width = 1, .signed = op.signed, .high = op.high };
+            try m.movVector128(.xmm2, .xmm1);
+            try emitSimdExtend(m, extend);
+            try m.movVector128(.xmm3, .xmm0);
+            try m.movVector128(.xmm0, .xmm2);
+            try emitSimdExtend(m, extend);
+            try m.multiplyLowPackedI16(.xmm0, .xmm3);
+        },
+        2 => {
+            try m.movVector128(.xmm2, .xmm0);
+            try m.multiplyHighPacked16(.xmm2, .xmm1, op.signed);
+            try m.multiplyLowPackedI16(.xmm0, .xmm1);
+            if (op.high)
+                try m.unpackHighPackedInteger(.xmm0, .xmm2, .half)
+            else
+                try m.unpackLowPackedInteger(.xmm0, .xmm2, .half);
+        },
+        4 => {
+            // Put the selected pair in PMULUDQ's even lanes. For signed
+            // inputs, subtract each negative operand's 2^32 correction.
+            const order: u8 = if (op.high) 0xfa else 0x50;
+            try m.shufflePackedI32(.xmm0, .xmm0, order);
+            try m.shufflePackedI32(.xmm1, .xmm1, order);
+            if (op.signed) {
+                try m.movVector128(.xmm2, .xmm0);
+                try m.movVector128(.xmm3, .xmm1);
+                try m.shiftRightArithmeticPackedI32(.xmm2, 31);
+                try m.shiftRightArithmeticPackedI32(.xmm3, 31);
+                try m.andPacked128(.xmm2, .xmm1);
+                try m.andPacked128(.xmm3, .xmm0);
+                try m.addPackedInteger(.xmm2, .xmm3, .word);
+                try m.movImm64(.rax, 32);
+                try m.movDXmmFromReg(.xmm3, .rax);
+                try m.shiftPackedInteger(.xmm2, .xmm3, .shl64);
+            }
+            try m.multiplyEvenPackedU32(.xmm0, .xmm1);
+            if (op.signed) try m.subtractPackedInteger(.xmm0, .xmm2, .double);
+        },
+        else => return error.UnsupportedOp,
+    }
 }
 
 fn emitSimdFloatArithmetic(m: *x64.Masm, op: simd.FloatArithmeticOp) Error!void {
