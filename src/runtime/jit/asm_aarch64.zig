@@ -271,6 +271,35 @@ pub fn widenLowV128(vd: Reg, vn: Reg, size: VectorLaneSize, signed: bool) u32 {
 
 pub const VectorIntegerSize = enum(u2) { byte, half, word, double };
 
+pub fn addSubtractV128(vd: Reg, vn: Reg, vm: Reg, size: VectorIntegerSize, subtract: bool) u32 {
+    const base: u32 = if (subtract) 0x6e208400 else 0x4e208400;
+    return base | (@as(u32, @intFromEnum(size)) << 22) | (r(vm) << 16) | (r(vn) << 5) | r(vd);
+}
+
+pub fn multiplyV128(vd: Reg, vn: Reg, vm: Reg, size: VectorLaneSize) u32 {
+    return 0x4e209c00 | (@as(u32, @intFromEnum(size)) << 22) | (r(vm) << 16) | (r(vn) << 5) | r(vd);
+}
+
+pub fn saturatingAddSubtractV128(vd: Reg, vn: Reg, vm: Reg, size: VectorIntegerSize, signed: bool, subtract: bool) u32 {
+    return 0x4e200c00 | (if (signed) @as(u32, 0) else 0x20000000) |
+        (if (subtract) @as(u32, 0x2000) else 0) |
+        (@as(u32, @intFromEnum(size)) << 22) | (r(vm) << 16) | (r(vn) << 5) | r(vd);
+}
+
+pub fn populationCountV128(vd: Reg, vn: Reg) u32 {
+    return 0x4e205800 | (r(vn) << 5) | r(vd);
+}
+
+pub fn duplicateIntegerV128(vd: Reg, rn: Reg, size: VectorIntegerSize) u32 {
+    return 0x4e000c00 | (@as(u32, 1) << (@as(u5, @intFromEnum(size)) + 16)) | (r(rn) << 5) | r(vd);
+}
+
+/// SSHL/USHL: a negative per-lane count shifts right.
+pub fn shiftIntegerV128(vd: Reg, vn: Reg, vm: Reg, size: VectorIntegerSize, signed: bool) u32 {
+    const base: u32 = if (signed) 0x4e204400 else 0x6e204400;
+    return base | (@as(u32, @intFromEnum(size)) << 22) | (r(vm) << 16) | (r(vn) << 5) | r(vd);
+}
+
 pub const VectorComparison = enum { eq, gt, ge };
 
 /// CMEQ / CMGT / CMGE / CMHI / CMHS, one all-ones mask per true lane.
@@ -1075,6 +1104,30 @@ test "jit asm_aarch64: SIMD float minmax encodings" {
     try std.testing.expectEqual(@as(u32, 0x4e31f4a3), minMaxFloatV128(.x3, .x5, .x17, false, true));
     try std.testing.expectEqual(@as(u32, 0x4ef1f4a3), minMaxFloatV128(.x3, .x5, .x17, true, false));
     try std.testing.expectEqual(@as(u32, 0x4e71f4a3), minMaxFloatV128(.x3, .x5, .x17, true, true));
+}
+
+test "jit asm_aarch64: SIMD integer arithmetic and shift encodings" {
+    const expectEqual = std.testing.expectEqual;
+    // Golden words assembled by clang, including distinct high registers.
+    const adds = [_]u32{ 0x4e3184a3, 0x4e7184a3, 0x4eb184a3, 0x4ef184a3 };
+    const subs = [_]u32{ 0x6e3184a3, 0x6e7184a3, 0x6eb184a3, 0x6ef184a3 };
+    const dups = [_]u32{ 0x4e010e23, 0x4e020e23, 0x4e040e23, 0x4e080e23 };
+    for (0..4) |size| {
+        try expectEqual(adds[size], addSubtractV128(.x3, .x5, .x17, @enumFromInt(size), false));
+        try expectEqual(subs[size], addSubtractV128(.x3, .x5, .x17, @enumFromInt(size), true));
+        try expectEqual(dups[size], duplicateIntegerV128(.x3, .x17, @enumFromInt(size)));
+    }
+    try expectEqual(@as(u32, 0x4e719ca3), multiplyV128(.x3, .x5, .x17, .half));
+    try expectEqual(@as(u32, 0x4eb19ca3), multiplyV128(.x3, .x5, .x17, .word));
+    try expectEqual(@as(u32, 0x4e310ca3), saturatingAddSubtractV128(.x3, .x5, .x17, .byte, true, false));
+    try expectEqual(@as(u32, 0x6e710ca3), saturatingAddSubtractV128(.x3, .x5, .x17, .half, false, false));
+    try expectEqual(@as(u32, 0x4e712ca3), saturatingAddSubtractV128(.x3, .x5, .x17, .half, true, true));
+    try expectEqual(@as(u32, 0x6e312ca3), saturatingAddSubtractV128(.x3, .x5, .x17, .byte, false, true));
+    try expectEqual(@as(u32, 0x4e205a23), populationCountV128(.x3, .x17));
+    try expectEqual(@as(u32, 0x6e3144a3), shiftIntegerV128(.x3, .x5, .x17, .byte, false));
+    try expectEqual(@as(u32, 0x4e7144a3), shiftIntegerV128(.x3, .x5, .x17, .half, true));
+    try expectEqual(@as(u32, 0x6eb144a3), shiftIntegerV128(.x3, .x5, .x17, .word, false));
+    try expectEqual(@as(u32, 0x4ef144a3), shiftIntegerV128(.x3, .x5, .x17, .double, true));
 }
 
 test "jit asm_aarch64: SIMD integer unary and average encodings" {

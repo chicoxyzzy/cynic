@@ -112,6 +112,40 @@ pub fn reductionOp(sub: u32) ?ReductionOp {
     };
 }
 
+pub const IntegerBinaryOp = struct {
+    width: u4,
+    kind: enum { add, sub, mul },
+    saturating: bool = false,
+    signed: bool = false,
+};
+
+pub fn integerBinaryOp(sub: u32) ?IntegerBinaryOp {
+    return switch (sub) {
+        110, 142, 174, 206 => .{ .width = @as(u4, 1) << @as(u2, @intCast((sub - 110) / 32)), .kind = .add },
+        113, 145, 177, 209 => .{ .width = @as(u4, 1) << @as(u2, @intCast((sub - 113) / 32)), .kind = .sub },
+        149, 181, 213 => .{ .width = @as(u4, 2) << @as(u2, @intCast((sub - 149) / 32)), .kind = .mul },
+        111, 112, 143, 144 => .{ .width = if (sub < 128) 1 else 2, .kind = .add, .saturating = true, .signed = sub % 2 == 1 },
+        114, 115, 146, 147 => .{ .width = if (sub < 128) 1 else 2, .kind = .sub, .saturating = true, .signed = sub % 2 == 0 },
+        else => null,
+    };
+}
+
+pub const ShiftOp = struct { width: u4, kind: enum { shl, shr_s, shr_u } };
+
+pub fn shiftOp(sub: u32) ?ShiftOp {
+    return switch (sub) {
+        107...109, 139...141, 171...173, 203...205 => .{
+            .width = @as(u4, 1) << @as(u2, @intCast((sub - 107) / 32)),
+            .kind = switch ((sub - 107) % 32) {
+                0 => .shl,
+                1 => .shr_s,
+                else => .shr_u,
+            },
+        },
+        else => null,
+    };
+}
+
 pub const IntegerUnaryOp = struct { width: u4, negate: bool };
 
 pub fn integerUnaryOp(sub: u32) ?IntegerUnaryOp {

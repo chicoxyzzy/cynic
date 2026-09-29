@@ -268,10 +268,11 @@ fn skipSimdImmediate(body: []const u8, index: *usize) ?void {
             skipMemArg(body, index) orelse return null;
             skipBytes(body, index, 1) orelse return null; // lane index
         },
-        15...20, 77...83, 174 => {}, // splats / bitwise / any_true / i32x4.add
+        15...20, 77...83, 98 => {}, // splats / bitwise / any_true / popcnt
         else => if (simd.reductionOp(sub) == null and simd.integerMinMaxOp(sub) == null and
             simd.integerUnaryOp(sub) == null and simd.roundingAverageWidth(sub) == null and
-            simd.floatMinMaxOp(sub) == null and simd.comparisonOp(sub) == null) return null,
+            simd.floatMinMaxOp(sub) == null and simd.comparisonOp(sub) == null and
+            simd.integerBinaryOp(sub) == null and simd.shiftOp(sub) == null) return null,
     }
 }
 

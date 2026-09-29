@@ -590,9 +590,8 @@ const op_f64_reinterpret_i64: u8 = 0xbf;
 // The baseline handles only the saturating truncations (sub-opcodes 0..7).
 const op_misc_prefix: u8 = 0xfc;
 // §4.4 SIMD — the 0xFD prefix introduces a second opcode byte (a varuint32),
-// distinct from the 0xFC misc prefix. The baseline compiles the v128 data
-// path, scalar lanes, bitwise operations, any_true, and i32x4.add;
-// every other sub-opcode degrades to the interpreter.
+// distinct from the 0xFC misc prefix. Shared operation shapes live in
+// spasm_simd.zig; missing lowerings refuse transactionally.
 const op_simd_prefix: u8 = 0xfd;
 // §4.4 SIMD sub-opcodes (after the 0xFD prefix, varuint32-encoded).
 const simd_v128_load: u32 = 0;
@@ -602,7 +601,6 @@ const simd_v128_any_true: u32 = 83;
 const simd_v128_load8_lane: u32 = 84;
 const simd_v128_store8_lane: u32 = 88;
 const simd_v128_store64_lane: u32 = 91;
-const simd_i32x4_add: u32 = 174;
 const op_memory_size: u8 = 0x3f;
 const op_memory_grow: u8 = 0x40;
 const op_i32_trunc_f32_s: u8 = 0xa8;
@@ -3351,14 +3349,9 @@ fn compileAarch64(
                 }
             },
             op_simd_prefix => {
-                // §4.4 SIMD — the 0xFD prefix. The baseline compiles the v128
-                // data path, widening loads, scalar lanes, bitwise ops,
-                // reductions, integer min/max/abs/neg, rounded averages, float min/max, and
-                // i32x4.add. A v128 is exactly one `Cell`, so it reuses the
-                // depth-keyed cell storage
-                // the runtime references use (the `.v128` Loc + `refSlotOff`):
-                // const/load/store/add move the 128-bit cell with GP halves or
-                // a NEON quad, never the GP operand bank.
+                // §4.4 SIMD: v128 occupies one depth-keyed Cell, just like a
+                // runtime reference. GP halves or NEON quads move its bits;
+                // vectors never occupy the scalar GP operand bank.
                 const sub = readUleb32(body, &i) orelse return null;
                 if (diagnostics) |out| {
                     out.subopcode = sub;
@@ -3523,6 +3516,55 @@ fn compileAarch64(
                     try m.emit(a64.strQImm(.x0, .x0, target));
                     sp -= 1;
                     stack[sp - 1] = .v128;
+                } else if (simd.integerBinaryOp(sub)) |binary| {
+                    if (sp < 2 or stack[sp - 2] != .v128 or stack[sp - 1] != .v128) return null;
+                    const target = refSlotOff(num_locals, sp - 2);
+                    const source = refSlotOff(num_locals, sp - 1);
+                    if (binary.kind == .mul and binary.width == 8) {
+                        for ([_]u15{ 0, 8 }) |half| {
+                            try m.emit(a64.ldrImm(.x16, .x0, target + half));
+                            try m.emit(a64.ldrImm(.x17, .x0, source + half));
+                            try m.emit(a64.mul(.x16, .x16, .x17));
+                            try m.emit(a64.strImm(.x16, .x0, target + half));
+                        }
+                    } else {
+                        const size: a64.VectorIntegerSize = @enumFromInt(std.math.log2_int(u4, binary.width));
+                        try m.emit(a64.ldrQImm(.x0, .x0, target));
+                        try m.emit(a64.ldrQImm(.x1, .x0, source));
+                        if (binary.saturating) {
+                            try m.emit(a64.saturatingAddSubtractV128(.x0, .x0, .x1, size, binary.signed, binary.kind == .sub));
+                        } else if (binary.kind == .mul) {
+                            try m.emit(a64.multiplyV128(.x0, .x0, .x1, @enumFromInt(@intFromEnum(size))));
+                        } else {
+                            try m.emit(a64.addSubtractV128(.x0, .x0, .x1, size, binary.kind == .sub));
+                        }
+                        try m.emit(a64.strQImm(.x0, .x0, target));
+                    }
+                    sp -= 1;
+                    stack[sp - 1] = .v128;
+                } else if (simd.shiftOp(sub)) |shift| {
+                    if (sp < 2 or stack[sp - 2] != .v128) return null;
+                    const count = try materialize(&m, stack[sp - 1], sp - 1);
+                    try m.movImm64(.x17, @as(u8, shift.width) * 8 - 1);
+                    try m.emit(a64.andReg(.x16, count, .x17));
+                    if (shift.kind != .shl) {
+                        try m.movImm64(.x17, 0);
+                        try m.emit(a64.subReg(.x16, .x17, .x16));
+                    }
+                    const size: a64.VectorIntegerSize = @enumFromInt(std.math.log2_int(u4, shift.width));
+                    const target = refSlotOff(num_locals, sp - 2);
+                    try m.emit(a64.duplicateIntegerV128(.x1, .x16, size));
+                    try m.emit(a64.ldrQImm(.x0, .x0, target));
+                    try m.emit(a64.shiftIntegerV128(.x0, .x0, .x1, size, shift.kind == .shr_s));
+                    try m.emit(a64.strQImm(.x0, .x0, target));
+                    sp -= 1;
+                    stack[sp - 1] = .v128;
+                } else if (sub == 98) {
+                    if (sp == 0 or stack[sp - 1] != .v128) return null;
+                    const target = refSlotOff(num_locals, sp - 1);
+                    try m.emit(a64.ldrQImm(.x0, .x0, target));
+                    try m.emit(a64.populationCountV128(.x0, .x0));
+                    try m.emit(a64.strQImm(.x0, .x0, target));
                 } else if (simd.integerUnaryOp(sub)) |unary| {
                     if (sp < 1 or stack[sp - 1] != .v128) return null;
                     const size: a64.VectorIntegerSize = switch (unary.width) {
@@ -3651,24 +3693,6 @@ fn compileAarch64(
                     try m.emit(a64.cmpImm(.x16, 0, false));
                     try m.emit(a64.csetW(result, .ne));
                     stack[sp - 1] = .{ .reg = result };
-                } else if (sub == simd_i32x4_add) {
-                    // §4.4 i32x4.add — pop two v128 operands (cells at depths
-                    // sp-1, sp-2), lane-wise add four i32 lanes, push the v128
-                    // result into v1's slot (depth sp-2). Both operands are
-                    // `.v128` in their depth-keyed cells. Load each cell into a
-                    // NEON quad (q0/q1 — the SIMD register file, disjoint from
-                    // the GP operand bank Spasm keeps everything else in), `ADD
-                    // Vd.4S`, store the result quad back to the lower cell.
-                    if (sp < 2) return null;
-                    if (stack[sp - 1] != .v128 or stack[sp - 2] != .v128) return null;
-                    const off_a = refSlotOff(num_locals, sp - 2);
-                    const off_b = refSlotOff(num_locals, sp - 1);
-                    try m.emit(a64.ldrQImm(.x0, .x0, off_a)); // q0 = a (Rn=x0 = locals base)
-                    try m.emit(a64.ldrQImm(.x1, .x0, off_b)); // q1 = b
-                    try m.emit(a64.addV4s(.x0, .x0, .x1)); // q0 = a + b (4×i32)
-                    try m.emit(a64.strQImm(.x0, .x0, off_a)); // result -> a's cell
-                    sp -= 1; // pop 2, push 1; the v128 result lives in a's slot
-                    stack[sp - 1] = .v128;
                 } else {
                     if (diagnostics) |out| out.stage = .unsupported_opcode;
                     return null;

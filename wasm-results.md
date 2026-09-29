@@ -48,13 +48,14 @@ memory splats, both zero loads, all eight lane loads/stores, scalar splats,
 extract/replace-lane, vector bitwise operations, `v128.any_true`, all integer
 `all_true`/`bitmask` reductions, all 12 integer min/max operations, integer
 `abs`/`neg` at every lane width, unsigned rounded averages, floating-point
-min/max at both lane widths, all 48 integer/floating comparisons, and `i32x4.add`;
+min/max at both lane widths, all 48 integer/floating comparisons, wrapping
+integer add/sub/mul, 8/16-bit saturating add/sub, all integer shifts, and byte popcount;
 other SIMD instructions still fall back.
 
 | target | native entries | compiled functions | refusals |
 |---|---:|---:|---:|
-| x86_64-macos (Rosetta) | 130,693 | 5,172 | 811 |
-| AArch64-macos | 136,260 | 5,146 | 837 |
+| x86_64-macos (Rosetta) | 131,902 | 5,310 | 673 |
+| AArch64-macos | 137,469 | 5,284 | 699 |
 
 The SIMD foundation added 249 compiled functions on x86_64 and 26 on AArch64
 over the reference-parity checkpoint. The bounded AArch64 code-reservation
@@ -75,11 +76,13 @@ The six widening loads add 66 compiled functions and 84 native entries per
 target, removing another 66 SIMD refusals apiece.
 Memory splats/zero loads and all comparisons add 181 compiled functions and
 6,767 native entries per target, removing another 181 SIMD refusals apiece.
+Integer arithmetic, saturation, shifts, and byte popcount add 138 compiled
+functions and 1,209 native entries per target, removing 138 more SIMD refusals.
 These are coverage counts, not speedups.
 
-- x86: 8 limits, 0 signatures, 397 bytecode shapes, 406 unsupported opcodes,
+- x86: 8 limits, 0 signatures, 397 bytecode shapes, 268 unsupported opcodes,
   0 emission failures, and 0 installation refusals.
-- AArch64: 8 limits, 0 signatures, 335 bytecode shapes, 494 unsupported
+- AArch64: 8 limits, 0 signatures, 335 bytecode shapes, 356 unsupported
   opcodes, 0 emission failures, and 0 installation refusals. Reusing x86's
   module-sized reservation removes all 99 installation refusals from the
   previous fixed 64 KiB arena. Both targets retain the 64 KiB minimum and
@@ -87,25 +90,22 @@ These are coverage counts, not speedups.
   back to Sarcasm if reservation or installation is refused.
 
 The x86 vector-signature bucket falls from 1,349 to zero, but many functions
-then encounter unsupported instructions: both targets record 335 refusals
-at `0xfd`. The largest reported subopcode groups are `i8x16.popcnt` (98: 15),
-`i8x16.shuffle` (13: 11), `f32x4.sqrt` (227: 8),
-`i8x16.swizzle` (14: 7), and `i32x4.sub` (177: 6).
+then encounter unsupported instructions: both targets record 197 refusals
+at `0xfd`. The largest reported subopcode groups are `i8x16.shuffle` (13: 11),
+`f32x4.sqrt` (227: 8), `i8x16.swizzle` (14: 7),
+`f32x4.abs` (224: 6), and `f64x2.neg` (237: 6).
 Counts classify the first refusal per attempted function, not every operation
 it contains. Both sweeps also report 7 overflows of the compact per-instance
 top-level opcode table; the fixed subopcode counters are tracked separately.
 
 The source inventory accounts for all 256 SIMD opcodes accepted by the
-validator: 133 have lowering paths on both targets; 123 still need them.
+validator: 164 have lowering paths on both targets; 92 still need them.
 This is an opcode count, not the first-refusal-per-function count above.
 Existing nonzero-memory and control-shape fallback restrictions still apply.
 
 | Remaining family | Opcodes |
 |---|---:|
-| Shuffle / swizzle / popcount | 3 |
-| Wrapping integer arithmetic | 10 |
-| Saturating arithmetic | 8 |
-| Shifts | 12 |
+| Shuffle / swizzle | 2 |
 | Narrow / extend / pairwise add | 20 |
 | Extended multiply / dot / Q15 | 14 |
 | Floating unary / arithmetic | 14 |
