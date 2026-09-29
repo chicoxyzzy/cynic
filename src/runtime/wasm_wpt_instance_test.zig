@@ -149,3 +149,20 @@ test "WPT Instance: async BufferSource result retains its module across collecti
         \\});
     );
 }
+
+test "WPT compile: promises fulfill and reject under allocation pressure" {
+    try expectAsyncTrue(
+        \\globalThis.async_ok = false;
+        \\let fulfilled = false, rejected = false;
+        \\WebAssembly.compile(new Uint8Array([0,97,115,109,1,0,0,0])).then(module => {
+        \\  __collectGarbage();
+        \\  fulfilled = new WebAssembly.Instance(module) instanceof WebAssembly.Instance;
+        \\  globalThis.async_ok = fulfilled && rejected;
+        \\});
+        \\WebAssembly.compile(new Uint8Array([0])).then(() => {}, reason => {
+        \\  __collectGarbage();
+        \\  rejected = reason instanceof WebAssembly.CompileError;
+        \\  globalThis.async_ok = fulfilled && rejected;
+        \\});
+    );
+}
