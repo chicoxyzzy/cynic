@@ -1813,6 +1813,37 @@ pub fn compile(
                             stack[depth] = .v128;
                         }
                     },
+                    1...6 => {
+                        const load = simd.wideningLoadOp(sub) orelse return null;
+                        const memory64 = memoryIs64(module, 0) orelse return null;
+                        const offset = readMemArg(body, &i, memory64) orelse return null;
+                        if (sp == 0) return null;
+                        const depth = sp - 1;
+                        const target = scratchOffset(num_locals, depth);
+                        try materialize(&m, stack[depth], num_locals, depth);
+                        if (memory64)
+                            try m.load64Disp32(.r10, .r12, target)
+                        else
+                            try m.load32Disp32(.r10, .r12, target);
+                        // A 64-bit load avoids over-reading the checked range.
+                        try emitMemAddress(&m, offset, 8, memory64, &trap_oob);
+                        trap_oob_used = true;
+                        try m.load64Disp32(.rax, .r11, 0);
+                        try m.movQXmmFromReg(.xmm0, .rax);
+                        const size: x64.Masm.PackedIntSize = switch (load.width) {
+                            1 => .byte,
+                            2 => .half,
+                            4 => .word,
+                            else => return null,
+                        };
+                        // Zero > signed lane yields all ones for negative
+                        // lanes. Interleave those extension bits using SSE2.
+                        try m.xorPacked128(.xmm1, .xmm1);
+                        if (load.signed) try m.compareGreaterSignedPacked(.xmm1, .xmm0, size);
+                        try m.unpackLowPackedInteger(.xmm0, .xmm1, size);
+                        try m.storeVector128(.r12, target, .xmm0);
+                        stack[depth] = .v128;
+                    },
                     15...20 => {
                         if (sp == 0) return null;
                         const width = simd.splatWidth(sub) orelse return null;

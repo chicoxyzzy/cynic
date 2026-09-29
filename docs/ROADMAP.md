@@ -2378,6 +2378,10 @@ and the per-builtin checklist; this section tracks status.
   canonical from arithmetic NaNs for scalar and vector expectations, rejects
   signaling NaNs for both, and preserves exact numeric expectations. All
   four interpreter/native target sweeps retain 58,779 passing assertions.
+  The six signed/unsigned SIMD widening loads add 66 compiled functions and
+  84 native entries per target, reducing SIMD refusals to 516 without a
+  score change. They retain SSE2 and check the eight-byte source range,
+  including memory64 address/offset overflow.
   Native table64, remaining SIMD
   arithmetic/compare/convert/shuffle operations, and the
   native-register/imported-call ABI remain next.

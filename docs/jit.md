@@ -1616,6 +1616,16 @@ useful:
    scalar/vector NaN tokens, while preserving exact numeric expectations.
    All four reference/native corpus runs retain the same score under
    these stricter checks.
+   The six signed/unsigned widening loads (8x8, 16x4, 32x2) now compile.
+   They check and read exactly eight source bytes before extending lanes,
+   following [Core memory semantics](https://webassembly.github.io/spec/core/exec/instructions.html).
+   ARM uses SXTL/UXTL as in Liftoff. Where
+   [Liftoff x86](https://github.com/v8/v8/blob/main/src/wasm/baseline/x64/liftoff-assembler-x64-inl.h)
+   uses PMOVSX/PMOVZX, Cynic retains SSE2: unpack each low lane with zero
+   or a signed-compare mask. Tests require native execution, preserve live
+   scalar/vector neighbors, and cover unaligned access, exact end-of-memory
+   bounds, memory64 overflow, unreachable immediates, and nonzero-memory
+   fallback. No new runtime allocations, helper calls, or policy changes.
    This follows the existing [Liftoff](https://v8.dev/blog/liftoff) /
    [Wizard-SPC](https://arxiv.org/abs/2305.13241) typed-stack design and
    [Core value and vector semantics](https://webassembly.github.io/spec/core/exec/instructions.html).

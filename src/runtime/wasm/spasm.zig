@@ -3352,8 +3352,8 @@ fn compileAarch64(
             },
             op_simd_prefix => {
                 // §4.4 SIMD — the 0xFD prefix. The baseline compiles the v128
-                // data path, scalar lanes, bitwise ops, reductions, integer
-                // min/max/abs/neg, rounded averages, float min/max, and
+                // data path, widening loads, scalar lanes, bitwise ops,
+                // reductions, integer min/max/abs/neg, rounded averages, float min/max, and
                 // i32x4.add. A v128 is exactly one `Cell`, so it reuses the
                 // depth-keyed cell storage
                 // the runtime references use (the `.v128` Loc + `refSlotOff`):
@@ -3399,6 +3399,25 @@ fn compileAarch64(
                     try m.emit(a64.addImm(.x16, .x16, 8, false));
                     try m.emit(a64.ldrReg(.x17, .x2, .x16));
                     try m.emit(a64.strImm(.x17, .x0, dst + 8));
+                    stack[sp - 1] = .v128;
+                } else if (simd.wideningLoadOp(sub)) |load| {
+                    const memory64 = memoryIs64(module, 0) orelse return null;
+                    const offset = readMemArg(body, &i, memory64) orelse return null;
+                    if (sp == 0) return null;
+                    const source = try materialize(&m, stack[sp - 1], sp - 1);
+                    // Core vector loads read 8 bytes, not the 16-byte result.
+                    try emitMemBounds(&m, source, offset, 8, memory64, &trap_oob);
+                    trap_oob_used = true;
+                    try m.emit(a64.ldrReg(.x17, .x2, .x16));
+                    try m.emit(a64.fmovXtoD(.x0, .x17));
+                    const size: a64.VectorLaneSize = switch (load.width) {
+                        1 => .byte,
+                        2 => .half,
+                        4 => .word,
+                        else => return null,
+                    };
+                    try m.emit(a64.widenLowV128(.x0, .x0, size, load.signed));
+                    try m.emit(a64.strQImm(.x0, .x0, refSlotOff(num_locals, sp - 1)));
                     stack[sp - 1] = .v128;
                 } else if (sub == simd_v128_store) {
                     // §4.4.7 v128.store — operands [addr, v128] (v128 on top);
