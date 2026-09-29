@@ -2373,9 +2373,11 @@ and the per-builtin checklist; this section tracks status.
   target, again with all 58,779 assertions passing and SSE2 unchanged.
   Floating-point min/max adds 58 compiled functions and 1,518 native
   entries per target with the same corpus score; bit-based tests enforce
-  signed-zero and quiet/canonical NaN rules beyond the harness's current
-  any-NaN matching. The interpreter min/max fallback now quiets signaling
-  NaNs too. Tightening the harness's scalar/vector NaN checks is next.
+  signed-zero and quiet/canonical NaN rules. The interpreter min/max fallback
+  now quiets signaling NaNs too. The corpus harness now distinguishes
+  canonical from arithmetic NaNs for scalar and vector expectations, rejects
+  signaling NaNs for both, and preserves exact numeric expectations. All
+  four interpreter/native target sweeps retain 58,779 passing assertions.
   Native table64, remaining SIMD
   arithmetic/compare/convert/shuffle operations, and the
   native-register/imported-call ABI remain next.

@@ -1611,7 +1611,11 @@ useful:
    including subnormals, infinities, both zero orders, signaling/quiet NaNs,
    payload bits, mixed lanes, and live neighbors. The scalar/vector
    interpreter fallback also quiets signaling NaNs; its previous raw-NaN
-   return escaped the corpus harness's permissive any-NaN matching.
+   return escaped the corpus harness's former any-NaN matching. The harness
+   now checks canonical payloads and the arithmetic quiet bit for
+   scalar/vector NaN tokens, while preserving exact numeric expectations.
+   All four reference/native corpus runs retain the same score under
+   these stricter checks.
    This follows the existing [Liftoff](https://v8.dev/blog/liftoff) /
    [Wizard-SPC](https://arxiv.org/abs/2305.13241) typed-stack design and
    [Core value and vector semantics](https://webassembly.github.io/spec/core/exec/instructions.html).

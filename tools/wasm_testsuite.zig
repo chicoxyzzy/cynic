@@ -773,16 +773,10 @@ fn matchValue(v: std.json.ObjectMap, got: u128) bool {
         return @as(u64, @truncate(got)) == want;
     }
     if (std.mem.eql(u8, t, "f32")) {
-        const lo: u32 = @truncate(got);
-        if (isNanToken(s)) return std.math.isNan(@as(f32, @bitCast(lo)));
-        const want = std.fmt.parseInt(u32, s, 10) catch return false;
-        return lo == want; // exact bits (handles ±0, exact floats)
+        return matchFloat(u32, s, @truncate(got));
     }
     if (std.mem.eql(u8, t, "f64")) {
-        const lo: u64 = @truncate(got);
-        if (isNanToken(s)) return std.math.isNan(@as(f64, @bitCast(lo)));
-        const want = std.fmt.parseInt(u64, s, 10) catch return false;
-        return lo == want;
+        return matchFloat(u64, s, @truncate(got));
     }
     if (std.mem.eql(u8, t, "funcref")) {
         // A function reference's index cannot round-trip through the
@@ -797,6 +791,19 @@ fn matchValue(v: std.json.ObjectMap, got: u128) bool {
         return @as(u32, @truncate(got)) == want;
     }
     return false;
+}
+
+/// Core §2.2.3: canonical NaNs have only the top payload bit set;
+/// arithmetic NaNs require that bit, but allow the remaining payload bits.
+/// Compare bits without host FP operations that could quiet signaling NaNs.
+fn matchFloat(comptime U: type, expected: []const u8, got: U) bool {
+    const sign: U = @as(U, 1) << (@bitSizeOf(U) - 1);
+    const canonical: U = if (U == u32) 0x7fc0_0000 else 0x7ff8_0000_0000_0000;
+    if (std.mem.eql(u8, expected, "nan:canonical")) return got & ~sign == canonical;
+    if (std.mem.eql(u8, expected, "nan:arithmetic")) return got & canonical == canonical;
+    // wast2json emits numeric bit patterns for exact expectations, even NaNs.
+    const want = std.fmt.parseInt(U, expected, 10) catch return false;
+    return got == want;
 }
 
 // ── v128 lane packing ───────────────────────────────────────────────
@@ -846,12 +853,12 @@ fn matchV128(v: std.json.ObjectMap, got: u128) bool {
     for (lanes, 0..) |lane, i| {
         if (lane != .string) return false;
         const got_lane = (got >> @intCast(@as(usize, i) * bits)) & mask;
-        if (is_float and isNanToken(lane.string)) {
-            const is_nan = if (bits == 64)
-                std.math.isNan(@as(f64, @bitCast(@as(u64, @truncate(got_lane)))))
+        if (is_float) {
+            const matches = if (bits == 64)
+                matchFloat(u64, lane.string, @truncate(got_lane))
             else
-                std.math.isNan(@as(f32, @bitCast(@as(u32, @truncate(got_lane)))));
-            if (!is_nan) return false;
+                matchFloat(u32, lane.string, @truncate(got_lane));
+            if (!matches) return false;
         } else {
             const want = parseLane(lt, lane.string) orelse return false;
             if (got_lane != (want & mask)) return false;
@@ -868,6 +875,113 @@ fn isNanToken(s: []const u8) bool {
 fn nanBits(s: []const u8, is64: bool) ?u128 {
     if (!isNanToken(s)) return null;
     return if (is64) @as(u128, 0x7ff8000000000000) else @as(u128, 0x7fc00000);
+}
+
+fn expectJsonMatch(json: []const u8, got: u128, expected: bool) !void {
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqual(expected, matchValue(parsed.value.object, got));
+}
+
+fn expectScalarMatch(comptime U: type, value: []const u8, got: U, expected: bool) !void {
+    var buffer: [128]u8 = undefined;
+    const json = try std.fmt.bufPrint(&buffer, "{{\"type\":\"{s}\",\"value\":\"{s}\"}}", .{ if (U == u32) "f32" else "f64", value });
+    try expectJsonMatch(json, got, expected);
+}
+
+fn testScalarNanMatch(comptime U: type, canonical: bool) !void {
+    const sign: U = @as(U, 1) << (@bitSizeOf(U) - 1);
+    const exponent: U = if (U == u32) 0x7f80_0000 else 0x7ff0_0000_0000_0000;
+    const quiet_bit = if (U == u32) 22 else 51;
+    const quiet: U = @as(U, 1) << quiet_bit;
+    const token = if (canonical) "nan:canonical" else "nan:arithmetic";
+    for ([_]U{ 0, sign }) |sign_bits| {
+        try expectScalarMatch(U, token, sign_bits | exponent | quiet, true);
+        for ([_]U{ 0, 1, exponent - 1, exponent }) |not_nan| {
+            try expectScalarMatch(U, token, sign_bits | not_nan, false);
+        }
+        for (0..quiet_bit) |bit| {
+            const payload = @as(U, 1) << @as(std.math.Log2Int(U), @intCast(bit));
+            try expectScalarMatch(U, token, sign_bits | exponent | payload, false);
+            try expectScalarMatch(U, token, sign_bits | exponent | quiet | payload, !canonical);
+        }
+        try expectScalarMatch(U, token, sign_bits | exponent | (quiet - 1), false);
+        try expectScalarMatch(U, token, sign_bits | exponent | (quiet * 2 - 1), !canonical);
+    }
+}
+
+test "wasm harness: f32 canonical NaN matching" {
+    try testScalarNanMatch(u32, true);
+}
+
+test "wasm harness: f64 canonical NaN matching" {
+    try testScalarNanMatch(u64, true);
+}
+
+test "wasm harness: f32 arithmetic NaN matching" {
+    try testScalarNanMatch(u32, false);
+}
+
+test "wasm harness: f64 arithmetic NaN matching" {
+    try testScalarNanMatch(u64, false);
+}
+
+test "wasm harness: numeric float expectations retain exact bits" {
+    inline for (.{ u32, u64 }) |U| {
+        const sign: U = @as(U, 1) << (@bitSizeOf(U) - 1);
+        const exponent: U = if (U == u32) 0x7f80_0000 else 0x7ff0_0000_0000_0000;
+        const quiet: U = if (U == u32) 0x0040_0000 else 0x0008_0000_0000_0000;
+        for ([_]U{ 0, sign, 1, exponent, exponent | 1, sign | exponent | quiet | 7 }) |bits| {
+            var buffer: [32]u8 = undefined;
+            const value = try std.fmt.bufPrint(&buffer, "{d}", .{bits});
+            try expectScalarMatch(U, value, bits, true);
+            try expectScalarMatch(U, value, bits ^ 1, false);
+            try expectScalarMatch(U, value, bits ^ sign, false);
+        }
+    }
+}
+
+test "wasm harness: mixed f32x4 NaN and exact lane expectations" {
+    const json =
+        \\{"type":"v128","lane_type":"f32","value":["nan:canonical","nan:arithmetic","2139095041","2147483648"]}
+    ;
+    const got: u128 = 0x80000000_7f800001_7fc00123_ffc00000;
+    try expectJsonMatch(json, got, true);
+    // Change each lane independently: noncanonical, signaling, exact
+    // signaling payload, then the sign of an exact zero.
+    for ([_]u128{ 1, @as(u128, 0x00400000) << 32, @as(u128, 1) << 64, @as(u128, 0x80000000) << 96 }) |change| {
+        try expectJsonMatch(json, got ^ change, false);
+    }
+}
+
+test "wasm harness: mixed f64x2 NaN and exact lane expectations" {
+    const nan_json =
+        \\{"type":"v128","lane_type":"f64","value":["nan:canonical","nan:arithmetic"]}
+    ;
+    const got: u128 = 0xfff8000000000123_7ff8000000000000;
+    try expectJsonMatch(nan_json, got, true);
+    try expectJsonMatch(nan_json, got ^ 1, false);
+    try expectJsonMatch(nan_json, got ^ (@as(u128, 0x0008000000000000) << 64), false);
+    const exact_json =
+        \\{"type":"v128","lane_type":"f64","value":["9218868437227405313","9223372036854775808"]}
+    ;
+    const exact: u128 = 0x8000000000000000_7ff0000000000001;
+    try expectJsonMatch(exact_json, exact, true);
+    try expectJsonMatch(exact_json, exact ^ 1, false);
+    try expectJsonMatch(exact_json, exact ^ (@as(u128, 1) << 127), false);
+}
+
+test "wasm harness: unknown NaN expectation tokens fail closed" {
+    for ([_][]const u8{ "nan", "nan:unknown", "nan:canonical-extra", "nan:0x1" }) |token| {
+        try expectScalarMatch(u32, token, 0x7fc00000, false);
+        try expectScalarMatch(u64, token, 0x7ff8000000000000, false);
+    }
+    try expectJsonMatch(
+        \\{"type":"v128","lane_type":"f32","value":["nan:unknown","0","0","0"]}
+    , 0x7fc00000, false);
+    try expectJsonMatch(
+        \\{"type":"v128","lane_type":"f64","value":["0","nan:canonical-extra"]}
+    , @as(u128, 0x7ff8000000000000) << 64, false);
 }
 
 // ── exports ─────────────────────────────────────────────────────────
@@ -913,6 +1027,11 @@ fn writeResults(gpa: std.mem.Allocator, io: std.Io, total: Counts, files: u32) !
         \\implemented but unscored here: this `wast2json` cannot parse the
         \\proposal's `(ref exn)` text syntax, so its `.wast` files don't lower
         \\(its coverage is the engine unit tests instead).
+        \\
+        \\Scalar and vector `nan:canonical` expectations allow only the quiet
+        \\payload bit; `nan:arithmetic` requires that bit and allows additional
+        \\payload bits. Either sign is valid. Numeric expectations remain
+        \\bit-exact, including signaling NaNs and signed zeros.
         \\
         \\## Current scores
         \\
