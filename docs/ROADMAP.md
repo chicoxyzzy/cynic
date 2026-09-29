@@ -2400,10 +2400,15 @@ and the per-builtin checklist; this section tracks status.
   truncations remove another 17 per target, leaving 31 SIMD refusals.
   Native-entry tests cover numeric boundaries, NaNs, unused upper lanes,
   live neighbors, and dense 1,024-conversion bodies on both targets.
-  The opcode inventory in `wasm-results.md` tracks the remaining 15 accepted
-  SIMD operations without native lowering, including the relaxed family.
-  Native table64, remaining relaxed SIMD operations, nonzero-memory SIMD
-  operands, and the
+  The remaining 15 relaxed operations now have lowering paths on both
+  targets, covering all 256 accepted SIMD opcodes at the source level.
+  Multiply-add remains unfused; lane selection, min/max, and Q15 reuse strict
+  lowering. Relaxed dot products saturate signed i16 pairs and wrap i32
+  accumulation, also closing an interpreter overflow panic. Native-entry
+  regressions cover all 15 operations and dense 1,024-operation bodies.
+  Nonzero-memory SIMD and the scope-wide opcode/reservation audit still
+  remain; a green corpus alone does not establish complete native coverage.
+  Native table64, nonzero-memory SIMD operands, and the
   native-register/imported-call ABI remain next.
 
   The architecture for all three tiers — the shared codegen

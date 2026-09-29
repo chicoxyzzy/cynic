@@ -269,6 +269,7 @@ fn skipSimdImmediate(body: []const u8, index: *usize) ?void {
             skipBytes(body, index, 1) orelse return null; // lane index
         },
         14...20, 77...83, 98, 256 => {}, // swizzles / splats / bitwise / any_true / popcnt
+        261...268, 274, 275 => {}, // relaxed multiply-add / lane selection / dot products
         else => if (simd.reductionOp(sub) == null and simd.integerMinMaxOp(sub) == null and
             simd.integerUnaryOp(sub) == null and simd.roundingAverageWidth(sub) == null and
             simd.floatMinMaxOp(sub) == null and simd.comparisonOp(sub) == null and

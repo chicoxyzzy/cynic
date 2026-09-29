@@ -3582,6 +3582,41 @@ fn compileAarch64(
                     try m.emit(a64.ldrQImm(.x0, .x0, target));
                     try m.emit(a64.pairwiseAddLongV128(.x0, .x0, size, pairwise.signed));
                     try m.emit(a64.strQImm(.x0, .x0, target));
+                } else if (sub >= 261 and sub <= 264) {
+                    if (sp < 3) return null;
+                    for (stack[sp - 3 .. sp]) |operand| if (operand != .v128) return null;
+                    const target = refSlotOff(num_locals, sp - 3);
+                    const wide = sub >= 263;
+                    try m.emit(a64.ldrQImm(.x0, .x0, target));
+                    try m.emit(a64.ldrQImm(.x1, .x0, refSlotOff(num_locals, sp - 2)));
+                    try m.emit(a64.ldrQImm(.x2, .x0, refSlotOff(num_locals, sp - 1)));
+                    if (sub % 2 == 0) try m.emit(a64.unaryFloatV128(.x0, .x0, wide, .neg));
+                    // Core's deterministic choice rounds multiply and add separately.
+                    try m.emit(a64.arithmeticFloatV128(.x0, .x0, .x1, wide, .mul));
+                    try m.emit(a64.arithmeticFloatV128(.x0, .x0, .x2, wide, .add));
+                    try m.emit(a64.strQImm(.x0, .x0, target));
+                    sp -= 2;
+                } else if (sub == 274 or sub == 275) {
+                    const consumed: usize = if (sub == 275) 3 else 2;
+                    if (sp < consumed) return null;
+                    for (stack[sp - consumed .. sp]) |operand| if (operand != .v128) return null;
+                    const target = refSlotOff(num_locals, sp - consumed);
+                    try m.emit(a64.ldrQImm(.x0, .x0, target));
+                    try m.emit(a64.ldrQImm(.x1, .x0, refSlotOff(num_locals, sp - consumed + 1)));
+                    try m.emit(a64.multiplyLongV128(.x2, .x0, .x1, .byte, true, false));
+                    try m.emit(a64.multiplyLongV128(.x0, .x0, .x1, .byte, true, true));
+                    // ivdotsat: widen the pair sum before saturating it to i16.
+                    try m.emit(a64.pairwiseAddLongV128(.x2, .x2, .half, true));
+                    try m.emit(a64.pairwiseAddLongV128(.x0, .x0, .half, true));
+                    try m.emit(a64.narrowIntegerV128(.x2, .x2, .half, true, false));
+                    try m.emit(a64.narrowIntegerV128(.x2, .x0, .half, true, true));
+                    if (sub == 275) {
+                        try m.emit(a64.pairwiseAddLongV128(.x2, .x2, .half, true));
+                        try m.emit(a64.ldrQImm(.x1, .x0, refSlotOff(num_locals, sp - 1)));
+                        try m.emit(a64.addV4s(.x2, .x2, .x1));
+                    }
+                    try m.emit(a64.strQImm(.x2, .x0, target));
+                    sp -= consumed - 1;
                 } else if (simd.productOp(sub)) |product| {
                     if (sp < 2 or stack[sp - 2] != .v128 or stack[sp - 1] != .v128) return null;
                     const target = refSlotOff(num_locals, sp - 2);
@@ -3741,8 +3776,8 @@ fn compileAarch64(
                     try m.emit(a64.strQImm(.x0, .x0, target));
                     sp -= 1;
                     stack[sp - 1] = .v128;
-                } else if (sub >= 77 and sub <= 82) {
-                    const consumed: usize = if (sub == 77) 1 else if (sub == 82) 3 else 2;
+                } else if ((sub >= 77 and sub <= 82) or (sub >= 265 and sub <= 268)) {
+                    const consumed: usize = if (sub == 77) 1 else if (sub == 82 or sub >= 265) 3 else 2;
                     if (sp < consumed) return null;
                     const depth = sp - consumed;
                     for (stack[depth..sp]) |operand| if (operand != .v128) return null;
@@ -3758,7 +3793,7 @@ fn compileAarch64(
                             78 => try m.emit(a64.andReg(.x16, .x16, .x17)),
                             79 => try m.emit(a64.bicReg(.x16, .x16, .x17)),
                             80 => try m.emit(a64.orrReg(.x16, .x16, .x17)),
-                            82 => {
+                            82, 265...268 => {
                                 try m.emit(a64.ldrImm(.x5, .x0, refSlotOff(num_locals, depth + 2) + half));
                                 // b ^ ((a ^ b) & mask) selects a for each set bit.
                                 try m.emit(a64.eorReg(.x16, .x16, .x17));

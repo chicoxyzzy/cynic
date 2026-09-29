@@ -2010,7 +2010,37 @@ pub fn compile(
                         try emitSimdPairwiseAdd(&m, pairwise);
                         try m.storeVector128(.r12, target, .xmm0);
                     },
-                    130, 156...159, 186, 188...191, 220...223 => {
+                    261...264 => {
+                        if (sp < 3) return null;
+                        for (stack[sp - 3 .. sp]) |operand| if (operand != .v128) return null;
+                        const target = scratchOffset(num_locals, sp - 3);
+                        const wide = sub >= 263;
+                        try m.loadVector128(.xmm0, .r12, target);
+                        if (sub % 2 == 0) try emitSimdFloatArithmetic(&m, .{ .double_precision = wide, .kind = .neg });
+                        try m.loadVector128(.xmm1, .r12, scratchOffset(num_locals, sp - 2));
+                        try m.arithmeticPackedFloat128(.xmm0, .xmm1, wide, .mul);
+                        try m.loadVector128(.xmm1, .r12, scratchOffset(num_locals, sp - 1));
+                        try m.arithmeticPackedFloat128(.xmm0, .xmm1, wide, .add);
+                        try m.storeVector128(.r12, target, .xmm0);
+                        sp -= 2;
+                    },
+                    274, 275 => {
+                        const consumed: usize = if (sub == 275) 3 else 2;
+                        if (sp < consumed) return null;
+                        for (stack[sp - consumed .. sp]) |operand| if (operand != .v128) return null;
+                        const target = scratchOffset(num_locals, sp - consumed);
+                        try m.loadVector128(.xmm0, .r12, target);
+                        try m.loadVector128(.xmm1, .r12, scratchOffset(num_locals, sp - consumed + 1));
+                        try emitSimdRelaxedDot(&m);
+                        if (sub == 275) {
+                            try emitSimdPairwiseAdd(&m, .{ .width = 2, .signed = true });
+                            try m.loadVector128(.xmm1, .r12, scratchOffset(num_locals, sp - 1));
+                            try m.addPackedInteger(.xmm0, .xmm1, .word);
+                        }
+                        try m.storeVector128(.r12, target, .xmm0);
+                        sp -= consumed - 1;
+                    },
+                    130, 156...159, 186, 188...191, 220...223, 273 => {
                         if (sp < 2 or stack[sp - 2] != .v128 or stack[sp - 1] != .v128) return null;
                         const product = simd.productOp(sub) orelse return null;
                         const target = scratchOffset(num_locals, sp - 2);
@@ -2089,7 +2119,7 @@ pub fn compile(
                         sp -= 1;
                         stack[sp - 1] = .v128;
                     },
-                    232, 233, 244, 245 => {
+                    232, 233, 244, 245, 269...272 => {
                         if (sp < 2 or stack[sp - 2] != .v128 or stack[sp - 1] != .v128) return null;
                         const minmax = simd.floatMinMaxOp(sub) orelse return null;
                         const target = scratchOffset(num_locals, sp - 2);
@@ -2100,8 +2130,8 @@ pub fn compile(
                         sp -= 1;
                         stack[sp - 1] = .v128;
                     },
-                    77...82 => {
-                        const consumed: usize = if (sub == 77) 1 else if (sub == 82) 3 else 2;
+                    77...82, 265...268 => {
+                        const consumed: usize = if (sub == 77) 1 else if (sub == 82 or sub >= 265) 3 else 2;
                         if (sp < consumed) return null;
                         const depth = sp - consumed;
                         for (stack[depth..sp]) |operand| if (operand != .v128) return null;
@@ -2121,7 +2151,7 @@ pub fn compile(
                                     try m.andReg64(.rax, .rcx);
                                 },
                                 80 => try m.orReg64(.rax, .rcx),
-                                82 => {
+                                82, 265...268 => {
                                     try m.load64Disp32(.rdx, .r12, scratchOffset(num_locals, depth + 2) + half);
                                     try m.xorReg64(.rax, .rcx);
                                     try m.andReg64(.rax, .rdx);
@@ -3039,6 +3069,24 @@ fn emitSimdPairwiseAdd(m: *x64.Masm, op: simd.PairwiseAddOp) Error!void {
         if (op.width == 1) try m.andPacked128(.xmm1, .xmm2);
     }
     try m.addPackedInteger(.xmm0, .xmm1, if (op.width == 1) .half else .word);
+}
+
+/// ivdotsat: signed bytes -> saturated i16 pair sums, with SSE2 only.
+/// xmm0/xmm1 -> xmm0; xmm2..xmm5 are scratch.
+fn emitSimdRelaxedDot(m: *x64.Masm) Error!void {
+    try m.xorPacked128(.xmm2, .xmm2);
+    try m.compareGreaterSignedPacked(.xmm2, .xmm0, .byte);
+    try m.xorPacked128(.xmm3, .xmm3);
+    try m.compareGreaterSignedPacked(.xmm3, .xmm1, .byte);
+    try m.movVector128(.xmm4, .xmm0);
+    try m.movVector128(.xmm5, .xmm1);
+    try m.unpackLowPackedInteger(.xmm0, .xmm2, .byte);
+    try m.unpackHighPackedInteger(.xmm4, .xmm2, .byte);
+    try m.unpackLowPackedInteger(.xmm1, .xmm3, .byte);
+    try m.unpackHighPackedInteger(.xmm5, .xmm3, .byte);
+    try m.multiplyAddPackedI16(.xmm0, .xmm1);
+    try m.multiplyAddPackedI16(.xmm4, .xmm5);
+    try m.packSigned32To16(.xmm0, .xmm4);
 }
 
 /// xmm0/xmm1 -> xmm0, using xmm2/xmm3 scratch and only SSE2.

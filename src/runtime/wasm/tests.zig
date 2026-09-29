@@ -3608,6 +3608,238 @@ test "wasm spasm: SIMD float arithmetic skips unreachable code" {
     }
 }
 
+fn simdRelaxedTernary(sub: u32) bool {
+    return sub <= 268 or sub == 275;
+}
+
+fn buildSimdRelaxedFunc(a: std.mem.Allocator, sub: u32, repetitions: usize, dead: bool) ![]const u8 {
+    var body: List = .empty;
+    try body.appendSlice(a, &.{ 1, 32, 0x7f, 0x20, 0, 0x20, 1 });
+    if (dead) try body.appendSlice(a, &.{ 0x02, 0x7b, 0x20, 2, 0x0c, 0 });
+    try body.appendSlice(a, &.{ 0x20, 2 });
+    for (0..repetitions) |_| {
+        try body.appendSlice(a, &.{ 0x20, 3 });
+        if (simdRelaxedTernary(sub)) try body.appendSlice(a, &.{ 0x20, 4 });
+        try body.append(a, 0xfd);
+        try uleb(a, &body, sub);
+    }
+    if (dead) try body.append(a, 0x0b);
+    try body.append(a, 0x0b);
+    return buildFunc(a, &.{ 0x7e, 0x7b, 0x7b, 0x7b, 0x7b }, &.{ 0x7e, 0x7b, 0x7b }, body.items, "relaxed");
+}
+
+fn expectSimdRelaxedFloatLane(comptime U: type, sub: u32, left: U, right: U, third: U, actual: U) !void {
+    @setFloatMode(.strict);
+    if (sub >= 269) return expectFloatMinMaxLane(U, left, right, actual, sub % 2 == 0);
+    const F = if (U == u32) f32 else f64;
+    const lhs: F = @bitCast(left);
+    const rhs: F = @bitCast(right);
+    const acc: F = @bitCast(third);
+    const product: F = (if (sub % 2 == 0) -lhs else lhs) * rhs;
+    const expected: F = product + acc;
+    if (!std.math.isNan(expected)) return testing.expectEqual(@as(U, @bitCast(expected)), actual);
+    const sign: U = @as(U, 1) << (@bitSizeOf(U) - 1);
+    const exponent: U = if (U == u32) 0x7f800000 else 0x7ff0000000000000;
+    const quiet: U = if (U == u32) 0x00400000 else 0x0008000000000000;
+    var canonical = true;
+    for ([_]U{ left, right, third }) |input| {
+        const magnitude = input & ~sign;
+        if (magnitude > exponent and magnitude != exponent | quiet) canonical = false;
+    }
+    try testing.expectEqual(exponent | quiet, actual & (if (canonical) ~sign else exponent | quiet));
+}
+
+fn expectedSimdRelaxedInteger(sub: u32, left: u128, right: u128, third: u128) u128 {
+    if (sub <= 268) return (left & third) | (right & ~third);
+    if (sub == 273) {
+        const x: [8]i16 = @bitCast(left);
+        const y: [8]i16 = @bitCast(right);
+        var r: [8]i16 = undefined;
+        for (&r, 0..) |*lane, i| {
+            const product = (@as(i64, x[i]) * y[i] + 16384) >> 15;
+            lane.* = @intCast(std.math.clamp(product, -32768, 32767));
+        }
+        return @bitCast(r);
+    }
+    const x: [16]i8 = @bitCast(left);
+    const y: [16]i8 = @bitCast(right);
+    var pairs: [8]i16 = undefined;
+    for (&pairs, 0..) |*lane, i| {
+        const sum = @as(i32, x[i * 2]) * y[i * 2] + @as(i32, x[i * 2 + 1]) * y[i * 2 + 1];
+        lane.* = @intCast(std.math.clamp(sum, -32768, 32767));
+    }
+    if (sub == 274) return @bitCast(pairs);
+    const acc: [4]u32 = @bitCast(third);
+    var result: [4]u32 = undefined;
+    for (&result, 0..) |*lane, i| {
+        const widened: i64 = @as(i64, pairs[i * 2]) + pairs[i * 2 + 1] + acc[i];
+        lane.* = @truncate(@as(u64, @bitCast(widened)));
+    }
+    return @bitCast(result);
+}
+
+fn expectSimdRelaxed(instance: *interp.Instance, sub: u32, left: u128, right: u128, third: u128, native: bool) !void {
+    errdefer std.debug.print("SIMD relaxed subopcode {d}, inputs {x} {x} {x}\n", .{ sub, left, right, third });
+    const before = instance.spasm_runs;
+    const result = try interp.invoke(instance, testing.allocator, 0, &.{ 37, simd_live_vector, left, right, third });
+    defer testing.allocator.free(result);
+    try testing.expectEqual(@as(usize, 3), result.len);
+    try testing.expectEqual(@as(u128, 37), result[0]);
+    try testing.expectEqual(simd_live_vector, result[1]);
+    try testing.expectEqual(before + @intFromBool(native), instance.spasm_runs);
+    if (sub <= 264 or (sub >= 269 and sub <= 272)) {
+        const wide = sub == 263 or sub == 264 or sub == 271 or sub == 272;
+        inline for (.{ u32, u64 }) |U| {
+            if (wide == (U == u64)) {
+                const lhs: [128 / @bitSizeOf(U)]U = @bitCast(left);
+                const rhs: [128 / @bitSizeOf(U)]U = @bitCast(right);
+                const acc: [128 / @bitSizeOf(U)]U = @bitCast(third);
+                const out: [128 / @bitSizeOf(U)]U = @bitCast(result[2]);
+                for (out, 0..) |lane, i| try expectSimdRelaxedFloatLane(U, sub, lhs[i], rhs[i], acc[i], lane);
+            }
+        }
+    } else try testing.expectEqual(expectedSimdRelaxedInteger(sub, left, right, third), result[2]);
+}
+
+fn testSimdRelaxedFloats(native: bool) !void {
+    if (native and !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    inline for (.{ u32, u64 }) |U| {
+        const sign: U = @as(U, 1) << (@bitSizeOf(U) - 1);
+        const exp: U = if (U == u32) 0x7f800000 else 0x7ff0000000000000;
+        const quiet: U = if (U == u32) 0x00400000 else 0x0008000000000000;
+        const one: U = if (U == u32) 0x3f800000 else 0x3ff0000000000000;
+        const values = [_]U{ 0, sign, 1, sign | 1, quiet * 2 - 1, quiet * 2, one - 2, one - 1, one, one + 1, sign | one, exp - 1, sign | (exp - 1), exp, sign | exp, exp | quiet, sign | exp | quiet, exp | 1, exp | quiet | 123 };
+        for ([_]u32{ 261, 262, 263, 264, 269, 270, 271, 272 }) |sub| {
+            if ((sub == 263 or sub == 264 or sub == 271 or sub == 272) != (U == u64)) continue;
+            const module = try wasm.decode(a, try buildSimdRelaxedFunc(a, sub, 1, false));
+            var instance: interp.Instance = undefined;
+            try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+            defer instance.deinit();
+            instance.spasm_enabled = native;
+            for (0..values.len) |x| {
+                for (0..values.len) |y| {
+                    for (0..values.len) |z| {
+                        var left: [128 / @bitSizeOf(U)]U = undefined;
+                        var right = left;
+                        var third = left;
+                        for (0..left.len) |lane| {
+                            left[lane] = values[(x + lane) % values.len];
+                            right[lane] = values[(y + lane * 3) % values.len];
+                            third[lane] = values[(z + lane * 5) % values.len];
+                        }
+                        try expectSimdRelaxed(&instance, sub, @bitCast(left), @bitCast(right), @bitCast(third), native);
+                    }
+                }
+            }
+            if (sub <= 264) {
+                // Non-fused cancellation: the product rounds to 1 before the add.
+                const left: @Vector(128 / @bitSizeOf(U), U) = @splat(one + 1);
+                const right: @Vector(128 / @bitSizeOf(U), U) = @splat(one - 2);
+                const third: @Vector(128 / @bitSizeOf(U), U) = @splat(one | (if (sub % 2 == 1) sign else 0));
+                const result = try interp.invoke(&instance, testing.allocator, 0, &.{ 37, simd_live_vector, @bitCast(left), @bitCast(right), @bitCast(third) });
+                defer testing.allocator.free(result);
+                try testing.expectEqual(@as(u128, 0), result[2]);
+            }
+        }
+    }
+}
+
+fn testSimdRelaxedIntegers(native: bool) !void {
+    if (native and !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const values = [_]i16{ -32768, -32767, -16384, -1, 0, 1, 127, 128, 16384, 32767 };
+    for ([_]u32{ 265, 266, 267, 268, 273, 274, 275 }) |sub| {
+        const module = try wasm.decode(a, try buildSimdRelaxedFunc(a, sub, 1, false));
+        var instance: interp.Instance = undefined;
+        try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+        defer instance.deinit();
+        instance.spasm_enabled = native;
+        for (0..values.len) |x| {
+            for (0..values.len) |y| {
+                var left: [8]i16 = undefined;
+                var right: [8]i16 = undefined;
+                for (0..8) |lane| {
+                    left[lane] = values[(x + lane) % values.len];
+                    right[lane] = values[(y + lane * 3) % values.len];
+                }
+                for ([_]u128{ 0, std.math.maxInt(u128), simd_live_vector, @bitCast([4]u32{ 0x7fffffff, 0x80000000, 0xffffffff, 0 }) }) |acc|
+                    try expectSimdRelaxed(&instance, sub, @bitCast(left), @bitCast(right), acc, native);
+            }
+        }
+        for (0..128) |bit| try expectSimdRelaxed(&instance, sub, simd_live_vector, ~simd_live_vector, @as(u128, 1) << @as(u7, @intCast(bit)), native);
+        if (sub >= 274) {
+            // Cover every signed byte-product pair, eight independent lanes at once.
+            for (0..256) |x| {
+                for (0..32) |batch| {
+                    var left: [16]u8 = undefined;
+                    var right: [16]u8 = undefined;
+                    for (0..8) |lane| {
+                        left[lane * 2] = @intCast(x);
+                        left[lane * 2 + 1] = @intCast(x);
+                        right[lane * 2] = @intCast(batch * 8 + lane);
+                        right[lane * 2 + 1] = @intCast(batch * 8 + lane);
+                    }
+                    try expectSimdRelaxed(&instance, sub, @bitCast(left), @bitCast(right), simd_live_vector, native);
+                }
+            }
+        }
+    }
+}
+
+test "wasm spasm: SIMD relaxed floating operations keep deterministic IEEE behavior" {
+    try testSimdRelaxedFloats(true);
+}
+test "wasm interpreter: SIMD relaxed floating operations keep deterministic IEEE behavior" {
+    try testSimdRelaxedFloats(false);
+}
+test "wasm spasm: SIMD relaxed integer operations preserve masks, saturation and wrapping" {
+    try testSimdRelaxedIntegers(true);
+}
+test "wasm interpreter: SIMD relaxed integer operations preserve masks, saturation and wrapping" {
+    try testSimdRelaxedIntegers(false);
+}
+test "wasm interpreter: SIMD relaxed dot addition wraps at signed limits" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const module = try wasm.decode(a, try buildSimdRelaxedFunc(a, 275, 1, false));
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = false;
+    const ones: [16]u8 = @splat(1);
+    try expectSimdRelaxed(&instance, 275, @bitCast(ones), @bitCast(ones), @bitCast([4]u32{ 0x7fffffff, 0x80000000, 0xfffffffe, 0 }), false);
+}
+test "wasm spasm: SIMD relaxed operations skip dead code and fit dense reservations" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (261..276) |opcode| {
+        const sub: u32 = @intCast(opcode);
+        for ([_]usize{ 1, 128, 1024 }) |count| {
+            const dead = count == 1;
+            const module = try wasm.decode(a, try buildSimdRelaxedFunc(a, sub, count, dead));
+            var instance: interp.Instance = undefined;
+            try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+            defer instance.deinit();
+            instance.spasm_enabled = true;
+            const input: u128 = if (dead) ~simd_live_vector else 0;
+            const result = try interp.invoke(&instance, testing.allocator, 0, &.{ 37, simd_live_vector, input, 0, 0 });
+            defer testing.allocator.free(result);
+            try testing.expectEqualSlices(u128, &.{ 37, simd_live_vector, input }, result);
+            try testing.expectEqual(@import("spasm.zig").RefusalStage.none, instance.spasm_last_refusal_stage);
+            try testing.expectEqual(@as(u32, 1), instance.spasm_compiles);
+            try testing.expectEqual(@as(u32, 1), instance.spasm_runs);
+        }
+    }
+}
+
 const SimdNumericConversion = struct {
     sub: u32,
     kind: enum { trunc_sat, convert, demote, promote },
