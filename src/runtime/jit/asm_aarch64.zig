@@ -262,6 +262,13 @@ pub fn addV4s(vd: Reg, vn: Reg, vm: Reg) u32 {
 
 pub const VectorLaneSize = enum(u2) { byte, half, word };
 
+/// SMIN/UMIN/SMAX/UMAX Vd.16B/8H/4S, Vn, Vm.
+pub fn minMaxV128(vd: Reg, vn: Reg, vm: Reg, size: VectorLaneSize, signed: bool, maximum: bool) u32 {
+    const base: u32 = if (maximum) 0x4E206400 else 0x4E206C00;
+    const unsigned_bit: u32 = if (signed) 0 else 0x20000000;
+    return base | unsigned_bit | (@as(u32, @intFromEnum(size)) << 22) | (r(vm) << 16) | (r(vn) << 5) | r(vd);
+}
+
 /// UMINV Bd/Hd/Sd, Vn.16B/8H/4S; the scalar result clears all other bits.
 pub fn uminv128(vd: Reg, vn: Reg, size: VectorLaneSize) u32 {
     return 0x6E31A800 | (@as(u32, @intFromEnum(size)) << 22) | (r(vn) << 5) | r(vd);
@@ -985,6 +992,23 @@ pub fn brk(imm16: u16) u32 {
 // Byte-exact encodings, cross-checked against `llvm-mc -triple
 // arm64 -show-encoding` output. These pin the bit layouts; the
 // execution tests in masm.zig prove them on hardware.
+
+test "jit asm_aarch64: SIMD integer minmax encodings" {
+    const expectEqual = std.testing.expectEqual;
+    // Golden words from clang's AArch64 assembler, with a high source register.
+    try expectEqual(@as(u32, 0x4e316ca3), minMaxV128(.x3, .x5, .x17, .byte, true, false));
+    try expectEqual(@as(u32, 0x6e316ca3), minMaxV128(.x3, .x5, .x17, .byte, false, false));
+    try expectEqual(@as(u32, 0x4e3164a3), minMaxV128(.x3, .x5, .x17, .byte, true, true));
+    try expectEqual(@as(u32, 0x6e3164a3), minMaxV128(.x3, .x5, .x17, .byte, false, true));
+    try expectEqual(@as(u32, 0x4e716ca3), minMaxV128(.x3, .x5, .x17, .half, true, false));
+    try expectEqual(@as(u32, 0x6e716ca3), minMaxV128(.x3, .x5, .x17, .half, false, false));
+    try expectEqual(@as(u32, 0x4e7164a3), minMaxV128(.x3, .x5, .x17, .half, true, true));
+    try expectEqual(@as(u32, 0x6e7164a3), minMaxV128(.x3, .x5, .x17, .half, false, true));
+    try expectEqual(@as(u32, 0x4eb16ca3), minMaxV128(.x3, .x5, .x17, .word, true, false));
+    try expectEqual(@as(u32, 0x6eb16ca3), minMaxV128(.x3, .x5, .x17, .word, false, false));
+    try expectEqual(@as(u32, 0x4eb164a3), minMaxV128(.x3, .x5, .x17, .word, true, true));
+    try expectEqual(@as(u32, 0x6eb164a3), minMaxV128(.x3, .x5, .x17, .word, false, true));
+}
 
 test "jit asm_aarch64: SIMD reduction encodings" {
     const expectEqual = std.testing.expectEqual;

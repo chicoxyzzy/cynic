@@ -690,8 +690,28 @@ pub const Masm = struct {
         try self.emitVectorMemory(0x7f, source, base, displacement);
     }
 
+    pub fn movVector128(self: *Masm, destination: Xmm, source: Xmm) error{OutOfMemory}!void {
+        try self.emitXmmReg(0x66, 0x6f, destination, source);
+    }
+
+    pub fn addPackedI16(self: *Masm, destination: Xmm, source: Xmm) error{OutOfMemory}!void {
+        try self.emitXmmReg(0x66, 0xfd, destination, source);
+    }
+
+    pub fn subtractPackedI16(self: *Masm, destination: Xmm, source: Xmm) error{OutOfMemory}!void {
+        try self.emitXmmReg(0x66, 0xf9, destination, source);
+    }
+
+    pub fn subtractSaturatingPackedU16(self: *Masm, destination: Xmm, source: Xmm) error{OutOfMemory}!void {
+        try self.emitXmmReg(0x66, 0xd9, destination, source);
+    }
+
     pub fn addPackedI32(self: *Masm, destination: Xmm, source: Xmm) error{OutOfMemory}!void {
         try self.emitXmmReg(0x66, 0xfe, destination, source);
+    }
+
+    pub fn andPacked128(self: *Masm, destination: Xmm, source: Xmm) error{OutOfMemory}!void {
+        try self.emitXmmReg(0x66, 0xdb, destination, source);
     }
 
     pub fn xorPacked128(self: *Masm, destination: Xmm, source: Xmm) error{OutOfMemory}!void {
@@ -702,6 +722,30 @@ pub const Masm = struct {
 
     pub fn compareEqualPacked(self: *Masm, destination: Xmm, source: Xmm, size: PackedIntSize) error{OutOfMemory}!void {
         try self.emitXmmReg(0x66, @intFromEnum(size), destination, source);
+    }
+
+    pub fn compareGreaterSignedPacked(self: *Masm, destination: Xmm, source: Xmm, size: PackedIntSize) error{OutOfMemory}!void {
+        try self.emitXmmReg(0x66, switch (size) {
+            .byte => 0x64,
+            .half => 0x65,
+            .word => 0x66,
+        }, destination, source);
+    }
+
+    pub const PackedMinMax = enum(u8) { min_u8 = 0xda, max_u8 = 0xde, min_i16 = 0xea, max_i16 = 0xee };
+
+    /// The four min/max instructions available without SSE4.1.
+    pub fn minMaxPacked128(self: *Masm, destination: Xmm, source: Xmm, op: PackedMinMax) error{OutOfMemory}!void {
+        try self.emitXmmReg(0x66, @intFromEnum(op), destination, source);
+    }
+
+    pub fn shiftRightArithmeticPackedI32(self: *Masm, destination: Xmm, amount: u8) error{OutOfMemory}!void {
+        try self.emitByte(0x66);
+        try self.emitByte(rex(false, false, false, isExtendedXmm(destination)));
+        try self.emitByte(0x0f);
+        try self.emitByte(0x72);
+        try self.emitByte(0xe0 | lowBitsXmm(destination)); // PSRAD /4, imm8
+        try self.emitByte(amount);
     }
 
     pub fn packSigned16To8(self: *Masm, destination: Xmm, source: Xmm) error{OutOfMemory}!void {
@@ -1215,6 +1259,40 @@ test "jit asm_x86_64: encodes unaligned SIMD moves and packed i32 addition" {
         0xf3, 0x45, 0x0f, 0x6f, 0x8c, 0x24, 0x10, 0,    0,    0,
         0x66, 0x45, 0x0f, 0xfe, 0xca, 0xf3, 0x45, 0x0f, 0x7f, 0x8d,
         0xf0, 0xff, 0xff, 0xff,
+    }, machine.code.items);
+}
+
+test "jit asm_x86_64: SIMD integer minmax encodings retain SSE2" {
+    var machine = Masm.init(std.testing.allocator);
+    defer machine.deinit();
+    try machine.movVector128(.xmm9, .xmm10);
+    try machine.andPacked128(.xmm9, .xmm10);
+    try machine.compareGreaterSignedPacked(.xmm9, .xmm10, .byte);
+    try machine.compareGreaterSignedPacked(.xmm9, .xmm10, .half);
+    try machine.compareGreaterSignedPacked(.xmm9, .xmm10, .word);
+    try machine.minMaxPacked128(.xmm9, .xmm10, .min_u8);
+    try machine.minMaxPacked128(.xmm9, .xmm10, .max_u8);
+    try machine.minMaxPacked128(.xmm9, .xmm10, .min_i16);
+    try machine.minMaxPacked128(.xmm9, .xmm10, .max_i16);
+    try machine.subtractSaturatingPackedU16(.xmm9, .xmm10);
+    try machine.subtractPackedI16(.xmm9, .xmm10);
+    try machine.addPackedI16(.xmm9, .xmm10);
+    try machine.shiftRightArithmeticPackedI32(.xmm10, 31);
+    try std.testing.expectEqualSlices(u8, &.{
+        0x66, 0x45, 0x0f, 0x6f, 0xca,
+        0x66, 0x45, 0x0f, 0xdb, 0xca,
+        0x66, 0x45, 0x0f, 0x64, 0xca,
+        0x66, 0x45, 0x0f, 0x65, 0xca,
+        0x66, 0x45, 0x0f, 0x66, 0xca,
+        0x66, 0x45, 0x0f, 0xda, 0xca,
+        0x66, 0x45, 0x0f, 0xde, 0xca,
+        0x66, 0x45, 0x0f, 0xea, 0xca,
+        0x66, 0x45, 0x0f, 0xee, 0xca,
+        0x66, 0x45, 0x0f, 0xd9, 0xca,
+        0x66, 0x45, 0x0f, 0xf9, 0xca,
+        0x66, 0x45, 0x0f, 0xfd, 0xca,
+        0x66, 0x41, 0x0f, 0x72, 0xe2,
+        0x1f,
     }, machine.code.items);
 }
 

@@ -7,6 +7,7 @@
 
 const Op = @import("opcodes.zig").Op;
 const ValType = @import("types.zig").ValType;
+const simd = @import("spasm_simd.zig");
 const std = @import("std");
 
 pub const FrameBoundary = enum { else_arm, end };
@@ -268,7 +269,7 @@ fn skipSimdImmediate(body: []const u8, index: *usize) ?void {
             skipBytes(body, index, 1) orelse return null; // lane index
         },
         15...20, 77...83, 174 => {}, // splats / bitwise / any_true / i32x4.add
-        else => if (@import("spasm_simd.zig").reductionOp(sub) == null) return null,
+        else => if (simd.reductionOp(sub) == null and simd.integerMinMaxOp(sub) == null) return null,
     }
 }
 

@@ -610,6 +610,9 @@ the measured design space:
   All four integer `all_true` and `bitmask` reductions compile with canonical
   i32 results, using baseline NEON/scalar operations on ARM and SSE2/scalar
   operations on x86. No optional SIMD extensions are required.
+  Signed/unsigned integer min/max for 8/16/32-bit lanes also compile on
+  both targets. ARM uses direct NEON instructions; x86 combines the SSE2
+  min/max forms, saturated subtraction, and compare/select sequences.
   Table64 operations (the helper ABI still uses u32
   indices), the remaining SIMD operations, and other unsupported x86
   bodies refuse before
