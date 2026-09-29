@@ -708,3 +708,13 @@ the measured design space:
 
 Conformance is scored against the official WebAssembly spec testsuite
 (the `.wast` corpus), the same way `test262-results.md` scores ECMA-262.
+Scalar and SIMD float expectations share a bit-based matcher for
+[Core canonical/arithmetic NaNs](https://webassembly.github.io/spec/core/syntax/values.html#syntax-float),
+following [WABT's expectation types](https://github.com/WebAssembly/wabt/blob/main/src/tools/spectest-interp.cc).
+Canonical expectations allow only the quiet payload bit; arithmetic
+expectations require that bit and allow additional payload bits. Both
+accept either sign. Explicit numeric bit patterns stay exact, including
+signaling NaNs and signed zeros; unknown NaN expectation tokens fail.
+Matcher regressions run in both `zig build test` and `zig build test-fast`
+(filter: `-Dtest-filter='wasm harness:'`). This is harness-only: no
+ECMA-262/test262 or SES behavior changes.

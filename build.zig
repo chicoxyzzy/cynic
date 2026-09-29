@@ -214,6 +214,15 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_exe_tests.step);
     test_step.dependOn(&run_bench_tests.step);
 
+    const wts_tests_mod = b.createModule(.{
+        .root_source_file = b.path("tools/wasm_testsuite.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    wts_tests_mod.addImport("cynic", lib_mod);
+    const wts_tests = b.addTest(.{ .root_module = wts_tests_mod, .filters = test_filters });
+    test_step.dependOn(&b.addRunArtifact(wts_tests).step);
+
     // `zig build test-fuzz` runs the Fuzzilli REPRL host unit tests
     // (the REPRL protocol encoder + the coverage-hook arithmetic).
     // These live in `tools/fuzz/`, outside `src/`, so the production
@@ -640,10 +649,18 @@ pub fn build(b: *std.Build) void {
     });
     safe_bench_tests_mod.addImport("cynic", lib_mod_test_safe);
     const safe_bench_tests = b.addTest(.{ .root_module = safe_bench_tests_mod, .filters = test_filters });
+    const safe_wts_tests_mod = b.createModule(.{
+        .root_source_file = b.path("tools/wasm_testsuite.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+    });
+    safe_wts_tests_mod.addImport("cynic", lib_mod_test_safe);
+    const safe_wts_tests = b.addTest(.{ .root_module = safe_wts_tests_mod, .filters = test_filters });
     const test_fast_step = b.step("test-fast", "Run all unit tests built ReleaseSafe — finishes in ~3 min vs the Debug `test` step's 10+; keeps safety checks, GC verifiers, leak detection");
     test_fast_step.dependOn(&b.addRunArtifact(safe_lib_tests).step);
     test_fast_step.dependOn(&b.addRunArtifact(safe_exe_tests).step);
     test_fast_step.dependOn(&b.addRunArtifact(safe_bench_tests).step);
+    test_fast_step.dependOn(&b.addRunArtifact(safe_wts_tests).step);
     test_fast_step.dependOn(&run_t262_tests.step);
 
     // A second harness binary, built ReleaseSafe and installed under

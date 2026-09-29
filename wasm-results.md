@@ -23,10 +23,11 @@ implemented but unscored here: this `wast2json` cannot parse the
 proposal's `(ref exn)` text syntax, so its `.wast` files don't lower
 (its coverage is the engine unit tests instead).
 
-The corpus harness currently matches NaN expectations by class only; it
-does not distinguish canonical from arithmetic NaNs or check the quiet bit.
-Focused floating-point min/max tests enforce those rules independently.
-Tightening scalar and vector NaN matching remains a harness follow-up.
+The corpus harness checks scalar and vector NaN expectations by their bits:
+`nan:canonical` allows only the quiet bit in the payload; `nan:arithmetic`
+requires that bit and allows any remaining payload. Either sign is valid.
+Numeric expectations remain bit-exact, including signaling NaNs and signed
+zeros. The score below is unchanged under these stricter checks.
 
 ## Current scores
 
