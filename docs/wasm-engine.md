@@ -656,6 +656,10 @@ the measured design space:
   operations or SSE2 sequences that handle both signed-zero orders and
   canonicalize NaNs. Focused tests enforce quiet/canonical NaN rules and
   preserve subnormal lane bits; no runtime helper calls are needed.
+  The six signed/unsigned widening loads (8x8, 16x4, 32x2) check and read
+  exactly eight bytes before widening to a full vector, using NEON
+  SXTL/UXTL or SSE2 unpacking with zero/sign masks. Memory64 overflow traps
+  before access; nonzero-memory operands still fall back.
   Table64 operations (the helper ABI still uses u32
   indices), the remaining SIMD operations, and other unsupported x86
   bodies refuse before
