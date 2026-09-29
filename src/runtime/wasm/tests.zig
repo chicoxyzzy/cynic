@@ -2496,6 +2496,131 @@ test "wasm spasm: SIMD lane addition wraps independently and memory is unaligned
     try testing.expectEqual(@as(u32, 1), instance.spasm_compiles);
 }
 
+fn buildSimdLaneFunc(a: std.mem.Allocator, memory64: bool, store: bool, size_log2: u2, lane: u8, offset: u64) ![]const u8 {
+    var body: List = .empty;
+    try body.appendSlice(a, &.{ 0, 0x20, 0, 0x20, 1, 0xfd, @as(u8, if (store) 88 else 84) + size_log2, 0 });
+    try uleb(a, &body, @intCast(offset));
+    try body.appendSlice(a, &.{ lane, 0x0b });
+    var code: List = .empty;
+    try uleb(a, &code, 1);
+    try uleb(a, &code, body.items.len);
+    try code.appendSlice(a, body.items);
+    var types: List = .empty;
+    try types.appendSlice(a, &.{ 1, 0x60, 2, if (memory64) 0x7e else 0x7f, 0x7b });
+    try types.appendSlice(a, if (store) &.{0} else &.{ 1, 0x7b });
+    return assemble(a, &.{
+        .{ .id = 1, .body = types.items },
+        .{ .id = 3, .body = &.{ 1, 0 } },
+        .{ .id = 5, .body = &.{ 1, if (memory64) 4 else 0, 1 } },
+        .{ .id = 10, .body = code.items },
+    });
+}
+
+test "wasm spasm: SIMD lane loads and stores preserve every other byte" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const vector_bytes = [_]u8{ 0xf0, 1, 0xe2, 3, 0xd4, 5, 0xc6, 7, 0xb8, 9, 0xaa, 11, 0x9c, 13, 0x8e, 15 };
+    const memory_bytes = [_]u8{ 0x87, 0x32, 0xa9, 0x54, 0xcb, 0x76, 0xed, 0x98 };
+    const vector = std.mem.readInt(u128, &vector_bytes, .little);
+    for ([_]bool{ false, true }) |memory64| {
+        for ([_]bool{ false, true }) |store| {
+            for (0..4) |size_log2| {
+                const width = @as(usize, 1) << @as(u6, @intCast(size_log2));
+                for (0..16 / width) |lane| {
+                    const bytes = try buildSimdLaneFunc(a, memory64, store, @intCast(size_log2), @intCast(lane), 8);
+                    const module = try wasm.decode(a, bytes);
+                    var instance: interp.Instance = undefined;
+                    try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+                    defer instance.deinit();
+                    instance.spasm_enabled = true;
+                    for ([_]usize{ 1, 65536 - width - 8 }) |address| {
+                        const memory = instance.memories[0].data;
+                        @memset(memory, 0x5a);
+                        const start = address + 8;
+                        if (!store) @memcpy(memory[start..][0..width], memory_bytes[0..width]);
+                        const result = try interp.invoke(&instance, testing.allocator, 0, &.{ address, vector });
+                        defer testing.allocator.free(result);
+                        if (store) {
+                            try testing.expectEqualSlices(u8, vector_bytes[lane * width ..][0..width], memory[start..][0..width]);
+                            try testing.expect(std.mem.allEqual(u8, memory[0..start], 0x5a));
+                            try testing.expect(std.mem.allEqual(u8, memory[start + width ..], 0x5a));
+                        } else {
+                            var expected = vector_bytes;
+                            @memcpy(expected[lane * width ..][0..width], memory_bytes[0..width]);
+                            try testing.expectEqual(std.mem.readInt(u128, &expected, .little), result[0]);
+                            try testing.expectEqualSlices(u8, memory_bytes[0..width], memory[start..][0..width]);
+                            try testing.expect(std.mem.allEqual(u8, memory[0..start], 0x5a));
+                            try testing.expect(std.mem.allEqual(u8, memory[start + width ..], 0x5a));
+                        }
+                    }
+                    try testing.expectEqual(@as(u32, 1), instance.spasm_compiles);
+                    try testing.expectEqual(@as(u32, 2), instance.spasm_runs);
+                }
+            }
+        }
+    }
+}
+
+test "wasm spasm: SIMD lane bounds use the lane width and reject address overflow" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_]bool{ false, true }) |memory64| {
+        for ([_]bool{ false, true }) |store| {
+            for (0..4) |size_log2| {
+                const width = @as(usize, 1) << @as(u6, @intCast(size_log2));
+                const limit = 65536 - width;
+                for ([_]u64{ 0, 8, 0xffff_ffff, 0x1_0000_0000, std.math.maxInt(u64) }) |offset| {
+                    if (!memory64 and offset > std.math.maxInt(u32)) continue;
+                    const bytes = try buildSimdLaneFunc(a, memory64, store, @intCast(size_log2), @intCast(16 / width - 1), offset);
+                    const module = try wasm.decode(a, bytes);
+                    var instance: interp.Instance = undefined;
+                    try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+                    defer instance.deinit();
+                    instance.spasm_enabled = true;
+                    for ([_]u64{ 0, 1, limit, limit + 1, 0xffff_ffff, 0x1_0000_0000, std.math.maxInt(u64) }) |address| {
+                        if (!memory64 and address > std.math.maxInt(u32)) continue;
+                        @memset(instance.memories[0].data, 0x5a);
+                        const result = interp.invoke(&instance, testing.allocator, 0, &.{ address, std.math.maxInt(u128) });
+                        defer if (result) |values| testing.allocator.free(values) else |_| {};
+                        if (offset <= limit and address <= limit - offset) {
+                            _ = try result;
+                        } else {
+                            try testing.expectError(error.OutOfBoundsMemoryAccess, result);
+                            try testing.expect(std.mem.allEqual(u8, instance.memories[0].data, 0x5a));
+                        }
+                    }
+                    try testing.expectEqual(@as(u32, 1), instance.spasm_compiles);
+                }
+            }
+        }
+    }
+}
+
+test "wasm spasm: SIMD any_true checks all 128 bits and preserves a live scalar" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const bytes = try buildFunc(a, &.{ 0x7f, 0x7b }, &.{0x7f}, &.{ 0, 0x20, 0, 0x20, 1, 0xfd, 83, 0x6a, 0x0b }, "any");
+    const module = try wasm.decode(a, bytes);
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true;
+    for (0..130) |index| {
+        const vector: u128 = if (index == 128) 0 else if (index == 129) std.math.maxInt(u128) else @as(u128, 1) << @as(u7, @intCast(index));
+        const result = try interp.invoke(&instance, testing.allocator, 0, &.{ 37, vector });
+        defer testing.allocator.free(result);
+        try testing.expectEqual(@as(u128, if (vector == 0) 37 else 38), result[0]);
+    }
+    try testing.expectEqual(@as(u32, 1), instance.spasm_compiles);
+    try testing.expectEqual(@as(u32, 130), instance.spasm_runs);
+}
+
 test "wasm spasm: SIMD unsupported operations report the exact prefix and subopcode" {
     if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);

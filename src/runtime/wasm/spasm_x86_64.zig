@@ -1812,6 +1812,63 @@ pub fn compile(
                             stack[depth] = .v128;
                         }
                     },
+                    84...91 => {
+                        const memory64 = memoryIs64(module, 0) orelse return null;
+                        const offset = readMemArg(body, &i, memory64) orelse return null;
+                        const size_log2: u2 = @intCast((sub - 84) % 4);
+                        const width = @as(u32, 1) << size_log2;
+                        if (i >= body.len or body[i] >= 16 / width) return null;
+                        const lane = body[i];
+                        i += 1;
+                        if (sp < 2 or stack[sp - 1] != .v128) return null;
+                        const store = sub >= 88;
+                        const depth = sp - 2;
+                        const target = scratchOffset(num_locals, depth);
+                        const source = scratchOffset(num_locals, sp - 1);
+                        try materialize(&m, stack[depth], num_locals, depth);
+                        if (memory64)
+                            try m.load64Disp32(.r10, .r12, target)
+                        else
+                            try m.load32Disp32(.r10, .r12, target);
+                        try emitMemAddress(&m, offset, width, memory64, &trap_oob);
+                        trap_oob_used = true;
+                        // Cells already hold the complete vector: MOVDQU plus
+                        // a narrow scalar move preserves the SSE2 baseline,
+                        // without SSE4.1 PINSR/PEXTR instructions.
+                        if (!store) {
+                            try m.loadVector128(.xmm0, .r12, source);
+                            try m.storeVector128(.r12, target, .xmm0);
+                        }
+                        const lane_offset = (if (store) source else target) + @as(i32, @intCast(lane * width));
+                        const from_base: x64.Reg = if (store) .r12 else .r11;
+                        const from_offset: i32 = if (store) lane_offset else 0;
+                        const to_base: x64.Reg = if (store) .r11 else .r12;
+                        const to_offset: i32 = if (store) 0 else lane_offset;
+                        switch (size_log2) {
+                            0 => try m.load8Disp32(.rax, from_base, from_offset),
+                            1 => try m.load16Disp32(.rax, from_base, from_offset),
+                            2 => try m.load32Disp32(.rax, from_base, from_offset),
+                            3 => try m.load64Disp32(.rax, from_base, from_offset),
+                        }
+                        switch (size_log2) {
+                            0 => try m.store8Disp32(to_base, to_offset, .rax),
+                            1 => try m.store16Disp32(to_base, to_offset, .rax),
+                            2 => try m.store32Disp32(to_base, to_offset, .rax),
+                            3 => try m.store64Disp32(to_base, to_offset, .rax),
+                        }
+                        sp -= if (store) @as(usize, 2) else 1;
+                        if (!store) stack[depth] = .v128;
+                    },
+                    83 => {
+                        if (sp == 0 or stack[sp - 1] != .v128) return null;
+                        const target = scratchOffset(num_locals, sp - 1);
+                        try m.load64Disp32(.rax, .r12, target);
+                        try m.load64Disp32(.rcx, .r12, target + 8);
+                        try m.orReg64(.rax, .rcx);
+                        try m.setCond32(.rax, .not_equal);
+                        try m.store64Disp32(.r12, target, .rax);
+                        stack[sp - 1] = .runtime;
+                    },
                     174 => {
                         if (sp < 2 or stack[sp - 1] != .v128 or stack[sp - 2] != .v128) return null;
                         const target = scratchOffset(num_locals, sp - 2);

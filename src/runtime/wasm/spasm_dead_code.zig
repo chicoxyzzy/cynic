@@ -262,7 +262,11 @@ fn skipSimdImmediate(body: []const u8, index: *usize) ?void {
     switch (sub) {
         12 => skipBytes(body, index, 16) orelse return null, // v128.const
         0, 11 => skipMemArg(body, index) orelse return null, // v128.load/store
-        174 => {}, // i32x4.add
+        84...91 => {
+            skipMemArg(body, index) orelse return null;
+            skipBytes(body, index, 1) orelse return null; // lane index
+        },
+        83, 174 => {}, // v128.any_true / i32x4.add
         else => return null,
     }
 }
@@ -270,7 +274,8 @@ fn skipSimdImmediate(body: []const u8, index: *usize) ?void {
 fn skipMemArg(body: []const u8, index: *usize) ?void {
     const flags = readUleb32(body, index) orelse return null;
     if (flags & 0x40 != 0) return null;
-    _ = readUleb32(body, index) orelse return null;
+    // The module is validated; memory64 offsets may occupy ten bytes.
+    skipLeb(body, index, 10) orelse return null;
 }
 
 fn skipValType(body: []const u8, index: *usize) ?void {
@@ -335,6 +340,19 @@ test "skipToFrameEnd refuses a truncated immediate" {
     var index: usize = 0;
     try std.testing.expect(skipToFrameEnd(&body, &index) == null);
     try std.testing.expectEqual(body.len, index);
+}
+
+test "skipToFrameEnd skips SIMD lane memory64 immediates and any_true" {
+    const body = [_]u8{
+        0xfd, 84, 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 1, 0x0b,
+        0xfd, 88, 0, 0x0b, 0x05, 0xfd, 83,   0x0b, 0x01,
+    };
+    var index: usize = 0;
+    try std.testing.expect(skipToFrameEnd(&body, &index) != null);
+    try std.testing.expectEqual(body.len - 1, index);
+    const truncated = [_]u8{ 0xfd, 84, 0, 0 };
+    index = 0;
+    try std.testing.expect(skipToFrameEnd(&truncated, &index) == null);
 }
 
 test "skipToFrameBoundary stops at the current if arm" {

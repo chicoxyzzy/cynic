@@ -552,6 +552,10 @@ the measured design space:
   The shared SIMD foundation includes `v128.const/load/store` and `i32x4.add`
   (NEON on AArch64, baseline SSE2 on x86_64); memory accesses check the whole
   16-byte range before reading or writing, including memory64 overflow.
+  All eight lane loads/stores also compile, checking only the lane's 1/2/4/8
+  bytes and preserving the other vector lanes. `v128.any_true` checks both
+  64-bit halves. These paths reuse scalar moves and existing Cell storage;
+  x86 stays at SSE2 without lane-insertion/extraction ISA extensions.
   Table64 operations (the helper ABI still uses u32
   indices), the remaining SIMD operations, and other unsupported x86
   bodies refuse before
