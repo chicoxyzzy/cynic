@@ -1697,6 +1697,18 @@ useful:
    ties across every significand position, signed zeros, subnormals, infinities,
    and NaN payloads. Tests also require native entry, live-value preservation,
    and dead-code scanning; ARM encodings are checked against the assembler.
+   Byte shuffle, strict swizzle, and relaxed swizzle now compile too. ARM
+   follows Liftoff's one-/two-register `TBL` lowering. x86 retains SSE2 instead
+   of requiring Liftoff's SSSE3 `PSHUFB`: it assembles both output qwords from
+   byte selections before writing either input Cell. Dynamic indices are
+   masked to 0..15 before any host load, then a conditional move zeros invalid
+   lanes. Two fixed eight-byte native loops keep swizzle's emitted size within
+   the existing module reservation: fully unrolled byte selection could cause
+   installation refusals in dense bodies. Native-entry tests cover functions
+   with 128 and 1,024 swizzles without increasing the code-cache budget.
+   Both targets keep the [Core deterministic relaxed-swizzle profile](https://webassembly.github.io/spec/core/exec/numerics.html#op-ivrelaxed-swizzle)
+   already used by Sarcasm. Tests cover every source/destination byte and every
+   byte value/index, live neighbors, and unreachable 16-byte shuffle immediates.
    This follows the existing [Liftoff](https://v8.dev/blog/liftoff) /
    [Wizard-SPC](https://arxiv.org/abs/2305.13241) typed-stack design and
    [Core value and vector semantics](https://webassembly.github.io/spec/core/exec/instructions.html).
@@ -1705,7 +1717,7 @@ useful:
    an unsupported lane operation. `tools/wasm_bench.zig` covers inline vector
    addition and vector-valued calls with checked high-lane checksums.
    The rest of the v128 lane-op
-   surface (the other arithmetic/convert/shuffle and relaxed families) is the
+   surface (conversions and the remaining relaxed families) is the
    remaining frontier, along with the side-table-as-control-oracle wiring (§6)
    that would make multi-target `br_table` cheap.
 5. **Ohaimark** — the ADR plus bytecode/feedback/SSA, initial specialization,

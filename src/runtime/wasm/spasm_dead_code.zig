@@ -261,14 +261,14 @@ fn skipMiscImmediate(body: []const u8, index: *usize) ?void {
 fn skipSimdImmediate(body: []const u8, index: *usize) ?void {
     const sub = readUleb32(body, index) orelse return null;
     switch (sub) {
-        12 => skipBytes(body, index, 16) orelse return null, // v128.const
+        12, 13 => skipBytes(body, index, 16) orelse return null, // v128.const / shuffle selectors
         21...34 => skipBytes(body, index, 1) orelse return null, // extract/replace_lane
         0...11, 92, 93 => skipMemArg(body, index) orelse return null, // vector loads/store
         84...91 => {
             skipMemArg(body, index) orelse return null;
             skipBytes(body, index, 1) orelse return null; // lane index
         },
-        15...20, 77...83, 98 => {}, // splats / bitwise / any_true / popcnt
+        14...20, 77...83, 98, 256 => {}, // swizzles / splats / bitwise / any_true / popcnt
         else => if (simd.reductionOp(sub) == null and simd.integerMinMaxOp(sub) == null and
             simd.integerUnaryOp(sub) == null and simd.roundingAverageWidth(sub) == null and
             simd.floatMinMaxOp(sub) == null and simd.comparisonOp(sub) == null and

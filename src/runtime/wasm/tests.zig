@@ -3608,6 +3608,157 @@ test "wasm spasm: SIMD float arithmetic skips unreachable code" {
     }
 }
 
+fn buildSimdPermutationFunc(a: std.mem.Allocator, sub: u32, selectors: [16]u8, dead: bool) ![]const u8 {
+    var body: List = .empty;
+    try body.appendSlice(a, &.{ 1, 32, 0x7f, 0x20, 0, 0x20, 1 });
+    if (dead) try body.appendSlice(a, &.{ 0x02, 0x7b, 0x20, 2, 0x0c, 0 });
+    try body.appendSlice(a, &.{ 0x20, 2, 0x20, 3, 0xfd });
+    try uleb(a, &body, sub);
+    if (sub == 13) try body.appendSlice(a, &selectors);
+    if (dead) try body.append(a, 0x0b);
+    try body.append(a, 0x0b);
+    return buildFunc(a, &.{ 0x7e, 0x7b, 0x7b, 0x7b }, &.{ 0x7e, 0x7b, 0x7b }, body.items, "permute");
+}
+
+fn expectSimdPermutation(instance: *interp.Instance, sub: u32, selectors: [16]u8, left: [16]u8, right: [16]u8, native: bool) !void {
+    var expected: [16]u8 = undefined;
+    for (0..16) |lane| {
+        const index = if (sub == 13) selectors[lane] else right[lane];
+        expected[lane] = if (index < 16) left[index] else if (sub == 13) right[index - 16] else 0;
+    }
+    const before = instance.spasm_runs;
+    const result = try interp.invoke(instance, testing.allocator, 0, &.{ 37, simd_live_vector, @bitCast(left), @bitCast(right) });
+    defer testing.allocator.free(result);
+    try testing.expectEqualSlices(u128, &.{ 37, simd_live_vector, @bitCast(expected) }, result);
+    try testing.expectEqual(before + @intFromBool(native), instance.spasm_runs);
+}
+
+test "wasm spasm: SIMD permutation shuffle covers every source and destination byte" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (0..32) |base| {
+        for ([_]bool{ false, true }) |broadcast| {
+            var selectors: [16]u8 = undefined;
+            for (&selectors, 0..) |*index, lane| index.* = @intCast((base + (if (broadcast) @as(usize, 0) else 31 - lane)) % 32);
+            const module = try wasm.decode(a, try buildSimdPermutationFunc(a, 13, selectors, false));
+            var instance: interp.Instance = undefined;
+            try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+            defer instance.deinit();
+            instance.spasm_enabled = true;
+            for (0..256) |seed| {
+                var left: [16]u8 = undefined;
+                var right: [16]u8 = undefined;
+                for (0..16) |lane| {
+                    left[lane] = @truncate(seed + lane * 17);
+                    right[lane] = @truncate(seed + 113 + lane * 23);
+                }
+                try expectSimdPermutation(&instance, 13, selectors, left, right, true);
+            }
+            try testing.expectEqual(@as(u32, 1), instance.spasm_compiles);
+        }
+    }
+}
+
+test "wasm spasm: SIMD permutation swizzles exhaust byte values and indices" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_]u32{ 14, 256 }) |sub| {
+        const module = try wasm.decode(a, try buildSimdPermutationFunc(a, sub, @splat(0), false));
+        var instance: interp.Instance = undefined;
+        try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+        defer instance.deinit();
+        instance.spasm_enabled = true;
+        for (0..256) |seed| {
+            for (0..256) |base| {
+                var left: [16]u8 = undefined;
+                var right: [16]u8 = undefined;
+                for (0..16) |lane| {
+                    left[lane] = @truncate(seed + lane * 17);
+                    right[lane] = @truncate(base + lane * 29);
+                }
+                try expectSimdPermutation(&instance, sub, @splat(0), left, right, true);
+            }
+        }
+        try testing.expectEqual(@as(u32, 1), instance.spasm_compiles);
+    }
+}
+
+test "wasm spasm: SIMD permutation dense swizzles fit the native code reservation" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_]usize{ 128, 1024 }) |repetitions| {
+        for ([_]u32{ 14, 256 }) |sub| {
+            var body: List = .empty;
+            try body.appendSlice(a, &.{ 1, 32, 0x7f, 0x20, 0, 0x20, 1, 0x20, 2 });
+            for (0..repetitions) |_| {
+                try body.appendSlice(a, &.{ 0x20, 3, 0xfd });
+                try uleb(a, &body, sub);
+            }
+            try body.append(a, 0x0b);
+            const module = try wasm.decode(a, try buildFunc(a, &.{ 0x7e, 0x7b, 0x7b, 0x7b }, &.{ 0x7e, 0x7b, 0x7b }, body.items, "dense"));
+            var instance: interp.Instance = undefined;
+            try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+            defer instance.deinit();
+            instance.spasm_enabled = true;
+            const identity: u128 = 0x0f0e0d0c0b0a09080706050403020100;
+            for ([_]u128{ identity, std.math.maxInt(u128) }, [_]u128{ simd_live_vector, 0 }) |indices, expected| {
+                const before = instance.spasm_runs;
+                const result = try interp.invoke(&instance, testing.allocator, 0, &.{ 37, ~simd_live_vector, simd_live_vector, indices });
+                defer testing.allocator.free(result);
+                try testing.expectEqualSlices(u128, &.{ 37, ~simd_live_vector, expected }, result);
+                try testing.expectEqual(@import("spasm.zig").RefusalStage.none, instance.spasm_last_refusal_stage);
+                try testing.expectEqual(@as(u32, 0), instance.spasm_refusals);
+                try testing.expectEqual(before + 1, instance.spasm_runs);
+            }
+            try testing.expectEqual(@as(u32, 1), instance.spasm_compiles);
+        }
+    }
+}
+
+test "wasm interpreter: SIMD permutation relaxed swizzle keeps deterministic invalid lanes" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_]u32{ 14, 256 }) |sub| {
+        const module = try wasm.decode(a, try buildSimdPermutationFunc(a, sub, @splat(0), false));
+        var instance: interp.Instance = undefined;
+        try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+        defer instance.deinit();
+        instance.spasm_enabled = false;
+        for (0..256) |base| {
+            var indices: [16]u8 = undefined;
+            for (&indices, 0..) |*index, lane| index.* = @truncate(base + lane * 29);
+            try expectSimdPermutation(&instance, sub, @splat(0), @bitCast(simd_live_vector), indices, false);
+        }
+    }
+}
+
+test "wasm spasm: SIMD permutation skips shuffle immediates and unreachable swizzles" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // Includes control-opcode bytes: none may be interpreted as dead code.
+    const selectors = [16]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 30, 31 };
+    for ([_]u32{ 13, 14, 256 }) |sub| {
+        const module = try wasm.decode(a, try buildSimdPermutationFunc(a, sub, selectors, true));
+        var instance: interp.Instance = undefined;
+        try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+        defer instance.deinit();
+        instance.spasm_enabled = true;
+        const result = try interp.invoke(&instance, testing.allocator, 0, &.{ 37, simd_live_vector, ~simd_live_vector, 0 });
+        defer testing.allocator.free(result);
+        try testing.expectEqualSlices(u128, &.{ 37, simd_live_vector, ~simd_live_vector }, result);
+        try testing.expectEqual(@as(u32, 1), instance.spasm_runs);
+    }
+}
+
 const SimdFloatSelection = struct {
     sub: u32,
     double_precision: bool,
@@ -4564,14 +4715,12 @@ test "wasm spasm: SIMD constant replacement survives branches and dead lane imme
     try testing.expectEqual(@as(u32, 1), instance.spasm_runs);
 }
 
-test "wasm spasm: SIMD unsupported operations report the exact prefix and subopcode" {
+test "wasm spasm: SIMD permutation swizzle clears refusal diagnostics" {
     if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    // i8x16.swizzle remains interpreted, but must be counted as SIMD, not
-    // mistaken for a signature refusal or a failure to install native code.
-    const bytes = try buildFunc(a, &.{ 0x7b, 0x7b }, &.{0x7b}, &.{ 0, 0x20, 0, 0x20, 1, 0xfd, 14, 0x0b }, "fallback");
+    const bytes = try buildFunc(a, &.{ 0x7b, 0x7b }, &.{0x7b}, &.{ 0, 0x20, 0, 0x20, 1, 0xfd, 14, 0x0b }, "swizzle");
     const module = try wasm.decode(a, bytes);
     var instance: interp.Instance = undefined;
     try interp.instantiate(&instance, a, testing.allocator, &module, .{});
@@ -4581,12 +4730,11 @@ test "wasm spasm: SIMD unsupported operations report the exact prefix and subopc
     const result = try interp.invoke(&instance, testing.allocator, 0, &.{ 0, 0 });
     defer testing.allocator.free(result);
     try testing.expectEqual(@as(u128, 0), result[0]);
-    try testing.expectEqual(@as(u32, 1), instance.spasm_refusals);
-    try testing.expectEqual(@import("spasm.zig").RefusalStage.unsupported_opcode, instance.spasm_last_refusal_stage);
-    try testing.expectEqual(@as(u8, 0xfd), instance.spasm_last_refused_opcode);
-    try testing.expect(instance.spasm_last_refusal_has_subopcode);
-    try testing.expectEqual(@as(u32, 14), instance.spasm_last_refused_subopcode);
-    try testing.expectEqual(@as(u32, 1), instance.spasm_refused_simd_subopcodes[14]);
+    try testing.expectEqual(@as(u32, 1), instance.spasm_runs);
+    try testing.expectEqual(@as(u32, 0), instance.spasm_refusals);
+    try testing.expectEqual(@import("spasm.zig").RefusalStage.none, instance.spasm_last_refusal_stage);
+    try testing.expect(!instance.spasm_last_refusal_has_subopcode);
+    try testing.expectEqual(@as(u32, 0), instance.spasm_refused_simd_subopcodes[14]);
     try testing.expectEqual(@as(u32, 0), instance.spasm_refused_vector_signatures);
 }
 

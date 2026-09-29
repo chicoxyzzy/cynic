@@ -37,7 +37,7 @@ zeros. The score below is unchanged under these stricter checks.
 
 The forced-Spasm differential posture (`--spasm`) produces this exact score on
 both qualified code-generation targets: native AArch64 and x86_64-macos under
-Rosetta (2026-09-29). Gating runs add `--require-spasm-entry`; focused target
+Rosetta (2026-09-30). Gating runs add `--require-spasm-entry`; focused target
 tests additionally require generated x86 instance/cache, trap, safe-point,
 self-link, and stable-gate execution. Unsupported x86 opcode families fall
 back per function and therefore remain covered by the same semantic sweep.
@@ -53,13 +53,14 @@ integer add/sub/mul, 8/16-bit saturating add/sub, all integer shifts, byte popco
 floating `abs/neg/sqrt/add/sub/mul/div` at both lane widths, and all
 signed/unsigned narrowing, low/high extension, pairwise extended sums,
 all 12 extended multiplications, signed halfword dot products, Q15 products,
-and floating rounding plus pseudo-min/max at both lane widths;
+floating rounding plus pseudo-min/max at both lane widths,
+byte shuffle, strict swizzle, and relaxed swizzle;
 other SIMD instructions still fall back.
 
 | target | native entries | compiled functions | refusals |
 |---|---:|---:|---:|
-| x86_64-macos (Rosetta) | 144,407 | 5,439 | 544 |
-| AArch64-macos | 149,974 | 5,413 | 570 |
+| x86_64-macos (Rosetta) | 144,448 | 5,459 | 524 |
+| AArch64-macos | 150,015 | 5,433 | 550 |
 
 The SIMD foundation added 249 compiled functions on x86_64 and 26 on AArch64
 over the reference-parity checkpoint. The bounded AArch64 code-reservation
@@ -93,11 +94,14 @@ checks enabled when both signed-minimum products sum to 2^31.
 Floating rounding and pseudo-min/max add 12 compiled functions and 8,096
 native entries per target, removing 12 more SIMD refusals. Shared rounding
 also quiets signaling NaNs explicitly, fixing an x86 interpreter/helper gap.
+Byte shuffle and strict/relaxed swizzle add 20 compiled functions and 41
+native entries per target, removing another 20 SIMD refusals. Both targets
+zero invalid swizzle indices; x86 retains the SSE2 baseline without helpers.
 These are coverage counts, not speedups.
 
-- x86: 8 limits, 0 signatures, 397 bytecode shapes, 139 unsupported opcodes,
+- x86: 8 limits, 0 signatures, 397 bytecode shapes, 119 unsupported opcodes,
   0 emission failures, and 0 installation refusals.
-- AArch64: 8 limits, 0 signatures, 335 bytecode shapes, 227 unsupported
+- AArch64: 8 limits, 0 signatures, 335 bytecode shapes, 207 unsupported
   opcodes, 0 emission failures, and 0 installation refusals. Reusing x86's
   module-sized reservation removes all 99 installation refusals from the
   previous fixed 64 KiB arena. Both targets retain the 64 KiB minimum and
@@ -105,24 +109,24 @@ These are coverage counts, not speedups.
   back to Sarcasm if reservation or installation is refused.
 
 The x86 vector-signature bucket falls from 1,349 to zero, but many functions
-then encounter unsupported instructions: both targets record 68 refusals
-at `0xfd`. The largest reported subopcode groups are `i8x16.shuffle` (13: 11),
-`i8x16.swizzle` (14: 7), `f32x4.convert_i32x4_s` (250: 4),
-`i32x4.trunc_sat_f32x4_s` (248: 3), and `f32x4.convert_i32x4_u` (251: 3).
+then encounter unsupported instructions: both targets record 48 refusals
+at `0xfd`. The largest reported subopcode groups are
+`f32x4.convert_i32x4_s` (250: 4), `i32x4.trunc_sat_f32x4_s` (248: 3),
+`f32x4.convert_i32x4_u` (251: 3), `f32x4.relaxed_madd` (261: 3),
+and `f32x4.relaxed_nmadd` (262: 2).
 Counts classify the first refusal per attempted function, not every operation
 it contains. Both sweeps also report 7 overflows of the compact per-instance
 top-level opcode table; the fixed subopcode counters are tracked separately.
 
 The source inventory accounts for all 256 SIMD opcodes accepted by the
-validator: 224 have lowering paths on both targets; 32 still need them.
+validator: 227 have lowering paths on both targets; 29 still need them.
 This is an opcode count, not the first-refusal-per-function count above.
 Existing nonzero-memory and control-shape fallback restrictions still apply.
 
 | Remaining family | Opcodes |
 |---|---:|
-| Shuffle / swizzle | 2 |
 | Conversions | 10 |
-| Relaxed SIMD | 20 |
+| Relaxed SIMD (except swizzle) | 19 |
 
 Both backends still refuse native table64 operations while their helpers use
 u32 indices, preventing truncation above 2^32. The largest remaining `0xfc` groups are
