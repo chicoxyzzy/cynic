@@ -511,6 +511,14 @@ fn rejectFromError(realm: *Realm, cap: promise_mod.PromiseCapability, err: Nativ
 fn wasmCompile(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
     const cap = try promise_mod.newPromiseCapability(realm, try promiseCtor(realm));
+    // Keep the capability alive through compilation and settlement. Custom
+    // resolve/reject callbacks can re-enter JS and collect without retaining
+    // the capability's returned object themselves.
+    const scope = try realm.heap.openScope();
+    defer scope.close();
+    try scope.push(cap.promise);
+    try scope.push(heap_mod.taggedFunction(cap.resolve));
+    try scope.push(heap_mod.taggedFunction(cap.reject));
     const result = compileToModule(realm, args) catch |err| return rejectFromError(realm, cap, err);
     return promise_mod.capabilityResolve(realm, cap, result);
 }

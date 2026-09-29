@@ -90,6 +90,37 @@ class ExecutorContract(CaseFixture, unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "enabled")
 
+    def assert_compile_capability_survives_collection(self, byte_source, expected_type):
+        # Independent callbacks do not retain the capability's returned object.
+        # Allocation-pressure safe points expose the missing native handle;
+        # explicit GC's conservative native-stack scan can mask it.
+        result = self.execute("""
+            let settled;
+            function settle(value) {
+                for (let i = 0; i < 1000; i++) { const temporary = {i}; }
+                settled = value;
+            }
+            globalThis.Promise = function (executor) {
+                executor(settle, settle);
+                return {marker: 42};
+            };
+            const result = WebAssembly.compile(new Uint8Array(BYTES));
+            if (result.marker !== 42) throw new Error('collected capability result');
+            if (!(settled instanceof EXPECTED)) throw new Error('wrong settlement');
+            print('retained');
+        """.replace("BYTES", byte_source).replace("EXPECTED", expected_type),
+            options=("--gc-threshold=1",))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "retained")
+
+    def test_compile_capability_survives_collecting_resolve(self):
+        self.assert_compile_capability_survives_collection(
+            "[0,97,115,109,1,0,0,0]", "WebAssembly.Module")
+
+    def test_compile_capability_survives_collecting_reject(self):
+        self.assert_compile_capability_survives_collection(
+            "[0]", "WebAssembly.CompileError")
+
 
 class HarnessContract(CaseFixture, unittest.TestCase):
     def completed(self, result):
