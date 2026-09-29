@@ -3101,6 +3101,128 @@ test "wasm interp: SIMD float minmax quiets signaling NaNs" {
     }
 }
 
+const simd_float_arithmetic_ops = [_]u32{ 224, 225, 227, 228, 229, 230, 231, 236, 237, 239, 240, 241, 242, 243 };
+
+fn buildSimdFloatArithmeticFunc(a: std.mem.Allocator, sub: u32, dead: bool) ![]const u8 {
+    const unary = (sub - (if (sub < 236) @as(u32, 224) else 236)) < 4;
+    var body: List = .empty;
+    try body.appendSlice(a, &.{ 1, 32, 0x7f, 0x20, 0, 0x20, 1 });
+    if (dead) try body.appendSlice(a, &.{ 0x02, 0x7b, 0x20, 2, 0x0c, 0 });
+    try body.appendSlice(a, &.{ 0x20, 2 });
+    if (!unary) try body.appendSlice(a, &.{ 0x20, 3 });
+    try body.append(a, 0xfd);
+    try uleb(a, &body, sub);
+    if (dead) try body.append(a, 0x0b);
+    try body.append(a, 0x0b);
+    return buildFunc(a, &.{ 0x7e, 0x7b, 0x7b, 0x7b }, &.{ 0x7e, 0x7b, 0x7b }, body.items, "float");
+}
+
+fn expectSimdFloatArithmeticLane(comptime U: type, sub: u32, left: U, right: U, actual: U) !void {
+    const sign: U = @as(U, 1) << (@bitSizeOf(U) - 1);
+    const exponent: U = if (U == u32) 0x7f80_0000 else 0x7ff0_0000_0000_0000;
+    const quiet: U = if (U == u32) 0x0040_0000 else 0x0008_0000_0000_0000;
+    const op = sub - (if (U == u32) @as(u32, 224) else 236);
+    if (op == 0 or op == 1) {
+        // abs/neg are bit operations, including on signaling NaNs.
+        try testing.expectEqual(if (op == 0) left & ~sign else left ^ sign, actual);
+        return;
+    }
+    const F = if (U == u32) f32 else f64;
+    const lhs: F = @bitCast(left);
+    const rhs: F = @bitCast(right);
+    const expected: F = switch (op) {
+        3 => @sqrt(lhs),
+        4 => lhs + rhs,
+        5 => lhs - rhs,
+        6 => lhs * rhs,
+        7 => lhs / rhs,
+        else => unreachable,
+    };
+    if (std.math.isNan(expected)) {
+        if ((left & ~sign) > exponent or (op != 3 and (right & ~sign) > exponent)) {
+            try expectFloatMinMaxLane(U, left, if (op == 3) 0 else right, actual, false);
+        } else {
+            // Invalid arithmetic without NaN inputs produces a canonical NaN.
+            try testing.expectEqual(exponent | quiet, actual & ~sign);
+        }
+    } else try testing.expectEqual(@as(U, @bitCast(expected)), actual);
+}
+
+fn testSimdFloatArithmetic(comptime U: type) !void {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const sign: U = @as(U, 1) << (@bitSizeOf(U) - 1);
+    const exponent: U = if (U == u32) 0x7f80_0000 else 0x7ff0_0000_0000_0000;
+    const quiet: U = if (U == u32) 0x0040_0000 else 0x0008_0000_0000_0000;
+    const one: U = if (U == u32) 0x3f80_0000 else 0x3ff0_0000_0000_0000;
+    const values = [_]U{
+        0,               sign,                1,                sign | 1,                quiet * 2 - 1,        sign | (quiet * 2 - 1),
+        quiet * 2,       sign | (quiet * 2),  one - 1,          one,                     one + 1,              sign | one,
+        one + quiet * 2, one - quiet * 2,     one + quiet * 4,  one + quiet * 3,         exponent - 1,         sign | (exponent - 1),
+        exponent,        sign | exponent,     exponent | quiet, sign | exponent | quiet, exponent | quiet | 1, sign | exponent | quiet | 0x123,
+        exponent | 1,    sign | exponent | 1,
+    };
+    for (simd_float_arithmetic_ops) |sub| {
+        if ((sub < 236) != (U == u32)) continue;
+        const module = try wasm.decode(a, try buildSimdFloatArithmeticFunc(a, sub, false));
+        var instance: interp.Instance = undefined;
+        try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+        defer instance.deinit();
+        instance.spasm_enabled = true;
+        for (0..values.len) |li| {
+            for (0..values.len) |ri| {
+                var left: u128 = 0;
+                var right: u128 = 0;
+                for (0..128 / @bitSizeOf(U)) |lane| {
+                    const shift: u7 = @intCast(lane * @bitSizeOf(U));
+                    left |= @as(u128, values[(li + lane * 3) % values.len]) << shift;
+                    right |= @as(u128, values[(ri + lane * 5) % values.len]) << shift;
+                }
+                const before = instance.spasm_runs;
+                const result = try interp.invoke(&instance, testing.allocator, 0, &.{ 37, simd_live_vector, left, right });
+                defer testing.allocator.free(result);
+                try testing.expectEqual(@as(usize, 3), result.len);
+                try testing.expectEqual(@as(u128, 37), result[0]);
+                try testing.expectEqual(simd_live_vector, result[1]);
+                for (0..128 / @bitSizeOf(U)) |lane| {
+                    const shift: u7 = @intCast(lane * @bitSizeOf(U));
+                    try expectSimdFloatArithmeticLane(U, sub, @truncate(left >> shift), @truncate(right >> shift), @truncate(result[2] >> shift));
+                }
+                try testing.expectEqual(before + 1, instance.spasm_runs);
+            }
+        }
+        try testing.expectEqual(@as(u32, 1), instance.spasm_compiles);
+    }
+}
+
+test "wasm spasm: SIMD float arithmetic f32 preserves IEEE results and live lanes" {
+    try testSimdFloatArithmetic(u32);
+}
+
+test "wasm spasm: SIMD float arithmetic f64 preserves IEEE results and live lanes" {
+    try testSimdFloatArithmetic(u64);
+}
+
+test "wasm spasm: SIMD float arithmetic skips unreachable code" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (simd_float_arithmetic_ops) |sub| {
+        const module = try wasm.decode(a, try buildSimdFloatArithmeticFunc(a, sub, true));
+        var instance: interp.Instance = undefined;
+        try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+        defer instance.deinit();
+        instance.spasm_enabled = true;
+        const result = try interp.invoke(&instance, testing.allocator, 0, &.{ 37, simd_live_vector, ~simd_live_vector, 0 });
+        defer testing.allocator.free(result);
+        try testing.expectEqualSlices(u128, &.{ 37, simd_live_vector, ~simd_live_vector }, result);
+        try testing.expectEqual(@as(u32, 1), instance.spasm_runs);
+    }
+}
+
 const SimdIntegerCase = struct { sub: u32, bits: usize, op: enum { abs, neg, average, popcnt, add, sub, mul, add_sat_s, add_sat_u, sub_sat_s, sub_sat_u } };
 const simd_integer_cases = [_]SimdIntegerCase{
     .{ .sub = 96, .bits = 8, .op = .abs },

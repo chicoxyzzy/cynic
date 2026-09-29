@@ -698,6 +698,9 @@ the measured design space:
   Wrapping add/sub/mul, saturating 8/16-bit add/sub, all integer shifts,
   and byte popcount compile on both targets. Counts are masked to the lane
   width; x86 retains SSE2 through packed/scalar sequences where necessary.
+  Both floating lane widths also compile `abs/neg/sqrt` and `add/sub/mul/div`:
+  direct NEON or packed SSE/SSE2 arithmetic, with bit-preserving sign masks
+  for abs/neg on x86.
   Floating-point min/max for `f32x4` and `f64x2` use NaN-propagating NEON
   operations or SSE2 sequences that handle both signed-zero orders and
   canonicalize NaNs. Focused tests enforce quiet/canonical NaN rules and

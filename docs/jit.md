@@ -1651,6 +1651,15 @@ useful:
    and check every shift count through 127 plus large unsigned counts with
    live scalar/vector neighbors. Fallback tests exceed the native operand
    limit so further SIMD additions cannot silently remove their coverage.
+   Both floating lane widths now compile `abs/neg/sqrt` and `add/sub/mul/div`.
+   Like Liftoff's ARM64 and x64 lowerings linked above, ARM uses direct NEON
+   operations; x86 uses packed SSE/SSE2 arithmetic and sign masks for abs/neg.
+   [Core floating-point semantics](https://webassembly.github.io/spec/core/exec/numerics.html)
+   distinguish the sign-bit operations, which retain signaling NaN payloads,
+   from arithmetic, which returns a quiet NaN. Tests require exact sign bits
+   and finite results, canonical NaNs where mandated, and arithmetic NaNs
+   otherwise, including zero divisors, negative square roots, infinities,
+   subnormals, underflow/overflow, mixed lanes, and unreachable-code scanning.
    This follows the existing [Liftoff](https://v8.dev/blog/liftoff) /
    [Wizard-SPC](https://arxiv.org/abs/2305.13241) typed-stack design and
    [Core value and vector semantics](https://webassembly.github.io/spec/core/exec/instructions.html).

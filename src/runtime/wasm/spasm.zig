@@ -3602,6 +3602,32 @@ fn compileAarch64(
                     try m.emit(a64.strQImm(.x0, .x0, target));
                     sp -= 1;
                     stack[sp - 1] = .v128;
+                } else if (simd.floatArithmeticOp(sub)) |arithmetic| {
+                    const consumed: usize = if (arithmetic.isUnary()) 1 else 2;
+                    if (sp < consumed) return null;
+                    for (stack[sp - consumed .. sp]) |operand| if (operand != .v128) return null;
+                    const target = refSlotOff(num_locals, sp - consumed);
+                    try m.emit(a64.ldrQImm(.x0, .x0, target));
+                    if (arithmetic.isUnary()) {
+                        try m.emit(a64.unaryFloatV128(.x0, .x0, arithmetic.double_precision, switch (arithmetic.kind) {
+                            .abs => .abs,
+                            .neg => .neg,
+                            .sqrt => .sqrt,
+                            else => return null,
+                        }));
+                    } else {
+                        try m.emit(a64.ldrQImm(.x1, .x0, refSlotOff(num_locals, sp - 1)));
+                        try m.emit(a64.arithmeticFloatV128(.x0, .x0, .x1, arithmetic.double_precision, switch (arithmetic.kind) {
+                            .add => .add,
+                            .sub => .sub,
+                            .mul => .mul,
+                            .div => .div,
+                            else => return null,
+                        }));
+                    }
+                    try m.emit(a64.strQImm(.x0, .x0, target));
+                    sp -= consumed - 1;
+                    stack[sp - 1] = .v128;
                 } else if (simd.floatMinMaxOp(sub)) |minmax| {
                     if (sp < 2 or stack[sp - 2] != .v128 or stack[sp - 1] != .v128) return null;
                     const target = refSlotOff(num_locals, sp - 2);
