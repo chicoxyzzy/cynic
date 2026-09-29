@@ -42,18 +42,21 @@ select, and single-result merges on both targets. Both compile
 | target | native entries | compiled functions | refusals |
 |---|---:|---:|---:|
 | x86_64-macos (Rosetta) | 120,822 | 4,257 | 1,726 |
-| AArch64-macos | 121,163 | 4,124 | 1,851 |
+| AArch64-macos | 126,389 | 4,231 | 1,752 |
 
-Compared with the reference-parity checkpoint, this adds 249 compiled
-functions on x86_64 and 26 on AArch64. These are coverage counts, not speedups.
+The SIMD foundation added 249 compiled functions on x86_64 and 26 on AArch64
+over the reference-parity checkpoint. The bounded AArch64 code-reservation
+follow-up adds another 107 compiled functions and 5,226 native entries, with
+x86 counts unchanged. These are coverage counts, not speedups.
 
 - x86: 8 limits, 0 signatures, 397 bytecode shapes, 1,321 unsupported opcodes,
   0 emission failures, and 0 installation refusals.
 - AArch64: 8 limits, 0 signatures, 335 bytecode shapes, 1,409 unsupported
-  opcodes, 0 emission failures, and 99 installation refusals. Diagnostics now
-  cover this backend too. The installation refusals exhaust its existing
-  fixed 64 KiB native-code arena; they safely fall back to Sarcasm. Its
-  reservation policy is unchanged by this milestone.
+  opcodes, 0 emission failures, and 0 installation refusals. Reusing x86's
+  module-sized reservation removes all 99 installation refusals from the
+  previous fixed 64 KiB arena. Both targets retain the 64 KiB minimum and
+  4 MiB cap, charge the entire mapping to a Realm's memory budget, and fall
+  back to Sarcasm if reservation or installation is refused.
 
 The x86 vector-signature bucket falls from 1,349 to zero, but many functions
 then encounter unsupported instructions: both targets record 1,250 refusals

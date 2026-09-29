@@ -2353,8 +2353,11 @@ and the per-builtin checklist; this section tracks status.
   plus x86 SSE2 `v128.const/load/store` and `i32x4.add`. Both targets now report
   per-SIMD-opcode refusals. The full corpus still passes, with 4,257 x86 and
   4,124 AArch64 functions compiled; vector-signature refusals are gone.
-  Native table64, remaining SIMD lane operations, AArch64's fixed native-code
-  reservation (99 capacity fallbacks now visible in diagnostics), and the
+  Sharing the bounded 64 KiB-to-4 MiB code reservation then removes all 99
+  AArch64 installation refusals: 4,231 compiled functions / 126,389 native
+  entries, with x86 counts unchanged. Realm ceilings charge the full mapping;
+  exhausted or refused allocations still fall back without relocating code.
+  Native table64, remaining SIMD lane operations, and the
   native-register/imported-call ABI remain next.
 
   The architecture for all three tiers — the shared codegen

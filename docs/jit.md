@@ -865,12 +865,21 @@ ever touches a syscall:
   forecloses either answer.
 - **Realm quota accounting:** `CodeAllocator.initMetered` accepts an optional
   live-byte ledger. Realm-backed Spasm charges each lazy per-instance mapping:
-  AArch64 retains the 64 KiB reservation; x86_64 uses a saturating module-size
-  estimate between 64 KiB and 4 MiB because its Cell-spill lowering expands
-  bodies more. Charge happens before `mmap`, rolls back if mapping fails, and
+  both AArch64 and x86_64 use a saturating module-size estimate between 64 KiB
+  and 4 MiB. The shared policy retains the conservative x86 Cell-spill estimate
+  (64 bytes per bytecode byte plus 256 per function, with 12.5% headroom).
+  Large AArch64 modules can therefore reserve more than before; a Realm that
+  cannot afford the full mapping stays in Sarcasm, even if 64 KiB would fit.
+  Charge happens before `mmap`, rolls back if mapping fails, and
   discharges only after `munmap`. A refused reservation leaves that instance
   on Sarcasm. Bare Wasm and the shared JS-tier allocator keep the ordinary
   unmetered constructor.
+  This follows the module-size/function-count estimation shape in
+  [V8's WasmCodeManager](https://chromium.googlesource.com/v8/v8/+/f67aa5ca18a419c5ea1a9613d8b3555bd056305d/src/wasm/wasm-code-manager.cc),
+  not its sizing factors or multi-region growth policy. Cynic reserves once
+  to keep published entry and call-gate addresses stable, charges the entire
+  mapping, and falls back if the bounded arena still fills. No JS API or
+  Wasm instruction semantics change; this is host resource policy.
 - **Targets without codegen:** the playground builds Cynic to
   `wasm32-freestanding` — the entire `src/runtime/jit/` directory is
   comptime-gated on native targets, and every tier-up check
@@ -1401,7 +1410,9 @@ useful:
    with no x86 emission/install failures. At that checkpoint AArch64 refusal
    diagnostics were incomplete. The SIMD foundation now records stages and
    prefix subopcodes on both backends; its 99 AArch64 installation refusals
-   exhaust the existing fixed 64 KiB code arena. The current native coverage
+   exhausted the then-fixed 64 KiB code arena. Sharing x86's bounded module-size
+   reservation removes those refusals and adds 107 AArch64 compiled functions
+   without changing x86 coverage. The current native coverage
    and refusal breakdown are in [wasm-results.md](../wasm-results.md).
    The **per-function code cache**
    now ships (`spasmEntryFor`): each emittable function compiles once on
