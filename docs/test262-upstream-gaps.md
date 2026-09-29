@@ -39,6 +39,37 @@ the corpus under the relevant section's directory before adding.
 ## Entries
 
 
+### Wasm memory growth left a stale cached buffer pointer after GC
+
+- **Fixed in:** `3ba77e56` (object identity in `33eda59e`).
+- **Spec:** Wasm JS API §4.2 and §5.3–5.5 object caches, Memory.buffer,
+  and grow; ECMA-262 §6.1.7 object identity and §25.1 ArrayBuffer detachment.
+- **Reproducer:** run with allocation-pressure GC; no strong reference keeps
+  the detached buffer alive:
+  ```js
+  const memory = new WebAssembly.Memory({initial: 1, maximum: 3});
+  (() => { memory.buffer; })();
+  memory.grow(1);
+  const noise = [];
+  for (let i = 0; i < 500; i++) noise.push(new ArrayBuffer(123));
+  if (memory.buffer.byteLength !== 131072) throw new Error('stale buffer');
+  ```
+- **Before fix:** growth detached the old buffer and removed its native GC
+  root, but retained a raw cached pointer. Collection and object-address reuse
+  made a subsequent getter return an unrelated 123-byte ArrayBuffer. Global,
+  Memory, and Table reexports also created new wrappers, losing identity and
+  attached properties or subclass prototypes.
+- **After fix:** the getter checks the live host-view registry before
+  dereferencing a cached buffer; all aliases reuse one wrapper per native
+  store address. Cache roots follow the existing Realm-owned store lifetime.
+- **Coverage:** the Wasm JS API belongs in WPT rather than test262. The pinned
+  caching fixture covers basic reexports; focused engine tests cover duplicate
+  exports, subclasses, distinct primitive-import Globals, cross-realm access,
+  cache-only collection, JS and Wasm growth under GC, and allocation-failure
+  rollback that preserves provider objects. A portable upstream growth fixture
+  would need optional GC hooks or stress execution to expose the stale pointer.
+
+
 ### Wasm function exposure lost identity and wrapper properties
 
 - **Fixed in:** `9335b14b`
