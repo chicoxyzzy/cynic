@@ -11,12 +11,12 @@
     "testharness.js (patched)": "fbe2e52e029bbeea3fecdedf963b69589526a8a1e3ceb18947120667443147f7",
     "wasm/jsapi/wasm-module-builder.js (patched)": "83a83b12adc7d51533c818b23fd37936d03a7203e7015356f9e6852b8625964d"
   },
-  "binary_sha256": "d4a32cf4672f55e9d8468ae66a7ff84bf8d5e433745302d3abd7942f3141ecbd",
+  "binary_sha256": "136c3e46e77e512127af02f99d0f13b50c2e208ce6cc423ab8300d20fb2b8d22",
   "provenance": {
-    "generated_at_utc": "2026-09-29T03:13:26Z",
+    "generated_at_utc": "2026-09-29T06:53:49Z",
     "platform": "Darwin",
     "architecture": "arm64",
-    "engine_git_head": "9335b14bf70c914c498b9f74dc8945209f78b5dd",
+    "engine_git_head": "3ba77e56b6b68005936006e3962fd4bb711f6bbb",
     "engine_git_dirty": false
   },
   "configuration": {
@@ -192,12 +192,12 @@
   "summary": {
     "files": {
       "execution_error": 2,
-      "fail": 15,
-      "pass": 23
+      "fail": 14,
+      "pass": 24
     },
     "subtests": {
-      "FAIL": 21,
-      "PASS": 575
+      "FAIL": 20,
+      "PASS": 576
     },
     "excluded_files": 40
   },
@@ -1859,12 +1859,12 @@
       "variant": ""
     },
     {
-      "status": "fail",
+      "status": "pass",
       "subtests": [
         {
           "name": "Untitled",
-          "status": 1,
-          "message": "assert_equals: expected object \"[object WebAssembly.Global]\" but got object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         }
       ],
       "harness": {

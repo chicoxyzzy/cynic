@@ -137,6 +137,12 @@ top-line score.
 
 ## History
 
+### 2026-09-29 — cynic `3ba77e56`, test262 `de8e621c`
+
+| passing | failing | total | pass% | Δ pass | elapsed |
+|---:|---:|---:|---:|---:|---:|
+| 48653 | 1324 | 49977 | 97.35 % | ±0 | 50.1 s |
+
 ### 2026-09-29 — cynic `9335b14b`, test262 `de8e621c`
 
 | passing | failing | total | pass% | Δ pass | elapsed |
