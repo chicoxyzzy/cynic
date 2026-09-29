@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const metadata = @import("spasm_metadata.zig");
+const simd = @import("spasm_simd.zig");
 const globalValType = metadata.globalValType;
 const tableIs32 = metadata.tableIs32;
 
@@ -1811,6 +1812,95 @@ pub fn compile(
                             try m.storeVector128(.r12, scratchOffset(num_locals, depth), .xmm0);
                             stack[depth] = .v128;
                         }
+                    },
+                    15...20 => {
+                        if (sp == 0) return null;
+                        const width = simd.splatWidth(sub) orelse return null;
+                        const target = scratchOffset(num_locals, sp - 1);
+                        try materialize(&m, stack[sp - 1], num_locals, sp - 1);
+                        switch (width) {
+                            1 => try m.load8Disp32(.rax, .r12, target),
+                            2 => try m.load16Disp32(.rax, .r12, target),
+                            4 => try m.load32Disp32(.rax, .r12, target),
+                            8 => try m.load64Disp32(.rax, .r12, target),
+                            else => return null,
+                        }
+                        var shift: u8 = @as(u8, width) * 8;
+                        while (shift < 64) : (shift *= 2) {
+                            try m.movReg64(.rcx, .rax);
+                            try m.shlImm8(.rcx, shift);
+                            try m.orReg64(.rax, .rcx);
+                        }
+                        try m.store64Disp32(.r12, target, .rax);
+                        try m.store64Disp32(.r12, target + 8, .rax);
+                        stack[sp - 1] = .v128;
+                    },
+                    21...34 => {
+                        const lane_op = simd.laneOp(sub) orelse return null;
+                        if (i >= body.len or body[i] >= @as(u8, 16) / lane_op.width) return null;
+                        const lane = body[i];
+                        i += 1;
+                        const consumed: usize = if (lane_op.replace) 2 else 1;
+                        if (sp < consumed or stack[sp - consumed] != .v128) return null;
+                        const depth = sp - consumed;
+                        const target = scratchOffset(num_locals, depth);
+                        const offset = target + @as(i32, lane) * lane_op.width;
+                        if (lane_op.replace) {
+                            try materialize(&m, stack[sp - 1], num_locals, sp - 1);
+                            try m.load64Disp32(.rax, .r12, scratchOffset(num_locals, sp - 1));
+                            switch (lane_op.width) {
+                                1 => try m.store8Disp32(.r12, offset, .rax),
+                                2 => try m.store16Disp32(.r12, offset, .rax),
+                                4 => try m.store32Disp32(.r12, offset, .rax),
+                                8 => try m.store64Disp32(.r12, offset, .rax),
+                                else => return null,
+                            }
+                            sp -= 1;
+                        } else {
+                            switch (lane_op.width) {
+                                1 => if (lane_op.signed) try m.load8Signed32Disp32(.rax, .r12, offset) else try m.load8Disp32(.rax, .r12, offset),
+                                2 => if (lane_op.signed) try m.load16Signed32Disp32(.rax, .r12, offset) else try m.load16Disp32(.rax, .r12, offset),
+                                4 => try m.load32Disp32(.rax, .r12, offset),
+                                8 => try m.load64Disp32(.rax, .r12, offset),
+                                else => return null,
+                            }
+                            try m.store64Disp32(.r12, target, .rax);
+                            stack[depth] = .runtime;
+                        }
+                    },
+                    77...82 => {
+                        const consumed: usize = if (sub == 77) 1 else if (sub == 82) 3 else 2;
+                        if (sp < consumed) return null;
+                        const depth = sp - consumed;
+                        for (stack[depth..sp]) |operand| if (operand != .v128) return null;
+                        const target = scratchOffset(num_locals, depth);
+                        for ([_]i32{ 0, 8 }) |half| {
+                            try m.load64Disp32(.rax, .r12, target + half);
+                            if (sub == 77)
+                                try m.movImm64(.rcx, std.math.maxInt(u64))
+                            else
+                                try m.load64Disp32(.rcx, .r12, scratchOffset(num_locals, depth + 1) + half);
+                            switch (sub) {
+                                77, 81 => try m.xorReg64(.rax, .rcx),
+                                78 => try m.andReg64(.rax, .rcx),
+                                79 => {
+                                    try m.movImm64(.rdx, std.math.maxInt(u64));
+                                    try m.xorReg64(.rcx, .rdx);
+                                    try m.andReg64(.rax, .rcx);
+                                },
+                                80 => try m.orReg64(.rax, .rcx),
+                                82 => {
+                                    try m.load64Disp32(.rdx, .r12, scratchOffset(num_locals, depth + 2) + half);
+                                    try m.xorReg64(.rax, .rcx);
+                                    try m.andReg64(.rax, .rdx);
+                                    try m.xorReg64(.rax, .rcx);
+                                },
+                                else => return null,
+                            }
+                            try m.store64Disp32(.r12, target + half, .rax);
+                        }
+                        sp = depth + 1;
+                        stack[depth] = .v128;
                     },
                     84...91 => {
                         const memory64 = memoryIs64(module, 0) orelse return null;

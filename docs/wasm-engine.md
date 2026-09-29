@@ -579,6 +579,9 @@ the measured design space:
   bytes and preserving the other vector lanes. `v128.any_true` checks both
   64-bit halves. These paths reuse scalar moves and existing Cell storage;
   x86 stays at SSE2 without lane-insertion/extraction ISA extensions.
+  Scalar splats, every extract/replace-lane variant, and vector
+  not/and/andnot/or/xor/bitselect also compile, preserving raw floating bits
+  and signed/unsigned integer extraction through shared lane metadata.
   Table64 operations (the helper ABI still uses u32
   indices), the remaining SIMD operations, and other unsupported x86
   bodies refuse before

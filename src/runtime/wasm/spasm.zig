@@ -32,6 +32,7 @@ const masm_mod = @import("../jit/masm.zig");
 const a64 = @import("../jit/asm_aarch64.zig");
 const dead_code = @import("spasm_dead_code.zig");
 const metadata = @import("spasm_metadata.zig");
+const simd = @import("spasm_simd.zig");
 const globalValType = metadata.globalValType;
 const tableIs32 = metadata.tableIs32;
 const spasm_x86_64 = @import("spasm_x86_64.zig");
@@ -590,7 +591,7 @@ const op_f64_reinterpret_i64: u8 = 0xbf;
 const op_misc_prefix: u8 = 0xfc;
 // §4.4 SIMD — the 0xFD prefix introduces a second opcode byte (a varuint32),
 // distinct from the 0xFC misc prefix. The baseline compiles the v128 data
-// path (const / load / store / lane memory), any_true, and i32x4.add;
+// path, scalar lanes, bitwise operations, any_true, and i32x4.add;
 // every other sub-opcode degrades to the interpreter.
 const op_simd_prefix: u8 = 0xfd;
 // §4.4 SIMD sub-opcodes (after the 0xFD prefix, varuint32-encoded).
@@ -3351,7 +3352,7 @@ fn compileAarch64(
             },
             op_simd_prefix => {
                 // §4.4 SIMD — the 0xFD prefix. The baseline compiles the v128
-                // data path, lane memory, any_true, and i32x4.add. A v128 is
+                // data path, scalar lanes, bitwise ops, any_true, and i32x4.add. A v128 is
                 // exactly one `Cell`, so it reuses the depth-keyed cell storage
                 // the runtime references use (the `.v128` Loc + `refSlotOff`):
                 // const/load/store/add move the 128-bit cell with GP halves or
@@ -3419,6 +3420,89 @@ fn compileAarch64(
                     try m.emit(a64.ldrImm(.x17, .x0, src + 8));
                     try m.emit(a64.strReg(.x17, .x2, .x16));
                     sp -= 2;
+                } else if (simd.splatWidth(sub)) |width| {
+                    if (sp == 0) return null;
+                    const source = try materialize(&m, stack[sp - 1], sp - 1);
+                    if (width == 8) {
+                        try m.emit(a64.movReg(.x16, source));
+                    } else if (width == 4) {
+                        try m.emit(a64.movRegW(.x16, source));
+                    } else {
+                        try m.movImm64(.x17, (@as(u64, 1) << @as(u6, @intCast(@as(u8, width) * 8))) - 1);
+                        try m.emit(a64.andReg(.x16, source, .x17));
+                    }
+                    // Repeat the raw lane bits within one half, then copy both
+                    // halves. Float splats must not quiet NaNs or change -0.
+                    var shift: u8 = @as(u8, width) * 8;
+                    while (shift < 64) : (shift *= 2) {
+                        try m.emit(a64.lslImm(.x17, .x16, @intCast(shift)));
+                        try m.emit(a64.orrReg(.x16, .x16, .x17));
+                    }
+                    const target = refSlotOff(num_locals, sp - 1);
+                    try m.emit(a64.strImm(.x16, .x0, target));
+                    try m.emit(a64.strImm(.x16, .x0, target + 8));
+                    stack[sp - 1] = .v128;
+                } else if (simd.laneOp(sub)) |lane_op| {
+                    if (i >= body.len or body[i] >= @as(u8, 16) / lane_op.width) return null;
+                    const lane = body[i];
+                    i += 1;
+                    const consumed: usize = if (lane_op.replace) 2 else 1;
+                    if (sp < consumed or stack[sp - consumed] != .v128) return null;
+                    const depth = sp - consumed;
+                    const offset = @as(u32, refSlotOff(num_locals, depth)) + @as(u32, lane) * lane_op.width;
+                    try m.movImm64(.x16, offset);
+                    if (lane_op.replace) {
+                        const source = try materialize(&m, stack[sp - 1], sp - 1);
+                        try m.emit(switch (lane_op.width) {
+                            1 => a64.strbRegW(source, .x0, .x16),
+                            2 => a64.strhRegW(source, .x0, .x16),
+                            4 => a64.strRegW(source, .x0, .x16),
+                            8 => a64.strReg(source, .x0, .x16),
+                            else => return null,
+                        });
+                        sp -= 1;
+                    } else {
+                        const result = regForDepth(depth);
+                        try m.emit(switch (lane_op.width) {
+                            1 => a64.ldrbRegW(result, .x0, .x16),
+                            2 => a64.ldrhRegW(result, .x0, .x16),
+                            4 => a64.ldrRegW(result, .x0, .x16),
+                            8 => a64.ldrReg(result, .x0, .x16),
+                            else => return null,
+                        });
+                        if (lane_op.signed) try m.emit(if (lane_op.width == 1) a64.sxtbW(result, result) else a64.sxthW(result, result));
+                        stack[depth] = .{ .reg = result };
+                    }
+                } else if (sub >= 77 and sub <= 82) {
+                    const consumed: usize = if (sub == 77) 1 else if (sub == 82) 3 else 2;
+                    if (sp < consumed) return null;
+                    const depth = sp - consumed;
+                    for (stack[depth..sp]) |operand| if (operand != .v128) return null;
+                    const target = refSlotOff(num_locals, depth);
+                    for ([_]u15{ 0, 8 }) |half| {
+                        try m.emit(a64.ldrImm(.x16, .x0, target + half));
+                        if (sub == 77)
+                            try m.movImm64(.x17, std.math.maxInt(u64))
+                        else
+                            try m.emit(a64.ldrImm(.x17, .x0, refSlotOff(num_locals, depth + 1) + half));
+                        switch (sub) {
+                            77, 81 => try m.emit(a64.eorReg(.x16, .x16, .x17)),
+                            78 => try m.emit(a64.andReg(.x16, .x16, .x17)),
+                            79 => try m.emit(a64.bicReg(.x16, .x16, .x17)),
+                            80 => try m.emit(a64.orrReg(.x16, .x16, .x17)),
+                            82 => {
+                                try m.emit(a64.ldrImm(.x5, .x0, refSlotOff(num_locals, depth + 2) + half));
+                                // b ^ ((a ^ b) & mask) selects a for each set bit.
+                                try m.emit(a64.eorReg(.x16, .x16, .x17));
+                                try m.emit(a64.andReg(.x16, .x16, .x5));
+                                try m.emit(a64.eorReg(.x16, .x16, .x17));
+                            },
+                            else => return null,
+                        }
+                        try m.emit(a64.strImm(.x16, .x0, target + half));
+                    }
+                    sp = depth + 1;
+                    stack[depth] = .v128;
                 } else if (sub >= simd_v128_load8_lane and sub <= simd_v128_store64_lane) {
                     const memory64 = memoryIs64(module, 0) orelse return null;
                     const offset = readMemArg(body, &i, memory64) orelse return null;

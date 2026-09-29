@@ -2360,8 +2360,11 @@ and the per-builtin checklist; this section tracks status.
   All eight SIMD lane loads/stores and `v128.any_true` now compile on both
   targets with lane-width bounds, memory64 overflow checks, and unchanged
   SSE2 requirements. Each target gains 245 compiled functions and 303 native
-  entries; the 58,779-command corpus stays green. Native table64, remaining
-  SIMD arithmetic/compare/convert/shuffle operations, and the
+  entries; the 58,779-command corpus stays green. Scalar splats, lane
+  extraction/replacement, and all six vector bitwise operations add another
+  138 compiled functions and 551 native entries per target, with the same
+  corpus score and SSE2 baseline. Native table64, remaining SIMD
+  arithmetic/compare/convert/shuffle/reduction operations, and the
   native-register/imported-call ABI remain next.
 
   The architecture for all three tiers — the shared codegen
