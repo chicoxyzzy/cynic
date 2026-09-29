@@ -101,7 +101,16 @@ fn execute(init: std.process.Init) !u8 {
     var gc_threshold: u32 = 32768;
     var args = init.minimal.args.iterate();
     _ = args.next();
-    while (args.next()) |argument| {
+    const first = args.next() orelse return error.MissingScripts;
+    // This isolated query runs no JS and cannot silently replace a fixture.
+    // Report the compiler's actual mode, never a caller-supplied expectation.
+    if (std.mem.eql(u8, first, "--build-info")) {
+        if (args.next() != null) return error.InvalidArgument;
+        try writeOutput("{\"schema_version\":1,\"build_mode\":\"" ++ @tagName(@import("builtin").mode) ++ "\"}\n");
+        return 0;
+    }
+    var argument_next: ?[]const u8 = first;
+    while (argument_next) |argument| : (argument_next = args.next()) {
         if (std.mem.startsWith(u8, argument, "--fuel=")) {
             fuel = try positive(u64, argument["--fuel=".len..]);
         } else if (std.mem.startsWith(u8, argument, "--memory-limit=")) {

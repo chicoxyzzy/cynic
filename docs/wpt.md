@@ -10,8 +10,10 @@ The corpus, license, pin, and inclusion reasons live in
 [`vendor/wpt/`](../vendor/wpt/README.md). Sources are preserved byte for byte;
 [`manifest.json`](../vendor/wpt/manifest.json) records hashes and all included
 and excluded `.any.js` candidates. The manifest owns selection;
-[`tools/wpt/baseline.json`](../tools/wpt/baseline.json) owns the measured named
-subtest results. An implementation failure never changes selection.
+[`tools/wpt/baseline.json`](../tools/wpt/baseline.json) and
+[`tools/wpt/baseline-gc.json`](../tools/wpt/baseline-gc.json) own the measured named
+subtest results for the normal and GC-pressure profiles. An implementation
+failure never changes selection.
 The [measured results](../wpt-results.md) distinguish assertion failures,
 strict-only parse errors, and observed subtest counts.
 
@@ -21,15 +23,20 @@ Requires the pinned Zig compiler and Python 3.9+ (standard library only).
 Normal builds and runs do not download anything.
 
 ```sh
-zig build test-wpt                         # importer, runner, real-engine contracts
+zig build test-wpt test-wpt-safe           # tooling and both real-engine contracts
 zig build wpt -- --list                    # show selected paths
 zig build wpt -- --filter=memory/toString  # one fixture, including all its subtests
 zig build wpt -- --json-out=/tmp/wpt.json  # full results; nonzero for any failure
 zig build wpt -- --baseline=tools/wpt/baseline.json
+zig build wpt-safe -- --gc-threshold=1 --baseline=tools/wpt/baseline-gc.json
 ```
 
 `wpt-build` builds and installs `zig-out/bin/cynic-wpt-case` without running
-the suite. After that, direct runs avoid rebuilding:
+the suite. `wpt-safe-build` installs `zig-out/bin/cynic-wpt-case-safe`, with both
+the executor and engine compiled in ReleaseSafe. The corresponding `wpt-safe`
+run target preserves GC verifiers and memory poisoning; pass `--gc-threshold=1`
+explicitly to collect on allocation pressure. After building, direct runs avoid
+rebuilding:
 
 ```sh
 python3 tools/wpt/run.py --binary=zig-out/bin/cynic-wpt-case --filter=module/
@@ -52,6 +59,16 @@ diagnostics, configuration, source provenance, and explicit exclusions. Use
 and reporting. Each selected fixture runs in a separate `cynic-wpt-case`
 process, with a fresh Realm. `tools/wpt/case.zig` uses the actual Cynic parser,
 compiler, interpreter, and Wasm engine. Python does not execute JavaScript.
+
+Before running fixtures, the supervisor queries the executor's standalone
+`--build-info` command. Its JSON response reports the actual compile mode from
+Zig's `builtin.mode`; no Realm or JavaScript is created for this query. Missing,
+malformed, timed-out, or unsuccessful responses fail the run. The report records
+the observed mode in `configuration.build_mode`, and `--expect-build-mode` rejects
+a mismatch before any fixture executes. The build targets supply their expected
+mode automatically: normally ReleaseFast for `wpt`, always ReleaseSafe for
+`wpt-safe`. Changing `-Doptimize` does not change these dedicated executors;
+`-Dtest262-debug=true` selects Debug for the normal executor only.
 
 The conformance posture is mutable primordials, eval permitted, Wasm byte
 compilation permitted, and no experimental realm flags. Both JavaScript JIT
@@ -121,20 +138,35 @@ To intentionally refresh after inspecting the full run:
 
 ```sh
 python3 tools/wpt/import_corpus.py --verify
-zig build wpt -- --write-baseline=tools/wpt/baseline.json --json-out=/tmp/wpt.json
-zig build wpt -- --baseline=tools/wpt/baseline.json
+zig build wpt -- --write-baseline=/tmp/wpt-baseline.json --json-out=/tmp/wpt.json
+zig build wpt-safe -- --gc-threshold=1 --write-baseline=/tmp/wpt-gc-baseline.json --json-out=/tmp/wpt-gc.json
+python3 tools/wpt/compare_profiles.py --normal=/tmp/wpt.json --gc-stress=/tmp/wpt-gc.json
+# Review both reports before copying the baselines into tools/wpt/.
 ```
 
 Writing a baseline still returns nonzero when the scored run has failures.
+Generate both from the same clean source revision, keeping temporary outputs
+outside the checkout until both measurements finish. Each baseline requires an
+exact execution-configuration match, including compile mode and GC threshold;
+the normal baseline cannot substitute for the GC-pressure baseline.
 Filtered runs cannot read or write the regression baseline. Improvements stay
 visible, and a later deliberate refresh adds them to the protected pass set.
 
 The `WPT Wasm JavaScript API` job in the main CI workflow runs on Linux after
 the existing build/unit-test matrix. It verifies source hashes, runs the
-importer/runner/executor contracts, and compares the complete selected corpus
-with the committed named-result baseline. It uploads the JSON report even
-when the comparison fails. The fixtures and support sources are vendored, so
-the job needs no WPT checkout or browser download.
+importer/runner/profile-comparison contracts and both executors, then runs the
+complete selected corpus in ReleaseFast with the default GC threshold and in
+ReleaseSafe with `--gc-threshold=1`. Both are required checks against separate
+committed baselines. A final comparison requires exact fixture membership,
+named subtest statuses, file outcomes, process exit codes, and harness statuses
+between the two reports, so independently refreshed baselines cannot hide a
+GC-only difference. It also requires the same corpus, adapters, engine revision,
+and limits; only build mode and GC threshold may differ in configuration.
+Diagnostic text, timings, and binary hashes may differ.
+
+The existing job name is preserved. It uploads both available JSON reports even
+when a check fails. The fixtures and support sources are vendored, so the job
+needs no WPT checkout or browser download.
 
 ## API corrections and specification drift
 

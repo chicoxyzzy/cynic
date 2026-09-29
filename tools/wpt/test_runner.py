@@ -181,6 +181,58 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual(report['status'], 'output_limit')
 
 
+class BuildInfoTests(unittest.TestCase):
+    def child(self, directory, source):
+        executable = Path(directory) / 'fake-executor'
+        executable.write_text('#!' + sys.executable + '\n' + source)
+        executable.chmod(0o755)
+        return executable
+
+    def test_real_binary_reports_each_supported_build_mode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for mode in ('Debug', 'ReleaseSafe', 'ReleaseFast', 'ReleaseSmall'):
+                child = self.child(directory, 'import json, sys\n'
+                                   'assert sys.argv[1:] == ["--build-info"]\n'
+                                   'print(json.dumps({"schema_version": 1, "build_mode": ' + repr(mode) + '}))\n')
+                with self.subTest(mode=mode):
+                    self.assertEqual(runner.probe_build_info(child), mode)
+
+    def test_missing_malformed_or_unrecognized_metadata_is_rejected(self):
+        outputs = ['', 'not JSON', 'null', '[]', '{}',
+                   '{"schema_version":true,"build_mode":"ReleaseSafe"}',
+                   '{"schema_version":2,"build_mode":"ReleaseSafe"}',
+                   '{"schema_version":1,"build_mode":null}',
+                   '{"schema_version":1,"build_mode":"release-safe"}',
+                   '{"schema_version":1,"build_mode":"ReleaseSafe","extra":1}',
+                   '{"schema_version":1,"build_mode":"ReleaseFast","build_mode":"ReleaseSafe"}',
+                   'log\n{"schema_version":1,"build_mode":"ReleaseSafe"}',
+                   '{"schema_version":1,"build_mode":"ReleaseSafe"}\n{}']
+        for output in outputs:
+            outcome = dict(runner.parse_output(output, 0), stdout=output, stderr='', duration_seconds=0)
+            with self.subTest(output=output), mock.patch.object(runner, 'execute_command', return_value=outcome):
+                with self.assertRaisesRegex(ValueError, 'build-info'):
+                    runner.probe_build_info(Path('/fake/executor'))
+
+    def test_nonzero_exit_cannot_claim_a_valid_build_mode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            child = self.child(directory, 'import sys\n'
+                               'print(\'{"schema_version":1,"build_mode":"ReleaseSafe"}\')\n'
+                               'sys.exit(3)\n')
+            with self.assertRaisesRegex(ValueError, 'build-info.*execution_error'):
+                runner.probe_build_info(child)
+
+    def test_missing_binary_timeout_and_output_limit_fail_closed(self):
+        with self.assertRaisesRegex(ValueError, 'build-info.*execution_error'):
+            runner.probe_build_info(Path('/missing/wpt/executor'))
+        with tempfile.TemporaryDirectory() as directory:
+            child = self.child(directory, 'import time\ntime.sleep(5)\n')
+            with self.assertRaisesRegex(ValueError, 'build-info.*timeout'):
+                runner.probe_build_info(child, timeout=0.05)
+            child = self.child(directory, 'print("x" * 5000)\n')
+            with self.assertRaisesRegex(ValueError, 'build-info.*output_limit'):
+                runner.probe_build_info(child)
+
+
 class ProvenanceTests(unittest.TestCase):
     def test_host_timestamp_revision_and_dirty_state_are_recorded(self):
         revision = 'a' * 40
@@ -271,6 +323,18 @@ class BaselineTests(unittest.TestCase):
             after['results'][0].update(new_fields)
             self.assertTrue(runner.compare_baseline(before, after))
 
+    def test_build_mode_and_gc_threshold_are_baseline_configuration(self):
+        before = self.report()
+        before['configuration'] = {'build_mode': 'ReleaseFast', 'gc_threshold': None}
+        for configuration in ({'build_mode': 'ReleaseSafe', 'gc_threshold': None},
+                              {'build_mode': 'ReleaseFast', 'gc_threshold': 1},
+                              {'gc_threshold': None}):
+            after = copy.deepcopy(before)
+            after['configuration'] = configuration
+            with self.subTest(configuration=configuration):
+                self.assertTrue(any('configuration changed' in item
+                                    for item in runner.compare_baseline(before, after)))
+
     def test_adapter_changes_require_review_but_engine_changes_do_not(self):
         before = self.report()
         before.update(adapter_sha256={'run.py': 'old'}, binary_sha256='engine-before')
@@ -313,6 +377,9 @@ class CorpusAndCLITests(unittest.TestCase):
         self.binary = self.root / 'fake-binary'
         self.binary.touch()
         self.args = ['--binary', str(self.binary), '--manifest', str(self.manifest)]
+        probe = mock.patch.object(runner, 'probe_build_info', return_value='ReleaseFast')
+        self.probe = probe.start()
+        self.addCleanup(probe.stop)
 
     def main(self, extra):
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
@@ -325,6 +392,7 @@ class CorpusAndCLITests(unittest.TestCase):
         self.assertEqual(len(fingerprint), 64)
         self.assertEqual(self.main(['--list']), 0)
         self.assertEqual(self.main(['--list', '--filter=absent']), 2)
+        self.probe.assert_not_called()
 
     def test_nonempty_variants_fail_before_execution_until_host_semantics_exist(self):
         fixture = self.root / 'wasm/jsapi/test.any.js'
@@ -399,6 +467,8 @@ class CorpusAndCLITests(unittest.TestCase):
         self.assertEqual(set(report['adapter_sha256']), {'run.py', 'case.zig', 'bootstrap.js', 'reporter.js', 'finish.js', 'testharness.js (patched)'})
         self.assertEqual(len(report['binary_sha256']), 64)
         self.assertIn('generated_at_utc', report['provenance'])
+        self.assertEqual(report['configuration']['build_mode'], 'ReleaseFast')
+        self.probe.assert_called_once_with(self.binary.resolve())
 
     def test_failures_are_visible_and_baseline_is_explicit(self):
         outcome = dict(runner.parse_output(protocol(result(status=1), complete()), 0), stdout='', stderr='', duration_seconds=0)
@@ -408,6 +478,28 @@ class CorpusAndCLITests(unittest.TestCase):
             self.assertEqual(self.main(['--write-baseline', str(baseline)]), 1)
             self.assertTrue(baseline.is_file())
             self.assertEqual(self.main(['--baseline', str(baseline)]), 0)
+
+    def test_metadata_probe_failure_prevents_fixture_execution(self):
+        self.probe.side_effect = ValueError('build-info metadata is invalid')
+        with mock.patch.object(runner, 'execute_command') as execute:
+            self.assertEqual(self.main([]), 2)
+            execute.assert_not_called()
+
+    def test_wrong_build_mode_is_rejected_before_fixture_execution(self):
+        with mock.patch.object(runner, 'execute_command') as execute:
+            self.assertEqual(self.main(['--expect-build-mode=ReleaseSafe']), 2)
+            execute.assert_not_called()
+        self.probe.assert_called_once_with(self.binary.resolve())
+
+    def test_expected_build_mode_allows_execution_and_records_observed_mode(self):
+        self.probe.return_value = 'ReleaseSafe'
+        outcome = dict(runner.parse_output(protocol(result(), complete()), 0), stdout='', stderr='', duration_seconds=0)
+        output = self.root / 'safe-report.json'
+        with mock.patch.object(runner, 'execute_command', return_value=outcome) as execute:
+            self.assertEqual(self.main(['--expect-build-mode=ReleaseSafe', '--json-out', str(output)]), 0)
+            execute.assert_called_once()
+        report = json.loads(output.read_text())
+        self.assertEqual(report['configuration']['build_mode'], 'ReleaseSafe')
 
     def test_baseline_rejects_filtered_selection(self):
         with self.assertRaises(SystemExit) as error:

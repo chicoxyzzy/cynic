@@ -501,17 +501,21 @@ pub fn build(b: *std.Build) void {
     b.step("wpt-build", "Build the isolated WPT shell executor").dependOn(&install_wpt.step);
     const run_wpt = b.addSystemCommand(&.{ "python3", "tools/wpt/run.py", "--binary" });
     run_wpt.addArtifactArg(wpt_exe);
+    run_wpt.addArgs(&.{ "--expect-build-mode", @tagName(t262_optimize) });
     run_wpt.step.dependOn(&install_wpt.step);
     run_wpt.addPassthruArgs();
     b.step("wpt", "Run the pinned WPT Wasm JavaScript API slice").dependOn(&run_wpt.step);
 
     const wpt_test_step = b.step("test-wpt", "Test WPT import, reporting, and real-engine completion semantics");
-    for ([_][]const u8{ "tools/wpt/test_runner.py", "tools/wpt/test_import_corpus.py" }) |script| {
+    const wpt_safe_test_step = b.step("test-wpt-safe", "Test WPT tooling and its ReleaseSafe executor");
+    for ([_][]const u8{ "tools/wpt/test_runner.py", "tools/wpt/test_import_corpus.py", "tools/wpt/test_compare_profiles.py" }) |script| {
         const wpt_unit = b.addSystemCommand(&.{ "python3", script });
         wpt_test_step.dependOn(&wpt_unit.step);
+        wpt_safe_test_step.dependOn(&wpt_unit.step);
     }
     const wpt_integration = b.addSystemCommand(&.{ "python3", "tools/wpt/test_case.py", "--binary" });
     wpt_integration.addArtifactArg(wpt_exe);
+    wpt_integration.addArgs(&.{ "--expect-build-mode", @tagName(t262_optimize) });
     wpt_test_step.dependOn(&wpt_integration.step);
 
     // `zig build wasm-testsuite` — Sarcasm conformance against the
@@ -594,6 +598,32 @@ pub fn build(b: *std.Build) void {
     });
     lib_mod_test_safe.addOptions("build_options", lib_build_options);
     addTzdb(lib_mod_test_safe, b, intl_tier);
+
+    // The WPT GC lane needs safety checks in BOTH the executor and engine.
+    // Reuse the unit-test engine's ReleaseSafe/global-Intl configuration, not
+    // the test262-specific Intl configuration below. Distinct executable names
+    // let normal and stress reports coexist without recompiling/clobbering.
+    const wpt_safe_mod = b.createModule(.{
+        .root_source_file = b.path("tools/wpt/case.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+        .link_libc = true,
+    });
+    wpt_safe_mod.addImport("cynic", lib_mod_test_safe);
+    const wpt_safe_exe = b.addExecutable(.{ .name = "cynic-wpt-case-safe", .root_module = wpt_safe_mod });
+    const install_wpt_safe = b.addInstallArtifact(wpt_safe_exe, .{});
+    b.step("wpt-safe-build", "Build the ReleaseSafe WPT executor (GC verifiers and free poison)").dependOn(&install_wpt_safe.step);
+    const run_wpt_safe = b.addSystemCommand(&.{ "python3", "tools/wpt/run.py", "--binary" });
+    run_wpt_safe.addArtifactArg(wpt_safe_exe);
+    run_wpt_safe.addArgs(&.{ "--expect-build-mode", "ReleaseSafe" });
+    run_wpt_safe.step.dependOn(&install_wpt_safe.step);
+    run_wpt_safe.addPassthruArgs();
+    b.step("wpt-safe", "Run the pinned WPT slice with the ReleaseSafe engine").dependOn(&run_wpt_safe.step);
+    const wpt_safe_integration = b.addSystemCommand(&.{ "python3", "tools/wpt/test_case.py", "--binary" });
+    wpt_safe_integration.addArtifactArg(wpt_safe_exe);
+    wpt_safe_integration.addArgs(&.{ "--expect-build-mode", "ReleaseSafe" });
+    wpt_safe_test_step.dependOn(&wpt_safe_integration.step);
+
     const exe_mod_test_safe = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
