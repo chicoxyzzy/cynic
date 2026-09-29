@@ -262,6 +262,13 @@ pub fn addV4s(vd: Reg, vn: Reg, vm: Reg) u32 {
 
 pub const VectorLaneSize = enum(u2) { byte, half, word };
 
+/// SXTL/UXTL Vd.8H/4S/2D, Vn.8B/4H/2S (SSHLL/USHLL with shift zero).
+pub fn widenLowV128(vd: Reg, vn: Reg, size: VectorLaneSize, signed: bool) u32 {
+    const base: u32 = if (signed) 0x0F00A400 else 0x2F00A400;
+    const immh = @as(u32, 8) << @intFromEnum(size);
+    return base | (immh << 16) | (r(vn) << 5) | r(vd);
+}
+
 pub const VectorIntegerSize = enum(u2) { byte, half, word, double };
 
 /// NaN-propagating FMIN/FMAX Vd.4S/2D, Vn, Vm (not FMINNM/FMAXNM).
@@ -1011,6 +1018,15 @@ pub fn brk(imm16: u16) u32 {
 // Byte-exact encodings, cross-checked against `llvm-mc -triple
 // arm64 -show-encoding` output. These pin the bit layouts; the
 // execution tests in masm.zig prove them on hardware.
+
+test "jit asm_aarch64: SIMD widening encodings" {
+    try std.testing.expectEqual(@as(u32, 0x0f08a623), widenLowV128(.x3, .x17, .byte, true));
+    try std.testing.expectEqual(@as(u32, 0x2f08a623), widenLowV128(.x3, .x17, .byte, false));
+    try std.testing.expectEqual(@as(u32, 0x0f10a623), widenLowV128(.x3, .x17, .half, true));
+    try std.testing.expectEqual(@as(u32, 0x2f10a623), widenLowV128(.x3, .x17, .half, false));
+    try std.testing.expectEqual(@as(u32, 0x0f20a623), widenLowV128(.x3, .x17, .word, true));
+    try std.testing.expectEqual(@as(u32, 0x2f20a623), widenLowV128(.x3, .x17, .word, false));
+}
 
 test "jit asm_aarch64: SIMD float minmax encodings" {
     try std.testing.expectEqual(@as(u32, 0x4eb1f4a3), minMaxFloatV128(.x3, .x5, .x17, false, false));
