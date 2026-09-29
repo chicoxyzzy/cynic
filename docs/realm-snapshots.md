@@ -240,9 +240,9 @@ Fields that carry heap references or must survive the round trip:
 - `synth_accessor_cells: ArrayListUnmanaged(*SyntheticAccessor)`
   (`realm.zig:1192`) — realm-allocator cells; each frozen prototype
   data property produced two (`intrinsics.zig:852-857`). Each
-  `JSFunction.synth_accessor` (`function.zig:344`) borrows one.
-  `SyntheticAccessor.key` (`function.zig:81-93`) borrows a
-  heap-anchored key slice — relocation needed (§5.3).
+  `JSFunction.synth_accessor` retains one independently of the realm
+  ledger, so surviving functions remain traceable after child teardown.
+  `SyntheticAccessor.key` is an owned copy — relocation needed (§5.3).
 - Posture flags to stamp into the header: `hardened`, `allow_eval`,
   `allow_wasm_compile`, `agent_can_block`, `jit_enabled`, `feature_flags`
   (`FeatureSet`), plus the comptime intl flavour
@@ -364,7 +364,7 @@ hooks above.
   dupe), `prop_key: []const u8` (owned dupe — `@@iterator` /
   `<sym:N>`), `is_registered`, `pinned`.
 - `SyntheticAccessor` (`function.zig:81`): `value: Value`, `key:
-  []const u8` (borrowed), `is_setter`.
+  []const u8` (owned), `is_setter`. Reference counts are runtime-only.
 
 ### 3.6 Why pool pages cannot be dumped wholesale
 
@@ -562,8 +562,7 @@ dupes). Classifying provenance at capture (image-range checks against
 
 **Decision: erase provenance — serialize every key by content into
 the `KEYS` arena (content-deduped), and at restore point every map
-key / `own_key_order` entry / `SyntheticAccessor.key` /
-`JSFunction.name` / `JSSymbol.prop_key` into the snapshot-owned
+key / `own_key_order` entry / `JSFunction.name` into the snapshot-owned
 arena** (one allocation, realm-lifetime, freed at realm teardown —
 needs a `snapshot_arena` field or ownership hook on `Realm`
 **[implementer decision]**). Consequences:
@@ -577,11 +576,11 @@ needs a `snapshot_arena` field or ownership hook on `Realm`
 - `JSSymbol.deinit` frees `prop_key`/`description`
   (`symbol.zig:80-84`); restored symbols would double-free arena
   bytes at sweep. Restored symbols must own *allocator dupes* for
-  these two fields specifically (they are the only per-object-freed
-  slices in the graph — `JSString.payload.flat` is likewise
-  per-object-freed and therefore also restored as a
+  these fields specifically. `SyntheticAccessor.key` also owns a dupe
+  so its referring functions can outlive the realm. `JSString.payload.flat`
+  is likewise per-object-freed and therefore also restored as a
   `bytes_allocator` dupe, not an arena view, preserving
-  `deinit`'s contract, `string.zig:194-208`). Rule of thumb the
+  `deinit`'s contract, `string.zig:194-208`. Rule of thumb the
   implementer must follow: **a slice freed by a `deinit` path is
   restored as an owned dupe; a slice only ever borrowed is restored
   as an arena view.**
@@ -760,10 +759,12 @@ concrete choices / deviations:
 - **Key ownership**: instead of a dedicated arena allocator, the
   restored realm owns a single duplicated copy of the `KEYS` blob
   (`Realm.snapshot_key_bytes`, freed in `Realm.deinit`); every
-  restored map key / `own_key_order` entry / `SyntheticAccessor.key`
-  is a view into it. `JSSymbol.{description, prop_key}` and
-  `JSString` byte payloads are allocator dupes because their
-  `deinit` paths free them (§5.3's owned-vs-borrowed rule).
+  restored map key / `own_key_order` entry is a view into it.
+  `SyntheticAccessor.key`, `JSSymbol.{description, prop_key}`, and
+  `JSString` byte payloads are allocator dupes because their cleanup
+  paths free them (§5.3's owned-vs-borrowed rule). Accessor cells begin
+  with the realm ledger reference; each restored function retains its
+  own reference, including when multiple functions name the same cell.
 - **build_id**: a comptime hash of the Zig version string, build
   mode, ISA, and intl flavour, plus three anchor-relative code-layout
   probe offsets checked at restore — a practical same-binary gate.

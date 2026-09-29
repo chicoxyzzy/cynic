@@ -1489,8 +1489,7 @@ const Restore = struct {
             const value = try self.readValue(&r);
             const key = try self.keyRef(&r);
             const is_setter = (try r.r8()) != 0;
-            const cell = try self.realm.allocator.create(SyntheticAccessor);
-            cell.* = .{ .value = value, .key = key, .is_setter = is_setter };
+            const cell = try SyntheticAccessor.create(self.realm.allocator, value, key, is_setter);
             self.realm.synth_accessor_cells.appendAssumeCapacity(cell);
             self.cells.appendAssumeCapacity(cell);
         }
@@ -1676,8 +1675,8 @@ const Restore = struct {
                 fn_tag_static_parent => f.static_parent = try self.functionAt(try r.r32()),
                 fn_tag_synth_accessor => {
                     const idx = try r.r32();
-                    if (idx >= self.cells.items.len) return error.SnapshotCorrupt;
-                    f.synth_accessor = self.cells.items[idx];
+                    if (idx >= self.cells.items.len or f.synth_accessor != null) return error.SnapshotCorrupt;
+                    f.synth_accessor = self.cells.items[idx].retain();
                 },
                 fn_tag_properties => try self.readValueMap(r, &f.properties),
                 fn_tag_property_flags => try self.readFlagsMap(r, &f.property_flags),
@@ -2005,6 +2004,44 @@ test "snapshot: restored hardened realm behaves like a fresh one" {
     const rs: *JSString = @ptrCast(@alignCast(restored_names.asString()));
     const cs: *JSString = @ptrCast(@alignCast(control_names.asString()));
     try testing.expectEqualStrings(cs.flatBytes(), rs.flatBytes());
+}
+
+test "snapshot: synthetic accessor restore owns keys and rejects duplicate fields" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    var key = [_]u8{ 'k', 'e', 'y' };
+    var rst = Restore{ .allocator = testing.allocator, .realm = &realm, .keys = &key };
+    defer rst.deinit();
+    var cells = Writer{ .allocator = testing.allocator };
+    defer cells.deinit();
+    try cells.w32(1);
+    try cells.w64(Value.fromInt32(42).bits);
+    try cells.w32(0);
+    try cells.w32(key.len);
+    try cells.w8(0);
+    try rst.restoreCells(cells.buf.items);
+    @memset(&key, 'x');
+    try testing.expectEqualStrings("key", rst.cells.items[0].key);
+
+    var record = Writer{ .allocator = testing.allocator };
+    defer record.deinit();
+    try record.w8(0); // flags
+    try record.w8(0); // base constructor
+    try record.w8(0); // parameter count
+    try record.w32(0); // no native callback
+    try record.w8(fn_tag_synth_accessor);
+    try record.w32(0);
+    try record.w8(fn_tag_synth_accessor);
+    try record.w32(0);
+    try record.w8(fn_tag_end);
+    const function = try realm.allocator.create(JSFunction);
+    function.* = .{ .param_count = 0, .name = null };
+    defer function.deinit(realm.allocator);
+    var reader = Reader{ .data = record.buf.items };
+    try testing.expectError(error.SnapshotCorrupt, rst.fillFunction(&reader, function));
+    // Partial restoration must leave the first assigned cell owned until
+    // function cleanup, without leaking a second reference for the same tag.
+    try testing.expectEqual(@as(i32, 42), function.synth_accessor.?.value.asInt32());
 }
 
 test "snapshot: restored realm survives GC and allocation pressure" {

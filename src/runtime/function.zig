@@ -62,34 +62,37 @@ pub const NativeFn = *const fn (
     args: []const @import("value.zig").Value,
 ) NativeError!@import("value.zig").Value;
 
-/// Per-pair state for a Phase 3 synthetic accessor (SES
-/// override-mistake fix). Two `JSFunction`s share one
-/// `*SyntheticAccessor`: the getter and the setter installed at
-/// the same `(prototype, key)` site. The getter reads `value`;
-/// the setter reads `key` and DefineOwnProperty's the receiver.
-///
-/// `key` is borrowed from the heap's interned property names —
-/// `freezePrimordials` walks `prototype.properties.keys()` which
-/// already point into heap-anchored strings, so no copy is
-/// needed and lifetime is the realm's.
-///
-/// Allocated on the realm's allocator; freed when the realm is
-/// torn down. Lifetime tied to the JSFunction GC arena — the
-/// accessor closures themselves are visible from realm.intrinsics
-/// (transitively) so a sweep can never reclaim them, and the
-/// `SyntheticAccessor` cell rides along.
+/// Captured state for one SES override-mistake accessor. The Realm's
+/// snapshot ledger and each referring JSFunction own independent references:
+/// shared-heap functions can survive child Realm teardown. Keys are owned too,
+/// so snapshot key storage and prototype property names need not outlive them.
 pub const SyntheticAccessor = struct {
-    /// Getter's captured return value. Marked as a root via the
-    /// `JSFunction` mark routine — see `Heap.markFunctionInternalSlots`.
+    /// Marked through referring JSFunctions, not through the ownership ledger.
     value: Value,
-    /// Setter's DefineOwnProperty key. Slice borrows from a
-    /// heap-anchored string (typically the prototype's own
-    /// property-name slice the freeze pass replaced).
     key: []const u8,
-    /// `true` ⇒ this JSFunction is the synthetic SETTER (call
-    /// dispatch performs the receiver-side DefineOwnProperty).
-    /// `false` ⇒ getter (call dispatch returns `value`).
     is_setter: bool,
+    /// Realm-local state is accessed only on the owning heap's thread.
+    ref_count: usize = 1,
+
+    pub fn create(allocator: std.mem.Allocator, value: Value, key: []const u8, is_setter: bool) !*SyntheticAccessor {
+        const cell = try allocator.create(SyntheticAccessor);
+        errdefer allocator.destroy(cell);
+        cell.* = .{ .value = value, .key = try allocator.dupe(u8, key), .is_setter = is_setter };
+        return cell;
+    }
+
+    pub fn retain(self: *SyntheticAccessor) *SyntheticAccessor {
+        self.ref_count += 1;
+        return self;
+    }
+
+    pub fn release(self: *SyntheticAccessor, allocator: std.mem.Allocator) void {
+        self.ref_count -= 1;
+        if (self.ref_count == 0) {
+            allocator.free(self.key);
+            allocator.destroy(self);
+        }
+    }
 };
 
 pub const JSFunction = struct {
@@ -510,6 +513,7 @@ pub const JSFunction = struct {
         self.own_key_order.deinit(allocator);
         self.key_anchors.deinit(allocator);
         if (self.bound_args) |a| allocator.free(a);
+        if (self.synth_accessor) |cell| cell.release(allocator);
         allocator.destroy(self);
     }
 

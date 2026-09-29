@@ -1354,19 +1354,17 @@ pub const Realm = struct {
     /// independent of registration order.
     wasm_extern_tables: std.ArrayListUnmanaged(WasmExternTableRoot) = .empty,
     wasm_extern_global_cells: std.ArrayListUnmanaged(WasmExternGlobalRoot) = .empty,
-    /// Phase 3 SES override-mistake fix — `freezePrimordials`
-    /// installs a `SyntheticAccessor` pair (getter + setter
-    /// JSFunctions sharing one capture cell) for every data
-    /// property on every reachable prototype. The capture cells
-    /// live as long as the realm; this list tracks them for the
-    /// teardown free. The realm owns the cells; the
-    /// `JSFunction.synth_accessor` slot is a borrow.
+    /// Phase 3 SES override-mistake fix — `freezePrimordials` installs
+    /// synthetic getter/setter functions, each retaining its own capture
+    /// cell. This list owns an additional reference until Realm teardown.
+    /// A function surviving a child Realm keeps its captured value and key
+    /// alive; the last Realm/function release frees the cell.
     synth_accessor_cells: std.ArrayListUnmanaged(*@import("function.zig").SyntheticAccessor) = .empty,
     /// CYSN snapshot restore — the realm-owned copy of the image's
     /// content-interned KEYS blob. Every property-map key /
-    /// `own_key_order` entry / `SyntheticAccessor.key` restored by
-    /// `snapshot.Snapshot.restore` is a borrowed view into this
-    /// buffer, so restored objects need no `key_anchors` (the blob
+    /// `own_key_order` entry restored by `snapshot.Snapshot.restore`
+    /// is a borrowed view into this buffer. Synthetic accessor cells own
+    /// separate key copies. Restored objects need no `key_anchors` (the blob
     /// is realm-lifetime, not GC-swept). `null` for realms built the
     /// ordinary way. See docs/realm-snapshots.md §5.3.
     snapshot_key_bytes: ?[]u8 = null,
@@ -1589,13 +1587,11 @@ pub const Realm = struct {
             self.allocator.destroy(cell);
         }
         self.derived_ctor_cells.deinit(self.allocator);
-        // Phase 3 — free the SES override-mistake-fix capture cells.
-        // The getter/setter JSFunctions referencing them are torn
-        // down with the heap below; freeing the cells here is
-        // safe-ordered (the heap sweep doesn't dereference
-        // `synth_accessor` after this point).
+        // Drop the Realm's capture-cell references. Surviving functions
+        // in a shared parent heap retain theirs until those functions are
+        // collected, so child teardown cannot invalidate GC-traced values.
         for (self.synth_accessor_cells.items) |cell| {
-            self.allocator.destroy(cell);
+            cell.release(self.allocator);
         }
         self.synth_accessor_cells.deinit(self.allocator);
         // Tear down child realms (created via $262.createRealm)
@@ -2772,6 +2768,88 @@ test "Realm: deinit frees heap-allocated strings" {
     var realm = Realm.init(testing.allocator);
     _ = try realm.heap.allocateString("leakable");
     realm.deinit();
+}
+
+test "Realm: child synthetic accessors retain captures until their surviving functions die" {
+    // Check the actual free event before reading the capture or marking its
+    // value. This fails deterministically on premature child cleanup instead
+    // of depending on whether an allocator poisons or reuses the freed cell.
+    const TrackingAllocator = struct {
+        backing: std.mem.Allocator,
+        watched: [2]usize = .{ 0, 0 },
+        frees: [2]usize = .{ 0, 0 },
+
+        fn allocator(self: *@This()) std.mem.Allocator {
+            return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+        }
+
+        fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            return self.backing.rawAlloc(len, alignment, ret_addr);
+        }
+
+        fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, len: usize, ret_addr: usize) bool {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            return self.backing.rawResize(memory, alignment, len, ret_addr);
+        }
+
+        fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, len: usize, ret_addr: usize) ?[*]u8 {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            return self.backing.rawRemap(memory, alignment, len, ret_addr);
+        }
+
+        fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            for (self.watched, 0..) |address, index| {
+                if (@intFromPtr(memory.ptr) == address) self.frees[index] += 1;
+            }
+            self.backing.rawFree(memory, alignment, ret_addr);
+        }
+    };
+
+    var tracking = TrackingAllocator{ .backing = testing.allocator };
+    var parent = Realm.init(tracking.allocator());
+    var parent_live = true;
+    defer if (parent_live) parent.deinit();
+    try parent.installBuiltins();
+    var child = Realm.initChild(&parent);
+    var child_live = true;
+    defer if (child_live) child.deinit();
+    try child.installBuiltins();
+    const accessor = child.intrinsics.array_buffer_prototype.?.getAccessor("slice").?;
+    const getter = accessor.getter.?;
+    const setter = accessor.setter.?;
+    const getter_cell = getter.synth_accessor.?;
+    const setter_cell = setter.synth_accessor.?;
+    const captured = getter_cell.value;
+    tracking.watched = .{ @intFromPtr(getter_cell), @intFromPtr(setter_cell) };
+    const scope = try parent.heap.openScope();
+    var scope_live = true;
+    defer if (scope_live) scope.close();
+    try scope.push(heap_mod.taggedFunction(getter));
+    try scope.push(heap_mod.taggedFunction(setter));
+
+    child.deinit();
+    child_live = false;
+    try testing.expectEqual([2]usize{ 0, 0 }, tracking.frees);
+    parent.collectGarbage();
+    try testing.expectEqual([2]usize{ 0, 0 }, tracking.frees);
+    try testing.expectEqual(captured.bits, getter.synth_accessor.?.value.bits);
+    try testing.expectEqual(captured.bits, setter.synth_accessor.?.value.bits);
+    try testing.expectEqualStrings("slice", getter.synth_accessor.?.key);
+    try testing.expectEqualStrings("slice", setter.synth_accessor.?.key);
+    try testing.expect(!getter.synth_accessor.?.is_setter);
+    try testing.expect(setter.synth_accessor.?.is_setter);
+    try testing.expectEqualStrings("slice", heap_mod.valueAsFunction(getter.synth_accessor.?.value).?.name.?);
+
+    // Inspect state only: calling either function would enter a dead Realm.
+    scope.close();
+    scope_live = false;
+    parent.collectGarbage();
+    try testing.expectEqual([2]usize{ 1, 1 }, tracking.frees);
+    parent.deinit();
+    parent_live = false;
+    try testing.expectEqual([2]usize{ 1, 1 }, tracking.frees);
 }
 
 test "WasmQuotaAllocator checks the Realm ceiling before backing allocation" {

@@ -311,7 +311,15 @@ fn syntheticSetterDispatch(
             const ex = try makeTypeError(realm, "Cannot add property; object is not extensible");
             return .{ .thrown = ex };
         }
-        obj.setWithFlags(realm.allocator, sa.key, value, flags) catch return error.OutOfMemory;
+        // The capture can die before this receiver. Property storage
+        // borrows its key, so anchor a separate copy before publishing a
+        // new own property; updates keep the already-owned key.
+        const key = if (obj.ownDataContains(sa.key)) sa.key else blk: {
+            const key_string = try realm.heap.allocateString(sa.key);
+            try obj.anchorKey(realm.allocator, key_string);
+            break :blk key_string.flatBytes();
+        };
+        obj.setWithFlags(realm.allocator, key, value, flags) catch return error.OutOfMemory;
         return .{ .value = Value.undefined_ };
     }
     if (heap_mod.valueAsFunction(receiver)) |fn_obj| {
@@ -326,7 +334,13 @@ fn syntheticSetterDispatch(
             const ex = try makeTypeError(realm, "Cannot add property; function is not extensible");
             return .{ .thrown = ex };
         }
-        fn_obj.setWithFlags(realm.allocator, sa.key, value, flags) catch return error.OutOfMemory;
+        // Function property maps have the same borrowed-key contract.
+        const key = if (fn_obj.ownDataContains(sa.key)) sa.key else blk: {
+            const key_string = try realm.heap.allocateString(sa.key);
+            try fn_obj.anchorKey(realm.allocator, key_string);
+            break :blk key_string.flatBytes();
+        };
+        fn_obj.setWithFlags(realm.allocator, key, value, flags) catch return error.OutOfMemory;
         return .{ .value = Value.undefined_ };
     }
     // Primitive receiver — §10.1.9.1 OrdinarySet step 4 says
@@ -1424,4 +1438,74 @@ pub fn startAsyncCall(
 
     try resumeAsyncFunction(allocator, realm, gen, Value.undefined_, false);
     return .{ .value = result_promise };
+}
+
+fn testSyntheticSetterRetainsReceiverKey(function_receiver: bool) !void {
+    const testing = std.testing;
+    const original_key = "capturedSetterProperty";
+    const borrowed_key = try testing.allocator.dupe(u8, original_key);
+    defer testing.allocator.free(borrowed_key);
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    const scope = try realm.heap.openScope();
+    defer scope.close();
+    const receiver = if (function_receiver) blk: {
+        const Native = struct {
+            fn call(_: *Realm, _: Value, _: []const Value) @import("../function.zig").NativeError!Value {
+                return Value.undefined_;
+            }
+        };
+        break :blk heap_mod.taggedFunction(try realm.heap.allocateFunctionNative(&realm, Native.call, 0, "receiver"));
+    } else blk: {
+        const object = try realm.heap.allocateObject();
+        // Dictionary keys borrow caller storage; shapes already copy it.
+        try object.set(realm.allocator, "existing", Value.undefined_);
+        try object.demoteFromShape(realm.allocator);
+        break :blk heap_mod.taggedObject(object);
+    };
+    try scope.push(receiver);
+    // Promote first so storing the new key also exercises the mature
+    // receiver's key-anchor barrier during the following minor cycle.
+    realm.collectGarbage();
+    var cell: @import("../function.zig").SyntheticAccessor = .{
+        .value = Value.undefined_,
+        .key = borrowed_key,
+        .is_setter = true,
+    };
+    const result = try syntheticSetterDispatch(&realm, &cell, receiver, Value.fromInt32(73));
+    switch (result) {
+        .value => |value| try testing.expect(value.isUndefined()),
+        else => return error.TestUnexpectedResult,
+    }
+    // Simulate the capture's key storage disappearing without a dangling
+    // read: receiver property names must own independent, GC-rooted bytes.
+    @memset(borrowed_key, 'x');
+    realm.collectGarbageYoung();
+    realm.collectGarbage();
+    if (heap_mod.valueAsFunction(receiver)) |function| {
+        const value = function.get(original_key);
+        try testing.expect(value.isInt32() and value.asInt32() == 73);
+        var it = function.properties.iterator();
+        while (it.next()) |entry| {
+            if (entry.value_ptr.isInt32() and entry.value_ptr.asInt32() == 73)
+                try testing.expectEqualStrings(original_key, entry.key_ptr.*);
+        }
+    } else {
+        const object = heap_mod.valueAsPlainObject(receiver).?;
+        const value = object.get(original_key);
+        try testing.expect(value.isInt32() and value.asInt32() == 73);
+        var it = object.iterOwnNamedKeys();
+        while (it.next()) |entry| {
+            if (entry.value_ptr.isInt32() and entry.value_ptr.asInt32() == 73)
+                try testing.expectEqualStrings(original_key, entry.key_ptr.*);
+        }
+    }
+}
+
+test "synthetic accessor: setter owns a plain receiver's shadow property key" {
+    try testSyntheticSetterRetainsReceiverKey(false);
+}
+
+test "synthetic accessor: setter owns a function receiver's shadow property key" {
+    try testSyntheticSetterRetainsReceiverKey(true);
 }

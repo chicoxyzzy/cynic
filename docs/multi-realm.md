@@ -1111,6 +1111,13 @@ user-facing FR code, and verified clean under `test262-safe
 --gc-threshold=1`. `$262.createRealm` children (no wrapper object) are
 never enqueued and keep their parent-`deinit` lifetime.
 
+SES synthetic accessor capture cells also follow the shared-heap lifetime.
+The realm's snapshot ledger and each referring function hold independent
+references; child teardown releases only the ledger reference. The last
+function's collection releases the capture and its owned property-name bytes.
+A synthetic setter separately anchors a copied name on a receiver when it
+creates an own property, so dropping the setter cannot invalidate that key.
+
 **Still open (optional):** a "N short-lived ShadowRealms in a loop"
 bench asserting steady-state RSS is flat across iterations.
 
