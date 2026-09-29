@@ -11,12 +11,12 @@
     "testharness.js (patched)": "fbe2e52e029bbeea3fecdedf963b69589526a8a1e3ceb18947120667443147f7",
     "wasm/jsapi/wasm-module-builder.js (patched)": "83a83b12adc7d51533c818b23fd37936d03a7203e7015356f9e6852b8625964d"
   },
-  "binary_sha256": "934b80d7e8dfad1894808445b2deba01b4c773be31b4c29918ad7149a9da2164",
+  "binary_sha256": "efa21fcf8ebf1790fd4a49143ea61425aad2097e4b88d7a776b7828ed9ac928e",
   "provenance": {
-    "generated_at_utc": "2026-09-29T07:22:24Z",
+    "generated_at_utc": "2026-09-29T19:54:29Z",
     "platform": "Darwin",
     "architecture": "arm64",
-    "engine_git_head": "c63be52b548a8602f1ec98b5ac0b062f211fa63e",
+    "engine_git_head": "ac93c078fda7b523b89f074e4aec3c58c652d210",
     "engine_git_dirty": false
   },
   "configuration": {
@@ -193,12 +193,12 @@
   "summary": {
     "files": {
       "execution_error": 2,
-      "fail": 14,
-      "pass": 24
+      "fail": 11,
+      "pass": 27
     },
     "subtests": {
-      "FAIL": 20,
-      "PASS": 576
+      "FAIL": 12,
+      "PASS": 584
     },
     "excluded_files": 40
   },
@@ -2638,7 +2638,7 @@
       "variant": ""
     },
     {
-      "status": "fail",
+      "status": "pass",
       "subtests": [
         {
           "name": "Missing arguments",
@@ -2732,8 +2732,8 @@
         },
         {
           "name": "Growing shared memory does not detach old buffer",
-          "status": 1,
-          "message": "assert_equals: buffer frozen expected true but got false"
+          "status": 0,
+          "message": null
         }
       ],
       "harness": {
@@ -2747,17 +2747,17 @@
       "variant": ""
     },
     {
-      "status": "fail",
+      "status": "pass",
       "subtests": [
         {
           "name": "API surface",
-          "status": 1,
-          "message": "assert_equals: expected \"object\" but got \"undefined\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "toFixedLengthBuffer caching behavior",
-          "status": 1,
-          "message": "value is not callable"
+          "status": 0,
+          "message": null
         }
       ],
       "harness": {
@@ -2771,32 +2771,32 @@
       "variant": ""
     },
     {
-      "status": "fail",
+      "status": "pass",
       "subtests": [
         {
           "name": "API surface",
-          "status": 1,
-          "message": "assert_equals: expected \"object\" but got \"undefined\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "toResizableBuffer caching behavior",
-          "status": 1,
-          "message": "value is not callable"
+          "status": 0,
+          "message": null
         },
         {
           "name": "toResizableBuffer max size",
-          "status": 1,
-          "message": "value is not callable"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Resizing a Memory's resizable buffer",
-          "status": 1,
-          "message": "value is not callable"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Resizable buffers from Memory cannot be detached by JS",
-          "status": 1,
-          "message": "value is not callable"
+          "status": 0,
+          "message": null
         }
       ],
       "harness": {
