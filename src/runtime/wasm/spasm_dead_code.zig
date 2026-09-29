@@ -272,7 +272,8 @@ fn skipSimdImmediate(body: []const u8, index: *usize) ?void {
         else => if (simd.reductionOp(sub) == null and simd.integerMinMaxOp(sub) == null and
             simd.integerUnaryOp(sub) == null and simd.roundingAverageWidth(sub) == null and
             simd.floatMinMaxOp(sub) == null and simd.comparisonOp(sub) == null and
-            simd.integerBinaryOp(sub) == null and simd.shiftOp(sub) == null) return null,
+            simd.integerBinaryOp(sub) == null and simd.shiftOp(sub) == null and
+            simd.floatArithmeticOp(sub) == null) return null,
     }
 }
 

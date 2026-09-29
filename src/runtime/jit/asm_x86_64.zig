@@ -778,6 +778,12 @@ pub const Masm = struct {
 
     pub const PackedFloatComparison = enum(u8) { eq = 0, lt = 1, le = 2, ne = 4 };
 
+    pub const PackedFloatArithmetic = enum(u8) { add = 0x58, sub = 0x5c, mul = 0x59, div = 0x5e, sqrt = 0x51 };
+
+    pub fn arithmeticPackedFloat128(self: *Masm, destination: Xmm, source: Xmm, double_precision: bool, op: PackedFloatArithmetic) error{OutOfMemory}!void {
+        try self.emitXmmReg(if (double_precision) @as(u8, 0x66) else null, @intFromEnum(op), destination, source);
+    }
+
     pub fn comparePackedFloat128(self: *Masm, destination: Xmm, source: Xmm, double_precision: bool, relation: PackedFloatComparison) error{OutOfMemory}!void {
         try self.emitXmmReg(if (double_precision) @as(u8, 0x66) else null, 0xc2, destination, source);
         try self.emitByte(@intFromEnum(relation));
@@ -1393,6 +1399,23 @@ test "jit asm_x86_64: SIMD widening encodings retain SSE2" {
         0x66, 0x45, 0x0f, 0x61, 0xca,
         0x66, 0x45, 0x0f, 0x62, 0xca,
     }, machine.code.items);
+}
+
+test "jit asm_x86_64: SIMD packed float arithmetic encodings retain SSE2" {
+    var m = Masm.init(std.testing.allocator);
+    defer m.deinit();
+    for ([_]bool{ false, true }) |double_precision| {
+        for ([_]Masm.PackedFloatArithmetic{ .add, .sub, .mul, .div, .sqrt }) |op|
+            try m.arithmeticPackedFloat128(.xmm9, .xmm11, double_precision, op);
+    }
+    try std.testing.expectEqualSlices(u8, &.{
+        0x45, 0x0f, 0x58, 0xcb, 0x45, 0x0f, 0x5c, 0xcb,
+        0x45, 0x0f, 0x59, 0xcb, 0x45, 0x0f, 0x5e, 0xcb,
+        0x45, 0x0f, 0x51, 0xcb, 0x66, 0x45, 0x0f, 0x58,
+        0xcb, 0x66, 0x45, 0x0f, 0x5c, 0xcb, 0x66, 0x45,
+        0x0f, 0x59, 0xcb, 0x66, 0x45, 0x0f, 0x5e, 0xcb,
+        0x66, 0x45, 0x0f, 0x51, 0xcb,
+    }, m.code.items);
 }
 
 test "jit asm_x86_64: SIMD float minmax encodings retain SSE2" {

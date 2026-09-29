@@ -1999,6 +1999,19 @@ pub fn compile(
                         sp -= 1;
                         stack[sp - 1] = .v128;
                     },
+                    224, 225, 227...231, 236, 237, 239...243 => {
+                        const arithmetic = simd.floatArithmeticOp(sub) orelse return null;
+                        const consumed: usize = if (arithmetic.isUnary()) 1 else 2;
+                        if (sp < consumed) return null;
+                        for (stack[sp - consumed .. sp]) |operand| if (operand != .v128) return null;
+                        const target = scratchOffset(num_locals, sp - consumed);
+                        try m.loadVector128(.xmm0, .r12, target);
+                        if (!arithmetic.isUnary()) try m.loadVector128(.xmm1, .r12, scratchOffset(num_locals, sp - 1));
+                        try emitSimdFloatArithmetic(&m, arithmetic);
+                        try m.storeVector128(.r12, target, .xmm0);
+                        sp -= consumed - 1;
+                        stack[sp - 1] = .v128;
+                    },
                     232, 233, 244, 245 => {
                         if (sp < 2 or stack[sp - 2] != .v128 or stack[sp - 1] != .v128) return null;
                         const minmax = simd.floatMinMaxOp(sub) orelse return null;
@@ -2881,6 +2894,27 @@ fn emitSimdSplat(m: *x64.Masm, width: u4, target: i32) Error!void {
     }
     try m.store64Disp32(.r12, target, .rax);
     try m.store64Disp32(.r12, target + 8, .rax);
+}
+
+fn emitSimdFloatArithmetic(m: *x64.Masm, op: simd.FloatArithmeticOp) Error!void {
+    if (op.kind == .abs or op.kind == .neg) {
+        // Unlike arithmetic, these sign-bit operations preserve signaling
+        // NaNs and every payload bit. Apply one mask per f32/f64 lane.
+        const sign: u64 = if (op.double_precision) 0x8000000000000000 else 0x8000000080000000;
+        try m.movImm64(.rax, if (op.kind == .abs) ~sign else sign);
+        try m.movQXmmFromReg(.xmm1, .rax);
+        try m.shufflePackedI32(.xmm1, .xmm1, 0x44);
+        if (op.kind == .abs) try m.andPacked128(.xmm0, .xmm1) else try m.xorPacked128(.xmm0, .xmm1);
+        return;
+    }
+    try m.arithmeticPackedFloat128(.xmm0, if (op.kind == .sqrt) .xmm0 else .xmm1, op.double_precision, switch (op.kind) {
+        .sqrt => .sqrt,
+        .add => .add,
+        .sub => .sub,
+        .mul => .mul,
+        .div => .div,
+        else => return error.UnsupportedOp,
+    });
 }
 
 /// Core integer arithmetic wraps at the lane width; saturating forms clamp.

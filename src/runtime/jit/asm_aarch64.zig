@@ -302,6 +302,18 @@ pub fn shiftIntegerV128(vd: Reg, vn: Reg, vm: Reg, size: VectorIntegerSize, sign
 
 pub const VectorComparison = enum { eq, gt, ge };
 
+pub const FloatUnary = enum(u32) { abs = 0x4ea0f800, neg = 0x6ea0f800, sqrt = 0x6ea1f800 };
+
+pub fn unaryFloatV128(vd: Reg, vn: Reg, double_precision: bool, op: FloatUnary) u32 {
+    return @intFromEnum(op) | (if (double_precision) @as(u32, 0x00400000) else 0) | (r(vn) << 5) | r(vd);
+}
+
+pub const FloatArithmetic = enum(u32) { add = 0x4e20d400, sub = 0x4ea0d400, mul = 0x6e20dc00, div = 0x6e20fc00 };
+
+pub fn arithmeticFloatV128(vd: Reg, vn: Reg, vm: Reg, double_precision: bool, op: FloatArithmetic) u32 {
+    return @intFromEnum(op) | (if (double_precision) @as(u32, 0x00400000) else 0) | (r(vm) << 16) | (r(vn) << 5) | r(vd);
+}
+
 /// CMEQ / CMGT / CMGE / CMHI / CMHS, one all-ones mask per true lane.
 pub fn compareIntegerV128(vd: Reg, vn: Reg, vm: Reg, size: VectorIntegerSize, relation: VectorComparison, signed: bool) u32 {
     const base: u32 = switch (relation) {
@@ -1097,6 +1109,19 @@ test "jit asm_aarch64: SIMD widening encodings" {
     try std.testing.expectEqual(@as(u32, 0x2f10a623), widenLowV128(.x3, .x17, .half, false));
     try std.testing.expectEqual(@as(u32, 0x0f20a623), widenLowV128(.x3, .x17, .word, true));
     try std.testing.expectEqual(@as(u32, 0x2f20a623), widenLowV128(.x3, .x17, .word, false));
+}
+
+test "jit asm_aarch64: SIMD packed float arithmetic encodings" {
+    const unary = [_]FloatUnary{ .abs, .neg, .sqrt };
+    const binary = [_]FloatArithmetic{ .add, .sub, .mul, .div };
+    const unary_words = [_]u32{ 0x4ea0fa23, 0x6ea0fa23, 0x6ea1fa23, 0x4ee0fa23, 0x6ee0fa23, 0x6ee1fa23 };
+    const binary_words = [_]u32{ 0x4e31d4a3, 0x4eb1d4a3, 0x6e31dca3, 0x6e31fca3, 0x4e71d4a3, 0x4ef1d4a3, 0x6e71dca3, 0x6e71fca3 };
+    for ([_]bool{ false, true }, 0..) |double_precision, index| {
+        for (unary, 0..) |op, oi|
+            try std.testing.expectEqual(unary_words[index * 3 + oi], unaryFloatV128(.x3, .x17, double_precision, op));
+        for (binary, 0..) |op, oi|
+            try std.testing.expectEqual(binary_words[index * 4 + oi], arithmeticFloatV128(.x3, .x5, .x17, double_precision, op));
+    }
 }
 
 test "jit asm_aarch64: SIMD float minmax encodings" {

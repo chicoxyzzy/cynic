@@ -168,6 +168,37 @@ pub fn roundingAverageWidth(sub: u32) ?u4 {
 
 pub const FloatMinMaxOp = struct { double_precision: bool, maximum: bool };
 
+pub const FloatArithmeticOp = struct {
+    double_precision: bool,
+    kind: enum { abs, neg, sqrt, add, sub, mul, div },
+
+    pub fn isUnary(self: FloatArithmeticOp) bool {
+        return switch (self.kind) {
+            .abs, .neg, .sqrt => true,
+            else => false,
+        };
+    }
+};
+
+pub fn floatArithmeticOp(sub: u32) ?FloatArithmeticOp {
+    return switch (sub) {
+        224, 225, 227...231, 236, 237, 239...243 => .{
+            .double_precision = sub >= 236,
+            .kind = switch (sub - (if (sub < 236) @as(u32, 224) else 236)) {
+                0 => .abs,
+                1 => .neg,
+                3 => .sqrt,
+                4 => .add,
+                5 => .sub,
+                6 => .mul,
+                7 => .div,
+                else => return null,
+            },
+        },
+        else => null,
+    };
+}
+
 pub fn floatMinMaxOp(sub: u32) ?FloatMinMaxOp {
     return switch (sub) {
         232, 233 => .{ .double_precision = false, .maximum = sub == 233 },
