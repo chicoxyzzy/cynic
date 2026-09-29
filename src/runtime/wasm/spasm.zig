@@ -3537,6 +3537,27 @@ fn compileAarch64(
                     try m.emit(a64.strQImm(.x0, .x0, target));
                     sp -= 1;
                     stack[sp - 1] = .v128;
+                } else if (simd.conversionOp(sub)) |conversion| {
+                    if (sp == 0 or stack[sp - 1] != .v128) return null;
+                    const target = refSlotOff(num_locals, sp - 1);
+                    try m.emit(a64.ldrQImm(.x0, .x0, target));
+                    switch (conversion.kind) {
+                        .demote, .promote => try m.emit(a64.convertPrecisionV128(.x0, .x0, conversion.kind == .promote)),
+                        .convert => {
+                            const wide = conversion.output_width == 8;
+                            if (wide) try m.emit(a64.widenLowV128(.x0, .x0, .word, conversion.signed));
+                            try m.emit(a64.convertIntegerV128(.x0, .x0, wide, conversion.signed));
+                        },
+                        .trunc_sat => {
+                            const wide = conversion.input_width == 8;
+                            try m.emit(a64.truncSatFloatV128(.x0, .x0, wide, conversion.signed));
+                            if (wide) try m.emit(if (conversion.signed)
+                                a64.narrowIntegerV128(.x0, .x0, .word, true, false)
+                            else
+                                a64.narrowUnsignedV128(.x0, .x0, .word));
+                        },
+                    }
+                    try m.emit(a64.strQImm(.x0, .x0, target));
                 } else if (simd.narrowOp(sub)) |narrow| {
                     if (sp < 2 or stack[sp - 2] != .v128 or stack[sp - 1] != .v128) return null;
                     const target = refSlotOff(num_locals, sp - 2);

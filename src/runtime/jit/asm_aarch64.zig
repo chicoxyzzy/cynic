@@ -280,6 +280,28 @@ pub fn narrowIntegerV128(vd: Reg, vn: Reg, size: VectorLaneSize, signed: bool, h
         (@as(u32, @intFromEnum(size)) << 22) | (r(vn) << 5) | r(vd);
 }
 
+/// UQXTN: unsigned input and unsigned saturating output; upper half is zero.
+pub fn narrowUnsignedV128(vd: Reg, vn: Reg, size: VectorLaneSize) u32 {
+    return 0x2e214800 | (@as(u32, @intFromEnum(size)) << 22) | (r(vn) << 5) | r(vd);
+}
+
+/// FCVTZS/FCVTZU Vd.4S/2D, Vn.4S/2D (NaN -> zero, overflow saturates).
+pub fn truncSatFloatV128(vd: Reg, vn: Reg, double_precision: bool, signed: bool) u32 {
+    return 0x4ea1b800 | (if (double_precision) @as(u32, 0x400000) else 0) |
+        (if (signed) @as(u32, 0) else 0x20000000) | (r(vn) << 5) | r(vd);
+}
+
+/// SCVTF/UCVTF Vd.4S/2D, Vn.4S/2D.
+pub fn convertIntegerV128(vd: Reg, vn: Reg, double_precision: bool, signed: bool) u32 {
+    return 0x4e21d800 | (if (double_precision) @as(u32, 0x400000) else 0) |
+        (if (signed) @as(u32, 0) else 0x20000000) | (r(vn) << 5) | r(vd);
+}
+
+/// FCVTN Vd.2S, Vn.2D (zero upper half) / FCVTL Vd.2D, Vn.2S.
+pub fn convertPrecisionV128(vd: Reg, vn: Reg, promote: bool) u32 {
+    return (if (promote) @as(u32, 0x0e617800) else 0x0e616800) | (r(vn) << 5) | r(vd);
+}
+
 /// SADDLP/UADDLP: adjacent source lanes summed into double-width lanes.
 pub fn pairwiseAddLongV128(vd: Reg, vn: Reg, size: VectorLaneSize, signed: bool) u32 {
     const base: u32 = if (signed) 0x4e202800 else 0x6e202800;
@@ -1210,6 +1232,22 @@ test "jit asm_aarch64: SIMD lane conversion encodings" {
     try std.testing.expectEqual(@as(u32, 0x6e202a23), pairwiseAddLongV128(.x3, .x17, .byte, false));
     try std.testing.expectEqual(@as(u32, 0x4e602a23), pairwiseAddLongV128(.x3, .x17, .half, true));
     try std.testing.expectEqual(@as(u32, 0x6e602a23), pairwiseAddLongV128(.x3, .x17, .half, false));
+}
+
+test "jit asm_aarch64: SIMD numeric conversion encodings" {
+    const expect = std.testing.expectEqual;
+    // Independently assembled using clang's AArch64 assembler.
+    try expect(@as(u32, 0x4ea1ba23), truncSatFloatV128(.x3, .x17, false, true));
+    try expect(@as(u32, 0x6ea1ba23), truncSatFloatV128(.x3, .x17, false, false));
+    try expect(@as(u32, 0x4ee1ba23), truncSatFloatV128(.x3, .x17, true, true));
+    try expect(@as(u32, 0x6ee1ba23), truncSatFloatV128(.x3, .x17, true, false));
+    try expect(@as(u32, 0x4e21da23), convertIntegerV128(.x3, .x17, false, true));
+    try expect(@as(u32, 0x6e21da23), convertIntegerV128(.x3, .x17, false, false));
+    try expect(@as(u32, 0x4e61da23), convertIntegerV128(.x3, .x17, true, true));
+    try expect(@as(u32, 0x6e61da23), convertIntegerV128(.x3, .x17, true, false));
+    try expect(@as(u32, 0x0e616a23), convertPrecisionV128(.x3, .x17, false));
+    try expect(@as(u32, 0x0e617a23), convertPrecisionV128(.x3, .x17, true));
+    try expect(@as(u32, 0x2ea14a23), narrowUnsignedV128(.x3, .x17, .word));
 }
 
 test "jit asm_aarch64: SIMD packed float arithmetic encodings" {
