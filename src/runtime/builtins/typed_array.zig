@@ -624,54 +624,64 @@ fn numberFromUsize(n: usize) Value {
     return Value.fromDouble(@floatFromInt(n));
 }
 
-/// §25.1.5.3 ArrayBuffer.prototype.transfer(newLength).
-/// `preserve_resizability=true` carries the source's resizable
-/// bit (preserving `[[ArrayBufferMaxByteLength]]`);
-/// `transferToFixedLength` always strips it.
+/// §25.1.3.3 ArrayBufferCopyAndDetach(arrayBuffer, newLength,
+/// preserveResizability). Both transfer methods share detach-key
+/// protection and differ only in the result's maximum slot.
 fn arrayBufferTransferImpl(realm: *Realm, this_value: Value, args: []const Value, preserve_resizability: bool) NativeError!Value {
     const src = heap_mod.valueAsPlainObject(this_value) orelse
         return throwTypeError(realm, "ArrayBuffer.prototype.transfer requires an ArrayBuffer receiver");
     if (!src.brand.has_array_buffer_data or src.isSharedArrayBuffer())
         return throwTypeError(realm, "ArrayBuffer.prototype.transfer requires an ArrayBuffer receiver");
 
-    // newLength defaults to source byteLength (or maxByteLength
-    // when preserving resizability and source is resizable —
-    // matches V8's transfer-preserves-cap semantics).
+    // ToIndex can re-enter JS, resize/detach the source, or collect
+    // otherwise ephemeral receivers. Do not retain its byte slice.
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(this_value) catch return error.OutOfMemory;
+    const new_length = argOr(args, 0, Value.undefined_);
+    const new_len = if (new_length.isUndefined())
+        if (src.getArrayBuffer()) |bytes| bytes.len else 0
+    else
+        try toIndex(realm, new_length);
+
+    // Steps 5–8 follow coercion: reload the possibly changed storage,
+    // then enforce the host's [[ArrayBufferDetachKey]]. Borrowed Wasm
+    // memory has the non-undefined key "WebAssembly.Memory" (§5.3 of
+    // the Wasm JS API), so neither transfer method may free its bytes.
     const src_buf = src.getArrayBuffer() orelse
         return throwTypeError(realm, "Cannot transfer a detached ArrayBuffer");
-    const new_len: usize = blk: {
-        if (args.len == 0 or args[0].isUndefined()) break :blk src_buf.len;
-        break :blk try toIndex(realm, args[0]);
-    };
-
-    const max_byte_length: ?usize = if (preserve_resizability) src.getArrayBufferMaxByteLength() else null;
-    if (max_byte_length) |m| {
-        if (new_len > m) return throwRangeError(realm, "ArrayBuffer.prototype.transfer: newLength exceeds maxByteLength");
+    const max_byte_length = if (preserve_resizability) src.getArrayBufferMaxByteLength() else null;
+    const src_ext = src.extension.?;
+    if (src_ext.array_buffer_external)
+        return throwTypeError(realm, "Cannot transfer a WebAssembly.Memory buffer");
+    if (max_byte_length) |max| {
+        if (new_len > max) return throwRangeError(realm, "ArrayBuffer.prototype.transfer: newLength exceeds maxByteLength");
     }
+    if (new_len > @as(usize, std.math.maxInt(u32)))
+        return throwRangeError(realm, "ArrayBuffer allocation exceeds host limit");
+    if (new_len > realm.heap.max_bytes -| realm.heap.bytes_live)
+        return throwRangeError(realm, "ArrayBuffer transfer exceeds heap ceiling");
 
-    const new_bytes = realm.allocator.alloc(u8, new_len) catch return error.OutOfMemory;
-    // §25.1.3.1 CopyDataBlockBytes — copy min(src, new) bytes,
-    // zero-fill any tail beyond src.
-    const copy_n = @min(src_buf.len, new_len);
-    @memcpy(new_bytes[0..copy_n], src_buf[0..copy_n]);
-    if (new_len > copy_n) @memset(new_bytes[copy_n..], 0);
-
-    // Detach the source — DetachArrayBuffer per §25.1.3.4.
-    realm.allocator.free(src_buf);
-    src.setArrayBuffer(realm.allocator, null) catch return error.OutOfMemory;
-    // Detaching clears the max-byte-length slot too; per spec a
-    // detached buffer's `maxByteLength` reads 0.
-    src.setArrayBufferMaxByteLength(realm.allocator, null) catch return error.OutOfMemory;
-
+    // AllocateArrayBuffer uses the intrinsic prototype, not a replaced
+    // global constructor. Complete every fallible object allocation
+    // before owning a new slab or detaching the source.
     const out = realm.heap.allocateObject() catch return error.OutOfMemory;
-    if (heap_mod.valueAsFunction(realm.globals.get("ArrayBuffer") orelse Value.undefined_)) |ab_ctor| {
-        realm.heap.setObjectPrototype(out, ab_ctor.prototype);
-    } else {
-        realm.heap.setObjectPrototype(out, realm.intrinsics.object_prototype);
-    }
-    out.setArrayBuffer(realm.allocator, new_bytes) catch return error.OutOfMemory;
+    scope.push(heap_mod.taggedObject(out)) catch return error.OutOfMemory;
+    realm.heap.setObjectPrototype(out, realm.intrinsics.array_buffer_prototype);
+    const out_ext = out.getOrCreateExtension(realm.allocator) catch return error.OutOfMemory;
+    out_ext.array_buffer_max_byte_length = max_byte_length;
     out.brand.has_array_buffer_data = true;
-    out.setArrayBufferMaxByteLength(realm.allocator, max_byte_length) catch return error.OutOfMemory;
+    const new_bytes = realm.allocator.alloc(u8, new_len) catch return error.OutOfMemory;
+    const copy_len = @min(src_buf.len, new_len);
+    @memcpy(new_bytes[0..copy_len], src_buf[0..copy_len]);
+    @memset(new_bytes[copy_len..], 0);
+    out_ext.array_buffer = new_bytes;
+
+    // DetachArrayBuffer clears data/length but preserves the maximum
+    // slot: a detached resizable buffer still reports resizable=true.
+    // No fallible work remains after the new slab takes ownership.
+    src_ext.array_buffer = null;
+    realm.allocator.free(src_buf);
     return heap_mod.taggedObject(out);
 }
 
@@ -4318,4 +4328,45 @@ pub fn readTypedElement(realm: *Realm, buf: []const u8, kind: ObjMod.TypedKind, 
             return heap_mod.taggedBigInt(bi);
         },
     }
+}
+
+test "WPT buffer transfer: allocation failures leave the source attached" {
+    const testing = std.testing;
+    var saw_success = false;
+    var failures: usize = 0;
+    for (0..16) |fail_offset| {
+        var failing = testing.FailingAllocator.init(testing.allocator, .{});
+        var realm = Realm.init(failing.allocator());
+        defer {
+            failing.fail_index = std.math.maxInt(usize);
+            realm.deinit();
+        }
+        const src = try realm.heap.allocateObject();
+        const src_ext = try src.getOrCreateExtension(realm.allocator);
+        const src_bytes = try realm.allocator.alloc(u8, 8);
+        @memset(src_bytes, 73);
+        src_ext.array_buffer = src_bytes;
+        src_ext.array_buffer_max_byte_length = 32;
+        src.brand.has_array_buffer_data = true;
+        const args = [_]Value{Value.fromInt32(16)};
+        failing.fail_index = failing.alloc_index + fail_offset;
+        const result = arrayBufferTransferImpl(&realm, heap_mod.taggedObject(src), &args, true);
+        failing.fail_index = std.math.maxInt(usize);
+        if (result) |value| {
+            const output = heap_mod.valueAsPlainObject(value).?;
+            try testing.expect(src.getArrayBuffer() == null);
+            try testing.expectEqual(@as(?usize, 32), src.getArrayBufferMaxByteLength());
+            try testing.expectEqual(@as(?usize, 32), output.getArrayBufferMaxByteLength());
+            try testing.expectEqualSlices(u8, &.{ 73, 73, 73, 73, 73, 73, 73, 73, 0, 0, 0, 0, 0, 0, 0, 0 }, output.getArrayBuffer().?);
+            saw_success = true;
+            break;
+        } else |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+            try testing.expectEqualSlices(u8, &.{ 73, 73, 73, 73, 73, 73, 73, 73 }, src.getArrayBuffer().?);
+            try testing.expectEqual(@as(?usize, 32), src.getArrayBufferMaxByteLength());
+            failures += 1;
+        }
+    }
+    try testing.expect(saw_success);
+    try testing.expect(failures >= 4);
 }

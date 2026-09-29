@@ -109,6 +109,7 @@ test {
     _ = @import("runtime/wasm_js_test.zig");
     _ = @import("runtime/wasm_wpt_global_test.zig");
     _ = @import("runtime/wasm_wpt_memory_table_test.zig");
+    _ = @import("runtime/wasm_wpt_transfer_test.zig");
     _ = @import("runtime/wasm_wpt_interface_test.zig");
     _ = @import("runtime/wasm_wpt_instance_test.zig");
     _ = @import("runtime/wasm_wpt_arguments_test.zig");
