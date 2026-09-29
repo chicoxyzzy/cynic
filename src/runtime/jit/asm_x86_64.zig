@@ -393,6 +393,14 @@ pub const Masm = struct {
         try self.emitByte(amount);
     }
 
+    /// `cmovcc destination, source`, retaining destination when false.
+    pub fn cmovReg64(self: *Masm, destination: Reg, source: Reg, condition: Cond) error{OutOfMemory}!void {
+        try self.emitByte(rex(true, isExtended(destination), false, isExtended(source)));
+        try self.emitByte(0x0f);
+        try self.emitByte(0x40 | @as(u8, @intFromEnum(condition)));
+        try self.emitByte(0xc0 | (lowBits(destination) << 3) | lowBits(source));
+    }
+
     /// Materialize one condition bit and zero-extend it to the full
     /// 32-bit destination without clobbering the flags before SETcc.
     pub fn setCond32(
@@ -1217,6 +1225,14 @@ fn isExtendedXmm(register: Xmm) bool {
 fn lowBitsXmm(register: Xmm) u8 {
     return @intFromEnum(register) & 7;
 }
+test "jit asm_x86_64: SIMD permutation conditional move encodings" {
+    var machine = Masm.init(std.testing.allocator);
+    defer machine.deinit();
+    try machine.cmovReg64(.rax, .rdx, .above_or_equal);
+    try machine.cmovReg64(.r9, .r10, .below);
+    try std.testing.expectEqualSlices(u8, &.{ 0x48, 0x0f, 0x43, 0xc2, 0x4d, 0x0f, 0x42, 0xca }, machine.code.items);
+}
+
 test "jit asm_x86_64: emits a native immediate return" {
     if (comptime !native_x86_64) return error.SkipZigTest;
     var machine = Masm.init(std.testing.allocator);

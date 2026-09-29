@@ -1788,6 +1788,19 @@ pub fn compile(
                         stack[sp] = .v128;
                         sp += 1;
                     },
+                    13, 14, 256 => {
+                        if (sp < 2 or stack[sp - 2] != .v128 or stack[sp - 1] != .v128) return null;
+                        const selectors: ?*const [16]u8 = if (sub == 13) blk: {
+                            if (body.len - i < 16) return null;
+                            const lanes = body[i..][0..16];
+                            for (lanes) |selector| if (selector >= 32) return null;
+                            i += 16;
+                            break :blk lanes;
+                        } else null;
+                        try emitSimdPermutation(&m, scratchOffset(num_locals, sp - 2), selectors);
+                        sp -= 1;
+                        stack[sp - 1] = .v128;
+                    },
                     0, 11 => {
                         const memory64 = memoryIs64(module, 0) orelse return null;
                         const offset = readMemArg(body, &i, memory64) orelse return null;
@@ -3091,6 +3104,49 @@ fn emitSimdProduct(m: *x64.Masm, op: simd.ProductOp) Error!void {
         },
         else => return error.UnsupportedOp,
     }
+}
+
+/// Adjacent input Cells start at target. Finish both halves before overwriting
+/// either input, so duplicate/reversed selectors cannot observe partial output.
+fn emitSimdPermutation(m: *x64.Masm, target: i32, selectors: ?*const [16]u8) Error!void {
+    try m.xorReg64(.r8, .r8);
+    try m.xorReg64(.r9, .r9);
+    if (selectors) |indices| {
+        for (indices, 0..) |index, lane| {
+            try m.load8Disp32(.rax, .r12, target + index);
+            if (lane % 8 != 0) try m.shlImm8(.rax, @intCast((lane % 8) * 8));
+            try m.orReg64(if (lane < 8) .r8 else .r9, .rax);
+        }
+    } else {
+        try m.movImm64(.r10, 15);
+        try m.xorReg64(.rdx, .rdx);
+        try m.leaDisp32(.rdi, .r12, target);
+        // Two fixed eight-byte loops bound both work and emitted code size.
+        // Fully unrolling this path can exceed the module's code reservation.
+        for ([_]x64.Reg{ .r8, .r9 }, 0..) |accumulator, half| {
+            try m.leaDisp32(.rsi, .r12, target + 23 + @as(i32, @intCast(half)) * 8);
+            try m.movImm64(.rcx, 8);
+            var next_byte: x64.Masm.Label = .{};
+            defer next_byte.deinit(m.gpa);
+            try m.bind(&next_byte);
+            try m.shlImm8(accumulator, 8);
+            try m.load8Disp32(.rax, .rsi, 0);
+            try m.movReg64(.r11, .rax);
+            // Mask before the load, not merely before selecting the result:
+            // every host address stays inside the 16-byte input Cell.
+            try m.andReg64(.rax, .r10);
+            try m.addReg64(.rax, .rdi);
+            try m.load8Disp32(.rax, .rax, 0);
+            try m.cmpReg32Imm32(.r11, 16);
+            try m.cmovReg64(.rax, .rdx, .above_or_equal);
+            try m.orReg64(accumulator, .rax);
+            try m.subRegImm32(.rsi, 1);
+            try m.subRegImm32(.rcx, 1);
+            try m.jumpCond(.not_equal, &next_byte);
+        }
+    }
+    try m.store64Disp32(.r12, target, .r8);
+    try m.store64Disp32(.r12, target + 8, .r9);
 }
 
 fn emitSimdFloatArithmetic(m: *x64.Masm, op: simd.FloatArithmeticOp) Error!void {

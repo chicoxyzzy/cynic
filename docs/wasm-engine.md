@@ -719,6 +719,10 @@ the measured design space:
   Pseudo-min/max retain the first input bits on equal or unordered comparisons,
   using NEON comparison masks plus bit selection or reversed SSE min/max
   operands. This intentionally differs from ordinary floating min/max.
+  Byte shuffle and strict/relaxed swizzle use NEON `TBL` or bounded scalar
+  byte selections on x86, with no SSSE3 requirement or runtime helper call.
+  Swizzle indices are checked against 16; relaxed swizzle retains Sarcasm's
+  deterministic zero-on-invalid-index behavior on both targets.
   The six signed/unsigned widening loads (8x8, 16x4, 32x2) check and read
   exactly eight bytes before widening to a full vector, using NEON
   SXTL/UXTL or SSE2 unpacking with zero/sign masks. Memory64 overflow traps

@@ -352,6 +352,11 @@ pub fn bitSelectV128(vd: Reg, vn: Reg, vm: Reg) u32 {
     return 0x6e601c00 | (r(vm) << 16) | (r(vn) << 5) | r(vd);
 }
 
+/// TBL Vd.16B, {Vn.16B[, Vn+1.16B]}, Vm.16B; invalid indices yield zero.
+pub fn tableLookupV128(vd: Reg, vn: Reg, vm: Reg, two_tables: bool) u32 {
+    return 0x4e000000 | (if (two_tables) @as(u32, 0x2000) else 0) | (r(vm) << 16) | (r(vn) << 5) | r(vd);
+}
+
 pub const FloatArithmetic = enum(u32) { add = 0x4e20d400, sub = 0x4ea0d400, mul = 0x6e20dc00, div = 0x6e20fc00 };
 
 pub fn arithmeticFloatV128(vd: Reg, vn: Reg, vm: Reg, double_precision: bool, op: FloatArithmetic) u32 {
@@ -1129,6 +1134,12 @@ pub fn brk(imm16: u16) u32 {
 // Byte-exact encodings, cross-checked against `llvm-mc -triple
 // arm64 -show-encoding` output. These pin the bit layouts; the
 // execution tests in masm.zig prove them on hardware.
+
+test "jit asm_aarch64: SIMD permutation table encodings" {
+    try std.testing.expectEqual(@as(u32, 0x4e1100a3), tableLookupV128(.x3, .x5, .x17, false));
+    try std.testing.expectEqual(@as(u32, 0x4e1120a3), tableLookupV128(.x3, .x5, .x17, true));
+    try std.testing.expectEqual(@as(u32, 0x4e1c23dd), tableLookupV128(.fp, .lr, .x28, true));
+}
 
 test "jit asm_aarch64: SIMD float selection encodings" {
     const single = [_]u32{ 0x4ea188a3, 0x4e2198a3, 0x4ea198a3, 0x4e2188a3 };

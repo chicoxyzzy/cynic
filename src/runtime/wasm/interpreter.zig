@@ -599,6 +599,33 @@ test "wasm spasm: code reserve accounts for module bodies on every backend" {
     try std.testing.expectEqual(spasmCodeReserveEstimate(body.len, funcs.len), spasmCodeReserve(&funcs));
 }
 
+test "wasm spasm: SIMD permutation refusal counters retain bounded and unknown subopcodes" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const module: Module = .{};
+    var instance: Instance = undefined;
+    try instantiate(&instance, arena.allocator(), testing.allocator, &module, .{});
+    defer instance.deinit();
+    for ([_]u32{ 14, std.math.maxInt(u32) }) |sub| {
+        instance.recordSpasmRefusal(.{
+            .stage = .unsupported_opcode,
+            .has_opcode = true,
+            .opcode = 0xfd,
+            .has_subopcode = true,
+            .subopcode = sub,
+        });
+        try testing.expectEqual(sub, instance.spasm_last_refused_subopcode);
+    }
+    try testing.expectEqual(@as(u32, 2), instance.spasm_refusals);
+    try testing.expectEqual(spasm.RefusalStage.unsupported_opcode, instance.spasm_last_refusal_stage);
+    try testing.expectEqual(@as(u8, 0xfd), instance.spasm_last_refused_opcode);
+    try testing.expect(instance.spasm_last_refusal_has_subopcode);
+    try testing.expectEqual(@as(u32, 1), instance.spasm_refused_simd_subopcodes[14]);
+    try testing.expectEqual(@as(u32, 1), instance.spasm_refused_simd_subopcode_other);
+    try testing.expectEqual(@as(u32, 0), instance.spasm_refused_vector_signatures);
+}
+
 pub const SpasmRefusedOpcode = struct {
     opcode: u8 = 0,
     count: u32 = 0,
@@ -4594,7 +4621,7 @@ fn execSimd(ip: *Interp, sub: u32, body: []const u8, pc: *usize) TrapError!void 
             }
             try ip.pushV128(@bitCast(r));
         },
-        14 => {
+        14, 256 => { // strict and deterministic relaxed swizzle
             const s = ip.popV128();
             const a = ip.popV128();
             const aa: [16]u8 = @bitCast(a);
@@ -4610,18 +4637,6 @@ fn execSimd(ip: *Interp, sub: u32, body: []const u8, pc: *usize) TrapError!void 
         // relaxed-simd (Wasm 3.0). "Relaxed" permits a choice of valid
         // results per lane; Sarcasm picks the deterministic, non-fused
         // behavior (so the same module yields the same bits everywhere).
-        256 => { // i8x16.relaxed_swizzle — swizzle (out-of-range lane → 0)
-            const s = ip.popV128();
-            const a = ip.popV128();
-            const aa: [16]u8 = @bitCast(a);
-            const ss: [16]u8 = @bitCast(s);
-            var r: [16]u8 = undefined;
-            inline for (0..16) |i| {
-                const idx = ss[i];
-                r[i] = if (idx < 16) aa[idx] else 0;
-            }
-            try ip.pushV128(@bitCast(r));
-        },
         257 => try ip.pushV128(truncSatF32x4(i32, ip.popV128())), // relaxed_trunc_f32x4_s
         258 => try ip.pushV128(truncSatF32x4(u32, ip.popV128())), // relaxed_trunc_f32x4_u
         259 => try ip.pushV128(truncSatF64x2Zero(i32, ip.popV128())), // _f64x2_s_zero

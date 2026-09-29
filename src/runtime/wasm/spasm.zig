@@ -3370,6 +3370,27 @@ fn compileAarch64(
                     try m.emit(a64.strImm(.x16, .x0, dst + 8));
                     stack[sp] = .v128;
                     sp += 1;
+                } else if (sub == 13 or sub == 14 or sub == 256) {
+                    if (sp < 2 or stack[sp - 2] != .v128 or stack[sp - 1] != .v128) return null;
+                    const target = refSlotOff(num_locals, sp - 2);
+                    try m.emit(a64.ldrQImm(.x0, .x0, target));
+                    try m.emit(a64.ldrQImm(.x1, .x0, refSlotOff(num_locals, sp - 1)));
+                    if (sub == 13) {
+                        if (body.len - i < 16) return null;
+                        for (body[i..][0..16]) |selector| if (selector >= 32) return null;
+                        const selectors = readV128Bytes(body, &i) orelse return null;
+                        try m.movImm64(.x16, selectors.lo);
+                        try m.emit(a64.fmovXtoD(.x2, .x16));
+                        try m.movImm64(.x16, selectors.hi);
+                        try m.emit(a64.insDFromX(.x2, 1, .x16));
+                        try m.emit(a64.tableLookupV128(.x0, .x0, .x2, true));
+                    } else {
+                        // Core's deterministic relaxed profile matches strict swizzle.
+                        try m.emit(a64.tableLookupV128(.x0, .x0, .x1, false));
+                    }
+                    try m.emit(a64.strQImm(.x0, .x0, target));
+                    sp -= 1;
+                    stack[sp - 1] = .v128;
                 } else if (sub == simd_v128_load) {
                     // §4.4.7 v128.load — pop the i32 address, bounds-check the
                     // 16-byte access, then copy 16 bytes mem→cell as two 64-bit
@@ -5490,6 +5511,41 @@ test "spasm: SIMD signatures compile and clear refusal diagnostics" {
     )) != null);
     try testing.expectEqual(RefusalStage.none, diagnostics.stage);
     try testing.expectEqual(null, diagnostics.signature_type);
+}
+
+test "spasm: SIMD permutation diagnostics retain unknown subopcodes" {
+    if (comptime !supported) return error.SkipZigTest;
+    var ca = try code_alloc.CodeAllocator.init(testing.allocator, 64 * 1024);
+    defer ca.deinit();
+    // Compile-only fixture: the decoder would reject this unknown subopcode.
+    const func: CompiledFunc = .{
+        .type_index = 0,
+        .local_types = &.{},
+        .body = &.{ op_simd_prefix, 0xff, 0xff, 0xff, 0xff, 0x0f, op_end },
+        .side_table = &.{},
+        .max_stack = 0,
+    };
+    const ftype: FuncType = .{ .params = &.{}, .results = &.{} };
+    const module: Module = .{ .types = &.{ftype}, .funcs = &.{0} };
+    var diagnostics: CompileDiagnostics = .{};
+    try testing.expect((try compileWithDiagnostics(
+        testing.allocator,
+        &ca,
+        &func,
+        &ftype,
+        &module,
+        &.{func},
+        0,
+        &.{},
+        null,
+        .{},
+        testExecutionPoll,
+        &diagnostics,
+    )) == null);
+    try testing.expectEqual(RefusalStage.unsupported_opcode, diagnostics.stage);
+    try testing.expect(diagnostics.has_opcode and diagnostics.has_subopcode);
+    try testing.expectEqual(op_simd_prefix, diagnostics.opcode);
+    try testing.expectEqual(std.math.maxInt(u32), diagnostics.subopcode);
 }
 
 test "spasm: x86_64 diagnostics retain unsupported 0xfc subopcodes" {

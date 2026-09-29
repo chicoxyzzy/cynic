@@ -2391,13 +2391,15 @@ and the per-builtin checklist; this section tracks status.
   dot products, and Q15 remove another 14, retaining
   SSE2 and all 58,779 passing assertions. Dot sums also wrap safely in the
   interpreter, closing a safety-check overflow panic.
-  Floating rounding and pseudo-min/max remove another 12 per target (68 SIMD
-  refusals remain), with all four interpreter/native corpus sweeps unchanged.
+  Floating rounding and pseudo-min/max remove another 12 per target,
+  with all four interpreter/native corpus sweeps unchanged.
   Shared rounding now explicitly quiets signaling NaNs, fixing an x86 gap.
-  The opcode inventory in `wasm-results.md` tracks the remaining 32 accepted
+  Byte shuffle and strict/relaxed swizzle remove another 20 per target
+  (48 SIMD refusals remain), retaining SSE2 and the same full corpus score.
+  The opcode inventory in `wasm-results.md` tracks the remaining 29 accepted
   SIMD operations without native lowering, including the relaxed family.
   Native table64, remaining SIMD
-  arithmetic/convert/shuffle operations, and the
+  conversions and relaxed operations, and the
   native-register/imported-call ABI remain next.
 
   The architecture for all three tiers — the shared codegen
