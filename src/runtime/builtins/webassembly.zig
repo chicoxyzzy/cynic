@@ -31,8 +31,8 @@
 //! scope; their eventual backing must use SharedDataBlock for non-moving,
 //! in-place growth. A v128 value crossing the JS boundary throws a TypeError — that
 //! is spec-mandated (§ToJSValue / §ToWebAssemblyValue), not a Cynic gap.
-//! `Instance.prototype.exports` is a prototype getter per spec; this
-//! implementation exposes the exports object as an own data property.
+//! `Instance.prototype.exports` is a branded prototype getter over the
+//! GC-traced [[Exports]] slot; the exports namespace is shallow-frozen.
 
 const std = @import("std");
 const Realm = @import("../realm.zig").Realm;
@@ -109,13 +109,25 @@ fn detachMemoryHostView(object: *anyopaque) void {
     if (buffer.arrayBufferSlot()) |slot| slot.* = null;
 }
 
+/// WebIDL §3.7.7 operations use enumerable data properties, including
+/// namespace/static operations. Their functions retain the ordinary builtin
+/// name/length descriptors and have no [[Construct]] internal method.
+fn installWebIdlOperation(realm: *Realm, target: anytype, name: []const u8, native: NativeFn, arity: u8) !void {
+    const function = try intrinsics.makeNativeFunction(realm, native, arity, name);
+    try target.setWithFlags(realm.allocator, name, heap_mod.taggedFunction(function), .{
+        .writable = true,
+        .enumerable = true,
+        .configurable = true,
+    });
+}
+
 pub fn install(realm: *Realm) !void {
     const ns = try realm.heap.allocateObject();
     realm.heap.setObjectPrototype(ns, realm.intrinsics.object_prototype);
     try intrinsics.installToStringTag(realm, ns, "WebAssembly");
-    try intrinsics.installNativeMethodOnProto(realm, ns, "validate", wasmValidate, 1);
-    try intrinsics.installNativeMethodOnProto(realm, ns, "compile", wasmCompile, 1);
-    try intrinsics.installNativeMethodOnProto(realm, ns, "instantiate", wasmInstantiate, 1);
+    try installWebIdlOperation(realm, ns, "validate", wasmValidate, 1);
+    try installWebIdlOperation(realm, ns, "compile", wasmCompile, 1);
+    try installWebIdlOperation(realm, ns, "instantiate", wasmInstantiate, 1);
 
     // Constructors live under the namespace, not the global object.
     const module_ctor = try intrinsics.installConstructor(realm, .{
@@ -124,13 +136,13 @@ pub fn install(realm: *Realm) !void {
         .name = "Module",
         .install_global = false,
     });
-    try ns.set(realm.allocator, "Module", heap_mod.taggedFunction(module_ctor.ctor));
+    try intrinsics.setNonEnumerable(ns, realm.allocator, "Module", heap_mod.taggedFunction(module_ctor.ctor));
     realm.wasm_module_prototype = module_ctor.proto;
     try intrinsics.installToStringTag(realm, module_ctor.proto, "WebAssembly.Module");
     // §Module statics — introspection, ungated (no code is generated).
-    try intrinsics.installNativeMethod(realm, module_ctor.ctor, "exports", wasmModuleExports, 1);
-    try intrinsics.installNativeMethod(realm, module_ctor.ctor, "imports", wasmModuleImports, 1);
-    try intrinsics.installNativeMethod(realm, module_ctor.ctor, "customSections", wasmModuleCustomSections, 2);
+    try installWebIdlOperation(realm, module_ctor.ctor, "exports", wasmModuleExports, 1);
+    try installWebIdlOperation(realm, module_ctor.ctor, "imports", wasmModuleImports, 1);
+    try installWebIdlOperation(realm, module_ctor.ctor, "customSections", wasmModuleCustomSections, 2);
 
     const instance_ctor = try intrinsics.installConstructor(realm, .{
         .ctor = instanceConstructor,
@@ -138,9 +150,21 @@ pub fn install(realm: *Realm) !void {
         .name = "Instance",
         .install_global = false,
     });
-    try ns.set(realm.allocator, "Instance", heap_mod.taggedFunction(instance_ctor.ctor));
+    try intrinsics.setNonEnumerable(ns, realm.allocator, "Instance", heap_mod.taggedFunction(instance_ctor.ctor));
     realm.wasm_instance_prototype = instance_ctor.proto;
     try intrinsics.installToStringTag(realm, instance_ctor.proto, "WebAssembly.Instance");
+    {
+        // Wasm JS API §5.2 / WebIDL attribute getter: own receiver brand,
+        // stable [[Exports]] identity, enumerable and configurable.
+        const getter = try intrinsics.makeNativeFunction(realm, instanceExportsGet, 0, "get exports");
+        const entry = try instance_ctor.proto.getOrPutAccessor(realm.allocator, "exports");
+        entry.value_ptr.* = .{ .getter = getter, .setter = null };
+        try (try instance_ctor.proto.flagsMut(realm.allocator)).put(realm.allocator, "exports", .{
+            .writable = false,
+            .enumerable = true,
+            .configurable = true,
+        });
+    }
 
     // §Errors — CompileError / LinkError / RuntimeError, Error subclasses
     // on the namespace.
@@ -154,9 +178,17 @@ pub fn install(realm: *Realm) !void {
         .name = "Global",
         .install_global = false,
     });
-    try ns.set(realm.allocator, "Global", heap_mod.taggedFunction(global_ctor.ctor));
+    try intrinsics.setNonEnumerable(ns, realm.allocator, "Global", heap_mod.taggedFunction(global_ctor.ctor));
     realm.wasm_global_prototype = global_ctor.proto;
     try intrinsics.installToStringTag(realm, global_ctor.proto, "WebAssembly.Global");
+    // WebAssembly JS API §5.5: valueOf and the value getter both use
+    // GetGlobalValue, including its receiver-brand check.
+    const global_value_of = try intrinsics.makeNativeFunction(realm, globalValueGet, 0, "valueOf");
+    try global_ctor.proto.setWithFlags(realm.allocator, "valueOf", heap_mod.taggedFunction(global_value_of), .{
+        .writable = true,
+        .enumerable = true,
+        .configurable = true,
+    });
     {
         // `Global.prototype.value` — a getter / setter over the cell.
         const getter = try intrinsics.makeNativeFunction(realm, globalValueGet, 0, "get value");
@@ -165,7 +197,7 @@ pub fn install(realm: *Realm) !void {
         entry.value_ptr.* = .{ .getter = getter, .setter = setter };
         try (try global_ctor.proto.flagsMut(realm.allocator)).put(realm.allocator, "value", .{
             .writable = false,
-            .enumerable = false,
+            .enumerable = true,
             .configurable = true,
         });
     }
@@ -176,19 +208,19 @@ pub fn install(realm: *Realm) !void {
         .name = "Table",
         .install_global = false,
     });
-    try ns.set(realm.allocator, "Table", heap_mod.taggedFunction(table_ctor.ctor));
+    try intrinsics.setNonEnumerable(ns, realm.allocator, "Table", heap_mod.taggedFunction(table_ctor.ctor));
     realm.wasm_table_prototype = table_ctor.proto;
     try intrinsics.installToStringTag(realm, table_ctor.proto, "WebAssembly.Table");
-    try intrinsics.installNativeMethodOnProto(realm, table_ctor.proto, "get", tableGet, 1);
-    try intrinsics.installNativeMethodOnProto(realm, table_ctor.proto, "set", tableSet, 2);
-    try intrinsics.installNativeMethodOnProto(realm, table_ctor.proto, "grow", tableGrow, 1);
+    try installWebIdlOperation(realm, table_ctor.proto, "get", tableGet, 1);
+    try installWebIdlOperation(realm, table_ctor.proto, "set", tableSet, 1);
+    try installWebIdlOperation(realm, table_ctor.proto, "grow", tableGrow, 1);
     {
         const getter = try intrinsics.makeNativeFunction(realm, tableLength, 0, "get length");
         const entry = try table_ctor.proto.getOrPutAccessor(realm.allocator, "length");
         entry.value_ptr.* = .{ .getter = getter, .setter = null };
         try (try table_ctor.proto.flagsMut(realm.allocator)).put(realm.allocator, "length", .{
             .writable = false,
-            .enumerable = false,
+            .enumerable = true,
             .configurable = true,
         });
     }
@@ -199,17 +231,17 @@ pub fn install(realm: *Realm) !void {
         .name = "Memory",
         .install_global = false,
     });
-    try ns.set(realm.allocator, "Memory", heap_mod.taggedFunction(memory_ctor.ctor));
+    try intrinsics.setNonEnumerable(ns, realm.allocator, "Memory", heap_mod.taggedFunction(memory_ctor.ctor));
     realm.wasm_memory_prototype = memory_ctor.proto;
     try intrinsics.installToStringTag(realm, memory_ctor.proto, "WebAssembly.Memory");
-    try intrinsics.installNativeMethodOnProto(realm, memory_ctor.proto, "grow", memoryGrow, 1);
+    try installWebIdlOperation(realm, memory_ctor.proto, "grow", memoryGrow, 1);
     {
         const getter = try intrinsics.makeNativeFunction(realm, memoryBufferGet, 0, "get buffer");
         const entry = try memory_ctor.proto.getOrPutAccessor(realm.allocator, "buffer");
         entry.value_ptr.* = .{ .getter = getter, .setter = null };
         try (try memory_ctor.proto.flagsMut(realm.allocator)).put(realm.allocator, "buffer", .{
             .writable = false,
-            .enumerable = false,
+            .enumerable = true,
             .configurable = true,
         });
     }
@@ -220,7 +252,7 @@ pub fn install(realm: *Realm) !void {
         .name = "Tag",
         .install_global = false,
     });
-    try ns.set(realm.allocator, "Tag", heap_mod.taggedFunction(tag_ctor.ctor));
+    try intrinsics.setNonEnumerable(ns, realm.allocator, "Tag", heap_mod.taggedFunction(tag_ctor.ctor));
     realm.wasm_tag_prototype = tag_ctor.proto;
     try intrinsics.installToStringTag(realm, tag_ctor.proto, "WebAssembly.Tag");
 
@@ -230,11 +262,11 @@ pub fn install(realm: *Realm) !void {
         .name = "Exception",
         .install_global = false,
     });
-    try ns.set(realm.allocator, "Exception", heap_mod.taggedFunction(exception_ctor.ctor));
+    try intrinsics.setNonEnumerable(ns, realm.allocator, "Exception", heap_mod.taggedFunction(exception_ctor.ctor));
     realm.wasm_exception_prototype = exception_ctor.proto;
     try intrinsics.installToStringTag(realm, exception_ctor.proto, "WebAssembly.Exception");
-    try intrinsics.installNativeMethodOnProto(realm, exception_ctor.proto, "is", exceptionIs, 1);
-    try intrinsics.installNativeMethodOnProto(realm, exception_ctor.proto, "getArg", exceptionGetArg, 2);
+    try installWebIdlOperation(realm, exception_ctor.proto, "is", exceptionIs, 1);
+    try installWebIdlOperation(realm, exception_ctor.proto, "getArg", exceptionGetArg, 2);
 
     try realm.globals.put(realm.allocator, "WebAssembly", heap_mod.taggedObject(ns));
 }
@@ -313,7 +345,18 @@ fn instanceConstructor(realm: *Realm, this_value: Value, args: []const Value) Na
 /// Resolve imports, instantiate, run the start function, and attach the
 /// `exports` namespace to `self`.
 fn populateInstance(realm: *Realm, self: *JSObject, mstate: *ModuleState, import_object: Value) NativeError!void {
-    var imports = try resolveImports(realm, mstate.module, import_object);
+    // Async instantiation allocates its receiver inside native code. Keep it
+    // alive through imported callbacks (including a collecting start function).
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(heap_mod.taggedObject(self)) catch return error.OutOfMemory;
+    scope.push(import_object) catch return error.OutOfMemory;
+    var imports = try resolveImports(realm, mstate.module, import_object, scope);
+    // A start callback can publish ref.func before a later trap. Once it
+    // begins, the realm-owned instance and all imported roots must survive
+    // until realm teardown, even if no Instance object is returned.
+    var may_have_escaped = false;
+    errdefer if (!may_have_escaped) unregisterHostImports(realm, imports.funcs);
     imports.store_allocator = realm.wasmStoreAllocator();
 
     const a = realm.wasmAllocator();
@@ -328,26 +371,28 @@ fn populateInstance(realm: *Realm, self: *JSObject, mstate: *ModuleState, import
     var registered_extern_tables: usize = 0;
     var registered_extern_globals: usize = 0;
     errdefer {
-        var tables_remaining = registered_extern_tables;
-        for (0..ip.tables.len) |i| {
-            if (tables_remaining == 0) break;
-            if ((ip.tableElemType(@intCast(i)) orelse continue) != .externref) continue;
-            const table = ip.tableRef(@intCast(i)) orelse continue;
-            realm.unregisterExternTable(table);
-            tables_remaining -= 1;
-        }
+        if (!may_have_escaped) {
+            var tables_remaining = registered_extern_tables;
+            for (0..ip.tables.len) |i| {
+                if (tables_remaining == 0) break;
+                if ((ip.tableElemType(@intCast(i)) orelse continue) != .externref) continue;
+                const table = ip.tableRef(@intCast(i)) orelse continue;
+                realm.unregisterExternTable(table);
+                tables_remaining -= 1;
+            }
 
-        var globals_remaining = registered_extern_globals;
-        for (0..ip.globals.len) |i| {
-            if (globals_remaining == 0) break;
-            const gt = ip.globalTypeAt(@intCast(i)) orelse continue;
-            if (gt.val != .externref) continue;
-            const cell = ip.globalCellPtr(@intCast(i)) orelse continue;
-            realm.unregisterExternGlobalCell(cell);
-            globals_remaining -= 1;
-        }
+            var globals_remaining = registered_extern_globals;
+            for (0..ip.globals.len) |i| {
+                if (globals_remaining == 0) break;
+                const gt = ip.globalTypeAt(@intCast(i)) orelse continue;
+                if (gt.val != .externref) continue;
+                const cell = ip.globalCellPtr(@intCast(i)) orelse continue;
+                realm.unregisterExternGlobalCell(cell);
+                globals_remaining -= 1;
+            }
 
-        realm.unregisterWasmInstance(ip);
+            realm.unregisterWasmInstance(ip);
+        }
     }
 
     // Let a `try_table` in this instance catch a JS exception thrown by a
@@ -390,9 +435,25 @@ fn populateInstance(realm: *Realm, self: *JSObject, mstate: *ModuleState, import
         }
     }
 
+    may_have_escaped = mstate.module.start != null;
     wasm.runStart(ip, realm.wasmInvocationAllocator()) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.HostThrew => return error.NativeThrew, // a host import threw during start
+        // A defined start function may call a throwing JS import. The
+        // Wasm exception bridge converts HostThrew to UncaughtException
+        // and clears pending_exception, just as for an exported call.
+        // Preserve the original JS throw; reify a pure Wasm exception.
+        error.UncaughtException => {
+            if (ip.pending_exn) |exn_rec| {
+                if (exn_rec.js_value != wasm.REF_NULL) {
+                    realm.pending_exception = Value{ .bits = @truncate(exn_rec.js_value) };
+                } else {
+                    realm.pending_exception = try makeExceptionFromRecord(realm, exn_rec);
+                }
+                return error.NativeThrew;
+            }
+            return throwRuntimeError(realm, "WebAssembly.Instance: uncaught start exception");
+        },
         error.StepBudgetExhausted,
         error.ExecutionInterrupted,
         error.ExecutionTerminated,
@@ -401,14 +462,20 @@ fn populateInstance(realm: *Realm, self: *JSObject, mstate: *ModuleState, import
     };
 
     const exports = try buildExports(realm, ip, mstate.module);
-    // Spec models `exports` as an Instance.prototype getter returning the
-    // immutable [[Exports]]; this slice exposes it as a read-only own
-    // property (also keeps it reachable for GC via the property bag).
-    try self.setWithFlags(realm.allocator, "exports", exports, .{
-        .writable = false,
-        .enumerable = true,
-        .configurable = false,
-    });
+    const exports_object = heap_mod.valueAsPlainObject(exports) orelse
+        return intrinsics.throwTypeError(realm, "WebAssembly.Instance: invalid exports namespace");
+    try self.setWasmInstanceExports(realm.allocator, exports_object);
+}
+
+/// Wasm JS API §5.2 / WebIDL: inherited slots and proxies do not brand
+/// a receiver. V8/JSC likewise return the instance's internal exports object.
+fn instanceExportsGet(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    const instance = heap_mod.valueAsPlainObject(this_value) orelse
+        return intrinsics.throwTypeError(realm, "WebAssembly.Instance.exports: incompatible receiver");
+    const exports = instance.getWasmInstanceExports() orelse
+        return intrinsics.throwTypeError(realm, "WebAssembly.Instance.exports: incompatible receiver");
+    return heap_mod.taggedObject(exports);
 }
 
 /// Build a fresh `WebAssembly.Instance` object (no `new`), for the
@@ -461,6 +528,13 @@ fn compileToModule(realm: *Realm, args: []const Value) NativeError!Value {
 fn wasmInstantiate(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
     const cap = try promise_mod.newPromiseCapability(realm, try promiseCtor(realm));
+    // Instantiation can call an imported start function, which may collect.
+    // Retain all capability members until fulfillment or rejection completes.
+    const scope = try realm.heap.openScope();
+    defer scope.close();
+    try scope.push(cap.promise);
+    try scope.push(heap_mod.taggedFunction(cap.resolve));
+    try scope.push(heap_mod.taggedFunction(cap.reject));
     const result = instantiateToResult(realm, args) catch |err| {
         // Host termination is not an ECMAScript abrupt completion and must
         // not be made catchable by converting it into a rejected Promise.
@@ -491,6 +565,11 @@ fn instantiateToResult(realm: *Realm, args: []const Value) NativeError!Value {
     const bytes = bufferSourceBytes(args) orelse
         return intrinsics.throwTypeError(realm, "WebAssembly.instantiate expects a BufferSource or Module");
     const module_v = try makeModuleObject(realm, bytes);
+    // The freshly compiled Module is not yet exposed to JS. Its wrapper
+    // must survive an imported start callback before joining the result.
+    const scope = try realm.heap.openScope();
+    defer scope.close();
+    try scope.push(module_v);
     const mobj = heap_mod.valueAsPlainObject(module_v) orelse unreachable;
     const mstate: *ModuleState = @ptrCast(@alignCast(mobj.getWasmModule() orelse unreachable));
     const instance_v = try makeInstanceObject(realm, mstate, import_object);
@@ -509,25 +588,36 @@ fn instantiateToResult(realm: *Realm, args: []const Value) NativeError!Value {
 fn globalConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const self = heap_mod.valueAsPlainObject(this_value) orelse
         return intrinsics.throwTypeError(realm, "WebAssembly.Global requires 'new'");
-    const desc = (if (args.len > 0) heap_mod.valueAsPlainObject(args[0]) else null) orelse
+    const descriptor = if (args.len > 0) args[0] else Value.undefined_;
+    if (!heap_mod.isJSObject(descriptor))
         return intrinsics.throwTypeError(realm, "WebAssembly.Global expects a descriptor object");
 
-    const vt = readValType(desc.get("value")) orelse
+    // WebIDL dictionary members are read in lexicographic order: mutable
+    // before value. Get and enum ToString may invoke arbitrary user JS.
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(this_value) catch return error.OutOfMemory;
+    scope.push(descriptor) catch return error.OutOfMemory;
+    const initial = if (args.len > 1) args[1] else Value.undefined_;
+    scope.push(initial) catch return error.OutOfMemory;
+    const mutable_value = (try intrinsics.getPropertyChainOnValue(realm, descriptor, "mutable")) orelse Value.undefined_;
+    const mutable = arith.toBoolean(mutable_value);
+    const type_value = (try intrinsics.getPropertyChainOnValue(realm, descriptor, "value")) orelse Value.undefined_;
+    scope.push(type_value) catch return error.OutOfMemory;
+    const type_string = try intrinsics.stringifyArg(realm, type_value);
+    scope.push(Value.fromString(type_string)) catch return error.OutOfMemory;
+    const type_bytes = try realm.heap.flattenString(type_string);
+    const vt = valTypeFromString(type_bytes) orelse
         return intrinsics.throwTypeError(realm, "WebAssembly.Global: invalid value type");
-    const mutable = arith.toBoolean(desc.get("mutable"));
 
+    // WebIDL treats an explicit undefined optional argument as missing.
+    // DefaultValue(externref) is JS undefined, not the Wasm null reference.
+    const default_cell: u128 = if (vt == .externref) @as(u128, Value.undefined_.bits) else if (vt == .funcref) wasm.REF_NULL else 0;
+    const initial_cell = if (initial.isUndefined()) default_cell else try marshalArg(realm, vt, initial);
     const a = realm.wasmAllocator();
     const g = a.create(wasm.Global) catch return error.OutOfMemory;
-    // A missing initial value is the type's default: the null ref for
-    // reference types, else the zero bit pattern (i32 0 / i64 0n /
-    // f32 +0 / f64 +0).
-    const default_cell: u128 = if (vt == .externref or vt == .funcref) wasm.REF_NULL else 0;
-    g.* = .{
-        .value = if (args.len > 1) try marshalArg(realm, vt, args[1]) else default_cell,
-        .mutable = mutable,
-    };
+    g.* = .{ .value = initial_cell, .mutable = mutable };
     const cell = &g.value;
-
     const st = a.create(GlobalState) catch return error.OutOfMemory;
     st.* = .{ .g = g, .cell = cell, .valtype = vt, .mutable = mutable };
     try self.setWasmGlobal(realm.allocator, st);
@@ -559,7 +649,13 @@ fn globalValueGet(realm: *Realm, this_value: Value, args: []const Value) NativeE
 fn globalValueSet(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const st = try globalStateOf(realm, this_value);
     if (!st.mutable) return intrinsics.throwTypeError(realm, "WebAssembly.Global is immutable");
-    st.cell.* = try marshalArg(realm, st.valtype, if (args.len > 0) args[0] else Value.undefined_);
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(this_value) catch return error.OutOfMemory;
+    const incoming = if (args.len > 0) args[0] else Value.undefined_;
+    scope.push(incoming) catch return error.OutOfMemory;
+    // Commit only after conversion succeeds; throws leave the cell unchanged.
+    st.cell.* = try marshalArg(realm, st.valtype, incoming);
     return Value.undefined_;
 }
 
@@ -577,37 +673,56 @@ fn makeGlobal(realm: *Realm, valtype: wasm.ValType, mutable: bool, g: *wasm.Glob
 
 // ── WebAssembly.Table ───────────────────────────────────────────────
 
+// Match Sarcasm/Spasm's implementation limit: do not let an oversized
+// backing lazily allocate successfully and abort the host on first touch.
+const max_js_table_elements: usize = 1 << 24;
+
 /// `new WebAssembly.Table({element, initial, maximum?}, value?)` — a
 /// growable reference table. It is independent of byte compilation policy.
 fn tableConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const self = heap_mod.valueAsPlainObject(this_value) orelse
         return intrinsics.throwTypeError(realm, "WebAssembly.Table requires 'new'");
-    const desc = (if (args.len > 0) heap_mod.valueAsPlainObject(args[0]) else null) orelse
+    const desc = if (args.len > 0) args[0] else Value.undefined_;
+    if (!heap_mod.isJSObject(desc))
         return intrinsics.throwTypeError(realm, "WebAssembly.Table expects a descriptor object");
+    const scope = try realm.heap.openScope();
+    defer scope.close();
+    try scope.push(this_value);
+    try scope.push(desc);
+    if (args.len > 1) try scope.push(args[1]);
 
-    const elem_v = desc.get("element");
-    if (!elem_v.isString()) return intrinsics.throwTypeError(realm, "WebAssembly.Table: invalid element type");
-    const elem_s: *JSString = @ptrCast(@alignCast(elem_v.asString()));
-    const elem = elem_s.flatBytes();
-    const is_funcref = std.mem.eql(u8, elem, "anyfunc") or std.mem.eql(u8, elem, "funcref");
+    // Web IDL dictionary conversion uses ordinary Get (including callable
+    // descriptors), followed by the TableKind enum's ToString conversion.
+    const elem_v = (try intrinsics.getPropertyChainOnValue(realm, desc, "element")).?;
+    const elem_s = try intrinsics.stringifyArg(realm, elem_v);
+    try scope.push(Value.fromString(elem_s));
+    const elem = try realm.heap.flattenString(elem_s);
+    const is_funcref = std.mem.eql(u8, elem, "anyfunc");
     if (!is_funcref and !std.mem.eql(u8, elem, "externref"))
         return intrinsics.throwTypeError(realm, "WebAssembly.Table: invalid element type");
 
-    // JS-API §Table — `initial` is required; `maximum`, when present,
-    // must be ≥ `initial`.
-    const initial_v = desc.get("initial");
+    // JS API §5.4: AddressValue is `any`, so dictionary member reads
+    // finish before the constructor performs the numeric conversions.
+    const initial_v = (try intrinsics.getPropertyChainOnValue(realm, desc, "initial")).?;
     if (initial_v.isUndefined())
         return intrinsics.throwTypeError(realm, "WebAssembly.Table: missing required 'initial'");
-    const initial = try indexArg(realm, initial_v);
-    const max = try optionalIndexArg(realm, desc.get("maximum"));
+    try scope.push(initial_v);
+    const maximum_v = (try intrinsics.getPropertyChainOnValue(realm, desc, "maximum")).?;
+    try scope.push(maximum_v);
+    const initial: usize = @intCast(try addressValueToU64(realm, initial_v));
+    const max = try optionalAddressValue(realm, maximum_v);
     if (max) |m| {
         if (m < initial) return intrinsics.throwRangeError(realm, "WebAssembly.Table: maximum is less than initial");
     }
 
-    const fill = if (args.len > 1) try tableElemFromValue(realm, is_funcref, args[1]) else wasm.REF_NULL;
+    // DefaultValue(externref) is JS undefined; DefaultValue(funcref) is null.
+    const fill = try tableElemFromValue(realm, is_funcref, if (args.len > 1) args[1] else Value.undefined_);
     const a = realm.wasmAllocator();
     const store_allocator = realm.wasmStoreAllocator();
-    const elems = store_allocator.alloc(u128, initial) catch return error.OutOfMemory;
+    if (initial > max_js_table_elements)
+        return intrinsics.throwRangeError(realm, "WebAssembly.Table exceeds the implementation size limit");
+    const elems = store_allocator.alloc(u128, initial) catch
+        return intrinsics.throwRangeError(realm, "WebAssembly.Table allocation failed");
     @memset(elems, fill);
 
     const tbl = a.create(wasm.Table) catch {
@@ -638,6 +753,8 @@ fn tableConstructor(realm: *Realm, this_value: Value, args: []const Value) Nativ
 
 /// A JS value -> a table element cell, per the table's element type.
 fn tableElemFromValue(realm: *Realm, is_funcref: bool, v: Value) NativeError!u128 {
+    // Optional Web IDL arguments with value undefined are treated as absent.
+    if (is_funcref and v.isUndefined()) return wasm.REF_NULL;
     return if (is_funcref) funcRefFromValue(realm, v) else marshalArg(realm, .externref, v);
 }
 
@@ -652,11 +769,14 @@ fn tableStateOf(realm: *Realm, this_value: Value) NativeError!*TableState {
 fn tableLength(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const st = try tableStateOf(realm, this_value);
-    return Value.fromInt32(@intCast(st.table.elems.len));
+    return u64ToAddressValue(st.table.elems.len);
 }
 
 fn tableGet(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const st = try tableStateOf(realm, this_value);
+    const scope = try realm.heap.openScope();
+    defer scope.close();
+    try scope.push(this_value);
     const idx = try tableIndex(realm, st, if (args.len > 0) args[0] else Value.undefined_);
     const cell = st.table.elems[idx];
     return marshalResult(realm, if (st.funcref) .funcref else .externref, cell);
@@ -664,28 +784,48 @@ fn tableGet(realm: *Realm, this_value: Value, args: []const Value) NativeError!V
 
 fn tableSet(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const st = try tableStateOf(realm, this_value);
-    const idx = try tableIndex(realm, st, if (args.len > 0) args[0] else Value.undefined_);
-    st.table.elems[idx] = try tableElemFromValue(realm, st.funcref, if (args.len > 1) args[1] else Value.null_);
+    const scope = try realm.heap.openScope();
+    defer scope.close();
+    try scope.push(this_value);
+    const value = if (args.len > 1) args[1] else Value.undefined_;
+    try scope.push(value);
+    // JS API §5.4 set: conversion of both arguments precedes table_write's
+    // bounds check. A value conversion TypeError wins over an invalid index.
+    const idx = try addressValueToU64(realm, if (args.len > 0) args[0] else Value.undefined_);
+    const ref = try tableElemFromValue(realm, st.funcref, value);
+    if (idx >= st.table.elems.len)
+        return intrinsics.throwRangeError(realm, "WebAssembly.Table index is out of bounds");
+    st.table.elems[@intCast(idx)] = ref;
     return Value.undefined_;
 }
 
 fn tableGrow(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const st = try tableStateOf(realm, this_value);
-    const delta = try indexArg(realm, if (args.len > 0) args[0] else Value.undefined_);
-    // The fill value is coerced per the table's element type — an
-    // externref table accepts any JS value, not just a funcref.
-    const fill = if (args.len > 1) try tableElemFromValue(realm, st.funcref, args[1]) else wasm.REF_NULL;
+    const scope = try realm.heap.openScope();
+    defer scope.close();
+    try scope.push(this_value);
+    const value = if (args.len > 1) args[1] else Value.undefined_;
+    try scope.push(value);
+    // §5.4 grow captures its return value before coercion. Coercion may
+    // itself grow the table, so allocation must use the refreshed size.
+    const initial_size = st.table.elems.len;
+    const delta: usize = @intCast(try addressValueToU64(realm, if (args.len > 0) args[0] else Value.undefined_));
+    const fill = try tableElemFromValue(realm, st.funcref, value);
     const old_len = st.table.elems.len;
     const new_len = std.math.add(usize, old_len, delta) catch
         return intrinsics.throwRangeError(realm, "WebAssembly.Table.grow size is too large");
+    if (new_len > max_js_table_elements)
+        return intrinsics.throwRangeError(realm, "WebAssembly.Table.grow exceeds the implementation size limit");
+    if (!st.table.is_64 and new_len > std.math.maxInt(u32))
+        return intrinsics.throwRangeError(realm, "WebAssembly.Table.grow exceeds the table32 size limit");
     if (st.table.max) |m| {
         if (new_len > m) return intrinsics.throwRangeError(realm, "WebAssembly.Table.grow exceeds the maximum");
     }
     const new_elems = st.table.storeAllocator(realm.wasmStoreAllocator()).realloc(st.table.elems, new_len) catch
-        return error.OutOfMemory;
+        return intrinsics.throwRangeError(realm, "WebAssembly.Table.grow allocation failed");
     @memset(new_elems[old_len..], fill);
     st.table.elems = new_elems;
-    return Value.fromInt32(@intCast(old_len));
+    return u64ToAddressValue(initial_size);
 }
 
 /// A JS value -> a funcref cell: null/undefined -> the null ref; a
@@ -700,25 +840,38 @@ fn funcRefFromValue(realm: *Realm, v: Value) NativeError!u128 {
     return wasm.makeFuncRef(rec.instance, rec.func_index);
 }
 
-/// Validate a table index argument against the table's bounds.
+/// Validate a table index argument against the table's current bounds.
 fn tableIndex(realm: *Realm, st: *TableState, v: Value) NativeError!usize {
-    const i = arith.toInt32(v);
-    if (i < 0 or @as(usize, @intCast(i)) >= st.table.elems.len)
+    const i = try addressValueToU64(realm, v);
+    if (i >= st.table.elems.len)
         return intrinsics.throwRangeError(realm, "WebAssembly.Table index is out of bounds");
     return @intCast(i);
 }
 
-/// Read a non-negative length-like argument as a usize.
-fn indexArg(realm: *Realm, v: Value) NativeError!usize {
-    const i = arith.toInt32(v);
-    if (i < 0) return intrinsics.throwRangeError(realm, "WebAssembly: length must be non-negative");
-    return @intCast(i);
+/// JS API §5.6 AddressValueToU64, for the existing i32 JS API surface.
+/// Web IDL ConvertToInt(v, 32, unsigned), [EnforceRange]: ToNumber may
+/// re-enter JS; truncate finite values before checking the unsigned range.
+fn addressValueToU64(realm: *Realm, v: Value) NativeError!u64 {
+    const number = arith.toNumber(try intrinsics.toNumber(realm, v));
+    if (!std.math.isFinite(number))
+        return intrinsics.throwTypeError(realm, "WebAssembly address must be finite");
+    const integer = @trunc(number);
+    if (integer < 0 or integer > std.math.maxInt(u32))
+        return intrinsics.throwTypeError(realm, "WebAssembly address must fit an unsigned 32-bit integer");
+    return @intFromFloat(integer); // safety: finite, truncated, and checked against [0, 2^32 - 1] above.
 }
 
-/// Read an optional maximum (undefined -> null).
-fn optionalIndexArg(realm: *Realm, v: Value) NativeError!?u64 {
+/// JS API U64ToAddressValue for i32: preserve the small-number fast path
+/// without a signed cast trap for lengths above the int32 range.
+fn u64ToAddressValue(value: u64) Value {
+    if (value <= std.math.maxInt(i32)) return Value.fromInt32(@intCast(value));
+    return Value.fromDouble(@floatFromInt(value));
+}
+
+/// An absent optional AddressValue member leaves the maximum unspecified.
+fn optionalAddressValue(realm: *Realm, v: Value) NativeError!?u64 {
     if (v.isUndefined()) return null;
-    return @as(u64, try indexArg(realm, v));
+    return try addressValueToU64(realm, v);
 }
 
 /// Wrap a shared engine table as a `WebAssembly.Table` (for exports).
@@ -739,23 +892,34 @@ fn makeTable(realm: *Realm, table: *wasm.Table, funcref: bool) NativeError!Value
 fn memoryConstructor(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const self = heap_mod.valueAsPlainObject(this_value) orelse
         return intrinsics.throwTypeError(realm, "WebAssembly.Memory requires 'new'");
-    const desc = (if (args.len > 0) heap_mod.valueAsPlainObject(args[0]) else null) orelse
+    const desc = if (args.len > 0) args[0] else Value.undefined_;
+    if (!heap_mod.isJSObject(desc))
         return intrinsics.throwTypeError(realm, "WebAssembly.Memory expects a descriptor object");
+    const scope = try realm.heap.openScope();
+    defer scope.close();
+    try scope.push(this_value);
+    try scope.push(desc);
 
-    // JS-API §Memory — `initial` is a required descriptor member; a
-    // missing one is a TypeError, not a default-to-zero.
-    const initial_v = desc.get("initial");
+    // JS API §5.3 / Web IDL dictionary conversion: collect `any` members
+    // before numeric coercion, rooting fresh getter results across Get.
+    const initial_v = (try intrinsics.getPropertyChainOnValue(realm, desc, "initial")).?;
     if (initial_v.isUndefined())
         return intrinsics.throwTypeError(realm, "WebAssembly.Memory: missing required 'initial'");
-    const initial = try indexArg(realm, initial_v);
-    const max = try optionalIndexArg(realm, desc.get("maximum"));
+    try scope.push(initial_v);
+    const maximum_v = (try intrinsics.getPropertyChainOnValue(realm, desc, "maximum")).?;
+    try scope.push(maximum_v);
+    const shared = arith.toBoolean((try intrinsics.getPropertyChainOnValue(realm, desc, "shared")).?);
+    const initial: usize = @intCast(try addressValueToU64(realm, initial_v));
+    const max = try optionalAddressValue(realm, maximum_v);
+    // Core validation limits a memory32 address space to 2^16 pages.
+    if (initial > 65536 or (max != null and max.? > 65536))
+        return intrinsics.throwRangeError(realm, "WebAssembly.Memory exceeds the memory32 size limit");
     // §Memory — `maximum`, when present, must be ≥ `initial`.
     if (max) |m| {
         if (m < initial) return intrinsics.throwRangeError(realm, "WebAssembly.Memory: maximum is less than initial");
     }
     // A shared memory exposes its buffer as a SharedArrayBuffer and must
     // declare a maximum (the buffer can never move).
-    const shared = arith.toBoolean(desc.get("shared"));
     if (shared and max == null)
         return intrinsics.throwTypeError(realm, "WebAssembly.Memory: a shared memory requires a maximum");
 
@@ -769,7 +933,8 @@ fn memoryConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
     // another agent. Keep their provisional backing arena-retained until the
     // Wasm shared-memory path uses SharedDataBlock in-place growth.
     const backing_allocator = if (shared) a else store_allocator;
-    const bytes = backing_allocator.alloc(u8, byte_len) catch return error.OutOfMemory;
+    const bytes = backing_allocator.alloc(u8, byte_len) catch
+        return intrinsics.throwRangeError(realm, "WebAssembly.Memory allocation failed");
     @memset(bytes, 0);
     const mem = a.create(wasm.Memory) catch {
         backing_allocator.free(bytes);
@@ -833,10 +998,15 @@ fn memoryBufferGet(realm: *Realm, this_value: Value, args: []const Value) Native
 /// current buffer, return the previous page count.
 fn memoryGrow(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const st = try memoryStateOf(realm, this_value);
-    const delta = try indexArg(realm, if (args.len > 0) args[0] else Value.undefined_);
+    const scope = try realm.heap.openScope();
+    defer scope.close();
+    try scope.push(this_value);
+    const delta: usize = @intCast(try addressValueToU64(realm, if (args.len > 0) args[0] else Value.undefined_));
     const old_pages = st.mem.data.len / wasm.PAGE_SIZE;
     const new_pages = std.math.add(usize, old_pages, delta) catch
         return intrinsics.throwRangeError(realm, "WebAssembly.Memory.grow size is too large");
+    if (!st.mem.is_64 and new_pages > 65536)
+        return intrinsics.throwRangeError(realm, "WebAssembly.Memory.grow exceeds the memory32 size limit");
     if (st.mem.max_pages) |m| {
         if (new_pages > m) return intrinsics.throwRangeError(realm, "WebAssembly.Memory.grow exceeds the maximum");
     }
@@ -847,13 +1017,13 @@ fn memoryGrow(realm: *Realm, this_value: Value, args: []const Value) NativeError
         return intrinsics.throwRangeError(realm, "WebAssembly.Memory.grow exceeds the Realm memory limit");
     const old_len = st.mem.data.len;
     const new_bytes = st.mem.storeAllocator(realm.wasmStoreAllocator()).realloc(st.mem.data, byte_len) catch
-        return error.OutOfMemory;
+        return intrinsics.throwRangeError(realm, "WebAssembly.Memory.grow allocation failed");
     @memset(new_bytes[old_len..], 0);
     // DetachArrayBuffer (§25.1.3.4) on every materialized non-shared view,
     // including wrappers created for imports/exports of this Memory record.
     st.mem.detachHostViewsAfterGrow();
     st.mem.data = new_bytes;
-    return Value.fromInt32(@intCast(old_pages));
+    return u64ToAddressValue(old_pages);
 }
 
 /// Wrap a shared engine memory as a `WebAssembly.Memory` (for exports).
@@ -873,9 +1043,28 @@ fn makeMemory(realm: *Realm, mem: *wasm.Memory) NativeError!Value {
 const HostImportCtx = struct {
     realm: *Realm,
     js_fn: *JSFunction,
+    js_value: u128, // root cell; registered while a resolved import remains live
     params: []const wasm.ValType,
     results: []const wasm.ValType,
 };
+
+/// Find our rooted JS callback in a direct or cross-module host import.
+fn hostImportContext(function: wasm.FuncRef) ?*HostImportCtx {
+    return switch (function) {
+        .host => |host| if (host.fn_ptr == jsHostTrampoline)
+            @ptrCast(@alignCast(host.ctx orelse return null))
+        else
+            null,
+        else => null,
+    };
+}
+
+fn unregisterHostImports(realm: *Realm, functions: []const wasm.FuncRef) void {
+    for (functions) |function| {
+        if (hostImportContext(function)) |context|
+            realm.unregisterExternGlobalCell(&context.js_value);
+    }
+}
 
 /// The engine's host-function callback for a JS import: marshal the wasm
 /// operands to JS values, call the JS function (re-entering Lantern),
@@ -925,7 +1114,7 @@ fn wasmExecutionMeteringArmed(ctx: *anyopaque) bool {
 /// WebAssembly exported function) or a host trampoline (any JS
 /// function); globals read a `Global` cell or marshal a primitive;
 /// memories / tables share the imported object's engine state.
-fn resolveImports(realm: *Realm, module: *const wasm.Module, import_obj_v: Value) NativeError!wasm.Imports {
+fn resolveImports(realm: *Realm, module: *const wasm.Module, import_obj_v: Value, roots: *heap_mod.HandleScope) NativeError!wasm.Imports {
     var nfunc: usize = 0;
     var nglob: usize = 0;
     var ntab: usize = 0;
@@ -940,7 +1129,7 @@ fn resolveImports(realm: *Realm, module: *const wasm.Module, import_obj_v: Value
     };
     if (module.imports.len == 0) return .{};
 
-    const import_obj = heap_mod.valueAsPlainObject(import_obj_v) orelse
+    if (!heap_mod.isJSObject(import_obj_v))
         return intrinsics.throwTypeError(realm, "WebAssembly.Instance: an importObject is required");
 
     const a = realm.wasmAllocator();
@@ -950,16 +1139,24 @@ fn resolveImports(realm: *Realm, module: *const wasm.Module, import_obj_v: Value
     const tags = a.alloc(*const wasm.TagType, ntag) catch return error.OutOfMemory;
     const memories = a.alloc(*wasm.Memory, nmem) catch return error.OutOfMemory;
     var fi: usize = 0;
+    errdefer unregisterHostImports(realm, funcs[0..fi]);
     var gi: usize = 0;
     var ti: usize = 0;
     var tgi: usize = 0;
     var mi: usize = 0;
 
     for (module.imports) |imp| {
-        const v = try lookupImport(realm, import_obj, imp.module, imp.name);
+        const v = try lookupImport(realm, import_obj_v, imp.module, imp.name);
+        // A subsequent import getter may remove this value from its source
+        // and collect. Keep fresh externrefs/wrappers until populateInstance
+        // has registered the instance's durable roots (including start).
+        try roots.push(v);
         switch (imp.desc) {
             .func => |type_idx| {
-                funcs[fi] = try resolveFuncImport(realm, v, module, type_idx);
+                const function = try resolveFuncImport(realm, v, module, type_idx);
+                if (hostImportContext(function)) |context|
+                    realm.registerExternGlobalCell(&context.js_value) catch return error.OutOfMemory;
+                funcs[fi] = function;
                 fi += 1;
             },
             .global => |gt| {
@@ -986,12 +1183,17 @@ fn resolveImports(realm: *Realm, module: *const wasm.Module, import_obj_v: Value
     return .{ .funcs = funcs, .globals = globals, .tables = tables, .memories = memories, .share_memory = true, .tags = tags };
 }
 
-/// `importObject[module][name]`.
-fn lookupImport(realm: *Realm, import_obj: *JSObject, module_name: []const u8, name: []const u8) NativeError!Value {
-    const mod_v = import_obj.get(module_name);
-    const mod_obj = heap_mod.valueAsPlainObject(mod_v) orelse
-        return throwLinkError(realm, "WebAssembly.Instance: import module namespace is not an object");
-    return mod_obj.get(name);
+/// JS API §5 "read the imports": ordinary Get for both components,
+/// repeated in declaration order. Abrupt completions propagate unchanged.
+fn lookupImport(realm: *Realm, import_obj: Value, module_name: []const u8, name: []const u8) NativeError!Value {
+    const scope = try realm.heap.openScope();
+    defer scope.close();
+    try scope.push(import_obj);
+    const mod_v = (try intrinsics.getPropertyChainOnValue(realm, import_obj, module_name)).?;
+    if (!heap_mod.isJSObject(mod_v))
+        return intrinsics.throwTypeError(realm, "WebAssembly.Instance: import module namespace is not an object");
+    try scope.push(mod_v);
+    return (try intrinsics.getPropertyChainOnValue(realm, mod_v, name)).?;
 }
 
 fn resolveFuncImport(realm: *Realm, v: Value, module: *const wasm.Module, type_idx: u32) NativeError!wasm.FuncRef {
@@ -1008,7 +1210,7 @@ fn resolveFuncImport(realm: *Realm, v: Value, module: *const wasm.Module, type_i
     if (ft.params.len > 16 or ft.results.len > 1)
         return intrinsics.throwTypeError(realm, "WebAssembly.Instance: host import arity is not supported");
     const ctx = realm.wasmAllocator().create(HostImportCtx) catch return error.OutOfMemory;
-    ctx.* = .{ .realm = realm, .js_fn = fn_obj, .params = ft.params, .results = ft.results };
+    ctx.* = .{ .realm = realm, .js_fn = fn_obj, .js_value = @as(u128, v.bits), .params = ft.params, .results = ft.results };
     return .{ .host = .{
         .fn_ptr = jsHostTrampoline,
         .ctx = ctx,
@@ -1018,17 +1220,32 @@ fn resolveFuncImport(realm: *Realm, v: Value, module: *const wasm.Module, type_i
 }
 
 fn resolveGlobalImport(realm: *Realm, v: Value, gt: anytype) NativeError!*wasm.Global {
-    // A WebAssembly.Global is aliased — a mutable global's writes are
-    // visible both ways (§4.5.4); a primitive is marshalled into a
-    // fresh engine global of the declared type.
+    // A WebAssembly.Global is aliased: a mutable global's writes are
+    // visible both ways. Primitive imports allocate a constant global.
     if (heap_mod.valueAsPlainObject(v)) |obj| {
         if (obj.getWasmGlobal()) |raw| {
             const st: *GlobalState = @ptrCast(@alignCast(raw));
             return st.g;
         }
     }
+    // JS API "read the imports": numeric primitive imports require the
+    // matching JS Number/BigInt type; they never run coercion hooks.
+    if (gt.mut == .mutable)
+        return throwLinkError(realm, "WebAssembly: a mutable global import requires WebAssembly.Global");
+    switch (gt.val) {
+        .i64 => if (heap_mod.valueAsBigInt(v) == null)
+            return throwLinkError(realm, "WebAssembly: an i64 global import must be a BigInt"),
+        .i32, .f32, .f64 => if (!v.isInt32() and !v.isDouble())
+            return throwLinkError(realm, "WebAssembly: a numeric global import must be a Number"),
+        .v128 => return throwLinkError(realm, "WebAssembly: a v128 import requires WebAssembly.Global"),
+        else => {},
+    }
+    const value = marshalArg(realm, gt.val, v) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.NativeThrew => return throwLinkError(realm, "WebAssembly: invalid global import value"),
+    };
     const g = realm.wasmAllocator().create(wasm.Global) catch return error.OutOfMemory;
-    g.* = .{ .value = try marshalArg(realm, gt.val, v), .mutable = gt.mut == .mutable };
+    g.* = .{ .value = value, .mutable = false };
     return g;
 }
 
@@ -1058,43 +1275,59 @@ fn resolveMemImport(realm: *Realm, v: Value) NativeError!*wasm.Memory {
 fn buildExports(realm: *Realm, ip: *wasm.Instance, module: *const wasm.Module) NativeError!Value {
     const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
     realm.heap.setObjectPrototype(obj, null); // §exports object has a null prototype
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(heap_mod.taggedObject(obj)) catch return error.OutOfMemory;
+    // Wasm JS API §5: CreateDataProperty followed by
+    // SetIntegrityLevel(exportsObject, "frozen"). Only the namespace
+    // is frozen; exported functions and store wrappers remain mutable.
+    const export_flags: @import("../object.zig").PropertyFlags = .{
+        .writable = false,
+        .enumerable = true,
+        .configurable = false,
+    };
     for (module.exports) |ex| {
         switch (ex.desc) {
             .func => |fidx| {
-                const fv = try makeExportedFunction(realm, ip, fidx, ex.name);
-                obj.set(realm.allocator, ex.name, fv) catch return error.OutOfMemory;
+                const fv = try makeExportedFunction(realm, ip, fidx);
+                obj.setWithFlags(realm.allocator, ex.name, fv, export_flags) catch return error.OutOfMemory;
             },
             .global => |gidx| {
                 const g = ip.globalRef(gidx) orelse continue;
                 const gt = ip.globalTypeAt(gidx) orelse continue;
                 const gobj = try makeGlobal(realm, gt.val, gt.mut == .mutable, g);
-                obj.set(realm.allocator, ex.name, gobj) catch return error.OutOfMemory;
+                obj.setWithFlags(realm.allocator, ex.name, gobj, export_flags) catch return error.OutOfMemory;
             },
             .table => |tidx| {
                 const tbl = ip.tableRef(tidx) orelse continue;
                 const et = ip.tableElemType(tidx) orelse continue;
                 const tobj = try makeTable(realm, tbl, et == .funcref);
-                obj.set(realm.allocator, ex.name, tobj) catch return error.OutOfMemory;
+                obj.setWithFlags(realm.allocator, ex.name, tobj, export_flags) catch return error.OutOfMemory;
             },
             .mem => |midx| {
                 const mem = ip.memoryPtr(midx) orelse continue;
                 const mobj = try makeMemory(realm, mem);
-                obj.set(realm.allocator, ex.name, mobj) catch return error.OutOfMemory;
+                obj.setWithFlags(realm.allocator, ex.name, mobj, export_flags) catch return error.OutOfMemory;
             },
             .tag => |tidx| {
                 const tobj = try makeTagForInstance(realm, ip, tidx);
-                obj.set(realm.allocator, ex.name, tobj) catch return error.OutOfMemory;
+                obj.setWithFlags(realm.allocator, ex.name, tobj, export_flags) catch return error.OutOfMemory;
             },
         }
     }
+    obj.brand.extensible = false;
     return heap_mod.taggedObject(obj);
 }
 
 /// Create a callable JS function wrapping `(instance, func_index)` —
 /// shared by `Instance.exports` and `Table.prototype.get` of a funcref.
-fn makeExportedFunction(realm: *Realm, instance: *wasm.Instance, func_index: u32, name: []const u8) NativeError!Value {
+fn makeExportedFunction(realm: *Realm, instance: *wasm.Instance, func_index: u32) NativeError!Value {
     const ft = instance.funcType(func_index) orelse
         return intrinsics.throwTypeError(realm, "WebAssembly: unknown exported function type");
+    // JS API §5.6 names a Wasm function with ToString(index), independent
+    // of its export key. makeNativeFunction copies this into a heap string.
+    var name_buffer: [10]u8 = undefined; // all decimal u32 indices fit
+    const name = std.fmt.bufPrint(&name_buffer, "{d}", .{func_index}) catch return error.OutOfMemory;
     const fn_obj = intrinsics.makeNativeFunction(realm, exportTrampoline, @intCast(ft.params.len), name) catch
         return error.OutOfMemory;
     const rec = realm.wasmAllocator().create(ExportRecord) catch return error.OutOfMemory;
@@ -1182,14 +1415,23 @@ fn exportTrampoline(realm: *Realm, this_value: Value, args: []const Value) Nativ
 /// (§ToWebAssemblyValue.)
 fn marshalArg(realm: *Realm, vt: wasm.ValType, v: Value) NativeError!u128 {
     switch (vt) {
-        .i32 => return @as(u32, @bitCast(arith.toInt32(v))),
+        // ECMA-262 §7.1.4/§7.1.6: use the full throwing ToNumber before
+        // the primitive bit conversion. Its ToPrimitive roots the receiver
+        // across user hooks; arena-backed Wasm cells survive that re-entry.
+        .i32 => return @as(u32, @bitCast(arith.toInt32(try intrinsics.toNumber(realm, v)))),
         .i64 => {
-            const bi = heap_mod.valueAsBigInt(v) orelse
+            // §7.1.13/§7.1.15 ToBigInt / ToBigInt64, including Boolean,
+            // String and object coercion, then modulo-2^64 truncation.
+            const converted = @import("bigint.zig").toBigIntValue(realm, v) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.NativeThrew,
+            };
+            const bi = heap_mod.valueAsBigInt(converted) orelse
                 return intrinsics.throwTypeError(realm, "WebAssembly: an i64 value must be a BigInt");
             return @as(u64, @bitCast(bi.toI64Truncating()));
         },
-        .f32 => return @as(u32, @bitCast(@as(f32, @floatCast(arith.toNumber(v))))),
-        .f64 => return @as(u64, @bitCast(arith.toNumber(v))),
+        .f32 => return @as(u32, @bitCast(@as(f32, @floatCast(arith.toNumber(try intrinsics.toNumber(realm, v)))))),
+        .f64 => return @as(u64, @bitCast(arith.toNumber(try intrinsics.toNumber(realm, v)))),
         // §ToWebAssemblyValue for reference types. An externref cell holds
         // the JS value's NaN-boxed bits (pinned as a GC root); JS null maps
         // to the wasm null ref. A funcref accepts null or an exported fn.
@@ -1249,7 +1491,7 @@ fn marshalResult(realm: *Realm, vt: wasm.ValType, cell: u128) NativeError!Value 
         },
         .funcref => {
             if (cell == wasm.REF_NULL) return Value.null_;
-            return makeExportedFunction(realm, wasm.funcRefInstance(cell), wasm.funcRefIndex(cell), "");
+            return makeExportedFunction(realm, wasm.funcRefInstance(cell), wasm.funcRefIndex(cell));
         },
         // §ToWebAssemblyValue / §ToJSValue — a v128 value cannot cross the JS
         // boundary; the spec mandates a TypeError.
@@ -1264,7 +1506,7 @@ fn marshalResult(realm: *Realm, vt: wasm.ValType, cell: u128) NativeError!Value 
                 return intrinsics.throwTypeError(realm, "WebAssembly: an exnref cannot yet cross the JS boundary");
             if (cell == wasm.REF_NULL) return Value.null_;
             if (heap == wasm_types.heap_abs_extern) return Value{ .bits = @truncate(cell) };
-            return makeExportedFunction(realm, wasm.funcRefInstance(cell), wasm.funcRefIndex(cell), "");
+            return makeExportedFunction(realm, wasm.funcRefInstance(cell), wasm.funcRefIndex(cell));
         },
     }
 }
@@ -1397,12 +1639,21 @@ fn exceptionConstructor(realm: *Realm, this_value: Value, args: []const Value) N
         return intrinsics.throwTypeError(realm, "WebAssembly.Exception expects a WebAssembly.Tag");
     const payload_obj = heap_mod.valueAsPlainObject(if (args.len > 1) args[1] else Value.undefined_) orelse
         return intrinsics.throwTypeError(realm, "WebAssembly.Exception expects a payload array");
+    // A later numeric argument may re-enter JS, delete earlier array
+    // elements, and collect. Keep every consumed value until the payload's
+    // externref cells have been registered as durable roots below.
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    scope.push(this_value) catch return error.OutOfMemory;
+    scope.push(heap_mod.taggedObject(payload_obj)) catch return error.OutOfMemory;
     const n: u32 = @intCast(tt.params.len);
     const a = realm.wasmAllocator();
     const payload = a.alloc(u128, n) catch return error.OutOfMemory;
     var i: u32 = 0;
     while (i < n) : (i += 1) {
-        payload[i] = try marshalArg(realm, tt.params[i], payload_obj.tryGetIndexedOwn(i) orelse Value.undefined_);
+        const value = payload_obj.tryGetIndexedOwn(i) orelse Value.undefined_;
+        scope.push(value) catch return error.OutOfMemory;
+        payload[i] = try marshalArg(realm, tt.params[i], value);
     }
     const st = a.create(ExceptionState) catch return error.OutOfMemory;
     st.* = .{ .tag = tt, .payload = payload };
@@ -1414,13 +1665,21 @@ fn exceptionConstructor(realm: *Realm, this_value: Value, args: []const Value) N
 fn exceptionIs(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const st = exceptionStateOf(this_value) orelse
         return intrinsics.throwTypeError(realm, "WebAssembly.Exception.prototype.is called on a non-Exception");
-    const tt = tagTypeOf(if (args.len > 0) args[0] else Value.undefined_);
-    return Value.fromBool(tt != null and st.tag == tt.?);
+    // WebIDL requires a Tag argument; an invalid interface value is a
+    // TypeError, while a different valid Tag is the ordinary false case.
+    if (args.len < 1)
+        return intrinsics.throwTypeError(realm, "WebAssembly.Exception.prototype.is requires a tag");
+    const tt = tagTypeOf(args[0]) orelse
+        return intrinsics.throwTypeError(realm, "WebAssembly.Exception.prototype.is expects a WebAssembly.Tag");
+    return Value.fromBool(st.tag == tt);
 }
 
 fn exceptionGetArg(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const st = exceptionStateOf(this_value) orelse
         return intrinsics.throwTypeError(realm, "WebAssembly.Exception.prototype.getArg called on a non-Exception");
+    // Missing required arguments fail overload resolution before conversion.
+    if (args.len < 2)
+        return intrinsics.throwTypeError(realm, "WebAssembly.Exception.prototype.getArg requires a tag and index");
     const tt = tagTypeOf(if (args.len > 0) args[0] else Value.undefined_) orelse
         return intrinsics.throwTypeError(realm, "WebAssembly.Exception.prototype.getArg expects a WebAssembly.Tag");
     if (st.tag != tt)
@@ -1438,6 +1697,9 @@ fn exceptionGetArg(realm: *Realm, this_value: Value, args: []const Value) Native
 /// return its prototype (chained to %Error.prototype%).
 fn makeWasmErrorClass(realm: *Realm, ns: *JSObject, name: []const u8, native: NativeFn) !*JSObject {
     const fn_obj = try realm.heap.allocateFunctionNative(realm, native, 1, name);
+    // Wasm JS API §5.10 uses ECMA-262 §20.5.6 NativeError structure.
+    // The constructor itself inherits %Error%, as do TypeError et al.
+    fn_obj.static_parent = realm.intrinsics.error_constructor;
     const proto = try realm.heap.allocateObject();
     realm.heap.setObjectPrototype(proto, realm.intrinsics.error_prototype);
     try proto.setWithFlags(realm.allocator, "constructor", heap_mod.taggedFunction(fn_obj), .{ .writable = true, .enumerable = false, .configurable = true });
@@ -1447,7 +1709,7 @@ fn makeWasmErrorClass(realm: *Realm, ns: *JSObject, name: []const u8, native: Na
     try proto.setWithFlags(realm.allocator, "message", Value.fromString(empty), .{ .writable = true, .enumerable = false, .configurable = true });
     realm.heap.setFunctionPrototype(fn_obj, proto);
     try fn_obj.property_flags.put(realm.allocator, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
-    try ns.set(realm.allocator, name, heap_mod.taggedFunction(fn_obj));
+    try intrinsics.setNonEnumerable(ns, realm.allocator, name, heap_mod.taggedFunction(fn_obj));
     return proto;
 }
 
@@ -1584,6 +1846,10 @@ fn wasmModuleImports(realm: *Realm, this_value: Value, args: []const Value) Nati
 /// `String(sectionName)`, in declaration order. Ungated.
 fn wasmModuleCustomSections(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
+    // WebIDL overload resolution requires both arguments; an explicitly
+    // supplied undefined sectionName still undergoes DOMString conversion.
+    if (args.len < 2)
+        return intrinsics.throwTypeError(realm, "WebAssembly.Module.customSections requires a module and section name");
     const mstate = try moduleStateArg(realm, args, "customSections");
 
     // §7.1.17 ToString(sectionName) — the full abstract operation, so a
@@ -1870,7 +2136,7 @@ test "WebAssembly.Memory host views outlive an importing child Realm" {
     const instance_value = try makeInstanceObject(child, module_state, heap_mod.taggedObject(imports));
     try scope.push(instance_value);
     const instance_object = heap_mod.valueAsPlainObject(instance_value) orelse return error.TestUnexpectedResult;
-    const exports = heap_mod.valueAsPlainObject(instance_object.get("exports")) orelse return error.TestUnexpectedResult;
+    const exports = instance_object.getWasmInstanceExports() orelse return error.TestUnexpectedResult;
     const child_memory = exports.get("mem");
     const child_buffer = try memoryBufferGet(child, child_memory, &.{});
     try scope.push(child_buffer);
@@ -1917,7 +2183,7 @@ fn testRealmBackedMemoryGrow(jit_enabled: bool) !void {
     const instance_value = try makeInstanceObject(&realm, module_state, Value.undefined_);
     try scope.push(instance_value);
     const instance_object = heap_mod.valueAsPlainObject(instance_value) orelse return error.TestUnexpectedResult;
-    const exports = heap_mod.valueAsPlainObject(instance_object.get("exports")) orelse return error.TestUnexpectedResult;
+    const exports = instance_object.getWasmInstanceExports() orelse return error.TestUnexpectedResult;
     const memory_value = exports.get("m");
     const grow_function = heap_mod.valueAsFunction(exports.get("gr")) orelse return error.TestUnexpectedResult;
     const record: *ExportRecord = @ptrCast(@alignCast(grow_function.wasm_export orelse return error.TestUnexpectedResult));
@@ -1999,7 +2265,7 @@ fn testRealmBackedTableGrow(jit_enabled: bool) !void {
     const instance_value = try makeInstanceObject(&realm, module_state, Value.undefined_);
     try scope.push(instance_value);
     const instance_object = heap_mod.valueAsPlainObject(instance_value) orelse return error.TestUnexpectedResult;
-    const exports = heap_mod.valueAsPlainObject(instance_object.get("exports")) orelse return error.TestUnexpectedResult;
+    const exports = instance_object.getWasmInstanceExports() orelse return error.TestUnexpectedResult;
     try testing.expect(!exports.get("t").isUndefined());
     const grow_function = heap_mod.valueAsFunction(exports.get("gr")) orelse return error.TestUnexpectedResult;
     const record: *ExportRecord = @ptrCast(@alignCast(grow_function.wasm_export orelse return error.TestUnexpectedResult));
@@ -2038,14 +2304,15 @@ test "WebAssembly-side table.grow uses the Realm store allocator with JIT enable
     try testRealmBackedTableGrow(true);
 }
 
-test "WebAssembly.Instance rolls back a trapping start transaction" {
+test "WebAssembly.Instance retains store state once a start function executes" {
     const testing = std.testing;
     const lantern = @import("../lantern/interpreter.zig");
     const spasm = @import("../wasm/spasm.zig");
 
     // Outer: import host.spawn, call it from start, then trap on i32.div_s.
-    // The large memory makes retained store backing unambiguous; its
-    // externref table/global exercise transactional root rollback.
+    // Start can publish functions before trapping, so its store and roots
+    // must survive through realm teardown. The large memory makes retained
+    // backing unambiguous; nested instances must remain registered too.
     const outer_bytes = [_]u8{
         0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
         0x01, 0x04, 0x01, 0x60, 0x00, 0x00, 0x02, 0x0e,
@@ -2092,10 +2359,12 @@ test "WebAssembly.Instance rolls back a trapping start transaction" {
     const outer_object = heap_mod.valueAsPlainObject(outer_module) orelse return error.TestUnexpectedResult;
     const outer_state: *ModuleState = @ptrCast(@alignCast(outer_object.getWasmModule() orelse return error.TestUnexpectedResult));
 
+    // Remove transient setup garbage before measuring retained backing.
+    realm.collectGarbage();
     var expected_instances = realm.wasm_instances.items.len;
     var expected_table_roots = realm.wasm_extern_tables.items.len;
     var expected_global_roots = realm.wasm_extern_global_cells.items.len;
-    const code_live_baseline = realm.wasm_code_bytes_live;
+    var code_live_before_attempt = realm.wasm_code_bytes_live;
     var expected_reservations = realm.wasm_code_reservations_total;
     var live_before_attempt = realm.heap.bytes_live;
     for (0..3) |_| {
@@ -2106,21 +2375,24 @@ test "WebAssembly.Instance rolls back a trapping start transaction" {
         realm.pending_exception = null;
         realm.collectGarbage();
 
-        expected_instances += 1;
-        expected_table_roots += 1;
-        expected_global_roots += 1;
+        expected_instances += 2; // outer and nested instances
+        expected_table_roots += 2; // outer and nested externref tables
+        expected_global_roots += 3; // both globals plus the host callback
         try testing.expectEqual(expected_instances, realm.wasm_instances.items.len);
         try testing.expectEqual(expected_table_roots, realm.wasm_extern_tables.items.len);
         try testing.expectEqual(expected_global_roots, realm.wasm_extern_global_cells.items.len);
-        // The nested instance remains registered; the exact outer code
-        // reservation and every outer root/backing return to baseline.
-        try testing.expectEqual(code_live_baseline, realm.wasm_code_bytes_live);
+        // The outer instance precedes the nested instance in the store.
+        // Its memory and generated code stay owned and metered until teardown.
+        const outer_instance = realm.wasm_instances.items[expected_instances - 2];
+        try testing.expectEqual(@as(usize, 16 * wasm.PAGE_SIZE), outer_instance.owned_memories[0].data.len);
         if (comptime spasm.supported) {
             expected_reservations += 1;
             try testing.expectEqual(expected_reservations, realm.wasm_code_reservations_total);
+            try testing.expect(realm.wasm_code_bytes_live > code_live_before_attempt);
         }
+        code_live_before_attempt = realm.wasm_code_bytes_live;
         const retained = realm.heap.bytes_live -| live_before_attempt;
-        try testing.expect(retained < 16 * wasm.PAGE_SIZE);
+        try testing.expect(retained >= 16 * wasm.PAGE_SIZE);
         live_before_attempt = realm.heap.bytes_live;
     }
 }

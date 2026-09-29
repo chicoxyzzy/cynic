@@ -633,6 +633,9 @@ pub const JSObjectExtension = struct {
     /// Table,Memory}`). Only those rare exotics populate them; the
     /// base `JSObject` no longer carries the four pointers (they were
     /// 32 bytes on every object — see `getWasmModule` etc.).
+    /// Wasm JS API §5.2 [[Exports]]; also brands a completed Instance.
+    /// Unlike the opaque arena-backed Wasm slots, this is a strong GC edge.
+    wasm_instance_exports: ?*JSObject = null,
     wasm_module: ?*anyopaque = null,
     wasm_global: ?*anyopaque = null,
     wasm_table: ?*anyopaque = null,
@@ -1538,7 +1541,7 @@ pub const JSObject = struct {
         // private-method inits, disposable resources, typed/data view)
         // live on the extension and are mutated in place after this
         // call. Flag once here — over-scan for the few extension fields
-        // the scan doesn't read (date_ms / host_data / wasm_*) is
+        // the scan doesn't read (date_ms / host_data / opaque Wasm slots) is
         // harmless; those are rare exotics, not the hot plain-object
         // population.
         self.needs_internal_scan = true;
@@ -1761,10 +1764,18 @@ pub const JSObject = struct {
 
     // ── WebAssembly host backings — extension-backed cold pointers ─
     //
-    // Only `WebAssembly.{Module,Global,Table,Memory}` exotics carry
+    // Only WebAssembly host-object exotics carry
     // these; a plain object/array has no extension and reads `null`
     // for free. Setters lazily allocate the extension. The records are
-    // realm-arena-owned opaque pointers (no GC marking / cleanup).
+    // realm-arena-owned opaque pointers, except [[Exports]], a GC-traced
+    // object edge populated through the typed-slot write barrier.
+    pub fn getWasmInstanceExports(self: *const JSObject) ?*JSObject {
+        return if (self.extension) |ext| ext.wasm_instance_exports else null;
+    }
+    pub fn setWasmInstanceExports(self: *JSObject, allocator: std.mem.Allocator, exports: *JSObject) !void {
+        (try self.getOrCreateExtension(allocator)).wasm_instance_exports = exports;
+        self.noteInternalSlotWrite();
+    }
     pub fn getWasmModule(self: *const JSObject) ?*anyopaque {
         return if (self.extension) |ext| ext.wasm_module else null;
     }

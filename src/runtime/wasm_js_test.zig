@@ -332,7 +332,7 @@ test "the WebAssembly namespace has the expected shape" {
 test "an exported function is a real function with name and arity" {
     const src =
         "const i = new WebAssembly.Instance(new WebAssembly.Module(" ++ adder_bytes ++ "));" ++
-        "(typeof i.exports.add === 'function' && i.exports.add.length === 2 && i.exports.add.name === 'add') ? 1 : 0";
+        "(typeof i.exports.add === 'function' && i.exports.add.length === 2 && i.exports.add.name === '0') ? 1 : 0";
     try expectIntWasm(src, 1);
 }
 
@@ -594,7 +594,7 @@ test "an externref table holds and returns JS values" {
         "const t = new WebAssembly.Table({ element: 'externref', initial: 2 });" ++
         "const o = { tag: 42 };" ++
         "t.set(1, o);" ++
-        "(t.length === 2 && t.get(0) === null && t.get(1) === o && t.get(1).tag === 42) ? 1 : 0";
+        "(t.length === 2 && t.get(0) === undefined && t.get(1) === o && t.get(1).tag === 42) ? 1 : 0";
     try expectIntWasm(src, 1);
 }
 
@@ -615,7 +615,7 @@ test "an externref Global holds a JS value" {
     const src =
         "const o = { v: 5 };" ++
         "const g = new WebAssembly.Global({ value: 'externref' }, o);" ++
-        "(g.value === o && new WebAssembly.Global({ value: 'externref' }).value === null) ? 1 : 0";
+        "(g.value === o && new WebAssembly.Global({ value: 'externref' }).value === undefined) ? 1 : 0";
     try expectIntWasm(src, 1);
 }
 

@@ -344,10 +344,11 @@ Each owned record carries its backing allocator; shared imports retain the
 provider's allocator and identity. One quota-backed Realm registry tracks
 instances and reaches their owned records; two smaller registries cover direct
 JS `Memory` / `Table` constructors. Teardown releases those backings before the
-arena invalidates their headers. A failed population transaction removes its
-exact instance and decrements its reference-counted externref roots before
-releasing code and store resources, including when a start function re-enters
-JS and creates another instance. The bare embedding defaults the backing
+arena invalidates their headers. A failed population transaction before start execution removes its exact
+instance and decrements its reference-counted roots before releasing code and
+store resources. Once a start function begins, the instance and its roots stay
+owned by the realm even if start throws: an imported callback may already have
+published a Wasm function or reference that still needs that store. The bare embedding defaults the backing
 allocator to the allocator passed to `instantiate` and releases it from
 `Instance.deinit`.
 
@@ -361,6 +362,28 @@ provisional arena backing until they move to `SharedDataBlock` for non-moving,
 in-place growth.
 
 ## 8. The JS boundary
+
+The scoped [WPT Wasm JavaScript API lane](wpt.md) supplements the core
+instruction tests; its [results](../wpt-results.md) track remaining API gaps.
+Its corrections follow WebIDL property descriptors and the Wasm JS API's
+conversion algorithms: nonenumerable interface constructors, enumerable
+operations and attributes, branded `Global.valueOf` / `Instance.exports`,
+shallow-frozen exports, and NativeError constructor inheritance. Numeric values
+use the throwing ECMA-262 ToNumber / ToBigInt operations. Host import callbacks
+stay rooted for the realm-owned Wasm store's lifetime. Failed import resolution
+and pre-start instantiation failures release their registrations; failures
+after start begins preserve potentially escaped references. Promise capabilities
+and intermediate wrappers are rooted across collecting start callbacks.
+
+`Instance` keeps `[[Exports]]` in a typed slot, traced by full and minor GC and
+covered by the typed-slot write barrier. This follows the
+[Wasm JS API §5.2](https://webassembly.github.io/spec/js-api/#instances)
+getter model used by
+[V8](https://github.com/v8/v8/blob/main/src/wasm/wasm-js.cc) and
+[JavaScriptCore](https://github.com/WebKit/WebKit/blob/main/Source/JavaScriptCore/wasm/js/WebAssemblyInstancePrototype.cpp).
+Production hardening still freezes the installed intrinsics after setup.
+WPT uses mutable primordials; focused tests also cover hardened exports and
+collection during callbacks.
 
 **Status: shipped** (`builtins/webassembly.zig`, tested in
 `runtime/wasm_js_test.zig`). The full surface is wired:
@@ -421,10 +444,10 @@ metadata:
 
 ```
 WebAssembly.Module   → wasm_module slot → *ModuleState   (decoded module)
-WebAssembly.Instance → exports own property; the *Instance lives in the
-                       arena, reached via each export fn's wasm_export slot
+WebAssembly.Instance → wasm_instance_exports slot → frozen exports object
+                       (prototype getter; GC-traced, including minor cycles)
 WebAssembly.Memory   → wasm_memory slot → *MemoryState   (+ cached .buffer)
-WebAssembly.Table    → wasm_table slot  → *TableState     (funcref only)
+WebAssembly.Table    → wasm_table slot  → *TableState     (funcref / externref)
 WebAssembly.Global   → wasm_global slot → *GlobalState
 exported function    → wasm_export slot → *ExportRecord (instance, index)
 ```

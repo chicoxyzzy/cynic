@@ -12,7 +12,7 @@ The corpus, license, pin, and inclusion reasons live in
 and excluded `.any.js` candidates. The manifest owns selection;
 [`tools/wpt/baseline.json`](../tools/wpt/baseline.json) owns the measured named
 subtest results. An implementation failure never changes selection.
-The initial [measured results](../wpt-results.md) distinguish assertion failures,
+The [measured results](../wpt-results.md) distinguish assertion failures,
 strict-only parse errors, and observed subtest counts.
 
 ## Run and inspect
@@ -126,6 +126,32 @@ zig build wpt -- --baseline=tools/wpt/baseline.json
 Writing a baseline still returns nonzero when the scored run has failures.
 Filtered runs cannot read or write the regression baseline. Improvements stay
 visible, and a later deliberate refresh adds them to the protected pass set.
+
+The `WPT Wasm JavaScript API` job in the main CI workflow runs on Linux after
+the existing build/unit-test matrix. It verifies source hashes, runs the
+importer/runner/executor contracts, and compares the complete selected corpus
+with the committed named-result baseline. It uploads the JSON report even
+when the comparison fails. The fixtures and support sources are vendored, so
+the job needs no WPT checkout or browser download.
+
+## API corrections and specification drift
+
+The first correction pass covers WebIDL descriptors and brands, Global value
+conversion and defaults, Memory/Table address conversion, shallow-frozen
+exports, function names, import getters, required arguments, error inheritance,
+and references held across JS callbacks and GC.
+Focused engine tests also run collecting callbacks and hardened realms, which
+the mutable-intrinsic WPT lane does not cover by itself.
+
+The current [Wasm JS API](https://webassembly.github.io/spec/js-api/)
+defines AddressValue dictionary members as `any`: Memory/Table constructors
+read the dictionary before converting its numeric members. The pinned WPT
+fixtures still expect some conversions during dictionary reads. Cynic follows
+the current specification and records these assertions as failures. The same
+principle applies to Table.set value conversion before bounds checking and
+Table.grow's size snapshot before reentrant delta conversion. A baseline is
+an observation of this exact corpus, not permission to replace normative
+behavior with whatever yields a higher score.
 
 ## Prior art
 

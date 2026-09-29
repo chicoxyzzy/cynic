@@ -299,22 +299,22 @@ const extension_serialized_fields = [_][]const u8{
     "regexp_source", "regexp_flags",
 };
 const extension_asserted_fields = [_][]const u8{
-    "private_properties",           "private_methods",          "private_accessors",
-    "namespace_redirects",          "ambiguous_namespace_keys", "map_data",
-    "set_data",                     "wasm_module",              "wasm_global",
-    "wasm_table",                   "wasm_memory",              "wasm_tag",
-    "wasm_exception",               "capability_record",        "generator_ref",
-    "finally_callback",             "finally_value",            "finally_constructor",
-    "instance_field_inits",         "private_method_inits",     "private_brand",
-    "private_compile_prefix",       "weak_ref_target",          "finalization_cells",
-    "array_buffer",                 "array_buffer_external",    "shared_block",
-    "array_buffer_max_byte_length", "typed_view",               "data_view",
-    "host_data",                    "shadow_realm_owner",       "disposable_state",
-    "disposable_resources",         "async_dispose_walk",       "temporal_record",
-    "intl_record",                  "array_like_iter",          "map_set_iter",
-    "regexp_string_iter",           "iter_record",              "iter_helper",
-    "regex_perlex",                 "proxy_target",             "proxy_handler",
-    "proxy_target_fn",              "sparse_elements",
+    "private_properties",    "private_methods",              "private_accessors",
+    "namespace_redirects",   "ambiguous_namespace_keys",     "map_data",
+    "wasm_instance_exports", "set_data",                     "wasm_module",
+    "wasm_global",           "wasm_table",                   "wasm_memory",
+    "wasm_tag",              "wasm_exception",               "capability_record",
+    "generator_ref",         "finally_callback",             "finally_value",
+    "finally_constructor",   "instance_field_inits",         "private_method_inits",
+    "private_brand",         "private_compile_prefix",       "weak_ref_target",
+    "finalization_cells",    "array_buffer",                 "array_buffer_external",
+    "shared_block",          "array_buffer_max_byte_length", "typed_view",
+    "data_view",             "host_data",                    "shadow_realm_owner",
+    "disposable_state",      "disposable_resources",         "async_dispose_walk",
+    "temporal_record",       "intl_record",                  "array_like_iter",
+    "map_set_iter",          "regexp_string_iter",           "iter_record",
+    "iter_helper",           "regex_perlex",                 "proxy_target",
+    "proxy_handler",         "proxy_target_fn",              "sparse_elements",
 };
 /// Extension fields recomputed / dropped at restore — never
 /// serialized, never asserted-default. `key_anchors` re-derives from
@@ -888,6 +888,7 @@ const Capture = struct {
         if (ext.private_properties.count() != 0 or ext.private_methods.count() != 0 or
             ext.private_accessors.count() != 0 or ext.namespace_redirects.count() != 0 or
             ext.ambiguous_namespace_keys.count() != 0 or ext.map_data != null or
+            ext.wasm_instance_exports != null or
             ext.set_data != null or ext.wasm_module != null or ext.wasm_global != null or
             ext.wasm_table != null or ext.wasm_memory != null or ext.wasm_tag != null or
             ext.wasm_exception != null or ext.capability_record != null or
