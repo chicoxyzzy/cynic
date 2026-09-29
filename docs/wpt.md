@@ -145,6 +145,14 @@ and references held across JS callbacks and GC.
 Focused engine tests also run collecting callbacks and hardened realms, which
 the mutable-intrinsic WPT lane does not cover by itself.
 
+Exported-function identity is cached by canonical store address across aliases,
+reexports, table/global reads, and reference results. The cache follows the
+store owner across realms and is traced during GC; failed instantiation rolls
+back new entries while preserving provider wrappers. See
+[the ownership design](wasm-engine.md#8-the-js-boundary). The compound imported
+object-caching fixture still fails after its function comparison, now on Global
+identity; that remaining store-object caching work stays visible in the score.
+
 The current [Wasm JS API](https://webassembly.github.io/spec/js-api/)
 defines AddressValue dictionary members as `any`: Memory/Table constructors
 read the dictionary before converting its numeric members. The pinned WPT

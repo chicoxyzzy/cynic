@@ -11,12 +11,12 @@
     "testharness.js (patched)": "fbe2e52e029bbeea3fecdedf963b69589526a8a1e3ceb18947120667443147f7",
     "wasm/jsapi/wasm-module-builder.js (patched)": "83a83b12adc7d51533c818b23fd37936d03a7203e7015356f9e6852b8625964d"
   },
-  "binary_sha256": "f98b531e401ee105517e9c870275fa41c564b06609f3c27fa6b8119ba36ab101",
+  "binary_sha256": "d4a32cf4672f55e9d8468ae66a7ff84bf8d5e433745302d3abd7942f3141ecbd",
   "provenance": {
-    "generated_at_utc": "2026-09-29T00:19:28Z",
+    "generated_at_utc": "2026-09-29T03:13:26Z",
     "platform": "Darwin",
     "architecture": "arm64",
-    "engine_git_head": "5efeabe324367f563f02b979e230da053e5ec308",
+    "engine_git_head": "9335b14bf70c914c498b9f74dc8945209f78b5dd",
     "engine_git_dirty": false
   },
   "configuration": {
@@ -192,12 +192,12 @@
   "summary": {
     "files": {
       "execution_error": 2,
-      "fail": 16,
-      "pass": 22
+      "fail": 15,
+      "pass": 23
     },
     "subtests": {
-      "FAIL": 26,
-      "PASS": 570
+      "FAIL": 21,
+      "PASS": 575
     },
     "excluded_files": 40
   },
@@ -1864,7 +1864,7 @@
         {
           "name": "Untitled",
           "status": 1,
-          "message": "assert_equals: expected function \"function 0() { [native code] }\" but got function \"function 0() { [native code] }\""
+          "message": "assert_equals: expected object \"[object WebAssembly.Global]\" but got object \"[object WebAssembly.Global]\""
         }
       ],
       "harness": {
@@ -3306,8 +3306,8 @@
         },
         {
           "name": "initialize anyfunc table with default value",
-          "status": 1,
-          "message": "assert_equals: expected function \"function 0() { [native code] }\" but got function \"function 0() { [native code] }\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "initialize anyfunc table with a bad default value",
@@ -3355,13 +3355,13 @@
         },
         {
           "name": "Basic",
-          "status": 1,
-          "message": "assert_equals: undefined: table.get(0 of 5) expected function \"function 0() { [native code] }\" but got function \"function 0() { [native code] }\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Growing",
-          "status": 1,
-          "message": "assert_equals: undefined: table.get(0 of 5) expected function \"function 0() { [native code] }\" but got function \"function 0() { [native code] }\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Setting out-of-bounds",
@@ -3485,8 +3485,8 @@
         },
         {
           "name": "Arguments for anyfunc table set",
-          "status": 1,
-          "message": "assert_equals: expected function \"function 0() { [native code] }\" but got function \"function 0() { [native code] }\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Arguments for externref table set",
@@ -3505,7 +3505,7 @@
       "variant": ""
     },
     {
-      "status": "fail",
+      "status": "pass",
       "subtests": [
         {
           "name": "Missing arguments",
@@ -3584,8 +3584,8 @@
         },
         {
           "name": "Grow with exported-function argument",
-          "status": 1,
-          "message": "assert_equals: expected function \"function 0() { [native code] }\" but got function \"function 0() { [native code] }\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Grow with non-function argument",
