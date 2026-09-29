@@ -115,6 +115,21 @@ const WasmFunctionWrapper = struct {
     function: *@import("function.zig").JSFunction,
 };
 
+/// Wasm JS API §4.2 object caches are keyed by store address, never by
+/// export index or current contents. The tag keeps each address space typed.
+pub const WasmObjectAddress = union(enum) {
+    global: *@import("wasm/wasm.zig").Global,
+    table: *@import("wasm/wasm.zig").Table,
+    memory: *@import("wasm/wasm.zig").Memory,
+};
+
+const WasmObjectWrapper = struct {
+    object: *@import("object.zig").JSObject,
+    /// null for direct JS constructors; exports record their population
+    /// transaction so rollback removes only wrappers created by that instance.
+    instance: ?*@import("wasm/interpreter.zig").Instance,
+};
+
 const WasmExternTableRoot = struct {
     table: *const @import("wasm/wasm.zig").Table,
     registrations: usize = 1,
@@ -1270,6 +1285,10 @@ pub const Realm = struct {
     /// Strong roots follow the existing realm-lifetime Wasm store. The
     /// backing instance identifies entries to remove on population rollback.
     wasm_function_wrappers: std.AutoArrayHashMapUnmanaged(usize, WasmFunctionWrapper) = .empty,
+    /// Agent-wide object identity is partitioned by the native store's Realm.
+    /// Imports arrive through an already cached wrapper, so cross-realm lookup
+    /// reuses the owner's entry; cache misses belong to this Realm's store.
+    wasm_object_wrappers: std.AutoArrayHashMapUnmanaged(WasmObjectAddress, WasmObjectWrapper) = .empty,
     /// Direct JS Memory/Table constructors are not owned by an Instance, so
     /// track their backings separately. Instance-owned resources are reached
     /// through `wasm_instances`; shared imports appear in neither direct list.
@@ -1601,6 +1620,7 @@ pub const Realm = struct {
             const allocator = quota.allocator();
             self.wasm_instances.deinit(allocator);
             self.wasm_function_wrappers.deinit(allocator);
+            self.wasm_object_wrappers.deinit(allocator);
             self.wasm_direct_memories.deinit(allocator);
             self.wasm_direct_tables.deinit(allocator);
             self.wasm_extern_roots.deinit(allocator);
@@ -2066,10 +2086,37 @@ pub const Realm = struct {
                     wrapper_index += 1;
                 }
             }
+            wrapper_index = 0;
+            while (wrapper_index < self.wasm_object_wrappers.count()) {
+                if (self.wasm_object_wrappers.values()[wrapper_index].instance == instance) {
+                    self.wasm_object_wrappers.swapRemoveAt(wrapper_index);
+                } else {
+                    wrapper_index += 1;
+                }
+            }
             instance.releaseExecutableCode();
             instance.releaseOwnedStoreBackings();
             return;
         }
+    }
+
+    /// Each sharing Realm contributes to the same agent's object caches.
+    /// Check self explicitly: native-only embeddings need not register a Realm
+    /// with the shared heap until they install builtins or evaluate JS.
+    pub fn findWasmObjectWrapper(self: *Realm, address: WasmObjectAddress) ?*@import("object.zig").JSObject {
+        if (self.wasm_object_wrappers.get(address)) |entry| return entry.object;
+        for (self.heap.realms.items) |other| {
+            if (other == self) continue;
+            if (other.wasm_object_wrappers.get(address)) |entry| return entry.object;
+        }
+        return null;
+    }
+
+    pub fn cacheWasmObjectWrapper(self: *Realm, address: WasmObjectAddress, object: *@import("object.zig").JSObject, instance: ?*@import("wasm/interpreter.zig").Instance) error{OutOfMemory}!void {
+        try self.wasm_object_wrappers.put(self.wasmStoreAllocator(), address, .{
+            .object = object,
+            .instance = instance,
+        });
     }
 
     pub fn registerWasmMemory(self: *Realm, memory: *@import("wasm/interpreter.zig").Memory) error{OutOfMemory}!void {
@@ -2406,11 +2453,13 @@ pub const Realm = struct {
         // stack, plus the live cells of every registered externref table
         // / global. (REF_NULL all-ones is skipped; a non-heap externref
         // marks as a no-op.)
-        // The function cache is a realm-root container, re-scanned on every
+        // Wrapper caches are realm-root containers, re-scanned on every
         // minor cycle and at incremental-major termination. No JS object
         // field/write barrier is involved in publishing a cache entry.
         for (self.wasm_function_wrappers.values()) |entry|
             self.heap.markValue(heap_mod.taggedFunction(entry.function));
+        for (self.wasm_object_wrappers.values()) |entry|
+            self.heap.markValue(heap_mod.taggedObject(entry.object));
         for (self.wasm_extern_roots.keys()) |bits| self.heap.markValue(Value{ .bits = bits });
         const ref_null = std.math.maxInt(u128);
         for (self.wasm_extern_tables.items) |root| {

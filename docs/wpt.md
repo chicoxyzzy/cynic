@@ -149,9 +149,12 @@ Exported-function identity is cached by canonical store address across aliases,
 reexports, table/global reads, and reference results. The cache follows the
 store owner across realms and is traced during GC; failed instantiation rolls
 back new entries while preserving provider wrappers. See
-[the ownership design](wasm-engine.md#8-the-js-boundary). The compound imported
-object-caching fixture still fails after its function comparison, now on Global
-identity; that remaining store-object caching work stays visible in the score.
+[the ownership design](wasm-engine.md#8-the-js-boundary).
+Global, Memory, and Table wrappers likewise preserve store-address identity
+across duplicate exports and import/reexport chains. Direct constructors seed
+the cache with their original receiver, including subclasses. Focused tests
+cover child realms, cache-only GC retention, memory-buffer replacement after
+growth, and allocation-failure rollback.
 
 The current [Wasm JS API](https://webassembly.github.io/spec/js-api/)
 defines AddressValue dictionary members as `any`: Memory/Table constructors
