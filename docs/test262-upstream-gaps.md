@@ -39,6 +39,37 @@ the corpus under the relevant section's directory before adding.
 ## Entries
 
 
+### Wasm compile could lose its capability result during settlement
+
+- **Fixed in:** `a774e75c`
+- **Spec:** ECMA-262 §27.2.1.5 NewPromiseCapability and the Wasm JS API's
+  compilation promise. This is a host-safety regression for the engine's
+  replaceable Promise binding, not a claim that Wasm must consult that binding.
+- **Reproducer:** run in an unhardened realm with `gc_threshold = 1`:
+  ```js
+  function settle(value) {
+    for (let i = 0; i < 1000; i++) { const temporary = {i}; }
+  }
+  globalThis.Promise = function (executor) {
+    executor(settle, settle);
+    return {marker: 42};
+  };
+  const bytes = new Uint8Array([0,97,115,109,1,0,0,0]);
+  const result = WebAssembly.compile(bytes);
+  if (result.marker !== 42) throw new Error('collected capability result');
+  ```
+- **Before fix:** collection during the resolve callback could sweep the
+  native capability's returned object. Invalid bytes reproduce the same
+  failure through the reject callback. Allocation alone does not trigger
+  collection here; reentry during settlement does.
+- **After fix:** a native handle scope retains the promise and both callbacks
+  through compilation and settlement, matching the instantiation path.
+- **Suggested fixture shape:** engine GC-pressure tests for both branches.
+  `tools/wpt/test_case.py` reproduces both failures against the ReleaseFast
+  executor; `wasm_wpt_instance_test.zig` checks ordinary fulfillment and
+  rejection under collection. This host-specific path is outside test262.
+
+
 ### Wasm instantiation lost promise wrappers and imported callbacks across collection
 
 - **Fixed in:** `5efeabe3`
