@@ -696,6 +696,17 @@ test "wasm spasm: a direct call to a leaf function runs Spasm-compiled" {
     try testing.expectEqual(native_calls_before, instance.spasm_native_calls);
 }
 
+// Both backends have a seven-operand native stack. Force a structural refusal
+// independently of which SIMD opcodes have gained lowering support.
+const simd_fallback_stack_pressure = blk: {
+    var bytes: [24]u8 = @splat(0x1a);
+    for (0..8) |index| {
+        bytes[index * 2] = 0x41;
+        bytes[index * 2 + 1] = 0;
+    }
+    break :blk bytes;
+};
+
 test "wasm spasm: SIMD cold gate preserves interpreter fallback for a refused callee" {
     const spasm = @import("spasm.zig");
     if (comptime !spasm.supported) return error.SkipZigTest;
@@ -704,9 +715,8 @@ test "wasm spasm: SIMD cold gate preserves interpreter fallback for a refused ca
     defer arena.deinit();
     const a = arena.allocator();
 
-    // The caller is emittable; the callee contains a dropped i8x16.popcnt,
-    // which is intentionally outside the current SIMD baseline. Its cold gate
-    // must resolve through Sarcasm without publishing a bogus native entry or
+    // The caller is emittable; the callee exceeds the native operand limit.
+    // Its cold gate must resolve through Sarcasm without publishing a bogus native entry or
     // changing the scalar result.
     const tbody = [_]u8{ 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f };
     const fbody = [_]u8{ 0x02, 0x00, 0x00 };
@@ -720,7 +730,7 @@ test "wasm spasm: SIMD cold gate preserves interpreter fallback for a refused ca
         0x10,
         0x01,
         0x0b,
-        0x19,
+        0x31,
         0x00,
         0x20,
         0x00,
@@ -745,8 +755,7 @@ test "wasm spasm: SIMD cold gate preserves interpreter fallback for a refused ca
         0xfd,
         0x62,
         0x1a,
-        0x0b,
-    };
+    } ++ simd_fallback_stack_pressure ++ [_]u8{0x0b};
     const bytes = try assemble(a, &.{
         .{ .id = 1, .body = &tbody },
         .{ .id = 3, .body = &fbody },
@@ -777,7 +786,7 @@ test "wasm spasm: SIMD cold gate preserves interpreter fallback for a refused ca
     try testing.expectEqual(@as(u32, 1), instance.spasm_compiles);
     try testing.expectEqual(@as(u32, 0), instance.spasm_native_calls);
     try testing.expectEqual(@as(u32, 1), instance.spasm_refusals);
-    try testing.expectEqual(@as(u8, 0xfd), instance.spasm_last_refused_opcode);
+    try testing.expectEqual(spasm.RefusalStage.limits, instance.spasm_last_refusal_stage);
 }
 
 test "wasm spasm: x86 unreachable raises a catchable trap without fallback" {
@@ -3092,7 +3101,7 @@ test "wasm interp: SIMD float minmax quiets signaling NaNs" {
     }
 }
 
-const SimdIntegerCase = struct { sub: u32, bits: usize, op: enum { abs, neg, average } };
+const SimdIntegerCase = struct { sub: u32, bits: usize, op: enum { abs, neg, average, popcnt, add, sub, mul, add_sat_s, add_sat_u, sub_sat_s, sub_sat_u } };
 const simd_integer_cases = [_]SimdIntegerCase{
     .{ .sub = 96, .bits = 8, .op = .abs },
     .{ .sub = 97, .bits = 8, .op = .neg },
@@ -3104,16 +3113,43 @@ const simd_integer_cases = [_]SimdIntegerCase{
     .{ .sub = 193, .bits = 64, .op = .neg },
     .{ .sub = 123, .bits = 8, .op = .average },
     .{ .sub = 155, .bits = 16, .op = .average },
+    .{ .sub = 98, .bits = 8, .op = .popcnt },
+    .{ .sub = 110, .bits = 8, .op = .add },
+    .{ .sub = 113, .bits = 8, .op = .sub },
+    .{ .sub = 142, .bits = 16, .op = .add },
+    .{ .sub = 145, .bits = 16, .op = .sub },
+    .{ .sub = 149, .bits = 16, .op = .mul },
+    .{ .sub = 174, .bits = 32, .op = .add },
+    .{ .sub = 177, .bits = 32, .op = .sub },
+    .{ .sub = 181, .bits = 32, .op = .mul },
+    .{ .sub = 206, .bits = 64, .op = .add },
+    .{ .sub = 209, .bits = 64, .op = .sub },
+    .{ .sub = 213, .bits = 64, .op = .mul },
+    .{ .sub = 111, .bits = 8, .op = .add_sat_s },
+    .{ .sub = 112, .bits = 8, .op = .add_sat_u },
+    .{ .sub = 114, .bits = 8, .op = .sub_sat_s },
+    .{ .sub = 115, .bits = 8, .op = .sub_sat_u },
+    .{ .sub = 143, .bits = 16, .op = .add_sat_s },
+    .{ .sub = 144, .bits = 16, .op = .add_sat_u },
+    .{ .sub = 146, .bits = 16, .op = .sub_sat_s },
+    .{ .sub = 147, .bits = 16, .op = .sub_sat_u },
 };
+
+fn simdIntegerIsBinary(op: SimdIntegerCase) bool {
+    return switch (op.op) {
+        .abs, .neg, .popcnt => false,
+        else => true,
+    };
+}
 
 fn buildSimdIntegerFunc(a: std.mem.Allocator, op: SimdIntegerCase) ![]const u8 {
     var body: List = .empty;
     try body.appendSlice(a, &.{ 1, 32, 0x7f, 0x20, 0, 0x20, 1, 0x20, 2 });
-    if (op.op == .average) try body.appendSlice(a, &.{ 0x20, 3 });
+    if (simdIntegerIsBinary(op)) try body.appendSlice(a, &.{ 0x20, 3 });
     try body.append(a, 0xfd);
     try uleb(a, &body, op.sub);
     try body.append(a, 0x0b);
-    const params: []const u8 = if (op.op == .average) &.{ 0x7e, 0x7b, 0x7b, 0x7b } else &.{ 0x7e, 0x7b, 0x7b };
+    const params: []const u8 = if (simdIntegerIsBinary(op)) &.{ 0x7e, 0x7b, 0x7b, 0x7b } else &.{ 0x7e, 0x7b, 0x7b };
     return buildFunc(a, params, &.{ 0x7e, 0x7b, 0x7b }, body.items, "integer");
 }
 
@@ -3129,18 +3165,32 @@ fn expectSimdInteger(instance: *interp.Instance, op: SimdIntegerCase, left: u128
             .abs => if (lhs >= modulus / 2) (modulus - lhs) & mask else lhs,
             .neg => (modulus - lhs) & mask,
             .average => (lhs + rhs + 1) / 2,
+            .popcnt => @popCount(lhs),
+            .add => (lhs + rhs) & mask,
+            .sub => (lhs + modulus - rhs) & mask,
+            .mul => (lhs * rhs) & mask,
+            .add_sat_u => @min(lhs + rhs, mask),
+            .sub_sat_u => lhs -| rhs,
+            .add_sat_s, .sub_sat_s => blk: {
+                const mod: i128 = @intCast(modulus);
+                const l = @as(i128, @intCast(lhs)) - (if (lhs >= modulus / 2) mod else 0);
+                const r = @as(i128, @intCast(rhs)) - (if (rhs >= modulus / 2) mod else 0);
+                const value = if (op.op == .add_sat_s) l + r else l - r;
+                const saturated = std.math.clamp(value, -@divExact(mod, 2), @divExact(mod, 2) - 1);
+                break :blk @as(u128, @bitCast(saturated)) & mask;
+            },
         };
         expected |= value << shift;
     }
     const args = [_]u128{ 37, simd_live_vector, left, right };
     const before = instance.spasm_runs;
-    const result = try interp.invoke(instance, testing.allocator, 0, args[0..if (op.op == .average) @as(usize, 4) else 3]);
+    const result = try interp.invoke(instance, testing.allocator, 0, args[0..if (simdIntegerIsBinary(op)) @as(usize, 4) else 3]);
     defer testing.allocator.free(result);
     try testing.expectEqualSlices(u128, &.{ 37, simd_live_vector, expected }, result);
     try testing.expectEqual(before + 1, instance.spasm_runs);
 }
 
-test "wasm spasm: SIMD integer unary and average boundaries preserve live lanes" {
+test "wasm spasm: SIMD integer operations preserve boundaries and live lanes" {
     if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -3197,33 +3247,35 @@ test "wasm spasm: SIMD integer unary exhausts byte and halfword inputs" {
     }
 }
 
-test "wasm spasm: SIMD integer average exhausts byte pairs" {
+test "wasm spasm: SIMD integer binary operations exhaust byte pairs" {
     if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const op = simd_integer_cases[8];
-    const module = try wasm.decode(a, try buildSimdIntegerFunc(a, op));
-    var instance: interp.Instance = undefined;
-    try interp.instantiate(&instance, a, testing.allocator, &module, .{});
-    defer instance.deinit();
-    instance.spasm_enabled = true;
-    for (0..256) |lhs| {
-        for (0..16) |batch| {
-            var left: [16]u8 = undefined;
-            var right: [16]u8 = undefined;
-            for (0..16) |lane| {
-                left[lane] = @truncate(lhs + 17 * lane);
-                right[lane] = @intCast(batch * 16 + lane);
+    for (simd_integer_cases) |op| {
+        if (op.bits != 8 or !simdIntegerIsBinary(op)) continue;
+        const module = try wasm.decode(a, try buildSimdIntegerFunc(a, op));
+        var instance: interp.Instance = undefined;
+        try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+        defer instance.deinit();
+        instance.spasm_enabled = true;
+        for (0..256) |lhs| {
+            for (0..16) |batch| {
+                var left: [16]u8 = undefined;
+                var right: [16]u8 = undefined;
+                for (0..16) |lane| {
+                    left[lane] = @truncate(lhs + 17 * lane);
+                    right[lane] = @intCast(batch * 16 + lane);
+                }
+                try expectSimdInteger(&instance, op, std.mem.readInt(u128, &left, .little), std.mem.readInt(u128, &right, .little));
             }
-            try expectSimdInteger(&instance, op, std.mem.readInt(u128, &left, .little), std.mem.readInt(u128, &right, .little));
         }
+        try testing.expectEqual(@as(u32, 1), instance.spasm_compiles);
+        try testing.expectEqual(@as(u32, 4096), instance.spasm_runs);
     }
-    try testing.expectEqual(@as(u32, 1), instance.spasm_compiles);
-    try testing.expectEqual(@as(u32, 4096), instance.spasm_runs);
 }
 
-test "wasm spasm: SIMD integer unary and average skip unreachable code" {
+test "wasm spasm: SIMD integer operations skip unreachable code" {
     if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -3231,7 +3283,7 @@ test "wasm spasm: SIMD integer unary and average skip unreachable code" {
     for (simd_integer_cases) |op| {
         var body: List = .empty;
         try body.appendSlice(a, &.{ 0, 0x02, 0x7b, 0x20, 0, 0x0c, 0, 0x20, 0 });
-        if (op.op == .average) try body.appendSlice(a, &.{ 0x20, 0 });
+        if (simdIntegerIsBinary(op)) try body.appendSlice(a, &.{ 0x20, 0 });
         try body.append(a, 0xfd);
         try uleb(a, &body, op.sub);
         try body.appendSlice(a, &.{ 0x0b, 0x0b });
@@ -3244,6 +3296,116 @@ test "wasm spasm: SIMD integer unary and average skip unreachable code" {
         defer testing.allocator.free(result);
         try testing.expectEqualSlices(u128, &.{simd_live_vector}, result);
         try testing.expectEqual(@as(u32, 1), instance.spasm_compiles);
+        try testing.expectEqual(@as(u32, 1), instance.spasm_runs);
+    }
+}
+
+test "wasm spasm: SIMD integer popcount exhausts bytes" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const op: SimdIntegerCase = .{ .sub = 98, .bits = 8, .op = .popcnt };
+    const module = try wasm.decode(a, try buildSimdIntegerFunc(a, op));
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true;
+    for (0..256) |base| {
+        var value: u128 = 0;
+        for (0..16) |lane| value |= @as(u128, @as(u8, @truncate(base + lane * 17))) << @as(u7, @intCast(lane * 8));
+        try expectSimdInteger(&instance, op, value, 0);
+    }
+}
+
+const simd_shift_ops = [_]u32{ 107, 108, 109, 139, 140, 141, 171, 172, 173, 203, 204, 205 };
+
+fn buildSimdShiftFunc(a: std.mem.Allocator, sub: u32, dead: bool) ![]const u8 {
+    var body: List = .empty;
+    try body.appendSlice(a, &.{ 1, 32, 0x7f, 0x20, 0, 0x20, 1 });
+    if (dead) try body.appendSlice(a, &.{ 0x02, 0x7b, 0x20, 2, 0x0c, 0 });
+    try body.appendSlice(a, &.{ 0x20, 2, 0x20, 3, 0xfd });
+    try uleb(a, &body, sub);
+    if (dead) try body.append(a, 0x0b);
+    try body.append(a, 0x0b);
+    return buildFunc(a, &.{ 0x7e, 0x7b, 0x7b, 0x7f }, &.{ 0x7e, 0x7b, 0x7b }, body.items, "shift");
+}
+
+fn expectedSimdShift(sub: u32, value: u128, count: u32) u128 {
+    const bits: u7 = @as(u7, 8) << @as(u2, @intCast((sub - 107) / 32));
+    const amount: u7 = @intCast(count % @as(u32, bits));
+    const modulus = @as(u128, 1) << bits;
+    const mask = modulus - 1;
+    var expected: u128 = 0;
+    for (0..128 / @as(usize, bits)) |lane| {
+        const shift: u7 = @intCast(lane * bits);
+        const input = (value >> shift) & mask;
+        const output = switch ((sub - 107) % 32) {
+            0 => (input << amount) & mask,
+            1 => blk: {
+                const signed = @as(i128, @intCast(input)) - (if (input >= modulus / 2) @as(i128, @intCast(modulus)) else 0);
+                break :blk @as(u128, @bitCast(signed >> amount)) & mask;
+            },
+            2 => input >> amount,
+            else => unreachable,
+        };
+        expected |= output << shift;
+    }
+    return expected;
+}
+
+test "wasm spasm: SIMD integer shifts mask counts and preserve lane boundaries" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (simd_shift_ops) |sub| {
+        const module = try wasm.decode(a, try buildSimdShiftFunc(a, sub, false));
+        var instance: interp.Instance = undefined;
+        try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+        defer instance.deinit();
+        instance.spasm_enabled = true;
+        for (0..132) |ci| {
+            const count: u32 = switch (ci) {
+                128 => 0xffff_ffff,
+                129 => 0x8000_0000,
+                130 => 0x8000_0021,
+                131 => 0xffff_ffc0,
+                else => @intCast(ci),
+            };
+            for (0..132) |vi| {
+                const value: u128 = switch (vi) {
+                    128 => 0,
+                    129 => std.math.maxInt(u128),
+                    130 => simd_live_vector,
+                    131 => ~simd_live_vector,
+                    else => @as(u128, 1) << @as(u7, @intCast(vi)),
+                };
+                const before = instance.spasm_runs;
+                const result = try interp.invoke(&instance, testing.allocator, 0, &.{ 37, simd_live_vector, value, count });
+                defer testing.allocator.free(result);
+                try testing.expectEqualSlices(u128, &.{ 37, simd_live_vector, expectedSimdShift(sub, value, count) }, result);
+                try testing.expectEqual(before + 1, instance.spasm_runs);
+            }
+        }
+        try testing.expectEqual(@as(u32, 1), instance.spasm_compiles);
+    }
+}
+
+test "wasm spasm: SIMD integer shifts skip unreachable code" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (simd_shift_ops) |sub| {
+        const module = try wasm.decode(a, try buildSimdShiftFunc(a, sub, true));
+        var instance: interp.Instance = undefined;
+        try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+        defer instance.deinit();
+        instance.spasm_enabled = true;
+        const result = try interp.invoke(&instance, testing.allocator, 0, &.{ 37, simd_live_vector, ~simd_live_vector, 0xffff_ffff });
+        defer testing.allocator.free(result);
+        try testing.expectEqualSlices(u128, &.{ 37, simd_live_vector, ~simd_live_vector }, result);
         try testing.expectEqual(@as(u32, 1), instance.spasm_runs);
     }
 }
@@ -3733,7 +3895,7 @@ test "wasm spasm: SIMD vectors survive host calls fallback and aliased multi-res
         } else &[_]Section{
             .{ .id = 1, .body = &types },
             .{ .id = 3, .body = &.{ 2, 0, 1 } },
-            .{ .id = 10, .body = &([_]u8{ 2, 11, 0, 0x20, 0, 0xfd, 77, 0x20, 0, 0xfd, 98, 0x1a, 0x0b } ++ wrapper) },
+            .{ .id = 10, .body = &([_]u8{ 2, 35, 0, 0x20, 0, 0xfd, 77, 0x20, 0, 0xfd, 98, 0x1a } ++ simd_fallback_stack_pressure ++ [_]u8{0x0b} ++ wrapper) },
         };
         const bytes = try assemble(a, sections);
         const module = try wasm.decode(a, bytes);
@@ -3752,6 +3914,7 @@ test "wasm spasm: SIMD vectors survive host calls fallback and aliased multi-res
         }
         if (host_call) try testing.expectError(error.Unreachable, interp.invoke(&instance, testing.allocator, 1, &.{ args[0], std.math.maxInt(u128) }));
         try testing.expectEqual(@as(u32, 1), instance.spasm_compiles);
+        if (!host_call) try testing.expectEqual(@import("spasm.zig").RefusalStage.limits, instance.spasm_last_refusal_stage);
     }
 }
 

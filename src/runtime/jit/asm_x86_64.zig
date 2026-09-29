@@ -695,7 +695,42 @@ pub const Masm = struct {
     }
 
     pub fn addPackedI16(self: *Masm, destination: Xmm, source: Xmm) error{OutOfMemory}!void {
-        try self.emitXmmReg(0x66, 0xfd, destination, source);
+        try self.addPackedInteger(destination, source, .half);
+    }
+
+    pub const PackedAddSize = enum(u8) { byte = 0xfc, half = 0xfd, word = 0xfe, double = 0xd4 };
+
+    pub fn addPackedInteger(self: *Masm, destination: Xmm, source: Xmm, size: PackedAddSize) error{OutOfMemory}!void {
+        try self.emitXmmReg(0x66, @intFromEnum(size), destination, source);
+    }
+
+    pub fn saturatingAddSubtractPacked128(self: *Masm, destination: Xmm, source: Xmm, halfword: bool, signed: bool, subtract: bool) error{OutOfMemory}!void {
+        const base: u8 = if (signed) (if (subtract) 0xe8 else 0xec) else (if (subtract) 0xd8 else 0xdc);
+        try self.emitXmmReg(0x66, base + @intFromBool(halfword), destination, source);
+    }
+
+    pub fn multiplyLowPackedI16(self: *Masm, destination: Xmm, source: Xmm) error{OutOfMemory}!void {
+        try self.emitXmmReg(0x66, 0xd5, destination, source);
+    }
+
+    pub fn multiplyEvenPackedU32(self: *Masm, destination: Xmm, source: Xmm) error{OutOfMemory}!void {
+        try self.emitXmmReg(0x66, 0xf4, destination, source);
+    }
+
+    pub const PackedShift = enum(u8) {
+        shl16 = 0xf1,
+        shl32 = 0xf2,
+        shl64 = 0xf3,
+        shr16 = 0xd1,
+        shr32 = 0xd2,
+        shr64 = 0xd3,
+        sar16 = 0xe1,
+        sar32 = 0xe2,
+    };
+
+    /// SSE2 packed shifts read the count from the low 64 bits of source.
+    pub fn shiftPackedInteger(self: *Masm, destination: Xmm, source: Xmm, op: PackedShift) error{OutOfMemory}!void {
+        try self.emitXmmReg(0x66, @intFromEnum(op), destination, source);
     }
 
     pub fn subtractPackedI16(self: *Masm, destination: Xmm, source: Xmm) error{OutOfMemory}!void {
@@ -718,11 +753,11 @@ pub const Masm = struct {
     }
 
     pub fn subtractSaturatingPackedU16(self: *Masm, destination: Xmm, source: Xmm) error{OutOfMemory}!void {
-        try self.emitXmmReg(0x66, 0xd9, destination, source);
+        try self.saturatingAddSubtractPacked128(destination, source, true, false, true);
     }
 
     pub fn addPackedI32(self: *Masm, destination: Xmm, source: Xmm) error{OutOfMemory}!void {
-        try self.emitXmmReg(0x66, 0xfe, destination, source);
+        try self.addPackedInteger(destination, source, .word);
     }
 
     pub fn andPacked128(self: *Masm, destination: Xmm, source: Xmm) error{OutOfMemory}!void {
@@ -780,6 +815,14 @@ pub const Masm = struct {
 
     pub fn compareEqualPacked(self: *Masm, destination: Xmm, source: Xmm, size: PackedIntSize) error{OutOfMemory}!void {
         try self.emitXmmReg(0x66, @intFromEnum(size), destination, source);
+    }
+
+    pub fn unpackHighPackedInteger(self: *Masm, destination: Xmm, source: Xmm, size: PackedIntSize) error{OutOfMemory}!void {
+        try self.emitXmmReg(0x66, switch (size) {
+            .byte => 0x68,
+            .half => 0x69,
+            .word => 0x6a,
+        }, destination, source);
     }
 
     pub fn compareGreaterSignedPacked(self: *Masm, destination: Xmm, source: Xmm, size: PackedIntSize) error{OutOfMemory}!void {
@@ -1380,6 +1423,30 @@ test "jit asm_x86_64: SIMD float minmax encodings retain SSE2" {
         0x0a, 0x66, 0x41, 0x0f,
         0x73, 0xd2, 0x0d,
     }, machine.code.items);
+}
+
+test "jit asm_x86_64: SIMD integer arithmetic and shift encodings retain SSE2" {
+    var m = Masm.init(std.testing.allocator);
+    defer m.deinit();
+    for ([_]Masm.PackedAddSize{ .byte, .half, .word, .double }) |size|
+        try m.addPackedInteger(.xmm9, .xmm11, size);
+    for ([_]bool{ false, true }) |subtract| {
+        for ([_]bool{ false, true }) |halfword| {
+            for ([_]bool{ true, false }) |signed|
+                try m.saturatingAddSubtractPacked128(.xmm9, .xmm11, halfword, signed, subtract);
+        }
+    }
+    try m.multiplyLowPackedI16(.xmm9, .xmm11);
+    try m.multiplyEvenPackedU32(.xmm9, .xmm11);
+    for ([_]Masm.PackedIntSize{ .byte, .half, .word }) |size|
+        try m.unpackHighPackedInteger(.xmm9, .xmm11, size);
+    for ([_]Masm.PackedShift{ .shl16, .shl32, .shl64, .shr16, .shr32, .shr64, .sar16, .sar32 }) |op|
+        try m.shiftPackedInteger(.xmm9, .xmm11, op);
+    // clang's bytes for the corresponding SSE2 instructions, using high XMMs.
+    const opcodes = [_]u8{ 0xfc, 0xfd, 0xfe, 0xd4, 0xec, 0xdc, 0xed, 0xdd, 0xe8, 0xd8, 0xe9, 0xd9, 0xd5, 0xf4, 0x68, 0x69, 0x6a, 0xf1, 0xf2, 0xf3, 0xd1, 0xd2, 0xd3, 0xe1, 0xe2 };
+    try std.testing.expectEqual(opcodes.len * 5, m.code.items.len);
+    for (opcodes, 0..) |op, index|
+        try std.testing.expectEqualSlices(u8, &.{ 0x66, 0x45, 0x0f, op, 0xcb }, m.code.items[index * 5 ..][0..5]);
 }
 
 test "jit asm_x86_64: SIMD integer unary and average encodings retain SSE2" {

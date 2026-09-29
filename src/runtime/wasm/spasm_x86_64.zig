@@ -2101,13 +2101,41 @@ pub fn compile(
                         try m.store64Disp32(.r12, target, .rax);
                         stack[sp - 1] = .runtime;
                     },
-                    174 => {
-                        if (sp < 2 or stack[sp - 1] != .v128 or stack[sp - 2] != .v128) return null;
-                        const target = scratchOffset(num_locals, sp - 2);
+                    98 => {
+                        if (sp == 0 or stack[sp - 1] != .v128) return null;
+                        const target = scratchOffset(num_locals, sp - 1);
                         try m.loadVector128(.xmm0, .r12, target);
-                        try m.loadVector128(.xmm1, .r12, scratchOffset(num_locals, sp - 1));
-                        try m.addPackedI32(.xmm0, .xmm1);
+                        try emitSimdPopcount(&m);
                         try m.storeVector128(.r12, target, .xmm0);
+                    },
+                    107...109, 139...141, 171...173, 203...205 => {
+                        if (sp < 2 or stack[sp - 2] != .v128) return null;
+                        const shift = simd.shiftOp(sub) orelse return null;
+                        try materialize(&m, stack[sp - 1], num_locals, sp - 1);
+                        const target = scratchOffset(num_locals, sp - 2);
+                        try m.load32Disp32(.rcx, .r12, scratchOffset(num_locals, sp - 1));
+                        try emitSimdShift(&m, shift, target);
+                        sp -= 1;
+                        stack[sp - 1] = .v128;
+                    },
+                    110...115, 142...147, 149, 174, 177, 181, 206, 209, 213 => {
+                        if (sp < 2 or stack[sp - 1] != .v128 or stack[sp - 2] != .v128) return null;
+                        const binary = simd.integerBinaryOp(sub) orelse return null;
+                        const target = scratchOffset(num_locals, sp - 2);
+                        const source = scratchOffset(num_locals, sp - 1);
+                        if (binary.kind == .mul and binary.width == 8) {
+                            for ([_]i32{ 0, 8 }) |half| {
+                                try m.load64Disp32(.rax, .r12, target + half);
+                                try m.load64Disp32(.rcx, .r12, source + half);
+                                try m.imulReg64(.rax, .rcx);
+                                try m.store64Disp32(.r12, target + half, .rax);
+                            }
+                        } else {
+                            try m.loadVector128(.xmm0, .r12, target);
+                            try m.loadVector128(.xmm1, .r12, source);
+                            try emitSimdIntegerBinary(&m, binary);
+                            try m.storeVector128(.r12, target, .xmm0);
+                        }
                         sp -= 1;
                         stack[sp - 1] = .v128;
                     },
@@ -2853,6 +2881,130 @@ fn emitSimdSplat(m: *x64.Masm, width: u4, target: i32) Error!void {
     }
     try m.store64Disp32(.r12, target, .rax);
     try m.store64Disp32(.r12, target + 8, .rax);
+}
+
+/// Core integer arithmetic wraps at the lane width; saturating forms clamp.
+/// Inputs/output are xmm0/xmm1 -> xmm0, with xmm2/xmm3 scratch (SSE2 only).
+fn emitSimdIntegerBinary(m: *x64.Masm, op: simd.IntegerBinaryOp) Error!void {
+    if (op.saturating) {
+        try m.saturatingAddSubtractPacked128(.xmm0, .xmm1, op.width == 2, op.signed, op.kind == .sub);
+        return;
+    }
+    switch (op.kind) {
+        .add => try m.addPackedInteger(.xmm0, .xmm1, switch (op.width) {
+            1 => .byte,
+            2 => .half,
+            4 => .word,
+            8 => .double,
+            else => return error.UnsupportedOp,
+        }),
+        .sub => try m.subtractPackedInteger(.xmm0, .xmm1, switch (op.width) {
+            1 => .byte,
+            2 => .half,
+            4 => .word,
+            8 => .double,
+            else => return error.UnsupportedOp,
+        }),
+        .mul => {
+            if (op.width == 2) {
+                try m.multiplyLowPackedI16(.xmm0, .xmm1);
+            } else if (op.width == 4) {
+                // PMULUDQ multiplies even dwords to qwords. Repeat for odd
+                // lanes, then interleave only the low dwords of each product.
+                try m.shufflePackedI32(.xmm2, .xmm0, 0xb1);
+                try m.shufflePackedI32(.xmm3, .xmm1, 0xb1);
+                try m.multiplyEvenPackedU32(.xmm0, .xmm1);
+                try m.multiplyEvenPackedU32(.xmm2, .xmm3);
+                try m.shufflePackedI32(.xmm0, .xmm0, 0x88);
+                try m.shufflePackedI32(.xmm2, .xmm2, 0x88);
+                try m.unpackLowPackedInteger(.xmm0, .xmm2, .word);
+            } else return error.UnsupportedOp;
+        },
+    }
+}
+
+/// SWAR popcount in each byte. Masks discard bits crossing byte boundaries
+/// during the wider PSRLD shifts; no SSSE3 shuffle table is required.
+fn emitSimdPopcount(m: *x64.Masm) Error!void {
+    for ([_]u64{ 0x5555555555555555, 0x3333333333333333, 0x0f0f0f0f0f0f0f0f }, 0..) |mask, step| {
+        try m.movImm64(.rax, mask);
+        try m.movQXmmFromReg(.xmm2, .rax);
+        try m.shufflePackedI32(.xmm2, .xmm2, 0x44);
+        try m.movVector128(.xmm1, .xmm0);
+        try m.shiftRightLogicalPacked128(.xmm1, @as(u8, 1) << @as(u3, @intCast(step)), false);
+        if (step < 2) try m.andPacked128(.xmm1, .xmm2);
+        if (step == 0) {
+            try m.subtractPackedInteger(.xmm0, .xmm1, .byte);
+        } else {
+            if (step == 1) try m.andPacked128(.xmm0, .xmm2);
+            try m.addPackedInteger(.xmm0, .xmm1, .byte);
+            if (step == 2) try m.andPacked128(.xmm0, .xmm2);
+        }
+    }
+}
+
+/// Count is rcx; Core requires it modulo the lane width, unlike SSE2's
+/// saturating counts. The vector stays in its Cell; rax/rdx/xmm0..2 scratch.
+fn emitSimdShift(m: *x64.Masm, op: simd.ShiftOp, target: i32) Error!void {
+    try m.movImm64(.rax, @as(u8, op.width) * 8 - 1);
+    try m.andReg32(.rcx, .rax);
+    if (op.width == 8 and op.kind == .shr_s) {
+        for ([_]i32{ 0, 8 }) |half| {
+            try m.load64Disp32(.rax, .r12, target + half);
+            try m.sarReg64Cl(.rax);
+            try m.store64Disp32(.r12, target + half, .rax);
+        }
+        return;
+    }
+    try m.loadVector128(.xmm0, .r12, target);
+    if (op.width == 1 and op.kind == .shr_s) {
+        // Duplicate each byte into both halves of a signed word. A further
+        // eight-bit arithmetic shift yields a sign-extended byte for packing.
+        try m.movVector128(.xmm1, .xmm0);
+        try m.unpackLowPackedInteger(.xmm0, .xmm0, .byte);
+        try m.unpackHighPackedInteger(.xmm1, .xmm1, .byte);
+        try m.addRegImm32(.rcx, 8);
+        try m.movDXmmFromReg(.xmm2, .rcx);
+        try m.shiftPackedInteger(.xmm0, .xmm2, .sar16);
+        try m.shiftPackedInteger(.xmm1, .xmm2, .sar16);
+        try m.packSigned16To8(.xmm0, .xmm1);
+    } else {
+        try m.movDXmmFromReg(.xmm1, .rcx);
+        const shift: x64.Masm.PackedShift = switch (op.kind) {
+            .shl => switch (op.width) {
+                1, 2 => .shl16,
+                4 => .shl32,
+                8 => .shl64,
+                else => return error.UnsupportedOp,
+            },
+            .shr_u => switch (op.width) {
+                1, 2 => .shr16,
+                4 => .shr32,
+                8 => .shr64,
+                else => return error.UnsupportedOp,
+            },
+            .shr_s => switch (op.width) {
+                2 => .sar16,
+                4 => .sar32,
+                else => return error.UnsupportedOp,
+            },
+        };
+        try m.shiftPackedInteger(.xmm0, .xmm1, shift);
+        if (op.width == 1) {
+            // Word shifts are valid byte shifts after masking the bits that
+            // spilled across each byte boundary. Broadcast the dynamic mask.
+            try m.movImm64(.rax, 0xff);
+            if (op.kind == .shl) try m.shlReg32Cl(.rax) else try m.shrReg32Cl(.rax);
+            try m.movImm64(.rdx, 0xff);
+            try m.andReg32(.rax, .rdx);
+            try m.movImm64(.rdx, 0x0101010101010101);
+            try m.imulReg64(.rax, .rdx);
+            try m.movQXmmFromReg(.xmm2, .rax);
+            try m.shufflePackedI32(.xmm2, .xmm2, 0x44);
+            try m.andPacked128(.xmm0, .xmm2);
+        }
+    }
+    try m.storeVector128(.r12, target, .xmm0);
 }
 
 /// Inputs are xmm0/xmm1; xmm2/xmm3 are scratch. Only SSE2 is required.

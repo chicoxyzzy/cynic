@@ -695,6 +695,9 @@ the measured design space:
   Integer `abs`/`neg` for 8/16/32/64-bit lanes and unsigned rounded averages
   for 8/16-bit lanes compile too. ARM uses direct NEON instructions; x86
   retains SSE2 with lane-width subtraction, sign masks, and `PAVGB/PAVGW`.
+  Wrapping add/sub/mul, saturating 8/16-bit add/sub, all integer shifts,
+  and byte popcount compile on both targets. Counts are masked to the lane
+  width; x86 retains SSE2 through packed/scalar sequences where necessary.
   Floating-point min/max for `f32x4` and `f64x2` use NaN-propagating NEON
   operations or SSE2 sequences that handle both signed-zero orders and
   canonicalize NaNs. Focused tests enforce quiet/canonical NaN rules and

@@ -1636,6 +1636,21 @@ useful:
    instead of negating an ordered comparison, preserving NaN behavior.
    Tests exhaust byte comparison pairs and check mixed wider lanes, signed
    zero, infinities, subnormals, signaling/quiet NaNs, and dead-code skipping.
+   Wrapping integer add/sub/mul, 8/16-bit saturating add/sub, every integer
+   shift, and byte popcount now compile on both targets. The
+   [Core integer operations](https://webassembly.github.io/spec/core/exec/numerics.html)
+   require lane-width wrapping, signed/unsigned clamping, and shift counts
+   modulo the lane width. ARM uses NEON arithmetic, `CNT`, and `SSHL/USHL`
+   with masked, replicated counts, following
+   [Liftoff](https://github.com/v8/v8/blob/main/src/wasm/baseline/arm64/liftoff-assembler-arm64-inl.h).
+   Both targets use scalar halves for i64 multiplication. x86 keeps SSE2:
+   `PMULUDQ` plus interleaving for i32 multiplication, word shifts with
+   byte-boundary masks or signed unpack/pack for byte shifts, scalar i64
+   arithmetic shifts, and a masked SWAR byte popcount. Tests exhaust byte
+   arithmetic pairs and popcount inputs, cover wider overflow boundaries,
+   and check every shift count through 127 plus large unsigned counts with
+   live scalar/vector neighbors. Fallback tests exceed the native operand
+   limit so further SIMD additions cannot silently remove their coverage.
    This follows the existing [Liftoff](https://v8.dev/blog/liftoff) /
    [Wizard-SPC](https://arxiv.org/abs/2305.13241) typed-stack design and
    [Core value and vector semantics](https://webassembly.github.io/spec/core/exec/instructions.html).
