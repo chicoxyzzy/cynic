@@ -2743,6 +2743,142 @@ test "wasm spasm: SIMD reductions are skipped after a terminating branch" {
     }
 }
 
+const SimdMinMaxCase = struct { sub: u32, bits: usize, signed: bool, maximum: bool };
+const simd_minmax_cases = [_]SimdMinMaxCase{
+    .{ .sub = 118, .bits = 8, .signed = true, .maximum = false },
+    .{ .sub = 119, .bits = 8, .signed = false, .maximum = false },
+    .{ .sub = 120, .bits = 8, .signed = true, .maximum = true },
+    .{ .sub = 121, .bits = 8, .signed = false, .maximum = true },
+    .{ .sub = 150, .bits = 16, .signed = true, .maximum = false },
+    .{ .sub = 151, .bits = 16, .signed = false, .maximum = false },
+    .{ .sub = 152, .bits = 16, .signed = true, .maximum = true },
+    .{ .sub = 153, .bits = 16, .signed = false, .maximum = true },
+    .{ .sub = 182, .bits = 32, .signed = true, .maximum = false },
+    .{ .sub = 183, .bits = 32, .signed = false, .maximum = false },
+    .{ .sub = 184, .bits = 32, .signed = true, .maximum = true },
+    .{ .sub = 185, .bits = 32, .signed = false, .maximum = true },
+};
+
+fn buildSimdMinMaxFunc(a: std.mem.Allocator, sub: u32) ![]const u8 {
+    var body: List = .empty;
+    try body.appendSlice(a, &.{ 1, 32, 0x7f, 0x20, 0, 0x20, 1, 0x20, 2, 0x20, 3, 0xfd });
+    try uleb(a, &body, sub);
+    try body.append(a, 0x0b);
+    return buildFunc(a, &.{ 0x7e, 0x7b, 0x7b, 0x7b }, &.{ 0x7e, 0x7b, 0x7b }, body.items, "minmax");
+}
+
+fn expectSimdMinMax(instance: *interp.Instance, op: SimdMinMaxCase, left: u128, right: u128) !void {
+    const modulus = @as(i64, 1) << @as(u6, @intCast(op.bits));
+    const mask: u128 = @intCast(modulus - 1);
+    var expected: u128 = 0;
+    for (0..128 / op.bits) |lane| {
+        const shift: u7 = @intCast(lane * op.bits);
+        const lhs = (left >> shift) & mask;
+        const rhs = (right >> shift) & mask;
+        var l: i64 = @intCast(lhs);
+        var r: i64 = @intCast(rhs);
+        if (op.signed) {
+            if (l >= @divExact(modulus, 2)) l -= modulus;
+            if (r >= @divExact(modulus, 2)) r -= modulus;
+        }
+        const choose_left = if (op.maximum) l > r else l < r;
+        expected |= (if (choose_left) lhs else rhs) << shift;
+    }
+    const before = instance.spasm_runs;
+    const result = try interp.invoke(instance, testing.allocator, 0, &.{ 37, simd_live_vector, left, right });
+    defer testing.allocator.free(result);
+    try testing.expectEqualSlices(u128, &.{ 37, simd_live_vector, expected }, result);
+    try testing.expectEqual(before + 1, instance.spasm_runs);
+}
+
+test "wasm spasm: SIMD integer minmax handles boundaries and mixed live lanes" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (simd_minmax_cases) |op| {
+        const module = try wasm.decode(a, try buildSimdMinMaxFunc(a, op.sub));
+        var instance: interp.Instance = undefined;
+        try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+        defer instance.deinit();
+        instance.spasm_enabled = true;
+        const sign = @as(u128, 1) << @as(u7, @intCast(op.bits - 1));
+        const mask = sign * 2 - 1;
+        const values = [_]u128{ 0, 1, 2, sign - 1, sign, sign + 1, mask - 1, mask, 0x5555_5555 & mask, 0xaaaa_aaaa & mask };
+        for (0..values.len) |li| {
+            for (0..values.len) |ri| {
+                var left: u128 = 0;
+                var right: u128 = 0;
+                for (0..128 / op.bits) |lane| {
+                    const shift: u7 = @intCast(lane * op.bits);
+                    left |= values[(li + lane) % values.len] << shift;
+                    right |= values[(ri + lane * 3) % values.len] << shift;
+                }
+                try expectSimdMinMax(&instance, op, left, right);
+                try expectSimdMinMax(&instance, op, left, left);
+            }
+        }
+        // Every individual bit can distinguish the two candidates, including
+        // the upper half and low bits below a differing signed/unsigned MSB.
+        for (0..128) |bit| {
+            const single = @as(u128, 1) << @as(u7, @intCast(bit));
+            try expectSimdMinMax(&instance, op, single, ~single);
+            try expectSimdMinMax(&instance, op, ~single, single);
+        }
+        try testing.expectEqual(@as(u32, 1), instance.spasm_compiles);
+    }
+}
+
+test "wasm spasm: SIMD integer minmax exhausts all byte pairs" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (simd_minmax_cases[0..4]) |op| {
+        const module = try wasm.decode(a, try buildSimdMinMaxFunc(a, op.sub));
+        var instance: interp.Instance = undefined;
+        try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+        defer instance.deinit();
+        instance.spasm_enabled = true;
+        for (0..256) |lhs| {
+            for (0..16) |batch| {
+                var left: [16]u8 = undefined;
+                var right: [16]u8 = undefined;
+                for (0..16) |lane| {
+                    left[lane] = @truncate(lhs + 17 * lane);
+                    right[lane] = @intCast(batch * 16 + lane);
+                }
+                try expectSimdMinMax(&instance, op, std.mem.readInt(u128, &left, .little), std.mem.readInt(u128, &right, .little));
+            }
+        }
+        try testing.expectEqual(@as(u32, 1), instance.spasm_compiles);
+        try testing.expectEqual(@as(u32, 4096), instance.spasm_runs);
+    }
+}
+
+test "wasm spasm: SIMD integer minmax is skipped after a terminating branch" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (simd_minmax_cases) |op| {
+        var body: List = .empty;
+        try body.appendSlice(a, &.{ 0, 0x02, 0x7b, 0x20, 0, 0x0c, 0, 0x20, 0, 0x20, 0, 0xfd });
+        try uleb(a, &body, op.sub);
+        try body.appendSlice(a, &.{ 0x0b, 0x0b });
+        const module = try wasm.decode(a, try buildFunc(a, &.{0x7b}, &.{0x7b}, body.items, "dead"));
+        var instance: interp.Instance = undefined;
+        try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+        defer instance.deinit();
+        instance.spasm_enabled = true;
+        const result = try interp.invoke(&instance, testing.allocator, 0, &.{simd_live_vector});
+        defer testing.allocator.free(result);
+        try testing.expectEqualSlices(u128, &.{simd_live_vector}, result);
+        try testing.expectEqual(@as(u32, 1), instance.spasm_compiles);
+        try testing.expectEqual(@as(u32, 1), instance.spasm_runs);
+    }
+}
+
 test "wasm spasm: SIMD splats truncate integers and preserve floating bit patterns" {
     if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);

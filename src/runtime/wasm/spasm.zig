@@ -3352,8 +3352,9 @@ fn compileAarch64(
             },
             op_simd_prefix => {
                 // §4.4 SIMD — the 0xFD prefix. The baseline compiles the v128
-                // data path, scalar lanes, bitwise ops, reductions, and i32x4.add. A v128 is
-                // exactly one `Cell`, so it reuses the depth-keyed cell storage
+                // data path, scalar lanes, bitwise ops, reductions, integer
+                // min/max, and i32x4.add. A v128 is exactly one `Cell`, so it
+                // reuses the depth-keyed cell storage
                 // the runtime references use (the `.v128` Loc + `refSlotOff`):
                 // const/load/store/add move the 128-bit cell with GP halves or
                 // a NEON quad, never the GP operand bank.
@@ -3478,6 +3479,21 @@ fn compileAarch64(
                     const result = regForDepth(sp - 1);
                     try emitSimdReduction(&m, refSlotOff(num_locals, sp - 1), result, reduction);
                     stack[sp - 1] = .{ .reg = result };
+                } else if (simd.integerMinMaxOp(sub)) |minmax| {
+                    if (sp < 2 or stack[sp - 2] != .v128 or stack[sp - 1] != .v128) return null;
+                    const size: a64.VectorLaneSize = switch (minmax.width) {
+                        1 => .byte,
+                        2 => .half,
+                        4 => .word,
+                        else => return null,
+                    };
+                    const target = refSlotOff(num_locals, sp - 2);
+                    try m.emit(a64.ldrQImm(.x0, .x0, target));
+                    try m.emit(a64.ldrQImm(.x1, .x0, refSlotOff(num_locals, sp - 1)));
+                    try m.emit(a64.minMaxV128(.x0, .x0, .x1, size, minmax.signed, minmax.maximum));
+                    try m.emit(a64.strQImm(.x0, .x0, target));
+                    sp -= 1;
+                    stack[sp - 1] = .v128;
                 } else if (sub >= 77 and sub <= 82) {
                     const consumed: usize = if (sub == 77) 1 else if (sub == 82) 3 else 2;
                     if (sp < consumed) return null;

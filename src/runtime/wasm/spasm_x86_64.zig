@@ -1909,6 +1909,17 @@ pub fn compile(
                         try m.store64Disp32(.r12, target, .rax);
                         stack[sp - 1] = .runtime;
                     },
+                    118...121, 150...153, 182...185 => {
+                        if (sp < 2 or stack[sp - 2] != .v128 or stack[sp - 1] != .v128) return null;
+                        const minmax = simd.integerMinMaxOp(sub) orelse return null;
+                        const target = scratchOffset(num_locals, sp - 2);
+                        try m.loadVector128(.xmm0, .r12, target);
+                        try m.loadVector128(.xmm1, .r12, scratchOffset(num_locals, sp - 1));
+                        const result = try emitSimdMinMax(&m, minmax);
+                        try m.storeVector128(.r12, target, result);
+                        sp -= 1;
+                        stack[sp - 1] = .v128;
+                    },
                     77...82 => {
                         const consumed: usize = if (sub == 77) 1 else if (sub == 82) 3 else 2;
                         if (sp < consumed) return null;
@@ -2670,6 +2681,50 @@ fn emitExecutionPoll(
     try m.cmpReg32Imm32(.rax, 0);
     try m.jumpCond(.not_equal, epilogue);
     try m.bind(&done);
+}
+
+/// Inputs are xmm0/xmm1; xmm2/xmm3 are scratch. Only SSE2 is required.
+fn emitSimdMinMax(m: *x64.Masm, op: simd.MinMaxOp) Error!x64.Xmm {
+    if (op.width == 1 and !op.signed) {
+        try m.minMaxPacked128(.xmm0, .xmm1, if (op.maximum) .max_u8 else .min_u8);
+        return .xmm0;
+    }
+    if (op.width == 2) {
+        if (op.signed) {
+            try m.minMaxPacked128(.xmm0, .xmm1, if (op.maximum) .max_i16 else .min_i16);
+            return .xmm0;
+        }
+        // d = saturating_unsigned(a - b): min = a - d, max = b + d.
+        // Neither final operation can wrap outside the unsigned lane range.
+        try m.movVector128(.xmm2, .xmm0);
+        try m.subtractSaturatingPackedU16(.xmm2, .xmm1);
+        if (op.maximum) {
+            try m.addPackedI16(.xmm1, .xmm2);
+            return .xmm1;
+        }
+        try m.subtractPackedI16(.xmm0, .xmm2);
+        return .xmm0;
+    }
+    const size: x64.Masm.PackedIntSize = switch (op.width) {
+        1 => .byte,
+        4 => .word,
+        else => return error.UnsupportedOp,
+    };
+    // The mask selects b when a > b for min, or when b > a for max.
+    try m.movVector128(.xmm2, if (op.maximum) .xmm1 else .xmm0);
+    try m.compareGreaterSignedPacked(.xmm2, if (op.maximum) .xmm0 else .xmm1, size);
+    if (!op.signed) {
+        // Unsigned ordering differs from signed ordering exactly when the
+        // sign bits differ. Broadcast that difference and flip the mask.
+        try m.movVector128(.xmm3, .xmm0);
+        try m.xorPacked128(.xmm3, .xmm1);
+        try m.shiftRightArithmeticPackedI32(.xmm3, 31);
+        try m.xorPacked128(.xmm2, .xmm3);
+    }
+    try m.xorPacked128(.xmm1, .xmm0);
+    try m.andPacked128(.xmm1, .xmm2);
+    try m.xorPacked128(.xmm0, .xmm1); // a ^ ((a ^ b) & mask)
+    return .xmm0;
 }
 
 fn materialize(m: *x64.Masm, loc: Loc, num_locals: usize, depth: usize) Error!void {

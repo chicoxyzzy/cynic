@@ -1573,6 +1573,18 @@ useful:
    and without lower-bit noise, every zero-lane position, canonical i32
    results, live neighbors, and unreachable-code skipping. No new runtime
    allocation, host calls, JS API, or SES policy changes are involved.
+   All 12 signed/unsigned integer min/max operations (8/16/32-bit lanes)
+   now compile too. ARM uses direct NEON `SMIN/UMIN/SMAX/UMAX`, as in
+   [Liftoff's ARM64 lowering](https://github.com/v8/v8/blob/main/src/wasm/baseline/arm64/liftoff-assembler-arm64-inl.h).
+   Unlike [Liftoff's SSE4.1 x64 min/max forms](https://github.com/v8/v8/blob/main/src/wasm/baseline/x64/liftoff-assembler-x64-inl.h),
+   Spasm keeps SSE2: direct unsigned-byte/signed-halfword min/max, unsigned
+   halfwords via saturated subtraction (also used by
+   [SIMDe](https://github.com/simd-everywhere/simde/blob/master/simde/x86/sse4.1.h)),
+   and signed compare/select for the remaining forms. Unsigned word ordering
+   flips the signed comparison mask where the operands' sign bits differ.
+   Tests cover all byte pairs, wider sign boundaries, equality, mixed lanes,
+   live scalar/vector neighbors, and dead-code skipping; no new runtime
+   allocations or host calls are introduced.
    This follows the existing [Liftoff](https://v8.dev/blog/liftoff) /
    [Wizard-SPC](https://arxiv.org/abs/2305.13241) typed-stack design and
    [Core value and vector semantics](https://webassembly.github.io/spec/core/exec/instructions.html).
@@ -1581,7 +1593,7 @@ useful:
    an unsupported lane operation. `tools/wasm_bench.zig` covers inline vector
    addition and vector-valued calls with checked high-lane checksums.
    The rest of the v128 lane-op
-   surface (the other arithmetic/compare/convert/shuffle/reduction families) is the
+   surface (the other arithmetic/compare/convert/shuffle families) is the
    remaining frontier, along with the side-table-as-control-oracle wiring (§6)
    that would make multi-target `br_table` cheap.
 5. **Ohaimark** — the ADR plus bytecode/feedback/SSA, initial specialization,

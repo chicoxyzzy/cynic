@@ -44,3 +44,23 @@ pub fn reductionOp(sub: u32) ?ReductionOp {
         else => null,
     };
 }
+
+pub const MinMaxOp = struct { width: u4, signed: bool, maximum: bool };
+
+pub fn integerMinMaxOp(sub: u32) ?MinMaxOp {
+    return switch (sub) {
+        118 => .{ .width = 1, .signed = true, .maximum = false },
+        119 => .{ .width = 1, .signed = false, .maximum = false },
+        120 => .{ .width = 1, .signed = true, .maximum = true },
+        121 => .{ .width = 1, .signed = false, .maximum = true },
+        150 => .{ .width = 2, .signed = true, .maximum = false },
+        151 => .{ .width = 2, .signed = false, .maximum = false },
+        152 => .{ .width = 2, .signed = true, .maximum = true },
+        153 => .{ .width = 2, .signed = false, .maximum = true },
+        182 => .{ .width = 4, .signed = true, .maximum = false },
+        183 => .{ .width = 4, .signed = false, .maximum = false },
+        184 => .{ .width = 4, .signed = true, .maximum = true },
+        185 => .{ .width = 4, .signed = false, .maximum = true },
+        else => null,
+    };
+}
