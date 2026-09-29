@@ -410,6 +410,39 @@ Realm, while its native backing record lives in the store owner's arena;
 cross-realm lookups reuse that owner's cache. This separates the function's
 creation Realm from the lifetime of the store it calls.
 
+`Global`, `Memory`, and `Table` identity uses one Realm-local map keyed by a
+union of their typed native pointers, implementing the same
+[object caches (§4.2)](https://webassembly.github.io/spec/js-api/#object-caches)
+and the initialize/create-object algorithms for
+[Memory (§5.3)](https://webassembly.github.io/spec/js-api/#memories),
+[Table (§5.4)](https://webassembly.github.io/spec/js-api/#tables), and
+[Global (§5.5)](https://webassembly.github.io/spec/js-api/#globals).
+Constructors register their actual `this` object, preserving subclasses and
+custom prototypes on reexport. Export helpers search the maps in `heap.realms`
+before allocating, so cross-realm imports reuse the original wrapper. A miss
+is local: foreign Memory/Table/Global imports already arrive through wrappers;
+primitive immutable Global imports allocate fresh local cells. First exposure
+therefore chooses the wrapper's Realm and prototype, while equal primitive
+imports remain distinct. Memory keys use the stable native `Memory` record,
+not its reallocatable byte backing, so growth preserves wrapper identity and
+all aliases share its cached `buffer`. As with function wrappers, entries are
+quota-accounted strong roots for the existing store lifetime, traced on every
+GC and released at teardown; pre-start instance rollback removes only that
+instance's partial entries, preserving imported providers.
+
+The closest prior art is
+[SpiderMonkey's `EnsureExportedGlobalObject` / `GetGlobalExport`](https://github.com/mozilla-firefox/firefox/blob/main/js/src/wasm/WasmModule.cpp):
+it materializes a Global wrapper once per index and reuses retained Memory
+and Table objects. [V8's `ProcessExports`](https://github.com/v8/v8/blob/main/src/wasm/module-instantiate.cc)
+and [JSC's `initializeExports`](https://github.com/WebKit/WebKit/blob/main/Source/JavaScriptCore/wasm/js/WebAssemblyModuleRecord.cpp)
+preserve imported wrappers, but their current local-Global paths differ from
+the explicit spec cache: V8 allocates a wrapper per local Global export, and
+JSC does so for embedded immutable globals. Cynic follows the spec for these
+aliases too. Shared-memory cloning needs a separate identity policy: the
+spec exempts shared objects from the uniqueness guarantee, and
+[V8's `ReadWasmMemory`](https://github.com/v8/v8/blob/main/src/objects/value-serializer.cc)
+creates a new wrapper linked to an existing shared backing store.
+
 **Status: shipped** (`builtins/webassembly.zig`, tested in
 `runtime/wasm_js_test.zig`). The full surface is wired:
 `validate` (ungated); the `Module` / `Instance` constructors and the

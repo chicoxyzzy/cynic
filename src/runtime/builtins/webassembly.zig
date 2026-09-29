@@ -629,6 +629,10 @@ fn globalConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
     const st = a.create(GlobalState) catch return error.OutOfMemory;
     st.* = .{ .g = g, .cell = cell, .valtype = vt, .mutable = mutable };
     try self.setWasmGlobal(realm.allocator, st);
+    // §5.5 Initialize a global object: cache the actual constructor receiver,
+    // including a subclass's prototype and own properties.
+    try realm.cacheWasmObjectWrapper(.{ .global = g }, self, null);
+    errdefer _ = realm.wasm_object_wrappers.swapRemove(.{ .global = g });
     if (vt == .externref) realm.registerExternGlobalCell(cell) catch return error.OutOfMemory;
     return this_value;
 }
@@ -669,13 +673,15 @@ fn globalValueSet(realm: *Realm, this_value: Value, args: []const Value) NativeE
 
 /// Wrap an instance's live global cell as a `WebAssembly.Global` object
 /// (for global exports). Reads / writes go straight to the cell.
-fn makeGlobal(realm: *Realm, valtype: wasm.ValType, mutable: bool, g: *wasm.Global) NativeError!Value {
+fn makeGlobal(realm: *Realm, instance: *wasm.Instance, valtype: wasm.ValType, mutable: bool, g: *wasm.Global) NativeError!Value {
+    if (realm.findWasmObjectWrapper(.{ .global = g })) |cached| return heap_mod.taggedObject(cached);
     const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
     realm.heap.setObjectPrototype(obj, realm.wasm_global_prototype);
     const a = realm.wasmAllocator();
     const st = a.create(GlobalState) catch return error.OutOfMemory;
     st.* = .{ .g = g, .cell = &g.value, .valtype = valtype, .mutable = mutable };
     try obj.setWasmGlobal(realm.allocator, st);
+    try realm.cacheWasmObjectWrapper(.{ .global = g }, obj, instance);
     return heap_mod.taggedObject(obj);
 }
 
@@ -754,6 +760,10 @@ fn tableConstructor(realm: *Realm, this_value: Value, args: []const Value) Nativ
         realm.registerExternTable(tbl) catch return error.OutOfMemory;
         extern_root_registered = true;
     }
+    // Publish before the final backing registration, so any later failure
+    // removes the cache root and the existing errdefers free the backing.
+    try realm.cacheWasmObjectWrapper(.{ .table = tbl }, self, null);
+    errdefer _ = realm.wasm_object_wrappers.swapRemove(.{ .table = tbl });
     realm.registerWasmTable(tbl) catch return error.OutOfMemory;
     backing_registered = true;
     return this_value;
@@ -883,12 +893,14 @@ fn optionalAddressValue(realm: *Realm, v: Value) NativeError!?u64 {
 }
 
 /// Wrap a shared engine table as a `WebAssembly.Table` (for exports).
-fn makeTable(realm: *Realm, table: *wasm.Table, funcref: bool) NativeError!Value {
+fn makeTable(realm: *Realm, instance: *wasm.Instance, table: *wasm.Table, funcref: bool) NativeError!Value {
+    if (realm.findWasmObjectWrapper(.{ .table = table })) |cached| return heap_mod.taggedObject(cached);
     const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
     realm.heap.setObjectPrototype(obj, realm.wasm_table_prototype);
     const st = realm.wasmAllocator().create(TableState) catch return error.OutOfMemory;
     st.* = .{ .table = table, .funcref = funcref };
     try obj.setWasmTable(realm.allocator, st);
+    try realm.cacheWasmObjectWrapper(.{ .table = table }, obj, instance);
     return heap_mod.taggedObject(obj);
 }
 
@@ -960,6 +972,8 @@ fn memoryConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
     const st = a.create(MemoryState) catch return error.OutOfMemory;
     st.* = .{ .mem = mem, .buffer = null, .shared = shared };
     try self.setWasmMemory(realm.allocator, st);
+    try realm.cacheWasmObjectWrapper(.{ .memory = mem }, self, null);
+    errdefer _ = realm.wasm_object_wrappers.swapRemove(.{ .memory = mem });
     realm.registerWasmMemory(mem) catch return error.OutOfMemory;
     backing_registered = true;
     return this_value;
@@ -1035,12 +1049,14 @@ fn memoryGrow(realm: *Realm, this_value: Value, args: []const Value) NativeError
 }
 
 /// Wrap a shared engine memory as a `WebAssembly.Memory` (for exports).
-fn makeMemory(realm: *Realm, mem: *wasm.Memory) NativeError!Value {
+fn makeMemory(realm: *Realm, instance: *wasm.Instance, mem: *wasm.Memory) NativeError!Value {
+    if (realm.findWasmObjectWrapper(.{ .memory = mem })) |cached| return heap_mod.taggedObject(cached);
     const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
     realm.heap.setObjectPrototype(obj, realm.wasm_memory_prototype);
     const st = realm.wasmAllocator().create(MemoryState) catch return error.OutOfMemory;
     st.* = .{ .mem = mem, .buffer = null, .shared = mem.is_shared };
     try obj.setWasmMemory(realm.allocator, st);
+    try realm.cacheWasmObjectWrapper(.{ .memory = mem }, obj, instance);
     return heap_mod.taggedObject(obj);
 }
 
@@ -1303,18 +1319,18 @@ fn buildExports(realm: *Realm, ip: *wasm.Instance, module: *const wasm.Module) N
             .global => |gidx| {
                 const g = ip.globalRef(gidx) orelse continue;
                 const gt = ip.globalTypeAt(gidx) orelse continue;
-                const gobj = try makeGlobal(realm, gt.val, gt.mut == .mutable, g);
+                const gobj = try makeGlobal(realm, ip, gt.val, gt.mut == .mutable, g);
                 obj.setWithFlags(realm.allocator, ex.name, gobj, export_flags) catch return error.OutOfMemory;
             },
             .table => |tidx| {
                 const tbl = ip.tableRef(tidx) orelse continue;
                 const et = ip.tableElemType(tidx) orelse continue;
-                const tobj = try makeTable(realm, tbl, et == .funcref);
+                const tobj = try makeTable(realm, ip, tbl, et == .funcref);
                 obj.setWithFlags(realm.allocator, ex.name, tobj, export_flags) catch return error.OutOfMemory;
             },
             .mem => |midx| {
                 const mem = ip.memoryPtr(midx) orelse continue;
-                const mobj = try makeMemory(realm, mem);
+                const mobj = try makeMemory(realm, ip, mem);
                 obj.setWithFlags(realm.allocator, ex.name, mobj, export_flags) catch return error.OutOfMemory;
             },
             .tag => |tidx| {
@@ -2338,6 +2354,69 @@ test "WebAssembly function identity: export allocation failure rolls back only n
     const exports = heap_mod.valueAsPlainObject(recovered).?.getWasmInstanceExports().?;
     try testing.expectEqual(function.bits, exports.get("p").bits);
     try testing.expectEqual(wrappers_before + 2, realm.wasm_function_wrappers.count());
+}
+
+test "WPT object identity: export allocation failure preserves provider objects" {
+    const testing = std.testing;
+    var failing = testing.FailingAllocator.init(testing.allocator, .{});
+    var realm = Realm.initWithBytesAllocator(testing.allocator, failing.allocator());
+    defer {
+        failing.fail_index = std.math.maxInt(usize);
+        realm.deinit();
+    }
+    realm.allow_wasm_compile = true;
+    try realm.installBuiltins();
+    const scope = try realm.heap.openScope();
+    defer scope.close();
+
+    // A no-start consumer reexports three provider objects, creates three
+    // owned object wrappers, then fails while naming its function export.
+    const provider_bytes = [_]u8{
+        0, 97,  115, 109, 1, 0,   0, 0, 4,   5,   1,   111, 1,  1, 3,  5,
+        4, 1,   1,   1,   3, 6,   6, 1, 111, 1,   208, 111, 11, 7, 13, 3,
+        1, 103, 3,   0,   1, 116, 1, 0, 1,   109, 2,   0,
+    };
+    const consumer_bytes = [_]u8{
+        0,   97, 115, 109, 1,   0, 0,   0, 1, 4,   1,   96,  0, 0,   2,   25,
+        3,   1,  112, 1,   103, 3, 111, 1, 1, 112, 1,   116, 1, 111, 1,   1,
+        3,   1,  112, 1,   109, 2, 1,   1, 3, 3,   2,   1,   0, 4,   5,   1,
+        111, 1,  1,   3,   5,   4, 1,   1, 1, 3,   6,   6,   1, 111, 1,   208,
+        111, 11, 7,   29,  7,   1, 103, 3, 0, 1,   116, 1,   0, 1,   109, 2,
+        0,   1,  71,  3,   1,   1, 84,  1, 1, 1,   77,  2,   1, 1,   102, 0,
+        0,   10, 4,   1,   2,   0, 11,
+    };
+    const provider_module = try makeModuleObject(&realm, &provider_bytes);
+    try scope.push(provider_module);
+    const provider_state: *ModuleState = @ptrCast(@alignCast(heap_mod.valueAsPlainObject(provider_module).?.getWasmModule().?));
+    const provider = try makeInstanceObject(&realm, provider_state, Value.undefined_);
+    try scope.push(provider);
+    const provider_exports = heap_mod.valueAsPlainObject(provider).?.getWasmInstanceExports().?;
+    const imports = try realm.heap.allocateObject();
+    try scope.push(heap_mod.taggedObject(imports));
+    try imports.set(realm.allocator, "p", heap_mod.taggedObject(provider_exports));
+    const consumer_module = try makeModuleObject(&realm, &consumer_bytes);
+    try scope.push(consumer_module);
+    const consumer_state: *ModuleState = @ptrCast(@alignCast(heap_mod.valueAsPlainObject(consumer_module).?.getWasmModule().?));
+    const instances_before = realm.wasm_instances.items.len;
+    const globals_before = realm.wasm_extern_global_cells.items.len;
+    const tables_before = realm.wasm_extern_tables.items.len;
+    const objects_before = realm.wasm_object_wrappers.count();
+    try testing.expectEqual(@as(usize, 3), objects_before);
+
+    failing.fail_index = failing.alloc_index;
+    try testing.expectError(error.OutOfMemory, makeInstanceObject(&realm, consumer_state, heap_mod.taggedObject(imports)));
+    failing.fail_index = std.math.maxInt(usize);
+    try testing.expectEqual(instances_before, realm.wasm_instances.items.len);
+    try testing.expectEqual(globals_before, realm.wasm_extern_global_cells.items.len);
+    try testing.expectEqual(tables_before, realm.wasm_extern_tables.items.len);
+    try testing.expectEqual(objects_before, realm.wasm_object_wrappers.count());
+    realm.collectGarbage();
+    const recovered = try makeInstanceObject(&realm, consumer_state, heap_mod.taggedObject(imports));
+    try scope.push(recovered);
+    const exports = heap_mod.valueAsPlainObject(recovered).?.getWasmInstanceExports().?;
+    for ([_][]const u8{ "g", "t", "m" }) |name|
+        try testing.expectEqual(provider_exports.get(name).bits, exports.get(name).bits);
+    try testing.expectEqual(objects_before + 3, realm.wasm_object_wrappers.count());
 }
 
 test "WebAssembly-side memory.grow uses the Realm store allocator in the interpreter" {
