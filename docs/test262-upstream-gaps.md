@@ -41,7 +41,7 @@ the corpus under the relevant section's directory before adding.
 
 ### Wasm compile could lose its capability result during settlement
 
-- **Fixed in:** `a774e75c`
+- **Fixed in:** `155c3a2a`
 - **Spec:** ECMA-262 §27.2.1.5 NewPromiseCapability and the Wasm JS API's
   compilation promise. This is a host-safety regression for the engine's
   replaceable Promise binding, not a claim that Wasm must consult that binding.
