@@ -55,13 +55,14 @@ signed/unsigned narrowing, low/high extension, pairwise extended sums,
 all 12 extended multiplications, signed halfword dot products, Q15 products,
 floating rounding plus pseudo-min/max at both lane widths,
 byte shuffle, strict swizzle, relaxed swizzle, all ten standard numeric
-conversions, and all four relaxed truncations;
-other SIMD instructions still fall back.
+conversions, all four relaxed truncations, and the remaining 15 relaxed
+operations (multiply-add, lane selection, min/max, Q15, and dot products).
+Nonzero-memory SIMD operands still fall back.
 
 | target | native entries | compiled functions | refusals |
 |---|---:|---:|---:|
-| x86_64-macos (Rosetta) | 144,768 | 5,476 | 507 |
-| AArch64-macos | 150,335 | 5,450 | 533 |
+| x86_64-macos (Rosetta) | 144,832 | 5,507 | 476 |
+| AArch64-macos | 150,399 | 5,481 | 502 |
 
 The SIMD foundation added 249 compiled functions on x86_64 and 26 on AArch64
 over the reference-parity checkpoint. The bounded AArch64 code-reservation
@@ -101,35 +102,34 @@ zero invalid swizzle indices; x86 retains the SSE2 baseline without helpers.
 Standard numeric conversions and relaxed truncations add 17 compiled
 functions and 320 native entries per target, removing 17 more SIMD refusals.
 Relaxed truncation uses deterministic saturation, matching the interpreter.
+The remaining relaxed operations add 31 compiled functions and 64 native
+entries per target, removing the last 31 SIMD refusals in this corpus.
+Multiply-add is unfused; dot products saturate signed i16 pair sums before
+wrapping i32 accumulation. The latter also fixes an interpreter overflow
+panic when safety checks are enabled.
 These are coverage counts, not speedups.
 
-- x86: 8 limits, 0 signatures, 397 bytecode shapes, 102 unsupported opcodes,
+- x86: 8 limits, 0 signatures, 397 bytecode shapes, 71 unsupported opcodes,
   0 emission failures, and 0 installation refusals.
-- AArch64: 8 limits, 0 signatures, 335 bytecode shapes, 190 unsupported
+- AArch64: 8 limits, 0 signatures, 335 bytecode shapes, 159 unsupported
   opcodes, 0 emission failures, and 0 installation refusals. Reusing x86's
   module-sized reservation removes all 99 installation refusals from the
   previous fixed 64 KiB arena. Both targets retain the 64 KiB minimum and
   4 MiB cap, charge the entire mapping to a Realm's memory budget, and fall
   back to Sarcasm if reservation or installation is refused.
 
-The x86 vector-signature bucket falls from 1,349 to zero, but many functions
-then encounter unsupported instructions: both targets record 31 refusals
-at `0xfd`. The largest reported subopcode groups are
-`f32x4.relaxed_madd` (261: 3), `f32x4.relaxed_nmadd` (262: 2),
-`f64x2.relaxed_madd` (263: 2), `f64x2.relaxed_nmadd` (264: 2),
-and `i8x16.relaxed_laneselect` (265: 2).
+The x86 vector-signature bucket falls from 1,349 to zero. Neither target
+now records a refusal at `0xfd` in this corpus.
 Counts classify the first refusal per attempted function, not every operation
 it contains. Both sweeps also report 7 overflows of the compact per-instance
 top-level opcode table; the fixed subopcode counters are tracked separately.
 
 The source inventory accounts for all 256 SIMD opcodes accepted by the
-validator: 241 have lowering paths on both targets; 15 still need them.
+validator: all 256 have lowering paths on both targets.
 This is an opcode count, not the first-refusal-per-function count above.
-Existing nonzero-memory and control-shape fallback restrictions still apply.
-
-| Remaining family | Opcodes |
-|---|---:|
-| Relaxed SIMD (except swizzle and truncation) | 15 |
+Existing nonzero-memory and control-shape fallback restrictions still apply;
+zero corpus SIMD refusals does not prove those paths are native. Nonzero-memory
+support and the scope-wide native-entry/code-reservation audit remain open.
 
 Both backends still refuse native table64 operations while their helpers use
 u32 indices, preventing truncation above 2^32. The largest remaining `0xfc` groups are

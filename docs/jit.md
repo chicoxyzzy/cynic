@@ -1723,6 +1723,19 @@ useful:
    floating boundaries, NaNs, mixed lanes, native-entry checks, dead code, and
    dense 128-/1,024-operation bodies cover both backends. This is Wasm-only
    machinery; the ECMA-262/SES surface is unchanged.
+   The remaining 15 relaxed operations also have native lowering. Lane
+   selection, min/max, and Q15 reuse their strict counterparts. Multiply-add
+   uses separate multiply/add instructions, negating the first operand for
+   `nmadd`; no FMA or extra x86 CPU feature is required. Dot products choose
+   signed bytes and [Core's saturating i16 pair sums](https://webassembly.github.io/spec/core/exec/numerics.html#op-ivdot-sat),
+   followed by widened pair sums and wrapping i32 accumulation for dot-add.
+   ARM uses `SMULL`, `SADDLP`, and `SQXTN`; x86 uses sign-extending unpack,
+   `PMADDWD`, and `PACKSSDW`. Unlike Liftoff's ARM wrapping pair-add sequence,
+   the explicit saturation retains the selected Core result even for two
+   `-128 * -128` products. Sarcasm shares this choice and no longer traps on
+   signed accumulator overflow. Native-entry tests cover all 15 operations,
+   every signed byte-product pair, cancellation that distinguishes fused
+   arithmetic, NaNs/zeros, live neighbors, dead code, and dense bodies.
    This follows the existing [Liftoff](https://v8.dev/blog/liftoff) /
    [Wizard-SPC](https://arxiv.org/abs/2305.13241) typed-stack design and
    [Core value and vector semantics](https://webassembly.github.io/spec/core/exec/instructions.html).
@@ -1730,10 +1743,9 @@ useful:
    targets; a function getting past its vector signature can still refuse at
    an unsupported lane operation. `tools/wasm_bench.zig` covers inline vector
    addition and vector-valued calls with checked high-lane checksums.
-   The rest of the v128 lane-op
-   surface (the remaining relaxed families) is the
-   remaining frontier, along with the side-table-as-control-oracle wiring (§6)
-   that would make multi-target `br_table` cheap.
+   Nonzero-memory SIMD operands and the full opcode/reservation audit remain,
+   along with the side-table-as-control-oracle wiring (§6) that would make
+   multi-target `br_table` cheap.
 5. **Ohaimark** — the ADR plus bytecode/feedback/SSA, initial specialization,
    tagged/int32 representation selection, and verified logical deopt metadata
    plus direct-entry/stable-home physical recovery have landed against measured

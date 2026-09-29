@@ -729,6 +729,12 @@ the measured design space:
   Unsigned i32-to-float conversion rounds once; widening preserves unread
   inputs. Relaxed truncation uses the same deterministic saturating behavior
   as Sarcasm, without runtime helper calls or a higher x86 ISA requirement.
+  Relaxed multiply-add is unfused; relaxed lane selection, min/max, and Q15
+  reuse the strict operations. Relaxed dot products saturate signed byte-pair
+  sums to i16, then dot-add widens pairs and wraps the i32 accumulation.
+  NEON and SSE2 implement the same choices as Sarcasm; ordinary permitted
+  NaN payload variation remains. The interpreter's dot-add also wraps under
+  safety checks instead of trapping on signed overflow.
   The six signed/unsigned widening loads (8x8, 16x4, 32x2) check and read
   exactly eight bytes before widening to a full vector, using NEON
   SXTL/UXTL or SSE2 unpacking with zero/sign masks. Memory64 overflow traps
@@ -738,7 +744,7 @@ the measured design space:
   handling and NaN-aware floating ordering. The x86 i64 forms use scalar
   comparisons to retain the SSE2 baseline.
   Table64 operations (the helper ABI still uses u32
-  indices), the remaining SIMD operations, and other unsupported x86
+  indices), nonzero-memory SIMD operands, and other unsupported x86
   bodies refuse before
   code publication and run in Sarcasm.
   This is a coverage difference, not a semantic one: forced-Spasm sweeps on

@@ -81,7 +81,7 @@ pub fn productOp(sub: u32) ?ProductOp {
             .high = sub % 2 == 1,
         },
         186 => .{ .width = 2, .kind = .dot },
-        130 => .{ .width = 2, .kind = .q15 },
+        130, 273 => .{ .width = 2, .kind = .q15 },
         else => null,
     };
 }
@@ -299,8 +299,10 @@ pub fn floatArithmeticOp(sub: u32) ?FloatArithmeticOp {
 
 pub fn floatMinMaxOp(sub: u32) ?FloatMinMaxOp {
     return switch (sub) {
-        232, 233 => .{ .double_precision = false, .maximum = sub == 233 },
-        244, 245 => .{ .double_precision = true, .maximum = sub == 245 },
+        232, 269 => .{ .double_precision = false, .maximum = false },
+        233, 270 => .{ .double_precision = false, .maximum = true },
+        244, 271 => .{ .double_precision = true, .maximum = false },
+        245, 272 => .{ .double_precision = true, .maximum = true },
         else => null,
     };
 }

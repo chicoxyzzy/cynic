@@ -4252,9 +4252,9 @@ fn funary(comptime N: usize, comptime T: type, comptime op: FUn, a: u128) u128 {
 }
 
 const FBin = enum { add, sub, mul, div, min, max };
-/// relaxed_{madd,nmadd}: per-lane `±(a*b) + c`. Pops c, b, a. Computed
-/// unfused (a valid relaxed choice — no separate FMA rounding).
+/// Core's deterministic relaxed_{madd,nmadd}: `(±a * b) + c`, unfused.
 fn frelaxedMadd(ip: *Interp, comptime N: usize, comptime T: type, comptime negate: bool) u128 {
+    @setFloatMode(.strict);
     const c = ip.popV128();
     const b = ip.popV128();
     const a = ip.popV128();
@@ -4263,10 +4263,22 @@ fn frelaxedMadd(ip: *Interp, comptime N: usize, comptime T: type, comptime negat
     const cv: [N]T = @bitCast(c);
     var r: [N]T = undefined;
     inline for (0..N) |i| {
-        const prod = av[i] * bv[i];
-        r[i] = (if (negate) -prod else prod) + cv[i];
+        const prod = (if (negate) -av[i] else av[i]) * bv[i];
+        r[i] = prod + cv[i];
     }
     return @bitCast(r);
+}
+
+/// Core ivdotsat_s: choose signed bytes, saturating each pair to i16.
+fn ivdotSat(a: u128, b: u128) [8]i16 {
+    const aa: [16]i8 = @bitCast(a);
+    const bb: [16]i8 = @bitCast(b);
+    var result: [8]i16 = undefined;
+    inline for (0..8) |i| {
+        const sum = @as(i32, aa[2 * i]) * bb[2 * i] + @as(i32, aa[2 * i + 1]) * bb[2 * i + 1];
+        result[i] = @intCast(std.math.clamp(sum, -32768, 32767));
+    }
+    return result;
 }
 
 fn fbin(ip: *Interp, comptime N: usize, comptime T: type, comptime op: FBin) u128 {
@@ -4636,7 +4648,7 @@ fn execSimd(ip: *Interp, sub: u32, body: []const u8, pc: *usize) TrapError!void 
 
         // relaxed-simd (Wasm 3.0). "Relaxed" permits a choice of valid
         // results per lane; Sarcasm picks the deterministic, non-fused
-        // behavior (so the same module yields the same bits everywhere).
+        // behavior (apart from the ordinary permitted NaN payload choices).
         257 => try ip.pushV128(truncSatF32x4(i32, ip.popV128())), // relaxed_trunc_f32x4_s
         258 => try ip.pushV128(truncSatF32x4(u32, ip.popV128())), // relaxed_trunc_f32x4_u
         259 => try ip.pushV128(truncSatF64x2Zero(i32, ip.popV128())), // _f64x2_s_zero
@@ -4670,27 +4682,18 @@ fn execSimd(ip: *Interp, sub: u32, body: []const u8, pc: *usize) TrapError!void 
         274 => { // i16x8.relaxed_dot_i8x16_i7x16_s — pairwise i8×i8 → i16
             const b = ip.popV128();
             const a = ip.popV128();
-            const aa: [16]i8 = @bitCast(a);
-            const bb: [16]i8 = @bitCast(b);
-            var r: [8]i16 = undefined;
-            inline for (0..8) |j| {
-                const s: i32 = @as(i32, aa[2 * j]) * @as(i32, bb[2 * j]) + @as(i32, aa[2 * j + 1]) * @as(i32, bb[2 * j + 1]);
-                r[j] = @truncate(s);
-            }
-            try ip.pushV128(@bitCast(r));
+            try ip.pushV128(@bitCast(ivdotSat(a, b)));
         },
-        275 => { // i32x4.relaxed_dot_i8x16_i7x16_add_s — 4 products + c, per lane
+        275 => { // saturated i16 pair dots, widened and added modulo 2^32
             const c = ip.popV128();
             const b = ip.popV128();
             const a = ip.popV128();
-            const aa: [16]i8 = @bitCast(a);
-            const bb: [16]i8 = @bitCast(b);
+            const pairs = ivdotSat(a, b);
             const cv: [4]i32 = @bitCast(c);
             var r: [4]i32 = undefined;
             inline for (0..4) |k| {
-                var s: i32 = 0;
-                inline for (0..4) |m| s += @as(i32, aa[4 * k + m]) * @as(i32, bb[4 * k + m]);
-                r[k] = s + cv[k];
+                const sum = @as(i32, pairs[2 * k]) + pairs[2 * k + 1];
+                r[k] = sum +% cv[k];
             }
             try ip.pushV128(@bitCast(r));
         },
