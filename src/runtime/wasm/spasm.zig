@@ -3668,6 +3668,28 @@ fn compileAarch64(
                     try m.emit(a64.strQImm(.x0, .x0, target));
                     sp -= consumed - 1;
                     stack[sp - 1] = .v128;
+                } else if (simd.floatRoundOp(sub)) |round| {
+                    if (sp == 0 or stack[sp - 1] != .v128) return null;
+                    const target = refSlotOff(num_locals, sp - 1);
+                    try m.emit(a64.ldrQImm(.x0, .x0, target));
+                    try m.emit(a64.roundFloatV128(.x0, .x0, round.double_precision, switch (round.mode) {
+                        .ceil => .ceil,
+                        .floor => .floor,
+                        .trunc => .trunc,
+                        .nearest => .nearest,
+                    }));
+                    try m.emit(a64.strQImm(.x0, .x0, target));
+                } else if (simd.floatPseudoMinMaxOp(sub)) |minmax| {
+                    if (sp < 2 or stack[sp - 2] != .v128 or stack[sp - 1] != .v128) return null;
+                    const target = refSlotOff(num_locals, sp - 2);
+                    try m.emit(a64.ldrQImm(.x0, .x0, target));
+                    try m.emit(a64.ldrQImm(.x1, .x0, refSlotOff(num_locals, sp - 1)));
+                    // Core fpmin/fpmax retain the first input bits on ties/NaNs.
+                    try m.emit(a64.compareFloatV128(.x2, if (minmax.maximum) .x1 else .x0, if (minmax.maximum) .x0 else .x1, minmax.double_precision, .gt));
+                    try m.emit(a64.bitSelectV128(.x2, .x1, .x0));
+                    try m.emit(a64.strQImm(.x2, .x0, target));
+                    sp -= 1;
+                    stack[sp - 1] = .v128;
                 } else if (simd.floatMinMaxOp(sub)) |minmax| {
                     if (sp < 2 or stack[sp - 2] != .v128 or stack[sp - 1] != .v128) return null;
                     const target = refSlotOff(num_locals, sp - 2);

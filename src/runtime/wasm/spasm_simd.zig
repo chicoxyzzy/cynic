@@ -223,6 +223,30 @@ pub fn roundingAverageWidth(sub: u32) ?u4 {
 
 pub const FloatMinMaxOp = struct { double_precision: bool, maximum: bool };
 
+pub const FloatRoundOp = struct {
+    double_precision: bool,
+    mode: @import("float_ops.zig").RoundMode,
+};
+
+pub fn floatRoundOp(sub: u32) ?FloatRoundOp {
+    return switch (sub) {
+        103...106 => .{ .double_precision = false, .mode = @enumFromInt(sub - 103) },
+        116 => .{ .double_precision = true, .mode = .ceil },
+        117 => .{ .double_precision = true, .mode = .floor },
+        122 => .{ .double_precision = true, .mode = .trunc },
+        148 => .{ .double_precision = true, .mode = .nearest },
+        else => null,
+    };
+}
+
+pub fn floatPseudoMinMaxOp(sub: u32) ?FloatMinMaxOp {
+    return switch (sub) {
+        234, 235 => .{ .double_precision = false, .maximum = sub == 235 },
+        246, 247 => .{ .double_precision = true, .maximum = sub == 247 },
+        else => null,
+    };
+}
+
 pub const FloatArithmeticOp = struct {
     double_precision: bool,
     kind: enum { abs, neg, sqrt, add, sub, mul, div },

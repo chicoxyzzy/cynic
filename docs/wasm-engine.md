@@ -713,6 +713,12 @@ the measured design space:
   operations or SSE2 sequences that handle both signed-zero orders and
   canonicalize NaNs. Focused tests enforce quiet/canonical NaN rules and
   preserve subnormal lane bits; no runtime helper calls are needed.
+  Floating `ceil/floor/trunc/nearest` use NEON directed rounding or the existing
+  SSE2-compatible scalar raw-bit helpers per lane. The shared rounding helper
+  explicitly quiets signaling NaNs in the interpreter and x86 native paths.
+  Pseudo-min/max retain the first input bits on equal or unordered comparisons,
+  using NEON comparison masks plus bit selection or reversed SSE min/max
+  operands. This intentionally differs from ordinary floating min/max.
   The six signed/unsigned widening loads (8x8, 16x4, 32x2) check and read
   exactly eight bytes before widening to a full vector, using NEON
   SXTL/UXTL or SSE2 unpacking with zero/sign masks. Memory64 overflow traps

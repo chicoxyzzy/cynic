@@ -4118,10 +4118,10 @@ fn floatUnop(comptime T: type, op: Op, x: T) T {
     return switch (op) {
         .f32_abs, .f64_abs => @abs(x),
         .f32_neg, .f64_neg => -x,
-        .f32_ceil, .f64_ceil => @ceil(x),
-        .f32_floor, .f64_floor => @floor(x),
-        .f32_trunc, .f64_trunc => @trunc(x),
-        .f32_nearest, .f64_nearest => float_ops.roundEven(T, x),
+        .f32_ceil, .f64_ceil => float_ops.round(T, x, .ceil),
+        .f32_floor, .f64_floor => float_ops.round(T, x, .floor),
+        .f32_trunc, .f64_trunc => float_ops.round(T, x, .trunc),
+        .f32_nearest, .f64_nearest => float_ops.round(T, x, .nearest),
         .f32_sqrt, .f64_sqrt => @sqrt(x),
         else => unreachable,
     };
@@ -4877,18 +4877,11 @@ fn vsat(ip: *Interp, comptime N: usize, comptime T: type, comptime is_add: bool)
     return @bitCast(if (is_add) x +| y else x -| y);
 }
 
-fn vround(comptime N: usize, comptime T: type, comptime op: enum { ceil, floor, trunc, nearest }, a: u128) u128 {
+fn vround(comptime N: usize, comptime T: type, comptime op: float_ops.RoundMode, a: u128) u128 {
     const x: @Vector(N, T) = @bitCast(a);
-    switch (op) {
-        .ceil => return @bitCast(@ceil(x)),
-        .floor => return @bitCast(@floor(x)),
-        .trunc => return @bitCast(@trunc(x)),
-        .nearest => {
-            var r: @Vector(N, T) = x;
-            inline for (0..N) |i| r[i] = float_ops.roundEven(T, x[i]);
-            return @bitCast(r);
-        },
-    }
+    var r: @Vector(N, T) = undefined;
+    inline for (0..N) |i| r[i] = float_ops.round(T, x[i], op);
+    return @bitCast(r);
 }
 
 fn vpminmax(ip: *Interp, comptime N: usize, comptime T: type, comptime is_max: bool) u128 {

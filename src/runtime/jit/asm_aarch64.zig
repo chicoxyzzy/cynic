@@ -341,6 +341,17 @@ pub fn unaryFloatV128(vd: Reg, vn: Reg, double_precision: bool, op: FloatUnary) 
     return @intFromEnum(op) | (if (double_precision) @as(u32, 0x00400000) else 0) | (r(vn) << 5) | r(vd);
 }
 
+pub const FloatRound = enum(u32) { ceil = 0x4ea18800, floor = 0x4e219800, trunc = 0x4ea19800, nearest = 0x4e218800 };
+
+pub fn roundFloatV128(vd: Reg, vn: Reg, double_precision: bool, mode: FloatRound) u32 {
+    return @intFromEnum(mode) | (if (double_precision) @as(u32, 0x00400000) else 0) | (r(vn) << 5) | r(vd);
+}
+
+/// BSL selects Vn bits where the original Vd mask is set, otherwise Vm.
+pub fn bitSelectV128(vd: Reg, vn: Reg, vm: Reg) u32 {
+    return 0x6e601c00 | (r(vm) << 16) | (r(vn) << 5) | r(vd);
+}
+
 pub const FloatArithmetic = enum(u32) { add = 0x4e20d400, sub = 0x4ea0d400, mul = 0x6e20dc00, div = 0x6e20fc00 };
 
 pub fn arithmeticFloatV128(vd: Reg, vn: Reg, vm: Reg, double_precision: bool, op: FloatArithmetic) u32 {
@@ -1118,6 +1129,17 @@ pub fn brk(imm16: u16) u32 {
 // Byte-exact encodings, cross-checked against `llvm-mc -triple
 // arm64 -show-encoding` output. These pin the bit layouts; the
 // execution tests in masm.zig prove them on hardware.
+
+test "jit asm_aarch64: SIMD float selection encodings" {
+    const single = [_]u32{ 0x4ea188a3, 0x4e2198a3, 0x4ea198a3, 0x4e2188a3 };
+    const double = [_]u32{ 0x4ee18bdd, 0x4e619bdd, 0x4ee19bdd, 0x4e618bdd };
+    const modes = [_]FloatRound{ .ceil, .floor, .trunc, .nearest };
+    for (modes, single, double) |mode, s, d| {
+        try std.testing.expectEqual(s, roundFloatV128(.x3, .x5, false, mode));
+        try std.testing.expectEqual(d, roundFloatV128(.fp, .lr, true, mode));
+    }
+    try std.testing.expectEqual(@as(u32, 0x6e711ca3), bitSelectV128(.x3, .x5, .x17));
+}
 
 test "jit asm_aarch64: SIMD comparison encodings" {
     const expected = [_]u32{ 0x6e318ca3, 0x6e718ca3, 0x6eb18ca3, 0x6ef18ca3 };

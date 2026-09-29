@@ -3486,6 +3486,10 @@ const simd_float_arithmetic_ops = [_]u32{ 224, 225, 227, 228, 229, 230, 231, 236
 
 fn buildSimdFloatArithmeticFunc(a: std.mem.Allocator, sub: u32, dead: bool) ![]const u8 {
     const unary = (sub - (if (sub < 236) @as(u32, 224) else 236)) < 4;
+    return buildSimdFloatFunc(a, sub, unary, dead);
+}
+
+fn buildSimdFloatFunc(a: std.mem.Allocator, sub: u32, unary: bool, dead: bool) ![]const u8 {
     var body: List = .empty;
     try body.appendSlice(a, &.{ 1, 32, 0x7f, 0x20, 0, 0x20, 1 });
     if (dead) try body.appendSlice(a, &.{ 0x02, 0x7b, 0x20, 2, 0x0c, 0 });
@@ -3593,6 +3597,216 @@ test "wasm spasm: SIMD float arithmetic skips unreachable code" {
     const a = arena.allocator();
     for (simd_float_arithmetic_ops) |sub| {
         const module = try wasm.decode(a, try buildSimdFloatArithmeticFunc(a, sub, true));
+        var instance: interp.Instance = undefined;
+        try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+        defer instance.deinit();
+        instance.spasm_enabled = true;
+        const result = try interp.invoke(&instance, testing.allocator, 0, &.{ 37, simd_live_vector, ~simd_live_vector, 0 });
+        defer testing.allocator.free(result);
+        try testing.expectEqualSlices(u128, &.{ 37, simd_live_vector, ~simd_live_vector }, result);
+        try testing.expectEqual(@as(u32, 1), instance.spasm_runs);
+    }
+}
+
+const SimdFloatSelection = struct {
+    sub: u32,
+    double_precision: bool,
+    op: enum { ceil, floor, trunc, nearest, pmin, pmax },
+
+    fn isUnary(self: SimdFloatSelection) bool {
+        return self.op != .pmin and self.op != .pmax;
+    }
+};
+const simd_float_selection_cases = [_]SimdFloatSelection{
+    .{ .sub = 103, .double_precision = false, .op = .ceil },
+    .{ .sub = 104, .double_precision = false, .op = .floor },
+    .{ .sub = 105, .double_precision = false, .op = .trunc },
+    .{ .sub = 106, .double_precision = false, .op = .nearest },
+    .{ .sub = 116, .double_precision = true, .op = .ceil },
+    .{ .sub = 117, .double_precision = true, .op = .floor },
+    .{ .sub = 122, .double_precision = true, .op = .trunc },
+    .{ .sub = 148, .double_precision = true, .op = .nearest },
+    .{ .sub = 234, .double_precision = false, .op = .pmin },
+    .{ .sub = 235, .double_precision = false, .op = .pmax },
+    .{ .sub = 246, .double_precision = true, .op = .pmin },
+    .{ .sub = 247, .double_precision = true, .op = .pmax },
+};
+
+fn expectSimdFloatSelectionLane(comptime U: type, op: SimdFloatSelection, left: U, right: U, actual: U) !void {
+    const sign: U = @as(U, 1) << (@bitSizeOf(U) - 1);
+    const fraction_bits = if (U == u32) 23 else 52;
+    const bias = if (U == u32) 127 else 1023;
+    const exponent: U = if (U == u32) 0x7f80_0000 else 0x7ff0_0000_0000_0000;
+    const quiet: U = @as(U, 1) << (fraction_bits - 1);
+    const magnitude = left & ~sign;
+    if (!op.isUnary()) {
+        const F = if (U == u32) f32 else f64;
+        const lhs: F = @bitCast(left);
+        const rhs: F = @bitCast(right);
+        const choose_right = magnitude <= exponent and (right & ~sign) <= exponent and
+            (if (op.op == .pmin) rhs < lhs else lhs < rhs);
+        // Core fpmin/fpmax select input bits, even for signaling NaNs.
+        try testing.expectEqual(if (choose_right) right else left, actual);
+        return;
+    }
+    if (magnitude > exponent) {
+        if (magnitude == exponent | quiet)
+            try testing.expectEqual(exponent | quiet, actual & ~sign)
+        else
+            try testing.expectEqual(exponent | quiet, actual & (exponent | quiet));
+        return;
+    }
+    // Independent integer-bit oracle, not the runtime's floating helpers.
+    const power = @as(i32, @intCast(magnitude >> fraction_bits)) - bias;
+    if (power >= fraction_bits or magnitude == 0) {
+        try testing.expectEqual(left, actual);
+        return;
+    }
+    const negative = left & sign != 0;
+    if (power < 0) {
+        const round_to_one = switch (op.op) {
+            .ceil => !negative,
+            .floor => negative,
+            .trunc => false,
+            .nearest => magnitude > @as(U, bias - 1) << fraction_bits,
+            else => unreachable,
+        };
+        try testing.expectEqual((left & sign) | (if (round_to_one) @as(U, bias) << fraction_bits else 0), actual);
+        return;
+    }
+    const count: std.math.Log2Int(U) = @intCast(fraction_bits - power);
+    const unit = @as(U, 1) << count;
+    const discarded = left & (unit - 1);
+    const truncated = left & ~(unit - 1);
+    const increment = switch (op.op) {
+        .ceil => !negative and discarded != 0,
+        .floor => negative and discarded != 0,
+        .trunc => false,
+        .nearest => discarded > unit / 2 or (discarded == unit / 2 and truncated & unit != 0),
+        else => unreachable,
+    };
+    try testing.expectEqual(truncated + (if (increment) unit else 0), actual);
+}
+
+fn expectSimdFloatSelection(comptime U: type, instance: *interp.Instance, op: SimdFloatSelection, left: u128, right: u128, native: bool) !void {
+    const before = instance.spasm_runs;
+    const result = try interp.invoke(instance, testing.allocator, 0, &.{ 37, simd_live_vector, left, right });
+    defer testing.allocator.free(result);
+    try testing.expectEqual(@as(usize, 3), result.len);
+    try testing.expectEqual(@as(u128, 37), result[0]);
+    try testing.expectEqual(simd_live_vector, result[1]);
+    for (0..128 / @bitSizeOf(U)) |lane| {
+        const shift: u7 = @intCast(lane * @bitSizeOf(U));
+        try expectSimdFloatSelectionLane(U, op, @truncate(left >> shift), @truncate(right >> shift), @truncate(result[2] >> shift));
+    }
+    try testing.expectEqual(before + @intFromBool(native), instance.spasm_runs);
+}
+
+fn testSimdFloatSelection(comptime U: type, native: bool) !void {
+    if (native and !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const sign: U = @as(U, 1) << (@bitSizeOf(U) - 1);
+    const fraction_bits = if (U == u32) 23 else 52;
+    const bias = if (U == u32) 127 else 1023;
+    const exponent: U = if (U == u32) 0x7f80_0000 else 0x7ff0_0000_0000_0000;
+    const quiet: U = @as(U, 1) << (fraction_bits - 1);
+    const one: U = @as(U, bias) << fraction_bits;
+    const half: U = @as(U, bias - 1) << fraction_bits;
+    const values = [_]U{
+        0,                               sign,                 1,                   sign | 1,            quiet * 2 - 1,           sign | (quiet * 2 - 1),
+        quiet * 2,                       sign | (quiet * 2),   half - 1,            half,                half + 1,                sign | (half - 1),
+        sign | half,                     sign | (half + 1),    one - 1,             one,                 one + 1,                 sign | one,
+        one + quiet,                     sign | (one + quiet), one + quiet * 2,     one + quiet * 5 / 2, one + quiet * 7 / 2,     exponent - 1,
+        sign | (exponent - 1),           exponent,             sign | exponent,     exponent | quiet,    sign | exponent | quiet, exponent | quiet | 1,
+        sign | exponent | quiet | 0x123, exponent | 1,         sign | exponent | 1,
+    };
+    for (simd_float_selection_cases) |op| {
+        if (op.double_precision != (U == u64)) continue;
+        const module = try wasm.decode(a, try buildSimdFloatFunc(a, op.sub, op.isUnary(), false));
+        var instance: interp.Instance = undefined;
+        try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+        defer instance.deinit();
+        instance.spasm_enabled = native;
+        for (0..values.len) |li| {
+            for (0..if (op.isUnary()) @as(usize, 1) else values.len) |ri| {
+                var left: u128 = 0;
+                var right: u128 = 0;
+                for (0..128 / @bitSizeOf(U)) |lane| {
+                    const shift: u7 = @intCast(lane * @bitSizeOf(U));
+                    left |= @as(u128, values[(li + lane * 3) % values.len]) << shift;
+                    right |= @as(u128, values[(ri + lane * 5) % values.len]) << shift;
+                }
+                try expectSimdFloatSelection(U, &instance, op, left, right, native);
+            }
+        }
+        if (op.isUnary()) {
+            for (0..fraction_bits) |power| {
+                const unit = @as(U, 1) << @as(std.math.Log2Int(U), @intCast(fraction_bits - power));
+                for ([_]U{ 0, unit }) |parity| {
+                    const tie = (@as(U, @intCast(bias + power)) << fraction_bits) + parity + unit / 2;
+                    for ([_]U{ tie - 1, tie, tie + 1 }) |bits| {
+                        var vector: u128 = 0;
+                        for (0..128 / @bitSizeOf(U)) |lane| {
+                            vector |= @as(u128, bits | (if (lane % 2 != 0) sign else 0)) << @as(u7, @intCast(lane * @bitSizeOf(U)));
+                        }
+                        try expectSimdFloatSelection(U, &instance, op, vector, 0, native);
+                    }
+                }
+            }
+        }
+        try testing.expectEqual(@as(u32, @intFromBool(native)), instance.spasm_compiles);
+    }
+}
+
+test "wasm spasm: SIMD float selection f32 preserves ties and NaN bits" {
+    try testSimdFloatSelection(u32, true);
+}
+
+test "wasm spasm: SIMD float selection f64 preserves ties and NaN bits" {
+    try testSimdFloatSelection(u64, true);
+}
+
+test "wasm interpreter: SIMD float selection preserves ties and NaN bits" {
+    try testSimdFloatSelection(u32, false);
+    try testSimdFloatSelection(u64, false);
+}
+
+test "wasm: SIMD float selection shared scalar rounds quiet signaling NaNs" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (simd_float_selection_cases) |op| {
+        if (!op.isUnary()) continue;
+        const scalar: u8 = (if (op.double_precision) @as(u8, 0x9b) else 0x8d) + @intFromEnum(op.op);
+        const ty: u8 = if (op.double_precision) 0x7c else 0x7d;
+        const module = try wasm.decode(a, try buildFunc(a, &.{ty}, &.{ty}, &.{ 0, 0x20, 0, scalar, 0x0b }, "round"));
+        for ([_]bool{ false, true }) |native| {
+            if (native and !@import("spasm.zig").supported) continue;
+            var instance: interp.Instance = undefined;
+            try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+            defer instance.deinit();
+            instance.spasm_enabled = native;
+            const bits: u128 = if (op.double_precision) 0x7ff0_0000_0000_0001 else 0x7f80_0001;
+            const result = try interp.invoke(&instance, testing.allocator, 0, &.{bits});
+            defer testing.allocator.free(result);
+            if (op.double_precision)
+                try expectSimdFloatSelectionLane(u64, op, @truncate(bits), 0, @truncate(result[0]))
+            else
+                try expectSimdFloatSelectionLane(u32, op, @truncate(bits), 0, @truncate(result[0]));
+            try testing.expectEqual(@as(u32, @intFromBool(native)), instance.spasm_runs);
+        }
+    }
+}
+
+test "wasm spasm: SIMD float selection skips unreachable code" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (simd_float_selection_cases) |op| {
+        const module = try wasm.decode(a, try buildSimdFloatFunc(a, op.sub, op.isUnary(), true));
         var instance: interp.Instance = undefined;
         try interp.instantiate(&instance, a, testing.allocator, &module, .{});
         defer instance.deinit();

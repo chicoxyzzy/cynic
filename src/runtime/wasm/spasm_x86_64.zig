@@ -2038,6 +2038,40 @@ pub fn compile(
                         sp -= consumed - 1;
                         stack[sp - 1] = .v128;
                     },
+                    103...106, 116, 117, 122, 148 => {
+                        if (sp == 0 or stack[sp - 1] != .v128) return null;
+                        const round = simd.floatRoundOp(sub) orelse return null;
+                        const width: i32 = if (round.double_precision) 8 else 4;
+                        const target = scratchOffset(num_locals, sp - 1);
+                        // Reuse the scalar raw-bit ABI without requiring SSE4.1.
+                        // All live operands stay in Cells across each call.
+                        for (0..@as(usize, @intCast(@divExact(16, width)))) |lane| {
+                            const offset = target + @as(i32, @intCast(lane)) * width;
+                            if (round.double_precision)
+                                try m.load64Disp32(.rdi, .r12, offset)
+                            else
+                                try m.load32Disp32(.rdi, .r12, offset);
+                            try m.movImm64(.rsi, @intFromEnum(round.mode));
+                            try m.movImm64(.r11, if (round.double_precision) @intFromPtr(&roundF64Bits) else @intFromPtr(&roundF32Bits));
+                            try m.callReg(.r11);
+                            if (round.double_precision)
+                                try m.store64Disp32(.r12, offset, .rax)
+                            else
+                                try m.store32Disp32(.r12, offset, .rax);
+                        }
+                    },
+                    234, 235, 246, 247 => {
+                        if (sp < 2 or stack[sp - 2] != .v128 or stack[sp - 1] != .v128) return null;
+                        const minmax = simd.floatPseudoMinMaxOp(sub) orelse return null;
+                        const target = scratchOffset(num_locals, sp - 2);
+                        try m.loadVector128(.xmm0, .r12, target);
+                        try m.loadVector128(.xmm1, .r12, scratchOffset(num_locals, sp - 1));
+                        // SSE selects its second operand on ties/NaNs; reverse.
+                        try m.minMaxPackedFloat128(.xmm1, .xmm0, minmax.double_precision, minmax.maximum);
+                        try m.storeVector128(.r12, target, .xmm1);
+                        sp -= 1;
+                        stack[sp - 1] = .v128;
+                    },
                     232, 233, 244, 245 => {
                         if (sp < 2 or stack[sp - 2] != .v128 or stack[sp - 1] != .v128) return null;
                         const minmax = simd.floatMinMaxOp(sub) orelse return null;
@@ -3392,21 +3426,11 @@ fn emitBranchValues(
 }
 
 fn roundF32Bits(bits: u32, mode: u32) callconv(.c) u32 {
-    return @bitCast(roundFloat(f32, @bitCast(bits), mode));
+    return @bitCast(float_ops.round(f32, @bitCast(bits), @enumFromInt(mode)));
 }
 
 fn roundF64Bits(bits: u64, mode: u32) callconv(.c) u64 {
-    return @bitCast(roundFloat(f64, @bitCast(bits), mode));
-}
-
-fn roundFloat(comptime T: type, value: T, mode: u32) T {
-    return switch (mode) {
-        0 => @ceil(value),
-        1 => @floor(value),
-        2 => @trunc(value),
-        3 => float_ops.roundEven(T, value),
-        else => value,
-    };
+    return @bitCast(float_ops.round(f64, @bitCast(bits), @enumFromInt(mode)));
 }
 
 /// Emit a §4.3.3 trapping float-to-int truncation. The operand enters in
