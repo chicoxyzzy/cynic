@@ -1543,6 +1543,17 @@ useful:
    check all 16 bytes before access, including memory64 carry, and accept
    unaligned addresses. Calls, globals, and single-result control merges now
    preserve vectors on both targets without changing the staged-Cell ABI.
+   All eight lane loads/stores now use the same Cells with narrow scalar
+   memory moves: bounds checks cover exactly 1/2/4/8 bytes, and loads copy the
+   incoming vector before replacing one lane. `v128.any_true` ORs both 64-bit
+   halves and returns a canonical i32 boolean. The dead-code scanner consumes
+   lane immediates and full memory64 offsets. Unlike V8 Liftoff's register-lane
+   [x64 LoadLane/StoreLane lowering](https://github.com/v8/v8/blob/main/src/wasm/baseline/x64/liftoff-assembler-x64-inl.h),
+   the existing Cell representation lets Spasm avoid SSE4.1 PINSR/PEXTR forms;
+   AArch64 likewise reuses its scalar load/store encoders. Tests cover every
+   lane, unaligned and exact-end accesses, overflow traps without partial
+   stores, and each of the 128 input bits for `any_true`. This changes no JS
+   API or SES policy; test262 remains a regression gate, not a coverage target.
    This follows the existing [Liftoff](https://v8.dev/blog/liftoff) /
    [Wizard-SPC](https://arxiv.org/abs/2305.13241) typed-stack design and
    [Core value and vector semantics](https://webassembly.github.io/spec/core/exec/instructions.html).

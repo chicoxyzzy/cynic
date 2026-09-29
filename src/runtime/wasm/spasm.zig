@@ -590,13 +590,17 @@ const op_f64_reinterpret_i64: u8 = 0xbf;
 const op_misc_prefix: u8 = 0xfc;
 // §4.4 SIMD — the 0xFD prefix introduces a second opcode byte (a varuint32),
 // distinct from the 0xFC misc prefix. The baseline compiles the v128 data
-// path (const / load / store) and the first NEON compute op (i32x4.add);
+// path (const / load / store / lane memory), any_true, and i32x4.add;
 // every other sub-opcode degrades to the interpreter.
 const op_simd_prefix: u8 = 0xfd;
 // §4.4 SIMD sub-opcodes (after the 0xFD prefix, varuint32-encoded).
 const simd_v128_load: u32 = 0;
 const simd_v128_store: u32 = 11;
 const simd_v128_const: u32 = 12;
+const simd_v128_any_true: u32 = 83;
+const simd_v128_load8_lane: u32 = 84;
+const simd_v128_store8_lane: u32 = 88;
+const simd_v128_store64_lane: u32 = 91;
 const simd_i32x4_add: u32 = 174;
 const op_memory_size: u8 = 0x3f;
 const op_memory_grow: u8 = 0x40;
@@ -3347,8 +3351,7 @@ fn compileAarch64(
             },
             op_simd_prefix => {
                 // §4.4 SIMD — the 0xFD prefix. The baseline compiles the v128
-                // data path (const / load / store) and the first NEON compute
-                // op (i32x4.add); every other sub-opcode degrades. A v128 is
+                // data path, lane memory, any_true, and i32x4.add. A v128 is
                 // exactly one `Cell`, so it reuses the depth-keyed cell storage
                 // the runtime references use (the `.v128` Loc + `refSlotOff`):
                 // const/load/store/add move the 128-bit cell with GP halves or
@@ -3416,6 +3419,58 @@ fn compileAarch64(
                     try m.emit(a64.ldrImm(.x17, .x0, src + 8));
                     try m.emit(a64.strReg(.x17, .x2, .x16));
                     sp -= 2;
+                } else if (sub >= simd_v128_load8_lane and sub <= simd_v128_store64_lane) {
+                    const memory64 = memoryIs64(module, 0) orelse return null;
+                    const offset = readMemArg(body, &i, memory64) orelse return null;
+                    const size_log2: u2 = @intCast((sub - simd_v128_load8_lane) % 4);
+                    const width = @as(u32, 1) << size_log2;
+                    if (i >= body.len or body[i] >= 16 / width) return null;
+                    const lane = body[i];
+                    i += 1;
+                    if (sp < 2 or stack[sp - 1] != .v128) return null;
+                    const store = sub >= simd_v128_store8_lane;
+                    const ra = try materialize(&m, stack[sp - 2], sp - 2);
+                    // Core SIMD memory instructions access only N/8 bytes,
+                    // not the full vector. Check before any memory write.
+                    try emitMemBounds(&m, ra, offset, width, memory64, &trap_oob);
+                    trap_oob_used = true;
+                    const src = refSlotOff(num_locals, sp - 1);
+                    const dst = refSlotOff(num_locals, sp - 2);
+                    if (!store) {
+                        try m.emit(a64.ldrImm(.x17, .x0, src));
+                        try m.emit(a64.strImm(.x17, .x0, dst));
+                        try m.emit(a64.ldrImm(.x17, .x0, src + 8));
+                        try m.emit(a64.strImm(.x17, .x0, dst + 8));
+                    }
+                    try m.movImm64(.x5, @as(u32, if (store) src else dst) + lane * width);
+                    const from_base: a64.Reg = if (store) .x0 else .x2;
+                    const from_offset: a64.Reg = if (store) .x5 else .x16;
+                    const to_base: a64.Reg = if (store) .x2 else .x0;
+                    const to_offset: a64.Reg = if (store) .x16 else .x5;
+                    try m.emit(switch (size_log2) {
+                        0 => a64.ldrbRegW(.x17, from_base, from_offset),
+                        1 => a64.ldrhRegW(.x17, from_base, from_offset),
+                        2 => a64.ldrRegW(.x17, from_base, from_offset),
+                        3 => a64.ldrReg(.x17, from_base, from_offset),
+                    });
+                    try m.emit(switch (size_log2) {
+                        0 => a64.strbRegW(.x17, to_base, to_offset),
+                        1 => a64.strhRegW(.x17, to_base, to_offset),
+                        2 => a64.strRegW(.x17, to_base, to_offset),
+                        3 => a64.strReg(.x17, to_base, to_offset),
+                    });
+                    sp -= if (store) @as(usize, 2) else 1;
+                    if (!store) stack[sp - 1] = .v128;
+                } else if (sub == simd_v128_any_true) {
+                    if (sp == 0 or stack[sp - 1] != .v128) return null;
+                    const src = refSlotOff(num_locals, sp - 1);
+                    const result = regForDepth(sp - 1);
+                    try m.emit(a64.ldrImm(.x16, .x0, src));
+                    try m.emit(a64.ldrImm(.x17, .x0, src + 8));
+                    try m.emit(a64.orrReg(.x16, .x16, .x17));
+                    try m.emit(a64.cmpImm(.x16, 0, false));
+                    try m.emit(a64.csetW(result, .ne));
+                    stack[sp - 1] = .{ .reg = result };
                 } else if (sub == simd_i32x4_add) {
                     // §4.4 i32x4.add — pop two v128 operands (cells at depths
                     // sp-1, sp-2), lane-wise add four i32 lanes, push the v128

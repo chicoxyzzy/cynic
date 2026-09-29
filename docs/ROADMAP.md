@@ -2357,7 +2357,11 @@ and the per-builtin checklist; this section tracks status.
   AArch64 installation refusals: 4,231 compiled functions / 126,389 native
   entries, with x86 counts unchanged. Realm ceilings charge the full mapping;
   exhausted or refused allocations still fall back without relocating code.
-  Native table64, remaining SIMD lane operations, and the
+  All eight SIMD lane loads/stores and `v128.any_true` now compile on both
+  targets with lane-width bounds, memory64 overflow checks, and unchanged
+  SSE2 requirements. Each target gains 245 compiled functions and 303 native
+  entries; the 58,779-command corpus stays green. Native table64, remaining
+  SIMD arithmetic/compare/convert/shuffle operations, and the
   native-register/imported-call ABI remain next.
 
   The architecture for all three tiers — the shared codegen
