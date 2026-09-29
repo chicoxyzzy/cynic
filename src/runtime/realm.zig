@@ -110,6 +110,11 @@ fn dischargeWasmCodeLedger(ctx: *anyopaque, bytes: usize) void {
     realm.wasm_code_bytes_live -|= bytes;
 }
 
+const WasmFunctionWrapper = struct {
+    instance: *@import("wasm/interpreter.zig").Instance,
+    function: *@import("function.zig").JSFunction,
+};
+
 const WasmExternTableRoot = struct {
     table: *const @import("wasm/wasm.zig").Table,
     registrations: usize = 1,
@@ -1259,6 +1264,12 @@ pub const Realm = struct {
     /// metadata still dies with `wasm_arena`; mappings require an explicit
     /// `munmap` before that arena invalidates the instance pointers.
     wasm_instances: std.ArrayListUnmanaged(*@import("wasm/interpreter.zig").Instance) = .empty,
+    /// Wasm JS API §4.2 / §5.6: one exported JS function per store address.
+    /// Keys are canonical CompiledFunc / HostImportCtx allocation addresses;
+    /// the store owner holds this cache even when another realm exposes it.
+    /// Strong roots follow the existing realm-lifetime Wasm store. The
+    /// backing instance identifies entries to remove on population rollback.
+    wasm_function_wrappers: std.AutoArrayHashMapUnmanaged(usize, WasmFunctionWrapper) = .empty,
     /// Direct JS Memory/Table constructors are not owned by an Instance, so
     /// track their backings separately. Instance-owned resources are reached
     /// through `wasm_instances`; shared imports appear in neither direct list.
@@ -1589,6 +1600,7 @@ pub const Realm = struct {
         if (self.wasm_quota_allocator) |*quota| {
             const allocator = quota.allocator();
             self.wasm_instances.deinit(allocator);
+            self.wasm_function_wrappers.deinit(allocator);
             self.wasm_direct_memories.deinit(allocator);
             self.wasm_direct_tables.deinit(allocator);
             self.wasm_extern_roots.deinit(allocator);
@@ -2043,6 +2055,17 @@ pub const Realm = struct {
         for (self.wasm_instances.items, 0..) |candidate, index| {
             if (candidate != instance) continue;
             _ = self.wasm_instances.swapRemove(index);
+            // Partial exports cannot escape before a start callback. Drop
+            // their cache roots; imported provider entries retain their own
+            // backing instance and must survive the consumer's rollback.
+            var wrapper_index: usize = 0;
+            while (wrapper_index < self.wasm_function_wrappers.count()) {
+                if (self.wasm_function_wrappers.values()[wrapper_index].instance == instance) {
+                    self.wasm_function_wrappers.swapRemoveAt(wrapper_index);
+                } else {
+                    wrapper_index += 1;
+                }
+            }
             instance.releaseExecutableCode();
             instance.releaseOwnedStoreBackings();
             return;
@@ -2383,6 +2406,11 @@ pub const Realm = struct {
         // stack, plus the live cells of every registered externref table
         // / global. (REF_NULL all-ones is skipped; a non-heap externref
         // marks as a no-op.)
+        // The function cache is a realm-root container, re-scanned on every
+        // minor cycle and at incremental-major termination. No JS object
+        // field/write barrier is involved in publishing a cache entry.
+        for (self.wasm_function_wrappers.values()) |entry|
+            self.heap.markValue(heap_mod.taggedFunction(entry.function));
         for (self.wasm_extern_roots.keys()) |bits| self.heap.markValue(Value{ .bits = bits });
         const ref_null = std.math.maxInt(u128);
         for (self.wasm_extern_tables.items) |root| {

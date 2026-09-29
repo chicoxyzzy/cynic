@@ -385,6 +385,31 @@ Production hardening still freezes the installed intrinsics after setup.
 WPT uses mutable primordials; focused tests also cover hardened exports and
 collection during callbacks.
 
+Exported-function identity follows the Wasm JS API's
+[object caches (§4.2)](https://webassembly.github.io/spec/js-api/#object-caches)
+and [Exported Functions (§5.6)](https://webassembly.github.io/spec/js-api/#exported-function).
+Every function exposure uses `makeExportedFunction`, including exports,
+table/global reads, and function-reference results. A lazy cache in the store
+owner's Realm maps the canonical `CompiledFunc` or `HostImportCtx` pointer to
+one JS function and its backing instance. Aliases and imported Wasm reexports
+therefore retain identity; independent ordinary JS imports receive fresh
+`HostImportCtx` records and remain distinct. This follows
+[JSC's `ensureFunctionWrapper`](https://github.com/WebKit/WebKit/blob/main/Source/JavaScriptCore/wasm/js/JSWebAssemblyInstance.cpp),
+[SpiderMonkey's `getExportedFunction`](https://github.com/mozilla-firefox/firefox/blob/main/js/src/wasm/WasmInstance.cpp),
+and [V8's `GetOrCreateExternal`](https://github.com/v8/v8/blob/main/src/wasm/wasm-objects.cc):
+reuse the canonical function wrapper instead of allocating one per exposure.
+
+The cache is strong for the existing Realm-owned store lifetime: entries are
+quota-accounted, their JS values are rooted on every GC cycle, and teardown
+releases the map with the store. This deliberately retains materialized
+wrappers until store teardown, matching the current arena lifetime of core
+instances rather than adding weak-cache collection. Pre-start instantiation
+rollback removes any partial entries; once start executes, potentially escaped
+references remain valid. First exposure creates the JS function in the current
+Realm, while its native backing record lives in the store owner's arena;
+cross-realm lookups reuse that owner's cache. This separates the function's
+creation Realm from the lifetime of the store it calls.
+
 **Status: shipped** (`builtins/webassembly.zig`, tested in
 `runtime/wasm_js_test.zig`). The full surface is wired:
 `validate` (ungated); the `Module` / `Instance` constructors and the

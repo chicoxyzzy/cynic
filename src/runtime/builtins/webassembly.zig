@@ -1327,20 +1327,63 @@ fn buildExports(realm: *Realm, ip: *wasm.Instance, module: *const wasm.Module) N
     return heap_mod.taggedObject(obj);
 }
 
-/// Create a callable JS function wrapping `(instance, func_index)` —
-/// shared by `Instance.exports` and `Table.prototype.get` of a funcref.
+/// Wasm JS API §4.2 / §5.6: retrieve the Exported Function cache entry for
+/// a store function address, or create it in the current realm. Imports are
+/// already resolved to the provider's CompiledFunc or host context, so aliases,
+/// tables, reference results, and re-exports all use the same identity.
 fn makeExportedFunction(realm: *Realm, instance: *wasm.Instance, func_index: u32) NativeError!Value {
-    const ft = instance.funcType(func_index) orelse
+    const target = instance.funcRefAt(func_index) orelse
+        return intrinsics.throwTypeError(realm, "WebAssembly: unknown exported function");
+    var backing_instance = instance;
+    var backing_index = func_index;
+    const owner: *Realm, const key: usize = switch (target) {
+        .wasm => |function| blk: {
+            backing_instance = function.instance;
+            // As in Spasm's cache lookup, recover the defining index, not
+            // the importing module's index. Check before subtracting/casting.
+            const offset = std.math.sub(usize, @intFromPtr(function.func), @intFromPtr(backing_instance.funcs.ptr)) catch
+                return intrinsics.throwTypeError(realm, "WebAssembly: invalid function address");
+            const local = offset / @sizeOf(wasm.CompiledFunc);
+            if (offset % @sizeOf(wasm.CompiledFunc) != 0 or local >= backing_instance.funcs.len)
+                return intrinsics.throwTypeError(realm, "WebAssembly: invalid function address");
+            const local_index = std.math.cast(u32, local) orelse return error.OutOfMemory;
+            backing_index = std.math.add(u32, backing_instance.func_import_count, local_index) catch
+                return error.OutOfMemory;
+            // populateInstance stamps the owning Realm on every JS-backed
+            // instance before start can expose a ref.func to user code.
+            const context = backing_instance.host_exn_ctx orelse
+                return intrinsics.throwTypeError(realm, "WebAssembly: missing function store owner");
+            break :blk .{ @ptrCast(@alignCast(context)), @intFromPtr(function.func) };
+        },
+        .host => blk: {
+            const context = hostImportContext(target) orelse
+                return intrinsics.throwTypeError(realm, "WebAssembly: unsupported host function");
+            // Each ordinary JS import gets a fresh context; reimporting an
+            // exported Wasm wrapper preserves that context's store address.
+            break :blk .{ context.realm, @intFromPtr(context) };
+        },
+    };
+    if (owner.wasm_function_wrappers.get(key)) |cached|
+        return heap_mod.taggedFunction(cached.function);
+
+    const ft = backing_instance.funcType(backing_index) orelse
         return intrinsics.throwTypeError(realm, "WebAssembly: unknown exported function type");
     // JS API §5.6 names a Wasm function with ToString(index), independent
     // of its export key. makeNativeFunction copies this into a heap string.
     var name_buffer: [10]u8 = undefined; // all decimal u32 indices fit
-    const name = std.fmt.bufPrint(&name_buffer, "{d}", .{func_index}) catch return error.OutOfMemory;
+    const name = std.fmt.bufPrint(&name_buffer, "{d}", .{backing_index}) catch return error.OutOfMemory;
     const fn_obj = intrinsics.makeNativeFunction(realm, exportTrampoline, @intCast(ft.params.len), name) catch
         return error.OutOfMemory;
-    const rec = realm.wasmAllocator().create(ExportRecord) catch return error.OutOfMemory;
-    rec.* = .{ .instance = instance, .func_index = func_index };
+    // The native record follows the store lifetime, not the realm that first
+    // materialized a wrapper through an imported table. Publish only after
+    // the function is complete; the owner traces the cache on every GC.
+    const rec = owner.wasmAllocator().create(ExportRecord) catch return error.OutOfMemory;
+    rec.* = .{ .instance = backing_instance, .func_index = backing_index };
     fn_obj.wasm_export = rec;
+    try owner.wasm_function_wrappers.put(owner.wasmStoreAllocator(), key, .{
+        .instance = backing_instance,
+        .function = fn_obj,
+    });
     return heap_mod.taggedFunction(fn_obj);
 }
 
@@ -2232,6 +2275,69 @@ fn testRealmBackedMemoryGrow(jit_enabled: bool) !void {
     try testing.expect(new_buffer_value.bits != old_buffer_value.bits);
     const new_buffer = heap_mod.valueAsPlainObject(new_buffer_value) orelse return error.TestUnexpectedResult;
     try testing.expectEqual(@as(usize, 2 * wasm.PAGE_SIZE), new_buffer.getArrayBuffer().?.len);
+}
+
+test "WebAssembly function identity: export allocation failure rolls back only new wrappers" {
+    const testing = std.testing;
+    var failing = testing.FailingAllocator.init(testing.allocator, .{});
+    var realm = Realm.initWithBytesAllocator(testing.allocator, failing.allocator());
+    defer {
+        failing.fail_index = std.math.maxInt(usize);
+        realm.deinit();
+    }
+    realm.allow_wasm_compile = true;
+    try realm.installBuiltins();
+    const scope = try realm.heap.openScope();
+    defer scope.close();
+
+    // A provider export remains cached while a no-start consumer fails after
+    // re-exporting it and creating the first of two new function wrappers.
+    const provider_bytes = [_]u8{
+        0, 97, 115, 109, 1, 0, 0, 0, 1,   5, 1, 96, 0, 1, 127,
+        3, 2,  1,   0,   7, 5, 1, 1, 102, 0, 0, 10, 6, 1, 4,
+        0, 65, 42,  11,
+    };
+    const consumer_bytes = [_]u8{
+        0,  97, 115, 109, 1,   0, 0,   0,  1, 5,  1, 96, 0, 1, 127,
+        2,  7,  1,   1,   109, 1, 102, 0,  0, 3,  3, 2,  0, 0, 7,
+        13, 3,  1,   112, 0,   0, 1,   97, 0, 1,  1, 98, 0, 2, 10,
+        11, 2,  4,   0,   65,  1, 11,  4,  0, 65, 2, 11,
+    };
+    const provider_module = try makeModuleObject(&realm, &provider_bytes);
+    try scope.push(provider_module);
+    const provider_object = heap_mod.valueAsPlainObject(provider_module).?;
+    const provider_state: *ModuleState = @ptrCast(@alignCast(provider_object.getWasmModule().?));
+    const provider = try makeInstanceObject(&realm, provider_state, Value.undefined_);
+    try scope.push(provider);
+    const provider_exports = heap_mod.valueAsPlainObject(provider).?.getWasmInstanceExports().?;
+    const function = provider_exports.get("f");
+    const namespace = try realm.heap.allocateObject();
+    try scope.push(heap_mod.taggedObject(namespace));
+    try namespace.set(realm.allocator, "f", function);
+    const imports = try realm.heap.allocateObject();
+    try scope.push(heap_mod.taggedObject(imports));
+    try imports.set(realm.allocator, "m", heap_mod.taggedObject(namespace));
+    const consumer_module = try makeModuleObject(&realm, &consumer_bytes);
+    try scope.push(consumer_module);
+    const consumer_object = heap_mod.valueAsPlainObject(consumer_module).?;
+    const consumer_state: *ModuleState = @ptrCast(@alignCast(consumer_object.getWasmModule().?));
+    const instances_before = realm.wasm_instances.items.len;
+    const wrappers_before = realm.wasm_function_wrappers.count();
+    try testing.expectEqual(@as(usize, 1), wrappers_before);
+
+    // A cached re-export allocates no string bytes; the first new function
+    // name succeeds and the second fails after a cache entry was published.
+    failing.fail_index = failing.alloc_index + 1;
+    try testing.expectError(error.OutOfMemory, makeInstanceObject(&realm, consumer_state, heap_mod.taggedObject(imports)));
+    failing.fail_index = std.math.maxInt(usize);
+    try testing.expectEqual(instances_before, realm.wasm_instances.items.len);
+    try testing.expectEqual(wrappers_before, realm.wasm_function_wrappers.count());
+    realm.collectGarbage();
+    const recovered = try makeInstanceObject(&realm, consumer_state, heap_mod.taggedObject(imports));
+    try scope.push(recovered);
+    const exports = heap_mod.valueAsPlainObject(recovered).?.getWasmInstanceExports().?;
+    try testing.expectEqual(function.bits, exports.get("p").bits);
+    try testing.expectEqual(wrappers_before + 2, realm.wasm_function_wrappers.count());
 }
 
 test "WebAssembly-side memory.grow uses the Realm store allocator in the interpreter" {
