@@ -121,6 +121,8 @@ pub fn install(realm: *Realm) !void {
         });
         const ctor = r.ctor;
         const proto = r.proto;
+        realm.intrinsics.shared_array_buffer_constructor = ctor;
+        realm.intrinsics.shared_array_buffer_prototype = proto;
         // §25.2.1.1 — byteLength / maxByteLength validated before OCFC.
         ctor.defers_proto_lookup = true;
         try installNativeGetter(realm, proto, "byteLength", sharedArrayBufferByteLength);
@@ -500,8 +502,9 @@ fn toIndex(realm: *Realm, v: Value) NativeError!usize {
     // CreateByteDataBlock (data-allocation-after-object-
     // creation.js expects the proto getter's DummyError to fire
     // first, which requires ToIndex to accept the 7 PiB value).
-    if (trunc > 9007199254740991.0)
+    if (trunc > 9007199254740991.0 or trunc > @as(f64, @floatFromInt(std.math.maxInt(usize))))
         return throwRangeError(realm, "value out of range");
+    // safety: finite nonnegative integer, bounded by MAX_SAFE_INTEGER and usize.
     return @intFromFloat(trunc);
 }
 
@@ -582,35 +585,24 @@ fn arrayBufferResizable(realm: *Realm, this_value: Value, args: []const Value) N
     return Value.fromBool(obj.getArrayBufferMaxByteLength() != null);
 }
 
-/// §25.1.5.3 ArrayBuffer.prototype.resize(newLength). ES2024.
-/// Only valid on a resizable (non-detached) ArrayBuffer.
+/// §25.1.6.6 ArrayBuffer.prototype.resize(newLength).
 fn arrayBufferResize(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
-    // Step 2 — RequireInternalSlot(O, [[ArrayBufferMaxByteLength]]).
-    // A fixed buffer doesn't carry the slot at all.
     const obj = heap_mod.valueAsPlainObject(this_value) orelse
         return throwTypeError(realm, "ArrayBuffer.prototype.resize requires a resizable ArrayBuffer receiver");
     if (!obj.brand.has_array_buffer_data or obj.isSharedArrayBuffer() or obj.getArrayBufferMaxByteLength() == null)
         return throwTypeError(realm, "ArrayBuffer.prototype.resize requires a resizable ArrayBuffer receiver");
-    // Step 5 — `Let newByteLength be ? ToIntegerOrInfinity(newLength)`.
-    // The `coerced-new-length-detach.js` fixture asserts that
-    // coercion runs BEFORE the detached check (step 4) — so we
-    // ToNumber here first, then validate.
-    const len_v = try intrinsics.toNumber(realm, argOr(args, 0, Value.undefined_));
-    const raw: f64 = if (len_v.isInt32()) @floatFromInt(len_v.asInt32()) else len_v.asDouble();
-    const trunc: f64 = if (std.math.isNan(raw)) 0 else if (std.math.isInf(raw)) raw else @trunc(raw);
-    // Step 4 — IsDetachedBuffer(O) check happens *after* coercion.
-    if (obj.getArrayBuffer() == null)
+    const scope = try realm.heap.openScope();
+    defer scope.close();
+    try scope.push(this_value);
+    // ToIndex may grow the backing store, detach it, or collect. No borrowed
+    // data pointer may survive this re-entry; validate live state afterward.
+    const new_len = try toIndex(realm, argOr(args, 0, Value.undefined_));
+    const old = obj.getArrayBuffer() orelse
         return throwTypeError(realm, "ArrayBuffer.prototype.resize on detached buffer");
-    // Step 6 — newByteLength < 0 or > max → RangeError.
-    const max = obj.getArrayBufferMaxByteLength().?;
-    const max_f: f64 = @floatFromInt(max);
-    if (trunc < 0 or (std.math.isInf(trunc) and trunc > 0) or trunc > max_f)
+    if (new_len > obj.getArrayBufferMaxByteLength().?)
         return throwRangeError(realm, "ArrayBuffer.prototype.resize newLength out of range");
-    const new_len: usize = @intFromFloat(trunc);
-
-    // Step 7 / 8 — HostResizeArrayBuffer. We're the host: realloc
-    // the backing buffer and zero-fill any growth tail.
-    const old = obj.getArrayBuffer().?;
+    if (try @import("webassembly.zig").hostResizeArrayBuffer(realm, obj, new_len))
+        return Value.undefined_;
     if (new_len == old.len) return Value.undefined_;
     const new_bytes = realm.allocator.realloc(old, new_len) catch return error.OutOfMemory;
     if (new_len > old.len) @memset(new_bytes[old.len..], 0);
@@ -854,12 +846,8 @@ fn sharedArrayBufferConstructor(realm: *Realm, this_value: Value, args: []const 
         if (len > max_len) return throwRangeError(realm, "SharedArrayBuffer length exceeds maxByteLength");
     }
 
-    // Default proto = %SharedArrayBuffer.prototype% (resolved off the
-    // installed global, mirroring the ArrayBuffer constructor).
-    const default_proto: ?*JSObject = blk: {
-        if (heap_mod.valueAsFunction(realm.globals.get("SharedArrayBuffer") orelse Value.undefined_)) |c| break :blk c.prototype;
-        break :blk realm.intrinsics.object_prototype;
-    };
+    // Intrinsic fallback remains stable if the global binding is replaced.
+    const default_proto = realm.intrinsics.shared_array_buffer_prototype;
     const interp = @import("../lantern/interpreter.zig");
     const proto_lookup = interp.getPrototypeFromConstructorValue(realm.allocator, realm, new_target, default_proto, realm) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -904,10 +892,7 @@ fn sharedArrayBufferConstructor(realm: *Realm, this_value: Value, args: []const 
 /// construct a SAB in the receiving realm over the same shared bytes.
 pub fn wrapSharedBlock(realm: *Realm, block: *@import("../shared_data_block.zig").SharedDataBlock) !Value {
     const inst = try realm.heap.allocateObject();
-    const proto: ?*JSObject = blk: {
-        if (heap_mod.valueAsFunction(realm.globals.get("SharedArrayBuffer") orelse Value.undefined_)) |c| break :blk c.prototype;
-        break :blk realm.intrinsics.object_prototype;
-    };
+    const proto = realm.intrinsics.shared_array_buffer_prototype;
     realm.heap.setObjectPrototype(inst, proto);
     block.retain();
     try inst.setSharedBlock(realm.allocator, block);
@@ -960,8 +945,15 @@ fn sharedArrayBufferGrow(realm: *Realm, this_value: Value, args: []const Value) 
     // Step 2-3 — RequireInternalSlot + IsSharedArrayBuffer + growable.
     if (!obj.isSharedArrayBuffer() or obj.getArrayBufferMaxByteLength() == null)
         return throwTypeError(realm, "SharedArrayBuffer.prototype.grow requires a growable SharedArrayBuffer receiver");
+    const scope = try realm.heap.openScope();
+    defer scope.close();
+    try scope.push(this_value);
     // Step 4 — `Let newByteLength be ? ToIndex(newLength)`.
     const new_len = try toIndex(realm, argOr(args, 0, Value.undefined_));
+    if (new_len > obj.getArrayBufferMaxByteLength().?)
+        return throwRangeError(realm, "SharedArrayBuffer.prototype.grow newLength out of range");
+    if (try @import("webassembly.zig").hostResizeArrayBuffer(realm, obj, new_len))
+        return Value.undefined_;
     // §25.2.4.4 — grow-only, bounded by maxByteLength. The store was
     // pre-allocated to the cap, so growth is an in-place length bump:
     // the data block never moves, so every agent's view (reading the
@@ -977,14 +969,31 @@ fn sharedArrayBufferGrow(realm: *Realm, this_value: Value, args: []const Value) 
     return Value.undefined_;
 }
 
+/// Shared wrappers can differ while their [[ArrayBufferData]] identifies
+/// the same store. Wasm fixed/growable conversions preserve that identity,
+/// as do agent-local wrappers around a common SharedDataBlock.
+fn sameArrayBufferData(left: *const JSObject, right: *const JSObject) bool {
+    if (left == right) return true;
+    if (left.getWasmMemoryBuffer()) |memory|
+        return right.getWasmMemoryBuffer() == memory;
+    if (left.getSharedBlock()) |block|
+        return right.getSharedBlock() == block;
+    return false;
+}
+
 /// §25.2.4.3 SharedArrayBuffer.prototype.slice(start, end) — like
 /// `ArrayBuffer.prototype.slice` but SpeciesConstructor defaults to
 /// %SharedArrayBuffer% and the result is itself a shared buffer (no
 /// detach checks — a SharedArrayBuffer never detaches).
 fn sharedArrayBufferSlice(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const src = try requireSharedArrayBuffer(realm, this_value, "SharedArrayBuffer.prototype.slice requires a SharedArrayBuffer receiver");
-    const src_buf = src.getArrayBuffer().?;
-    const total: i64 = @intCast(src_buf.len);
+    const scope = realm.heap.openScope() catch return error.OutOfMemory;
+    defer scope.close();
+    try scope.push(this_value);
+    // Snapshot the initial length, but not a byte pointer: coercion and
+    // species construction can grow Wasm memory and replace its store.
+    const total: i64 = @intCast((src.getArrayBuffer() orelse
+        return throwTypeError(realm, "SharedArrayBuffer.prototype.slice: unavailable backing store")).len);
     var start_d: f64 = 0;
     if (args.len > 0) start_d = try taSetToIntegerOrInfinity(realm, args[0]);
     var end_d: f64 = @floatFromInt(total);
@@ -996,16 +1005,14 @@ fn sharedArrayBufferSlice(realm: *Realm, this_value: Value, args: []const Value)
     const end_i: i64 = @intFromFloat(end_f);
     const new_len: usize = if (end_i > start_i) @intCast(end_i - start_i) else 0;
 
-    const default_ctor = heap_mod.valueAsFunction(realm.globals.get("SharedArrayBuffer") orelse Value.undefined_);
+    const default_ctor = realm.intrinsics.shared_array_buffer_constructor;
     const ctor_fn = try arrayBufferSpeciesConstructor(realm, src, default_ctor);
-
-    const scope = realm.heap.openScope() catch return error.OutOfMemory;
-    defer scope.close();
 
     const ctor_args = [_]Value{numberFromI64(@intCast(new_len))};
     const lantern = @import("../lantern/interpreter.zig");
     const result_v = if (ctor_fn) |cf| blk: {
         const callee_v = heap_mod.taggedFunction(cf);
+        try scope.push(callee_v);
         const outcome = lantern.constructValue(realm.allocator, realm, callee_v, &ctor_args, callee_v) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.NativeThrew,
@@ -1033,11 +1040,15 @@ fn sharedArrayBufferSlice(realm: *Realm, this_value: Value, args: []const Value)
         return throwTypeError(realm, "SharedArrayBuffer.prototype.slice: species ctor returned non-object");
     if (!result_obj.isSharedArrayBuffer())
         return throwTypeError(realm, "SharedArrayBuffer.prototype.slice: species ctor did not return a SharedArrayBuffer");
-    if (result_obj == src)
-        return throwTypeError(realm, "SharedArrayBuffer.prototype.slice: species ctor returned the receiver");
+    // The spec rejects the same Shared Data Block even when a species
+    // constructor returns a different wrapper, and even for an empty slice.
+    if (sameArrayBufferData(result_obj, src))
+        return throwTypeError(realm, "SharedArrayBuffer.prototype.slice: species ctor returned the same shared data block");
     const result_buf = result_obj.getArrayBuffer().?;
     if (result_buf.len < new_len)
         return throwTypeError(realm, "SharedArrayBuffer.prototype.slice: species ctor returned too-short SharedArrayBuffer");
+    const src_buf = src.getArrayBuffer() orelse
+        return throwTypeError(realm, "SharedArrayBuffer.prototype.slice: unavailable backing store");
     if (new_len > 0) {
         @memcpy(result_buf[0..new_len], src_buf[@intCast(start_i)..@intCast(end_i)]);
     }
@@ -1902,7 +1913,7 @@ fn taSetFromTypedArray(
     const src_size = src_tv.kind.elementSize();
     const dst_base = tv.byte_offset + offset * elem_size;
     const src_base = src_tv.byte_offset;
-    const same_buffer = src_tv.viewed == tv.viewed;
+    const same_buffer = sameArrayBufferData(src_tv.viewed, tv.viewed);
 
     if (src_tv.kind == tv.kind and !same_buffer) {
         const byte_count = src_length * elem_size;
@@ -2912,6 +2923,9 @@ fn typedArraySlice(realm: *Realm, this_value: Value, args: []const Value) Native
     // from MakeTypedArrayWithBufferWitnessRecord(O, seq-cst).
     const tv_pre = try taValidatedView(realm, this_value, "slice");
     const self = heap_mod.valueAsPlainObject(this_value).?;
+    const scope = try realm.heap.openScope();
+    defer scope.close();
+    try scope.push(this_value);
     const len: i64 = @intCast(taCurrentLength(tv_pre));
     // §23.2.3.27 steps 5-12 — ToIntegerOrInfinity(start), then
     // ToIntegerOrInfinity(end). Each call can run a user
@@ -2965,7 +2979,7 @@ fn typedArraySlice(realm: *Realm, this_value: Value, args: []const Value) Native
         const dst_avail: usize = if (dst_off >= out_buf.len) 0 else @min(want, out_buf.len - dst_off);
         const avail = @min(src_avail, dst_avail);
         if (avail == 0) return heap_mod.taggedObject(out);
-        const same_buffer = out_tv.viewed == tv_post.viewed;
+        const same_buffer = sameArrayBufferData(out_tv.viewed, tv_post.viewed);
         if (same_buffer) {
             // §23.2.3.27 step 15.g.v — forward byte-by-byte copy
             // even when the destination aliases the source, since

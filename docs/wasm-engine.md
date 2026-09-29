@@ -354,8 +354,9 @@ allocator to the allocator passed to `instantiate` and releases it from
 
 **Linear memory and JS views.** `Memory.prototype.buffer` returns a real,
 non-owning `ArrayBuffer` view over the live bytes. `memory.grow` reallocates
-the backing and **detaches** the prior buffer (observable and spec-required),
-then the next `.buffer` access materializes a fresh view. Ordinary imported
+the backing and **detaches** a prior fixed-length buffer; a resizable buffer
+retains its identity and receives the live backing slice. The next `.buffer`
+access materializes a fresh fixed view when needed. Ordinary imported
 instances share the same `Memory` header, so a grow updates every importer.
 The threads proposal remains out of scope; shared memories retain their
 provisional arena backing until they move to `SharedDataBlock` for non-moving,
@@ -515,13 +516,16 @@ exported function    → wasm_export slot → *ExportRecord (instance, index)
 
 `Memory.buffer` is a non-owning `ArrayBuffer` view over the live store backing
 (an `array_buffer_external` flag keeps `deinit` from freeing them);
-each `Memory` registers and roots its materialized host views outside the JS
-property graph. Root traversal reaches instance-owned memories through the
+each `Memory` registers its materialized host views outside the JS property
+graph and roots the current buffer of each wrapper cache. Superseded shared
+views remain registered while reachable from JavaScript; object teardown
+unregisters them before reclaiming their headers. Root traversal reaches instance-owned memories through the
 instance registry and direct-constructor memories through their dedicated
-registry. A successful non-shared grow detaches every registered view before
-execution can re-enter JS, then re-materializes a fresh one on demand; this
-keeps Wasm-instruction growth from leaving an ArrayBuffer pointed at a freed
-backing. An
+registry. `Memory.commitGrowth` publishes the live backing, then refreshes
+registered views without allocation or JS re-entry. Fixed non-shared buffers
+detach and leave the registry; resizable buffers retain identity and update
+their slices. The JS, interpreter, and Spasm growth paths all use this operation.
+An
 imported memory shares the provider's bytes (`Imports.share_memory`), so
 writes propagate both ways; the spectest harness keeps the snapshot
 (dupe) default. `externref` tables / globals and reference round-trips
@@ -529,6 +533,45 @@ through host calls work, GC-reclaimed precisely per §5. A JS-side `grow`
 updates the shared `Memory` record and is visible to importing instances.
 `v128` remains spec-rejected at the JS boundary (a TypeError,
 §ToJSValue / §ToWebAssemblyValue).
+
+### Memory buffer conversion and host resizing
+
+`Memory.toFixedLengthBuffer()` and `toResizableBuffer()` follow
+[Wasm JS API §5.3](https://webassembly.github.io/spec/js-api/#memories).
+Repeated same-kind requests return the cached buffer. A kind change creates
+and registers the replacement before detaching the old non-shared buffer, so
+allocation failure leaves the old view usable. Resizable conversion requires
+an explicit maximum; `ArrayBuffer.resize` grows the owning Memory in whole
+64 KiB pages and cannot shrink. Existing typed-array and DataView length
+tracking reads the refreshed buffer slice.
+
+A typed `wasm_memory_buffer` slot connects borrowed buffers to their native
+Memory, avoiding a pointer into the calling Realm. The detach callback clears
+both the slice and this link before the owning store is released. Transfer
+operations enforce the Wasm detach restriction after length coercion and never
+free externally owned bytes. Ordinary transfer also reloads its source after
+coercion and completes fallible allocations before detaching it.
+
+Shared wrappers remain non-detachable and frozen. Old fixed SAB views keep
+their original extent; growable views continue tracking the Memory even after
+it switches to a fixed wrapper. Within the existing single-agent shared-memory
+implementation, refresh callbacks repoint both kinds after backing relocation.
+This does not add Wasm threads or cross-agent shared backing: the provisional
+arena storage still needs replacement with `SharedDataBlock` for that work.
+Superseded shared wrappers are weak registrations, so repeated conversions do
+not retain unreachable wrappers forever. Shared-buffer slice rejects species
+results that alias its backing; typed-array copies detect shared store identity
+across distinct wrappers and preserve overlapping input bytes.
+
+Prior art: [V8's ArrayBuffer transfer / ResizeHelper](https://github.com/v8/v8/blob/main/src/builtins/builtins-arraybuffer.cc)
+checks detach restrictions before allocation and routes Wasm resize through
+its owning Memory; [V8's WasmMemoryObject](https://github.com/v8/v8/blob/main/src/wasm/wasm-objects.cc)
+and [JSC's JSWebAssemblyMemory](https://github.com/WebKit/WebKit/blob/main/Source/JavaScriptCore/wasm/js/JSWebAssemblyMemory.cpp)
+preserve growable wrapper identity and leave old shared wrappers attached.
+Cynic uses its existing provider-owned view registry for the same lifetime
+contract. Tests cover both hardened postures, GC pressure, JIT growth, child
+Realm teardown, and allocation failure. The adjacent test262 buckets are
+ArrayBuffer, SharedArrayBuffer, TypedArray, and DataView.
 
 ## 9. SES / hardening
 

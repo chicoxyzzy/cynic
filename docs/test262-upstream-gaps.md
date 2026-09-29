@@ -1805,3 +1805,33 @@ the corpus under the relevant section's directory before adding.
   allocation large enough to cross a collector threshold); the
   portable fixtures still protect the observable coercion order and
   result types.
+
+
+### ArrayBuffer transfer retained stale storage across newLength coercion
+
+- **Fixed in:** `143adf39` (2026-09-29)
+- **Spec:** §25.1.3.3 ArrayBufferCopyAndDetach; §25.1.3.5 DetachArrayBuffer.
+- **Reproducer:**
+
+  ```js
+  const buffer = new ArrayBuffer(0, { maxByteLength: 16 });
+  const output = buffer.transfer({ valueOf() {
+    buffer.resize(8);
+    new Uint8Array(buffer)[0] = 73;
+    return 8;
+  }});
+  assert.sameValue(new Uint8Array(output)[0], 73);
+  assert.sameValue(buffer.detached, true);
+  ```
+
+- **Before fix:** transfer saved the original byte slice before ToIndex,
+  copied the stale extent after re-entry, and leaked the replacement backing
+  in the zero-length reproducer. Reentrant detachment was also not rechecked.
+- **After fix:** root the receiver, coerce the length, recheck detachment,
+  and reload live storage. Allocate the result before detaching the source.
+- **Suggested fixture shape:** positive runtime tests under both
+  `built-ins/ArrayBuffer/prototype/{transfer,transferToFixedLength}`, covering
+  growth, shrinkage, and nested transfer during `newLength.valueOf`. Existing
+  argument-conversion fixtures check coercion without resizing or detaching
+  the source from that callback. A separate Wasm regression rejects transfer
+  of borrowed linear memory; that host integration belongs in WPT.

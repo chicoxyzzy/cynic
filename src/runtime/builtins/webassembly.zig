@@ -94,8 +94,8 @@ const TableState = struct {
 };
 
 /// A `WebAssembly.Memory`'s backing state: the shared engine memory and
-/// the cached `buffer` ArrayBuffer (a non-owning view over the memory's
-/// bytes, recreated after a JS-initiated grow). Arena-owned.
+/// the cached `buffer` wrapper. Fixed non-shared views detach on growth;
+/// resizable and shared views refresh through the store registry. Arena-owned.
 const MemoryState = struct {
     mem: *wasm.Memory,
     buffer: ?*JSObject,
@@ -106,7 +106,30 @@ const MemoryState = struct {
 
 fn detachMemoryHostView(object: *anyopaque) void {
     const buffer: *JSObject = @ptrCast(@alignCast(object));
-    if (buffer.arrayBufferSlot()) |slot| slot.* = null;
+    if (buffer.extension) |ext| {
+        ext.array_buffer = null;
+        ext.wasm_memory_buffer = null;
+    }
+}
+
+/// Refresh borrowed views after the store commits a successful growth.
+/// Returning false releases the registry root of a detached fixed buffer.
+fn refreshMemoryHostView(object: *anyopaque, bytes: []u8) bool {
+    const buffer: *JSObject = @ptrCast(@alignCast(object));
+    const ext = buffer.extension orelse return false;
+    const old = ext.array_buffer orelse return false;
+    if (ext.array_buffer_max_byte_length != null) {
+        ext.array_buffer = bytes;
+        return true;
+    }
+    if (buffer.isSharedArrayBuffer()) {
+        // Old fixed SABs remain aliases of their original extent even when
+        // the provisional shared backing reallocates. They never detach.
+        ext.array_buffer = bytes[0..old.len];
+        return true;
+    }
+    detachMemoryHostView(object);
+    return false;
 }
 
 /// WebIDL §3.7.7 operations use enumerable data properties, including
@@ -235,6 +258,8 @@ pub fn install(realm: *Realm) !void {
     realm.wasm_memory_prototype = memory_ctor.proto;
     try intrinsics.installToStringTag(realm, memory_ctor.proto, "WebAssembly.Memory");
     try installWebIdlOperation(realm, memory_ctor.proto, "grow", memoryGrow, 1);
+    try installWebIdlOperation(realm, memory_ctor.proto, "toFixedLengthBuffer", memoryToFixedLengthBuffer, 0);
+    try installWebIdlOperation(realm, memory_ctor.proto, "toResizableBuffer", memoryToResizableBuffer, 0);
     {
         const getter = try intrinsics.makeNativeFunction(realm, memoryBufferGet, 0, "get buffer");
         const entry = try memory_ctor.proto.getOrPutAccessor(realm.allocator, "buffer");
@@ -987,73 +1012,155 @@ fn memoryStateOf(realm: *Realm, this_value: Value) NativeError!*MemoryState {
     return @ptrCast(@alignCast(raw));
 }
 
-/// `Memory.prototype.buffer` — a cached non-owning ArrayBuffer aliasing
-/// the live linear bytes.
+/// A cache entry is usable only while the provider's registry roots it.
+/// A detached buffer may already have been collected or its address reused.
+fn cachedMemoryBuffer(st: *MemoryState) ?*JSObject {
+    const buffer = st.buffer orelse return null;
+    for (st.mem.host_views.items) |view| {
+        if (view.object != @as(*anyopaque, @ptrCast(buffer))) continue;
+        const bytes = buffer.getArrayBuffer() orelse return null;
+        // Shared fixed buffers retain their old size, but `.buffer` must
+        // vend a new fixed view of the current extent after growth.
+        if (st.shared and buffer.getArrayBufferMaxByteLength() == null and bytes.len != st.mem.data.len)
+            return null;
+        return buffer;
+    }
+    return null;
+}
+
+/// Wasm JS API §5.3 Create a (fixed length / resizable) memory buffer.
+/// Register last: allocation failure must not invalidate the current buffer.
+fn createMemoryBuffer(realm: *Realm, st: *MemoryState, max_bytes: ?usize) NativeError!*JSObject {
+    const buffer = realm.heap.allocateObject() catch return error.OutOfMemory;
+    const proto = if (st.shared)
+        realm.intrinsics.shared_array_buffer_prototype
+    else
+        realm.intrinsics.array_buffer_prototype;
+    realm.heap.setObjectPrototype(buffer, proto);
+    try buffer.setExternalArrayBuffer(realm.allocator, st.mem.data);
+    try buffer.setArrayBufferMaxByteLength(realm.allocator, max_bytes);
+    buffer.brand.has_array_buffer_data = true;
+    if (st.shared) {
+        buffer.brand.array_buffer_shared = true;
+        // A fresh SAB has no own properties: preventing extensions freezes
+        // it without affecting the mutable backing store (threads JS API).
+        buffer.brand.extensible = false;
+    }
+    try st.mem.registerHostView(realm.wasmStoreAllocator(), .{
+        .object = buffer,
+        .detach_fn = detachMemoryHostView,
+        .refresh_fn = refreshMemoryHostView,
+    });
+    // Publish the owner only once registration succeeds. Failed objects
+    // are not visited by store teardown and must never retain its address.
+    buffer.extension.?.wasm_memory_buffer = st.mem;
+    return buffer;
+}
+
+/// `Memory.prototype.buffer` — a cached non-owning view of linear memory.
 fn memoryBufferGet(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = args;
     const st = try memoryStateOf(realm, this_value);
-    if (st.buffer) |buffer| {
-        // Both JS and Wasm growth clear the rooted host-view registry. The
-        // old buffer may already have been collected (or its address reused)
-        // before this getter runs, so check membership without dereferencing
-        // the cached pointer first. Registered views are kept alive by GC.
-        for (st.mem.host_views.items) |view| {
-            if (view.object != @as(*anyopaque, @ptrCast(buffer))) continue;
-            if (buffer.getArrayBuffer() != null) return heap_mod.taggedObject(buffer);
-            break;
+    if (cachedMemoryBuffer(st)) |buffer| return heap_mod.taggedObject(buffer);
+    const buffer = try createMemoryBuffer(realm, st, null);
+    const previous = st.buffer;
+    st.buffer = buffer;
+    if (st.shared) {
+        // A shared fixed view can be stale only in extent, while still live
+        // as a JS alias. Registry lookup avoids dereferencing the old cache.
+        if (previous) |old| {
+            if (old != buffer) st.mem.weakenHostView(old);
         }
-        st.buffer = null;
     }
-    const buf = realm.heap.allocateObject() catch return error.OutOfMemory;
-    // A shared memory's buffer is a SharedArrayBuffer (JS-API §Memory):
-    // the SAB prototype plus the `array_buffer_shared` flag, over the
-    // same non-owning view of the live linear bytes.
-    const ab_proto: ?*JSObject = if (st.shared) blk: {
-        if (heap_mod.valueAsFunction(realm.globals.get("SharedArrayBuffer") orelse Value.undefined_)) |c| break :blk c.prototype;
-        break :blk realm.intrinsics.array_buffer_prototype;
-    } else realm.intrinsics.array_buffer_prototype;
-    realm.heap.setObjectPrototype(buf, ab_proto);
-    buf.setExternalArrayBuffer(realm.allocator, st.mem.data) catch return error.OutOfMemory;
-    buf.brand.has_array_buffer_data = true;
-    if (st.shared) buf.brand.array_buffer_shared = true;
-    st.mem.registerHostView(realm.wasmStoreAllocator(), .{
-        .object = buf,
-        .detach_fn = detachMemoryHostView,
-    }) catch return error.OutOfMemory;
-    st.buffer = buf;
-    return heap_mod.taggedObject(buf);
+    return heap_mod.taggedObject(buffer);
 }
 
-/// `Memory.prototype.grow(delta)` — grow by `delta` pages, detach the
-/// current buffer, return the previous page count.
+fn memoryToFixedLengthBuffer(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    return memoryBufferConvert(realm, this_value, false);
+}
+
+fn memoryToResizableBuffer(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
+    _ = args;
+    return memoryBufferConvert(realm, this_value, true);
+}
+
+/// Wasm JS API §5.3: switching kind detaches only non-shared buffers.
+fn memoryBufferConvert(realm: *Realm, this_value: Value, resizable: bool) NativeError!Value {
+    const st = try memoryStateOf(realm, this_value);
+    const max_bytes: ?usize = if (resizable) blk: {
+        const maximum = st.mem.max_pages orelse
+            return intrinsics.throwTypeError(realm, "WebAssembly.Memory.toResizableBuffer requires a maximum");
+        const pages = std.math.cast(usize, maximum) orelse
+            return intrinsics.throwRangeError(realm, "WebAssembly.Memory maximum exceeds the host size limit");
+        break :blk std.math.mul(usize, pages, wasm.PAGE_SIZE) catch
+            return intrinsics.throwRangeError(realm, "WebAssembly.Memory maximum exceeds the host size limit");
+    } else null;
+    const old = cachedMemoryBuffer(st);
+    if (old) |buffer| {
+        if ((buffer.getArrayBufferMaxByteLength() != null) == resizable)
+            return heap_mod.taggedObject(buffer);
+    }
+    // Publish a complete replacement before releasing the old registry root.
+    const buffer = try createMemoryBuffer(realm, st, max_bytes);
+    const previous_cache = st.buffer;
+    st.buffer = buffer;
+    if (st.shared) {
+        // Retain distinct caches' current roots: only this cache's previous
+        // view becomes weak, and only after its replacement is published.
+        if (previous_cache) |previous| {
+            if (previous != buffer) st.mem.weakenHostView(previous);
+        }
+    } else if (old) |previous| {
+        st.mem.unregisterHostView(previous);
+        detachMemoryHostView(previous);
+    }
+    return heap_mod.taggedObject(buffer);
+}
+
+/// GrowMemoryBuffer (§5.3), shared by Memory.grow and host buffer resizing.
+/// The provider's allocator owns the backing and enforces its quota.
+fn growMemoryBuffer(realm: *Realm, mem: *wasm.Memory, delta: u64) NativeError!u64 {
+    const old_pages: u64 = @intCast(mem.data.len / wasm.PAGE_SIZE);
+    const new_pages = std.math.add(u64, old_pages, delta) catch
+        return intrinsics.throwRangeError(realm, "WebAssembly.Memory.grow size is too large");
+    if (!mem.is_64 and new_pages > 65536)
+        return intrinsics.throwRangeError(realm, "WebAssembly.Memory.grow exceeds the memory32 size limit");
+    if (mem.max_pages) |maximum| {
+        if (new_pages > maximum) return intrinsics.throwRangeError(realm, "WebAssembly.Memory.grow exceeds the maximum");
+    }
+    const page_count = std.math.cast(usize, new_pages) orelse
+        return intrinsics.throwRangeError(realm, "WebAssembly.Memory.grow size is too large");
+    const byte_len = std.math.mul(usize, page_count, wasm.PAGE_SIZE) catch
+        return intrinsics.throwRangeError(realm, "WebAssembly.Memory.grow size is too large");
+    const old_len = mem.data.len;
+    if (byte_len - old_len > realm.heap.max_bytes -| realm.heap.bytes_live)
+        return intrinsics.throwRangeError(realm, "WebAssembly.Memory.grow exceeds the Realm memory limit");
+    const grown = mem.storeAllocator(realm.wasmStoreAllocator()).realloc(mem.data, byte_len) catch
+        return intrinsics.throwRangeError(realm, "WebAssembly.Memory.grow allocation failed");
+    @memset(grown[old_len..], 0);
+    mem.commitGrowth(grown);
+    return old_pages;
+}
+
+/// HostResizeArrayBuffer (§25.1.3.8 / Wasm JS API §5.3). Called only after
+/// coercion and detached/maximum checks; no JS re-entry occurs here.
+pub fn hostResizeArrayBuffer(realm: *Realm, buffer: *JSObject, new_length: usize) NativeError!bool {
+    const mem = buffer.getWasmMemoryBuffer() orelse return false;
+    const current = mem.data.len;
+    if (new_length < current or (new_length - current) % wasm.PAGE_SIZE != 0)
+        return intrinsics.throwRangeError(realm, "WebAssembly memory buffers grow only in whole pages");
+    _ = try growMemoryBuffer(realm, mem, @intCast((new_length - current) / wasm.PAGE_SIZE));
+    return true;
+}
+
 fn memoryGrow(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const st = try memoryStateOf(realm, this_value);
     const scope = try realm.heap.openScope();
     defer scope.close();
     try scope.push(this_value);
-    const delta: usize = @intCast(try addressValueToU64(realm, if (args.len > 0) args[0] else Value.undefined_));
-    const old_pages = st.mem.data.len / wasm.PAGE_SIZE;
-    const new_pages = std.math.add(usize, old_pages, delta) catch
-        return intrinsics.throwRangeError(realm, "WebAssembly.Memory.grow size is too large");
-    if (!st.mem.is_64 and new_pages > 65536)
-        return intrinsics.throwRangeError(realm, "WebAssembly.Memory.grow exceeds the memory32 size limit");
-    if (st.mem.max_pages) |m| {
-        if (new_pages > m) return intrinsics.throwRangeError(realm, "WebAssembly.Memory.grow exceeds the maximum");
-    }
-    const byte_len = std.math.mul(usize, new_pages, wasm.PAGE_SIZE) catch
-        return intrinsics.throwRangeError(realm, "WebAssembly.Memory.grow size is too large");
-    const growth_bytes = byte_len - st.mem.data.len;
-    if (growth_bytes > realm.heap.max_bytes -| realm.heap.bytes_live)
-        return intrinsics.throwRangeError(realm, "WebAssembly.Memory.grow exceeds the Realm memory limit");
-    const old_len = st.mem.data.len;
-    const new_bytes = st.mem.storeAllocator(realm.wasmStoreAllocator()).realloc(st.mem.data, byte_len) catch
-        return intrinsics.throwRangeError(realm, "WebAssembly.Memory.grow allocation failed");
-    @memset(new_bytes[old_len..], 0);
-    // DetachArrayBuffer (§25.1.3.4) on every materialized non-shared view,
-    // including wrappers created for imports/exports of this Memory record.
-    st.mem.detachHostViewsAfterGrow();
-    st.mem.data = new_bytes;
-    return u64ToAddressValue(old_pages);
+    const delta = try addressValueToU64(realm, if (args.len > 0) args[0] else Value.undefined_);
+    return u64ToAddressValue(try growMemoryBuffer(realm, st.mem, delta));
 }
 
 /// Wrap a shared engine memory as a `WebAssembly.Memory` (for exports).
@@ -2301,6 +2408,201 @@ fn testRealmBackedMemoryGrow(jit_enabled: bool) !void {
     try testing.expectEqual(@as(usize, 2 * wasm.PAGE_SIZE), new_buffer.getArrayBuffer().?.len);
 }
 
+fn testRealmBackedResizableMemoryGrow(jit_enabled: bool) !void {
+    const testing = std.testing;
+    // (module (memory (export "m") 1 3)
+    //         (func (export "gr") (param i32) (result i32)
+    //           local.get 0 memory.grow))
+    const mod_bytes = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+        0x01, 0x06, 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f,
+        0x03, 0x02, 0x01, 0x00, 0x05, 0x04, 0x01, 0x01,
+        0x01, 0x03, 0x07, 0x0a, 0x02, 0x01, 'm',  0x02,
+        0x00, 0x02, 'g',  'r',  0x00, 0x00, 0x0a, 0x08,
+        0x01, 0x06, 0x00, 0x20, 0x00, 0x40, 0x00, 0x0b,
+    };
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.allow_wasm_compile = true;
+    realm.jit_enabled = jit_enabled;
+    try realm.installBuiltins();
+    const scope = try realm.heap.openScope();
+    defer scope.close();
+    const module_value = try makeModuleObject(&realm, &mod_bytes);
+    try scope.push(module_value);
+    const module_state: *ModuleState = @ptrCast(@alignCast(heap_mod.valueAsPlainObject(module_value).?.getWasmModule().?));
+    const instance_value = try makeInstanceObject(&realm, module_state, Value.undefined_);
+    try scope.push(instance_value);
+    const exports = heap_mod.valueAsPlainObject(instance_value).?.getWasmInstanceExports().?;
+    const memory_value = exports.get("m");
+    const grow_function = heap_mod.valueAsFunction(exports.get("gr")).?;
+    const record: *ExportRecord = @ptrCast(@alignCast(grow_function.wasm_export.?));
+    const buffer_value = try memoryToResizableBuffer(&realm, memory_value, &.{});
+    try scope.push(buffer_value);
+    const buffer = heap_mod.valueAsPlainObject(buffer_value).?;
+    buffer.getArrayBuffer().?[0] = 73;
+    buffer.getArrayBuffer().?[wasm.PAGE_SIZE - 1] = 91;
+
+    // Exercise zero growth, successful relocation, and failed growth with
+    // the same JS buffer; require actual native entries in the JIT posture.
+    const deltas = [_]i32{ 0, 1, 2 };
+    const old_pages = [_]i32{ 1, 1, -1 };
+    const byte_lengths = [_]usize{ wasm.PAGE_SIZE, 2 * wasm.PAGE_SIZE, 2 * wasm.PAGE_SIZE };
+    for (deltas, old_pages, byte_lengths) |delta, expected_old_pages, byte_length| {
+        const runs_before = record.instance.spasm_runs;
+        const outcome = try call.callJSFunction(realm.allocator, &realm, grow_function, Value.undefined_, &.{Value.fromInt32(delta)});
+        switch (outcome) {
+            .value => |value| try testing.expectEqual(expected_old_pages, value.asInt32()),
+            else => return error.TestUnexpectedResult,
+        }
+        if (jit_enabled and comptime @import("../wasm/spasm.zig").full_coverage_supported)
+            try testing.expect(record.instance.spasm_runs > runs_before);
+        if (!jit_enabled) try testing.expectEqual(@as(u32, 0), record.instance.spasm_runs);
+        realm.collectGarbage();
+        try testing.expectEqual(buffer_value.bits, (try memoryBufferGet(&realm, memory_value, &.{})).bits);
+        const bytes = buffer.getArrayBuffer().?;
+        try testing.expectEqual(byte_length, bytes.len);
+        try testing.expectEqual(@as(?usize, 3 * wasm.PAGE_SIZE), buffer.getArrayBufferMaxByteLength());
+        try testing.expectEqual(@as(u8, 73), bytes[0]);
+        try testing.expectEqual(@as(u8, 91), bytes[wasm.PAGE_SIZE - 1]);
+        if (bytes.len > wasm.PAGE_SIZE)
+            try testing.expect(std.mem.allEqual(u8, bytes[wasm.PAGE_SIZE..], 0));
+    }
+}
+
+test "WebAssembly resizable memory buffer survives interpreter zero positive and failed growth" {
+    try testRealmBackedResizableMemoryGrow(false);
+}
+
+test "WebAssembly resizable memory buffer survives Spasm zero positive and failed growth" {
+    try testRealmBackedResizableMemoryGrow(true);
+}
+
+test "WebAssembly resizable memory buffer outlives an importing child Realm" {
+    const testing = std.testing;
+    const lantern = @import("../lantern/interpreter.zig");
+    // (module (import "m" "mem" (memory 1)) (export "mem" (memory 0)))
+    const mod_bytes = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+        0x02, 0x0a, 0x01, 0x01, 'm',  0x03, 'm',  'e',
+        'm',  0x02, 0x00, 0x01, 0x07, 0x07, 0x01, 0x03,
+        'm',  'e',  'm',  0x02, 0x00,
+    };
+    var parent = Realm.init(testing.allocator);
+    defer parent.deinit();
+    try parent.installBuiltins();
+    const child = try parent.allocator.create(Realm);
+    child.* = Realm.initChild(&parent);
+    var child_live = true;
+    defer if (child_live) {
+        child.deinit();
+        parent.allocator.destroy(child);
+    };
+    child.allow_wasm_compile = true;
+    try child.installBuiltins();
+    const scope = try parent.heap.openScope();
+    defer scope.close();
+    const evaluated = try lantern.evaluateScript(testing.allocator, &parent, "new WebAssembly.Memory({initial:1,maximum:3})");
+    const memory_value = switch (evaluated) {
+        .value => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try scope.push(memory_value);
+    const namespace = try parent.heap.allocateObject();
+    try scope.push(heap_mod.taggedObject(namespace));
+    try namespace.set(parent.allocator, "mem", memory_value);
+    const imports = try parent.heap.allocateObject();
+    try scope.push(heap_mod.taggedObject(imports));
+    try imports.set(parent.allocator, "m", heap_mod.taggedObject(namespace));
+    const module_value = try makeModuleObject(child, &mod_bytes);
+    try scope.push(module_value);
+    const module_state: *ModuleState = @ptrCast(@alignCast(heap_mod.valueAsPlainObject(module_value).?.getWasmModule().?));
+    const instance_value = try makeInstanceObject(child, module_state, heap_mod.taggedObject(imports));
+    try scope.push(instance_value);
+    const exports = heap_mod.valueAsPlainObject(instance_value).?.getWasmInstanceExports().?;
+    const imported_memory = exports.get("mem");
+    try testing.expectEqual(memory_value.bits, imported_memory.bits);
+    const buffer_value = try memoryToResizableBuffer(child, imported_memory, &.{});
+    try scope.push(buffer_value);
+    const buffer = heap_mod.valueAsPlainObject(buffer_value).?;
+    buffer.getArrayBuffer().?[0] = 73;
+
+    // Neither the retained host callback nor HostResizeArrayBuffer may keep
+    // a context allocated in the shorter-lived importing Realm.
+    child.deinit();
+    parent.allocator.destroy(child);
+    child_live = false;
+    parent.collectGarbage();
+    _ = try memoryGrow(&parent, memory_value, &.{Value.fromInt32(1)});
+    try testing.expectEqual(buffer_value.bits, (try memoryBufferGet(&parent, memory_value, &.{})).bits);
+    try testing.expectEqual(@as(usize, 2 * wasm.PAGE_SIZE), buffer.getArrayBuffer().?.len);
+    try testing.expect(try hostResizeArrayBuffer(&parent, buffer, 3 * wasm.PAGE_SIZE));
+    try testing.expectEqual(@as(usize, 3 * wasm.PAGE_SIZE), buffer.getArrayBuffer().?.len);
+    try testing.expectEqual(@as(u8, 73), buffer.getArrayBuffer().?[0]);
+    try testing.expect(std.mem.allEqual(u8, buffer.getArrayBuffer().?[wasm.PAGE_SIZE..], 0));
+}
+
+test "WebAssembly memory buffer conversion allocation failures preserve the previous buffer" {
+    const testing = std.testing;
+    const lantern = @import("../lantern/interpreter.zig");
+    for ([_]bool{ false, true }) |source_resizable| {
+        var saw_success = false;
+        var failures: usize = 0;
+        for (0..16) |fail_offset| {
+            var failing = testing.FailingAllocator.init(testing.allocator, .{});
+            var realm = Realm.init(failing.allocator());
+            defer {
+                failing.fail_index = std.math.maxInt(usize);
+                failing.resize_fail_index = std.math.maxInt(usize);
+                realm.deinit();
+            }
+            try realm.installBuiltins();
+            const evaluated = try lantern.evaluateScript(realm.allocator, &realm, "new WebAssembly.Memory({initial:1,maximum:2})");
+            const memory_value = switch (evaluated) {
+                .value => |value| value,
+                else => return error.TestUnexpectedResult,
+            };
+            const st = try memoryStateOf(&realm, memory_value);
+            const previous_value = try memoryBufferConvert(&realm, memory_value, source_resizable);
+            const previous = heap_mod.valueAsPlainObject(previous_value).?;
+            previous.getArrayBuffer().?[0] = 73;
+            const previous_bytes = previous.getArrayBuffer().?;
+            const previous_maximum = previous.getArrayBufferMaxByteLength();
+
+            // Force publication to grow the registry, so the failure sweep
+            // covers its allocation after constructing the replacement too.
+            const entries = try st.mem.host_views.toOwnedSlice(st.mem.host_view_allocator.?);
+            st.mem.host_views = .{ .items = entries, .capacity = entries.len };
+            failing.resize_fail_index = failing.resize_index;
+            failing.fail_index = failing.alloc_index + fail_offset;
+            const result = memoryBufferConvert(&realm, memory_value, !source_resizable);
+            failing.fail_index = std.math.maxInt(usize);
+            failing.resize_fail_index = std.math.maxInt(usize);
+            if (result) |replacement| {
+                try testing.expect(previous.getArrayBuffer() == null);
+                try testing.expect(previous.getWasmMemoryBuffer() == null);
+                try testing.expectEqual(replacement.bits, (try memoryBufferGet(&realm, memory_value, &.{})).bits);
+                try testing.expectEqual(@as(usize, 1), st.mem.host_views.items.len);
+                try testing.expectEqual(@as(u8, 73), heap_mod.valueAsPlainObject(replacement).?.getArrayBuffer().?[0]);
+                saw_success = true;
+                break;
+            } else |err| {
+                try testing.expectEqual(error.OutOfMemory, err);
+                try testing.expectEqual(previous_value.bits, (try memoryBufferGet(&realm, memory_value, &.{})).bits);
+                try testing.expect(previous.getArrayBuffer().?.ptr == previous_bytes.ptr);
+                try testing.expectEqual(previous_bytes.len, previous.getArrayBuffer().?.len);
+                try testing.expectEqual(previous_maximum, previous.getArrayBufferMaxByteLength());
+                try testing.expectEqual(@as(u8, 73), previous.getArrayBuffer().?[0]);
+                try testing.expectEqual(@as(usize, 1), st.mem.host_views.items.len);
+                try testing.expect(previous.getWasmMemoryBuffer() == st.mem);
+                failures += 1;
+            }
+        }
+        try testing.expect(saw_success);
+        try testing.expect(failures >= 2);
+    }
+}
+
 test "WebAssembly function identity: export allocation failure rolls back only new wrappers" {
     const testing = std.testing;
     var failing = testing.FailingAllocator.init(testing.allocator, .{});
@@ -2803,4 +3105,104 @@ test "WebAssembly.Module.customSections charges ArrayBuffer payloads to the Real
         error.OutOfMemory,
         wasmModuleCustomSections(&realm, Value.undefined_, &.{ module, name }),
     );
+}
+
+test "WebAssembly shared memory obsolete buffers collect after conversion and growth" {
+    const testing = std.testing;
+    const lantern = @import("../lantern/interpreter.zig");
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try realm.installBuiltins();
+    const created = try lantern.evaluateScript(testing.allocator, &realm,
+        \\var collectedSharedMemory = new WebAssembly.Memory({initial:1, maximum:4, shared:true});
+        \\var retainedSharedTypedArray = new Uint8Array(collectedSharedMemory.buffer);
+        \\retainedSharedTypedArray[0] = 73;
+        \\var retainedSharedGrowable = collectedSharedMemory.toResizableBuffer();
+        \\collectedSharedMemory;
+    );
+    const memory_value = switch (created) {
+        .value => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    const st = try memoryStateOf(&realm, memory_value);
+    for (0..3) |cycle| {
+        const converted = try lantern.evaluateScript(testing.allocator, &realm,
+            \\for (let conversionIndex = 0; conversionIndex < 24; conversionIndex++) {
+            \\  collectedSharedMemory.toFixedLengthBuffer();
+            \\  collectedSharedMemory.toResizableBuffer();
+            \\}
+            \\collectedSharedMemory.toFixedLengthBuffer();
+        );
+        switch (converted) {
+            .value => {},
+            else => return error.TestUnexpectedResult,
+        }
+        if (cycle == 0) realm.collectGarbage() else realm.collectGarbageYoung();
+        // Minor GC can retain the previous mature cache entry until the
+        // next major cycle. Every obsolete young conversion is collectable;
+        // the other three views are current, explicitly retained growable,
+        // and the old fixed buffer retained exclusively by its TypedArray.
+        try testing.expectEqual(@as(usize, if (cycle == 0) 3 else 4), st.mem.host_views.items.len);
+        _ = try memoryGrow(&realm, memory_value, &.{Value.fromInt32(1)});
+        _ = try memoryBufferGet(&realm, memory_value, &.{});
+        realm.collectGarbage();
+        try testing.expectEqual(@as(usize, 3), st.mem.host_views.items.len);
+        const observed = try lantern.evaluateScript(testing.allocator, &realm,
+            \\retainedSharedTypedArray[0] === 73 &&
+            \\retainedSharedTypedArray.length === 65536 &&
+            \\retainedSharedGrowable.byteLength === collectedSharedMemory.buffer.byteLength &&
+            \\new Uint8Array(retainedSharedGrowable)[0] === 73;
+        );
+        switch (observed) {
+            .value => |value| try testing.expect(value.isBool() and value.asBool()),
+            else => return error.TestUnexpectedResult,
+        }
+    }
+}
+
+test "WebAssembly shared memory weak views survive an importing Realm only while retained" {
+    const testing = std.testing;
+    const lantern = @import("../lantern/interpreter.zig");
+    var parent = Realm.init(testing.allocator);
+    defer parent.deinit();
+    try parent.installBuiltins();
+    const child = try parent.allocator.create(Realm);
+    child.* = Realm.initChild(&parent);
+    var child_live = true;
+    defer if (child_live) {
+        child.deinit();
+        parent.allocator.destroy(child);
+    };
+    try child.installBuiltins();
+    const created = try lantern.evaluateScript(testing.allocator, &parent,
+        \\var sharedViewProvider = new WebAssembly.Memory({initial:0, maximum:1, shared:true});
+        \\sharedViewProvider;
+    );
+    const memory_value = switch (created) {
+        .value => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    const st = try memoryStateOf(&parent, memory_value);
+    {
+        const scope = try parent.heap.openScope();
+        defer scope.close();
+        const retained_value = try memoryToResizableBuffer(child, memory_value, &.{});
+        try scope.push(retained_value);
+        const retained = heap_mod.valueAsPlainObject(retained_value).?;
+        _ = try memoryToFixedLengthBuffer(child, memory_value, &.{});
+        child.deinit();
+        parent.allocator.destroy(child);
+        child_live = false;
+        parent.collectGarbageYoung();
+        try testing.expectEqual(@as(usize, 2), st.mem.host_views.items.len);
+        try testing.expect(try hostResizeArrayBuffer(&parent, retained, wasm.PAGE_SIZE));
+        _ = try memoryBufferGet(&parent, memory_value, &.{});
+        parent.collectGarbage();
+        try testing.expectEqual(@as(usize, 2), st.mem.host_views.items.len);
+        try testing.expectEqual(@as(usize, wasm.PAGE_SIZE), retained.getArrayBuffer().?.len);
+    }
+    parent.collectGarbage();
+    try testing.expectEqual(@as(usize, 1), st.mem.host_views.items.len);
+    const current = try memoryBufferGet(&parent, memory_value, &.{});
+    try testing.expectEqual(@as(usize, wasm.PAGE_SIZE), heap_mod.valueAsPlainObject(current).?.getArrayBuffer().?.len);
 }
