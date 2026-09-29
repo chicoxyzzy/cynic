@@ -1868,6 +1868,47 @@ pub fn compile(
                             stack[depth] = .runtime;
                         }
                     },
+                    99, 100, 131, 132, 163, 164, 195, 196 => {
+                        if (sp == 0 or stack[sp - 1] != .v128) return null;
+                        const reduction = simd.reductionOp(sub) orelse return null;
+                        const target = scratchOffset(num_locals, sp - 1);
+                        if (!reduction.bitmask and reduction.width == 8) {
+                            // PCMPEQQ would require SSE4.1. Two whole-lane tests
+                            // retain SSE2 and accept nonzero values in either word.
+                            try m.load64Disp32(.rax, .r12, target);
+                            try m.testReg64(.rax, .rax);
+                            try m.setCond32(.rax, .not_equal);
+                            try m.load64Disp32(.rcx, .r12, target + 8);
+                            try m.testReg64(.rcx, .rcx);
+                            try m.setCond32(.rcx, .not_equal);
+                            try m.andReg32(.rax, .rcx);
+                        } else {
+                            try m.loadVector128(.xmm0, .r12, target);
+                            if (reduction.bitmask) {
+                                switch (reduction.width) {
+                                    1 => try m.movByteMask(.rax, .xmm0),
+                                    2 => {
+                                        // Signed saturation preserves the sign
+                                        // and duplicates all eight packed lanes.
+                                        try m.packSigned16To8(.xmm0, .xmm0);
+                                        try m.movByteMask(.rax, .xmm0);
+                                        try m.shrImm8(.rax, 8);
+                                    },
+                                    4 => try m.movFloatMask(.rax, .xmm0),
+                                    8 => try m.movDoubleMask(.rax, .xmm0),
+                                    else => return null,
+                                }
+                            } else {
+                                try m.xorPacked128(.xmm1, .xmm1);
+                                try m.compareEqualPacked(.xmm0, .xmm1, if (reduction.width == 1) .byte else if (reduction.width == 2) .half else .word);
+                                try m.movByteMask(.rax, .xmm0);
+                                try m.testReg64(.rax, .rax);
+                                try m.setCond32(.rax, .equal);
+                            }
+                        }
+                        try m.store64Disp32(.r12, target, .rax);
+                        stack[sp - 1] = .runtime;
+                    },
                     77...82 => {
                         const consumed: usize = if (sub == 77) 1 else if (sub == 82) 3 else 2;
                         if (sp < consumed) return null;

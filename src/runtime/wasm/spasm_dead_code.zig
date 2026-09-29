@@ -268,7 +268,7 @@ fn skipSimdImmediate(body: []const u8, index: *usize) ?void {
             skipBytes(body, index, 1) orelse return null; // lane index
         },
         15...20, 77...83, 174 => {}, // splats / bitwise / any_true / i32x4.add
-        else => return null,
+        else => if (@import("spasm_simd.zig").reductionOp(sub) == null) return null,
     }
 }
 

@@ -2363,8 +2363,11 @@ and the per-builtin checklist; this section tracks status.
   entries; the 58,779-command corpus stays green. Scalar splats, lane
   extraction/replacement, and all six vector bitwise operations add another
   138 compiled functions and 551 native entries per target, with the same
-  corpus score and SSE2 baseline. Native table64, remaining SIMD
-  arithmetic/compare/convert/shuffle/reduction operations, and the
+  corpus score and SSE2 baseline. All four integer `all_true` and `bitmask`
+  reductions add another 46 compiled functions and 143 native entries per
+  target, with all 58,779 assertions still passing and no raised CPU
+  requirement. Native table64, remaining SIMD
+  arithmetic/compare/convert/shuffle operations, and the
   native-register/imported-call ABI remain next.
 
   The architecture for all three tiers — the shared codegen

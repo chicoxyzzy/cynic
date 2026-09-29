@@ -1560,6 +1560,19 @@ useful:
    and signed zero; scalar shifts/logic reuse existing encoders without
    raising the x86 ISA baseline. Tests retain live scalar/vector operands and
    cover every lane plus all 128 individual mask bits for `bitselect`.
+   All four integer `all_true` and `bitmask` reductions now compile too.
+   Like [V8's x64 Liftoff reductions](https://github.com/v8/v8/blob/main/src/wasm/baseline/x64/liftoff-assembler-x64-inl.h),
+   x86 uses packed equality plus `PMOVMSKB` for zero-lane detection,
+   `PACKSSWB` for the i16 sign mask, and `MOVMSKPS/PD` for i32/i64 masks.
+   Whole-i64 truth tests use scalar comparisons instead of SSE4.1 `PCMPEQQ`.
+   ARM uses `UMINV` for the smaller truth reductions and the baseline
+   sign-fill/weight/horizontal-add strategy from
+   [V8's ARM64 bit masks](https://github.com/v8/v8/blob/main/src/codegen/arm64/macro-assembler-arm64.cc),
+   without optional PMULL/SVE instructions; its i32/i64 masks gather bits
+   from existing Cell halves. Tests exhaust all sign-mask combinations with
+   and without lower-bit noise, every zero-lane position, canonical i32
+   results, live neighbors, and unreachable-code skipping. No new runtime
+   allocation, host calls, JS API, or SES policy changes are involved.
    This follows the existing [Liftoff](https://v8.dev/blog/liftoff) /
    [Wizard-SPC](https://arxiv.org/abs/2305.13241) typed-stack design and
    [Core value and vector semantics](https://webassembly.github.io/spec/core/exec/instructions.html).

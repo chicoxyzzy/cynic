@@ -3352,7 +3352,7 @@ fn compileAarch64(
             },
             op_simd_prefix => {
                 // §4.4 SIMD — the 0xFD prefix. The baseline compiles the v128
-                // data path, scalar lanes, bitwise ops, any_true, and i32x4.add. A v128 is
+                // data path, scalar lanes, bitwise ops, reductions, and i32x4.add. A v128 is
                 // exactly one `Cell`, so it reuses the depth-keyed cell storage
                 // the runtime references use (the `.v128` Loc + `refSlotOff`):
                 // const/load/store/add move the 128-bit cell with GP halves or
@@ -3473,6 +3473,11 @@ fn compileAarch64(
                         if (lane_op.signed) try m.emit(if (lane_op.width == 1) a64.sxtbW(result, result) else a64.sxthW(result, result));
                         stack[depth] = .{ .reg = result };
                     }
+                } else if (simd.reductionOp(sub)) |reduction| {
+                    if (sp == 0 or stack[sp - 1] != .v128) return null;
+                    const result = regForDepth(sp - 1);
+                    try emitSimdReduction(&m, refSlotOff(num_locals, sp - 1), result, reduction);
+                    stack[sp - 1] = .{ .reg = result };
                 } else if (sub >= 77 and sub <= 82) {
                     const consumed: usize = if (sub == 77) 1 else if (sub == 82) 3 else 2;
                     if (sp < consumed) return null;
@@ -4288,6 +4293,64 @@ fn callFrameBytes(bufcells: usize, below: usize) ?u12 {
 /// the checked helper path rather than narrowing an AArch64 immediate.
 fn nativeLinkStackBytes(framebytes: u12) ?u12 {
     return std.math.add(u12, framebytes, native_entry_prologue_bytes) catch null;
+}
+
+fn emitSimdReduction(m: *masm_mod.Masm, src: u15, result: a64.Reg, op: simd.ReductionOp) CompileError!void {
+    if (!op.bitmask) {
+        if (op.width == 8) {
+            // UMINV has no .2D form. Test each complete lane, not its words.
+            try m.emit(a64.ldrImm(.x16, .x0, src));
+            try m.emit(a64.cmpImm(.x16, 0, false));
+            try m.emit(a64.csetW(result, .ne));
+            try m.emit(a64.ldrImm(.x17, .x0, src + 8));
+            try m.emit(a64.cmpImm(.x17, 0, false));
+            try m.emit(a64.csetW(.x17, .ne));
+            try m.emit(a64.andRegW(result, result, .x17));
+        } else {
+            try m.emit(a64.ldrQImm(.x0, .x0, src));
+            try m.emit(a64.uminv128(.x0, .x0, if (op.width == 1) .byte else if (op.width == 2) .half else .word));
+            try m.emit(a64.fmovStoW(.x16, .x0));
+            try m.emit(a64.cmpImm(.x16, 0, false));
+            try m.emit(a64.csetW(result, .ne));
+        }
+    } else if (op.width >= 4) {
+        // Cell halves are already in memory. Gather their top word/dword bits
+        // with GP operations; 64-bit loads cover the full scratch-offset range.
+        for ([_]u15{ 0, 8 }) |half| {
+            const part: a64.Reg = if (half == 0) result else .x17;
+            try m.emit(a64.ldrImm(.x16, .x0, src + half));
+            if (op.width == 4) {
+                try m.emit(a64.movRegW(part, .x16));
+                try m.emit(a64.lsrImm(part, part, 31));
+                try m.emit(a64.lsrImm(.x16, .x16, 63));
+                try m.emit(a64.lslImm(.x16, .x16, 1));
+                try m.emit(a64.orrReg(part, part, .x16));
+            } else {
+                try m.emit(a64.lsrImm(part, .x16, 63));
+            }
+            if (half != 0) {
+                try m.emit(a64.lslImm(part, part, @intCast(@as(u8, 8) / op.width)));
+                try m.emit(a64.orrReg(result, result, part));
+            }
+        }
+    } else {
+        // Baseline NEON: sign-fill each lane, weight its bit, then sum. For
+        // bytes, interleave the two halves into low/high bytes of eight H lanes
+        // so ADDV produces the low and high mask bytes without a carry between.
+        try m.emit(a64.ldrQImm(.x0, .x0, src));
+        try m.emit(a64.sshrSign128(.x0, .x0, if (op.width == 1) .byte else .half));
+        try m.movImm64(.x16, if (op.width == 1) 0x8040_2010_0804_0201 else 0x0008_0004_0002_0001);
+        try m.emit(a64.fmovXtoD(.x1, .x16));
+        if (op.width == 2) try m.movImm64(.x16, 0x0080_0040_0020_0010);
+        try m.emit(a64.insDFromX(.x1, 1, .x16));
+        try m.emit(a64.andV16b(.x0, .x0, .x1));
+        if (op.width == 1) {
+            try m.emit(a64.extV16b(.x1, .x0, .x0, 8));
+            try m.emit(a64.zip1V16b(.x0, .x0, .x1));
+        }
+        try m.emit(a64.addv8h(.x0, .x0));
+        try m.emit(a64.fmovStoW(result, .x0));
+    }
 }
 
 /// Place `loc`'s value into the register for stack `depth`, emitting a
