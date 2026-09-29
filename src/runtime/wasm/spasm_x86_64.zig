@@ -1980,6 +1980,10 @@ pub fn compile(
                         const result = try emitSimdIntegerUnary(&m, unary);
                         try m.storeVector128(.r12, target, result);
                     },
+                    94, 95, 248...255, 257...260 => {
+                        if (sp == 0 or stack[sp - 1] != .v128) return null;
+                        try emitSimdConversion(&m, scratchOffset(num_locals, sp - 1), simd.conversionOp(sub) orelse return null);
+                    },
                     101, 102, 133, 134 => {
                         if (sp < 2 or stack[sp - 2] != .v128 or stack[sp - 1] != .v128) return null;
                         const narrow = simd.narrowOp(sub) orelse return null;
@@ -3147,6 +3151,63 @@ fn emitSimdPermutation(m: *x64.Masm, target: i32, selectors: ?*const [16]u8) Err
     }
     try m.store64Disp32(.r12, target, .r8);
     try m.store64Disp32(.r12, target + 8, .r9);
+}
+
+/// Reuse scalar SSE2 conversions without raising the host ISA requirement.
+/// A fixed lane loop keeps dense conversion bodies within the code reserve.
+fn emitSimdConversion(m: *x64.Masm, target: i32, op: simd.ConversionOp) Error!void {
+    const widening = op.output_width > op.input_width;
+    const count: u32 = if (op.input_width == 8 or op.output_width == 8) 2 else 4;
+    // Walk widening conversions backwards so stores never clobber unread lanes.
+    try m.leaDisp32(.rsi, .r12, target + (if (widening) @as(i32, 4) else 0));
+    try m.leaDisp32(.rdi, .r12, target + (if (widening) @as(i32, 8) else 0));
+    try m.movImm64(.r8, count);
+    var next_lane: x64.Masm.Label = .{};
+    defer next_lane.deinit(m.gpa);
+    try m.bind(&next_lane);
+    if (op.input_width == 4) {
+        try m.load32Disp32(.rax, .rsi, 0);
+        if (op.kind != .convert) try m.movDXmmFromReg(.xmm0, .rax);
+    } else {
+        try m.load64Disp32(.rax, .rsi, 0);
+        try m.movQXmmFromReg(.xmm0, .rax);
+    }
+    switch (op.kind) {
+        .demote => try m.cvtDoubleToFloat(.xmm0, .xmm0),
+        .promote => try m.cvtFloatToDouble(.xmm0, .xmm0),
+        .convert => {
+            // The zero-extended u32 fits i64: one conversion, one rounding.
+            if (op.output_width == 4) {
+                if (op.signed) try m.cvtI32ToFloat(.xmm0, .rax) else try m.cvtI64ToFloat(.xmm0, .rax);
+            } else {
+                if (op.signed) try m.cvtI32ToDouble(.xmm0, .rax) else try m.cvtI64ToDouble(.xmm0, .rax);
+            }
+        },
+        .trunc_sat => {
+            if (op.input_width == 4) {
+                if (op.signed) try emitTruncSat(m, true, false, true) else try emitTruncSat(m, true, false, false);
+            } else {
+                if (op.signed) try emitTruncSat(m, false, false, true) else try emitTruncSat(m, false, false, false);
+            }
+        },
+    }
+    if (op.kind != .trunc_sat) {
+        if (op.output_width == 4) try m.movDRegFromXmm(.rax, .xmm0) else try m.movQRegFromXmm(.rax, .xmm0);
+    }
+    if (op.output_width == 4) try m.store32Disp32(.rdi, 0, .rax) else try m.store64Disp32(.rdi, 0, .rax);
+    if (widening) {
+        try m.subRegImm32(.rsi, op.input_width);
+        try m.subRegImm32(.rdi, op.output_width);
+    } else {
+        try m.addRegImm32(.rsi, op.input_width);
+        try m.addRegImm32(.rdi, op.output_width);
+    }
+    try m.subRegImm32(.r8, 1);
+    try m.jumpCond(.not_equal, &next_lane);
+    if (op.input_width > op.output_width) {
+        try m.xorReg64(.rax, .rax);
+        try m.store64Disp32(.r12, target + 8, .rax);
+    }
 }
 
 fn emitSimdFloatArithmetic(m: *x64.Masm, op: simd.FloatArithmeticOp) Error!void {

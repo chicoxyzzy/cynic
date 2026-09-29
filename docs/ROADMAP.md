@@ -2395,11 +2395,15 @@ and the per-builtin checklist; this section tracks status.
   with all four interpreter/native corpus sweeps unchanged.
   Shared rounding now explicitly quiets signaling NaNs, fixing an x86 gap.
   Byte shuffle and strict/relaxed swizzle remove another 20 per target
-  (48 SIMD refusals remain), retaining SSE2 and the same full corpus score.
-  The opcode inventory in `wasm-results.md` tracks the remaining 29 accepted
+  (48 SIMD refusals at that checkpoint), retaining SSE2 and the same full
+  corpus score. All ten standard numeric conversions and four relaxed
+  truncations remove another 17 per target, leaving 31 SIMD refusals.
+  Native-entry tests cover numeric boundaries, NaNs, unused upper lanes,
+  live neighbors, and dense 1,024-conversion bodies on both targets.
+  The opcode inventory in `wasm-results.md` tracks the remaining 15 accepted
   SIMD operations without native lowering, including the relaxed family.
-  Native table64, remaining SIMD
-  conversions and relaxed operations, and the
+  Native table64, remaining relaxed SIMD operations, nonzero-memory SIMD
+  operands, and the
   native-register/imported-call ABI remain next.
 
   The architecture for all three tiers — the shared codegen

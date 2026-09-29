@@ -276,7 +276,7 @@ fn skipSimdImmediate(body: []const u8, index: *usize) ?void {
             simd.floatArithmeticOp(sub) == null and simd.narrowOp(sub) == null and
             simd.extendOp(sub) == null and simd.pairwiseAddOp(sub) == null and
             simd.productOp(sub) == null and simd.floatRoundOp(sub) == null and
-            simd.floatPseudoMinMaxOp(sub) == null) return null,
+            simd.floatPseudoMinMaxOp(sub) == null and simd.conversionOp(sub) == null) return null,
     }
 }
 

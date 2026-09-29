@@ -723,6 +723,12 @@ the measured design space:
   byte selections on x86, with no SSSE3 requirement or runtime helper call.
   Swizzle indices are checked against 16; relaxed swizzle retains Sarcasm's
   deterministic zero-on-invalid-index behavior on both targets.
+  All standard SIMD numeric conversions and relaxed truncations compile via
+  NEON conversions or fixed SSE2 scalar-lane loops. Truncations map NaNs to
+  zero and clamp out-of-range values; `_zero` forms clear unused upper lanes.
+  Unsigned i32-to-float conversion rounds once; widening preserves unread
+  inputs. Relaxed truncation uses the same deterministic saturating behavior
+  as Sarcasm, without runtime helper calls or a higher x86 ISA requirement.
   The six signed/unsigned widening loads (8x8, 16x4, 32x2) check and read
   exactly eight bytes before widening to a full vector, using NEON
   SXTL/UXTL or SSE2 unpacking with zero/sign masks. Memory64 overflow traps

@@ -1709,6 +1709,20 @@ useful:
    Both targets keep the [Core deterministic relaxed-swizzle profile](https://webassembly.github.io/spec/core/exec/numerics.html#op-ivrelaxed-swizzle)
    already used by Sarcasm. Tests cover every source/destination byte and every
    byte value/index, live neighbors, and unreachable 16-byte shuffle immediates.
+   All ten standard numeric conversions and four relaxed truncations compile.
+   ARM follows Liftoff's vector `FCVTZS/FCVTZU`, `SCVTF/UCVTF`, and
+   `FCVTN/FCVTL` lowering; f64-to-i32 truncation saturates to i64 first and
+   then saturating-narrows, while i32-to-f64 widens before conversion.
+   x86 reuses the scalar SSE2 conversion emitters in fixed two-/four-lane
+   loops, including their NaN and saturation guards. Unsigned i32 conversion
+   zero-extends into an i64 source so there is only one rounding step.
+   Widening walks backwards to preserve unread input lanes; shrinking clears
+   the upper 64 bits. Neither backend calls a runtime conversion helper.
+   Relaxed truncation keeps the [Core deterministic saturating choice](https://webassembly.github.io/spec/core/exec/numerics.html#op-relaxed-trunc)
+   already used by Sarcasm. Independent integer-bit truncation oracles,
+   floating boundaries, NaNs, mixed lanes, native-entry checks, dead code, and
+   dense 128-/1,024-operation bodies cover both backends. This is Wasm-only
+   machinery; the ECMA-262/SES surface is unchanged.
    This follows the existing [Liftoff](https://v8.dev/blog/liftoff) /
    [Wizard-SPC](https://arxiv.org/abs/2305.13241) typed-stack design and
    [Core value and vector semantics](https://webassembly.github.io/spec/core/exec/instructions.html).
@@ -1717,7 +1731,7 @@ useful:
    an unsupported lane operation. `tools/wasm_bench.zig` covers inline vector
    addition and vector-valued calls with checked high-lane checksums.
    The rest of the v128 lane-op
-   surface (conversions and the remaining relaxed families) is the
+   surface (the remaining relaxed families) is the
    remaining frontier, along with the side-table-as-control-oracle wiring (§6)
    that would make multi-target `br_table` cheap.
 5. **Ohaimark** — the ADR plus bytecode/feedback/SSA, initial specialization,

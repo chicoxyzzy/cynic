@@ -3,6 +3,25 @@
 
 pub const WideningLoadOp = struct { width: u4, signed: bool };
 
+pub const ConversionOp = struct {
+    kind: enum { trunc_sat, convert, demote, promote },
+    input_width: u4,
+    output_width: u4,
+    signed: bool = false,
+};
+
+pub fn conversionOp(sub: u32) ?ConversionOp {
+    return switch (sub) {
+        94 => .{ .kind = .demote, .input_width = 8, .output_width = 4 },
+        95 => .{ .kind = .promote, .input_width = 4, .output_width = 8 },
+        248, 249, 257, 258 => .{ .kind = .trunc_sat, .input_width = 4, .output_width = 4, .signed = sub == 248 or sub == 257 },
+        250, 251 => .{ .kind = .convert, .input_width = 4, .output_width = 4, .signed = sub == 250 },
+        252, 253, 259, 260 => .{ .kind = .trunc_sat, .input_width = 8, .output_width = 4, .signed = sub == 252 or sub == 259 },
+        254, 255 => .{ .kind = .convert, .input_width = 4, .output_width = 8, .signed = sub == 254 },
+        else => null,
+    };
+}
+
 pub fn wideningLoadOp(sub: u32) ?WideningLoadOp {
     return switch (sub) {
         1, 2 => .{ .width = 1, .signed = sub == 1 },

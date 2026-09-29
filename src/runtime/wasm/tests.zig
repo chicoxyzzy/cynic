@@ -3608,6 +3608,190 @@ test "wasm spasm: SIMD float arithmetic skips unreachable code" {
     }
 }
 
+const SimdNumericConversion = struct {
+    sub: u32,
+    kind: enum { trunc_sat, convert, demote, promote },
+    wide: bool = false,
+    signed: bool = false,
+};
+const simd_numeric_conversions = [_]SimdNumericConversion{
+    .{ .sub = 94, .kind = .demote, .wide = true },
+    .{ .sub = 95, .kind = .promote },
+    .{ .sub = 248, .kind = .trunc_sat, .signed = true },
+    .{ .sub = 249, .kind = .trunc_sat },
+    .{ .sub = 250, .kind = .convert, .signed = true },
+    .{ .sub = 251, .kind = .convert },
+    .{ .sub = 252, .kind = .trunc_sat, .wide = true, .signed = true },
+    .{ .sub = 253, .kind = .trunc_sat, .wide = true },
+    .{ .sub = 254, .kind = .convert, .wide = true, .signed = true },
+    .{ .sub = 255, .kind = .convert, .wide = true },
+    .{ .sub = 257, .kind = .trunc_sat, .signed = true },
+    .{ .sub = 258, .kind = .trunc_sat },
+    .{ .sub = 259, .kind = .trunc_sat, .wide = true, .signed = true },
+    .{ .sub = 260, .kind = .trunc_sat, .wide = true },
+};
+
+fn buildSimdNumericConversionFunc(a: std.mem.Allocator, sub: u32, repetitions: usize, dead: bool) ![]const u8 {
+    var body: List = .empty;
+    try body.appendSlice(a, &.{ 1, 32, 0x7f, 0x20, 0, 0x20, 1 });
+    if (dead) try body.appendSlice(a, &.{ 0x02, 0x7b, 0x20, 2, 0x0c, 0 });
+    try body.appendSlice(a, &.{ 0x20, 2 });
+    for (0..repetitions) |_| {
+        try body.append(a, 0xfd);
+        try uleb(a, &body, sub);
+    }
+    if (dead) try body.append(a, 0x0b);
+    try body.append(a, 0x0b);
+    return buildFunc(a, &.{ 0x7e, 0x7b, 0x7b }, &.{ 0x7e, 0x7b, 0x7b }, body.items, "convert");
+}
+
+/// Integer-bit oracle: never casts an unchecked float into a host integer.
+fn expectedSimdTruncSat(comptime U: type, bits: U, signed: bool) u32 {
+    const fraction = if (U == u32) 23 else 52;
+    const bias = if (U == u32) 127 else 1023;
+    const exponent_mask = if (U == u32) 255 else 2047;
+    const negative = bits >> (@bitSizeOf(U) - 1) != 0;
+    const exponent = (bits >> fraction) & exponent_mask;
+    const mantissa = bits & ((@as(U, 1) << fraction) - 1);
+    if (exponent == exponent_mask and mantissa != 0) return 0;
+    if (negative and !signed) return 0;
+    const power = @as(i32, @intCast(exponent)) - bias;
+    if (power < 0) return 0;
+    const limit: u32 = if (signed) (if (negative) 0x80000000 else 0x7fffffff) else 0xffffffff;
+    const magnitude: u32 = if (power >= 32) limit else blk: {
+        const significand: u64 = (@as(u64, 1) << fraction) | mantissa;
+        const value = if (power >= fraction)
+            significand << @as(u6, @intCast(power - fraction))
+        else
+            significand >> @as(u6, @intCast(fraction - power));
+        break :blk @intCast(@min(value, limit));
+    };
+    return if (negative) 0 -% magnitude else magnitude;
+}
+
+fn expectSimdConvertedFloat(comptime U: type, expected: U, actual: U) !void {
+    const exponent: U = if (U == u32) 0x7f800000 else 0x7ff0000000000000;
+    const quiet: U = if (U == u32) 0x00400000 else 0x0008000000000000;
+    const magnitude = expected & (std.math.maxInt(U) >> 1);
+    if (magnitude > exponent) {
+        if (magnitude == exponent | quiet)
+            try testing.expectEqual(exponent | quiet, actual & (std.math.maxInt(U) >> 1))
+        else
+            try testing.expectEqual(exponent | quiet, actual & (exponent | quiet));
+    } else try testing.expectEqual(expected, actual);
+}
+
+fn expectSimdNumericConversion(instance: *interp.Instance, op: SimdNumericConversion, input: u128, native: bool) !void {
+    const before = instance.spasm_runs;
+    const result = try interp.invoke(instance, testing.allocator, 0, &.{ 37, simd_live_vector, input });
+    defer testing.allocator.free(result);
+    try testing.expectEqual(@as(usize, 3), result.len);
+    try testing.expectEqual(@as(u128, 37), result[0]);
+    try testing.expectEqual(simd_live_vector, result[1]);
+    const source32: [4]u32 = @bitCast(input);
+    const source64: [2]u64 = @bitCast(input);
+    const output32: [4]u32 = @bitCast(result[2]);
+    const output64: [2]u64 = @bitCast(result[2]);
+    const count: usize = if (op.wide or op.kind == .promote) 2 else 4;
+    for (0..count) |lane| switch (op.kind) {
+        .trunc_sat => try testing.expectEqual(if (op.wide)
+            expectedSimdTruncSat(u64, source64[lane], op.signed)
+        else
+            expectedSimdTruncSat(u32, source32[lane], op.signed), output32[lane]),
+        .convert => {
+            const exact: f64 = if (op.signed) @floatFromInt(@as(i32, @bitCast(source32[lane]))) else @floatFromInt(source32[lane]);
+            if (op.wide)
+                try testing.expectEqual(@as(u64, @bitCast(exact)), output64[lane])
+            else
+                try testing.expectEqual(@as(u32, @bitCast(@as(f32, @floatCast(exact)))), output32[lane]);
+        },
+        .demote => try expectSimdConvertedFloat(u32, @bitCast(@as(f32, @floatCast(@as(f64, @bitCast(source64[lane]))))), output32[lane]),
+        .promote => try expectSimdConvertedFloat(u64, @bitCast(@as(f64, @as(f32, @bitCast(source32[lane])))), output64[lane]),
+    };
+    if (op.kind == .demote or (op.kind == .trunc_sat and op.wide)) try testing.expectEqual(@as(u64, 0), output64[1]);
+    try testing.expectEqual(before + @intFromBool(native), instance.spasm_runs);
+}
+
+fn testSimdNumericConversions(native: bool) !void {
+    if (native and !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const bits32 = [_]u32{
+        0,          0x80000000, 1,          0x80000001, 0x007fffff, 0x00800000,
+        0x3f000000, 0x3f7fffff, 0x3f800000, 0xbf800000, 0xbf7fffff, 0x4effffff,
+        0x4f000000, 0x4f000001, 0x4f7fffff, 0x4f800000, 0xceffffff, 0xcf000000,
+        0xcf000001, 0x7f7fffff, 0xff7fffff, 0x7f800000, 0xff800000, 0x7fc00000,
+        0x7f800001, 0x7fc12345, 0xff800001, 0x00ffffff, 0x01000001, 0x01000003,
+        0x7fffffff, 0x80000081, 0xffffff7f, 0xffffffff,
+    };
+    const bits64 = [_]u64{
+        0,                  0x8000000000000000, 1,                  0x8000000000000001, 0x000fffffffffffff, 0x0010000000000000,
+        0x3fefffffffffffff, 0x3ff0000000000000, 0xbfefffffffffffff, 0xbff0000000000000, 0x41dfffffffc00000, 0x41dfffffffffffff,
+        0x41e0000000000000, 0x41e0000000000001, 0xc1dfffffffffffff, 0xc1e0000000000000, 0xc1e0000000000001, 0x41efffffffe00000,
+        0x41efffffffffffff, 0x41f0000000000000, 0x47efffffe0000000, 0x47effffff0000000, 0x3690000000000000, 0x3690000000000001,
+        0x3ff0000010000000, 0x3ff0000030000000, 0x7fefffffffffffff, 0x7ff0000000000000, 0xfff0000000000000, 0x7ff8000000000000,
+        0x7ff0000000000001, 0xfff8123456789abc,
+    };
+    var random: u64 = 0xd17341b6092a7c85;
+    for (simd_numeric_conversions) |op| {
+        const module = try wasm.decode(a, try buildSimdNumericConversionFunc(a, op.sub, 1, false));
+        var instance: interp.Instance = undefined;
+        try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+        defer instance.deinit();
+        instance.spasm_enabled = native;
+        for (0..bits32.len) |base| {
+            var input: [4]u32 = undefined;
+            for (&input, 0..) |*lane, index| lane.* = bits32[(base + index) % bits32.len];
+            try expectSimdNumericConversion(&instance, op, @bitCast(input), native);
+        }
+        for (0..bits64.len) |base| try expectSimdNumericConversion(&instance, op, @bitCast([2]u64{ bits64[base], bits64[(base + 1) % bits64.len] }), native);
+        for (0..2048) |_| {
+            var input: [2]u64 = undefined;
+            for (&input) |*lane| {
+                random ^= random << 13;
+                random ^= random >> 7;
+                random ^= random << 17;
+                lane.* = random;
+            }
+            try expectSimdNumericConversion(&instance, op, @bitCast(input), native);
+        }
+    }
+}
+
+test "wasm spasm: SIMD numeric conversions preserve boundaries, NaNs and live values" {
+    try testSimdNumericConversions(true);
+}
+
+test "wasm interpreter: SIMD numeric conversions satisfy an independent lane oracle" {
+    try testSimdNumericConversions(false);
+}
+
+test "wasm spasm: SIMD numeric conversions skip dead code and fit dense reservations" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (simd_numeric_conversions) |op| {
+        for ([_]usize{ 1, 128, 1024 }) |count| {
+            const dead = count == 1;
+            const module = try wasm.decode(a, try buildSimdNumericConversionFunc(a, op.sub, count, dead));
+            var instance: interp.Instance = undefined;
+            try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+            defer instance.deinit();
+            instance.spasm_enabled = true;
+            const input: u128 = if (dead) ~simd_live_vector else 0;
+            const result = try interp.invoke(&instance, testing.allocator, 0, &.{ 37, simd_live_vector, input });
+            defer testing.allocator.free(result);
+            try testing.expectEqualSlices(u128, &.{ 37, simd_live_vector, input }, result);
+            try testing.expectEqual(@import("spasm.zig").RefusalStage.none, instance.spasm_last_refusal_stage);
+            try testing.expectEqual(@as(u32, 0), instance.spasm_refusals);
+            try testing.expectEqual(@as(u32, 1), instance.spasm_compiles);
+            try testing.expectEqual(@as(u32, 1), instance.spasm_runs);
+        }
+    }
+}
+
 fn buildSimdPermutationFunc(a: std.mem.Allocator, sub: u32, selectors: [16]u8, dead: bool) ![]const u8 {
     var body: List = .empty;
     try body.appendSlice(a, &.{ 1, 32, 0x7f, 0x20, 0, 0x20, 1 });
