@@ -261,12 +261,13 @@ fn skipSimdImmediate(body: []const u8, index: *usize) ?void {
     const sub = readUleb32(body, index) orelse return null;
     switch (sub) {
         12 => skipBytes(body, index, 16) orelse return null, // v128.const
+        21...34 => skipBytes(body, index, 1) orelse return null, // extract/replace_lane
         0, 11 => skipMemArg(body, index) orelse return null, // v128.load/store
         84...91 => {
             skipMemArg(body, index) orelse return null;
             skipBytes(body, index, 1) orelse return null; // lane index
         },
-        83, 174 => {}, // v128.any_true / i32x4.add
+        15...20, 77...83, 174 => {}, // splats / bitwise / any_true / i32x4.add
         else => return null,
     }
 }
@@ -368,4 +369,19 @@ test "skipToFrameBoundary stops at the current if arm" {
     try std.testing.expectEqual(@as(usize, 6), index);
     try std.testing.expectEqual(FrameBoundary.end, skipToFrameBoundary(&body, &index).?);
     try std.testing.expectEqual(body.len, index);
+}
+
+test "skipToFrameEnd skips SIMD scalar lane and bitwise operations" {
+    for (15..35) |sub| {
+        const body = [_]u8{ 0xfd, @intCast(sub), 0x0b, 0x0b };
+        var index: usize = 0;
+        try std.testing.expect(skipToFrameEnd(&body, &index) != null);
+        try std.testing.expectEqual(@as(usize, if (sub <= 20) 3 else 4), index);
+    }
+    for (77..83) |sub| {
+        const body = [_]u8{ 0xfd, @intCast(sub), 0x0b };
+        var index: usize = 0;
+        try std.testing.expect(skipToFrameEnd(&body, &index) != null);
+        try std.testing.expectEqual(body.len, index);
+    }
 }

@@ -1554,6 +1554,12 @@ useful:
    lane, unaligned and exact-end accesses, overflow traps without partial
    stores, and each of the 128 input bits for `any_true`. This changes no JS
    API or SES policy; test262 remains a regression gate, not a coverage target.
+   Scalar splats, extract/replace-lane, and all six vector bitwise operations
+   now compile on both targets as well. Shared lane metadata keeps widths and
+   signedness consistent. Raw integer moves preserve floating NaN payloads
+   and signed zero; scalar shifts/logic reuse existing encoders without
+   raising the x86 ISA baseline. Tests retain live scalar/vector operands and
+   cover every lane plus all 128 individual mask bits for `bitselect`.
    This follows the existing [Liftoff](https://v8.dev/blog/liftoff) /
    [Wizard-SPC](https://arxiv.org/abs/2305.13241) typed-stack design and
    [Core value and vector semantics](https://webassembly.github.io/spec/core/exec/instructions.html).
@@ -1562,7 +1568,7 @@ useful:
    an unsupported lane operation. `tools/wasm_bench.zig` covers inline vector
    addition and vector-valued calls with checked high-lane checksums.
    The rest of the v128 lane-op
-   surface (the other arithmetic/compare/convert/shuffle/lane families) is the
+   surface (the other arithmetic/compare/convert/shuffle/reduction families) is the
    remaining frontier, along with the side-table-as-control-oracle wiring (§6)
    that would make multi-target `br_table` cheap.
 5. **Ohaimark** — the ADR plus bytecode/feedback/SSA, initial specialization,
