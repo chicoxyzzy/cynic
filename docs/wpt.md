@@ -89,8 +89,10 @@ diagnosis. Changed limits require a separate reviewed baseline.
 
 Only fixtures explicitly declaring `jsshell` are eligible. WPT `.any.js`
 defaults to window and dedicated-worker environments, not arbitrary engines.
-Browser HTML tests, the IDL harness, shared Wasm memory/threads, module-host
-integration, and unsupported proposal families have documented exclusions.
+Browser HTML tests, the IDL harness, dedicated shared-memory/thread suites,
+module-host integration, and unsupported proposal families have documented
+exclusions. Included general-purpose fixtures can still contain individual
+shared-memory assertions; these remain scored.
 The shipped Exception/Tag API is eligible even where upstream filenames still
 say `tentative`; strict-only failures inside those fixtures remain failures.
 
@@ -149,7 +151,8 @@ read the dictionary before converting its numeric members. The pinned WPT
 fixtures still expect some conversions during dictionary reads. Cynic follows
 the current specification and records these assertions as failures. The same
 principle applies to Table.set value conversion before bounds checking and
-Table.grow's size snapshot before reentrant delta conversion. A baseline is
+Table.grow's size snapshot before reentrant delta conversion, as well as
+Table.set's optional value treating explicit undefined as absent. A baseline is
 an observation of this exact corpus, not permission to replace normative
 behavior with whatever yields a higher score.
 
