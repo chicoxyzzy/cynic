@@ -1,20 +1,21 @@
 # WPT Wasm JavaScript API results
 
-Measured baseline after the first API correction pass: **22 of 40 included
-files pass completely**. The remaining files are 16 assertion-failure files
-and 2 strict-mode parse errors. Across files that execute, **570 subtests pass
-and 26 fail** (596 observed subtests). The two unparsed files contribute no
+Measured baseline after exported-function identity corrections: **23 of 40 included
+files pass completely**. The remaining files are 15 assertion-failure files
+and 2 strict-mode parse errors. Across files that execute, **575 subtests pass
+and 21 fail** (596 observed subtests). The two unparsed files contribute no
 observed subtests; 596 is not the complete potential subtest denominator.
 No fixture crashed, timed out, or ended without a harness result except those
 two explicit parse errors. Another 40 files are explicitly excluded.
 
-Compared with the initial measurement, **304 additional named subtests pass**
-and 8 additional files pass completely; no previously passing subtest was lost.
+Compared with the initial measurement, **309 additional named subtests pass**
+and 9 additional files pass completely; no previously passing subtest was lost.
 
 | Measurement | Passing files | Failing files | Parse errors | Passing subtests | Failing subtests |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | Initial integration | 14 | 24 | 2 | 266 | 330 |
 | API corrections | 22 | 16 | 2 | 570 | 26 |
+| Function identity | 23 | 15 | 2 | 575 | 21 |
 
 This measures a selected Wasm JavaScript API slice, not browser conformance or
 the Wasm core instruction suite. See [the integration guide](docs/wpt.md),
@@ -25,9 +26,9 @@ the Wasm core instruction suite. See [the integration guide](docs/wpt.md),
 
 | Input | Value |
 | --- | --- |
-| Captured | 2026-09-29T00:19:28Z |
+| Captured | 2026-09-29T03:13:26Z |
 | WPT revision | [`9ee707c850996c8d124809570c3ff855d67301b9`](https://github.com/web-platform-tests/wpt/tree/9ee707c850996c8d124809570c3ff855d67301b9/wasm/jsapi) |
-| Engine checkout | `5efeabe324367f563f02b979e230da053e5ec308` (clean runtime source) |
+| Engine checkout | `9335b14bf70c914c498b9f74dc8945209f78b5dd` (clean runtime source) |
 | Host | macOS arm64 |
 | Posture | Strict-only, mutable primordials, eval and Wasm compilation enabled; JS and Wasm JITs off |
 | Limits | 50 million fuel units; 256 MiB engine memory; 10-second normal / 60-second long timeout |
@@ -49,9 +50,9 @@ regressions in CI while continuing to report existing failures as failures.
 | Memory | 1 | 5 | 0 | 46 | 10 |
 | Module | 5 | 0 | 0 | 43 | 0 |
 | Prototypes | 1 | 0 | 0 | 5 | 0 |
-| Table | 1 | 4 | 0 | 80 | 8 |
+| Table | 2 | 3 | 0 | 85 | 3 |
 | Tag | 2 | 0 | 0 | 8 | 0 |
-| **Total** | **22** | **16** | **2** | **570** | **26** |
+| **Total** | **23** | **15** | **2** | **575** | **21** |
 
 ## Corrections and remaining failures
 
@@ -63,11 +64,19 @@ cover collecting getters/start callbacks, promise capabilities, retained import
 closures, and a function escaping a trapping start. Those GC tests supplement
 the WPT score; they do not inflate its denominator.
 
-The remaining 26 assertions fall into these observed categories:
+The function-identity correction reuses one JS wrapper per Wasm store function,
+including aliases, imported reexports, table/global reads, and reference results.
+Five named subtests now pass. The compound `instance/constructor-caching` test
+passes its function comparison, then fails its Global-object comparison; it
+remains one failing subtest. All file and named-subtest outcomes also match
+under `--gc-threshold=1`. Unit regressions cover hardened and unhardened realms,
+collecting start callbacks, child-realm access, and allocation-failure rollback.
+
+The remaining 21 assertions fall into these observed categories:
 
 | Category | Assertions | Status |
 | --- | ---: | --- |
-| Exported-function wrapper identity/caching | 6 | Engine gap |
+| Imported store-object wrapper identity/caching | 1 | Global identity now exposed by the compound caching test |
 | Fixed-length/resizable memory-buffer methods | 7 | Missing API |
 | Shared-memory buffer freezing | 1 | Engine gap in an included basic assertion |
 | BufferSource instantiate import-lookup timing | 1 | Engine currently instantiates synchronously |

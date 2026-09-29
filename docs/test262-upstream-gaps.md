@@ -39,6 +39,35 @@ the corpus under the relevant section's directory before adding.
 ## Entries
 
 
+### Wasm function exposure lost identity and wrapper properties
+
+- **Fixed in:** `9335b14b`
+- **Spec:** Wasm JS API §4.2 WebAssembly JS Object Caches / §5.6 Exported
+  Functions; ECMA-262 §6.1.7 Object identity underlies the observable equality.
+- **Reproducer:** ordinary JS, with the GC check additionally run under engine
+  allocation pressure:
+  ```js
+  const bytes = new Uint8Array([0,97,115,109,1,0,0,0,1,5,1,96,0,1,127,
+    3,2,1,0,7,5,1,1,102,0,0,10,6,1,4,0,65,42,11]);
+  const module = new WebAssembly.Module(bytes);
+  const f = new WebAssembly.Instance(module).exports.f;
+  f.marker = {answer: 42};
+  const table = new WebAssembly.Table({element: 'anyfunc', initial: 1}, f);
+  if (table.get(0) !== f) throw new Error('new wrapper for the same function');
+  if (table.get(0).marker !== f.marker) throw new Error('lost wrapper state');
+  ```
+- **Before fix:** every exposure created a new function wrapper. Aliased
+  exports, table/global reads, and Wasm import reexports could compare unequal;
+  properties attached to the original wrapper disappeared on the fresh one.
+- **After fix:** a traced store-owner cache returns the same function, including
+  across child realms and GC. Independent ordinary JS imports remain distinct
+  Wasm function addresses. Failed instantiation removes its partial entries.
+- **Coverage:** Wasm JS API fixtures belong to WPT rather than test262. Existing
+  table fixtures already cover ordinary identity; Cynic adds hardened/unhardened
+  tests, collecting start exposure, cross-realm access, and OOM rollback. The
+  full scoped WPT run has the same named outcomes under GC pressure.
+
+
 ### Wasm compile could lose its capability result during settlement
 
 - **Fixed in:** `155c3a2a`
