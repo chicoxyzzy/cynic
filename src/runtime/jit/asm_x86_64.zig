@@ -729,6 +729,32 @@ pub const Masm = struct {
         try self.emitXmmReg(0x66, 0xdb, destination, source);
     }
 
+    pub fn orPacked128(self: *Masm, destination: Xmm, source: Xmm) error{OutOfMemory}!void {
+        try self.emitXmmReg(0x66, 0xeb, destination, source);
+    }
+
+    pub fn andNotPacked128(self: *Masm, destination: Xmm, source: Xmm) error{OutOfMemory}!void {
+        try self.emitXmmReg(0x66, 0xdf, destination, source);
+    }
+
+    pub fn minMaxPackedFloat128(self: *Masm, destination: Xmm, source: Xmm, double_precision: bool, maximum: bool) error{OutOfMemory}!void {
+        try self.emitXmmReg(if (double_precision) 0x66 else null, if (maximum) 0x5f else 0x5d, destination, source);
+    }
+
+    pub fn compareUnorderedPackedFloat128(self: *Masm, destination: Xmm, source: Xmm, double_precision: bool) error{OutOfMemory}!void {
+        try self.emitXmmReg(if (double_precision) 0x66 else null, 0xc2, destination, source);
+        try self.emitByte(3); // CMPUNORDPS/PD
+    }
+
+    pub fn shiftRightLogicalPacked128(self: *Masm, destination: Xmm, amount: u8, quadword: bool) error{OutOfMemory}!void {
+        try self.emitByte(0x66);
+        try self.emitByte(rex(false, false, false, isExtendedXmm(destination)));
+        try self.emitByte(0x0f);
+        try self.emitByte(if (quadword) 0x73 else 0x72);
+        try self.emitByte(0xd0 | lowBitsXmm(destination)); // PSRLD/Q /2, imm8
+        try self.emitByte(amount);
+    }
+
     pub fn xorPacked128(self: *Masm, destination: Xmm, source: Xmm) error{OutOfMemory}!void {
         try self.emitXmmReg(0x66, 0xef, destination, source);
     }
@@ -1004,12 +1030,12 @@ pub const Masm = struct {
 
     fn emitXmmReg(
         self: *Masm,
-        prefix: u8,
+        prefix: ?u8,
         opcode: u8,
         destination: Xmm,
         source: Xmm,
     ) error{OutOfMemory}!void {
-        try self.emitByte(prefix);
+        if (prefix) |byte| try self.emitByte(byte);
         try self.emitByte(rex(false, isExtendedXmm(destination), false, isExtendedXmm(source)));
         try self.emitByte(0x0F);
         try self.emitByte(opcode);
@@ -1274,6 +1300,36 @@ test "jit asm_x86_64: encodes unaligned SIMD moves and packed i32 addition" {
         0xf3, 0x45, 0x0f, 0x6f, 0x8c, 0x24, 0x10, 0,    0,    0,
         0x66, 0x45, 0x0f, 0xfe, 0xca, 0xf3, 0x45, 0x0f, 0x7f, 0x8d,
         0xf0, 0xff, 0xff, 0xff,
+    }, machine.code.items);
+}
+
+test "jit asm_x86_64: SIMD float minmax encodings retain SSE2" {
+    var machine = Masm.init(std.testing.allocator);
+    defer machine.deinit();
+    try machine.minMaxPackedFloat128(.xmm9, .xmm10, false, false);
+    try machine.minMaxPackedFloat128(.xmm9, .xmm10, false, true);
+    try machine.minMaxPackedFloat128(.xmm9, .xmm10, true, false);
+    try machine.minMaxPackedFloat128(.xmm9, .xmm10, true, true);
+    try machine.compareUnorderedPackedFloat128(.xmm9, .xmm10, false);
+    try machine.compareUnorderedPackedFloat128(.xmm9, .xmm10, true);
+    try machine.orPacked128(.xmm9, .xmm10);
+    try machine.andNotPacked128(.xmm9, .xmm10);
+    try machine.shiftRightLogicalPacked128(.xmm10, 10, false);
+    try machine.shiftRightLogicalPacked128(.xmm10, 13, true);
+    try std.testing.expectEqualSlices(u8, &.{
+        0x45, 0x0f, 0x5d, 0xca,
+        0x45, 0x0f, 0x5f, 0xca,
+        0x66, 0x45, 0x0f, 0x5d,
+        0xca, 0x66, 0x45, 0x0f,
+        0x5f, 0xca, 0x45, 0x0f,
+        0xc2, 0xca, 0x03, 0x66,
+        0x45, 0x0f, 0xc2, 0xca,
+        0x03, 0x66, 0x45, 0x0f,
+        0xeb, 0xca, 0x66, 0x45,
+        0x0f, 0xdf, 0xca, 0x66,
+        0x41, 0x0f, 0x72, 0xd2,
+        0x0a, 0x66, 0x41, 0x0f,
+        0x73, 0xd2, 0x0d,
     }, machine.code.items);
 }
 

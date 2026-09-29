@@ -1598,6 +1598,20 @@ useful:
    pairs, plus wider sign boundaries, odd-sum rounding, live neighbors,
    and unreachable code. These operations keep the existing full-Cell ABI
    and add no runtime allocations, host calls, or JS/SES policy changes.
+   The four floating-point `min/max` operations now compile too. ARM uses
+   NaN-propagating `FMIN/FMAX`, matching
+   [Liftoff](https://github.com/v8/v8/blob/main/src/wasm/baseline/arm64/liftoff-assembler-arm64-inl.h).
+   The SSE2 path follows the both-operand-orders approach in
+   [V8's shared x86 lowering](https://github.com/v8/v8/blob/main/src/codegen/shared-ia32-x64/macro-assembler-shared-ia32-x64.cc),
+   with an explicit unordered mask: OR selects the negative zero for min,
+   AND selects positive zero for max, and masked payload clearing produces
+   a canonical quiet NaN. No floating-point subtraction or scalar helper
+   is needed. Bit-based test oracles enforce
+   [Core fmin/fmax and nans semantics](https://webassembly.github.io/spec/core/exec/numerics.html#op-fmin),
+   including subnormals, infinities, both zero orders, signaling/quiet NaNs,
+   payload bits, mixed lanes, and live neighbors. The scalar/vector
+   interpreter fallback also quiets signaling NaNs; its previous raw-NaN
+   return escaped the corpus harness's permissive any-NaN matching.
    This follows the existing [Liftoff](https://v8.dev/blog/liftoff) /
    [Wizard-SPC](https://arxiv.org/abs/2305.13241) typed-stack design and
    [Core value and vector semantics](https://webassembly.github.io/spec/core/exec/instructions.html).

@@ -264,6 +264,12 @@ pub const VectorLaneSize = enum(u2) { byte, half, word };
 
 pub const VectorIntegerSize = enum(u2) { byte, half, word, double };
 
+/// NaN-propagating FMIN/FMAX Vd.4S/2D, Vn, Vm (not FMINNM/FMAXNM).
+pub fn minMaxFloatV128(vd: Reg, vn: Reg, vm: Reg, double_precision: bool, maximum: bool) u32 {
+    const base: u32 = if (maximum) 0x4E20F400 else 0x4EA0F400;
+    return base | (@as(u32, @intFromBool(double_precision)) << 22) | (r(vm) << 16) | (r(vn) << 5) | r(vd);
+}
+
 /// ABS/NEG Vd.16B/8H/4S/2D, Vn; wrapping, not saturating.
 pub fn integerUnaryV128(vd: Reg, vn: Reg, size: VectorIntegerSize, negate: bool) u32 {
     const base: u32 = if (negate) 0x6E20B800 else 0x4E20B800;
@@ -1005,6 +1011,13 @@ pub fn brk(imm16: u16) u32 {
 // Byte-exact encodings, cross-checked against `llvm-mc -triple
 // arm64 -show-encoding` output. These pin the bit layouts; the
 // execution tests in masm.zig prove them on hardware.
+
+test "jit asm_aarch64: SIMD float minmax encodings" {
+    try std.testing.expectEqual(@as(u32, 0x4eb1f4a3), minMaxFloatV128(.x3, .x5, .x17, false, false));
+    try std.testing.expectEqual(@as(u32, 0x4e31f4a3), minMaxFloatV128(.x3, .x5, .x17, false, true));
+    try std.testing.expectEqual(@as(u32, 0x4ef1f4a3), minMaxFloatV128(.x3, .x5, .x17, true, false));
+    try std.testing.expectEqual(@as(u32, 0x4e71f4a3), minMaxFloatV128(.x3, .x5, .x17, true, true));
+}
 
 test "jit asm_aarch64: SIMD integer unary and average encodings" {
     const expectEqual = std.testing.expectEqual;
