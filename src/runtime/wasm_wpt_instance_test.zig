@@ -569,3 +569,39 @@ test "WPT object identity: equal primitive global imports allocate distinct addr
         , hardened, false);
     }
 }
+
+test "WPT object identity: memory buffer cache survives collection after JS and Wasm growth" {
+    // Keep only a WeakRef to the old buffer. Successful growth detaches and
+    // removes its native host-view root; a later buffer getter must not follow
+    // MemoryState's former raw pointer after that object has been collected.
+    for ([_]bool{ false, true }) |hardened| {
+        try expectTrue(
+            \\const growModule = new WebAssembly.Module(new Uint8Array([0,97,115,109,1,0,0,0,1,6,1,96,1,127,1,127,2,9,1,1,115,1,109,2,1,1,3,3,2,1,0,7,8,1,4,103,114,111,119,0,0,10,8,1,6,0,32,0,64,0,11]));
+            \\let correct = true;
+            \\for (const viaWasm of [false, true]) {
+            \\  for (const delta of [0, 1]) {
+            \\    const memory = new WebAssembly.Memory({initial: 1, maximum: 3});
+            \\    const old = (() => {
+            \\      const buffer = memory.buffer;
+            \\      new Uint8Array(buffer)[0] = 101;
+            \\      return new WeakRef(buffer);
+            \\    })();
+            \\    const previous = viaWasm
+            \\      ? new WebAssembly.Instance(growModule, {s: {m: memory}}).exports.grow(delta)
+            \\      : memory.grow(delta);
+            \\    __clearKeptObjects();
+            \\    __collectGarbage();
+            \\    for (let i = 0; i < 100; i++) { const temporary = {i}; }
+            \\    __clearKeptObjects();
+            \\    __collectGarbage();
+            \\    const current = memory.buffer;
+            \\    correct = previous === 1 && current.byteLength === (1 + delta) * 65536 &&
+            \\      current === memory.buffer && new Uint8Array(current)[0] === 101 && correct;
+            \\    const former = old.deref();
+            \\    correct = (former === undefined || former.byteLength === 0) && correct;
+            \\  }
+            \\}
+            \\correct
+        , hardened, true);
+    }
+}

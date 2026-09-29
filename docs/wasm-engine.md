@@ -428,7 +428,10 @@ not its reallocatable byte backing, so growth preserves wrapper identity and
 all aliases share its cached `buffer`. As with function wrappers, entries are
 quota-accounted strong roots for the existing store lifetime, traced on every
 GC and released at teardown; pre-start instance rollback removes only that
-instance's partial entries, preserving imported providers.
+instance's partial entries, preserving imported providers. After growth removes
+old buffers from the rooted host-view registry, the buffer getter checks
+registry membership before dereferencing its cached pointer: GC may already
+have reclaimed that detached buffer before the next getter call.
 
 The closest prior art is
 [SpiderMonkey's `EnsureExportedGlobalObject` / `GetGlobalExport`](https://github.com/mozilla-firefox/firefox/blob/main/js/src/wasm/WasmModule.cpp):

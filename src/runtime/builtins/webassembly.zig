@@ -993,7 +993,15 @@ fn memoryBufferGet(realm: *Realm, this_value: Value, args: []const Value) Native
     _ = args;
     const st = try memoryStateOf(realm, this_value);
     if (st.buffer) |buffer| {
-        if (buffer.getArrayBuffer() != null) return heap_mod.taggedObject(buffer);
+        // Both JS and Wasm growth clear the rooted host-view registry. The
+        // old buffer may already have been collected (or its address reused)
+        // before this getter runs, so check membership without dereferencing
+        // the cached pointer first. Registered views are kept alive by GC.
+        for (st.mem.host_views.items) |view| {
+            if (view.object != @as(*anyopaque, @ptrCast(buffer))) continue;
+            if (buffer.getArrayBuffer() != null) return heap_mod.taggedObject(buffer);
+            break;
+        }
         st.buffer = null;
     }
     const buf = realm.heap.allocateObject() catch return error.OutOfMemory;
