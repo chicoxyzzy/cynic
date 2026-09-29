@@ -2470,14 +2470,15 @@ pub const Realm = struct {
         for (self.wasm_extern_global_cells.items) |root| {
             if (root.cell.* != ref_null) self.heap.markValue(Value{ .bits = @truncate(root.cell.*) });
         }
-        // A WebAssembly.Memory owns the identity of every materialized
-        // `.buffer` until the next non-shared grow detaches it. The host-view
-        // registry is outside the JS property graph, so mark those buffers
-        // explicitly; otherwise MemoryState's cached pointer could dangle
-        // after a collection.
+        // A WebAssembly.Memory roots its current cached buffer even without
+        // another JS reference. Replaced shared views remain in the registry
+        // only to refresh their borrowed backing after growth; the ordinary
+        // JS graph keeps live old views reachable, and their object finalizer
+        // unregisters unreachable ones before their addresses can be reused.
         for (self.wasm_instances.items) |instance| {
             for (instance.owned_memories) |*memory| {
                 for (memory.host_views.items) |view| {
+                    if (!view.strong_root) continue;
                     const object: *@import("object.zig").JSObject = @ptrCast(@alignCast(view.object));
                     self.heap.markValue(heap_mod.taggedObject(object));
                 }
@@ -2485,6 +2486,7 @@ pub const Realm = struct {
         }
         for (self.wasm_direct_memories.items) |memory| {
             for (memory.host_views.items) |view| {
+                if (!view.strong_root) continue;
                 const object: *@import("object.zig").JSObject = @ptrCast(@alignCast(view.object));
                 self.heap.markValue(heap_mod.taggedObject(object));
             }

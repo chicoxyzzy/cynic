@@ -234,6 +234,11 @@ pub const Intrinsics = struct {
     /// can resolve the intrinsic-default prototype from a native
     /// without re-walking globals.
     array_buffer_prototype: ?*JSObject = null,
+    /// %SharedArrayBuffer% / %SharedArrayBuffer.prototype% (§25.2).
+    /// Host-created wrappers and intrinsic constructor fallbacks must not
+    /// consult the replaceable global binding in an unhardened Realm.
+    shared_array_buffer_constructor: ?*JSFunction = null,
+    shared_array_buffer_prototype: ?*JSObject = null,
     /// `%DataView.prototype%` (§25.3.4). Same role as
     /// `array_buffer_prototype` — supplies the intrinsic default
     /// for §25.3.2.1's deferred OCFC.

@@ -188,6 +188,14 @@ the cache with their original receiver, including subclasses. Focused tests
 cover child realms, cache-only GC retention, memory-buffer replacement after
 growth, and allocation-failure rollback.
 
+Memory buffer conversion now covers both fixed and resizable wrappers,
+page-granular host resizing, and identity/extent updates across JS, interpreter,
+and Spasm growth. Shared wrappers stay frozen and attached; overlap-sensitive
+copies compare backing-store identity. Transfer rejects Wasm-owned storage and
+rechecks ordinary buffers after collecting coercion callbacks. Focused tests
+also cover allocation failure, weak registration cleanup, and child-realm
+teardown; these checks supplement the WPT score.
+
 The current [Wasm JS API](https://webassembly.github.io/spec/js-api/)
 defines AddressValue dictionary members as `any`: Memory/Table constructors
 read the dictionary before converting its numeric members. The pinned WPT

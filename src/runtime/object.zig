@@ -698,6 +698,9 @@ pub const JSObjectExtension = struct {
     /// `WebAssembly.Memory.prototype.buffer` returns: its bytes live in
     /// the realm's wasm arena, not this realm's general allocator.
     array_buffer_external: bool = false,
+    /// Wasm JS API §5.3 HostResizeArrayBuffer. Store-owned, not a GC edge;
+    /// the host-view detach callback clears it before releasing the store.
+    wasm_memory_buffer: ?*@import("wasm/wasm.zig").Memory = null,
     /// §25.2 SharedArrayBuffer backing store — a refcounted, non-GC
     /// block shared across agents. Present (and `array_buffer` null)
     /// on `SharedArrayBuffer` instances; `getArrayBuffer` returns the
@@ -2445,6 +2448,10 @@ pub const JSObject = struct {
         ext.array_buffer_external = true;
     }
 
+    pub fn getWasmMemoryBuffer(self: *const JSObject) ?*@import("wasm/wasm.zig").Memory {
+        return if (self.extension) |ext| ext.wasm_memory_buffer else null;
+    }
+
     /// In-place mutate of the slice; safe only when the extension
     /// already exists (the array_buffer setter ran).
     pub fn arrayBufferSlot(self: *JSObject) ?*?[]u8 {
@@ -2773,6 +2780,14 @@ pub const JSObject = struct {
             },
         }
         if (self.extension) |ext| {
+            // Old shared Wasm views are weak registry entries. Unregister
+            // before recycling this object so a later grow cannot refresh
+            // freed storage. Provider teardown clears this slot before its
+            // Memory headers disappear, making either teardown order safe.
+            if (ext.wasm_memory_buffer) |memory| {
+                ext.wasm_memory_buffer = null;
+                memory.unregisterHostView(self);
+            }
             ext.deinit(allocator);
             allocator.destroy(ext);
         }

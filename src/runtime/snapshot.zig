@@ -309,12 +309,13 @@ const extension_asserted_fields = [_][]const u8{
     "private_brand",         "private_compile_prefix",       "weak_ref_target",
     "finalization_cells",    "array_buffer",                 "array_buffer_external",
     "shared_block",          "array_buffer_max_byte_length", "typed_view",
-    "data_view",             "host_data",                    "shadow_realm_owner",
-    "disposable_state",      "disposable_resources",         "async_dispose_walk",
-    "temporal_record",       "intl_record",                  "array_like_iter",
-    "map_set_iter",          "regexp_string_iter",           "iter_record",
-    "iter_helper",           "regex_perlex",                 "proxy_target",
-    "proxy_handler",         "proxy_target_fn",              "sparse_elements",
+    "wasm_memory_buffer",    "data_view",                    "host_data",
+    "shadow_realm_owner",    "disposable_state",             "disposable_resources",
+    "async_dispose_walk",    "temporal_record",              "intl_record",
+    "array_like_iter",       "map_set_iter",                 "regexp_string_iter",
+    "iter_record",           "iter_helper",                  "regex_perlex",
+    "proxy_target",          "proxy_handler",                "proxy_target_fn",
+    "sparse_elements",
 };
 /// Extension fields recomputed / dropped at restore — never
 /// serialized, never asserted-default. `key_anchors` re-derives from
@@ -897,7 +898,7 @@ const Capture = struct {
             ext.instance_field_inits != null or ext.private_method_inits != null or
             ext.private_brand.len != 0 or ext.private_compile_prefix.len != 0 or
             !ext.weak_ref_target.isUndefined() or ext.finalization_cells != null or
-            ext.array_buffer != null or ext.array_buffer_external or
+            ext.array_buffer != null or ext.array_buffer_external or ext.wasm_memory_buffer != null or
             ext.shared_block != null or ext.array_buffer_max_byte_length != null or
             ext.typed_view != null or ext.data_view != null or ext.host_data != null or
             ext.shadow_realm_owner != null or ext.disposable_state != null or

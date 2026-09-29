@@ -274,11 +274,20 @@ pub const Imports = struct {
 
 /// One JS `ArrayBuffer` view cached by a `WebAssembly.Memory` wrapper. Kept
 /// opaque so the standalone Wasm engine does not depend on JSObject layout.
-/// Realm root marking follows `object`; a successful non-shared grow invokes
-/// `detach_fn` before execution can re-enter JS.
+/// Realm root marking follows `object` only for a current cached view.
+/// Growth refreshes retained views and detaches fixed non-shared views before
+/// execution can re-enter JS.
 pub const MemoryHostView = struct {
     object: *anyopaque,
     detach_fn: *const fn (*anyopaque) void,
+    /// Current cached buffers are strong roots. Replaced shared views are
+    /// weak entries, removed by their JSObject finalizer when unreachable.
+    strong_root: bool = true,
+    /// Called after Memory.data holds the grown store. This callback must not
+    /// allocate, mutate this registry, or re-enter JS. Return true to retain
+    /// this registration (preserving its root strength), or false after
+    /// invalidating a view that no longer aliases the store.
+    refresh_fn: ?*const fn (*anyopaque, []u8) bool = null,
 };
 
 /// Linear memory: a byte-addressable, page-granular buffer. (The
@@ -310,12 +319,46 @@ pub const Memory = struct {
         try self.host_views.append(self.host_view_allocator.?, view);
     }
 
-    pub fn detachHostViewsAfterGrow(self: *Memory) void {
-        // Shared memories expose a non-detachable SharedArrayBuffer. Their
-        // backing-store growth remains a separate shared-data-block concern.
-        if (self.is_shared) return;
-        for (self.host_views.items) |view| view.detach_fn(view.object);
-        self.host_views.clearRetainingCapacity();
+    /// Keep refreshing an old shared view only while JS still retains it.
+    /// Compare pointers without dereferencing a potentially stale cache entry.
+    pub fn weakenHostView(self: *Memory, object: *anyopaque) void {
+        for (self.host_views.items) |*view| {
+            if (view.object != object) continue;
+            view.strong_root = false;
+            return;
+        }
+    }
+
+    /// Remove a converted or collected view. Registry removal itself does
+    /// not invoke callbacks or allocate, so object sweeping can call it.
+    pub fn unregisterHostView(self: *Memory, object: *anyopaque) void {
+        for (self.host_views.items, 0..) |view, index| {
+            if (view.object != object) continue;
+            _ = self.host_views.swapRemove(index);
+            return;
+        }
+    }
+
+    /// Publish a successfully grown store and refresh host views without any
+    /// allocation or JS re-entry. A failed growth must not call this method.
+    pub fn commitGrowth(self: *Memory, bytes: []u8) void {
+        self.data = bytes;
+        var retained: usize = 0;
+        for (self.host_views.items) |view| {
+            const keep = if (view.refresh_fn) |refresh|
+                refresh(view.object, bytes)
+            else if (self.is_shared)
+                true
+            else blk: {
+                view.detach_fn(view.object);
+                break :blk false;
+            };
+            if (keep) {
+                self.host_views.items[retained] = view;
+                retained += 1;
+            }
+        }
+        self.host_views.items.len = retained;
     }
 
     pub fn releaseBacking(self: *Memory, fallback: std.mem.Allocator) void {
@@ -329,6 +372,145 @@ pub const Memory = struct {
         self.backing_released = true;
     }
 };
+
+const TestMemoryHostView = struct {
+    memory: *Memory,
+    bytes: ?[]u8,
+    retain_after_refresh: bool = true,
+    refresh_calls: usize = 0,
+    detach_calls: usize = 0,
+    saw_committed_data: bool = true,
+
+    fn refresh(object: *anyopaque, bytes: []u8) bool {
+        const self: *TestMemoryHostView = @ptrCast(@alignCast(object));
+        self.refresh_calls += 1;
+        self.saw_committed_data = self.saw_committed_data and
+            self.memory.data.ptr == bytes.ptr and self.memory.data.len == bytes.len;
+        self.bytes = bytes;
+        if (!self.retain_after_refresh) detach(object);
+        return self.retain_after_refresh;
+    }
+
+    fn detach(object: *anyopaque) void {
+        const self: *TestMemoryHostView = @ptrCast(@alignCast(object));
+        self.detach_calls += 1;
+        self.bytes = null;
+    }
+
+    fn registration(self: *TestMemoryHostView) MemoryHostView {
+        return .{ .object = self, .detach_fn = detach, .refresh_fn = refresh };
+    }
+};
+
+test "wasm Memory host views refresh committed growth and release retained views once" {
+    const testing = std.testing;
+    var memory: Memory = .{
+        .data = try testing.allocator.alloc(u8, 8),
+        .max_pages = null,
+        .backing_allocator = testing.allocator,
+    };
+    defer memory.releaseBacking(testing.allocator);
+    var removed: TestMemoryHostView = .{ .memory = &memory, .bytes = memory.data, .retain_after_refresh = false };
+    var retained: TestMemoryHostView = .{ .memory = &memory, .bytes = memory.data };
+    var legacy: TestMemoryHostView = .{ .memory = &memory, .bytes = memory.data };
+    try memory.registerHostView(testing.allocator, removed.registration());
+    try memory.registerHostView(testing.allocator, retained.registration());
+    try memory.registerHostView(testing.allocator, .{ .object = &legacy, .detach_fn = TestMemoryHostView.detach });
+    const registry_storage = memory.host_views.items.ptr;
+    const registry_capacity = memory.host_views.capacity;
+
+    const grown = try testing.allocator.realloc(memory.data, 16);
+    memory.commitGrowth(grown);
+    try testing.expect(removed.saw_committed_data and retained.saw_committed_data);
+    try testing.expectEqual(@as(usize, 1), memory.host_views.items.len);
+    try testing.expect(memory.host_views.items[0].object == @as(*anyopaque, @ptrCast(&retained)));
+    try testing.expectEqual(@as(usize, 1), removed.refresh_calls);
+    try testing.expectEqual(@as(usize, 1), removed.detach_calls);
+    try testing.expectEqual(@as(usize, 1), legacy.detach_calls);
+    try testing.expect(removed.bytes == null and legacy.bytes == null);
+    try testing.expectEqual(@as(usize, 16), retained.bytes.?.len);
+    try testing.expect(retained.bytes.?.ptr == memory.data.ptr);
+
+    // Successful zero growth still refreshes the persistent view. The
+    // registry compacts in place and never allocates during publication.
+    memory.commitGrowth(memory.data);
+    try testing.expectEqual(@as(usize, 2), retained.refresh_calls);
+    try testing.expectEqual(@as(usize, 0), retained.detach_calls);
+    try testing.expectEqual(@as(usize, 1), removed.refresh_calls);
+    try testing.expect(registry_storage == memory.host_views.items.ptr);
+    try testing.expectEqual(registry_capacity, memory.host_views.capacity);
+    try testing.expect(retained.saw_committed_data);
+
+    memory.releaseBacking(testing.allocator);
+    memory.releaseBacking(testing.allocator);
+    try testing.expectEqual(@as(usize, 1), retained.detach_calls);
+    try testing.expectEqual(@as(usize, 1), removed.detach_calls);
+    try testing.expectEqual(@as(usize, 1), legacy.detach_calls);
+    try testing.expect(retained.bytes == null);
+    try testing.expectEqual(@as(usize, 0), memory.host_views.items.len);
+    try testing.expect(memory.host_view_allocator == null);
+    try testing.expectEqual(@as(usize, 0), memory.data.len);
+}
+
+test "wasm Memory unregisterHostView removes only the selected registration" {
+    const testing = std.testing;
+    var memory: Memory = .{
+        .data = try testing.allocator.alloc(u8, 8),
+        .max_pages = null,
+        .backing_allocator = testing.allocator,
+    };
+    defer memory.releaseBacking(testing.allocator);
+    var first: TestMemoryHostView = .{ .memory = &memory, .bytes = memory.data };
+    var removed: TestMemoryHostView = .{ .memory = &memory, .bytes = memory.data };
+    var last: TestMemoryHostView = .{ .memory = &memory, .bytes = memory.data };
+    var unregistered: TestMemoryHostView = .{ .memory = &memory, .bytes = memory.data };
+    try memory.registerHostView(testing.allocator, first.registration());
+    try memory.registerHostView(testing.allocator, removed.registration());
+    try memory.registerHostView(testing.allocator, last.registration());
+
+    memory.unregisterHostView(&removed);
+    memory.unregisterHostView(&removed);
+    memory.unregisterHostView(&unregistered);
+    try testing.expectEqual(@as(usize, 2), memory.host_views.items.len);
+    try testing.expectEqual(@as(usize, 0), removed.detach_calls);
+    memory.commitGrowth(memory.data);
+    try testing.expectEqual(@as(usize, 1), first.refresh_calls);
+    try testing.expectEqual(@as(usize, 0), removed.refresh_calls);
+    try testing.expectEqual(@as(usize, 1), last.refresh_calls);
+    memory.releaseBacking(testing.allocator);
+    try testing.expectEqual(@as(usize, 1), first.detach_calls);
+    try testing.expectEqual(@as(usize, 0), removed.detach_calls);
+    try testing.expectEqual(@as(usize, 1), last.detach_calls);
+}
+
+test "wasm Memory shared growth refreshes callbacks and preserves legacy registrations" {
+    const testing = std.testing;
+    var memory: Memory = .{
+        .data = try testing.allocator.alloc(u8, 8),
+        .max_pages = null,
+        .is_shared = true,
+        .backing_allocator = testing.allocator,
+    };
+    defer memory.releaseBacking(testing.allocator);
+    var retained: TestMemoryHostView = .{ .memory = &memory, .bytes = memory.data };
+    var removed: TestMemoryHostView = .{ .memory = &memory, .bytes = memory.data, .retain_after_refresh = false };
+    var legacy: TestMemoryHostView = .{ .memory = &memory, .bytes = memory.data };
+    try memory.registerHostView(testing.allocator, retained.registration());
+    try memory.registerHostView(testing.allocator, removed.registration());
+    try memory.registerHostView(testing.allocator, .{ .object = &legacy, .detach_fn = TestMemoryHostView.detach });
+
+    memory.commitGrowth(memory.data);
+    try testing.expectEqual(@as(usize, 2), memory.host_views.items.len);
+    try testing.expectEqual(@as(usize, 1), retained.refresh_calls);
+    try testing.expectEqual(@as(usize, 1), removed.refresh_calls);
+    try testing.expectEqual(@as(usize, 1), removed.detach_calls);
+    try testing.expectEqual(@as(usize, 0), legacy.detach_calls);
+    try testing.expect(retained.saw_committed_data and removed.saw_committed_data);
+    memory.releaseBacking(testing.allocator);
+    try testing.expectEqual(@as(usize, 1), retained.detach_calls);
+    try testing.expectEqual(@as(usize, 1), removed.detach_calls);
+    try testing.expectEqual(@as(usize, 1), legacy.detach_calls);
+}
 
 /// An instantiated module: its validated functions plus runtime state.
 /// Linear memory and tables join in later steps; the integer+control
@@ -1983,8 +2165,7 @@ fn spasmMemoryGrow(instance_opaque: *anyopaque, mem_idx: u32, delta: u64, out_ba
         const old_len = mem.data.len;
         const grown = mem.storeAllocator(inst.gpa).realloc(mem.data, byte_len) catch break :grow;
         @memset(grown[old_len..], 0);
-        mem.detachHostViewsAfterGrow();
-        mem.data = grown;
+        mem.commitGrowth(grown);
         result = @bitCast(old);
     }
     // Hand the body the *current* base/len — grown on success, unchanged on
@@ -3542,8 +3723,7 @@ fn growMem(ip: *Interp, mem: *Memory, delta: u64) ?u64 {
     const old_len = mem.data.len;
     const grown = mem.storeAllocator(ip.instance.gpa).realloc(mem.data, byte_len) catch return null;
     @memset(grown[old_len..], 0);
-    mem.detachHostViewsAfterGrow();
-    mem.data = grown;
+    mem.commitGrowth(grown);
     return old;
 }
 
