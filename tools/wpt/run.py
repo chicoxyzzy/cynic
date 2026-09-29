@@ -24,6 +24,7 @@ ROOT = Path(__file__).resolve().parents[2]
 PROTOCOL = '@@WPT@@'
 SCHEMA_VERSION = 1
 MAX_OUTPUT_BYTES = 8 * 1024 * 1024
+BUILD_MODES = ('Debug', 'ReleaseSafe', 'ReleaseFast', 'ReleaseSmall')
 SUBTEST_STATUS = {0: 'PASS', 1: 'FAIL', 2: 'TIMEOUT', 3: 'NOTRUN', 4: 'PRECONDITION_FAILED'}
 FILE_STATUSES = {'pass', 'fail', 'timeout', 'crash', 'execution_error', 'output_limit',
                  'protocol_error', 'incomplete', 'no_tests', 'harness_error'}
@@ -178,6 +179,35 @@ def execute_command(command, timeout, max_output_bytes=MAX_OUTPUT_BYTES):
         report.update(status='output_limit', message='process output exceeded capture limit')
     report.update(duration_seconds=round(time.monotonic() - start, 3), stdout=out, stderr=err)
     return report
+
+
+def probe_build_info(binary, timeout=5.0):
+    """Verify the executable's own build mode before accepting fixture results."""
+    # Reuse the timeout and bounded diagnostic capture from fixture execution.
+    # A metadata response has no WPT records, hence the expected incomplete
+    # status here; only the standalone JSON document below establishes success.
+    outcome = execute_command([str(binary), '--build-info'], timeout, max_output_bytes=4096)
+    if outcome['returncode'] != 0 or outcome['status'] != 'incomplete':
+        raise ValueError('build-info probe failed (' + outcome['status'] + '): ' +
+                         (outcome['message'] or 'unexpected process response'))
+
+    def unique_fields(pairs):
+        fields = {}
+        for name, value in pairs:
+            if name in fields:
+                raise ValueError('duplicate field: ' + name)
+            fields[name] = value
+        return fields
+
+    try:
+        metadata = json.loads(outcome['stdout'], object_pairs_hook=unique_fields)
+    except ValueError as error:
+        raise ValueError('build-info response must be standalone JSON: ' + str(error)) from error
+    if (not isinstance(metadata, dict) or set(metadata) != {'schema_version', 'build_mode'} or
+            type(metadata['schema_version']) is not int or metadata['schema_version'] != 1 or
+            metadata['build_mode'] not in BUILD_MODES):
+        raise ValueError('build-info response has an unsupported schema or build mode')
+    return metadata['build_mode']
 
 
 def corpus_file(directory, name):
@@ -368,6 +398,8 @@ def capture_provenance():
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--binary', type=Path, required=True, help='built cynic-wpt-case executable')
+    parser.add_argument('--expect-build-mode', choices=BUILD_MODES,
+                        help='require this observed executor build mode before running fixtures')
     parser.add_argument('--manifest', type=Path, default=ROOT / 'vendor/wpt/manifest.json')
     parser.add_argument('--filter', default='', help='substring of fixture path plus variant')
     parser.add_argument('--list', action='store_true', help='list selected cases without executing')
@@ -402,6 +434,9 @@ def main(argv=None):
         binary = args.binary.resolve()
         if not binary.is_file():
             raise ValueError('runner binary does not exist: ' + str(binary))
+        build_mode = probe_build_info(binary)
+        if args.expect_build_mode and build_mode != args.expect_build_mode:
+            raise ValueError('executor build mode is ' + build_mode + '; expected ' + args.expect_build_mode)
         directory = args.manifest.resolve().parent
         harness_source = corpus_file(directory, 'resources/testharness.js').read_text(encoding='utf-8')
         local = Path(__file__).resolve().parent
@@ -427,7 +462,8 @@ def main(argv=None):
                   # identity for reproduction without pinning this comparison.
                   'binary_sha256': file_sha256(binary),
                   'provenance': capture_provenance(),
-                  'configuration': {'timeout': args.timeout, 'long_timeout': args.long_timeout,
+                  'configuration': {'build_mode': build_mode,
+                                    'timeout': args.timeout, 'long_timeout': args.long_timeout,
                                     'fuel': args.fuel, 'memory_limit': args.memory_limit,
                                     'gc_threshold': args.gc_threshold},
                   'filter': args.filter, 'excluded': excluded, 'results': []}

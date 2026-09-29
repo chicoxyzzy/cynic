@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -18,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[2]
 BINARY = None
 HARNESS = None
 PREFIX = "@@WPT@@"
+BUILD_MODES = ("Debug", "ReleaseSafe", "ReleaseFast", "ReleaseSmall")
 
 
 class CaseFixture:
@@ -45,6 +47,81 @@ class CaseFixture:
     def records(self, result):
         return [json.loads(line[len(PREFIX):])
                 for line in result.stdout.split("\n") if line.startswith(PREFIX)]
+
+
+def query_build_info(binary):
+    result = subprocess.run([str(binary), "--build-info"], capture_output=True,
+                            text=True, timeout=20)
+    if result.returncode != 0:
+        raise ValueError("executor --build-info failed: " + result.stderr.strip())
+    if result.stderr:
+        raise ValueError("executor --build-info wrote unexpected diagnostics: " +
+                         result.stderr.strip())
+    try:
+        metadata = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise ValueError("executor --build-info did not return JSON") from error
+    if (not isinstance(metadata, dict) or
+            set(metadata) != {"schema_version", "build_mode"} or
+            type(metadata["schema_version"]) is not int or
+            metadata["schema_version"] != 1 or
+            metadata["build_mode"] not in BUILD_MODES):
+        raise ValueError("executor --build-info returned invalid metadata")
+    return metadata
+
+
+class BuildInfoContract(CaseFixture, unittest.TestCase):
+    def test_standalone_query_needs_no_scripts(self):
+        metadata = query_build_info(BINARY)
+        self.assertEqual(metadata["schema_version"], 1)
+        self.assertIn(metadata["build_mode"], BUILD_MODES)
+
+    def test_query_rejects_scripts_in_either_order_without_running_them(self):
+        with tempfile.TemporaryDirectory(prefix="cynic-wpt-build-info-") as temp:
+            script = Path(temp) / "must-not-run.js"
+            script.write_text("print('must not run');", encoding="utf-8")
+            for arguments in (("--build-info", str(script)),
+                              (str(script), "--build-info")):
+                with self.subTest(arguments=arguments):
+                    result = subprocess.run([str(BINARY), *arguments], capture_output=True,
+                                            text=True, timeout=20)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(result.stdout, "")
+                    self.assertTrue(result.stderr)
+
+    def test_query_rejects_execution_options_and_duplicate_queries(self):
+        for option in ("--fuel=1", "--memory-limit=1", "--gc-threshold=1",
+                       "--build-info"):
+            for arguments in (("--build-info", option), (option, "--build-info")):
+                with self.subTest(arguments=arguments):
+                    result = self.execute(options=arguments)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(result.stdout, "")
+                    self.assertTrue(result.stderr)
+
+    def test_expected_mode_is_consumed_before_running_tests(self):
+        actual = query_build_info(BINARY)["build_mode"]
+        result = subprocess.run(
+            [sys.executable, __file__, "--binary", str(BINARY),
+             "--expect-build-mode", actual,
+             "ExecutorContract.test_print_and_shared_global_scripts"],
+            capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Ran 1 test", result.stderr)
+
+    def test_wrong_expected_mode_fails_before_test_selection(self):
+        actual = query_build_info(BINARY)["build_mode"]
+        different = next(mode for mode in BUILD_MODES if mode != actual)
+        result = subprocess.run(
+            [sys.executable, __file__, "--binary", str(BINARY),
+             "--expect-build-mode", different, "NonexistentTest"],
+            capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("executor build mode mismatch", result.stderr)
+        self.assertIn("expected " + different, result.stderr)
+        self.assertIn("got " + actual, result.stderr)
+        self.assertNotIn("NonexistentTest", result.stderr)
+        self.assertEqual(result.stdout, "")
 
 
 class ExecutorContract(CaseFixture, unittest.TestCase):
@@ -261,6 +338,8 @@ def main():
     global BINARY, HARNESS
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", default=os.environ.get("WPT_CASE_BINARY"))
+    parser.add_argument("--expect-build-mode", choices=BUILD_MODES,
+                        help="require the executor to report this Zig optimization mode")
     parser.add_argument("--harness", type=Path,
                         default=ROOT / "vendor/wpt/resources/testharness.js")
     options, unittest_args = parser.parse_known_args()
@@ -268,6 +347,14 @@ def main():
         parser.error("--binary or WPT_CASE_BINARY is required")
     BINARY = Path(options.binary).resolve()
     HARNESS = options.harness.resolve()
+    if options.expect_build_mode is not None:
+        try:
+            actual = query_build_info(BINARY)["build_mode"]
+        except (OSError, subprocess.TimeoutExpired, ValueError) as error:
+            parser.error(str(error))
+        if actual != options.expect_build_mode:
+            parser.error("executor build mode mismatch: expected " +
+                         options.expect_build_mode + ", got " + actual)
     unittest.main(argv=[__file__, *unittest_args])
 
 

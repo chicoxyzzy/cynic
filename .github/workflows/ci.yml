@@ -239,7 +239,7 @@ jobs:
   wpt-wasm-jsapi:
     name: WPT Wasm JavaScript API (scoped regression gate)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     needs: build-and-test
     steps:
       - name: Audit egress (advisory)
@@ -258,18 +258,26 @@ jobs:
       - name: Verify pinned WPT sources
         run: python3 tools/wpt/import_corpus.py --verify
 
-      - name: Verify WPT runner and real-engine completion
-        run: zig build test-wpt
+      - name: Verify WPT tooling and both executor build modes
+        run: zig build test-wpt test-wpt-safe
 
       - name: Score WPT and protect every previously passing subtest
-        run: zig build wpt -- --quiet --baseline=tools/wpt/baseline.json --json-out=wpt-run.json
+        run: zig build wpt -- --quiet --expect-build-mode=ReleaseFast --baseline=tools/wpt/baseline.json --json-out=wpt-run.json
+
+      - name: Score WPT with ReleaseSafe and allocation-pressure GC
+        run: zig build wpt-safe -- --quiet --gc-threshold=1 --expect-build-mode=ReleaseSafe --baseline=tools/wpt/baseline-gc.json --json-out=wpt-gc-run.json
+
+      - name: Require identical normal and GC-pressure results
+        run: python3 tools/wpt/compare_profiles.py --normal=wpt-run.json --gc-stress=wpt-gc-run.json
 
       - name: Preserve complete WPT results
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: wpt-wasm-jsapi-results
-          path: wpt-run.json
+          path: |
+            wpt-run.json
+            wpt-gc-run.json
           if-no-files-found: ignore
 
   wasm-testsuite:
