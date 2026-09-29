@@ -761,6 +761,16 @@ pub const Masm = struct {
 
     pub const PackedIntSize = enum(u8) { byte = 0x74, half = 0x75, word = 0x76 };
 
+    /// PUNPCKLBW/WD/DQ: interleave the low halves, retaining the SSE2 baseline.
+    pub fn unpackLowPackedInteger(self: *Masm, destination: Xmm, source: Xmm, size: PackedIntSize) error{OutOfMemory}!void {
+        const opcode: u8 = switch (size) {
+            .byte => 0x60,
+            .half => 0x61,
+            .word => 0x62,
+        };
+        try self.emitXmmReg(0x66, opcode, destination, source);
+    }
+
     pub fn compareEqualPacked(self: *Masm, destination: Xmm, source: Xmm, size: PackedIntSize) error{OutOfMemory}!void {
         try self.emitXmmReg(0x66, @intFromEnum(size), destination, source);
     }
@@ -1300,6 +1310,19 @@ test "jit asm_x86_64: encodes unaligned SIMD moves and packed i32 addition" {
         0xf3, 0x45, 0x0f, 0x6f, 0x8c, 0x24, 0x10, 0,    0,    0,
         0x66, 0x45, 0x0f, 0xfe, 0xca, 0xf3, 0x45, 0x0f, 0x7f, 0x8d,
         0xf0, 0xff, 0xff, 0xff,
+    }, machine.code.items);
+}
+
+test "jit asm_x86_64: SIMD widening encodings retain SSE2" {
+    var machine = Masm.init(std.testing.allocator);
+    defer machine.deinit();
+    try machine.unpackLowPackedInteger(.xmm9, .xmm10, .byte);
+    try machine.unpackLowPackedInteger(.xmm9, .xmm10, .half);
+    try machine.unpackLowPackedInteger(.xmm9, .xmm10, .word);
+    try std.testing.expectEqualSlices(u8, &.{
+        0x66, 0x45, 0x0f, 0x60, 0xca,
+        0x66, 0x45, 0x0f, 0x61, 0xca,
+        0x66, 0x45, 0x0f, 0x62, 0xca,
     }, machine.code.items);
 }
 

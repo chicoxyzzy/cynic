@@ -1,6 +1,17 @@
 //! SIMD scalar/vector shapes shared by Spasm's native backends.
 //! WebAssembly Core vector instructions (0xfd prefix).
 
+pub const WideningLoadOp = struct { width: u4, signed: bool };
+
+pub fn wideningLoadOp(sub: u32) ?WideningLoadOp {
+    return switch (sub) {
+        1, 2 => .{ .width = 1, .signed = sub == 1 },
+        3, 4 => .{ .width = 2, .signed = sub == 3 },
+        5, 6 => .{ .width = 4, .signed = sub == 5 },
+        else => null,
+    };
+}
+
 pub fn splatWidth(sub: u32) ?u4 {
     return switch (sub) {
         15 => 1,

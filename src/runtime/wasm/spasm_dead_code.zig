@@ -263,7 +263,7 @@ fn skipSimdImmediate(body: []const u8, index: *usize) ?void {
     switch (sub) {
         12 => skipBytes(body, index, 16) orelse return null, // v128.const
         21...34 => skipBytes(body, index, 1) orelse return null, // extract/replace_lane
-        0, 11 => skipMemArg(body, index) orelse return null, // v128.load/store
+        0...6, 11 => skipMemArg(body, index) orelse return null, // v128.load/store and widening loads
         84...91 => {
             skipMemArg(body, index) orelse return null;
             skipBytes(body, index, 1) orelse return null; // lane index
@@ -344,6 +344,22 @@ test "skipToFrameEnd refuses a truncated immediate" {
     var index: usize = 0;
     try std.testing.expect(skipToFrameEnd(&body, &index) == null);
     try std.testing.expectEqual(body.len, index);
+}
+
+test "skipToFrameEnd skips SIMD widening memory64 immediates" {
+    for (1..7) |sub| {
+        const body = [_]u8{ 0xfd, @intCast(sub), 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 1, 0x0b, 0x01 };
+        var index: usize = 0;
+        try std.testing.expect(skipToFrameEnd(&body, &index) != null);
+        try std.testing.expectEqual(body.len - 1, index);
+        const short = [_]u8{ 0xfd, @intCast(sub), 0, 0x0b, 0x0b };
+        index = 0;
+        try std.testing.expect(skipToFrameEnd(&short, &index) != null);
+        try std.testing.expectEqual(short.len, index);
+        const truncated = [_]u8{ 0xfd, @intCast(sub), 0, 0x80 };
+        index = 0;
+        try std.testing.expect(skipToFrameEnd(&truncated, &index) == null);
+    }
 }
 
 test "skipToFrameEnd skips SIMD lane memory64 immediates and any_true" {
