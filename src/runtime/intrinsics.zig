@@ -876,22 +876,23 @@ fn installSyntheticAccessorPair(
     // Two cells — one per role. They share the key + value
     // contents but each carries its own `is_setter` flag because
     // call dispatch reads that to pick the branch.
-    const get_cell = try realm.allocator.create(SyntheticAccessor);
-    get_cell.* = .{ .value = value, .key = key, .is_setter = false };
-    try realm.synth_accessor_cells.append(realm.allocator, get_cell);
-    const set_cell = try realm.allocator.create(SyntheticAccessor);
-    set_cell.* = .{ .value = value, .key = key, .is_setter = true };
-    try realm.synth_accessor_cells.append(realm.allocator, set_cell);
+    // Reserve the ledger first so failed initialization leaves each cell
+    // with an owner, even before a JSFunction has been allocated for it.
+    try realm.synth_accessor_cells.ensureUnusedCapacity(realm.allocator, 2);
+    const get_cell = try SyntheticAccessor.create(realm.allocator, value, key, false);
+    realm.synth_accessor_cells.appendAssumeCapacity(get_cell);
+    const set_cell = try SyntheticAccessor.create(realm.allocator, value, key, true);
+    realm.synth_accessor_cells.appendAssumeCapacity(set_cell);
 
     // Allocate the getter / setter JSFunctions. The native body
     // is a placeholder — call dispatch short-circuits on
     // `synth_accessor != null` before invoking it.
     const get_fn = try realm.heap.allocateFunctionNative(realm, synthAccessorPlaceholder, 0, "");
-    get_fn.synth_accessor = get_cell;
+    get_fn.synth_accessor = get_cell.retain();
     get_fn.has_construct = false;
     get_fn.extensible = false;
     const set_fn = try realm.heap.allocateFunctionNative(realm, synthAccessorPlaceholder, 1, "");
-    set_fn.synth_accessor = set_cell;
+    set_fn.synth_accessor = set_cell.retain();
     set_fn.has_construct = false;
     set_fn.extensible = false;
 
