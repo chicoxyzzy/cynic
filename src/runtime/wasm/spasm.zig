@@ -3516,6 +3516,30 @@ fn compileAarch64(
                     try m.emit(a64.strQImm(.x0, .x0, target));
                     sp -= 1;
                     stack[sp - 1] = .v128;
+                } else if (simd.narrowOp(sub)) |narrow| {
+                    if (sp < 2 or stack[sp - 2] != .v128 or stack[sp - 1] != .v128) return null;
+                    const target = refSlotOff(num_locals, sp - 2);
+                    const size: a64.VectorLaneSize = @enumFromInt(std.math.log2_int(u4, narrow.width));
+                    try m.emit(a64.ldrQImm(.x0, .x0, target));
+                    try m.emit(a64.ldrQImm(.x1, .x0, refSlotOff(num_locals, sp - 1)));
+                    try m.emit(a64.narrowIntegerV128(.x0, .x0, size, narrow.signed, false));
+                    try m.emit(a64.narrowIntegerV128(.x0, .x1, size, narrow.signed, true));
+                    try m.emit(a64.strQImm(.x0, .x0, target));
+                    sp -= 1;
+                } else if (simd.extendOp(sub)) |extend| {
+                    if (sp == 0 or stack[sp - 1] != .v128) return null;
+                    const target = refSlotOff(num_locals, sp - 1);
+                    const size: a64.VectorLaneSize = @enumFromInt(std.math.log2_int(u4, extend.width));
+                    try m.emit(a64.ldrQImm(.x0, .x0, target));
+                    try m.emit(a64.extendIntegerV128(.x0, .x0, size, extend.signed, extend.high));
+                    try m.emit(a64.strQImm(.x0, .x0, target));
+                } else if (simd.pairwiseAddOp(sub)) |pairwise| {
+                    if (sp == 0 or stack[sp - 1] != .v128) return null;
+                    const target = refSlotOff(num_locals, sp - 1);
+                    const size: a64.VectorLaneSize = @enumFromInt(std.math.log2_int(u4, pairwise.width));
+                    try m.emit(a64.ldrQImm(.x0, .x0, target));
+                    try m.emit(a64.pairwiseAddLongV128(.x0, .x0, size, pairwise.signed));
+                    try m.emit(a64.strQImm(.x0, .x0, target));
                 } else if (simd.integerBinaryOp(sub)) |binary| {
                     if (sp < 2 or stack[sp - 2] != .v128 or stack[sp - 1] != .v128) return null;
                     const target = refSlotOff(num_locals, sp - 2);

@@ -1651,6 +1651,17 @@ useful:
    and check every shift count through 127 plus large unsigned counts with
    live scalar/vector neighbors. Fallback tests exceed the native operand
    limit so further SIMD additions cannot silently remove their coverage.
+   Signed/unsigned narrowing, low/high extension, and pairwise extended add
+   now compile for every lane width. [Core narrowing semantics](https://webassembly.github.io/spec/core/exec/numerics.html#op-narrow)
+   interpret the source as signed even for unsigned destinations. ARM uses
+   `SQXTN/SQXTUN`, `SXTL/UXTL` (including high halves), and `SADDLP/UADDLP`,
+   as in Liftoff. x86 shares its unpack/sign-mask extension path with widening
+   loads. Unsigned i32-to-i16 narrowing clamps negatives, subtracts 32768,
+   uses `PACKSSDW`, then flips each output sign bit; this avoids SSE4.1
+   `PACKUSDW`. Pairwise sums use masked shifts or `PMADDWD` with unit
+   multipliers. Tests exhaust narrow halfword and extended byte/halfword
+   inputs and pairwise byte pairs, plus wider boundaries, mixed lane order,
+   live neighbors, and unreachable code. No runtime helpers are added.
    Both floating lane widths now compile `abs/neg/sqrt` and `add/sub/mul/div`.
    Like Liftoff's ARM64 and x64 lowerings linked above, ARM uses direct NEON
    operations; x86 uses packed SSE/SSE2 arithmetic and sign masks for abs/neg.

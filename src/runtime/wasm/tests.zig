@@ -3101,6 +3101,191 @@ test "wasm interp: SIMD float minmax quiets signaling NaNs" {
     }
 }
 
+const SimdLaneConversionCase = struct {
+    sub: u32,
+    bits: u7,
+    kind: enum { narrow, extend, pairwise },
+    signed: bool,
+    high: bool = false,
+};
+
+const simd_lane_conversion_cases = [_]SimdLaneConversionCase{
+    .{ .sub = 101, .bits = 16, .kind = .narrow, .signed = true },
+    .{ .sub = 102, .bits = 16, .kind = .narrow, .signed = false },
+    .{ .sub = 133, .bits = 32, .kind = .narrow, .signed = true },
+    .{ .sub = 134, .bits = 32, .kind = .narrow, .signed = false },
+    .{ .sub = 135, .bits = 8, .kind = .extend, .signed = true },
+    .{ .sub = 136, .bits = 8, .kind = .extend, .signed = true, .high = true },
+    .{ .sub = 137, .bits = 8, .kind = .extend, .signed = false },
+    .{ .sub = 138, .bits = 8, .kind = .extend, .signed = false, .high = true },
+    .{ .sub = 167, .bits = 16, .kind = .extend, .signed = true },
+    .{ .sub = 168, .bits = 16, .kind = .extend, .signed = true, .high = true },
+    .{ .sub = 169, .bits = 16, .kind = .extend, .signed = false },
+    .{ .sub = 170, .bits = 16, .kind = .extend, .signed = false, .high = true },
+    .{ .sub = 199, .bits = 32, .kind = .extend, .signed = true },
+    .{ .sub = 200, .bits = 32, .kind = .extend, .signed = true, .high = true },
+    .{ .sub = 201, .bits = 32, .kind = .extend, .signed = false },
+    .{ .sub = 202, .bits = 32, .kind = .extend, .signed = false, .high = true },
+    .{ .sub = 124, .bits = 8, .kind = .pairwise, .signed = true },
+    .{ .sub = 125, .bits = 8, .kind = .pairwise, .signed = false },
+    .{ .sub = 126, .bits = 16, .kind = .pairwise, .signed = true },
+    .{ .sub = 127, .bits = 16, .kind = .pairwise, .signed = false },
+};
+
+fn buildSimdLaneConversionFunc(a: std.mem.Allocator, op: SimdLaneConversionCase, dead: bool) ![]const u8 {
+    var body: List = .empty;
+    try body.appendSlice(a, &.{ 1, 32, 0x7f, 0x20, 0, 0x20, 1 });
+    if (dead) try body.appendSlice(a, &.{ 0x02, 0x7b, 0x20, 2, 0x0c, 0 });
+    try body.appendSlice(a, &.{ 0x20, 2 });
+    if (op.kind == .narrow) try body.appendSlice(a, &.{ 0x20, 3 });
+    try body.append(a, 0xfd);
+    try uleb(a, &body, op.sub);
+    if (dead) try body.append(a, 0x0b);
+    try body.append(a, 0x0b);
+    return buildFunc(a, &.{ 0x7e, 0x7b, 0x7b, 0x7b }, &.{ 0x7e, 0x7b, 0x7b }, body.items, "lanes");
+}
+
+fn simdLaneInteger(value: u128, bits: u7, lane: usize, signed: bool) i128 {
+    const modulus = @as(u128, 1) << bits;
+    const raw = (value >> @as(u7, @intCast(lane * bits))) & (modulus - 1);
+    return @as(i128, @intCast(raw)) - (if (signed and raw >= modulus / 2) @as(i128, @intCast(modulus)) else 0);
+}
+
+fn expectedSimdLaneConversion(op: SimdLaneConversionCase, left: u128, right: u128) u128 {
+    const out_bits: u7 = if (op.kind == .narrow) op.bits / 2 else op.bits * 2;
+    const modulus = @as(u128, 1) << out_bits;
+    const out_lanes = 128 / @as(usize, out_bits);
+    var expected: u128 = 0;
+    for (0..out_lanes) |lane| {
+        const value = switch (op.kind) {
+            .narrow => blk: {
+                // Core narrow_u also interprets its *source* as signed.
+                const input = if (lane < out_lanes / 2) left else right;
+                const number = simdLaneInteger(input, op.bits, lane % (out_lanes / 2), true);
+                const lower: i128 = if (op.signed) -@as(i128, @intCast(modulus / 2)) else 0;
+                const upper: i128 = @intCast((if (op.signed) modulus / 2 else modulus) - 1);
+                break :blk std.math.clamp(number, lower, upper);
+            },
+            .extend => simdLaneInteger(left, op.bits, lane + (if (op.high) out_lanes else 0), op.signed),
+            .pairwise => simdLaneInteger(left, op.bits, lane * 2, op.signed) + simdLaneInteger(left, op.bits, lane * 2 + 1, op.signed),
+        };
+        expected |= (@as(u128, @bitCast(value)) & (modulus - 1)) << @as(u7, @intCast(lane * out_bits));
+    }
+    return expected;
+}
+
+fn expectSimdLaneConversion(instance: *interp.Instance, op: SimdLaneConversionCase, left: u128, right: u128) !void {
+    const before = instance.spasm_runs;
+    const result = try interp.invoke(instance, testing.allocator, 0, &.{ 37, simd_live_vector, left, right });
+    defer testing.allocator.free(result);
+    try testing.expectEqualSlices(u128, &.{ 37, simd_live_vector, expectedSimdLaneConversion(op, left, right) }, result);
+    try testing.expectEqual(before + 1, instance.spasm_runs);
+}
+
+test "wasm spasm: SIMD lane conversions preserve saturation boundaries order and live lanes" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (simd_lane_conversion_cases) |op| {
+        const module = try wasm.decode(a, try buildSimdLaneConversionFunc(a, op, false));
+        var instance: interp.Instance = undefined;
+        try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+        defer instance.deinit();
+        instance.spasm_enabled = true;
+        const sign = @as(u128, 1) << (op.bits - 1);
+        const mask = sign * 2 - 1;
+        const narrow_limit = @as(u128, 1) << (op.bits / 2);
+        const values = [_]u128{ 0, 1, 2, sign - 1, sign, sign + 1, mask - 1, mask, narrow_limit / 2 - 1, narrow_limit / 2, narrow_limit - 1, narrow_limit, (mask - narrow_limit / 2) & mask, (mask - narrow_limit / 2 + 1) & mask, 0x55555555 & mask, 0xaaaaaaaa & mask };
+        for (0..values.len) |li| {
+            for (0..values.len) |ri| {
+                var left: u128 = 0;
+                var right: u128 = 0;
+                for (0..128 / @as(usize, op.bits)) |lane| {
+                    const shift: u7 = @intCast(lane * op.bits);
+                    left |= values[(li + lane * 3) % values.len] << shift;
+                    right |= values[(ri + lane * 5) % values.len] << shift;
+                }
+                try expectSimdLaneConversion(&instance, op, left, right);
+            }
+        }
+        for (0..128) |bit| {
+            const single = @as(u128, 1) << @as(u7, @intCast(bit));
+            try expectSimdLaneConversion(&instance, op, single, ~single);
+            try expectSimdLaneConversion(&instance, op, ~single, single);
+        }
+        try testing.expectEqual(@as(u32, 1), instance.spasm_compiles);
+    }
+}
+
+test "wasm spasm: SIMD lane conversions exhaust narrow halfwords and extended bytes" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (simd_lane_conversion_cases) |op| {
+        if (!(op.kind == .narrow and op.bits == 16) and !(op.kind == .extend and op.bits <= 16)) continue;
+        const module = try wasm.decode(a, try buildSimdLaneConversionFunc(a, op, false));
+        var instance: interp.Instance = undefined;
+        try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+        defer instance.deinit();
+        instance.spasm_enabled = true;
+        const lanes = 128 / @as(usize, op.bits);
+        const count = @as(usize, 1) << @as(u6, @intCast(op.bits));
+        for (0..count) |base| {
+            var left: u128 = 0;
+            for (0..lanes) |lane| left |= @as(u128, (base + lane * 17) % count) << @as(u7, @intCast(lane * op.bits));
+            try expectSimdLaneConversion(&instance, op, left, ~left);
+        }
+        try testing.expectEqual(@as(u32, 1), instance.spasm_compiles);
+    }
+}
+
+test "wasm spasm: SIMD lane conversions exhaust pairwise byte pairs" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (simd_lane_conversion_cases) |op| {
+        if (op.kind != .pairwise or op.bits != 8) continue;
+        const module = try wasm.decode(a, try buildSimdLaneConversionFunc(a, op, false));
+        var instance: interp.Instance = undefined;
+        try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+        defer instance.deinit();
+        instance.spasm_enabled = true;
+        for (0..256) |left| {
+            for (0..32) |batch| {
+                var input: u128 = 0;
+                for (0..8) |lane| {
+                    const low: u8 = @truncate(left + lane * 17);
+                    const high: u8 = @intCast(batch * 8 + lane);
+                    input |= (@as(u128, low) | (@as(u128, high) << 8)) << @as(u7, @intCast(lane * 16));
+                }
+                try expectSimdLaneConversion(&instance, op, input, 0);
+            }
+        }
+        try testing.expectEqual(@as(u32, 8192), instance.spasm_runs);
+    }
+}
+
+test "wasm spasm: SIMD lane conversions skip unreachable code" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (simd_lane_conversion_cases) |op| {
+        const module = try wasm.decode(a, try buildSimdLaneConversionFunc(a, op, true));
+        var instance: interp.Instance = undefined;
+        try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+        defer instance.deinit();
+        instance.spasm_enabled = true;
+        const result = try interp.invoke(&instance, testing.allocator, 0, &.{ 37, simd_live_vector, ~simd_live_vector, 0 });
+        defer testing.allocator.free(result);
+        try testing.expectEqualSlices(u128, &.{ 37, simd_live_vector, ~simd_live_vector }, result);
+        try testing.expectEqual(@as(u32, 1), instance.spasm_runs);
+    }
+}
+
 const simd_float_arithmetic_ops = [_]u32{ 224, 225, 227, 228, 229, 230, 231, 236, 237, 239, 240, 241, 242, 243 };
 
 fn buildSimdFloatArithmeticFunc(a: std.mem.Allocator, sub: u32, dead: bool) ![]const u8 {

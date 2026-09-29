@@ -698,6 +698,10 @@ the measured design space:
   Wrapping add/sub/mul, saturating 8/16-bit add/sub, all integer shifts,
   and byte popcount compile on both targets. Counts are masked to the lane
   width; x86 retains SSE2 through packed/scalar sequences where necessary.
+  All signed/unsigned narrowing, low/high extension, and pairwise extended
+  sums compile too. ARM uses direct NEON instructions; x86 uses SSE2 pack,
+  unpack, shift, and multiply-add sequences. Unsigned i32-to-i16 narrowing
+  explicitly clamps negative source lanes before biasing and signed packing.
   Both floating lane widths also compile `abs/neg/sqrt` and `add/sub/mul/div`:
   direct NEON or packed SSE/SSE2 arithmetic, with bit-preserving sign masks
   for abs/neg on x86.
