@@ -11,13 +11,13 @@
     "testharness.js (patched)": "fbe2e52e029bbeea3fecdedf963b69589526a8a1e3ceb18947120667443147f7",
     "wasm/jsapi/wasm-module-builder.js (patched)": "83a83b12adc7d51533c818b23fd37936d03a7203e7015356f9e6852b8625964d"
   },
-  "binary_sha256": "58522e8581bd5d33b0c4216e173abb32bf142595f84c3046919315f470c7447a",
+  "binary_sha256": "f98b531e401ee105517e9c870275fa41c564b06609f3c27fa6b8119ba36ab101",
   "provenance": {
-    "generated_at_utc": "2026-09-28T22:45:47Z",
+    "generated_at_utc": "2026-09-29T00:19:28Z",
     "platform": "Darwin",
     "architecture": "arm64",
-    "engine_git_head": "39619d43d32d89c2bb1f6b7105636cf8e97bf857",
-    "engine_git_dirty": true
+    "engine_git_head": "5efeabe324367f563f02b979e230da053e5ec308",
+    "engine_git_dirty": false
   },
   "configuration": {
     "timeout": 10.0,
@@ -192,18 +192,18 @@
   "summary": {
     "files": {
       "execution_error": 2,
-      "fail": 24,
-      "pass": 14
+      "fail": 16,
+      "pass": 22
     },
     "subtests": {
-      "FAIL": 330,
-      "PASS": 266
+      "FAIL": 26,
+      "PASS": 570
     },
     "excluded_files": 40
   },
   "results": [
     {
-      "status": "fail",
+      "status": "pass",
       "subtests": [
         {
           "name": "Promise type",
@@ -227,13 +227,13 @@
         },
         {
           "name": "Empty buffer",
-          "status": 1,
-          "message": "promise_rejects_js: function \"function CompileError() { [native code] }\" is not an Error subtype"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Invalid code",
-          "status": 1,
-          "message": "promise_rejects_js: function \"function CompileError() { [native code] }\" is not an Error subtype"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Result type",
@@ -286,8 +286,8 @@
         },
         {
           "name": "Branding",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Invalid arguments",
@@ -296,268 +296,268 @@
         },
         {
           "name": "Empty module without imports argument: BufferSource argument",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Empty module without imports argument: Module argument",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Empty module with undefined imports argument: BufferSource argument",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Empty module with undefined imports argument: Module argument",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Empty module with empty imports argument: BufferSource argument",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Empty module with empty imports argument: Module argument",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "getter order for imports object: BufferSource argument",
-          "status": 1,
-          "message": "promise_test: Unhandled rejection with value: object \"LinkError: WebAssembly.Instance: import module namespace is not an object\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "getter order for imports object: Module argument",
-          "status": 1,
-          "message": "promise_test: Unhandled rejection with value: object \"LinkError: WebAssembly.Instance: import module namespace is not an object\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "imports: BufferSource argument",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "imports: Module argument",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "imports with empty module names: BufferSource argument",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "imports with empty module names: Module argument",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "imports with empty names: BufferSource argument",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "imports with empty names: Module argument",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "exports with empty name: function: BufferSource argument",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "exports with empty name: function: Module argument",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "exports with empty name: table: BufferSource argument",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "exports with empty name: table: Module argument",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "exports with empty name: global: BufferSource argument",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "exports with empty name: global: Module argument",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "No imports: BufferSource argument",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "No imports: Module argument",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "exports and imports: BufferSource argument",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "exports and imports: Module argument",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "i64 exports and imports: BufferSource argument",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "i64 exports and imports: Module argument",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "import with i32-returning function: BufferSource argument",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "import with i32-returning function: Module argument",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "import with function that takes and returns i32: BufferSource argument",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "import with function that takes and returns i32: Module argument",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "import with i64-returning function: BufferSource argument",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "import with i64-returning function: Module argument",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "import with function that takes and returns i64: BufferSource argument",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "import with function that takes and returns i64: Module argument",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "import with i32-taking function: BufferSource argument",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "import with i32-taking function: Module argument",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "import with i64-taking function: BufferSource argument",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "import with i64-taking function: Module argument",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "export i64-returning function: BufferSource argument",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "export i64-returning function: Module argument",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "i32 mutable WebAssembly.Global import: BufferSource argument",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "i32 mutable WebAssembly.Global import: Module argument",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "i64 mutable WebAssembly.Global import: BufferSource argument",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "i64 mutable WebAssembly.Global import: Module argument",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Multiple i64 arguments: BufferSource argument",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Multiple i64 arguments: Module argument",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "stray argument: BufferSource argument",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "stray argument: Module argument",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Synchronous options handling: Buffer argument",
           "status": 1,
-          "message": "promise_test: Unhandled rejection with value: object \"LinkError: WebAssembly.Instance: import module namespace is not an object\""
+          "message": "assert_array_equals: lengths differ, expected array [] length 0, got [\"module getter\", \"global getter\"] length 2"
         },
         {
           "name": "Synchronous options handling: Module argument",
-          "status": 1,
-          "message": "assert_array_equals: lengths differ, expected array [\"module getter\", \"global getter\"] length 2, got [] length 0"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Empty buffer",
-          "status": 1,
-          "message": "promise_rejects_js: function \"function CompileError() { [native code] }\" is not an Error subtype"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Invalid code",
-          "status": 1,
-          "message": "promise_rejects_js: function \"function CompileError() { [native code] }\" is not an Error subtype"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Changing the buffer",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         }
       ],
       "harness": {
@@ -1045,8 +1045,8 @@
       "subtests": [
         {
           "name": "Missing arguments",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => exn.getArg(tag)\" threw object \"RangeError: WebAssembly.Exception.prototype.getArg: index out of range\" (\"RangeError\") expected instance of function \"function TypeError() { [native code] }\" (\"TypeError\")"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Invalid exception argument",
@@ -1084,8 +1084,8 @@
       "subtests": [
         {
           "name": "Missing arguments",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => exn.is()\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Invalid exception argument",
@@ -1133,7 +1133,7 @@
       "variant": ""
     },
     {
-      "status": "fail",
+      "status": "pass",
       "subtests": [
         {
           "name": "name",
@@ -1157,8 +1157,8 @@
         },
         {
           "name": "Order of evaluation",
-          "status": 1,
-          "message": "WebAssembly.Global: invalid value type"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Invalid descriptor argument",
@@ -1177,233 +1177,233 @@
         },
         {
           "name": "i64 with default",
-          "status": 1,
-          "message": "assert_equals: valueOf expected (bigint) 0n but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Default value for type i32",
-          "status": 1,
-          "message": "assert_equals: valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Explicit value undefined for type i32",
-          "status": 1,
-          "message": "assert_equals: valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Explicit value null for type i32",
-          "status": 1,
-          "message": "assert_equals: valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Explicit value true for type i32",
-          "status": 1,
-          "message": "assert_equals: valueOf expected (number) 1 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Explicit value false for type i32",
-          "status": 1,
-          "message": "assert_equals: valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Explicit value 2 for type i32",
-          "status": 1,
-          "message": "assert_equals: valueOf expected (number) 2 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Explicit value \"3\" for type i32",
-          "status": 1,
-          "message": "assert_equals: valueOf expected (number) 3 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Explicit value object with toString returning string for type i32",
-          "status": 1,
-          "message": "assert_equals: value expected 5 but got 0"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Explicit value object with valueOf returning string for type i32",
-          "status": 1,
-          "message": "assert_equals: value expected 8 but got 0"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Explicit value object with toString returning number for type i32",
-          "status": 1,
-          "message": "assert_equals: value expected 6 but got 0"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Explicit value object with valueOf returning number for type i32",
-          "status": 1,
-          "message": "assert_equals: value expected 9 but got 0"
+          "status": 0,
+          "message": null
         },
         {
           "name": "BigInt value for type i32",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => new WebAssembly.Global(argument, 0n)\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Default value for type f32",
-          "status": 1,
-          "message": "assert_equals: valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Explicit value undefined for type f32",
-          "status": 1,
-          "message": "assert_equals: value expected 0 but got NaN"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Explicit value null for type f32",
-          "status": 1,
-          "message": "assert_equals: valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Explicit value true for type f32",
-          "status": 1,
-          "message": "assert_equals: valueOf expected (number) 1 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Explicit value false for type f32",
-          "status": 1,
-          "message": "assert_equals: valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Explicit value 2 for type f32",
-          "status": 1,
-          "message": "assert_equals: valueOf expected (number) 2 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Explicit value \"3\" for type f32",
-          "status": 1,
-          "message": "assert_equals: valueOf expected (number) 3 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Explicit value object with toString returning string for type f32",
-          "status": 1,
-          "message": "assert_equals: value expected 5 but got NaN"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Explicit value object with valueOf returning string for type f32",
-          "status": 1,
-          "message": "assert_equals: value expected 8 but got NaN"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Explicit value object with toString returning number for type f32",
-          "status": 1,
-          "message": "assert_equals: value expected 6 but got NaN"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Explicit value object with valueOf returning number for type f32",
-          "status": 1,
-          "message": "assert_equals: value expected 9 but got NaN"
+          "status": 0,
+          "message": null
         },
         {
           "name": "BigInt value for type f32",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => new WebAssembly.Global(argument, 0n)\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Default value for type f64",
-          "status": 1,
-          "message": "assert_equals: valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Explicit value undefined for type f64",
-          "status": 1,
-          "message": "assert_equals: value expected 0 but got NaN"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Explicit value null for type f64",
-          "status": 1,
-          "message": "assert_equals: valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Explicit value true for type f64",
-          "status": 1,
-          "message": "assert_equals: valueOf expected (number) 1 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Explicit value false for type f64",
-          "status": 1,
-          "message": "assert_equals: valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Explicit value 2 for type f64",
-          "status": 1,
-          "message": "assert_equals: valueOf expected (number) 2 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Explicit value \"3\" for type f64",
-          "status": 1,
-          "message": "assert_equals: valueOf expected (number) 3 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Explicit value object with toString returning string for type f64",
-          "status": 1,
-          "message": "assert_equals: value expected 5 but got NaN"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Explicit value object with valueOf returning string for type f64",
-          "status": 1,
-          "message": "assert_equals: value expected 8 but got NaN"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Explicit value object with toString returning number for type f64",
-          "status": 1,
-          "message": "assert_equals: value expected 6 but got NaN"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Explicit value object with valueOf returning number for type f64",
-          "status": 1,
-          "message": "assert_equals: value expected 9 but got NaN"
+          "status": 0,
+          "message": null
         },
         {
           "name": "BigInt value for type f64",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => new WebAssembly.Global(argument, 0n)\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Explicit value undefined for type i64",
-          "status": 1,
-          "message": "WebAssembly: an i64 value must be a BigInt"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Explicit value true for type i64",
-          "status": 1,
-          "message": "WebAssembly: an i64 value must be a BigInt"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Explicit value false for type i64",
-          "status": 1,
-          "message": "WebAssembly: an i64 value must be a BigInt"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Explicit value \"3\" for type i64",
-          "status": 1,
-          "message": "WebAssembly: an i64 value must be a BigInt"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Explicit value 123n for type i64",
-          "status": 1,
-          "message": "assert_equals: valueOf expected (bigint) 123n but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Explicit value object with toString returning string for type i64",
-          "status": 1,
-          "message": "WebAssembly: an i64 value must be a BigInt"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Explicit value object with valueOf returning string for type i64",
-          "status": 1,
-          "message": "WebAssembly: an i64 value must be a BigInt"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Explicit value object with toString returning bigint for type i64",
-          "status": 1,
-          "message": "WebAssembly: an i64 value must be a BigInt"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Explicit value object with valueOf returning bigint for type i64",
-          "status": 1,
-          "message": "WebAssembly: an i64 value must be a BigInt"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Pass non-bigint as i64 Global value: null",
@@ -1432,8 +1432,8 @@
         },
         {
           "name": "Stray argument",
-          "status": 1,
-          "message": "assert_equals: valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         }
       ],
       "harness": {
@@ -1471,7 +1471,7 @@
       "variant": ""
     },
     {
-      "status": "fail",
+      "status": "pass",
       "subtests": [
         {
           "name": "Branding",
@@ -1480,328 +1480,328 @@
         },
         {
           "name": "Immutable i32 (missing)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Immutable i32 with ToNumber side-effects (missing)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Immutable i32 (undefined)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Immutable i32 with ToNumber side-effects (undefined)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Immutable i32 (null)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Immutable i32 with ToNumber side-effects (null)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Immutable i32 (false)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Immutable i32 with ToNumber side-effects (false)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Immutable i32 (empty string)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Immutable i32 with ToNumber side-effects (empty string)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Immutable i32 (zero)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Immutable i32 with ToNumber side-effects (zero)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Mutable i32 (true)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Mutable i32 (one)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Mutable i32 (string)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Mutable i32 (true on prototype)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Immutable i64 (missing)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (bigint) 0n but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Immutable i64 with ToNumber side-effects (missing)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (bigint) 0n but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Immutable i64 (undefined)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (bigint) 0n but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Immutable i64 with ToNumber side-effects (undefined)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (bigint) 0n but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Immutable i64 (null)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (bigint) 0n but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Immutable i64 with ToNumber side-effects (null)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (bigint) 0n but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Immutable i64 (false)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (bigint) 0n but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Immutable i64 with ToNumber side-effects (false)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (bigint) 0n but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Immutable i64 (empty string)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (bigint) 0n but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Immutable i64 with ToNumber side-effects (empty string)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (bigint) 0n but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Immutable i64 (zero)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (bigint) 0n but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Immutable i64 with ToNumber side-effects (zero)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (bigint) 0n but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Mutable i64 (true)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (bigint) 0n but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Mutable i64 (one)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (bigint) 0n but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Mutable i64 (string)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (bigint) 0n but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Mutable i64 (true on prototype)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (bigint) 0n but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Immutable f32 (missing)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Immutable f32 with ToNumber side-effects (missing)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Immutable f32 (undefined)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Immutable f32 with ToNumber side-effects (undefined)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Immutable f32 (null)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Immutable f32 with ToNumber side-effects (null)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Immutable f32 (false)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Immutable f32 with ToNumber side-effects (false)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Immutable f32 (empty string)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Immutable f32 with ToNumber side-effects (empty string)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Immutable f32 (zero)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Immutable f32 with ToNumber side-effects (zero)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Mutable f32 (true)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Mutable f32 (one)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Mutable f32 (string)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Mutable f32 (true on prototype)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Immutable f64 (missing)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Immutable f64 with ToNumber side-effects (missing)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Immutable f64 (undefined)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Immutable f64 with ToNumber side-effects (undefined)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Immutable f64 (null)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Immutable f64 with ToNumber side-effects (null)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Immutable f64 (false)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Immutable f64 with ToNumber side-effects (false)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Immutable f64 (empty string)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Immutable f64 with ToNumber side-effects (empty string)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Immutable f64 (zero)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Immutable f64 with ToNumber side-effects (zero)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Mutable f64 (true)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Mutable f64 (one)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Mutable f64 (string)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Mutable f64 (true on prototype)",
-          "status": 1,
-          "message": "assert_equals: initial valueOf expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "i64 mutability",
-          "status": 1,
-          "message": "assert_equals: post-set valueOf expected (bigint) 123n but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Calling setter without argument",
@@ -1825,17 +1825,17 @@
       "variant": ""
     },
     {
-      "status": "fail",
+      "status": "pass",
       "subtests": [
         {
           "name": "Branding",
-          "status": 1,
-          "message": "assert_throws_js: this=true function \"() => fn.call(thisValue)\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Stray argument",
-          "status": 1,
-          "message": "assert_equals: expected (number) 0 but got (object) object \"[object WebAssembly.Global]\""
+          "status": 0,
+          "message": null
         }
       ],
       "harness": {
@@ -1864,7 +1864,7 @@
         {
           "name": "Untitled",
           "status": 1,
-          "message": "assert_equals: expected function \"function fn() { [native code] }\" but got function \"function exportedFunction() { [native code] }\""
+          "message": "assert_equals: expected function \"function 0() { [native code] }\" but got function \"function 0() { [native code] }\""
         }
       ],
       "harness": {
@@ -1878,7 +1878,7 @@
       "variant": ""
     },
     {
-      "status": "fail",
+      "status": "pass",
       "subtests": [
         {
           "name": "name",
@@ -1907,123 +1907,123 @@
         },
         {
           "name": "Empty module without imports argument",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Empty module with undefined imports argument",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Empty module with empty imports argument",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "getter order for imports object",
-          "status": 1,
-          "message": "WebAssembly.Instance: import module namespace is not an object"
+          "status": 0,
+          "message": null
         },
         {
           "name": "imports",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "imports with empty module names",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "imports with empty names",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "exports with empty name: function",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "exports with empty name: table",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "exports with empty name: global",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "No imports",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "exports and imports",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "i64 exports and imports",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "import with i32-returning function",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "import with function that takes and returns i32",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "import with i64-returning function",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "import with function that takes and returns i64",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "import with i32-taking function",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "import with i64-taking function",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "export i64-returning function",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "i32 mutable WebAssembly.Global import",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "i64 mutable WebAssembly.Global import",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Multiple i64 arguments",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "stray argument",
-          "status": 1,
-          "message": "assert_false: extensible exports expected false got true"
+          "status": 0,
+          "message": null
         }
       ],
       "harness": {
@@ -2041,18 +2041,18 @@
       "subtests": [
         {
           "name": "Branding",
-          "status": 1,
-          "message": "assert_equals: expected \"object\" but got \"undefined\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Stray argument",
-          "status": 1,
-          "message": "assert_equals: expected \"object\" but got \"undefined\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "Setting (sloppy mode)",
           "status": 1,
-          "message": "Cannot assign to read-only property"
+          "message": "Cannot set property which has only a getter"
         },
         {
           "name": "Setting (strict mode)",
@@ -2095,7 +2095,7 @@
       "variant": ""
     },
     {
-      "status": "fail",
+      "status": "pass",
       "subtests": [
         {
           "name": "WebAssembly: property descriptor",
@@ -2114,8 +2114,8 @@
         },
         {
           "name": "WebAssembly.Module: property descriptor",
-          "status": 1,
-          "message": "assert_false: enumerable expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "WebAssembly.Module: prototype",
@@ -2129,8 +2129,8 @@
         },
         {
           "name": "WebAssembly.Instance: property descriptor",
-          "status": 1,
-          "message": "assert_false: enumerable expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "WebAssembly.Instance: prototype",
@@ -2144,8 +2144,8 @@
         },
         {
           "name": "WebAssembly.Memory: property descriptor",
-          "status": 1,
-          "message": "assert_false: enumerable expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "WebAssembly.Memory: prototype",
@@ -2159,8 +2159,8 @@
         },
         {
           "name": "WebAssembly.Table: property descriptor",
-          "status": 1,
-          "message": "assert_false: enumerable expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "WebAssembly.Table: prototype",
@@ -2174,8 +2174,8 @@
         },
         {
           "name": "WebAssembly.Global: property descriptor",
-          "status": 1,
-          "message": "assert_false: enumerable expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "WebAssembly.Global: prototype",
@@ -2189,8 +2189,8 @@
         },
         {
           "name": "WebAssembly.CompileError: property descriptor",
-          "status": 1,
-          "message": "assert_false: enumerable expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "WebAssembly.CompileError: prototype",
@@ -2204,8 +2204,8 @@
         },
         {
           "name": "WebAssembly.LinkError: property descriptor",
-          "status": 1,
-          "message": "assert_false: enumerable expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "WebAssembly.LinkError: prototype",
@@ -2219,8 +2219,8 @@
         },
         {
           "name": "WebAssembly.RuntimeError: property descriptor",
-          "status": 1,
-          "message": "assert_false: enumerable expected false got true"
+          "status": 0,
+          "message": null
         },
         {
           "name": "WebAssembly.RuntimeError: prototype",
@@ -2234,8 +2234,8 @@
         },
         {
           "name": "WebAssembly.validate",
-          "status": 1,
-          "message": "assert_true: enumerable expected true got false"
+          "status": 0,
+          "message": null
         },
         {
           "name": "WebAssembly.validate: name",
@@ -2249,8 +2249,8 @@
         },
         {
           "name": "WebAssembly.compile",
-          "status": 1,
-          "message": "assert_true: enumerable expected true got false"
+          "status": 0,
+          "message": null
         },
         {
           "name": "WebAssembly.compile: name",
@@ -2264,8 +2264,8 @@
         },
         {
           "name": "WebAssembly.instantiate",
-          "status": 1,
-          "message": "assert_true: enumerable expected true got false"
+          "status": 0,
+          "message": null
         },
         {
           "name": "WebAssembly.instantiate: name",
@@ -2279,8 +2279,8 @@
         },
         {
           "name": "WebAssembly.Module.exports",
-          "status": 1,
-          "message": "assert_true: enumerable expected true got false"
+          "status": 0,
+          "message": null
         },
         {
           "name": "WebAssembly.Module.exports: name",
@@ -2294,8 +2294,8 @@
         },
         {
           "name": "WebAssembly.Module.imports",
-          "status": 1,
-          "message": "assert_true: enumerable expected true got false"
+          "status": 0,
+          "message": null
         },
         {
           "name": "WebAssembly.Module.imports: name",
@@ -2309,8 +2309,8 @@
         },
         {
           "name": "WebAssembly.Module.customSections",
-          "status": 1,
-          "message": "assert_true: enumerable expected true got false"
+          "status": 0,
+          "message": null
         },
         {
           "name": "WebAssembly.Module.customSections: name",
@@ -2324,23 +2324,23 @@
         },
         {
           "name": "WebAssembly.Instance.exports",
-          "status": 1,
-          "message": "assert_equals: expected \"object\" but got \"undefined\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "WebAssembly.Instance.exports: getter",
-          "status": 1,
-          "message": "assert_equals: expected \"object\" but got \"undefined\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "WebAssembly.Instance.exports: setter",
-          "status": 1,
-          "message": "assert_equals: expected \"object\" but got \"undefined\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "WebAssembly.Memory.grow",
-          "status": 1,
-          "message": "assert_true: enumerable expected true got false"
+          "status": 0,
+          "message": null
         },
         {
           "name": "WebAssembly.Memory.grow: name",
@@ -2354,8 +2354,8 @@
         },
         {
           "name": "WebAssembly.Memory.buffer",
-          "status": 1,
-          "message": "assert_true: enumerable expected true got false"
+          "status": 0,
+          "message": null
         },
         {
           "name": "WebAssembly.Memory.buffer: getter",
@@ -2369,8 +2369,8 @@
         },
         {
           "name": "WebAssembly.Table.grow",
-          "status": 1,
-          "message": "assert_true: enumerable expected true got false"
+          "status": 0,
+          "message": null
         },
         {
           "name": "WebAssembly.Table.grow: name",
@@ -2384,8 +2384,8 @@
         },
         {
           "name": "WebAssembly.Table.get",
-          "status": 1,
-          "message": "assert_true: enumerable expected true got false"
+          "status": 0,
+          "message": null
         },
         {
           "name": "WebAssembly.Table.get: name",
@@ -2399,8 +2399,8 @@
         },
         {
           "name": "WebAssembly.Table.set",
-          "status": 1,
-          "message": "assert_true: enumerable expected true got false"
+          "status": 0,
+          "message": null
         },
         {
           "name": "WebAssembly.Table.set: name",
@@ -2409,13 +2409,13 @@
         },
         {
           "name": "WebAssembly.Table.set: length",
-          "status": 1,
-          "message": "assert_equals: WebAssembly.Table.set length should be 1 expected 1 but got 2"
+          "status": 0,
+          "message": null
         },
         {
           "name": "WebAssembly.Table.length",
-          "status": 1,
-          "message": "assert_true: enumerable expected true got false"
+          "status": 0,
+          "message": null
         },
         {
           "name": "WebAssembly.Table.length: getter",
@@ -2429,8 +2429,8 @@
         },
         {
           "name": "WebAssembly.Global.valueOf",
-          "status": 1,
-          "message": "assert_equals: expected \"object\" but got \"undefined\""
+          "status": 0,
+          "message": null
         },
         {
           "name": "WebAssembly.Global.valueOf: name",
@@ -2444,8 +2444,8 @@
         },
         {
           "name": "WebAssembly.Global.value",
-          "status": 1,
-          "message": "assert_true: enumerable expected true got false"
+          "status": 0,
+          "message": null
         },
         {
           "name": "WebAssembly.Global.value: getter",
@@ -2537,63 +2537,63 @@
         },
         {
           "name": "Out-of-range initial value in descriptor: NaN",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => new WebAssembly.Memory({ \"initial\": value })\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Out-of-range maximum value in descriptor: NaN",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => new WebAssembly.Memory({ \"initial\": 0, \"maximum\": value })\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Out-of-range initial value in descriptor: Infinity",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => new WebAssembly.Memory({ \"initial\": value })\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Out-of-range maximum value in descriptor: Infinity",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => new WebAssembly.Memory({ \"initial\": 0, \"maximum\": value })\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Out-of-range initial value in descriptor: -Infinity",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => new WebAssembly.Memory({ \"initial\": value })\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Out-of-range maximum value in descriptor: -Infinity",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => new WebAssembly.Memory({ \"initial\": 0, \"maximum\": value })\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Out-of-range initial value in descriptor: -1",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => new WebAssembly.Memory({ \"initial\": value })\" threw object \"RangeError: WebAssembly: length must be non-negative\" (\"RangeError\") expected instance of function \"function TypeError() { [native code] }\" (\"TypeError\")"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Out-of-range maximum value in descriptor: -1",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => new WebAssembly.Memory({ \"initial\": 0, \"maximum\": value })\" threw object \"RangeError: WebAssembly: length must be non-negative\" (\"RangeError\") expected instance of function \"function TypeError() { [native code] }\" (\"TypeError\")"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Out-of-range initial value in descriptor: 4294967296",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => new WebAssembly.Memory({ \"initial\": value })\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Out-of-range maximum value in descriptor: 4294967296",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => new WebAssembly.Memory({ \"initial\": 0, \"maximum\": value })\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Out-of-range initial value in descriptor: 68719476736",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => new WebAssembly.Memory({ \"initial\": value })\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Out-of-range maximum value in descriptor: 68719476736",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => new WebAssembly.Memory({ \"initial\": 0, \"maximum\": value })\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Initial value exceeds maximum",
@@ -2602,13 +2602,13 @@
         },
         {
           "name": "Proxy descriptor",
-          "status": 1,
-          "message": "WebAssembly.Memory: missing required 'initial'"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Order of evaluation for descriptor",
           "status": 1,
-          "message": "WebAssembly.Memory: missing required 'initial'"
+          "message": "assert_array_equals: expected property 1 to be \"initial valueOf\" but got \"maximum\" (expected array [\"initial\", \"initial valueOf\", \"maximum\", \"maximum valueOf\"] got [\"initial\", \"maximum\", \"initial valueOf\", \"maximum valueOf\"])"
         },
         {
           "name": "Zero initial",
@@ -2641,8 +2641,8 @@
       "subtests": [
         {
           "name": "Missing arguments",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => memory.grow()\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Branding",
@@ -2656,8 +2656,8 @@
         },
         {
           "name": "Zero initial with valueOf",
-          "status": 1,
-          "message": "assert_equals: New buffer after growing: size expected 131072 but got 0"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Non-zero initial",
@@ -2681,48 +2681,48 @@
         },
         {
           "name": "Out-of-range argument: undefined",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => memory.grow(value)\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Out-of-range argument: NaN",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => memory.grow(value)\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Out-of-range argument: Infinity",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => memory.grow(value)\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Out-of-range argument: -Infinity",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => memory.grow(value)\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Out-of-range argument: -1",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => memory.grow(value)\" threw object \"RangeError: WebAssembly: length must be non-negative\" (\"RangeError\") expected instance of function \"function TypeError() { [native code] }\" (\"TypeError\")"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Out-of-range argument: 4294967296",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => memory.grow(value)\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Out-of-range argument: 68719476736",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => memory.grow(value)\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Out-of-range argument: \"0x100000000\"",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => memory.grow(value)\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Out-of-range argument: object \"[object Object]\"",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => memory.grow(value)\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Stray argument",
@@ -2833,7 +2833,7 @@
       "variant": ""
     },
     {
-      "status": "fail",
+      "status": "pass",
       "subtests": [
         {
           "name": "name",
@@ -2862,13 +2862,13 @@
         },
         {
           "name": "Empty buffer",
-          "status": 1,
-          "message": "assert_throws_js: function \"function CompileError() { [native code] }\" is not an Error subtype"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Invalid code",
-          "status": 1,
-          "message": "assert_throws_js: function \"function CompileError() { [native code] }\" is not an Error subtype"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Prototype",
@@ -2897,12 +2897,12 @@
       "variant": ""
     },
     {
-      "status": "fail",
+      "status": "pass",
       "subtests": [
         {
           "name": "Missing arguments",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => WebAssembly.Module.customSections(module)\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Non-Module arguments",
@@ -3201,63 +3201,63 @@
         },
         {
           "name": "Out-of-range initial value in descriptor: NaN",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => new WebAssembly.Table({ \"element\": \"anyfunc\", \"initial\": value })\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Out-of-range maximum value in descriptor: NaN",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => new WebAssembly.Table({ \"element\": \"anyfunc\", \"initial\": 0, \"maximum\": value })\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Out-of-range initial value in descriptor: Infinity",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => new WebAssembly.Table({ \"element\": \"anyfunc\", \"initial\": value })\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Out-of-range maximum value in descriptor: Infinity",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => new WebAssembly.Table({ \"element\": \"anyfunc\", \"initial\": 0, \"maximum\": value })\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Out-of-range initial value in descriptor: -Infinity",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => new WebAssembly.Table({ \"element\": \"anyfunc\", \"initial\": value })\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Out-of-range maximum value in descriptor: -Infinity",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => new WebAssembly.Table({ \"element\": \"anyfunc\", \"initial\": 0, \"maximum\": value })\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Out-of-range initial value in descriptor: -1",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => new WebAssembly.Table({ \"element\": \"anyfunc\", \"initial\": value })\" threw object \"RangeError: WebAssembly: length must be non-negative\" (\"RangeError\") expected instance of function \"function TypeError() { [native code] }\" (\"TypeError\")"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Out-of-range maximum value in descriptor: -1",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => new WebAssembly.Table({ \"element\": \"anyfunc\", \"initial\": 0, \"maximum\": value })\" threw object \"RangeError: WebAssembly: length must be non-negative\" (\"RangeError\") expected instance of function \"function TypeError() { [native code] }\" (\"TypeError\")"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Out-of-range initial value in descriptor: 4294967296",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => new WebAssembly.Table({ \"element\": \"anyfunc\", \"initial\": value })\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Out-of-range maximum value in descriptor: 4294967296",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => new WebAssembly.Table({ \"element\": \"anyfunc\", \"initial\": 0, \"maximum\": value })\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Out-of-range initial value in descriptor: 68719476736",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => new WebAssembly.Table({ \"element\": \"anyfunc\", \"initial\": value })\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Out-of-range maximum value in descriptor: 68719476736",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => new WebAssembly.Table({ \"element\": \"anyfunc\", \"initial\": 0, \"maximum\": value })\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Initial value exceeds maximum",
@@ -3281,18 +3281,18 @@
         },
         {
           "name": "Proxy descriptor",
-          "status": 1,
-          "message": "WebAssembly.Table: invalid element type"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Type conversion for descriptor.element",
-          "status": 1,
-          "message": "WebAssembly.Table: invalid element type"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Order of evaluation for descriptor",
           "status": 1,
-          "message": "WebAssembly.Table: invalid element type"
+          "message": "assert_array_equals: expected property 3 to be \"initial valueOf\" but got \"maximum\" (expected array [\"element\", \"element toString\", \"initial\", \"initial valueOf\", \"maximum\", \"maximum valueOf\"] got [\"element\", \"element toString\", \"initial\", \"maximum\", \"initial valueOf\", \"maximum valueOf\"])"
         },
         {
           "name": "initialize externref table with default value",
@@ -3307,7 +3307,7 @@
         {
           "name": "initialize anyfunc table with default value",
           "status": 1,
-          "message": "assert_equals: expected function \"function fn() { [native code] }\" but got function \"function () { [native code] }\""
+          "message": "assert_equals: expected function \"function 0() { [native code] }\" but got function \"function 0() { [native code] }\""
         },
         {
           "name": "initialize anyfunc table with a bad default value",
@@ -3335,8 +3335,8 @@
       "subtests": [
         {
           "name": "Missing arguments: get",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => table.get()\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Branding: get",
@@ -3345,8 +3345,8 @@
         },
         {
           "name": "Missing arguments: set",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => table.set()\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Branding: set",
@@ -3356,127 +3356,127 @@
         {
           "name": "Basic",
           "status": 1,
-          "message": "assert_throws_js: undefined: table.get(-1) function \"() => table.get(-1)\" threw object \"RangeError: WebAssembly.Table index is out of bounds\" (\"RangeError\") expected instance of function \"function TypeError() { [native code] }\" (\"TypeError\")"
+          "message": "assert_equals: undefined: table.get(0 of 5) expected function \"function 0() { [native code] }\" but got function \"function 0() { [native code] }\""
         },
         {
           "name": "Growing",
           "status": 1,
-          "message": "assert_throws_js: undefined: table.get(-1) function \"() => table.get(-1)\" threw object \"RangeError: WebAssembly.Table index is out of bounds\" (\"RangeError\") expected instance of function \"function TypeError() { [native code] }\" (\"TypeError\")"
+          "message": "assert_equals: undefined: table.get(0 of 5) expected function \"function 0() { [native code] }\" but got function \"function 0() { [native code] }\""
         },
         {
           "name": "Setting out-of-bounds",
-          "status": 1,
-          "message": "assert_throws_js: undefined: table.get(-1) function \"() => table.get(-1)\" threw object \"RangeError: WebAssembly.Table index is out of bounds\" (\"RangeError\") expected instance of function \"function TypeError() { [native code] }\" (\"TypeError\")"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Setting non-function",
           "status": 1,
-          "message": "assert_throws_js: undefined: table.get(-1) function \"() => table.get(-1)\" threw object \"RangeError: WebAssembly.Table index is out of bounds\" (\"RangeError\") expected instance of function \"function TypeError() { [native code] }\" (\"TypeError\")"
+          "message": "assert_throws_js: set(undefined) function \"() => table.set(0, argument)\" did not throw"
         },
         {
           "name": "Setting non-wasm function",
-          "status": 1,
-          "message": "assert_throws_js: undefined: table.get(-1) function \"() => table.get(-1)\" threw object \"RangeError: WebAssembly.Table index is out of bounds\" (\"RangeError\") expected instance of function \"function TypeError() { [native code] }\" (\"TypeError\")"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Setting non-wasm arrow function",
-          "status": 1,
-          "message": "assert_throws_js: undefined: table.get(-1) function \"() => table.get(-1)\" threw object \"RangeError: WebAssembly.Table index is out of bounds\" (\"RangeError\") expected instance of function \"function TypeError() { [native code] }\" (\"TypeError\")"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Getting out-of-range argument: undefined",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => table.get(value)\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Setting out-of-range argument: undefined",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => table.set(value, null)\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Getting out-of-range argument: NaN",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => table.get(value)\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Setting out-of-range argument: NaN",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => table.set(value, null)\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Getting out-of-range argument: Infinity",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => table.get(value)\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Setting out-of-range argument: Infinity",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => table.set(value, null)\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Getting out-of-range argument: -Infinity",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => table.get(value)\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Setting out-of-range argument: -Infinity",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => table.set(value, null)\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Getting out-of-range argument: -1",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => table.get(value)\" threw object \"RangeError: WebAssembly.Table index is out of bounds\" (\"RangeError\") expected instance of function \"function TypeError() { [native code] }\" (\"TypeError\")"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Setting out-of-range argument: -1",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => table.set(value, null)\" threw object \"RangeError: WebAssembly.Table index is out of bounds\" (\"RangeError\") expected instance of function \"function TypeError() { [native code] }\" (\"TypeError\")"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Getting out-of-range argument: 4294967296",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => table.get(value)\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Setting out-of-range argument: 4294967296",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => table.set(value, null)\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Getting out-of-range argument: 68719476736",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => table.get(value)\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Setting out-of-range argument: 68719476736",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => table.set(value, null)\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Getting out-of-range argument: \"0x100000000\"",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => table.get(value)\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Setting out-of-range argument: \"0x100000000\"",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => table.set(value, null)\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Getting out-of-range argument: object \"[object Object]\"",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => table.get(value)\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Setting out-of-range argument: object \"[object Object]\"",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => table.set(value, null)\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Order of argument conversion",
-          "status": 1,
-          "message": "assert_equals: expected 1 but got 0"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Stray argument",
@@ -3486,12 +3486,12 @@
         {
           "name": "Arguments for anyfunc table set",
           "status": 1,
-          "message": "assert_equals: expected function \"function fn() { [native code] }\" but got function \"function () { [native code] }\""
+          "message": "assert_equals: expected function \"function 0() { [native code] }\" but got function \"function 0() { [native code] }\""
         },
         {
           "name": "Arguments for externref table set",
-          "status": 1,
-          "message": "assert_equals: expected (undefined) undefined but got (object) null"
+          "status": 0,
+          "message": null
         }
       ],
       "harness": {
@@ -3509,8 +3509,8 @@
       "subtests": [
         {
           "name": "Missing arguments",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => table.grow()\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Branding",
@@ -3519,73 +3519,73 @@
         },
         {
           "name": "Basic",
-          "status": 1,
-          "message": "assert_throws_js: before: table.get(-1) function \"() => table.get(-1)\" threw object \"RangeError: WebAssembly.Table index is out of bounds\" (\"RangeError\") expected instance of function \"function TypeError() { [native code] }\" (\"TypeError\")"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Reached maximum",
-          "status": 1,
-          "message": "assert_throws_js: before: table.get(-1) function \"() => table.get(-1)\" threw object \"RangeError: WebAssembly.Table index is out of bounds\" (\"RangeError\") expected instance of function \"function TypeError() { [native code] }\" (\"TypeError\")"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Exceeded maximum",
-          "status": 1,
-          "message": "assert_throws_js: before: table.get(-1) function \"() => table.get(-1)\" threw object \"RangeError: WebAssembly.Table index is out of bounds\" (\"RangeError\") expected instance of function \"function TypeError() { [native code] }\" (\"TypeError\")"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Out-of-range argument: undefined",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => table.grow(value)\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Out-of-range argument: NaN",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => table.grow(value)\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Out-of-range argument: Infinity",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => table.grow(value)\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Out-of-range argument: -Infinity",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => table.grow(value)\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Out-of-range argument: -1",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => table.grow(value)\" threw object \"RangeError: WebAssembly: length must be non-negative\" (\"RangeError\") expected instance of function \"function TypeError() { [native code] }\" (\"TypeError\")"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Out-of-range argument: 4294967296",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => table.grow(value)\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Out-of-range argument: 68719476736",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => table.grow(value)\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Out-of-range argument: \"0x100000000\"",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => table.grow(value)\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Out-of-range argument: object \"[object Object]\"",
-          "status": 1,
-          "message": "assert_throws_js: function \"() => table.grow(value)\" did not throw"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Stray argument",
-          "status": 1,
-          "message": "assert_throws_js: before: table.get(-1) function \"() => table.get(-1)\" threw object \"RangeError: WebAssembly.Table index is out of bounds\" (\"RangeError\") expected instance of function \"function TypeError() { [native code] }\" (\"TypeError\")"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Grow with exported-function argument",
           "status": 1,
-          "message": "assert_equals: expected function \"function fn() { [native code] }\" but got function \"function () { [native code] }\""
+          "message": "assert_equals: expected function \"function 0() { [native code] }\" but got function \"function 0() { [native code] }\""
         },
         {
           "name": "Grow with non-function argument",

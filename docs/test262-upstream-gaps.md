@@ -41,7 +41,7 @@ the corpus under the relevant section's directory before adding.
 
 ### Wasm instantiation lost promise wrappers and imported callbacks across collection
 
-- **Fixed in:** TBD (WPT Wasm JS API correction pass)
+- **Fixed in:** `5efeabe3`
 - **Spec:** [Wasm JS API §5.2 Instance](https://webassembly.github.io/spec/js-api/#instances),
   §4.6 Exported Functions, and ECMA-262 §27.2.1.5 NewPromiseCapability.
   The Wasm API is outside test262's ECMAScript scope; these belong in WPT
