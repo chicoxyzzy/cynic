@@ -1685,6 +1685,18 @@ useful:
    and finite results, canonical NaNs where mandated, and arithmetic NaNs
    otherwise, including zero divisors, negative square roots, infinities,
    subnormals, underflow/overflow, mixed lanes, and unreachable-code scanning.
+   Floating `ceil/floor/trunc/nearest` and pseudo-min/max now compile at both
+   lane widths. ARM follows Liftoff's vector `FRINTP/M/Z/N` and comparison-mask
+   plus `BSL` selection. x86 reverses `MINPS/PD` or `MAXPS/PD` operands for
+   pseudo-min/max, preserving the first input's exact bits on ties and NaNs.
+   Rounding reuses the scalar raw-bit helper ABI once per lane to retain the
+   SSE2 baseline; f32 results use four-byte stores so adjacent lanes survive.
+   Shared scalar/vector interpreter and x86 rounding explicitly quiet NaNs:
+   the previous x86 library path could return a signaling NaN unchanged.
+   Independent integer-bit rounding oracles cover fractional boundaries and
+   ties across every significand position, signed zeros, subnormals, infinities,
+   and NaN payloads. Tests also require native entry, live-value preservation,
+   and dead-code scanning; ARM encodings are checked against the assembler.
    This follows the existing [Liftoff](https://v8.dev/blog/liftoff) /
    [Wizard-SPC](https://arxiv.org/abs/2305.13241) typed-stack design and
    [Core value and vector semantics](https://webassembly.github.io/spec/core/exec/instructions.html).

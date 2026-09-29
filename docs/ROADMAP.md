@@ -2388,10 +2388,13 @@ and the per-builtin checklist; this section tracks status.
   138 per target. Floating abs/neg/sqrt and arithmetic remove another 67
   per target, with the same full corpus score. Narrowing, low/high extension,
   and pairwise extended sums remove another 36 per target. Extended multiply,
-  dot products, and Q15 remove another 14 (80 SIMD refusals remain), retaining
+  dot products, and Q15 remove another 14, retaining
   SSE2 and all 58,779 passing assertions. Dot sums also wrap safely in the
   interpreter, closing a safety-check overflow panic.
-  The opcode inventory in `wasm-results.md` tracks the remaining 44 accepted
+  Floating rounding and pseudo-min/max remove another 12 per target (68 SIMD
+  refusals remain), with all four interpreter/native corpus sweeps unchanged.
+  Shared rounding now explicitly quiets signaling NaNs, fixing an x86 gap.
+  The opcode inventory in `wasm-results.md` tracks the remaining 32 accepted
   SIMD operations without native lowering, including the relaxed family.
   Native table64, remaining SIMD
   arithmetic/convert/shuffle operations, and the
