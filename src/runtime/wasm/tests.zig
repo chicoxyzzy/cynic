@@ -6059,48 +6059,52 @@ test "wasm spasm: reference calls preserve arguments results and null local defa
     try testing.expectEqual(@as(u32, 0), instance.spasm_refusals);
 }
 
-test "wasm spasm: reference table roundtrip retains a foreign function instance" {
+test "wasm spasm: reference table64 roundtrip retains a foreign function instance" {
     if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const bytes = try assemble(a, &.{
-        .{ .id = 1, .body = &.{ 0x02, 0x60, 0x00, 0x01, 0x70, 0x60, 0x01, 0x70, 0x01, 0x70 } },
-        .{ .id = 3, .body = &.{ 0x02, 0x00, 0x01 } },
-        .{ .id = 4, .body = &.{ 0x01, 0x70, 0x00, 0x01 } },
-        .{ .id = 9, .body = &.{ 0x01, 0x03, 0x00, 0x01, 0x00 } },
-        .{
-            .id = 10,
-            .body = &.{
-                0x02,
-                0x04, 0x00, 0xd2, 0x00, 0x0b, // ref.func 0
-                0x13, 0x00,
-                0x41, 0x00, 0x20, 0x00, 0x26, 0x00, // table[0] = argument
-                0x41, 0x00, 0x25, 0x00, 0x21, 0x00, // argument = table[0]
-                0x41, 0x00, 0x11, 0x00, 0x00, 0x0b, // call_indirect ()->funcref
+    for ([_]bool{ false, true }) |wide| {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const bytes = try assemble(a, &.{
+            .{ .id = 1, .body = &.{ 0x02, 0x60, 0x00, 0x01, 0x70, 0x60, 0x01, 0x70, 0x01, 0x70 } },
+            .{ .id = 3, .body = &.{ 0x02, 0x00, 0x01 } },
+            .{ .id = 4, .body = &.{ 0x01, 0x70, if (wide) 0x04 else 0x00, 0x01 } },
+            .{ .id = 9, .body = &.{ 0x01, 0x03, 0x00, 0x01, 0x00 } },
+            .{
+                .id = 10,
+                .body = &.{
+                    0x02,
+                    0x04, 0x00, 0xd2, 0x00, 0x0b, // ref.func 0
+                    0x13, 0x00,
+                    if (wide) 0x42 else 0x41, 0x00, 0x20, 0x00, 0x26, 0x00, // table[0] = argument
+                    if (wide) 0x42 else 0x41, 0x00, 0x25, 0x00, 0x21, 0x00, // argument = table[0]
+                    if (wide) 0x42 else 0x41, 0x00, 0x11, 0x00, 0x00, 0x0b, // call_indirect ()->funcref
+                },
             },
-        },
-    });
-    const module = try wasm.decode(a, bytes);
-    var provider: interp.Instance = undefined;
-    try interp.instantiate(&provider, a, testing.allocator, &module, .{});
-    defer provider.deinit();
-    provider.spasm_enabled = true;
-    var consumer: interp.Instance = undefined;
-    try interp.instantiate(&consumer, a, testing.allocator, &module, .{});
-    defer consumer.deinit();
-    consumer.spasm_enabled = true;
+        });
+        const module = try wasm.decode(a, bytes);
+        var provider: interp.Instance = undefined;
+        try interp.instantiate(&provider, a, testing.allocator, &module, .{});
+        defer provider.deinit();
+        provider.spasm_enabled = true;
+        var consumer: interp.Instance = undefined;
+        try interp.instantiate(&consumer, a, testing.allocator, &module, .{});
+        defer consumer.deinit();
+        consumer.spasm_enabled = true;
 
-    const reference = try interp.invoke(&provider, testing.allocator, 0, &.{});
-    defer testing.allocator.free(reference);
-    try testing.expectEqual(interp.makeFuncRef(&provider, 0), reference[0]);
-    const results = try interp.invoke(&consumer, testing.allocator, 1, reference);
-    defer testing.allocator.free(results);
-    try testing.expectEqual(reference[0], results[0]);
-    try testing.expect(provider.spasm_runs > 0);
-    try testing.expect(consumer.spasm_runs > 0);
-    try testing.expectEqual(@as(u32, 0), provider.spasm_refusals);
-    try testing.expectEqual(@as(u32, 0), consumer.spasm_refusals);
+        const reference = try interp.invoke(&provider, testing.allocator, 0, &.{});
+        defer testing.allocator.free(reference);
+        try testing.expectEqual(interp.makeFuncRef(&provider, 0), reference[0]);
+        const results = try interp.invoke(&consumer, testing.allocator, 1, reference);
+        defer testing.allocator.free(results);
+        try testing.expectEqual(reference[0], results[0]);
+        try testing.expectError(error.UninitializedElement, interp.invoke(&consumer, testing.allocator, 1, &.{interp.REF_NULL}));
+        try testing.expectError(error.IndirectCallTypeMismatch, interp.invoke(&consumer, testing.allocator, 1, &.{interp.makeFuncRef(&provider, 1)}));
+        try testing.expect(provider.spasm_runs > 0);
+        try testing.expect(consumer.spasm_runs > 0);
+        try testing.expectEqual(@as(u32, 0), provider.spasm_refusals);
+        try testing.expectEqual(@as(u32, 0), consumer.spasm_refusals);
+    }
 }
 
 test "wasm spasm: reference host calls preserve live operands and propagate traps" {
@@ -6234,8 +6238,8 @@ test "wasm spasm: reference table64 access cannot truncate an i64 index" {
     const result = interp.invoke(&instance, testing.allocator, 0, &.{0x1_0000_0000});
     defer if (result) |values| testing.allocator.free(values) else |_| {};
     try testing.expectError(error.OutOfBoundsTableAccess, result);
-    try testing.expectEqual(@as(u32, 0), instance.spasm_runs);
-    try testing.expect(instance.spasm_cache.?.slots[0] == .failed);
+    try testing.expectEqual(@as(u32, 1), instance.spasm_runs);
+    try testing.expectEqual(@as(u32, 0), instance.spasm_refusals);
 }
 
 test "wasm spasm: reference globals preserve imported and defined cells" {
@@ -6381,7 +6385,7 @@ test "wasm spasm: reference and scalar multi-results survive aliased call buffer
     try testing.expectEqual(@as(u32, 2), instance.spasm_compiles);
 }
 
-test "wasm spasm: reference table64 helpers refuse defined and imported wide tables" {
+test "wasm spasm: reference table64 helpers enter native code without narrowing wide indices" {
     if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -6431,8 +6435,161 @@ test "wasm spasm: reference table64 helpers refuse defined and imported wide tab
             } else {
                 try testing.expectEqual(@as(u128, 1), (try result)[0]);
             }
-            try testing.expectEqual(@as(u32, 0), instance.spasm_runs);
-            try testing.expect(instance.spasm_cache.?.slots[0] == .failed);
+            try testing.expectEqual(@as(u32, 1), instance.spasm_runs);
+            try testing.expectEqual(@as(u32, 0), instance.spasm_refusals);
+        }
+    }
+}
+
+const Table64Config = struct {
+    widths: []const bool,
+    imports: usize = 0,
+    alias: bool = false,
+    params: []const u8,
+    results: []const u8,
+    ops: []const u8,
+};
+
+fn buildTable64Func(a: std.mem.Allocator, config: Table64Config) ![]const u8 {
+    var types: List = .empty;
+    try types.appendSlice(a, &.{ 1, 0x60 });
+    try uleb(a, &types, config.params.len);
+    try types.appendSlice(a, config.params);
+    try uleb(a, &types, config.results.len);
+    try types.appendSlice(a, config.results);
+    var imports: List = .empty;
+    var tables: List = .empty;
+    try uleb(a, &imports, config.imports);
+    try uleb(a, &tables, config.widths.len - config.imports);
+    for (config.widths, 0..) |wide, index| {
+        const target = if (index < config.imports) &imports else &tables;
+        if (index < config.imports) try target.appendSlice(a, &.{ 1, 'h', 1, 't', 1 });
+        try target.appendSlice(a, &.{ 0x6f, if (wide) 5 else 1, 8, 12 });
+    }
+    var code: List = .empty;
+    try code.append(a, 1);
+    try uleb(a, &code, config.ops.len + 4);
+    try code.appendSlice(a, &.{ 1, 32, 0x7f });
+    try code.appendSlice(a, config.ops);
+    try code.append(a, 0x0b);
+    return assemble(a, &.{
+        .{ .id = 1, .body = types.items },
+        .{ .id = 2, .body = imports.items },
+        .{ .id = 3, .body = &.{ 1, 0 } },
+        .{ .id = 4, .body = tables.items },
+        .{ .id = 9, .body = &.{ 1, 5, 0x6f, 2, 0xd0, 0x6f, 0x0b, 0xd0, 0x6f, 0x0b } },
+        .{ .id = 10, .body = code.items },
+    });
+}
+
+const table64_reference: u128 = 0x1234_5678_9abc_def0_ffff_ffff_0000_0000;
+
+test "wasm validator: table64 copy count uses the narrower address type" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_]bool{ false, true }) |dst64| {
+        for ([_]bool{ false, true }) |src64| {
+            for ([_]bool{ false, true }) |count64| {
+                const config: Table64Config = .{
+                    .widths = &.{ dst64, src64 },
+                    .params = &.{ if (dst64) 0x7e else 0x7f, if (src64) 0x7e else 0x7f, if (count64) 0x7e else 0x7f },
+                    .results = &.{},
+                    .ops = &.{ 0x20, 0, 0x20, 1, 0x20, 2, 0xfc, 14, 0, 1 },
+                };
+                const module = try wasm.decode(a, try buildTable64Func(a, config));
+                if (count64 == (dst64 and src64)) {
+                    _ = try wasm.validateModule(a, &module);
+                } else {
+                    try testing.expectError(error.TypeMismatch, wasm.validateModule(a, &module));
+                }
+            }
+        }
+    }
+}
+
+fn checkTable64(config: Table64Config, args: []const u128, expected: []const u128, trap: ?wasm.TrapError) !void {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const module = try wasm.decode(a, try buildTable64Func(a, config));
+    var provider_config = config;
+    provider_config.imports = 0;
+    const provider_module = try wasm.decode(a, try buildTable64Func(a, provider_config));
+    var reference_tables: std.ArrayListUnmanaged([]const u128) = .empty;
+    for ([_]bool{ false, true }) |native| {
+        var provider: interp.Instance = undefined;
+        try interp.instantiate(&provider, a, testing.allocator, &provider_module, .{});
+        defer provider.deinit();
+        const imported = try a.dupe(*interp.Table, provider.tables[0..config.imports]);
+        if (config.alias) imported[1] = imported[0];
+        var instance: interp.Instance = undefined;
+        try interp.instantiate(&instance, a, testing.allocator, &module, .{ .tables = imported });
+        defer instance.deinit();
+        for (instance.tables) |table| for (table.elems, 0..) |*ref, index| {
+            ref.* = table64_reference + index;
+        };
+        instance.spasm_enabled = native;
+        const outcome = interp.invoke(&instance, testing.allocator, 0, args);
+        defer if (outcome) |values| testing.allocator.free(values) else |_| {};
+        if (trap) |err| try testing.expectError(err, outcome) else try testing.expectEqualSlices(u128, expected, try outcome);
+        if (native) {
+            try testing.expectEqual(@as(u32, 1), instance.spasm_runs);
+            try testing.expectEqual(@as(u32, 0), instance.spasm_refusals);
+        }
+        for (instance.tables, 0..) |table, index| {
+            if (native) try testing.expectEqualSlices(u128, reference_tables.items[index], table.elems) else try reference_tables.append(a, try a.dupe(u128, table.elems));
+            if (trap != null) for (table.elems, 0..) |ref, offset| {
+                try testing.expectEqual(table64_reference + offset, ref);
+            };
+        }
+    }
+}
+
+test "wasm spasm: table64 get set grow size preserve wide references and live values" {
+    for ([_]usize{ 0, 1, 2 }) |imports| {
+        for ([_]bool{ false, true }) |wide| {
+            const ty: u8 = if (wide) 0x7e else 0x7f;
+            const get: Table64Config = .{ .widths = &.{ !wide, wide }, .imports = imports, .params = &.{ 0x7e, 0x7b, ty }, .results = &.{ 0x7e, 0x7b, 0x6f }, .ops = &.{ 0x20, 0, 0x20, 1, 0x20, 2, 0x25, 1 } };
+            try checkTable64(get, &.{ 37, simd_live_vector, 7 }, &.{ 37, simd_live_vector, table64_reference + 7 }, null);
+            const set: Table64Config = .{ .widths = get.widths, .imports = imports, .params = &.{ 0x7e, 0x7b, ty, 0x6f }, .results = get.results, .ops = &.{ 0x20, 0, 0x20, 1, 0x20, 2, 0x20, 3, 0x26, 1, 0x20, 2, 0x25, 1 } };
+            try checkTable64(set, &.{ 37, simd_live_vector, 7, ~table64_reference }, &.{ 37, simd_live_vector, ~table64_reference }, null);
+            for ([_]u64{ 8, 0xffff_ffff, if (wide) 0x1_0000_0000 else 9, if (wide) std.math.maxInt(u64) else 10 }) |index| {
+                try checkTable64(get, &.{ 37, simd_live_vector, index }, &.{}, error.OutOfBoundsTableAccess);
+                try checkTable64(set, &.{ 37, simd_live_vector, index, interp.REF_NULL }, &.{}, error.OutOfBoundsTableAccess);
+            }
+            const grow: Table64Config = .{ .widths = get.widths, .imports = imports, .params = &.{ 0x7e, 0x7b, ty, 0x6f }, .results = &.{ 0x7e, 0x7b, ty, ty }, .ops = &.{ 0x20, 0, 0x20, 1, 0x20, 3, 0x20, 2, 0xfc, 15, 1, 0xfc, 16, 1 } };
+            for ([_]u64{ 0, 4, 5, 0xffff_ffff, if (wide) 0x1_0000_0000 else 6, if (wide) std.math.maxInt(u64) else 7 }) |delta| {
+                const failure: u128 = if (wide) std.math.maxInt(u64) else std.math.maxInt(u32);
+                try checkTable64(grow, &.{ 37, simd_live_vector, delta, ~table64_reference }, &.{ 37, simd_live_vector, if (delta <= 4) 8 else failure, if (delta <= 4) 8 + delta else 8 }, null);
+            }
+        }
+    }
+}
+
+test "wasm spasm: table64 bulk operations check full ranges before mutation" {
+    for ([_]bool{ false, true }) |dst64| {
+        const dt: u8 = if (dst64) 0x7e else 0x7f;
+        const fill: Table64Config = .{ .widths = &.{ !dst64, dst64 }, .imports = 2, .params = &.{ 0x7e, 0x7b, dt, 0x6f, dt }, .results = &.{ 0x7e, 0x7b }, .ops = &.{ 0x20, 0, 0x20, 1, 0x20, 2, 0x20, 3, 0x20, 4, 0xfc, 17, 1 } };
+        const init: Table64Config = .{ .widths = fill.widths, .imports = 2, .params = &.{ 0x7e, 0x7b, dt, 0x7f, 0x7f }, .results = fill.results, .ops = &.{ 0x20, 0, 0x20, 1, 0x20, 2, 0x20, 3, 0x20, 4, 0xfc, 12, 0, 1 } };
+        for ([_][2]u64{ .{ 6, 2 }, .{ 8, 0 }, .{ 7, 2 }, .{ if (dst64) 0x1_0000_0000 else 0xffff_ffff, 1 }, .{ 0, if (dst64) std.math.maxInt(u64) else 0xffff_ffff } }) |range| {
+            const trap: ?wasm.TrapError = if (range[0] <= 8 and range[1] <= 8 - range[0]) null else error.OutOfBoundsTableAccess;
+            try checkTable64(fill, &.{ 37, simd_live_vector, range[0], ~table64_reference, range[1] }, &.{ 37, simd_live_vector }, trap);
+            if (range[1] <= 2) try checkTable64(init, &.{ 37, simd_live_vector, range[0], 0, range[1] }, &.{ 37, simd_live_vector }, trap);
+        }
+        try checkTable64(init, &.{ 37, simd_live_vector, 0, 1, 2 }, &.{}, error.OutOfBoundsTableAccess);
+        for ([_]bool{ false, true }) |src64| {
+            const st: u8 = if (src64) 0x7e else 0x7f;
+            const nt: u8 = if (src64 and dst64) 0x7e else 0x7f;
+            for ([_]bool{ false, true }) |alias| {
+                if (alias and src64 != dst64) continue;
+                const copy: Table64Config = .{ .widths = &.{ src64, dst64 }, .imports = 2, .alias = alias, .params = &.{ 0x7e, 0x7b, dt, st, nt }, .results = fill.results, .ops = &.{ 0x20, 0, 0x20, 1, 0x20, 2, 0x20, 3, 0x20, 4, 0xfc, 14, 1, 0 } };
+                for ([_][3]u64{ .{ 1, 0, 7 }, .{ 0, 1, 7 }, .{ 8, 8, 0 }, .{ 7, 0, 2 }, .{ 0, 7, 2 }, .{ if (dst64) 0x1_0000_0000 else 0xffff_ffff, 0, 0 }, .{ 0, if (src64) std.math.maxInt(u64) else 0xffff_ffff, 0 }, .{ 0, 0, if (src64 and dst64) std.math.maxInt(u64) else 0xffff_ffff } }) |args| {
+                    const trap: ?wasm.TrapError = if (args[0] <= 8 and args[1] <= 8 and args[2] <= 8 - args[0] and args[2] <= 8 - args[1]) null else error.OutOfBoundsTableAccess;
+                    try checkTable64(copy, &.{ 37, simd_live_vector, args[0], args[1], args[2] }, &.{ 37, simd_live_vector }, trap);
+                }
+            }
         }
     }
 }

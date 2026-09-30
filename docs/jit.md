@@ -1387,9 +1387,9 @@ useful:
    transfer; declared reference locals start at all-ones null. Tests pin
    cross-instance funcref identity, upper-half preservation, traps, and GC
    across a JS host callback. A reproduced table64 index-truncation bug also
-   requires conservative fallback for table64 operations while the helper
-   ABI uses u32 indices. The exact sweep reaches 120,469 native entries
-   / 4,001 compiled functions with 1,978 refusals. Signature diagnostics split
+   required conservative fallback for table64 operations until the helper
+   ABI was widened (now shipped below). The exact sweep reaches 120,469 native
+   entries / 4,001 compiled functions with 1,978 refusals. Signature diagnostics split
    the previous 1,401 into 52 reference and 1,349 vector cases; all remaining
    signature refusals are vectors. This keeps the existing
    [Liftoff](https://v8.dev/blog/liftoff) /
@@ -1401,7 +1401,7 @@ useful:
    explicit returns. Typed result homes preserve full Cells across branches,
    while scalar operands retain their register homes. Imported/defined table
    lookup is shared: the same above-2^32 truncation reproduced on AArch64, so
-   both backends now refuse table64 operations before code publication.
+   both backends initially refused table64 operations before code publication.
    Tests cover all eight table helper paths, imported tables, cross-instance
    funcrefs, aliased mixed-result buffers, and GC during native host calls.
    The exact sweep reaches 121,135 native entries / 4,098 compiled functions
@@ -1433,7 +1433,7 @@ useful:
    interpret it). A red-first `wasm_js_test` (a JS export runs
    Spasm-compiled native code, `spasm_runs >= 1`) plus the full JS-wasm
    suite run under the jit-on posture gate it; non-emittable bodies
-   (type-index blocks, table64 operations, and other unsupported shapes)
+   (type-index blocks and other unsupported shapes)
    degrade, so the suite still covers the interpreter through that fallback. The scalar ALU now spans
    the i32/i64 and f32/f64 arithmetic and comparisons, the full float unary
    set (incl. min/max/copysign), the integer bit-counts (clz/ctz/popcnt)
@@ -1764,8 +1764,23 @@ useful:
    execution polls. Native-entry tests cover every scalar width, mixed-width
    copies, imported aliases, growth/failure, overflow, exact bounds, live
    scalar/vector neighbors, dense bodies, and post-entry interruption. This
-   changes no JavaScript surface, test262 posture, or SES policy. Table64
-   remains a separate, conservatively refused native family.
+   changes no JavaScript surface, test262 posture, or SES policy.
+   Table64 now compiles on both backends through the existing table helpers:
+   get/set, grow/size, fill/copy/init, and `call_indirect`. As in
+   [Liftoff's table lowering](https://github.com/v8/v8/blob/main/src/wasm/baseline/liftoff-compiler.cc),
+   imported/defined metadata selects the address width before argument staging.
+   Runtime indices/counts remain u64 until overflow-safe bounds checks; module
+   table/type/segment identifiers remain u32. Per
+   [Core table.copy validation](https://webassembly.github.io/spec/core/valid/instructions.html#valid-table-copy),
+   source and destination use their own address widths and count uses the
+   narrower width, fixing a validator mismatch for table64 destinations with
+   table32 sources. `table.init` keeps i32 segment offsets/counts and widens
+   only its destination. References still travel as complete 128-bit Cells;
+   grow keeps its existing allocation limits and returns -1 at the table's
+   width. Native-entry tests check defined/imported tables, aliased overlap,
+   no partial writes on failure, high indices/counts, cross-instance indirect
+   calls, null/type traps, live scalar/vector neighbors, and GC in a JS host
+   callback. No JS API, test262, or SES policy changes are involved.
    This follows the existing [Liftoff](https://v8.dev/blog/liftoff) /
    [Wizard-SPC](https://arxiv.org/abs/2305.13241) typed-stack design and
    [Core value and vector semantics](https://webassembly.github.io/spec/core/exec/instructions.html).

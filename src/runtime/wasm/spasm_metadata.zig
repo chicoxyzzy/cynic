@@ -34,17 +34,17 @@ pub fn readMemoryAccess(module: *const Module, body: []const u8, pos: *usize) ?M
     return .{ .index = index, .offset = offset, .memory64 = memory64 };
 }
 
-/// Table helpers use u32 indices. Refuse table64 before narrowing an operand.
-pub fn tableIs32(module: *const Module, index: u32) bool {
+/// Table indices include imported tables before module-defined tables.
+pub fn tableIs64(module: *const Module, index: u32) ?bool {
     var imported: u32 = 0;
     for (module.imports) |import| {
         if (import.desc != .table) continue;
-        if (index == imported) return !import.desc.table.limits.is_64;
+        if (index == imported) return import.desc.table.limits.is_64;
         imported += 1;
     }
-    if (index < imported) return false;
+    if (index < imported) return null;
     const local: usize = index - imported;
-    return local < module.tables.len and !module.tables[local].limits.is_64;
+    return if (local < module.tables.len) module.tables[local].limits.is_64 else null;
 }
 
 /// Global indices include imports before module-defined globals.

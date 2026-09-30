@@ -1391,9 +1391,12 @@ fn validateExpr(v: *Validator) ValidateError!void {
                         // §3.4.8 — the source table's element type must
                         // match the destination's.
                         if (!isSubtype(try tableElemType(v.module, src_t), try tableElemType(v.module, dst_t))) return error.TypeMismatch;
-                        try v.popExpect(try tableAddr(v.module, dst_t)); // n
-                        try v.popExpect(try tableAddr(v.module, src_t)); // src
-                        try v.popExpect(try tableAddr(v.module, dst_t)); // dst
+                        const dst_addr = try tableAddr(v.module, dst_t);
+                        const src_addr = try tableAddr(v.module, src_t);
+                        // Core table.copy: count uses min(dst_addr, src_addr).
+                        try v.popExpect(if (dst_addr == .i64 and src_addr == .i64) .i64 else .i32); // n
+                        try v.popExpect(src_addr); // src
+                        try v.popExpect(dst_addr); // dst
                     },
                     15 => { // table.grow
                         const tidx = try v.r.uleb(u32);

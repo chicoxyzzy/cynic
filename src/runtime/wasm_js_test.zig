@@ -631,28 +631,35 @@ test "an externref round-trips JS -> wasm -> host -> wasm -> JS" {
     try expectIntWasm(src, 1);
 }
 
-test "a native externref call retains its JS object across host GC" {
+test "a native externref call and table64 indirect call retain JS objects across host GC" {
     if (comptime !@import("wasm/spasm.zig").supported) return error.SkipZigTest;
-    var realm = Realm.init(testing.allocator);
-    defer realm.deinit();
-    realm.allow_wasm_compile = true;
-    realm.jit_enabled = true;
-    try realm.installBuiltins();
-    try realm.installTestGlobals();
-    const src =
-        "const inst = new WebAssembly.Instance(new WebAssembly.Module(" ++ extern_id_bytes ++ ")," ++
-        "{ env: { id: (x) => { __collectGarbage(); return x; } } });" ++
-        "const result = inst.exports.run({ id: 7 });" ++
-        "result.id === 7 ? 1 : 0;";
-    const outcome = try lantern.evaluateScript(testing.allocator, &realm, src);
-    const value = switch (outcome) {
-        .value => |v| v,
-        else => return error.WasmThrewUnexpectedly,
-    };
-    try testing.expectEqual(@as(i32, 1), value.asInt32());
-    try testing.expectEqual(@as(usize, 1), realm.wasm_instances.items.len);
-    try testing.expect(realm.wasm_instances.items[0].spasm_runs > 0);
-    try testing.expectEqual(@as(u32, 0), realm.wasm_instances.items[0].spasm_refusals);
+    const indirect_bytes =
+        "new Uint8Array([0,97,115,109,1,0,0,0," ++
+        "1,6,1,96,1,111,1,111,2,10,1,3,101,110,118,2,105,100,0,0," ++
+        "3,2,1,0,4,4,1,112,4,1,7,7,1,3,114,117,110,0,1," ++
+        "9,7,1,0,66,0,11,1,0,10,11,1,9,0,32,0,66,0,17,0,0,11])";
+    inline for (.{ extern_id_bytes, indirect_bytes }) |bytes| {
+        var realm = Realm.init(testing.allocator);
+        defer realm.deinit();
+        realm.allow_wasm_compile = true;
+        realm.jit_enabled = true;
+        try realm.installBuiltins();
+        try realm.installTestGlobals();
+        const src =
+            "const inst = new WebAssembly.Instance(new WebAssembly.Module(" ++ bytes ++ ")," ++
+            "{ env: { id: (x) => { __collectGarbage(); return x; } } });" ++
+            "const result = inst.exports.run({ id: 7 });" ++
+            "result.id === 7 ? 1 : 0;";
+        const outcome = try lantern.evaluateScript(testing.allocator, &realm, src);
+        const value = switch (outcome) {
+            .value => |v| v,
+            else => return error.WasmThrewUnexpectedly,
+        };
+        try testing.expectEqual(@as(i32, 1), value.asInt32());
+        try testing.expectEqual(@as(usize, 1), realm.wasm_instances.items.len);
+        try testing.expect(realm.wasm_instances.items[0].spasm_runs > 0);
+        try testing.expectEqual(@as(u32, 0), realm.wasm_instances.items[0].spasm_refusals);
+    }
 }
 
 test "a native externref global retains its JS object across host GC" {

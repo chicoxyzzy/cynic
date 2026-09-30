@@ -61,6 +61,8 @@ All SIMD memory forms also support explicit memory indices, with the
 selected memory's address width and bounds.
 Scalar loads/stores and size/grow/fill/copy/init now support indexed memories
 on both targets too, including mixed-width copies and aliased imports.
+Table64 get/set, grow/size, fill/copy/init, and indirect calls also enter native
+code, preserving full-width indices and complete reference values.
 
 The interpreter and forced-Spasm sweeps also reproduce this score in
 `ReleaseSafe` on both targets, under the same 600-second / 3-GB guards.
@@ -73,8 +75,8 @@ the validator guard and bounded scratch retention.
 
 | target | native entries | compiled functions | refusals |
 |---|---:|---:|---:|
-| x86_64-macos (Rosetta) | 145,535 | 5,725 | 260 |
-| AArch64-macos | 151,102 | 5,699 | 286 |
+| x86_64-macos (Rosetta) | 145,676 | 5,771 | 215 |
+| AArch64-macos | 151,243 | 5,745 | 241 |
 
 The SIMD foundation added 249 compiled functions on x86_64 and 26 on AArch64
 over the reference-parity checkpoint. The bounded AArch64 code-reservation
@@ -124,11 +126,14 @@ target, removing 216 first refusals apiece. Loads/stores share SIMD's indexed
 decoder and view helpers; fill/copy keep their bounded execution polls.
 Growth refreshes memory zero even when a nonzero imported index aliases it,
 and both tiers copy aliased imports in the overlap-safe direction.
+Table64 adds 46 compiled functions and 141 native entries per target,
+removing 45 first refusals apiece. The helper ABI retains u64 indices through
+bounds checks, and mixed-width table.copy validation uses the narrower count.
 These are coverage counts, not speedups.
 
-- x86: 8 limits, 0 signatures, 181 bytecode shapes, 71 unsupported opcodes,
+- x86: 8 limits, 0 signatures, 136 bytecode shapes, 71 unsupported opcodes,
   0 emission failures, and 0 installation refusals.
-- AArch64: 8 limits, 0 signatures, 119 bytecode shapes, 159 unsupported
+- AArch64: 8 limits, 0 signatures, 74 bytecode shapes, 159 unsupported
   opcodes, 0 emission failures, and 0 installation refusals. Reusing x86's
   module-sized reservation removes all 99 installation refusals from the
   previous fixed 64 KiB arena. Both targets retain the 64 KiB minimum and
@@ -153,7 +158,9 @@ memory forms with explicit indices, mixed memory32/memory64 widths,
 imported memories, growth, and exact-width bounds. Unrelated unsupported
 instructions, control shapes, and resource ceilings still permit fallback.
 
-Both backends still refuse native table64 operations while their helpers use
-u32 indices, preventing truncation above 2^32. The remaining `0xfc` groups are
-`table.copy` (22), `table.grow` (5), `table.size` (5), and `table.fill` (1).
-Scalar memory operations leave the leading first-refusal list on both targets.
+Neither backend now records a `0xfc` refusal in this corpus. Focused table64
+tests require native entry for all eight helper paths, imported/defined
+tables, mixed-width copies, aliased overlap, high indices/counts, growth
+failure, full references, cross-instance calls, and host-callback GC.
+The leading remaining refusals are control/reference instructions and
+unsupported bytecode shapes, plus the eight intentional resource limits.

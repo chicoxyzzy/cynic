@@ -2416,7 +2416,13 @@ and the per-builtin checklist; this section tracks status.
   narrower count type; imported aliases copy overlap-safely and growing one
   refreshes the memory-zero cache. Native-entry tests cover bounds/overflow,
   growth, aliases, live values, dense bodies, and interruptible bulk loops.
-  Native table64 and the native-register/imported-call ABI remain next.
+  Native table64 now covers get/set, grow/size, fill/copy/init, and indirect
+  calls on both targets. Helpers retain u64 indices until after bounds checks;
+  reference values retain both halves of their Cell. Mixed-width table.copy
+  uses the narrower count type, including in validation. Native-entry tests
+  cover imported tables, aliases, overflow, growth failure, live values,
+  cross-instance calls, and GC in a JS callback. The native-register/imported-call
+  ABI and remaining unsupported control shapes remain next.
 
   The architecture for all three tiers — the shared codegen
   substrate and the JS↔wasm call-boundary fast path included — is
