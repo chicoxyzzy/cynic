@@ -1,15 +1,15 @@
 # WPT Wasm JavaScript API results
 
-Measured baseline after memory-buffer conversion and ownership corrections: **27 of 40
-included files pass completely**. The remaining files are 11 assertion-failure files
-and 2 strict-mode parse errors. Across files that execute, **584 subtests pass
-and 12 fail** (596 observed subtests). The two unparsed files contribute no
-observed subtests; 596 is not the complete potential subtest denominator.
+Measured baseline after adding shared-memory coverage: **29 of 43 included
+files pass completely**. The remaining files are 12 assertion-failure files
+and 2 strict-mode parse errors. Across files that execute, **590 subtests pass
+and 13 fail** (603 observed subtests). The two unparsed files contribute no
+observed subtests; 603 is not the complete potential subtest denominator.
 No fixture crashed, timed out, or ended without a harness result except those
-two explicit parse errors. Another 40 files are explicitly excluded.
+two explicit parse errors. Another 37 files are explicitly excluded.
 
-Compared with the initial measurement, **318 additional named subtests pass**
-and 13 additional files pass completely; no previously passing subtest was lost.
+Compared with the initial measurement, **324 additional named subtests pass**
+and 15 additional files pass completely; no previously passing subtest was lost.
 
 | Measurement | Passing files | Failing files | Parse errors | Passing subtests | Failing subtests |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -18,6 +18,7 @@ and 13 additional files pass completely; no previously passing subtest was lost.
 | Function identity | 23 | 15 | 2 | 575 | 21 |
 | Store-object identity / buffer GC | 24 | 14 | 2 | 576 | 20 |
 | Memory-buffer conversion / ownership | 27 | 11 | 2 | 584 | 12 |
+| Shared-memory coverage | 29 | 12 | 2 | 590 | 13 |
 
 This measures a selected Wasm JavaScript API slice, not browser conformance or
 the Wasm core instruction suite. See [the integration guide](docs/wpt.md),
@@ -29,9 +30,9 @@ the Wasm core instruction suite. See [the integration guide](docs/wpt.md),
 
 | Input | Value |
 | --- | --- |
-| Captured | 2026-09-29T20:02:04Z (normal); 2026-09-29T19:54:29Z (GC pressure) |
+| Captured | 2026-09-30T11:16:21Z (normal); 2026-09-30T11:16:02Z (GC pressure) |
 | WPT revision | [`9ee707c850996c8d124809570c3ff855d67301b9`](https://github.com/web-platform-tests/wpt/tree/9ee707c850996c8d124809570c3ff855d67301b9/wasm/jsapi) |
-| Engine checkout | `ac93c078fda7b523b89f074e4aec3c58c652d210` (clean source for both profiles) |
+| Engine checkout | `6af4545f1f95daa47d56dcd1706a18d73c6ca222` (clean source for both profiles) |
 | Host | macOS arm64 |
 | Profiles | ReleaseFast / default GC; ReleaseSafe / `--gc-threshold=1` |
 | Posture | Strict-only, mutable primordials, eval and Wasm compilation enabled; JS and Wasm JITs off |
@@ -55,12 +56,12 @@ between the two profiles, including known failures.
 | Global | 4 | 0 | 0 | 132 | 0 |
 | Instance | 3 | 1 | 1 | 35 | 1 |
 | Interface | 1 | 0 | 0 | 72 | 0 |
-| Memory | 4 | 2 | 0 | 54 | 2 |
+| Memory | 6 | 3 | 0 | 60 | 3 |
 | Module | 5 | 0 | 0 | 43 | 0 |
 | Prototypes | 1 | 0 | 0 | 5 | 0 |
 | Table | 2 | 3 | 0 | 85 | 3 |
 | Tag | 2 | 0 | 0 | 8 | 0 |
-| **Total** | **27** | **11** | **2** | **584** | **12** |
+| **Total** | **29** | **12** | **2** | **590** | **13** |
 
 ## Corrections and remaining failures
 
@@ -96,7 +97,14 @@ also protect borrowed storage from transfer, reentrant coercion, overlapping
 copies across shared wrappers, failed allocations, and unreachable-wrapper
 cleanup.
 
-The remaining 12 assertions fall into these observed categories:
+Three newly included single-agent shared-memory fixtures add seven observed
+subtests: six pass, and the constructor descriptor-order assertion records the
+same pinned-spec mismatch as the non-shared constructor. They cover shared
+construction, fixed/resizable buffer caching, maximum size, and growth. No
+engine or upstream fixture code changed for this coverage expansion; all 596
+previously observed subtest outcomes remain unchanged in both profiles.
+
+The remaining 13 assertions fall into these observed categories:
 
 | Category | Assertions | Status |
 | --- | ---: | --- |
@@ -104,7 +112,7 @@ The remaining 12 assertions fall into these observed categories:
 | Multiple return values from JS imports | 1 | Unsupported host-call result arity |
 | Exception fixture binaries rejected by the decoder | 2 | Wasm encoding support gap |
 | Sloppy setter expectations / undeclared loop variable | 5 | Strict-only policy |
-| Dictionary conversion order / explicit undefined Table.set | 3 | Pinned WPT expectations differ from the current JS API |
+| Dictionary conversion order / explicit undefined Table.set | 4 | Pinned WPT expectations differ from the current JS API |
 
 Both `constructor/instantiate-bad-imports.any.js` and
 `instance/constructor-bad-imports.any.js` bind a rest parameter named
@@ -114,7 +122,7 @@ two execution errors; the fixtures and language policy are unchanged.
 The current Wasm JS API uses `any` AddressValue dictionary members, so numeric
 conversion follows dictionary reads, and its optional Table.set value treats
 explicit undefined as absent. The pinned WPT asserts older behavior in those
-three cases. See [specification drift](docs/wpt.md#api-corrections-and-specification-drift).
+four cases. See [specification drift](docs/wpt.md#api-corrections-and-specification-drift).
 
 The runner adapts only two support expressions in temporary copies: literal
 regex braces in `testharness.js`, and the module builder's legacy `unescape`

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "corpus_revision": "9ee707c850996c8d124809570c3ff855d67301b9",
-  "manifest_sha256": "08cb08d11574c249ecb6d0991327704b08bf76a70725096d29cb4781b8559480",
+  "manifest_sha256": "447a0242e1e5da4b35ff654e0a432371a5bace55e3d393e472b521df27a0d615",
   "adapter_sha256": {
     "run.py": "e32ee468cee38c130eb7b2ce80dbf85d5097e920cddb7316ce05b14f708cdcdc",
     "case.zig": "286d8ffb542332c1fa5ea8be6db41fee5506f2df1e2afb241518224aab58fbac",
@@ -11,12 +11,12 @@
     "testharness.js (patched)": "fbe2e52e029bbeea3fecdedf963b69589526a8a1e3ceb18947120667443147f7",
     "wasm/jsapi/wasm-module-builder.js (patched)": "83a83b12adc7d51533c818b23fd37936d03a7203e7015356f9e6852b8625964d"
   },
-  "binary_sha256": "efa21fcf8ebf1790fd4a49143ea61425aad2097e4b88d7a776b7828ed9ac928e",
+  "binary_sha256": "b8251f9d2ebdb9fe8568ba3c7f71b75d1b90c2576db28c15a565e87e99af191e",
   "provenance": {
-    "generated_at_utc": "2026-09-29T19:54:29Z",
+    "generated_at_utc": "2026-09-30T11:16:02Z",
     "platform": "Darwin",
     "architecture": "arm64",
-    "engine_git_head": "ac93c078fda7b523b89f074e4aec3c58c652d210",
+    "engine_git_head": "6af4545f1f95daa47d56dcd1706a18d73c6ca222",
     "engine_git_dirty": false
   },
   "configuration": {
@@ -154,20 +154,8 @@
       "reason": "Wasm JS Promise Integration is outside the initial shipped-feature scope"
     },
     {
-      "path": "wasm/jsapi/memory/constructor-shared.tentative.any.js",
-      "reason": "Shared Wasm memory and threads are outside the initial shell scope"
-    },
-    {
       "path": "wasm/jsapi/memory/constructor-types.tentative.any.js",
       "reason": "Wasm JS type reflection proposal (type methods/minimum descriptors) is outside the shipped API scope"
-    },
-    {
-      "path": "wasm/jsapi/memory/to-fixed-length-buffer-shared.any.js",
-      "reason": "Shared Wasm memory and threads are outside the initial shell scope"
-    },
-    {
-      "path": "wasm/jsapi/memory/to-resizable-buffer-shared.any.js",
-      "reason": "Shared Wasm memory and threads are outside the initial shell scope"
     },
     {
       "path": "wasm/jsapi/memory/type.tentative.any.js",
@@ -193,14 +181,14 @@
   "summary": {
     "files": {
       "execution_error": 2,
-      "fail": 11,
-      "pass": 27
+      "fail": 12,
+      "pass": 29
     },
     "subtests": {
-      "FAIL": 12,
-      "PASS": 584
+      "FAIL": 13,
+      "PASS": 590
     },
-    "excluded_files": 40
+    "excluded_files": 37
   },
   "results": [
     {
@@ -2507,6 +2495,35 @@
       "status": "fail",
       "subtests": [
         {
+          "name": "Shared memory without maximum",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Order of evaluation for descriptor (with shared)",
+          "status": 1,
+          "message": "assert_array_equals: expected property 1 to be \"initial valueOf\" but got \"maximum\" (expected array [\"initial\", \"initial valueOf\", \"maximum\", \"maximum valueOf\", \"shared\"] got [\"initial\", \"maximum\", \"shared\", \"initial valueOf\", \"maximum valueOf\"])"
+        },
+        {
+          "name": "Shared memory",
+          "status": 0,
+          "message": null
+        }
+      ],
+      "harness": {
+        "status": 0,
+        "message": null
+      },
+      "returncode": 0,
+      "message": null,
+      "id": "wasm/jsapi/memory/constructor-shared.tentative.any.js",
+      "path": "wasm/jsapi/memory/constructor-shared.tentative.any.js",
+      "variant": ""
+    },
+    {
+      "status": "fail",
+      "subtests": [
+        {
           "name": "name",
           "status": 0,
           "message": null
@@ -2750,6 +2767,25 @@
       "status": "pass",
       "subtests": [
         {
+          "name": "toFixedLengthBuffer caching behavior",
+          "status": 0,
+          "message": null
+        }
+      ],
+      "harness": {
+        "status": 0,
+        "message": null
+      },
+      "returncode": 0,
+      "message": null,
+      "id": "wasm/jsapi/memory/to-fixed-length-buffer-shared.any.js",
+      "path": "wasm/jsapi/memory/to-fixed-length-buffer-shared.any.js",
+      "variant": ""
+    },
+    {
+      "status": "pass",
+      "subtests": [
+        {
           "name": "API surface",
           "status": 0,
           "message": null
@@ -2768,6 +2804,35 @@
       "message": null,
       "id": "wasm/jsapi/memory/to-fixed-length-buffer.any.js",
       "path": "wasm/jsapi/memory/to-fixed-length-buffer.any.js",
+      "variant": ""
+    },
+    {
+      "status": "pass",
+      "subtests": [
+        {
+          "name": "toResizableBuffer caching behavior",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "toResizableBuffer max size",
+          "status": 0,
+          "message": null
+        },
+        {
+          "name": "Resizing a Memory's resizable buffer",
+          "status": 0,
+          "message": null
+        }
+      ],
+      "harness": {
+        "status": 0,
+        "message": null
+      },
+      "returncode": 0,
+      "message": null,
+      "id": "wasm/jsapi/memory/to-resizable-buffer-shared.any.js",
+      "path": "wasm/jsapi/memory/to-resizable-buffer-shared.any.js",
       "variant": ""
     },
     {
