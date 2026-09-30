@@ -10,7 +10,7 @@ const std = @import("std");
 const metadata = @import("spasm_metadata.zig");
 const simd = @import("spasm_simd.zig");
 const globalValType = metadata.globalValType;
-const tableIs32 = metadata.tableIs32;
+const tableIs64 = metadata.tableIs64;
 const memoryIs64 = metadata.memoryIs64;
 
 const x64 = @import("../jit/asm_x86_64.zig");
@@ -705,7 +705,7 @@ pub fn compile(
                 const helper = config.call_indirect_helper orelse return null;
                 const type_index = readUleb32(body, &i) orelse return null;
                 const table_index = readUleb32(body, &i) orelse return null;
-                if (!tableIs32(module, table_index)) return null;
+                const table64 = tableIs64(module, table_index) orelse return null;
                 if (type_index >= module.types.len) return null;
                 const callee = &module.types[type_index];
                 for (callee.params) |param_type| if (!isSupportedValue(param_type)) return null;
@@ -743,7 +743,7 @@ pub fn compile(
                 try m.load64Disp32(.rdi, .rsp, @intCast(call_frame_bytes));
                 try m.movImm64(.rsi, type_index);
                 try m.movImm64(.rdx, table_index);
-                try m.load32Disp32(.rcx, .r12, scratchOffset(num_locals, index_depth));
+                if (table64) try m.load64Disp32(.rcx, .r12, scratchOffset(num_locals, index_depth)) else try m.load32Disp32(.rcx, .r12, scratchOffset(num_locals, index_depth));
                 try m.leaDisp32(.r8, .rsp, @intCast(call_stack_args_size));
                 try m.movReg64(.r9, .rbx);
                 try m.movImm64(.r11, helper);
@@ -847,19 +847,19 @@ pub fn compile(
                 sp -= 1;
             },
             op_table_get => {
-                // §4.4.x: replace the i32 element index with the table's
+                // §4.4.x: replace the i32/i64 element index with the table's
                 // 128-bit reference. The shared helper writes directly into
                 // the operand's home Cell and reports an OOB trap via eax.
                 const helper = config.table_get_helper orelse return null;
                 const table_index = readUleb32(body, &i) orelse return null;
-                if (!tableIs32(module, table_index)) return null;
+                const table64 = tableIs64(module, table_index) orelse return null;
                 if (sp == 0) return null;
                 const depth = sp - 1;
                 try materialize(&m, stack[depth], num_locals, depth);
 
                 try m.load64Disp32(.rdi, .rsp, 0);
                 try m.movImm64(.rsi, table_index);
-                try m.load32Disp32(.rdx, .r12, scratchOffset(num_locals, depth));
+                if (table64) try m.load64Disp32(.rdx, .r12, scratchOffset(num_locals, depth)) else try m.load32Disp32(.rdx, .r12, scratchOffset(num_locals, depth));
                 try m.leaDisp32(.rcx, .r12, scratchOffset(num_locals, depth));
                 try m.movImm64(.r11, helper);
                 try m.callReg(.r11);
@@ -878,7 +878,7 @@ pub fn compile(
                 // Cell, then let the shared helper bounds-check and store it.
                 const helper = config.table_set_helper orelse return null;
                 const table_index = readUleb32(body, &i) orelse return null;
-                if (!tableIs32(module, table_index)) return null;
+                const table64 = tableIs64(module, table_index) orelse return null;
                 if (sp < 2) return null;
                 const index_depth = sp - 2;
                 const ref_depth = sp - 1;
@@ -887,7 +887,7 @@ pub fn compile(
 
                 try m.load64Disp32(.rdi, .rsp, 0);
                 try m.movImm64(.rsi, table_index);
-                try m.load32Disp32(.rdx, .r12, scratchOffset(num_locals, index_depth));
+                if (table64) try m.load64Disp32(.rdx, .r12, scratchOffset(num_locals, index_depth)) else try m.load32Disp32(.rdx, .r12, scratchOffset(num_locals, index_depth));
                 try m.leaDisp32(.rcx, .r12, scratchOffset(num_locals, ref_depth));
                 try m.movImm64(.r11, helper);
                 try m.callReg(.r11);
@@ -2463,7 +2463,7 @@ pub fn compile(
                     const helper = config.table_init_helper orelse return null;
                     const element_index = readUleb32(body, &i) orelse return null;
                     const table_index = readUleb32(body, &i) orelse return null;
-                    if (!tableIs32(module, table_index)) return null;
+                    const table64 = tableIs64(module, table_index) orelse return null;
                     if (sp < 3) return null;
                     const below = sp - 3;
                     try materialize(&m, stack[below], num_locals, below);
@@ -2473,7 +2473,7 @@ pub fn compile(
                     try m.load64Disp32(.rdi, .rsp, 0);
                     try m.movImm64(.rsi, element_index);
                     try m.movImm64(.rdx, table_index);
-                    try m.load32Disp32(.rcx, .r12, scratchOffset(num_locals, below));
+                    if (table64) try m.load64Disp32(.rcx, .r12, scratchOffset(num_locals, below)) else try m.load32Disp32(.rcx, .r12, scratchOffset(num_locals, below));
                     try m.load32Disp32(.r8, .r12, scratchOffset(num_locals, below + 1));
                     try m.load32Disp32(.r9, .r12, scratchOffset(num_locals, below + 2));
                     try m.movImm64(.r11, helper);
@@ -2501,7 +2501,8 @@ pub fn compile(
                     const helper = config.table_copy_helper orelse return null;
                     const destination_table = readUleb32(body, &i) orelse return null;
                     const source_table = readUleb32(body, &i) orelse return null;
-                    if (!tableIs32(module, destination_table) or !tableIs32(module, source_table)) return null;
+                    const destination64 = tableIs64(module, destination_table) orelse return null;
+                    const source64 = tableIs64(module, source_table) orelse return null;
                     if (sp < 3) return null;
                     const below = sp - 3;
                     try materialize(&m, stack[below], num_locals, below);
@@ -2511,9 +2512,10 @@ pub fn compile(
                     try m.load64Disp32(.rdi, .rsp, 0);
                     try m.movImm64(.rsi, destination_table);
                     try m.movImm64(.rdx, source_table);
-                    try m.load32Disp32(.rcx, .r12, scratchOffset(num_locals, below));
-                    try m.load32Disp32(.r8, .r12, scratchOffset(num_locals, below + 1));
-                    try m.load32Disp32(.r9, .r12, scratchOffset(num_locals, below + 2));
+                    if (destination64) try m.load64Disp32(.rcx, .r12, scratchOffset(num_locals, below)) else try m.load32Disp32(.rcx, .r12, scratchOffset(num_locals, below));
+                    if (source64) try m.load64Disp32(.r8, .r12, scratchOffset(num_locals, below + 1)) else try m.load32Disp32(.r8, .r12, scratchOffset(num_locals, below + 1));
+                    // Core table.copy uses the narrower table's width for len.
+                    if (destination64 and source64) try m.load64Disp32(.r9, .r12, scratchOffset(num_locals, below + 2)) else try m.load32Disp32(.r9, .r12, scratchOffset(num_locals, below + 2));
                     try m.movImm64(.r11, helper);
                     try m.callReg(.r11);
 
@@ -2527,10 +2529,10 @@ pub fn compile(
                 } else if (sub == 15) {
                     // §4.4.x table.grow: [init_ref, delta] -> old_size. The
                     // helper reads the complete reference from its home Cell;
-                    // growth failure returns i32 -1 and never traps.
+                    // growth failure returns i32/i64 -1 and never traps.
                     const helper = config.table_grow_helper orelse return null;
                     const table_index = readUleb32(body, &i) orelse return null;
-                    if (!tableIs32(module, table_index)) return null;
+                    const table64 = tableIs64(module, table_index) orelse return null;
                     if (sp < 2) return null;
                     const below = sp - 2;
                     if (below + 1 > operand_stack_capacity) return null;
@@ -2540,10 +2542,10 @@ pub fn compile(
                     try m.load64Disp32(.rdi, .rsp, 0);
                     try m.movImm64(.rsi, table_index);
                     try m.leaDisp32(.rdx, .r12, scratchOffset(num_locals, below));
-                    try m.load32Disp32(.rcx, .r12, scratchOffset(num_locals, below + 1));
+                    if (table64) try m.load64Disp32(.rcx, .r12, scratchOffset(num_locals, below + 1)) else try m.load32Disp32(.rcx, .r12, scratchOffset(num_locals, below + 1));
                     try m.movImm64(.r11, helper);
                     try m.callReg(.r11);
-                    try m.movReg32(.rax, .rax);
+                    if (!table64) try m.movReg32(.rax, .rax);
                     try m.store64Disp32(.r12, scratchOffset(num_locals, below), .rax);
                     stack[below] = .runtime;
                     sp = below + 1;
@@ -2551,13 +2553,13 @@ pub fn compile(
                     // §4.4.x table.size: [] -> current element count.
                     const helper = config.table_size_helper orelse return null;
                     const table_index = readUleb32(body, &i) orelse return null;
-                    if (!tableIs32(module, table_index)) return null;
+                    const table64 = tableIs64(module, table_index) orelse return null;
                     if (sp >= operand_stack_capacity) return null;
                     try m.load64Disp32(.rdi, .rsp, 0);
                     try m.movImm64(.rsi, table_index);
                     try m.movImm64(.r11, helper);
                     try m.callReg(.r11);
-                    try m.movReg32(.rax, .rax);
+                    if (!table64) try m.movReg32(.rax, .rax);
                     try m.store64Disp32(.r12, scratchOffset(num_locals, sp), .rax);
                     stack[sp] = .runtime;
                     sp += 1;
@@ -2565,7 +2567,7 @@ pub fn compile(
                     // §4.4.x table.fill: [index, reference, count] -> [].
                     const helper = config.table_fill_helper orelse return null;
                     const table_index = readUleb32(body, &i) orelse return null;
-                    if (!tableIs32(module, table_index)) return null;
+                    const table64 = tableIs64(module, table_index) orelse return null;
                     if (sp < 3) return null;
                     const below = sp - 3;
                     try materialize(&m, stack[below], num_locals, below);
@@ -2574,9 +2576,9 @@ pub fn compile(
 
                     try m.load64Disp32(.rdi, .rsp, 0);
                     try m.movImm64(.rsi, table_index);
-                    try m.load32Disp32(.rdx, .r12, scratchOffset(num_locals, below));
+                    if (table64) try m.load64Disp32(.rdx, .r12, scratchOffset(num_locals, below)) else try m.load32Disp32(.rdx, .r12, scratchOffset(num_locals, below));
                     try m.leaDisp32(.rcx, .r12, scratchOffset(num_locals, below + 1));
-                    try m.load32Disp32(.r8, .r12, scratchOffset(num_locals, below + 2));
+                    if (table64) try m.load64Disp32(.r8, .r12, scratchOffset(num_locals, below + 2)) else try m.load32Disp32(.r8, .r12, scratchOffset(num_locals, below + 2));
                     try m.movImm64(.r11, helper);
                     try m.callReg(.r11);
 

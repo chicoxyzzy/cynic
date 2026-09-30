@@ -750,9 +750,11 @@ the measured design space:
   memory indices on both targets. Mixed-width copies use each memory's
   address type and the narrower count type. Imported aliases retain
   overlap-safe copying and a fresh memory-zero cache after growth.
-  Table64 operations (the helper ABI still uses u32
-  indices) and other unsupported bodies refuse before
-  code publication and run in Sarcasm.
+  Table64 get/set, grow/size, fill/copy/init, and indirect calls use u64
+  helper arguments and width-correct results on both targets. Mixed-width
+  table copies use the narrower count type; table.init keeps i32 segment
+  offsets/counts. Unsupported bodies still refuse before code publication
+  and run in Sarcasm.
   This is a coverage difference, not a semantic one: forced-Spasm sweeps on
   both architectures pass all 58,779 scored spec commands. Current native
   coverage and per-opcode refusals are in [wasm-results.md](../wasm-results.md).
@@ -763,9 +765,9 @@ the measured design space:
   The x86 scalar rounding fallback is
   deliberately helper-based on SSE2-only targets rather than assuming SSE4.1;
   remaining refusals are unsupported bytecode shapes/opcodes and resource
-  limits, not vector signatures. Both targets reject native table64 compilation
-  before a wide index can reach a 32-bit helper; imported and defined tables
-  use the same module-index lookup. The memory64 closure retains u64
+  limits, not vector signatures. Table indices stay full-width until after
+  bounds checks; imported and defined tables use the same module-index
+  lookup. The memory64 closure retains u64
   memarg offsets, traps effective-address carry, and covers grow plus the bulk
   memory family without changing the exact pass set. CI pairs
   `--spasm` with `--require-spasm-entry`, and the focused x86 instance/cache,

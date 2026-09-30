@@ -34,7 +34,7 @@ const dead_code = @import("spasm_dead_code.zig");
 const metadata = @import("spasm_metadata.zig");
 const simd = @import("spasm_simd.zig");
 const globalValType = metadata.globalValType;
-const tableIs32 = metadata.tableIs32;
+const tableIs64 = metadata.tableIs64;
 const memoryIs64 = metadata.memoryIs64;
 const spasm_x86_64 = @import("spasm_x86_64.zig");
 const CompiledFunc = @import("code.zig").CompiledFunc;
@@ -271,7 +271,7 @@ pub const CallIndirectHelperFn = *const fn (
     instance: *anyopaque,
     type_index: u32,
     table_index: u32,
-    elem_index: u32,
+    elem_index: u64,
     buf: [*]Cell,
     execution_control: ?*anyopaque,
 ) callconv(.c) u32;
@@ -319,30 +319,31 @@ pub const DataDropHelperFn = *const fn (instance: *anyopaque, data_index: u32) c
 
 /// The native helper a Spasm-compiled `table.size` (§4.4.x) branches to:
 /// `(instance, table_index) -> elem_count`. It returns the current element
-/// count of the table — the i32 the op pushes; no reference crosses the
+/// count of the table — the i32/i64 the op pushes; no reference crosses the
 /// operand stack. It cannot trap. Injected at startup like the other helpers.
-pub const TableSizeHelperFn = *const fn (instance: *anyopaque, table_index: u32) callconv(.c) u32;
+pub const TableSizeHelperFn = *const fn (instance: *anyopaque, table_index: u32) callconv(.c) u64;
 
 /// The native helper a Spasm-compiled `table.copy` (§4.4.x) branches to:
 /// `(instance, dst_table, src_table, dst, src, len) -> status`. It copies
 /// `len` references from the source table (offset `src`) into the destination
 /// table (offset `dst`), overlap-safe, after a bounds check, reusing the
-/// interpreter's overlap-safe copy. Only the i32 indices crossed the operand
+/// interpreter's overlap-safe copy. Only the numeric indices cross the operand
 /// stack — the references stay table-internal, so it neither resizes nor
 /// touches linear memory. Returns `trap_ok`, or `trap_pending` on an
 /// out-of-bounds access (the concrete `OutOfBoundsTableAccess` is stashed on
 /// the instance — see `EntryFn`). Injected at startup (one-directional import).
-pub const TableCopyHelperFn = *const fn (instance: *anyopaque, dst_table: u32, src_table: u32, dst: u32, src: u32, len: u32) callconv(.c) u32;
+pub const TableCopyHelperFn = *const fn (instance: *anyopaque, dst_table: u32, src_table: u32, dst: u64, src: u64, len: u64) callconv(.c) u32;
 
 /// The native helper a Spasm-compiled `table.init` (§4.4.x) branches to:
 /// `(instance, elem_index, table_index, dst, src, len) -> status`. It copies
 /// `len` references from the passive element segment (offset `src`) into the
 /// table (offset `dst`) after a bounds check, reusing the interpreter's
-/// `tableInit` logic. Only the i32 indices crossed the operand stack. Returns
+/// `tableInit` logic. Only the destination follows the table's address width;
+/// segment-relative source and length remain i32. Returns
 /// `trap_ok`, or `trap_pending` on an out-of-bounds access (the concrete
 /// `OutOfBoundsTableAccess` is stashed on the instance — see `EntryFn`).
 /// Injected at startup (one-directional import).
-pub const TableInitHelperFn = *const fn (instance: *anyopaque, elem_index: u32, table_index: u32, dst: u32, src: u32, len: u32) callconv(.c) u32;
+pub const TableInitHelperFn = *const fn (instance: *anyopaque, elem_index: u32, table_index: u32, dst: u64, src: u32, len: u32) callconv(.c) u32;
 
 /// The native helper a Spasm-compiled `elem.drop` (§4.4.x) branches to:
 /// `(instance, elem_index) -> void`. It marks the passive element segment
@@ -359,7 +360,7 @@ pub const ElemDropHelperFn = *const fn (instance: *anyopaque, elem_index: u32) c
 /// `spasm.trap_pending`. The reference is the first value Spasm moves across
 /// the operand stack at runtime, so it travels through `out_cell` rather than
 /// a GP register. Injected at startup (one-directional import).
-pub const TableGetHelperFn = *const fn (instance: *anyopaque, table_index: u32, index: u32, out_cell: [*]u128) callconv(.c) u32;
+pub const TableGetHelperFn = *const fn (instance: *anyopaque, table_index: u32, index: u64, out_cell: [*]u128) callconv(.c) u32;
 
 /// The native helper a Spasm-compiled `table.set` (§4.4.x, opcode 0x26)
 /// branches to: `(instance, table_index, index, ref_slot) -> status`. It
@@ -371,7 +372,7 @@ pub const TableGetHelperFn = *const fn (instance: *anyopaque, table_index: u32, 
 /// codegen staged a compile-time `ref.func`/`ref.null` into) rather than a GP
 /// register, just like `table.get`'s `out_cell`. Injected at startup
 /// (one-directional import).
-pub const TableSetHelperFn = *const fn (instance: *anyopaque, table_index: u32, index: u32, ref_slot: [*]const u128) callconv(.c) u32;
+pub const TableSetHelperFn = *const fn (instance: *anyopaque, table_index: u32, index: u64, ref_slot: [*]const u128) callconv(.c) u32;
 
 /// The native helper a Spasm-compiled `table.grow` (§4.4.x, 0xFC sub 15)
 /// branches to: `(instance, table_index, init_slot, delta) -> old_size`. It
@@ -384,7 +385,7 @@ pub const TableSetHelperFn = *const fn (instance: *anyopaque, table_index: u32, 
 /// travels through `init_slot` (a depth-keyed cell, or a staged temporary for a
 /// compile-time `ref.func`/`ref.null`). Injected at startup (one-directional
 /// import).
-pub const TableGrowHelperFn = *const fn (instance: *anyopaque, table_index: u32, init_slot: [*]const u128, delta: u32) callconv(.c) i64;
+pub const TableGrowHelperFn = *const fn (instance: *anyopaque, table_index: u32, init_slot: [*]const u128, delta: u64) callconv(.c) i64;
 
 /// The native helper a Spasm-compiled `table.fill` (§4.4.x, 0xFC sub 17)
 /// branches to: `(instance, table_index, index, val_slot, count) -> status`. It
@@ -392,10 +393,10 @@ pub const TableGrowHelperFn = *const fn (instance: *anyopaque, table_index: u32,
 /// at `val_slot[0]`, after an overflow-safe bounds check; out of range it
 /// stashes `OutOfBoundsTableAccess` and returns `spasm.trap_pending`. Only the
 /// fill reference travels through `val_slot` (a depth-keyed cell, or a staged
-/// temporary for a compile-time `ref.func`/`ref.null`); the i32 index and count
+/// temporary for a compile-time `ref.func`/`ref.null`); the i32/i64 index and count
 /// cross the operand stack directly. Injected at startup (one-directional
 /// import).
-pub const TableFillHelperFn = *const fn (instance: *anyopaque, table_index: u32, index: u32, val_slot: [*]const u128, count: u32) callconv(.c) u32;
+pub const TableFillHelperFn = *const fn (instance: *anyopaque, table_index: u32, index: u64, val_slot: [*]const u128, count: u64) callconv(.c) u32;
 
 /// Native boundaries embedded into one compiled body. Passed by value so
 /// concurrent realms never race on process-global helper slots while lazily
@@ -620,11 +621,11 @@ const op_i64_trunc_f64_u: u8 = 0xb1;
 const op_ref_null: u8 = 0xd0;
 const op_ref_is_null: u8 = 0xd1;
 const op_ref_func: u8 = 0xd2;
-// §4.4.x table.get — one ULEB table index. Pops an i32 element index and
+// §4.4.x table.get — one ULEB table index. Pops an i32/i64 element index and
 // pushes the 128-bit reference at `tables[idx][index]` (trapping OOB). The
 // first op whose result is a runtime reference on Spasm's operand stack.
 const op_table_get: u8 = 0x25;
-// §4.4.x table.set — one ULEB table index. Pops [index(i32), ref] (the ref on
+// §4.4.x table.set — one ULEB table index. Pops [index(i32/i64), ref] (the ref on
 // top) and writes `tables[idx][index] = ref` (trapping OOB). The first op that
 // MOVES a reference off the operand stack into a table.
 const op_table_set: u8 = 0x26;
@@ -1225,7 +1226,7 @@ fn compileAarch64(
                 }
             },
             op_table_get => {
-                // §4.4.x table.get — pop an i32 element index, push the
+                // §4.4.x table.get — pop an i32/i64 element index, push the
                 // 128-bit reference at `tables[table_idx][index]` (trapping
                 // OOB). The result is the first runtime reference Spasm puts
                 // on the operand stack: it does NOT land in a register but in
@@ -1245,7 +1246,7 @@ fn compileAarch64(
                 // instance, so it is materialized into x3 just before the call.
                 if (helpers.table_get == null) return null; // helper not wired
                 const table_idx = readUleb32(body, &i) orelse return null;
-                if (!tableIs32(module, table_idx)) return null;
+                const table64 = tableIs64(module, table_idx) orelse return null;
                 if (sp < 1) return null;
                 const below = sp - 1; // operands beneath the index
                 if (below > operand_reg_count) return null;
@@ -1301,7 +1302,7 @@ fn compileAarch64(
                     try m.movImm64(.x16, out_off);
                     try m.emit(a64.addReg(.x3, .x0, .x16));
                 }
-                try m.emit(a64.movReg(.x2, idx_reg));
+                try m.emit(if (table64) a64.movReg(.x2, idx_reg) else a64.movRegW(.x2, idx_reg));
                 try m.emit(a64.movReg(.x0, .x19));
                 try m.movImm64(.x1, table_idx);
                 try m.callAbs(.x16, @intFromPtr(helpers.table_get.?));
@@ -1336,12 +1337,12 @@ fn compileAarch64(
                 }
                 try m.emit(a64.addSpImm(framebytes));
                 // The result is a runtime reference in its depth-keyed slot:
-                // pop the i32 index, push the ref at the same depth.
+                // pop the numeric index, push the ref at the same depth.
                 stack[below] = .ref;
                 sp = below + 1;
             },
             op_table_set => {
-                // §4.4.x table.set — pop [index(i32), ref] (the ref on top) and
+                // §4.4.x table.set — pop [index(i32/i64), ref] (the ref on top) and
                 // write `tables[table_idx][index] = ref`, trapping OOB. The
                 // first op that MOVES a reference off the operand stack into a
                 // table. The ref operand at depth sp-1 carries its value either
@@ -1360,7 +1361,7 @@ fn compileAarch64(
                 // then reload.
                 if (helpers.table_set == null) return null; // helper not wired
                 const table_idx = readUleb32(body, &i) orelse return null;
-                if (!tableIs32(module, table_idx)) return null;
+                const table64 = tableIs64(module, table_idx) orelse return null;
                 if (sp < 2) return null;
                 const below = sp - 2; // operands beneath the index
                 if (below > operand_reg_count) return null;
@@ -1422,7 +1423,7 @@ fn compileAarch64(
                     try m.movImm64(.x16, ref_off);
                     try m.emit(a64.addReg(.x3, .x0, .x16));
                 }
-                try m.emit(a64.movReg(.x2, idx_reg));
+                try m.emit(if (table64) a64.movReg(.x2, idx_reg) else a64.movRegW(.x2, idx_reg));
                 try m.emit(a64.movReg(.x0, .x19));
                 try m.movImm64(.x1, table_idx);
                 try m.callAbs(.x16, @intFromPtr(helpers.table_set.?));
@@ -2855,7 +2856,7 @@ fn compileAarch64(
                     // sp unchanged (no stack effect).
                 } else if (sub == 16) {
                     // §4.4.x table.size — push the current element count of
-                    // table `table_idx` as i32. A native helper reads
+                    // table `table_idx` at its address width. A native helper reads
                     // `tables[table_idx].elems.len`; no reference crosses the
                     // operand stack, only the size. It cannot trap. The frame
                     // shuffle mirrors `op_memory_grow`'s result capture: a
@@ -2864,7 +2865,7 @@ fn compileAarch64(
                     // call, capture w0 into the result slot, then reload.
                     if (helpers.table_size == null) return null; // helper not wired
                     const table_idx = readUleb32(body, &i) orelse return null;
-                    if (!tableIs32(module, table_idx)) return null;
+                    const table64 = tableIs64(module, table_idx) orelse return null;
                     // Pushes a result, consumes nothing.
                     const below = sp;
                     if (below + 1 > operand_reg_count) return null;
@@ -2904,11 +2905,9 @@ fn compileAarch64(
                     try m.movImm64(.x1, table_idx);
                     try m.callAbs(.x16, @intFromPtr(helpers.table_size.?));
 
-                    // x0 holds the element count (u32), x6 is clobbered.
-                    // Capture the result FIRST: a 32-bit move zero-extends the
-                    // i32 into the result slot register. Then recompute x6 from
-                    // SP and reload the boundary regs + register below-operands.
-                    try m.emit(a64.movRegW(regForDepth(below), .x0));
+                    // Capture the result at the table's address width before
+                    // restoring the boundary registers and live operands.
+                    try m.emit(if (table64) a64.movReg(regForDepth(below), .x0) else a64.movRegW(regForDepth(below), .x0));
                     try m.emit(a64.addRegSp(.x6, 0));
                     try m.emit(a64.ldrImm(.x0, .x6, spill_off));
                     try m.emit(a64.ldrImm(.x1, .x6, spill_off + 8));
@@ -2941,7 +2940,8 @@ fn compileAarch64(
                     if (helpers.table_copy == null) return null; // helper not wired
                     const dst_t = readUleb32(body, &i) orelse return null;
                     const src_t = readUleb32(body, &i) orelse return null;
-                    if (!tableIs32(module, dst_t) or !tableIs32(module, src_t)) return null;
+                    const dst64 = tableIs64(module, dst_t) orelse return null;
+                    const src64 = tableIs64(module, src_t) orelse return null;
                     if (sp < 3) return null;
                     const below = sp - 3;
                     if (below + 0 > operand_reg_count) return null;
@@ -2980,9 +2980,10 @@ fn compileAarch64(
                     // dst/src/len from their operand registers FIRST (they are
                     // x9.., never clobbered by the x0..x2 immediates), then
                     // overwrite x0..x2.
-                    try m.emit(a64.movReg(.x3, r_dst));
-                    try m.emit(a64.movReg(.x4, r_src));
-                    try m.emit(a64.movReg(.x5, r_len));
+                    try m.emit(if (dst64) a64.movReg(.x3, r_dst) else a64.movRegW(.x3, r_dst));
+                    try m.emit(if (src64) a64.movReg(.x4, r_src) else a64.movRegW(.x4, r_src));
+                    // Core table.copy uses the narrower table's width for len.
+                    try m.emit(if (dst64 and src64) a64.movReg(.x5, r_len) else a64.movRegW(.x5, r_len));
                     try m.emit(a64.movReg(.x0, .x19));
                     try m.movImm64(.x1, dst_t);
                     try m.movImm64(.x2, src_t);
@@ -3025,7 +3026,7 @@ fn compileAarch64(
                     if (helpers.table_init == null) return null; // helper not wired
                     const elem_idx = readUleb32(body, &i) orelse return null;
                     const table_idx = readUleb32(body, &i) orelse return null;
-                    if (!tableIs32(module, table_idx)) return null;
+                    const table64 = tableIs64(module, table_idx) orelse return null;
                     if (sp < 3) return null;
                     const below = sp - 3;
                     if (below + 0 > operand_reg_count) return null;
@@ -3061,9 +3062,9 @@ fn compileAarch64(
                     // Load dst/src/len from their operand registers FIRST (they
                     // are x9.., never clobbered by the x0..x2 immediates), then
                     // overwrite x0..x2.
-                    try m.emit(a64.movReg(.x3, r_dst));
-                    try m.emit(a64.movReg(.x4, r_src));
-                    try m.emit(a64.movReg(.x5, r_len));
+                    try m.emit(if (table64) a64.movReg(.x3, r_dst) else a64.movRegW(.x3, r_dst));
+                    try m.emit(a64.movRegW(.x4, r_src));
+                    try m.emit(a64.movRegW(.x5, r_len));
                     try m.emit(a64.movReg(.x0, .x19));
                     try m.movImm64(.x1, elem_idx);
                     try m.movImm64(.x2, table_idx);
@@ -3150,9 +3151,9 @@ fn compileAarch64(
                     try m.emit(a64.addSpImm(framebytes));
                     // sp unchanged (no stack effect).
                 } else if (sub == 15) {
-                    // §4.4.x table.grow — pop [init(ref), delta(i32)] (delta on
+                    // §4.4.x table.grow — pop [init(ref), delta(i32/i64)] (delta on
                     // top), grow table `table_idx` by `delta` filling new slots
-                    // with `init`, push the PREVIOUS element count (i32) or -1
+                    // with `init`, push the PREVIOUS element count (i32/i64) or -1
                     // on failure (it never traps). The init ref carries its
                     // value in its depth-keyed cell (a runtime `.ref`) or as a
                     // compile-time constant (`.ref_func`/`.ref_null`); it is
@@ -3160,17 +3161,14 @@ fn compileAarch64(
                     // so the helper reads one uniform slot pointer. Unlike
                     // `memory.grow`, a table realloc never invalidates a cached
                     // register (table access always goes through the instance),
-                    // so NO mem_base/mem_len reload is needed — only the i32
+                    // so NO mem_base/mem_len reload is needed — only the numeric
                     // result is captured. The frame shuffle otherwise mirrors
                     // `memory.grow`'s result-capture form: a callconv(.c) helper
                     // clobbers x0..x18 + x6, so spill the boundary registers +
                     // the live register below-operands, call, capture w0, reload.
                     if (helpers.table_grow == null) return null; // helper not wired
                     const table_idx = readUleb32(body, &i) orelse return null;
-                    // A table64's result is i64, not i32 (a different width than
-                    // this arm produces) — degrade rather than special-case it,
-                    // exactly as `memory.grow` does for memory64.
-                    if (!tableIs32(module, table_idx)) return null;
+                    const table64 = tableIs64(module, table_idx) orelse return null;
                     if (sp < 2) return null;
                     const below = sp - 2; // operands beneath init+delta
                     // Post-op stack = survivors + 1 result; it must fit the bank.
@@ -3220,19 +3218,18 @@ fn compileAarch64(
                         try m.movImm64(.x16, init_off);
                         try m.emit(a64.addReg(.x2, .x0, .x16));
                     }
-                    try m.emit(a64.movReg(.x3, delta_reg));
+                    try m.emit(if (table64) a64.movReg(.x3, delta_reg) else a64.movRegW(.x3, delta_reg));
                     try m.emit(a64.movReg(.x0, .x19));
                     try m.movImm64(.x1, table_idx);
                     try m.callAbs(.x16, @intFromPtr(helpers.table_grow.?));
 
                     // x0 holds old_size (i64), or -1 (0xFFFF_FFFF_FFFF_FFFF) on
-                    // failure; x6 is clobbered. Capture the result FIRST: a
-                    // 32-bit move zero-extends the i32 old size (or the low
-                    // 0xFFFFFFFF of -1) into the result slot register. Then
+                    // failure; x6 is clobbered. Capture the result FIRST at
+                    // the table's address width, retaining all bits of -1. Then
                     // recompute x6 from SP and reload the boundary registers +
                     // register below-operands. No mem_base/mem_len reload —
                     // a table grow leaves the cached memory registers valid.
-                    try m.emit(a64.movRegW(regForDepth(below), .x0));
+                    try m.emit(if (table64) a64.movReg(regForDepth(below), .x0) else a64.movRegW(regForDepth(below), .x0));
                     try m.emit(a64.addRegSp(.x6, 0));
                     try m.emit(a64.ldrImm(.x0, .x6, spill_off));
                     try m.emit(a64.ldrImm(.x1, .x6, spill_off + 8));
@@ -3251,7 +3248,8 @@ fn compileAarch64(
                     stack[below] = .{ .reg = regForDepth(below) };
                     sp = below + 1; // 2 consumed (init + delta), 1 pushed
                 } else if (sub == 17) {
-                    // §4.4.x table.fill — pop [index(i32), val(ref), count(i32)]
+                    // §4.4.x table.fill — pop [index, val(ref), count], with
+                    // index and count at the table's address width
                     // (count on top, val in the middle, index at the bottom),
                     // fill `count` entries of table `table_idx` from `index`
                     // with `val`, trapping OOB. The val ref carries its value in
@@ -3266,7 +3264,7 @@ fn compileAarch64(
                     // call, reload. table.fill never resizes memory.
                     if (helpers.table_fill == null) return null; // helper not wired
                     const table_idx = readUleb32(body, &i) orelse return null;
-                    if (!tableIs32(module, table_idx)) return null;
+                    const table64 = tableIs64(module, table_idx) orelse return null;
                     if (sp < 3) return null;
                     const below = sp - 3; // operands beneath index/val/count
                     if (below > operand_reg_count) return null;
@@ -3316,8 +3314,8 @@ fn compileAarch64(
                         try m.movImm64(.x16, val_off);
                         try m.emit(a64.addReg(.x3, .x0, .x16));
                     }
-                    try m.emit(a64.movReg(.x2, idx_reg));
-                    try m.emit(a64.movReg(.x4, cnt_reg));
+                    try m.emit(if (table64) a64.movReg(.x2, idx_reg) else a64.movRegW(.x2, idx_reg));
+                    try m.emit(if (table64) a64.movReg(.x4, cnt_reg) else a64.movRegW(.x4, cnt_reg));
                     try m.emit(a64.movReg(.x0, .x19));
                     try m.movImm64(.x1, table_idx);
                     try m.callAbs(.x16, @intFromPtr(helpers.table_fill.?));
@@ -4216,7 +4214,7 @@ fn compileAarch64(
                 if (helpers.call_indirect == null) return null; // helper not wired
                 const type_idx = readUleb32(body, &i) orelse return null;
                 const table_idx = readUleb32(body, &i) orelse return null;
-                if (!tableIs32(module, table_idx)) return null;
+                const table64 = tableIs64(module, table_idx) orelse return null;
                 if (type_idx >= module.types.len) return null;
                 const callee = &module.types[type_idx];
                 const nparams: usize = callee.params.len;
@@ -4276,7 +4274,7 @@ fn compileAarch64(
                 try m.emit(a64.movReg(.x0, .x19));
                 try m.movImm64(.x1, type_idx);
                 try m.movImm64(.x2, table_idx);
-                try m.emit(a64.movReg(.x3, idx_reg));
+                try m.emit(if (table64) a64.movReg(.x3, idx_reg) else a64.movRegW(.x3, idx_reg));
                 try m.emit(a64.movReg(.x4, .x6));
                 try m.emit(a64.movReg(.x5, .x21));
                 try m.callAbs(.x16, @intFromPtr(helpers.call_indirect.?));

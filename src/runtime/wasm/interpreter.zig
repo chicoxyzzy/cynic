@@ -2114,7 +2114,7 @@ fn spasmCallIndirect(
     instance_opaque: *anyopaque,
     type_index: u32,
     table_index: u32,
-    elem_index: u32,
+    elem_index: u64,
     buf: [*]u128,
     execution_control: ?*anyopaque,
 ) callconv(.c) u32 {
@@ -2128,7 +2128,7 @@ fn spasmCallIndirect(
         inst.spasm_call_trap = error.UndefinedElement;
         return spasm.trap_pending;
     }
-    const ref = table.elems[@as(usize, elem_index)];
+    const ref = table.elems[@intCast(elem_index)];
     if (ref == REF_NULL) {
         inst.spasm_call_trap = error.UninitializedElement;
         return spasm.trap_pending;
@@ -2258,11 +2258,11 @@ fn spasmDataDrop(instance_opaque: *anyopaque, data_idx: u32) callconv(.c) void {
 }
 
 /// The native helper a Spasm-compiled `table.size` (§4.4.x) branches to.
-/// Returns the current element count of table `table_idx` (the i32 result
+/// Returns the current element count of table `table_idx` (the i32/i64 result
 /// the op pushes). No reference crosses the operand stack — only the size.
 /// Cannot trap; an out-of-range index (which validation forbids) is read
 /// defensively and reported as 0.
-fn spasmTableSize(instance_opaque: *anyopaque, table_idx: u32) callconv(.c) u32 {
+fn spasmTableSize(instance_opaque: *anyopaque, table_idx: u32) callconv(.c) u64 {
     const inst: *Instance = @ptrCast(@alignCast(instance_opaque));
     if (table_idx >= inst.tables.len) return 0;
     return @intCast(inst.tables[table_idx].elems.len);
@@ -2272,16 +2272,16 @@ fn spasmTableSize(instance_opaque: *anyopaque, table_idx: u32) callconv(.c) u32 
 /// Mirrors `tableCopy`: move `len` elements from table `src_t` (offset
 /// `src`) to table `dst_t` (offset `dst`), overlap-safe (forward when
 /// dst <= src, else backward), after an overflow-safe bounds check on both
-/// ranges. The references stay table-internal — only the i32 indices crossed
+/// ranges. The references stay table-internal — only the numeric indices cross
 /// the operand stack. On any out-of-bounds it stashes `OutOfBoundsTableAccess`
 /// and returns `spasm.trap_pending`; otherwise `spasm.trap_ok`.
 fn spasmTableCopy(
     instance_opaque: *anyopaque,
     dst_t: u32,
     src_t: u32,
-    dst: u32,
-    src: u32,
-    len: u32,
+    dst: u64,
+    src: u64,
+    len: u64,
 ) callconv(.c) u32 {
     const inst: *Instance = @ptrCast(@alignCast(instance_opaque));
     if (dst_t >= inst.tables.len or src_t >= inst.tables.len) {
@@ -2316,15 +2316,15 @@ fn spasmTableCopy(
 /// `elem_idx` (offset `src`) into table `table_idx` (offset `dst`), after an
 /// overflow-safe bounds check on both the segment and the table. A dropped
 /// segment has empty `values`, so a non-zero `len` against it fails the check
-/// and traps. The references stay table-internal — only the i32 indices
-/// crossed the operand stack. On any out-of-bounds it stashes
+/// and traps. The table destination follows its address width; segment-relative
+/// source and length remain i32. On any out-of-bounds it stashes
 /// `OutOfBoundsTableAccess` and returns `spasm.trap_pending`; otherwise
 /// `spasm.trap_ok`.
 fn spasmTableInit(
     instance_opaque: *anyopaque,
     elem_idx: u32,
     table_idx: u32,
-    dst: u32,
+    dst: u64,
     src: u32,
     len: u32,
 ) callconv(.c) u32 {
@@ -2369,7 +2369,7 @@ fn spasmElemDrop(instance_opaque: *anyopaque, elem_idx: u32) callconv(.c) void {
 fn spasmTableGet(
     instance_opaque: *anyopaque,
     table_idx: u32,
-    index: u32,
+    index: u64,
     out_cell: [*]u128,
 ) callconv(.c) u32 {
     const inst: *Instance = @ptrCast(@alignCast(instance_opaque));
@@ -2382,7 +2382,7 @@ fn spasmTableGet(
         inst.spasm_call_trap = error.OutOfBoundsTableAccess;
         return spasm.trap_pending;
     }
-    out_cell[0] = table.elems[index];
+    out_cell[0] = table.elems[@intCast(index)];
     return spasm.trap_ok;
 }
 
@@ -2400,7 +2400,7 @@ fn spasmTableGet(
 fn spasmTableSet(
     instance_opaque: *anyopaque,
     table_idx: u32,
-    index: u32,
+    index: u64,
     ref_slot: [*]const u128,
 ) callconv(.c) u32 {
     const inst: *Instance = @ptrCast(@alignCast(instance_opaque));
@@ -2413,7 +2413,7 @@ fn spasmTableSet(
         inst.spasm_call_trap = error.OutOfBoundsTableAccess;
         return spasm.trap_pending;
     }
-    table.elems[index] = ref_slot[0];
+    table.elems[@intCast(index)] = ref_slot[0];
     return spasm.trap_ok;
 }
 
@@ -2424,13 +2424,13 @@ fn spasmTableSet(
 /// temporary the codegen staged a compile-time `ref.func`/`ref.null` into).
 /// Returns the PREVIOUS element count as an i64, or -1 on failure (an
 /// implementation limit or the table's max — growth never traps). Only the
-/// init reference travels through the cell; the i32 delta and the i32/i64
+/// init reference travels through the cell; the i32/i64 delta and the i32/i64
 /// result cross the operand stack directly.
 fn spasmTableGrow(
     instance_opaque: *anyopaque,
     table_idx: u32,
     init_slot: [*]const u128,
-    delta: u32,
+    delta: u64,
 ) callconv(.c) i64 {
     const inst: *Instance = @ptrCast(@alignCast(instance_opaque));
     if (table_idx >= inst.tables.len) return -1;
@@ -2458,15 +2458,15 @@ fn spasmTableGrow(
 /// `val_slot[0]` (a cell in the over-allocated locals buffer, or a temporary
 /// the codegen staged a compile-time `ref.func`/`ref.null` into), after an
 /// overflow-safe bounds check. Only the fill reference travels through the
-/// cell; the i32 index and count cross the operand stack directly. On an
+/// cell; the i32/i64 index and count cross the operand stack directly. On an
 /// out-of-bounds range it stashes `OutOfBoundsTableAccess` and returns
 /// `spasm.trap_pending`; otherwise `spasm.trap_ok`.
 fn spasmTableFill(
     instance_opaque: *anyopaque,
     table_idx: u32,
-    index: u32,
+    index: u64,
     val_slot: [*]const u128,
-    count: u32,
+    count: u64,
 ) callconv(.c) u32 {
     const inst: *Instance = @ptrCast(@alignCast(instance_opaque));
     if (table_idx >= inst.tables.len) {
@@ -2479,9 +2479,9 @@ fn spasmTableFill(
         return spasm.trap_pending;
     }
     const base: usize = @intCast(index);
+    const len: usize = @intCast(count);
     const val = val_slot[0];
-    var k: u32 = 0;
-    while (k < count) : (k += 1) table.elems[base + k] = val;
+    for (table.elems[base..][0..len]) |*elem| elem.* = val;
     return spasm.trap_ok;
 }
 
