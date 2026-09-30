@@ -2663,7 +2663,8 @@ test "wasm spasm: SIMD memory loads skip unreachable memory64 immediates" {
     }
 }
 
-test "wasm spasm: SIMD memory loads on a nonzero memory fall back safely" {
+test "wasm spasm: SIMD multi-memory loads enter native code" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -2678,7 +2679,490 @@ test "wasm spasm: SIMD memory loads on a nonzero memory fall back safely" {
         const result = try interp.invoke(&instance, testing.allocator, 0, &.{ 37, simd_live_vector, 0 });
         defer testing.allocator.free(result);
         try testing.expectEqualSlices(u128, &.{ 37, simd_live_vector, expectedSimdMemoryLoad(sub, 0x8181818181818181) }, result);
-        try testing.expectEqual(@as(u32, 0), instance.spasm_runs);
+        try testing.expectEqual(@as(u32, 1), instance.spasm_runs);
+    }
+}
+
+const simd_memory_ops = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93 };
+
+const SimdAuditOp = struct {
+    inputs: []const u8,
+    output: ?u8 = 0x7b,
+    immediate: enum { none, memory, lane, memory_lane, constant, shuffle } = .none,
+};
+
+// Independent of the compiler's classifiers: Core's accepted SIMD signatures.
+fn simdAuditOp(sub: u32) ?SimdAuditOp {
+    return switch (sub) {
+        0...10, 92, 93 => .{ .inputs = &.{0x7f}, .immediate = .memory },
+        11 => .{ .inputs = &.{ 0x7f, 0x7b }, .output = null, .immediate = .memory },
+        12 => .{ .inputs = &.{}, .immediate = .constant },
+        13 => .{ .inputs = &.{ 0x7b, 0x7b }, .immediate = .shuffle },
+        15...17 => .{ .inputs = &.{0x7f} },
+        18 => .{ .inputs = &.{0x7e} },
+        19 => .{ .inputs = &.{0x7d} },
+        20 => .{ .inputs = &.{0x7c} },
+        21, 22, 24, 25, 27 => .{ .inputs = &.{0x7b}, .output = 0x7f, .immediate = .lane },
+        29 => .{ .inputs = &.{0x7b}, .output = 0x7e, .immediate = .lane },
+        31 => .{ .inputs = &.{0x7b}, .output = 0x7d, .immediate = .lane },
+        33 => .{ .inputs = &.{0x7b}, .output = 0x7c, .immediate = .lane },
+        23, 26, 28 => .{ .inputs = &.{ 0x7b, 0x7f }, .immediate = .lane },
+        30 => .{ .inputs = &.{ 0x7b, 0x7e }, .immediate = .lane },
+        32 => .{ .inputs = &.{ 0x7b, 0x7d }, .immediate = .lane },
+        34 => .{ .inputs = &.{ 0x7b, 0x7c }, .immediate = .lane },
+        82, 261...268, 275 => .{ .inputs = &.{ 0x7b, 0x7b, 0x7b } },
+        83, 99, 100, 131, 132, 163, 164, 195, 196 => .{ .inputs = &.{0x7b}, .output = 0x7f },
+        84...87 => .{ .inputs = &.{ 0x7f, 0x7b }, .immediate = .memory_lane },
+        88...91 => .{ .inputs = &.{ 0x7f, 0x7b }, .output = null, .immediate = .memory_lane },
+        107...109, 139...141, 171...173, 203...205 => .{ .inputs = &.{ 0x7b, 0x7f } },
+        77,
+        94...98,
+        103...106,
+        116,
+        117,
+        122,
+        124...129,
+        135...138,
+        148,
+        160,
+        161,
+        167...170,
+        192,
+        193,
+        199...202,
+        224,
+        225,
+        227,
+        236,
+        237,
+        239,
+        248...255,
+        257...260,
+        => .{ .inputs = &.{0x7b} },
+        14,
+        35...76,
+        78...81,
+        101,
+        102,
+        110...115,
+        118...121,
+        123,
+        130,
+        133,
+        134,
+        142...147,
+        149...153,
+        155...159,
+        174,
+        177,
+        181...186,
+        188...191,
+        206,
+        209,
+        213...223,
+        228...235,
+        240...247,
+        256,
+        269...274,
+        => .{ .inputs = &.{ 0x7b, 0x7b } },
+        else => null,
+    };
+}
+
+fn simdAuditParam(value_type: u8) u8 {
+    return switch (value_type) {
+        0x7f => 2,
+        0x7e => 3,
+        0x7d => 4,
+        0x7c => 5,
+        else => 6,
+    };
+}
+
+fn buildSimdAuditFunc(a: std.mem.Allocator, sub: u32, op: SimdAuditOp, count: usize, dead: bool) ![]const u8 {
+    var body: List = .empty;
+    try body.appendSlice(a, &.{ 1, 32, 0x7f, 0x20, 0, 0x20, 1 });
+    if (dead) {
+        try body.appendSlice(a, &.{ 0x02, op.output orelse 0x40 });
+        if (op.output) |value_type| try body.appendSlice(a, &.{ 0x20, simdAuditParam(value_type) });
+        try body.appendSlice(a, &.{ 0x0c, 0 });
+    }
+    const chain = op.output == 0x7b and op.inputs.len > 0 and op.inputs[0] == 0x7b;
+    for (0..count) |iteration| {
+        if (iteration > 0 and !chain and op.output != null) try body.append(a, 0x1a);
+        for (op.inputs, 0..) |value_type, input| {
+            if (iteration > 0 and chain and input == 0) continue;
+            try body.appendSlice(a, &.{ 0x20, simdAuditParam(value_type) });
+        }
+        try body.append(a, 0xfd);
+        try uleb(a, &body, sub);
+        switch (op.immediate) {
+            .none => {},
+            .memory => try body.appendSlice(a, &.{ 0, 0 }),
+            .lane => try body.append(a, 0),
+            .memory_lane => try body.appendSlice(a, &.{ 0, 0, 0 }),
+            .constant => try body.appendSlice(a, &@as([16]u8, @splat(0))),
+            .shuffle => for (0..16) |lane| try body.append(a, @intCast(lane)),
+        }
+    }
+    if (dead) try body.append(a, 0x0b);
+    try body.append(a, 0x0b);
+    var code: List = .empty;
+    try uleb(a, &code, 1);
+    try uleb(a, &code, body.items.len);
+    try code.appendSlice(a, body.items);
+    var types: List = .empty;
+    try types.appendSlice(a, &.{ 1, 0x60, 7, 0x7e, 0x7b, 0x7f, 0x7e, 0x7d, 0x7c, 0x7b, if (op.output != null) 3 else 2, 0x7e, 0x7b });
+    if (op.output) |value_type| try types.append(a, value_type);
+    return assemble(a, &.{
+        .{ .id = 1, .body = types.items },
+        .{ .id = 3, .body = &.{ 1, 0 } },
+        .{ .id = 5, .body = &.{ 1, 0, 1 } },
+        .{ .id = 10, .body = code.items },
+    });
+}
+
+fn expectSimdAuditValue(sub: u32, expected: u128, actual: u128) !void {
+    const float_width: u8 = switch (sub) {
+        94, 103...106, 224, 225, 227...235, 250, 251, 261, 262, 269, 270 => 32,
+        95, 116, 117, 122, 148, 236, 237, 239...247, 254, 255, 263, 264, 271, 272 => 64,
+        else => 0,
+    };
+    if (float_width == 0) return testing.expectEqual(expected, actual);
+    inline for (.{ u32, u64 }) |U| {
+        if (float_width == @bitSizeOf(U)) {
+            const F = if (U == u32) f32 else f64;
+            const x: [128 / @bitSizeOf(U)]U = @bitCast(expected);
+            const y: [128 / @bitSizeOf(U)]U = @bitCast(actual);
+            for (x, y) |left, right| {
+                if (std.math.isNan(@as(F, @bitCast(left)))) {
+                    try testing.expect(std.math.isNan(@as(F, @bitCast(right))));
+                    const quiet: U = if (U == u32) 0x00400000 else 0x0008000000000000;
+                    try testing.expect(right & quiet != 0);
+                } else try testing.expectEqual(left, right);
+            }
+        }
+    }
+}
+
+fn testSimdAuditCase(sub: u32, op: SimdAuditOp, count: usize, dead: bool) !void {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const module = try wasm.decode(a, try buildSimdAuditFunc(a, sub, op, count, dead));
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+    defer instance.deinit();
+    const args = [_]u128{ 37, simd_live_vector, 1, 1, 0x3f800000, 0x3ff0000000000000, 0x3ff000003f8000003ff000003f800000 };
+    instance.spasm_enabled = false;
+    @memset(instance.memories[0].data, 0x81);
+    const expected = try interp.invoke(&instance, testing.allocator, 0, &args);
+    defer testing.allocator.free(expected);
+    const expected_memory = try a.dupe(u8, instance.memories[0].data);
+    instance.spasm_enabled = true;
+    @memset(instance.memories[0].data, 0x81);
+    const actual = try interp.invoke(&instance, testing.allocator, 0, &args);
+    defer testing.allocator.free(actual);
+    try testing.expectEqual(@import("spasm.zig").RefusalStage.none, instance.spasm_last_refusal_stage);
+    try testing.expectEqual(@as(u32, 1), instance.spasm_compiles);
+    try testing.expectEqual(@as(u32, 1), instance.spasm_runs);
+    try testing.expectEqual(expected.len, actual.len);
+    try testing.expectEqualSlices(u128, &.{ 37, simd_live_vector }, actual[0..2]);
+    if (op.output != null) try expectSimdAuditValue(sub, expected[2], actual[2]);
+    try testing.expectEqualSlices(u8, expected_memory, instance.memories[0].data);
+}
+
+fn testSimdAudit(count: usize, dead: bool) !void {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var covered: usize = 0;
+    var failed: usize = 0;
+    for (0..276) |opcode| {
+        const sub: u32 = @intCast(opcode);
+        const op = simdAuditOp(sub) orelse continue;
+        testSimdAuditCase(sub, op, count, dead) catch |err| {
+            std.debug.print("SIMD audit sub={d}, count={d}, dead={}: {s}\n", .{ sub, count, dead, @errorName(err) });
+            failed += 1;
+        };
+        covered += 1;
+    }
+    try testing.expectEqual(@as(usize, 256), covered);
+    try testing.expectEqual(@as(usize, 0), failed);
+}
+
+test "wasm spasm: SIMD opcode audit requires native entry for all 256 accepted operations" {
+    try testSimdAudit(1, false);
+}
+
+test "wasm spasm: SIMD opcode audit skips all accepted dead immediates" {
+    try testSimdAudit(1, true);
+}
+
+test "wasm spasm: SIMD opcode audit checks dense reservations without unary padding" {
+    try testSimdAudit(128, false);
+    try testSimdAudit(1024, false);
+}
+
+const SimdMultiMemoryConfig = struct {
+    sub: u8,
+    index: u32 = 1,
+    memory64: bool = false,
+    offset: u64 = 0,
+    imports: u32 = 0,
+    dead: bool = false,
+    grow: bool = false,
+    repetitions: usize = 1,
+
+    fn is64(self: @This(), index: usize) bool {
+        return if (index == self.index) self.memory64 else !self.memory64;
+    }
+
+    fn store(self: @This()) bool {
+        return self.sub == 11 or (self.sub >= 88 and self.sub <= 91);
+    }
+
+    fn lane(self: @This()) bool {
+        return self.sub >= 84 and self.sub <= 91;
+    }
+
+    fn width(self: @This()) usize {
+        if (self.sub == 0 or self.sub == 11) return 16;
+        if (self.lane()) return @as(usize, 1) << @as(u3, @intCast((self.sub - 84) % 4));
+        return simdMemoryLoadWidth(self.sub);
+    }
+};
+
+fn buildSimdMultiMemoryFunc(a: std.mem.Allocator, config: SimdMultiMemoryConfig) ![]const u8 {
+    var body: List = .empty;
+    try body.appendSlice(a, &.{ 1, 32, 0x7f, 0x20, 0, 0x20, 1 });
+    if (config.grow) try body.appendSlice(a, &.{ 0x10, 1 });
+    if (config.dead) try body.appendSlice(a, &.{ 0x02, 0x7b, 0x20, 3, 0x0c, 0 });
+    for (0..config.repetitions) |iteration| {
+        try body.appendSlice(a, &.{ 0x20, 2 });
+        if (config.store() or config.lane()) try body.appendSlice(a, &.{ 0x20, 3 });
+        try body.appendSlice(a, &.{ 0xfd, config.sub, 0x40 });
+        try uleb(a, &body, config.index);
+        try uleb(a, &body, @intCast(config.offset));
+        if (config.lane()) try body.append(a, @intCast(16 / config.width() - 1));
+        if (config.store()) try body.appendSlice(a, &.{ 0x20, 3 });
+        if (iteration + 1 != config.repetitions) try body.append(a, 0x1a);
+    }
+    if (config.dead) try body.append(a, 0x0b);
+    // A memory-zero access after the selected access detects cache corruption.
+    try body.appendSlice(a, &.{ if (config.is64(0)) 0x42 else 0x41, 0, 0xfd, 0, 0, 0, 0x0b });
+    var code: List = .empty;
+    try uleb(a, &code, if (config.grow) 2 else 1);
+    try uleb(a, &code, body.items.len);
+    try code.appendSlice(a, body.items);
+    if (config.grow) {
+        var grow: List = .empty;
+        try grow.appendSlice(a, &.{ 0, if (config.memory64) 0x42 else 0x41, 1, 0x40 });
+        try uleb(a, &grow, config.index);
+        try grow.appendSlice(a, &.{ 0x1a, 0x0b });
+        try uleb(a, &code, grow.items.len);
+        try code.appendSlice(a, grow.items);
+    }
+    var types: List = .empty;
+    try types.appendSlice(a, &.{ if (config.grow) 2 else 1, 0x60, 4, 0x7e, 0x7b, if (config.memory64) 0x7e else 0x7f, 0x7b, 4, 0x7e, 0x7b, 0x7b, 0x7b });
+    if (config.grow) try types.appendSlice(a, &.{ 0x60, 0, 0 });
+    const count = @max(2, config.index + 1);
+    var imports: List = .empty;
+    var memories: List = .empty;
+    try uleb(a, &imports, config.imports);
+    try uleb(a, &memories, count - config.imports);
+    for (0..count) |index| {
+        const memory_section = if (index < config.imports) &imports else &memories;
+        if (index < config.imports) try memory_section.appendSlice(a, &.{ 1, 'm', 1, 'm', 2 });
+        try memory_section.appendSlice(a, &.{ if (config.is64(index)) 4 else 0, if (index == 0 or index == config.index) 1 else 0 });
+    }
+    return assemble(a, &.{
+        .{ .id = 1, .body = types.items },
+        .{ .id = 2, .body = imports.items },
+        .{ .id = 3, .body = if (config.grow) &.{ 2, 0, 1 } else &.{ 1, 0 } },
+        .{ .id = 5, .body = memories.items },
+        .{ .id = 10, .body = code.items },
+    });
+}
+
+fn checkSimdMultiMemory(instance: *interp.Instance, config: SimdMultiMemoryConfig, address: u64) !void {
+    errdefer std.debug.print("SIMD memory sub={d}, index={d}, memory64={}, offset={d}, address={d}\n", .{ config.sub, config.index, config.memory64, config.offset, address });
+    for (instance.memories, 0..) |memory, index| @memset(memory.data, if (index == config.index) 0x81 else 0x35);
+    const memory = instance.memories[config.index].data;
+    const width = config.width();
+    const in_bounds = config.offset <= memory.len - width and address <= memory.len - width - config.offset;
+    const before = instance.spasm_runs;
+    const outcome = interp.invoke(instance, testing.allocator, 0, &.{ 37, simd_live_vector, address, ~simd_live_vector });
+    defer if (outcome) |values| testing.allocator.free(values) else |_| {};
+    try testing.expectEqual(before + 1, instance.spasm_runs);
+    if (in_bounds) {
+        const start: usize = @intCast(address + config.offset);
+        var expected: u128 = if (config.store()) ~simd_live_vector else if (config.sub == 0) @bitCast(@as([16]u8, @splat(0x81))) else if (config.lane()) blk: {
+            var bytes: [16]u8 = @bitCast(~simd_live_vector);
+            @memset(bytes[16 - width ..], 0x81);
+            break :blk @bitCast(bytes);
+        } else expectedSimdMemoryLoad(config.sub, 0x8181818181818181);
+        if (config.dead) expected = ~simd_live_vector;
+        const result = try outcome;
+        try testing.expectEqualSlices(u128, &.{ 37, simd_live_vector, expected, std.mem.readInt(u128, instance.memories[0].data[0..16], .little) }, result);
+        if (config.store() and !config.dead) {
+            const input: [16]u8 = @bitCast(~simd_live_vector);
+            try testing.expectEqualSlices(u8, input[16 - width ..], memory[start..][0..width]);
+            try testing.expect(std.mem.allEqual(u8, memory[0..start], 0x81));
+            try testing.expect(std.mem.allEqual(u8, memory[start + width ..], 0x81));
+        } else try testing.expect(std.mem.allEqual(u8, memory, 0x81));
+    } else {
+        try testing.expectError(error.OutOfBoundsMemoryAccess, outcome);
+        try testing.expect(std.mem.allEqual(u8, memory, 0x81));
+    }
+    for (instance.memories, 0..) |other, index| {
+        if (index != config.index) try testing.expect(std.mem.allEqual(u8, other.data, 0x35));
+    }
+}
+
+test "wasm spasm: SIMD multi-memory selects the address width and preserves memory zero" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    for (simd_memory_ops) |sub| {
+        for ([_]bool{ false, true }) |memory64| {
+            for ([_]u32{ 0, 1, 128 }) |index| {
+                var arena = std.heap.ArenaAllocator.init(testing.allocator);
+                defer arena.deinit();
+                const a = arena.allocator();
+                const config: SimdMultiMemoryConfig = .{ .sub = sub, .index = index, .memory64 = memory64, .offset = 3 };
+                const module = try wasm.decode(a, try buildSimdMultiMemoryFunc(a, config));
+                var instance: interp.Instance = undefined;
+                try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+                defer instance.deinit();
+                instance.spasm_enabled = true;
+                try checkSimdMultiMemory(&instance, config, 1);
+                try checkSimdMultiMemory(&instance, config, 65536 - config.width() - config.offset);
+            }
+        }
+    }
+}
+
+test "wasm spasm: SIMD multi-memory traps before partial stores or address overflow" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    for (simd_memory_ops) |sub| {
+        for ([_]bool{ false, true }) |memory64| {
+            for ([_]u64{ 0, 8, 0xffffffff, 0x100000000, std.math.maxInt(u64) }) |offset| {
+                if (!memory64 and offset > std.math.maxInt(u32)) continue;
+                var arena = std.heap.ArenaAllocator.init(testing.allocator);
+                defer arena.deinit();
+                const a = arena.allocator();
+                const config: SimdMultiMemoryConfig = .{ .sub = sub, .memory64 = memory64, .offset = offset };
+                const module = try wasm.decode(a, try buildSimdMultiMemoryFunc(a, config));
+                var instance: interp.Instance = undefined;
+                try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+                defer instance.deinit();
+                instance.spasm_enabled = true;
+                for ([_]u64{ 0, 1, 65536 - config.width(), 65537 - config.width(), 0xffffffff, 0x100000000, std.math.maxInt(u64) }) |address| {
+                    if (!memory64 and address > std.math.maxInt(u32)) continue;
+                    try checkSimdMultiMemory(&instance, config, address);
+                }
+            }
+        }
+    }
+}
+
+test "wasm spasm: SIMD multi-memory skips complete unreachable immediates" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    for (simd_memory_ops) |sub| {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const config: SimdMultiMemoryConfig = .{ .sub = sub, .index = 128, .memory64 = true, .offset = std.math.maxInt(u64), .dead = true };
+        const module = try wasm.decode(a, try buildSimdMultiMemoryFunc(a, config));
+        var instance: interp.Instance = undefined;
+        try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+        defer instance.deinit();
+        instance.spasm_enabled = true;
+        const result = try interp.invoke(&instance, testing.allocator, 0, &.{ 37, simd_live_vector, std.math.maxInt(u64), ~simd_live_vector });
+        defer testing.allocator.free(result);
+        try testing.expectEqualSlices(u128, &.{ 37, simd_live_vector, ~simd_live_vector, 0 }, result);
+        try testing.expectEqual(@as(u32, 1), instance.spasm_runs);
+    }
+}
+
+test "wasm spasm: SIMD multi-memory resolves imported and defined memory indices" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    for (simd_memory_ops) |sub| {
+        for ([_]bool{ false, true }) |memory64| {
+            for ([_]u32{ 1, 2 }) |imports| {
+                var arena = std.heap.ArenaAllocator.init(testing.allocator);
+                defer arena.deinit();
+                const a = arena.allocator();
+                const config: SimdMultiMemoryConfig = .{ .sub = sub, .memory64 = memory64, .imports = imports };
+                var provider_config = config;
+                provider_config.imports = 0;
+                const provider_module = try wasm.decode(a, try buildSimdMultiMemoryFunc(a, provider_config));
+                var provider: interp.Instance = undefined;
+                try interp.instantiate(&provider, a, testing.allocator, &provider_module, .{});
+                defer provider.deinit();
+                const module = try wasm.decode(a, try buildSimdMultiMemoryFunc(a, config));
+                var instance: interp.Instance = undefined;
+                try interp.instantiate(&instance, a, testing.allocator, &module, .{ .memories = provider.memories[0..imports], .share_memory = true });
+                defer instance.deinit();
+                instance.spasm_enabled = true;
+                try checkSimdMultiMemory(&instance, config, 1);
+                try testing.expect(instance.memories[0] == provider.memories[0]);
+                if (imports == 2) try testing.expect(instance.memories[1] == provider.memories[1]);
+            }
+        }
+    }
+}
+
+test "wasm spasm: SIMD multi-memory refreshes the selected view after a callee grows it" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    for ([_]bool{ false, true }) |memory64| {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const config: SimdMultiMemoryConfig = .{ .sub = 0, .memory64 = memory64, .grow = true, .imports = 2 };
+        var provider_config = config;
+        provider_config.imports = 0;
+        provider_config.grow = false;
+        const provider_module = try wasm.decode(a, try buildSimdMultiMemoryFunc(a, provider_config));
+        var provider: interp.Instance = undefined;
+        try interp.instantiate(&provider, a, testing.allocator, &provider_module, .{});
+        defer provider.deinit();
+        const module = try wasm.decode(a, try buildSimdMultiMemoryFunc(a, config));
+        var instance: interp.Instance = undefined;
+        try interp.instantiate(&instance, a, testing.allocator, &module, .{ .memories = provider.memories, .share_memory = true });
+        defer instance.deinit();
+        instance.spasm_enabled = true;
+        @memset(instance.memories[0].data, 0x35);
+        for ([_]u64{ 65536, 131072 }) |address| {
+            const before = instance.spasm_runs;
+            const result = try interp.invoke(&instance, testing.allocator, 0, &.{ 37, simd_live_vector, address, ~simd_live_vector });
+            defer testing.allocator.free(result);
+            try testing.expectEqualSlices(u128, &.{ 37, simd_live_vector, 0, @bitCast(@as([16]u8, @splat(0x35))) }, result);
+            // Nonzero memory.grow still falls back; the SIMD caller must not.
+            try testing.expectEqual(before + 1, instance.spasm_runs);
+            try testing.expectEqual(address + 65536, instance.memories[1].data.len);
+            try testing.expectEqual(address + 65536, provider.memories[1].data.len);
+            try testing.expectEqual(@as(usize, 65536), instance.memories[0].data.len);
+        }
+    }
+}
+
+test "wasm spasm: SIMD multi-memory dense bodies fit the code reservation" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    for (simd_memory_ops) |sub| {
+        for ([_]bool{ false, true }) |memory64| {
+            for ([_]usize{ 128, 1024 }) |repetitions| {
+                var arena = std.heap.ArenaAllocator.init(testing.allocator);
+                defer arena.deinit();
+                const a = arena.allocator();
+                const config: SimdMultiMemoryConfig = .{ .sub = sub, .memory64 = memory64, .repetitions = repetitions };
+                const module = try wasm.decode(a, try buildSimdMultiMemoryFunc(a, config));
+                var instance: interp.Instance = undefined;
+                try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+                defer instance.deinit();
+                instance.spasm_enabled = true;
+                try checkSimdMultiMemory(&instance, config, 1);
+                try testing.expectEqual(@import("spasm.zig").RefusalStage.none, instance.spasm_last_refusal_stage);
+                try testing.expectEqual(@as(u32, 1), instance.spasm_compiles);
+            }
+        }
     }
 }
 

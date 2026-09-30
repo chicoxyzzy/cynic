@@ -94,6 +94,13 @@ pub const Masm = struct {
         try self.emitU64(value);
     }
 
+    /// `mov r32, imm32`, zero-extending the full destination register.
+    pub fn movImm32(self: *Masm, destination: Reg, value: u32) error{OutOfMemory}!void {
+        if (isExtended(destination)) try self.emitByte(0x41);
+        try self.emitByte(0xB8 + lowBits(destination));
+        try self.emitU32(value);
+    }
+
     /// `mov destination, source`.
     pub fn movReg64(self: *Masm, destination: Reg, source: Reg) error{OutOfMemory}!void {
         try self.emitRegReg(0x89, destination, source);
@@ -1225,6 +1232,14 @@ fn isExtendedXmm(register: Xmm) bool {
 fn lowBitsXmm(register: Xmm) u8 {
     return @intFromEnum(register) & 7;
 }
+test "jit asm_x86_64: SIMD immediate32 masks use compact zero-extending encodings" {
+    var m = Masm.init(std.testing.allocator);
+    defer m.deinit();
+    try m.movImm32(.rax, 0x55555555);
+    try m.movImm32(.r9, 0x89abcdef);
+    try std.testing.expectEqualSlices(u8, &.{ 0xb8, 0x55, 0x55, 0x55, 0x55, 0x41, 0xb9, 0xef, 0xcd, 0xab, 0x89 }, m.code.items);
+}
+
 test "jit asm_x86_64: SIMD permutation conditional move encodings" {
     var machine = Masm.init(std.testing.allocator);
     defer machine.deinit();

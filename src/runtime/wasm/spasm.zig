@@ -35,6 +35,7 @@ const metadata = @import("spasm_metadata.zig");
 const simd = @import("spasm_simd.zig");
 const globalValType = metadata.globalValType;
 const tableIs32 = metadata.tableIs32;
+const memoryIs64 = metadata.memoryIs64;
 const spasm_x86_64 = @import("spasm_x86_64.zig");
 const CompiledFunc = @import("code.zig").CompiledFunc;
 const FuncType = @import("types.zig").FuncType;
@@ -3392,37 +3393,32 @@ fn compileAarch64(
                     sp -= 1;
                     stack[sp - 1] = .v128;
                 } else if (sub == simd_v128_load) {
-                    // §4.4.7 v128.load — pop the i32 address, bounds-check the
+                    // §4.4.7 v128.load — pop the address, bounds-check the
                     // 16-byte access, then copy 16 bytes mem→cell as two 64-bit
                     // GP halves (no NEON needed for the move). The result lands
                     // in the address operand's depth-keyed slot (its depth = the
-                    // result's depth). `emitMemBounds` leaves the effective
-                    // address in x16 (and clobbers x17); the high half reads
-                    // [x2, ea+8], still inside the checked [ea, ea+16) range.
-                    const memory64 = memoryIs64(module, 0) orelse return null;
-                    const offset = readMemArg(body, &i, memory64) orelse return null;
+                    // result's depth). The high half stays inside the checked
+                    // [ea, ea+16) range of the selected memory.
+                    const access = metadata.readMemoryAccess(module, body, &i) orelse return null;
                     if (sp < 1) return null;
-                    const ra = try materialize(&m, stack[sp - 1], sp - 1);
-                    try emitMemBounds(&m, ra, offset, 16, memory64, &trap_oob);
+                    const base = (try emitSimdMemBounds(&m, stack[0..sp], sp - 1, access, 16, helpers.mem_view, &trap_oob)) orelse return null;
                     trap_oob_used = true;
                     const dst = refSlotOff(num_locals, sp - 1);
-                    // low 64: [x2, ea] -> cell
-                    try m.emit(a64.ldrReg(.x17, .x2, .x16));
+                    // low 64: [base, ea] -> cell
+                    try m.emit(a64.ldrReg(.x17, base, .x16));
                     try m.emit(a64.strImm(.x17, .x0, dst));
-                    // high 64: ea += 8, [x2, ea] -> cell + 8
+                    // high 64: ea += 8, [base, ea] -> cell + 8
                     try m.emit(a64.addImm(.x16, .x16, 8, false));
-                    try m.emit(a64.ldrReg(.x17, .x2, .x16));
+                    try m.emit(a64.ldrReg(.x17, base, .x16));
                     try m.emit(a64.strImm(.x17, .x0, dst + 8));
                     stack[sp - 1] = .v128;
                 } else if (simd.wideningLoadOp(sub)) |load| {
-                    const memory64 = memoryIs64(module, 0) orelse return null;
-                    const offset = readMemArg(body, &i, memory64) orelse return null;
+                    const access = metadata.readMemoryAccess(module, body, &i) orelse return null;
                     if (sp == 0) return null;
-                    const source = try materialize(&m, stack[sp - 1], sp - 1);
                     // Core vector loads read 8 bytes, not the 16-byte result.
-                    try emitMemBounds(&m, source, offset, 8, memory64, &trap_oob);
+                    const base = (try emitSimdMemBounds(&m, stack[0..sp], sp - 1, access, 8, helpers.mem_view, &trap_oob)) orelse return null;
                     trap_oob_used = true;
-                    try m.emit(a64.ldrReg(.x17, .x2, .x16));
+                    try m.emit(a64.ldrReg(.x17, base, .x16));
                     try m.emit(a64.fmovXtoD(.x0, .x17));
                     const size: a64.VectorLaneSize = switch (load.width) {
                         1 => .byte,
@@ -3434,17 +3430,15 @@ fn compileAarch64(
                     try m.emit(a64.strQImm(.x0, .x0, refSlotOff(num_locals, sp - 1)));
                     stack[sp - 1] = .v128;
                 } else if (simd.scalarLoadOp(sub)) |load| {
-                    const memory64 = memoryIs64(module, 0) orelse return null;
-                    const offset = readMemArg(body, &i, memory64) orelse return null;
+                    const access = metadata.readMemoryAccess(module, body, &i) orelse return null;
                     if (sp == 0) return null;
-                    const source = try materialize(&m, stack[sp - 1], sp - 1);
-                    try emitMemBounds(&m, source, offset, load.width, memory64, &trap_oob);
+                    const base = (try emitSimdMemBounds(&m, stack[0..sp], sp - 1, access, load.width, helpers.mem_view, &trap_oob)) orelse return null;
                     trap_oob_used = true;
                     try m.emit(switch (load.width) {
-                        1 => a64.ldrbRegW(.x17, .x2, .x16),
-                        2 => a64.ldrhRegW(.x17, .x2, .x16),
-                        4 => a64.ldrRegW(.x17, .x2, .x16),
-                        8 => a64.ldrReg(.x17, .x2, .x16),
+                        1 => a64.ldrbRegW(.x17, base, .x16),
+                        2 => a64.ldrhRegW(.x17, base, .x16),
+                        4 => a64.ldrRegW(.x17, base, .x16),
+                        8 => a64.ldrReg(.x17, base, .x16),
                         else => return null,
                     });
                     const target = refSlotOff(num_locals, sp - 1);
@@ -3463,21 +3457,19 @@ fn compileAarch64(
                     // → mem as two 64-bit GP halves. The v128 operand at sp-1 is
                     // a `.v128` in its depth-keyed slot (validated). Pops both,
                     // pushes nothing.
-                    const memory64 = memoryIs64(module, 0) orelse return null;
-                    const offset = readMemArg(body, &i, memory64) orelse return null;
+                    const access = metadata.readMemoryAccess(module, body, &i) orelse return null;
                     if (sp < 2) return null;
                     if (stack[sp - 1] != .v128) return null; // value must be a v128
-                    const ra = try materialize(&m, stack[sp - 2], sp - 2); // addr
                     const src = refSlotOff(num_locals, sp - 1);
-                    try emitMemBounds(&m, ra, offset, 16, memory64, &trap_oob);
+                    const base = (try emitSimdMemBounds(&m, stack[0..sp], sp - 2, access, 16, helpers.mem_view, &trap_oob)) orelse return null;
                     trap_oob_used = true;
-                    // low 64: cell -> [x2, ea]
+                    // low 64: cell -> [base, ea]
                     try m.emit(a64.ldrImm(.x17, .x0, src));
-                    try m.emit(a64.strReg(.x17, .x2, .x16));
-                    // high 64: ea += 8, cell + 8 -> [x2, ea]
+                    try m.emit(a64.strReg(.x17, base, .x16));
+                    // high 64: ea += 8, cell + 8 -> [base, ea]
                     try m.emit(a64.addImm(.x16, .x16, 8, false));
                     try m.emit(a64.ldrImm(.x17, .x0, src + 8));
-                    try m.emit(a64.strReg(.x17, .x2, .x16));
+                    try m.emit(a64.strReg(.x17, base, .x16));
                     sp -= 2;
                 } else if (simd.splatWidth(sub)) |width| {
                     if (sp == 0) return null;
@@ -3807,8 +3799,7 @@ fn compileAarch64(
                     sp = depth + 1;
                     stack[depth] = .v128;
                 } else if (sub >= simd_v128_load8_lane and sub <= simd_v128_store64_lane) {
-                    const memory64 = memoryIs64(module, 0) orelse return null;
-                    const offset = readMemArg(body, &i, memory64) orelse return null;
+                    const access = metadata.readMemoryAccess(module, body, &i) orelse return null;
                     const size_log2: u2 = @intCast((sub - simd_v128_load8_lane) % 4);
                     const width = @as(u32, 1) << size_log2;
                     if (i >= body.len or body[i] >= 16 / width) return null;
@@ -3816,10 +3807,9 @@ fn compileAarch64(
                     i += 1;
                     if (sp < 2 or stack[sp - 1] != .v128) return null;
                     const store = sub >= simd_v128_store8_lane;
-                    const ra = try materialize(&m, stack[sp - 2], sp - 2);
                     // Core SIMD memory instructions access only N/8 bytes,
                     // not the full vector. Check before any memory write.
-                    try emitMemBounds(&m, ra, offset, width, memory64, &trap_oob);
+                    const base = (try emitSimdMemBounds(&m, stack[0..sp], sp - 2, access, width, helpers.mem_view, &trap_oob)) orelse return null;
                     trap_oob_used = true;
                     const src = refSlotOff(num_locals, sp - 1);
                     const dst = refSlotOff(num_locals, sp - 2);
@@ -3830,9 +3820,9 @@ fn compileAarch64(
                         try m.emit(a64.strImm(.x17, .x0, dst + 8));
                     }
                     try m.movImm64(.x5, @as(u32, if (store) src else dst) + lane * width);
-                    const from_base: a64.Reg = if (store) .x0 else .x2;
+                    const from_base: a64.Reg = if (store) .x0 else base;
                     const from_offset: a64.Reg = if (store) .x5 else .x16;
-                    const to_base: a64.Reg = if (store) .x2 else .x0;
+                    const to_base: a64.Reg = if (store) base else .x0;
                     const to_offset: a64.Reg = if (store) .x16 else .x5;
                     try m.emit(switch (size_log2) {
                         0 => a64.ldrbRegW(.x17, from_base, from_offset),
@@ -4885,18 +4875,48 @@ fn emitRefIntoLocalCell(m: *masm_mod.Masm, loc: Loc, dst_off: u15, depth: usize,
     }
 }
 
-/// Resolve one memory's address width in the memory index space.
-fn memoryIs64(module: *const Module, index: u32) ?bool {
-    var seen: u32 = 0;
-    for (module.imports) |import| {
-        if (import.desc != .mem) continue;
-        if (seen == index) return import.desc.mem.limits.is_64;
-        seen += 1;
+/// Return the selected base register and effective offset in x16. Nonzero
+/// memories use a fresh, non-allocating view; x2/x3 retain memory zero.
+fn emitSimdMemBounds(
+    m: *masm_mod.Masm,
+    stack: []const Loc,
+    depth: usize,
+    access: metadata.MemoryAccess,
+    width: u32,
+    mem_view: ?MemViewHelperFn,
+    oob: *masm_mod.Masm.Label,
+) CompileError!?a64.Reg {
+    if (access.index != 0) {
+        const helper = mem_view orelse return null;
+        const spill_off: u15 = 16; // [base, length] precede the saved boundary.
+        const op_spill_off: u15 = spill_off + 40;
+        const framebytes: u12 = @intCast((op_spill_off + stack.len * 8 + 15) & ~@as(usize, 15));
+        try m.emit(a64.subSpImm(framebytes));
+        try m.emit(a64.addRegSp(.x6, 0));
+        inline for (.{ a64.Reg.x0, .x1, .x2, .x3, .x4 }, 0..) |reg, slot|
+            try m.emit(a64.strImm(reg, .x6, spill_off + slot * 8));
+        for (stack, 0..) |loc, d| {
+            if (loc == .reg) try m.emit(a64.strImm(loc.reg, .x6, @intCast(op_spill_off + d * 8)));
+        }
+        try m.emit(a64.movReg(.x0, .x19));
+        try m.movImm64(.x1, access.index);
+        try m.emit(a64.movReg(.x2, .x6));
+        try m.callAbs(.x16, @intFromPtr(helper));
+        try m.emit(a64.addRegSp(.x6, 0));
+        // x7/x8 are outside the persistent boundary and operand-register bank.
+        try m.emit(a64.ldrImm(.x7, .x6, 0));
+        try m.emit(a64.ldrImm(.x8, .x6, 8));
+        inline for (.{ a64.Reg.x0, .x1, .x2, .x3, .x4 }, 0..) |reg, slot|
+            try m.emit(a64.ldrImm(reg, .x6, spill_off + slot * 8));
+        for (stack, 0..) |loc, d| {
+            if (loc == .reg) try m.emit(a64.ldrImm(loc.reg, .x6, @intCast(op_spill_off + d * 8)));
+        }
+        // All trap edges use the ordinary frame, never this temporary frame.
+        try m.emit(a64.addSpImm(framebytes));
     }
-    if (index < seen) return null;
-    const local: usize = index - seen;
-    if (local >= module.mems.len) return null;
-    return module.mems[local].limits.is_64;
+    const address = try materialize(m, stack[depth], depth);
+    try emitMemBoundsWithLength(m, address, access.offset, width, access.memory64, if (access.index == 0) .x3 else .x8, oob);
+    return if (access.index == 0) .x2 else .x7;
 }
 
 /// Emit a memory access's effective-address computation and bounds check
@@ -4918,6 +4938,18 @@ fn emitMemBounds(
     memory64: bool,
     oob: *masm_mod.Masm.Label,
 ) CompileError!void {
+    return emitMemBoundsWithLength(m, addr_reg, offset, n, memory64, .x3, oob);
+}
+
+fn emitMemBoundsWithLength(
+    m: *masm_mod.Masm,
+    addr_reg: a64.Reg,
+    offset: u64,
+    n: u32,
+    memory64: bool,
+    length: a64.Reg,
+    oob: *masm_mod.Masm.Label,
+) CompileError!void {
     if (!memory64 and offset <= 4095) {
         try m.emit(a64.addImm(.x16, addr_reg, @intCast(offset), false));
     } else {
@@ -4929,7 +4961,7 @@ fn emitMemBounds(
             try m.emit(a64.addReg(.x16, addr_reg, .x16));
         }
     }
-    try m.emit(a64.subsReg(.x17, .x3, .x16)); // x17 = mem_len - ea; carry clear iff ea > len
+    try m.emit(a64.subsReg(.x17, length, .x16)); // x17 = mem_len - ea; carry clear iff ea > len
     try m.jumpCond(.cc, oob); // ea > mem_len -> out of bounds
     try m.movImm64(.x5, n); // x5 scratch: x4 now carries the globals base
     try m.emit(a64.cmpReg(.x17, .x5));
