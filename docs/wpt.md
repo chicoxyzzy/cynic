@@ -106,12 +106,16 @@ diagnosis. Changed limits require a separate reviewed baseline.
 
 Only fixtures explicitly declaring `jsshell` are eligible. WPT `.any.js`
 defaults to window and dedicated-worker environments, not arbitrary engines.
-Browser HTML tests, the IDL harness, dedicated shared-memory/thread suites,
-module-host integration, and unsupported proposal families have documented
-exclusions. Included general-purpose fixtures can still contain individual
-shared-memory assertions; these remain scored.
-The shipped Exception/Tag API is eligible even where upstream filenames still
-say `tentative`; strict-only failures inside those fixtures remain failures.
+Browser HTML tests, the IDL harness, thread-dependent suites, module-host
+integration, and unsupported proposal families have documented exclusions.
+Three explicitly reviewed shared-memory fixtures run within one agent: memory
+construction, fixed-length buffer conversion, and resizable buffer conversion.
+They require no workers or thread coordination. Other shared-memory and thread
+fixtures still require review before inclusion. Shared-memory assertions in
+general-purpose fixtures also remain scored.
+The shipped Exception/Tag API and shared-memory constructor are eligible even
+where upstream filenames still say `tentative`; strict-only failures inside
+those fixtures remain failures.
 
 There is no host unhandled-rejection event reporting yet. Returned promises
 inside `promise_test` are observed by the upstream harness, but detached
@@ -191,16 +195,19 @@ growth, and allocation-failure rollback.
 Memory buffer conversion now covers both fixed and resizable wrappers,
 page-granular host resizing, and identity/extent updates across JS, interpreter,
 and Spasm growth. Shared wrappers stay frozen and attached; overlap-sensitive
-copies compare backing-store identity. Transfer rejects Wasm-owned storage and
-rechecks ordinary buffers after collecting coercion callbacks. Focused tests
+copies compare backing-store identity. The selected WPT corpus also exercises
+shared-memory construction, buffer caching, maximum size, and growth in both
+CI profiles. Transfer rejects Wasm-owned storage and rechecks ordinary buffers
+after collecting coercion callbacks. Focused tests
 also cover allocation failure, weak registration cleanup, and child-realm
 teardown; these checks supplement the WPT score.
 
 The current [Wasm JS API](https://webassembly.github.io/spec/js-api/)
 defines AddressValue dictionary members as `any`: Memory/Table constructors
 read the dictionary before converting its numeric members. The pinned WPT
-fixtures still expect some conversions during dictionary reads. Cynic follows
-the current specification and records these assertions as failures. The same
+fixtures, including the shared-memory constructor, still expect some
+conversions during dictionary reads. Cynic follows the current specification
+and records these assertions as failures. The same
 principle applies to Table.set value conversion before bounds checking and
 Table.grow's size snapshot before reentrant delta conversion, as well as
 Table.set's optional value treating explicit undefined as absent. A baseline is

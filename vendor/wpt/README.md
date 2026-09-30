@@ -14,15 +14,19 @@ integration metadata, not upstream source files.
 
 ## Scope
 
-The initial baseline includes 40 `*.any.js` files that explicitly declare
+The baseline includes 43 `*.any.js` files that explicitly declare
 the `jsshell` environment. Those exercise constructors, validation, compilation
 and instantiation promises, imports/exports, prototypes, globals, tables, and
-memory, plus the shipped Tag and Exception APIs. Seven Tag/Exception files still
-carry upstream `.tentative` names; filename status alone does not exclude an
-already-shipped feature. Stable APIs remain in scope even when Cynic does not yet implement them;
+memory, plus the shipped Tag and Exception APIs. Three reviewed shared-memory
+fixtures cover construction and fixed/resizable buffer conversion within one
+agent; they need no workers or thread coordination. Other shared-memory and
+thread fixtures still require explicit review before inclusion. Seven
+Tag/Exception files and the shared-memory constructor file still carry upstream
+`.tentative` names; filename status alone does not exclude an already-shipped
+feature. Stable APIs remain in scope even when Cynic does not yet implement them;
 such results are engine failures, not selection exclusions.
 
-The other 40 `*.any.js` files have an explicit `excluded_reason` in the manifest:
+The other 37 `*.any.js` files have an explicit `excluded_reason` in the manifest:
 
 | Reason | Files |
 | --- | ---: |
@@ -33,7 +37,6 @@ The other 40 `*.any.js` files have an explicit `excluded_reason` in the manifest
 | Wasm GC | 3 |
 | Wasm JS string builtins | 3 |
 | Wasm JS Promise Integration | 3 |
-| Shared Wasm memory/threads | 3 |
 | Browser WebIDL harness | 1 |
 | Detached asynchronous assertions requiring host rejection tracking | 1 |
 
