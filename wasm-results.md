@@ -60,6 +60,15 @@ operations (multiply-add, lane selection, min/max, Q15, and dot products).
 All SIMD memory forms also support explicit memory indices, with the
 selected memory's address width and bounds.
 
+The interpreter and forced-Spasm sweeps also reproduce this score in
+`ReleaseSafe` on both targets, under the same 600-second / 3-GB guards.
+That validation caught a pre-existing branch-metadata underflow: unreachable
+stacks now skip metadata arithmetic, and missing carried operands are rejected
+before subtraction. The harness releases action scratch after each assertion
+instead of retaining interpreter stacks for a whole manifest, and releases
+its copied command-line options at shutdown. Focused regressions cover both
+the validator guard and bounded scratch retention.
+
 | target | native entries | compiled functions | refusals |
 |---|---:|---:|---:|
 | x86_64-macos (Rosetta) | 144,832 | 5,507 | 476 |
