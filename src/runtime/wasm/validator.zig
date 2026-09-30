@@ -675,12 +675,15 @@ const Validator = struct {
     /// Emit a side-table entry for a reachable branch to `target`,
     /// returning its index (or null when the branch is in dead code).
     fn emitBranch(self: *Validator, branch_ip: u32, target: *Ctrl) !?u32 {
+        // Core Appendix validation: a dead stack is polymorphic, not a
+        // concrete height from which runtime branch metadata can be derived.
+        if (!self.reachable()) return null;
         const arity: u32 = @intCast(target.labelTypes().len);
         // popcnt: operands above the target label's height, minus the
-        // carried arity. In reachable code the height is concrete.
+        // carried arity. Callers have not yet checked the carried operands.
         const height: u32 = @intCast(self.vals.items.len);
+        if (height < target.height or height - target.height < arity) return error.StackUnderflow;
         const popcnt = height - target.height - arity;
-        if (!self.reachable()) return null;
         const idx: u32 = @intCast(self.side_table.items.len);
         try self.side_table.append(self.arena, .{
             .delta_ip = 0,
@@ -1782,4 +1785,40 @@ fn sameTypes(a: []const ValType, b: []const ValType) bool {
     if (a.len != b.len) return false;
     for (a, b) |x, y| if (x != y) return false;
     return true;
+}
+
+test "wasm validator: branch metadata rejects missing carried operands" {
+    const module: Module = .{ .types = &.{.{ .params = &.{}, .results = &.{.i32} }} };
+    for ([_][]const u8{
+        &.{ 0x00, 0x0c, 0x00, 0x0b }, // br 0
+        &.{ 0x00, 0x41, 0x01, 0x0d, 0x00, 0x0b }, // br_if 0
+        &.{ 0x00, 0x41, 0x00, 0x0e, 0x01, 0x00, 0x00, 0x0b }, // br_table 0 0
+        &.{ 0x00, 0x41, 0x01, 0x02, 0x7f, 0x0c, 0x00, 0x0b, 0x6a, 0x0b }, // nested label at height 1
+    }) |body| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        try std.testing.expectError(error.StackUnderflow, validateFunc(arena.allocator(), &module, 0, body, &.{}, &.{}));
+    }
+}
+
+test "wasm validator: branch metadata skips polymorphic dead stacks" {
+    const module: Module = .{ .types = &.{.{ .params = &.{}, .results = &.{.i32} }} };
+    for ([_][]const u8{
+        &.{ 0x00, 0x00, 0x0c, 0x00, 0x0b }, // unreachable; br 0
+        &.{ 0x00, 0x00, 0x0d, 0x00, 0x0b }, // unreachable; br_if 0
+        &.{ 0x00, 0x00, 0x0e, 0x01, 0x00, 0x00, 0x0b }, // unreachable; br_table 0 0
+    }) |body| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const compiled = try validateFunc(arena.allocator(), &module, 0, body, &.{}, &.{});
+        try std.testing.expectEqual(@as(usize, 0), compiled.side_table.len);
+    }
+}
+
+test "wasm validator: branch metadata does not hide dead-code type errors" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const module: Module = .{ .types = &.{.{ .params = &.{}, .results = &.{.i32} }} };
+    // unreachable; f32.const 0; br 0 still carries the wrong concrete type.
+    try std.testing.expectError(error.TypeMismatch, validateFunc(arena.allocator(), &module, 0, &.{ 0x00, 0x00, 0x43, 0, 0, 0, 0, 0x0c, 0x00, 0x0b }, &.{}, &.{}));
 }
