@@ -2411,8 +2411,12 @@ and the per-builtin checklist; this section tracks status.
   cached fast path. A separate audit checks native entry for all 256 accepted
   opcodes, dead immediates, and dense unpadded unary chains; compact x86
   immediates close the popcount/f32-rounding code-reservation gaps it found.
-  Native table64, nonzero-memory scalar operations, and the
-  native-register/imported-call ABI remain next.
+  Scalar multi-memory now reuses that decoder/view machinery on both targets:
+  loads/stores, size/grow, and fill/copy/init. Mixed-width copies retain the
+  narrower count type; imported aliases copy overlap-safely and growing one
+  refreshes the memory-zero cache. Native-entry tests cover bounds/overflow,
+  growth, aliases, live values, dense bodies, and interruptible bulk loops.
+  Native table64 and the native-register/imported-call ABI remain next.
 
   The architecture for all three tiers — the shared codegen
   substrate and the JS↔wasm call-boundary fast path included — is

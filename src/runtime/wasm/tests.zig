@@ -2902,6 +2902,185 @@ test "wasm spasm: SIMD opcode audit checks dense reservations without unary padd
     try testSimdAudit(1024, false);
 }
 
+const ScalarMultiMemoryConfig = struct {
+    memories: []const bool,
+    imports: u32 = 0,
+    params: []const u8 = &.{},
+    results: []const u8 = &.{},
+    ops: []const u8,
+    alias: bool = false,
+};
+
+fn buildScalarMultiMemoryFunc(a: std.mem.Allocator, config: ScalarMultiMemoryConfig) ![]const u8 {
+    var types: List = .empty;
+    try types.appendSlice(a, &.{ 1, 0x60 });
+    try uleb(a, &types, config.params.len);
+    try types.appendSlice(a, config.params);
+    try uleb(a, &types, config.results.len);
+    try types.appendSlice(a, config.results);
+    var imports: List = .empty;
+    var memories: List = .empty;
+    try uleb(a, &imports, config.imports);
+    try uleb(a, &memories, config.memories.len - config.imports);
+    for (config.memories, 0..) |memory64, index| {
+        const section_body = if (index < config.imports) &imports else &memories;
+        if (index < config.imports) try section_body.appendSlice(a, &.{ 1, 'm', 1, 'm', 2 });
+        try section_body.appendSlice(a, &.{ if (memory64) 5 else 1, 1, 3 });
+    }
+    var code: List = .empty;
+    try code.append(a, 1);
+    try uleb(a, &code, config.ops.len + 4);
+    try code.appendSlice(a, &.{ 1, 32, 0x7f }); // nonzero Cell offsets
+    try code.appendSlice(a, config.ops);
+    try code.append(a, 0x0b);
+    return assemble(a, &.{
+        .{ .id = 1, .body = types.items },
+        .{ .id = 2, .body = imports.items },
+        .{ .id = 3, .body = &.{ 1, 0 } },
+        .{ .id = 5, .body = memories.items },
+        .{ .id = 12, .body = &.{1} },
+        .{ .id = 10, .body = code.items },
+        .{ .id = 11, .body = &.{ 1, 1, 8, 1, 2, 3, 4, 5, 6, 7, 8 } },
+    });
+}
+
+fn checkScalarMultiMemory(config: ScalarMultiMemoryConfig, args: []const u128, expected: ?[]const u128, trap: bool) !void {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const module = try wasm.decode(a, try buildScalarMultiMemoryFunc(a, config));
+    var provider_config = config;
+    provider_config.imports = 0;
+    const provider_module = try wasm.decode(a, try buildScalarMultiMemoryFunc(a, provider_config));
+    var reference_result: []const u128 = &.{};
+    var reference_memories: std.ArrayListUnmanaged([]const u8) = .empty;
+    for ([_]bool{ false, true }) |native| {
+        var provider: interp.Instance = undefined;
+        try interp.instantiate(&provider, a, testing.allocator, &provider_module, .{});
+        defer provider.deinit();
+        const imported = try a.dupe(*interp.Memory, provider.memories[0..config.imports]);
+        if (config.alias) imported[1] = imported[0];
+        var instance: interp.Instance = undefined;
+        try interp.instantiate(&instance, a, testing.allocator, &module, .{ .memories = imported, .share_memory = true });
+        defer instance.deinit();
+        for (instance.memories) |memory| {
+            for (memory.data, 0..) |*byte, index| byte.* = @truncate(index);
+        }
+        instance.spasm_enabled = native;
+        const outcome = interp.invoke(&instance, testing.allocator, 0, args);
+        defer if (outcome) |values| testing.allocator.free(values) else |_| {};
+        if (trap) {
+            try testing.expectError(error.OutOfBoundsMemoryAccess, outcome);
+        } else {
+            const result = try outcome;
+            if (expected) |values| try testing.expectEqualSlices(u128, values, result);
+            if (native) try testing.expectEqualSlices(u128, reference_result, result) else reference_result = try a.dupe(u128, result);
+        }
+        if (native) try testing.expectEqual(@as(u32, 1), instance.spasm_runs);
+        for (instance.memories, 0..) |memory, index| {
+            if (native) try testing.expectEqualSlices(u8, reference_memories.items[index], memory.data) else try reference_memories.append(a, try a.dupe(u8, memory.data));
+            if (trap) for (memory.data, 0..) |byte, offset| {
+                try testing.expectEqual(@as(u8, @truncate(offset)), byte);
+            };
+        }
+    }
+}
+
+test "wasm spasm: scalar multi-memory loads and stores use selected widths and exact bounds" {
+    const value_types = [_]u8{ 0x7f, 0x7e, 0x7d, 0x7c, 0x7f, 0x7f, 0x7f, 0x7f, 0x7e, 0x7e, 0x7e, 0x7e, 0x7e, 0x7e, 0x7f, 0x7e, 0x7d, 0x7c, 0x7f, 0x7f, 0x7e, 0x7e, 0x7e };
+    const widths = [_]u8{ 4, 8, 4, 8, 1, 1, 2, 2, 1, 1, 2, 2, 4, 4, 4, 8, 4, 8, 1, 2, 1, 2, 4 };
+    for (value_types, widths, 0..) |value_type, width, op_index| {
+        for ([_]bool{ false, true }) |memory64| {
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            const store = op_index >= 14;
+            var ops: List = .empty;
+            try ops.appendSlice(a, &.{ 0x20, 0, 0x20, 1, 0x20, 2 });
+            if (store) try ops.appendSlice(a, &.{ 0x20, 3 });
+            try ops.appendSlice(a, &.{ @as(u8, @intCast(0x28 + op_index)), 0x40, 1, 3 });
+            if (store) try ops.appendSlice(a, &.{ 0x20, 3 });
+            try ops.appendSlice(a, &.{ if (memory64) 0x41 else 0x42, 0, 0x28, 0, 0 });
+            const config: ScalarMultiMemoryConfig = .{
+                .memories = &.{ !memory64, memory64 },
+                .imports = 2,
+                .params = &.{ 0x7e, 0x7b, if (memory64) 0x7e else 0x7f, value_type },
+                .results = &.{ 0x7e, 0x7b, value_type, 0x7f },
+                .ops = ops.items,
+            };
+            for ([_]u64{ 1, 65536 - @as(u64, width) - 3, 65536 - @as(u64, width) - 2, if (memory64) std.math.maxInt(u64) else std.math.maxInt(u32) }) |address| {
+                const value: u128 = if (value_type == 0x7e or value_type == 0x7c) 0x89abcdef01234567 else 0xdeadbeef;
+                try checkScalarMultiMemory(config, &.{ 37, simd_live_vector, address, value }, null, address > 65536 - @as(u64, width) - 3);
+            }
+        }
+    }
+}
+
+test "wasm spasm: scalar multi-memory decodes long indices and offsets in dense bodies" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var memories: [129]bool = @splat(false);
+    memories[128] = true;
+    var ops: List = .empty;
+    for (0..1024) |_| try ops.appendSlice(a, &.{ 0x42, 0, 0x29, 0x40, 0x80, 1, 0, 0x1a });
+    try checkScalarMultiMemory(.{ .memories = &memories, .ops = ops.items }, &.{}, &.{}, false);
+    ops.clearRetainingCapacity();
+    try ops.appendSlice(a, &.{ 0x20, 0, 0x29, 0x40, 0x80, 1 });
+    try uleb(a, &ops, std.math.maxInt(u64));
+    try ops.append(a, 0x1a);
+    try checkScalarMultiMemory(.{ .memories = &memories, .params = &.{0x7e}, .ops = ops.items }, &.{1}, null, true);
+}
+
+test "wasm spasm: scalar multi-memory grow preserves memory zero including imported aliases" {
+    for ([_]bool{ false, true }) |memory64| {
+        for ([_]bool{ false, true }) |alias| {
+            const ty: u8 = if (memory64) 0x7e else 0x7f;
+            const zero: u8 = if (memory64) 0x42 else 0x41;
+            const body = [_]u8{ 0x20, 0, 0x3f, 1, zero, 1, 0x40, 1, 0x3f, 1, 0x3f, 0, zero, 0, 0x28, 0, 0, zero, 0x7f, 0x40, 1 };
+            const failure: u128 = if (memory64) std.math.maxInt(u64) else std.math.maxInt(u32);
+            try checkScalarMultiMemory(.{ .memories = &.{ memory64, memory64 }, .imports = 2, .alias = alias, .params = &.{0x7e}, .results = &.{ 0x7e, ty, ty, ty, ty, 0x7f, ty }, .ops = &body }, &.{37}, &.{ 37, 1, 1, 2, if (alias) 2 else 1, 0x03020100, failure }, false);
+        }
+    }
+}
+
+test "wasm spasm: scalar multi-memory fill copy init and alias overlap" {
+    for ([_]bool{ false, true }) |dst64| {
+        for ([_]bool{ false, true }) |src64| {
+            const dt: u8 = if (dst64) 0x7e else 0x7f;
+            const st: u8 = if (src64) 0x7e else 0x7f;
+            const nt: u8 = if (dst64 and src64) 0x7e else 0x7f;
+            for ([_]bool{ false, true }) |alias| {
+                if (alias and dst64 != src64) continue;
+                const config: ScalarMultiMemoryConfig = .{
+                    .memories = &.{ src64, dst64 },
+                    .imports = 2,
+                    .alias = alias,
+                    .params = &.{ 0x7e, 0x7b, dt, st, nt },
+                    .results = &.{ 0x7e, 0x7b },
+                    .ops = &.{ 0x20, 0, 0x20, 1, 0x20, 2, 0x20, 3, 0x20, 4, 0xfc, 10, 1, 0 },
+                };
+                for ([_][3]u128{ .{ 1, 0, 12000 }, .{ 0, 1, 12000 }, .{ 65536, 65536, 0 }, .{ 65535, 0, 2 }, .{ 0, 65535, 2 }, .{ if (dst64) std.math.maxInt(u64) else std.math.maxInt(u32), 0, 1 }, .{ 0, if (src64) std.math.maxInt(u64) else std.math.maxInt(u32), 1 }, .{ 0, 0, if (dst64 and src64) std.math.maxInt(u64) else std.math.maxInt(u32) } }) |args|
+                    try checkScalarMultiMemory(config, &.{ 37, simd_live_vector, args[0], args[1], args[2] }, &.{ 37, simd_live_vector }, args[0] + args[2] > 65536 or args[1] + args[2] > 65536);
+            }
+        }
+        const ty: u8 = if (dst64) 0x7e else 0x7f;
+        for ([_]u8{ 8, 11 }) |sub| {
+            const ops = [_]u8{ 0x20, 0, 0x20, 1, 0x20, 2, 0x20, 3, 0x20, 4, 0xfc, sub, if (sub == 8) 0 else 1, 1 };
+            const config: ScalarMultiMemoryConfig = .{ .memories = &.{ !dst64, dst64 }, .params = &.{ 0x7e, 0x7b, ty, 0x7f, if (sub == 8) 0x7f else ty }, .results = &.{ 0x7e, 0x7b }, .ops = ops[0 .. ops.len - @intFromBool(sub == 11)] };
+            try checkScalarMultiMemory(config, &.{ 37, simd_live_vector, 65532, 0, 4 }, &.{ 37, simd_live_vector }, false);
+            try checkScalarMultiMemory(config, &.{ 37, simd_live_vector, 65533, 0, 4 }, null, true);
+            try checkScalarMultiMemory(config, &.{ 37, simd_live_vector, if (dst64) std.math.maxInt(u64) else std.math.maxInt(u32), 0, 1 }, null, true);
+            try checkScalarMultiMemory(config, &.{ 37, simd_live_vector, 65536, if (sub == 8) 8 else 0, 0 }, &.{ 37, simd_live_vector }, false);
+            if (sub == 11) try checkScalarMultiMemory(config, &.{ 37, simd_live_vector, 3, 0x1ab, 12000 }, &.{ 37, simd_live_vector }, false);
+        }
+    }
+    // Explicit expected bytes catch an alias bug shared by both execution tiers.
+    try checkScalarMultiMemory(.{ .memories = &.{ false, false }, .imports = 2, .alias = true, .results = &.{0x7e}, .ops = &.{ 0x41, 1, 0x41, 0, 0x41, 7, 0xfc, 10, 1, 0, 0x41, 0, 0x29, 0, 0 } }, &.{}, &.{0x0605040302010000}, false);
+    try checkScalarMultiMemory(.{ .memories = &.{ false, true, true }, .params = &.{ 0x7e, 0x7e, 0x7e }, .ops = &.{ 0x20, 0, 0x20, 1, 0x20, 2, 0xfc, 10, 2, 1 } }, &.{ 1, 0, 12000 }, &.{}, false);
+}
+
 const SimdMultiMemoryConfig = struct {
     sub: u8,
     index: u32 = 1,
@@ -3135,8 +3314,11 @@ test "wasm spasm: SIMD multi-memory refreshes the selected view after a callee g
             const result = try interp.invoke(&instance, testing.allocator, 0, &.{ 37, simd_live_vector, address, ~simd_live_vector });
             defer testing.allocator.free(result);
             try testing.expectEqualSlices(u128, &.{ 37, simd_live_vector, 0, @bitCast(@as([16]u8, @splat(0x35))) }, result);
-            // Nonzero memory.grow still falls back; the SIMD caller must not.
-            try testing.expectEqual(before + 1, instance.spasm_runs);
+            // The cold callee enters through the helper; its hot direct link
+            // bypasses the top-level entry counter on the second invocation.
+            try testing.expectEqual(before + @as(u32, if (address == 65536) 2 else 1), instance.spasm_runs);
+            try testing.expectEqual(@as(u32, 2), instance.spasm_compiles);
+            try testing.expectEqual(@as(u32, 0), instance.spasm_refusals);
             try testing.expectEqual(address + 65536, instance.memories[1].data.len);
             try testing.expectEqual(address + 65536, provider.memories[1].data.len);
             try testing.expectEqual(@as(usize, 65536), instance.memories[0].data.len);

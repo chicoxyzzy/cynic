@@ -746,9 +746,12 @@ the measured design space:
   All 48 integer/floating comparisons compile, including unsigned sign-boundary
   handling and NaN-aware floating ordering. The x86 i64 forms use scalar
   comparisons to retain the SSE2 baseline.
+  Scalar loads/stores and size/grow/fill/copy/init also support explicit
+  memory indices on both targets. Mixed-width copies use each memory's
+  address type and the narrower count type. Imported aliases retain
+  overlap-safe copying and a fresh memory-zero cache after growth.
   Table64 operations (the helper ABI still uses u32
-  indices), nonzero-memory scalar operations, and other unsupported x86
-  bodies refuse before
+  indices) and other unsupported bodies refuse before
   code publication and run in Sarcasm.
   This is a coverage difference, not a semantic one: forced-Spasm sweeps on
   both architectures pass all 58,779 scored spec commands. Current native

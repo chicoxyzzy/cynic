@@ -2172,9 +2172,9 @@ fn spasmCallIndirect(
 /// Grows memory `mem_idx` by `delta` pages, reusing `growMem`'s logic, and
 /// returns the previous page count (>= 0) or -1 if growth fails (it never
 /// traps). The grow reallocates the backing buffer, so the compiled body's
-/// cached `mem_base`/`mem_len` are now stale; the new `data.ptr` and
-/// `data.len` are written to `out_baselen[0]`/`out_baselen[1]` for the body
-/// to reload. They are written even on failure — there they are just the
+/// cached memory-zero view may be stale, including when a nonzero import
+/// aliases memory zero. Its current base and length are written to
+/// `out_baselen` for the body to reload. On failure the helper writes the
 /// unchanged current values, which is exactly what the body should reload.
 fn spasmMemoryGrow(instance_opaque: *anyopaque, mem_idx: u32, delta: u64, out_baselen: [*]u64) callconv(.c) i64 {
     const inst: *Instance = @ptrCast(@alignCast(instance_opaque));
@@ -2195,10 +2195,7 @@ fn spasmMemoryGrow(instance_opaque: *anyopaque, mem_idx: u32, delta: u64, out_ba
         mem.commitGrowth(grown);
         result = @bitCast(old);
     }
-    // Hand the body the *current* base/len — grown on success, unchanged on
-    // failure — so its reload always sees the live memory.
-    out_baselen[0] = @intFromPtr(mem.data.ptr);
-    out_baselen[1] = mem.data.len;
+    spasmMemoryView(instance_opaque, 0, out_baselen);
     return result;
 }
 
@@ -3769,7 +3766,7 @@ fn memCopy(ip: *Interp, dst_mi: u32, src_mi: u32) TrapError!void {
     // Same memory may overlap; copy in the direction that never reads
     // an already-written byte. Distinct memories never overlap, so
     // either direction is fine.
-    if (dst <= src or dst_mi != src_mi) {
+    if (dst <= src or ip.instance.memories[dst_mi] != ip.instance.memories[src_mi]) {
         var i: usize = 0;
         while (i < cnt) : (i += 1) dst_data[d + i] = src_data[s + i];
     } else {

@@ -1433,7 +1433,7 @@ useful:
    interpret it). A red-first `wasm_js_test` (a JS export runs
    Spasm-compiled native code, `spasm_runs >= 1`) plus the full JS-wasm
    suite run under the jit-on posture gate it; non-emittable bodies
-   (type-index blocks, nonzero-memory scalar operations, and other unsupported shapes)
+   (type-index blocks, table64 operations, and other unsupported shapes)
    degrade, so the suite still covers the interpreter through that fallback. The scalar ALU now spans
    the i32/i64 and f32/f64 arithmetic and comparisons, the full float unary
    set (incl. min/max/copysign), the integer bit-counts (clz/ctz/popcnt)
@@ -1494,7 +1494,7 @@ useful:
    and select through full 128-bit Cells. Single-result branch merges retain
    the value kind; wide call arguments/results use both halves of the staged
    buffer. Native gates initialize declared reference locals to null and
-   vector locals to zero. Table64 operations, nonzero-memory scalar operations, and other
+   vector locals to zero. Table64 operations and other
    unsupported instructions retain transactional fallback; a dedicated native-register
    imported-call ABI is still deferred.
    Non-gated calls retain the checked helper and per-function Sarcasm fallback.
@@ -1750,6 +1750,22 @@ useful:
    This exposed x86 reservation failures for byte popcount and f32 rounding:
    dword mask broadcasts and compact mode immediates remove duplicate bytes
    without changing the code-cache budget or the SSE2 baseline.
+   Scalar loads/stores now reuse the same indexed memarg decoder and view
+   helpers on both targets. `memory.size`, `memory.grow`, and bulk fill/copy/init
+   also accept indexed operands. Following
+   [Core memory.copy validation](https://webassembly.github.io/spec/core/valid/instructions.html#valid-memory-copy),
+   source and destination retain their own address widths and the count uses
+   the narrower one. Copy bounds are checked before any write; native loops
+   compare host pointers so two imports of the same memory remain overlap-safe.
+   Sarcasm likewise compares memory objects instead of module-local indices.
+   Growth always refreshes memory zero's cached view, even when the grown
+   nonzero import aliases it. Memory-zero loads/stores remain helper-free; indexed
+   views do not allocate or re-enter JS, and fill/copy retain their 4,096-byte
+   execution polls. Native-entry tests cover every scalar width, mixed-width
+   copies, imported aliases, growth/failure, overflow, exact bounds, live
+   scalar/vector neighbors, dense bodies, and post-entry interruption. This
+   changes no JavaScript surface, test262 posture, or SES policy. Table64
+   remains a separate, conservatively refused native family.
    This follows the existing [Liftoff](https://v8.dev/blog/liftoff) /
    [Wizard-SPC](https://arxiv.org/abs/2305.13241) typed-stack design and
    [Core value and vector semantics](https://webassembly.github.io/spec/core/exec/instructions.html).
