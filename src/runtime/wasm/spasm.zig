@@ -280,9 +280,10 @@ pub const CallIndirectHelperFn = *const fn (
 /// `(instance, mem_index, delta_pages, out_baselen) -> old_pages`. It grows
 /// the memory and returns the previous page count, or -1 on failure (grow
 /// never traps). Growth reallocates the backing buffer, so the helper writes
-/// the new base pointer to `out_baselen[0]` and the new byte length to
+/// memory zero's current base pointer to `out_baselen[0]` and byte length to
 /// `out_baselen[1]`; the compiled body reloads its stale `mem_base`/`mem_len`
-/// from there. The interpreter owns the grow (it reuses `growMem`); spasm.zig
+/// from there, even when a nonzero imported index aliases memory zero.
+/// The interpreter owns the grow (it reuses `growMem`); spasm.zig
 /// only emits the `blr`, so the address is injected at startup to keep the
 /// module dependency one-directional (interpreter imports spasm, never the
 /// reverse).
@@ -1891,23 +1892,22 @@ fn compileAarch64(
                 // produces the value). The narrow forms zero- or
                 // sign-extend into the i32 (LDRB/LDRSB, LDRH/LDRSH); the W
                 // destination clears the cell's high word either way.
-                const memory64 = memoryIs64(module, 0) orelse return null;
-                const offset = readMemArg(body, &i, memory64) orelse return null;
+                const access = metadata.readMemoryAccess(module, body, &i) orelse return null;
                 if (sp < 1) return null;
-                const ra = try materialize(&m, stack[sp - 1], sp - 1);
                 const n: u32 = switch (op) {
                     op_i32_load8_s, op_i32_load8_u => 1,
                     op_i32_load16_s, op_i32_load16_u => 2,
                     else => 4,
                 };
-                try emitMemBounds(&m, ra, offset, n, memory64, &trap_oob);
+                const base = (try emitIndexedMemBounds(&m, stack[0..sp], sp - 1, access, n, helpers.mem_view, &trap_oob)) orelse return null;
+                const ra = try materialize(&m, stack[sp - 1], sp - 1);
                 trap_oob_used = true;
                 switch (op) {
-                    op_i32_load, op_f32_load => try m.emit(a64.ldrRegW(ra, .x2, .x16)),
-                    op_i32_load8_u => try m.emit(a64.ldrbRegW(ra, .x2, .x16)),
-                    op_i32_load8_s => try m.emit(a64.ldrsbRegW(ra, .x2, .x16)),
-                    op_i32_load16_u => try m.emit(a64.ldrhRegW(ra, .x2, .x16)),
-                    else => try m.emit(a64.ldrshRegW(ra, .x2, .x16)), // load16_s
+                    op_i32_load, op_f32_load => try m.emit(a64.ldrRegW(ra, base, .x16)),
+                    op_i32_load8_u => try m.emit(a64.ldrbRegW(ra, base, .x16)),
+                    op_i32_load8_s => try m.emit(a64.ldrsbRegW(ra, base, .x16)),
+                    op_i32_load16_u => try m.emit(a64.ldrhRegW(ra, base, .x16)),
+                    else => try m.emit(a64.ldrshRegW(ra, base, .x16)), // load16_s
                 }
                 stack[sp - 1] = .{ .reg = ra };
             },
@@ -1915,23 +1915,21 @@ fn compileAarch64(
                 // §4.4.7 i32 stores — operands [addr, value]; bounds-check
                 // ea for the access width, then store value's low bytes at
                 // mem_base + ea (STR/STRB/STRH). Pops both, pushes nothing.
-                const memory64 = memoryIs64(module, 0) orelse return null;
-                const offset = readMemArg(body, &i, memory64) orelse return null;
+                const access = metadata.readMemoryAccess(module, body, &i) orelse return null;
                 if (sp < 2) return null;
-                const ra = try materialize(&m, stack[sp - 2], sp - 2); // addr
-                const rv = try materialize(&m, stack[sp - 1], sp - 1); // value
-                sp -= 2;
                 const n: u32 = switch (op) {
                     op_i32_store8 => 1,
                     op_i32_store16 => 2,
                     else => 4,
                 };
-                try emitMemBounds(&m, ra, offset, n, memory64, &trap_oob);
+                const base = (try emitIndexedMemBounds(&m, stack[0..sp], sp - 2, access, n, helpers.mem_view, &trap_oob)) orelse return null;
+                const rv = try materialize(&m, stack[sp - 1], sp - 1);
+                sp -= 2;
                 trap_oob_used = true;
                 switch (op) {
-                    op_i32_store, op_f32_store => try m.emit(a64.strRegW(rv, .x2, .x16)),
-                    op_i32_store8 => try m.emit(a64.strbRegW(rv, .x2, .x16)),
-                    else => try m.emit(a64.strhRegW(rv, .x2, .x16)), // store16
+                    op_i32_store, op_f32_store => try m.emit(a64.strRegW(rv, base, .x16)),
+                    op_i32_store8 => try m.emit(a64.strbRegW(rv, base, .x16)),
+                    else => try m.emit(a64.strhRegW(rv, base, .x16)), // store16
                 }
             },
             op_i64_const => {
@@ -2087,51 +2085,48 @@ fn compileAarch64(
                 // extending forms reuse the W-form ldrb/ldrh/ldr (the W
                 // destination clears bits 32..63, i.e. the i64 zero-extend);
                 // the signed forms sign-extend to the full 64.
-                const memory64 = memoryIs64(module, 0) orelse return null;
-                const offset = readMemArg(body, &i, memory64) orelse return null;
+                const access = metadata.readMemoryAccess(module, body, &i) orelse return null;
                 if (sp < 1) return null;
-                const ra = try materialize(&m, stack[sp - 1], sp - 1);
                 const n: u32 = switch (op) {
                     op_i64_load8_s, op_i64_load8_u => 1,
                     op_i64_load16_s, op_i64_load16_u => 2,
                     op_i64_load32_s, op_i64_load32_u => 4,
                     else => 8, // i64.load
                 };
-                try emitMemBounds(&m, ra, offset, n, memory64, &trap_oob);
+                const base = (try emitIndexedMemBounds(&m, stack[0..sp], sp - 1, access, n, helpers.mem_view, &trap_oob)) orelse return null;
+                const ra = try materialize(&m, stack[sp - 1], sp - 1);
                 trap_oob_used = true;
                 switch (op) {
-                    op_i64_load, op_f64_load => try m.emit(a64.ldrReg(ra, .x2, .x16)),
-                    op_i64_load8_u => try m.emit(a64.ldrbRegW(ra, .x2, .x16)),
-                    op_i64_load8_s => try m.emit(a64.ldrsbReg(ra, .x2, .x16)),
-                    op_i64_load16_u => try m.emit(a64.ldrhRegW(ra, .x2, .x16)),
-                    op_i64_load16_s => try m.emit(a64.ldrshReg(ra, .x2, .x16)),
-                    op_i64_load32_u => try m.emit(a64.ldrRegW(ra, .x2, .x16)),
-                    else => try m.emit(a64.ldrswReg(ra, .x2, .x16)), // load32_s
+                    op_i64_load, op_f64_load => try m.emit(a64.ldrReg(ra, base, .x16)),
+                    op_i64_load8_u => try m.emit(a64.ldrbRegW(ra, base, .x16)),
+                    op_i64_load8_s => try m.emit(a64.ldrsbReg(ra, base, .x16)),
+                    op_i64_load16_u => try m.emit(a64.ldrhRegW(ra, base, .x16)),
+                    op_i64_load16_s => try m.emit(a64.ldrshReg(ra, base, .x16)),
+                    op_i64_load32_u => try m.emit(a64.ldrRegW(ra, base, .x16)),
+                    else => try m.emit(a64.ldrswReg(ra, base, .x16)), // load32_s
                 }
                 stack[sp - 1] = .{ .reg = ra };
             },
             op_i64_store, op_i64_store8, op_i64_store16, op_i64_store32, op_f64_store => {
                 // §4.4.7 i64 stores — operands [addr, value]; bounds-check ea,
                 // then store the value's low bytes at mem_base + ea.
-                const memory64 = memoryIs64(module, 0) orelse return null;
-                const offset = readMemArg(body, &i, memory64) orelse return null;
+                const access = metadata.readMemoryAccess(module, body, &i) orelse return null;
                 if (sp < 2) return null;
-                const ra = try materialize(&m, stack[sp - 2], sp - 2); // addr
-                const rv = try materialize(&m, stack[sp - 1], sp - 1); // value
-                sp -= 2;
                 const n: u32 = switch (op) {
                     op_i64_store8 => 1,
                     op_i64_store16 => 2,
                     op_i64_store32 => 4,
                     else => 8, // i64.store
                 };
-                try emitMemBounds(&m, ra, offset, n, memory64, &trap_oob);
+                const base = (try emitIndexedMemBounds(&m, stack[0..sp], sp - 2, access, n, helpers.mem_view, &trap_oob)) orelse return null;
+                const rv = try materialize(&m, stack[sp - 1], sp - 1);
+                sp -= 2;
                 trap_oob_used = true;
                 switch (op) {
-                    op_i64_store, op_f64_store => try m.emit(a64.strReg(rv, .x2, .x16)),
-                    op_i64_store8 => try m.emit(a64.strbRegW(rv, .x2, .x16)),
-                    op_i64_store16 => try m.emit(a64.strhRegW(rv, .x2, .x16)),
-                    else => try m.emit(a64.strRegW(rv, .x2, .x16)), // store32 (low 4)
+                    op_i64_store, op_f64_store => try m.emit(a64.strReg(rv, base, .x16)),
+                    op_i64_store8 => try m.emit(a64.strbRegW(rv, base, .x16)),
+                    op_i64_store16 => try m.emit(a64.strhRegW(rv, base, .x16)),
+                    else => try m.emit(a64.strRegW(rv, base, .x16)), // store32 (low 4)
                 }
             },
             op_i64_extend_i32_s => {
@@ -2435,14 +2430,15 @@ fn compileAarch64(
             },
             op_memory_size => {
                 // §4.4.9 memory.size — the current size in 64 KiB pages, i.e.
-                // mem_len >> 16 (x3 carries the byte length). The result type
+                // mem_len >> 16 for the selected memory. The result type
                 // (i32 for a 32-bit memory, i64 for memory64) is validation's
                 // concern; the page count is the same shift either way.
                 const mem_idx = readUleb32(body, &i) orelse return null;
-                if (mem_idx != 0) return null; // single memory only
+                if (memoryIs64(module, mem_idx) == null) return null;
                 if (sp >= operand_reg_count) return null;
+                const view = (try emitMemoryView(&m, stack[0..sp], mem_idx, helpers.mem_view)) orelse return null;
                 const ra = regForDepth(sp);
-                try m.emit(a64.lsrImm(ra, .x3, 16));
+                try m.emit(a64.lsrImm(ra, view.length, 16));
                 stack[sp] = .{ .reg = ra };
                 sp += 1;
             },
@@ -2450,15 +2446,14 @@ fn compileAarch64(
                 // §4.4.7 memory.grow — pop `delta` (pages), grow linear
                 // memory, push the previous page count (i32) or -1 on
                 // failure (it never traps). Growth reallocates the backing
-                // buffer, so the cached mem_base (x2) / mem_len (x3) go stale
-                // and must be reloaded after. A native helper does the grow
-                // (it reuses the interpreter's `growMem`), writing the fresh
-                // base/len into an out-region of the frame; the body reloads
+                // buffer, so the cached memory-zero base (x2) / length (x3)
+                // may go stale, even through an aliased nonzero import. A
+                // native helper writes memory zero's fresh base/len into an
+                // out-region of the frame; the body reloads
                 // x2/x3 from there. The frame shuffle mirrors `op_call`: a
                 // callconv(.c) helper clobbers x0..x18 + x6, so spill the
                 // boundary registers that must survive and reload them after.
                 const mem_idx = readUleb32(body, &i) orelse return null;
-                if (mem_idx != 0) return null; // single memory only
                 const memory64 = memoryIs64(module, mem_idx) orelse return null;
                 if (helpers.mem_grow == null) return null; // helper not wired
                 if (sp < 1) return null; // need the delta operand
@@ -2584,29 +2579,32 @@ fn compileAarch64(
                     // bounds check is up-front and overflow-safe (the spec's
                     // rangeInBounds: dst > len or n > len - dst traps before any
                     // write), then an inline byte loop keeps the op leaf — no
-                    // helper, no frame.
+                    // helper on memory zero; other memories fetch a live view.
                     const mem_idx = readUleb32(body, &i) orelse return null;
-                    if (mem_idx != 0) return null; // single memory only
+                    if (memoryIs64(module, mem_idx) == null) return null;
                     if (sp < 3) return null;
+                    const view = (try emitMemoryView(&m, stack[0..sp], mem_idx, helpers.mem_view)) orelse return null;
                     const r_n = try materialize(&m, stack[sp - 1], sp - 1);
                     const r_val = try materialize(&m, stack[sp - 2], sp - 2);
                     const r_dst = try materialize(&m, stack[sp - 3], sp - 3);
                     stack[sp - 1] = .{ .reg = r_n };
                     stack[sp - 2] = .{ .reg = r_val };
                     stack[sp - 3] = .{ .reg = r_dst };
-                    try m.emit(a64.subsReg(.x17, .x3, r_dst)); // x17 = mem_len - dst
+                    try m.emit(a64.subsReg(.x17, view.length, r_dst)); // x17 = mem_len - dst
                     try m.jumpCond(.cc, &trap_oob); // dst > mem_len
                     try m.emit(a64.cmpReg(.x17, r_n));
                     try m.jumpCond(.cc, &trap_oob); // (mem_len - dst) < n
                     trap_oob_used = true;
-                    // while (n != 0) { mem_base[dst] = val; dst += 1; n -= 1; }
+                    // Keep the host pointer in an operand register so execution
+                    // polls preserve it along with the count and value.
+                    try m.emit(a64.addReg(r_dst, view.base, r_dst));
                     var fill_loop: masm_mod.Masm.Label = .{};
                     var fill_done: masm_mod.Masm.Label = .{};
                     defer fill_loop.deinit(gpa);
                     defer fill_done.deinit(gpa);
                     try m.bind(&fill_loop);
                     try m.jumpCbz(r_n, &fill_done);
-                    try m.emit(a64.strbRegW(r_val, .x2, r_dst));
+                    try m.emit(a64.strbImm(r_val, r_dst, 0));
                     try m.emit(a64.addImm(r_dst, r_dst, 1, false));
                     try m.emit(a64.subImm(r_n, r_n, 1, false));
                     try m.jumpCbz(r_n, &fill_done);
@@ -2623,15 +2621,15 @@ fn compileAarch64(
                 } else if (sub == 10) {
                     // §4.4.7 memory.copy — move n bytes from src to dst
                     // (memmove). Operands [dst, src, n]; the encoding carries
-                    // two memory indices (dst, src), only single-memory
-                    // compiles. Bounds-check both ranges up front, then copy in
-                    // the overlap-safe direction: forward (low→high) when
+                    // two memory indices (dst, src). Bounds-check both ranges
+                    // up front, then copy in the overlap-safe direction:
+                    // forward (low→high) when
                     // dst <= src, else backward (high→low) so an overlapping
                     // copy never reads a byte it already overwrote. Inline
                     // loops keep it leaf.
                     const dst_mi = readUleb32(body, &i) orelse return null;
                     const src_mi = readUleb32(body, &i) orelse return null;
-                    if (dst_mi != 0 or src_mi != 0) return null;
+                    if (memoryIs64(module, dst_mi) == null or memoryIs64(module, src_mi) == null) return null;
                     if (sp < 3) return null;
                     const r_n = try materialize(&m, stack[sp - 1], sp - 1);
                     const r_src = try materialize(&m, stack[sp - 2], sp - 2);
@@ -2639,16 +2637,21 @@ fn compileAarch64(
                     stack[sp - 1] = .{ .reg = r_n };
                     stack[sp - 2] = .{ .reg = r_src };
                     stack[sp - 3] = .{ .reg = r_dst };
-                    // Both [src, src+n) and [dst, dst+n) must lie in [0, len).
-                    try m.emit(a64.subsReg(.x17, .x3, r_src));
+                    // Resolve and check each view before any write. Host-pointer
+                    // ordering also handles two imports of the same memory.
+                    const src_view = (try emitMemoryView(&m, stack[0..sp], src_mi, helpers.mem_view)) orelse return null;
+                    try m.emit(a64.subsReg(.x17, src_view.length, r_src));
                     try m.jumpCond(.cc, &trap_oob);
                     try m.emit(a64.cmpReg(.x17, r_n));
                     try m.jumpCond(.cc, &trap_oob);
-                    try m.emit(a64.subsReg(.x17, .x3, r_dst));
+                    try m.emit(a64.addReg(r_src, src_view.base, r_src));
+                    const dst_view = (try emitMemoryView(&m, stack[0..sp], dst_mi, helpers.mem_view)) orelse return null;
+                    try m.emit(a64.subsReg(.x17, dst_view.length, r_dst));
                     try m.jumpCond(.cc, &trap_oob);
                     try m.emit(a64.cmpReg(.x17, r_n));
                     try m.jumpCond(.cc, &trap_oob);
                     trap_oob_used = true;
+                    try m.emit(a64.addReg(r_dst, dst_view.base, r_dst));
                     var fwd_loop: masm_mod.Masm.Label = .{};
                     var bwd_loop: masm_mod.Masm.Label = .{};
                     var copy_done: masm_mod.Masm.Label = .{};
@@ -2664,8 +2667,8 @@ fn compileAarch64(
                     try m.jumpCbz(r_n, &copy_done);
                     try m.emit(a64.subImm(r_dst, r_dst, 1, false));
                     try m.emit(a64.subImm(r_src, r_src, 1, false));
-                    try m.emit(a64.ldrbRegW(.x16, .x2, r_src));
-                    try m.emit(a64.strbRegW(.x16, .x2, r_dst));
+                    try m.emit(a64.ldrbImm(.x16, r_src, 0));
+                    try m.emit(a64.strbImm(.x16, r_dst, 0));
                     try m.emit(a64.subImm(r_n, r_n, 1, false));
                     try m.jumpCbz(r_n, &copy_done);
                     var bwd_continue: masm_mod.Masm.Label = .{};
@@ -2678,8 +2681,8 @@ fn compileAarch64(
                     try m.jump(&bwd_loop);
                     try m.bind(&fwd_loop);
                     try m.jumpCbz(r_n, &copy_done);
-                    try m.emit(a64.ldrbRegW(.x16, .x2, r_src));
-                    try m.emit(a64.strbRegW(.x16, .x2, r_dst));
+                    try m.emit(a64.ldrbImm(.x16, r_src, 0));
+                    try m.emit(a64.strbImm(.x16, r_dst, 0));
                     try m.emit(a64.addImm(r_src, r_src, 1, false));
                     try m.emit(a64.addImm(r_dst, r_dst, 1, false));
                     try m.emit(a64.subImm(r_n, r_n, 1, false));
@@ -2707,7 +2710,7 @@ fn compileAarch64(
                     if (helpers.mem_init == null) return null; // helper not wired
                     const data_idx = readUleb32(body, &i) orelse return null;
                     const mem_idx = readUleb32(body, &i) orelse return null;
-                    if (mem_idx != 0) return null; // single memory only
+                    if (memoryIs64(module, mem_idx) == null) return null;
                     if (sp < 3) return null;
                     const below = sp - 3;
                     // No result, but keep the bank-fit check uniform with the
@@ -3401,7 +3404,7 @@ fn compileAarch64(
                     // [ea, ea+16) range of the selected memory.
                     const access = metadata.readMemoryAccess(module, body, &i) orelse return null;
                     if (sp < 1) return null;
-                    const base = (try emitSimdMemBounds(&m, stack[0..sp], sp - 1, access, 16, helpers.mem_view, &trap_oob)) orelse return null;
+                    const base = (try emitIndexedMemBounds(&m, stack[0..sp], sp - 1, access, 16, helpers.mem_view, &trap_oob)) orelse return null;
                     trap_oob_used = true;
                     const dst = refSlotOff(num_locals, sp - 1);
                     // low 64: [base, ea] -> cell
@@ -3416,7 +3419,7 @@ fn compileAarch64(
                     const access = metadata.readMemoryAccess(module, body, &i) orelse return null;
                     if (sp == 0) return null;
                     // Core vector loads read 8 bytes, not the 16-byte result.
-                    const base = (try emitSimdMemBounds(&m, stack[0..sp], sp - 1, access, 8, helpers.mem_view, &trap_oob)) orelse return null;
+                    const base = (try emitIndexedMemBounds(&m, stack[0..sp], sp - 1, access, 8, helpers.mem_view, &trap_oob)) orelse return null;
                     trap_oob_used = true;
                     try m.emit(a64.ldrReg(.x17, base, .x16));
                     try m.emit(a64.fmovXtoD(.x0, .x17));
@@ -3432,7 +3435,7 @@ fn compileAarch64(
                 } else if (simd.scalarLoadOp(sub)) |load| {
                     const access = metadata.readMemoryAccess(module, body, &i) orelse return null;
                     if (sp == 0) return null;
-                    const base = (try emitSimdMemBounds(&m, stack[0..sp], sp - 1, access, load.width, helpers.mem_view, &trap_oob)) orelse return null;
+                    const base = (try emitIndexedMemBounds(&m, stack[0..sp], sp - 1, access, load.width, helpers.mem_view, &trap_oob)) orelse return null;
                     trap_oob_used = true;
                     try m.emit(switch (load.width) {
                         1 => a64.ldrbRegW(.x17, base, .x16),
@@ -3461,7 +3464,7 @@ fn compileAarch64(
                     if (sp < 2) return null;
                     if (stack[sp - 1] != .v128) return null; // value must be a v128
                     const src = refSlotOff(num_locals, sp - 1);
-                    const base = (try emitSimdMemBounds(&m, stack[0..sp], sp - 2, access, 16, helpers.mem_view, &trap_oob)) orelse return null;
+                    const base = (try emitIndexedMemBounds(&m, stack[0..sp], sp - 2, access, 16, helpers.mem_view, &trap_oob)) orelse return null;
                     trap_oob_used = true;
                     // low 64: cell -> [base, ea]
                     try m.emit(a64.ldrImm(.x17, .x0, src));
@@ -3809,7 +3812,7 @@ fn compileAarch64(
                     const store = sub >= simd_v128_store8_lane;
                     // Core SIMD memory instructions access only N/8 bytes,
                     // not the full vector. Check before any memory write.
-                    const base = (try emitSimdMemBounds(&m, stack[0..sp], sp - 2, access, width, helpers.mem_view, &trap_oob)) orelse return null;
+                    const base = (try emitIndexedMemBounds(&m, stack[0..sp], sp - 2, access, width, helpers.mem_view, &trap_oob)) orelse return null;
                     trap_oob_used = true;
                     const src = refSlotOff(num_locals, sp - 1);
                     const dst = refSlotOff(num_locals, sp - 2);
@@ -4877,7 +4880,7 @@ fn emitRefIntoLocalCell(m: *masm_mod.Masm, loc: Loc, dst_off: u15, depth: usize,
 
 /// Return the selected base register and effective offset in x16. Nonzero
 /// memories use a fresh, non-allocating view; x2/x3 retain memory zero.
-fn emitSimdMemBounds(
+fn emitIndexedMemBounds(
     m: *masm_mod.Masm,
     stack: []const Loc,
     depth: usize,
@@ -4886,7 +4889,16 @@ fn emitSimdMemBounds(
     mem_view: ?MemViewHelperFn,
     oob: *masm_mod.Masm.Label,
 ) CompileError!?a64.Reg {
-    if (access.index != 0) {
+    const view = (try emitMemoryView(m, stack, access.index, mem_view)) orelse return null;
+    const address = try materialize(m, stack[depth], depth);
+    try emitMemBoundsWithLength(m, address, access.offset, width, access.memory64, view.length, oob);
+    return view.base;
+}
+
+const MemoryView = struct { base: a64.Reg, length: a64.Reg };
+
+fn emitMemoryView(m: *masm_mod.Masm, stack: []const Loc, index: u32, mem_view: ?MemViewHelperFn) CompileError!?MemoryView {
+    if (index != 0) {
         const helper = mem_view orelse return null;
         const spill_off: u15 = 16; // [base, length] precede the saved boundary.
         const op_spill_off: u15 = spill_off + 40;
@@ -4899,7 +4911,7 @@ fn emitSimdMemBounds(
             if (loc == .reg) try m.emit(a64.strImm(loc.reg, .x6, @intCast(op_spill_off + d * 8)));
         }
         try m.emit(a64.movReg(.x0, .x19));
-        try m.movImm64(.x1, access.index);
+        try m.movImm64(.x1, index);
         try m.emit(a64.movReg(.x2, .x6));
         try m.callAbs(.x16, @intFromPtr(helper));
         try m.emit(a64.addRegSp(.x6, 0));
@@ -4914,15 +4926,13 @@ fn emitSimdMemBounds(
         // All trap edges use the ordinary frame, never this temporary frame.
         try m.emit(a64.addSpImm(framebytes));
     }
-    const address = try materialize(m, stack[depth], depth);
-    try emitMemBoundsWithLength(m, address, access.offset, width, access.memory64, if (access.index == 0) .x3 else .x8, oob);
-    return if (access.index == 0) .x2 else .x7;
+    return .{ .base = if (index == 0) .x2 else .x7, .length = if (index == 0) .x3 else .x8 };
 }
 
 /// Emit a memory access's effective-address computation and bounds check
 /// (§4.4.7): `x16 = addr_reg + offset`, then trap to `oob` when the
-/// `n`-byte access runs past `mem_len` (x3). A memory64 address and its u64
-/// memarg offset may themselves overflow, so flag-setting addition traps on
+/// `n`-byte access runs past the selected memory's length. A memory64 address
+/// and its u64 memarg offset may overflow, so flag-setting addition traps on
 /// carry before the range check. The range check is also overflow-safe: an
 /// `ea + n > len` form could wrap a huge address back under the bound; instead
 /// this mirrors `rangeInBounds`. `subs` computes `mem_len - ea`, whose unsigned
@@ -4930,17 +4940,6 @@ fn emitSimdMemBounds(
 /// `mem_len - ea < n`. The boundary keeps the memory base in x2 and length in
 /// x3 untouched by codegen (x4 carries globals); x5 is scratch. x16 holds the
 /// effective address on return.
-fn emitMemBounds(
-    m: *masm_mod.Masm,
-    addr_reg: a64.Reg,
-    offset: u64,
-    n: u32,
-    memory64: bool,
-    oob: *masm_mod.Masm.Label,
-) CompileError!void {
-    return emitMemBoundsWithLength(m, addr_reg, offset, n, memory64, .x3, oob);
-}
-
 fn emitMemBoundsWithLength(
     m: *masm_mod.Masm,
     addr_reg: a64.Reg,
@@ -5044,18 +5043,6 @@ fn readBlockResult(body: []const u8, i: *usize) ?BlockResult {
     return .{ .arity = 1, .value_type = value_type };
 }
 
-/// Read a load/store memarg (§5.4.7): the align/flags uleb followed by the
-/// memory-width offset uleb, returning the offset. Degrades (null) on the
-/// multi-memory form (flags bit 6 sets an explicit memory index) — the
-/// baseline addresses memory 0 only. The align field is a hint only;
-/// AArch64 handles unaligned access, so it is ignored.
-fn readMemArg(body: []const u8, i: *usize, memory64: bool) ?u64 {
-    const flags = readUleb32(body, i) orelse return null;
-    if (flags & 0x40 != 0) return null; // explicit memidx — multi-memory
-    if (memory64) return readUleb64(body, i);
-    return readUleb32(body, i) orelse return null;
-}
-
 /// Unsigned LEB128 (§5.2.2) — `local.get`'s index. Null on a malformed
 /// / over-long sequence (never aborts; AGENTS.md robustness contract).
 /// Skip a value type encoding (§5.3.1) in an instruction immediate (the
@@ -5085,26 +5072,6 @@ fn readUleb32(body: []const u8, i: *usize) ?u32 {
         }
         shift += 7;
         if (shift >= 35) return null;
-    }
-    return null;
-}
-
-fn readUleb64(body: []const u8, i: *usize) ?u64 {
-    var result: u64 = 0;
-    var shift: u32 = 0;
-    var byte_index: usize = 0;
-    while (byte_index < 10 and i.* < body.len) : (byte_index += 1) {
-        const byte = body[i.*];
-        i.* += 1;
-        const low = byte & 0x7f;
-        if (byte_index == 9) {
-            if (low > 1 or byte & 0x80 != 0) return null;
-            result |= @as(u64, low) << 63;
-            return result;
-        }
-        result |= @as(u64, low) << @as(u6, @intCast(shift));
-        if (byte & 0x80 == 0) return result;
-        shift += 7;
     }
     return null;
 }
@@ -6033,7 +6000,7 @@ test "spasm: native bulk-memory loops observe post-entry interrupts" {
 
     const ftype: FuncType = .{ .params = &.{ .i32, .i32, .i32 }, .results = &.{} };
     const types_arr = [_]FuncType{ftype};
-    const mems = [_]@import("types.zig").MemType{.{ .limits = .{ .min = 1 } }};
+    const mems = [_]@import("types.zig").MemType{ .{ .limits = .{ .min = 1 } }, .{ .limits = .{ .min = 1 } } };
     const module: Module = .{ .types = &types_arr, .funcs = &.{0}, .mems = &mems };
     const fill_body = [_]u8{
         op_local_get,   0x00, op_local_get, 0x01,   op_local_get, 0x02,
@@ -6043,7 +6010,22 @@ test "spasm: native bulk-memory loops observe post-entry interrupts" {
         op_local_get,   0x00, op_local_get, 0x01, op_local_get, 0x02,
         op_misc_prefix, 0x0a, 0x00,         0x00, op_end,
     };
-    const bodies = [_][]const u8{ &fill_body, &copy_body };
+    const indexed_fill_body = [_]u8{
+        op_local_get,   0x00, op_local_get, 0x01,   op_local_get, 0x02,
+        op_misc_prefix, 0x0b, 0x01,         op_end,
+    };
+    const indexed_copy_body = [_]u8{
+        op_local_get,   0x00, op_local_get, 0x01, op_local_get, 0x02,
+        op_misc_prefix, 0x0a, 0x01,         0x01, op_end,
+    };
+    const bodies = [_][]const u8{ &fill_body, &copy_body, &indexed_fill_body, &indexed_copy_body };
+    const View = struct {
+        fn get(instance: *anyopaque, _: u32, out: [*]u64) callconv(.c) void {
+            const data: *[32 * 1024]u8 = @ptrCast(@alignCast(instance));
+            out[0] = @intFromPtr(data);
+            out[1] = data.len;
+        }
+    };
     var funcs = [_]CompiledFunc{.{
         .type_index = 0,
         .local_types = ftype.params,
@@ -6072,16 +6054,17 @@ test "spasm: native bulk-memory loops observe post-entry interrupts" {
             0,
             &.{},
             null,
-            .{},
+            .{ .mem_view = View.get },
             TestExecutionPoll.poll,
         )) orelse return error.SpasmRefused;
 
-        const invocations: usize = if (body_index == 0) 1 else 2;
+        const fill = body_index % 2 == 0;
+        const invocations: usize = if (fill) 1 else 2;
         var invocation: usize = 0;
         while (invocation < invocations) : (invocation += 1) {
             poll.calls = 0;
-            frame[0] = if (body_index == 0) 0 else if (invocation == 0) 0 else 8192;
-            frame[1] = if (body_index == 0) 0xab else if (invocation == 0) 8192 else 0;
+            frame[0] = if (fill) 0 else if (invocation == 0) 0 else 8192;
+            frame[1] = if (fill) 0xab else if (invocation == 0) 8192 else 0;
             frame[2] = 8192;
             const status = entry(
                 &frame,
@@ -6089,7 +6072,7 @@ test "spasm: native bulk-memory loops observe post-entry interrupts" {
                 &memory,
                 memory.len,
                 @ptrCast(&frame),
-                @ptrCast(&frame),
+                @ptrCast(&memory),
                 0,
                 @ptrCast(&control),
             );

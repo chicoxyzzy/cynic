@@ -59,6 +59,8 @@ conversions, all four relaxed truncations, and the remaining 15 relaxed
 operations (multiply-add, lane selection, min/max, Q15, and dot products).
 All SIMD memory forms also support explicit memory indices, with the
 selected memory's address width and bounds.
+Scalar loads/stores and size/grow/fill/copy/init now support indexed memories
+on both targets too, including mixed-width copies and aliased imports.
 
 The interpreter and forced-Spasm sweeps also reproduce this score in
 `ReleaseSafe` on both targets, under the same 600-second / 3-GB guards.
@@ -71,8 +73,8 @@ the validator guard and bounded scratch retention.
 
 | target | native entries | compiled functions | refusals |
 |---|---:|---:|---:|
-| x86_64-macos (Rosetta) | 144,832 | 5,507 | 476 |
-| AArch64-macos | 150,399 | 5,481 | 502 |
+| x86_64-macos (Rosetta) | 145,535 | 5,725 | 260 |
+| AArch64-macos | 151,102 | 5,699 | 286 |
 
 The SIMD foundation added 249 compiled functions on x86_64 and 26 on AArch64
 over the reference-parity checkpoint. The bounded AArch64 code-reservation
@@ -117,11 +119,16 @@ entries per target, removing the last 31 SIMD refusals in this corpus.
 Multiply-add is unfused; dot products saturate signed i16 pair sums before
 wrapping i32 accumulation. The latter also fixes an interpreter overflow
 panic when safety checks are enabled.
+Scalar multi-memory adds 218 compiled functions and 703 native entries per
+target, removing 216 first refusals apiece. Loads/stores share SIMD's indexed
+decoder and view helpers; fill/copy keep their bounded execution polls.
+Growth refreshes memory zero even when a nonzero imported index aliases it,
+and both tiers copy aliased imports in the overlap-safe direction.
 These are coverage counts, not speedups.
 
-- x86: 8 limits, 0 signatures, 397 bytecode shapes, 71 unsupported opcodes,
+- x86: 8 limits, 0 signatures, 181 bytecode shapes, 71 unsupported opcodes,
   0 emission failures, and 0 installation refusals.
-- AArch64: 8 limits, 0 signatures, 335 bytecode shapes, 159 unsupported
+- AArch64: 8 limits, 0 signatures, 119 bytecode shapes, 159 unsupported
   opcodes, 0 emission failures, and 0 installation refusals. Reusing x86's
   module-sized reservation removes all 99 installation refusals from the
   previous fixed 64 KiB arena. Both targets retain the 64 KiB minimum and
@@ -131,8 +138,8 @@ These are coverage counts, not speedups.
 The x86 vector-signature bucket falls from 1,349 to zero. Neither target
 now records a refusal at `0xfd` in this corpus.
 Counts classify the first refusal per attempted function, not every operation
-it contains. Both sweeps also report 7 overflows of the compact per-instance
-top-level opcode table; the fixed subopcode counters are tracked separately.
+it contains. Neither sweep now overflows the compact per-instance top-level
+opcode table; the fixed subopcode counters are tracked separately.
 
 The source inventory accounts for all 256 SIMD opcodes accepted by the
 validator: all 256 have lowering paths on both targets.
@@ -147,6 +154,6 @@ imported memories, growth, and exact-width bounds. Unrelated unsupported
 instructions, control shapes, and resource ceilings still permit fallback.
 
 Both backends still refuse native table64 operations while their helpers use
-u32 indices, preventing truncation above 2^32. The largest remaining `0xfc` groups are
-`table.copy` (22), `table.grow` (5), `table.size` (5), `memory.init` (4),
-and `memory.copy` (2).
+u32 indices, preventing truncation above 2^32. The remaining `0xfc` groups are
+`table.copy` (22), `table.grow` (5), `table.size` (5), and `table.fill` (1).
+Scalar memory operations leave the leading first-refusal list on both targets.
