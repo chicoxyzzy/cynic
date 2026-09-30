@@ -1433,7 +1433,7 @@ useful:
    interpret it). A red-first `wasm_js_test` (a JS export runs
    Spasm-compiled native code, `spasm_runs >= 1`) plus the full JS-wasm
    suite run under the jit-on posture gate it; non-emittable bodies
-   (unsupported SIMD operations, type-index blocks, and other unsupported shapes)
+   (type-index blocks, nonzero-memory scalar operations, and other unsupported shapes)
    degrade, so the suite still covers the interpreter through that fallback. The scalar ALU now spans
    the i32/i64 and f32/f64 arithmetic and comparisons, the full float unary
    set (incl. min/max/copysign), the integer bit-counts (clz/ctz/popcnt)
@@ -1494,7 +1494,7 @@ useful:
    and select through full 128-bit Cells. Single-result branch merges retain
    the value kind; wide call arguments/results use both halves of the staged
    buffer. Native gates initialize declared reference locals to null and
-   vector locals to zero. Table64 operations, unsupported SIMD operations, and other
+   vector locals to zero. Table64 operations, nonzero-memory scalar operations, and other
    unsupported instructions retain transactional fallback; a dedicated native-register
    imported-call ABI is still deferred.
    Non-gated calls retain the checked helper and per-function Sarcasm fallback.

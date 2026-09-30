@@ -2300,7 +2300,7 @@ and the per-builtin checklist; this section tracks status.
   saturating) — plus globals, structured control flow, same-module calls
   (including W^X-safe stable gates for scalar cross-function calls and a
   helper-free local link for eligible self-recursion), the table/reference
-  family, the first SIMD data path, and Realm fuel/interrupt safe points at
+  family, the complete accepted SIMD ISA, and Realm fuel/interrupt safe points at
   native entry plus taken structured-loop backedges ship and are default-on
   for wasm. A qualified SysV x86_64 backend now covers the complete scalar
   numeric ISA, scalar globals and memory32/memory64 access,

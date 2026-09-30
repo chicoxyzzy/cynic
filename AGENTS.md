@@ -721,7 +721,7 @@ reviewed in PRs against `test262-results.md`.
                           comparison, and every conversion), globals,
                           bulk-memory fill/copy/size, and structured
                           control flow, same-module calls, the table/reference
-                          family, and the first SIMD data path; unsupported
+                          family, and the complete accepted SIMD ISA; unsupported
                           bodies still degrade to the interpreter.
                           Passes 100% of the
                           spec-testsuite commands it scores
