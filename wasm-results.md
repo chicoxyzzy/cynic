@@ -57,7 +57,8 @@ floating rounding plus pseudo-min/max at both lane widths,
 byte shuffle, strict swizzle, relaxed swizzle, all ten standard numeric
 conversions, all four relaxed truncations, and the remaining 15 relaxed
 operations (multiply-add, lane selection, min/max, Q15, and dot products).
-Nonzero-memory SIMD operands still fall back.
+All SIMD memory forms also support explicit memory indices, with the
+selected memory's address width and bounds.
 
 | target | native entries | compiled functions | refusals |
 |---|---:|---:|---:|
@@ -127,9 +128,14 @@ top-level opcode table; the fixed subopcode counters are tracked separately.
 The source inventory accounts for all 256 SIMD opcodes accepted by the
 validator: all 256 have lowering paths on both targets.
 This is an opcode count, not the first-refusal-per-function count above.
-Existing nonzero-memory and control-shape fallback restrictions still apply;
-zero corpus SIMD refusals does not prove those paths are native. Nonzero-memory
-support and the scope-wide native-entry/code-reservation audit remain open.
+An independent catalogue requires native entry for each accepted opcode,
+unreachable immediates, and 128-/1,024-operation bodies, including unpadded
+unary chains. It exposed five x86 installation refusals (byte popcount and
+the four f32 rounding operations); compact immediates address their excess
+code size without raising the reservation. Separate tests cover all 22
+memory forms with explicit indices, mixed memory32/memory64 widths,
+imported memories, growth, and exact-width bounds. Unrelated unsupported
+instructions, control shapes, and resource ceilings still permit fallback.
 
 Both backends still refuse native table64 operations while their helpers use
 u32 indices, preventing truncation above 2^32. The largest remaining `0xfc` groups are

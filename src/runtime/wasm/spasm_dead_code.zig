@@ -283,7 +283,7 @@ fn skipSimdImmediate(body: []const u8, index: *usize) ?void {
 
 fn skipMemArg(body: []const u8, index: *usize) ?void {
     const flags = readUleb32(body, index) orelse return null;
-    if (flags & 0x40 != 0) return null;
+    if (flags & 0x40 != 0) _ = readUleb32(body, index) orelse return null;
     // The module is validated; memory64 offsets may occupy ten bytes.
     skipLeb(body, index, 10) orelse return null;
 }

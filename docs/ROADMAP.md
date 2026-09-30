@@ -2406,9 +2406,12 @@ and the per-builtin checklist; this section tracks status.
   lowering. Relaxed dot products saturate signed i16 pairs and wrap i32
   accumulation, also closing an interpreter overflow panic. Native-entry
   regressions cover all 15 operations and dense 1,024-operation bodies.
-  Nonzero-memory SIMD and the scope-wide opcode/reservation audit still
-  remain; a green corpus alone does not establish complete native coverage.
-  Native table64, nonzero-memory SIMD operands, and the
+  All 22 SIMD memory forms now resolve explicit memory indices, including
+  mixed address widths and imported memories, while preserving memory zero's
+  cached fast path. A separate audit checks native entry for all 256 accepted
+  opcodes, dead immediates, and dense unpadded unary chains; compact x86
+  immediates close the popcount/f32-rounding code-reservation gaps it found.
+  Native table64, nonzero-memory scalar operations, and the
   native-register/imported-call ABI remain next.
 
   The architecture for all three tiers — the shared codegen

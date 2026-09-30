@@ -738,13 +738,16 @@ the measured design space:
   The six signed/unsigned widening loads (8x8, 16x4, 32x2) check and read
   exactly eight bytes before widening to a full vector, using NEON
   SXTL/UXTL or SSE2 unpacking with zero/sign masks. Memory64 overflow traps
-  before access; nonzero-memory operands still fall back.
+  before access. All SIMD memory forms support explicit memory indices;
+  the selected memory controls both address width and bounds. Nonzero
+  memories use a fresh non-allocating base/length view without replacing
+  the memory-zero cache, including after growth of an imported memory.
   Memory splats and zero loads use exact-width reads and preserve raw bits.
   All 48 integer/floating comparisons compile, including unsigned sign-boundary
   handling and NaN-aware floating ordering. The x86 i64 forms use scalar
   comparisons to retain the SSE2 baseline.
   Table64 operations (the helper ABI still uses u32
-  indices), nonzero-memory SIMD operands, and other unsupported x86
+  indices), nonzero-memory scalar operations, and other unsupported x86
   bodies refuse before
   code publication and run in Sarcasm.
   This is a coverage difference, not a semantic one: forced-Spasm sweeps on

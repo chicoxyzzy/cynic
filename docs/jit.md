@@ -1624,8 +1624,8 @@ useful:
    uses PMOVSX/PMOVZX, Cynic retains SSE2: unpack each low lane with zero
    or a signed-compare mask. Tests require native execution, preserve live
    scalar/vector neighbors, and cover unaligned access, exact end-of-memory
-   bounds, memory64 overflow, unreachable immediates, and nonzero-memory
-   fallback. No new runtime allocations, helper calls, or policy changes.
+   bounds, memory64 overflow, and unreachable immediates. Memory-zero forms
+   need no runtime allocations or helper calls.
    Memory splats and zero loads now compile with exact-width scalar reads.
    Splats reuse the raw-bit replication path; zero loads clear every other
    vector bit. All 48 integer/floating comparisons also compile, following
@@ -1736,15 +1736,28 @@ useful:
    signed accumulator overflow. Native-entry tests cover all 15 operations,
    every signed byte-product pair, cancellation that distinguishes fused
    arithmetic, NaNs/zeros, live neighbors, dead code, and dense bodies.
+   All 22 SIMD memory forms also handle explicit memory indices. Like
+   [Liftoff's indexed memory accesses](https://github.com/v8/v8/blob/main/src/wasm/baseline/liftoff-compiler.cc),
+   decoding resolves the selected memory's address width before its offset.
+   Memory zero retains its cached fast path; other indices obtain a fresh
+   base/length through the existing non-allocating memory-view helper. The
+   temporary call frame is released before every bounds-check trap edge.
+   Tests cover mixed memory32/memory64 modules, explicit zero and multi-byte
+   indices, imported/defined memories, shared-memory growth, live neighbors,
+   exact-width bounds, no partial stores, and complete dead-code immediates.
+   A separate catalogue requires native entry for every accepted SIMD opcode,
+   including 128-/1,024-operation chains without padding unary operations.
+   This exposed x86 reservation failures for byte popcount and f32 rounding:
+   dword mask broadcasts and compact mode immediates remove duplicate bytes
+   without changing the code-cache budget or the SSE2 baseline.
    This follows the existing [Liftoff](https://v8.dev/blog/liftoff) /
    [Wizard-SPC](https://arxiv.org/abs/2305.13241) typed-stack design and
    [Core value and vector semantics](https://webassembly.github.io/spec/core/exec/instructions.html).
    Diagnostics record the first refused opcode and `0xfd` subopcode on both
-   targets; a function getting past its vector signature can still refuse at
-   an unsupported lane operation. `tools/wasm_bench.zig` covers inline vector
+   targets; unrelated unsupported instructions or control shapes can still
+   cause a function to fall back. `tools/wasm_bench.zig` covers inline vector
    addition and vector-valued calls with checked high-lane checksums.
-   Nonzero-memory SIMD operands and the full opcode/reservation audit remain,
-   along with the side-table-as-control-oracle wiring (§6) that would make
+   The side-table-as-control-oracle wiring (§6) remains, which would make
    multi-target `br_table` cheap.
 5. **Ohaimark** — the ADR plus bytecode/feedback/SSA, initial specialization,
    tagged/int32 representation selection, and verified logical deopt metadata
