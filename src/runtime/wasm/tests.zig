@@ -789,9 +789,9 @@ test "wasm spasm: SIMD cold gate preserves interpreter fallback for a refused ca
     try testing.expectEqual(spasm.RefusalStage.limits, instance.spasm_last_refusal_stage);
 }
 
-test "wasm spasm: x86 unreachable raises a catchable trap without fallback" {
+test "wasm spasm: multivalue unreachable raises a catchable trap without fallback" {
     const spasm = @import("spasm.zig");
-    if (comptime !spasm.supported or spasm.full_coverage_supported) return error.SkipZigTest;
+    if (comptime !spasm.supported) return error.SkipZigTest;
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -5944,6 +5944,198 @@ test "wasm spasm: reference values preserve both halves through locals select an
         }
     }
     try testing.expectEqual(@as(u32, 0), instance.spasm_refusals);
+}
+
+const ControlSignature = struct { params: []const u8, results: []const u8 };
+
+fn buildControlFunc(a: std.mem.Allocator, function: ControlSignature, block: ControlSignature, block_index: usize, body: []const u8) ![]const u8 {
+    var types: List = .empty;
+    try uleb(a, &types, block_index + 1);
+    for (0..block_index + 1) |index| {
+        const signature = if (index == 0) function else block;
+        try types.append(a, 0x60);
+        try uleb(a, &types, signature.params.len);
+        try types.appendSlice(a, signature.params);
+        try uleb(a, &types, signature.results.len);
+        try types.appendSlice(a, signature.results);
+    }
+    var code: List = .empty;
+    try uleb(a, &code, 1);
+    try uleb(a, &code, body.len);
+    try code.appendSlice(a, body);
+    return assemble(a, &.{
+        .{ .id = 1, .body = types.items },
+        .{ .id = 3, .body = &.{ 1, 0 } },
+        .{ .id = 10, .body = code.items },
+    });
+}
+
+fn expectControlResults(bytes: []const u8, args: []const u128, expected: []const u128, native_polls: ?u32) !void {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const module = try wasm.decode(arena.allocator(), bytes);
+    for ([_]bool{ false, true }) |native| {
+        var instance: interp.Instance = undefined;
+        try interp.instantiate(&instance, arena.allocator(), testing.allocator, &module, .{});
+        defer instance.deinit();
+        instance.spasm_enabled = native;
+        var control: CountingExecutionControl = .{};
+        if (native_polls != null) instance.execution_control = control.control();
+        const results = try interp.invoke(&instance, testing.allocator, 0, args);
+        defer testing.allocator.free(results);
+        try testing.expectEqualSlices(u128, expected, results);
+        if (native) {
+            try testing.expectEqual(@as(u32, 1), instance.spasm_compiles);
+            try testing.expectEqual(@as(u32, 1), instance.spasm_runs);
+            try testing.expectEqual(@as(u32, 0), instance.spasm_refusals);
+            if (native_polls) |polls| try testing.expectEqual(polls, control.polls);
+        }
+    }
+}
+
+test "wasm spasm: multivalue type-index blocks and if parameters preserve every value kind" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const values = [_]u128{ 42, 0xfedc_ba98_7654_3210, 0x8000_0000, 0x8000_0000_0000_0000, 0x1234_5678_9abc_def0_ffff_ffff_ffff_ffff, 0xabcdef01_23456789_abcdef01_23456789 };
+    const kinds = &[_]u8{ 0x7f, 0x7e, 0x7d, 0x7c, 0x6f, 0x7b };
+    for ([_]usize{ 1, 64, 128 }) |type_index| {
+        for ([_]u8{ 0x02, 0x03, 0x04 }) |op| {
+            var body: List = .empty;
+            try body.append(a, 0);
+            for (0..6) |index| try body.appendSlice(a, &.{ 0x20, @intCast(index) });
+            if (op == 0x04) try body.appendSlice(a, &.{ 0x20, 6 });
+            try body.append(a, op);
+            // Positive s33 indices >=64 need the sign-preserving extra byte.
+            if (type_index == 1) try body.append(a, 1) else try body.appendSlice(a, &.{ @as(u8, @intCast(type_index & 0x7f)) | 0x80, @intCast(type_index >> 7) });
+            try body.appendSlice(a, &.{ 0x0b, 0x0b });
+            const bytes = try buildControlFunc(a, .{ .params = kinds ++ &[_]u8{0x7f}, .results = kinds }, .{ .params = kinds, .results = kinds }, type_index, body.items);
+            for ([_]u128{ 0, 1 }) |condition| try expectControlResults(bytes, &(values ++ [_]u128{condition}), &values, null);
+        }
+    }
+}
+
+test "wasm spasm: multivalue if restores parameters after terminating and ordinary arms" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const pair = &[_]u8{ 0x6f, 0x7b };
+    const values = [_]u128{ 0x1234_5678_9abc_def0_ffff_ffff_ffff_ffff, 0xfedc_ba98_7654_3210_0123_4567_89ab_cdef };
+    for ([_][]const u8{ &.{}, &.{ 0x0c, 0 }, &.{ 0x41, 0, 0x0e, 0, 0 }, &.{0x0f} }) |terminator| {
+        var body: List = .empty;
+        try body.appendSlice(a, &.{ 0, 0x20, 0, 0x20, 1, 0x20, 2, 0x04, 1 });
+        // Consume both parameters and replace the ref with null in the then arm.
+        try body.appendSlice(a, &.{ 0x1a, 0x1a, 0xd0, 0x6f, 0x20, 1 });
+        try body.appendSlice(a, terminator);
+        try body.appendSlice(a, &.{ 0x05, 0x0b, 0x0b });
+        const bytes = try buildControlFunc(a, .{ .params = pair ++ &[_]u8{0x7f}, .results = pair }, .{ .params = pair, .results = pair }, 1, body.items);
+        for ([_]u128{ 0, 1 }) |condition| {
+            try expectControlResults(bytes, &(values ++ [_]u128{condition}), &.{ if (condition == 0) values[0] else std.math.maxInt(u128), values[1] }, null);
+        }
+    }
+}
+
+test "wasm spasm: multivalue branches copy overlapping results and retain the untaken stack" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const kinds = &[_]u8{ 0x7f, 0x6f, 0x7b };
+    const values = [_]u128{ 42, 0x1234_5678_9abc_def0_ffff_ffff_ffff_ffff, 0xfedc_ba98_7654_3210_0123_4567_89ab_cdef };
+    for ([_][]const u8{ &.{ 0x0c, 0 }, &.{ 0x20, 3, 0x0d, 0 }, &.{ 0x20, 3, 0x0e, 1, 0, 0 } }) |branch| {
+        var body: List = .empty;
+        try body.appendSlice(a, &.{ 0, 0x02, 1, 0x42, 7, 0x20, 0, 0x20, 1, 0x20, 2 });
+        try body.appendSlice(a, branch);
+        try body.appendSlice(a, &.{ 0x1a, 0x1a, 0x1a, 0x1a, 0x20, 0, 0x20, 1, 0x20, 2, 0x0b, 0x0b });
+        const bytes = try buildControlFunc(a, .{ .params = kinds ++ &[_]u8{0x7f}, .results = kinds }, .{ .params = &.{}, .results = kinds }, 1, body.items);
+        for ([_]u128{ 0, 1, 99 }) |condition| try expectControlResults(bytes, &(values ++ [_]u128{condition}), &values, null);
+    }
+}
+
+test "wasm spasm: multivalue loop parameters survive kind-changing transfers and armed polls" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const kinds = &.{ 0x7f, 0x6f, 0x7b };
+    const reference: u128 = 0x1234_5678_9abc_def0_ffff_ffff_ffff_ffff;
+    const vector: u128 = 0xfedc_ba98_7654_3210_0123_4567_89ab_cdef;
+    for ([_][]const u8{
+        &.{ 0x0d, 0 }, // br_if loop
+        &.{ 0x04, 1, 0x0c, 1, 0x05, 0x0b }, // if (params/results) br loop
+        &.{ 0x04, 1, 0x41, 0, 0x0e, 1, 1, 1, 0x05, 0x0b }, // br_table case
+        &.{ 0x04, 1, 0x41, 7, 0x0e, 1, 1, 1, 0x05, 0x0b }, // br_table default
+    }) |branch| {
+        var body: List = .empty;
+        try body.appendSlice(a, &.{
+            1,    1,    0x7f, // counter local 2
+            0x41, 3,    0x20,
+            0,    0x20, 1,
+            0x03, 1,
+            0x1a, 0x1a, 0x21, 2, // save counter, consume parameters
+            0x20, 0, // discardable ref occupies the scalar target's depth
+            0x20, 2,
+            0x41, 1,
+            0x6b, 0x22,
+            2,    0x20,
+            0,    0x20,
+            1,
+            0x20, 2, // condition; carry (counter - 1, ref, vector)
+        });
+        try body.appendSlice(a, branch);
+        try body.appendSlice(a, &.{ 0x1a, 0x1a, 0x1a, 0x1a, 0x20, 2, 0x20, 0, 0x20, 1, 0x0b, 0x0b });
+        const bytes = try buildControlFunc(a, .{ .params = &.{ 0x6f, 0x7b }, .results = kinds }, .{ .params = kinds, .results = kinds }, 1, body.items);
+        try expectControlResults(bytes, &.{ reference, vector }, &.{ 0, reference, vector }, 3);
+    }
+}
+
+test "wasm spasm: multivalue return does not change a reachable else prefix" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const bytes = try buildFunc(a, &.{ 0x6f, 0x7f }, &.{0x7f}, &.{
+        0, 0x20, 0, 0x20, 1, 0x04, 0x40, 0x41, 9, 0x0f, 0x05, 0x0b, 0xd1, 0x0b,
+    }, "prefix");
+    for ([_]u128{ 0, 1 }) |condition| try expectControlResults(bytes, &.{ std.math.maxInt(u128), condition }, &.{if (condition == 0) @as(u128, 1) else 9}, null);
+}
+
+test "wasm spasm: multivalue loop labels use parameters rather than result arity" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const kinds = &.{ 0x6f, 0x7b };
+    const bytes = try buildControlFunc(a, .{ .params = kinds, .results = kinds }, .{ .params = &.{0x7f}, .results = kinds }, 1, &.{
+        1, 1, 0x7f, // counter local 2
+        0x41, 3,    0x03, 1, // loop (i32) -> (externref, v128)
+        0x41, 1,    0x6b, 0x22,
+        2,    0x20, 2,    0x0d,
+        0,    0x1a, 0x20, 0,
+        0x20, 1,    0x0b, 0x0b,
+    });
+    const values = [_]u128{ 0x1234_5678_9abc_def0_ffff_ffff_ffff_ffff, 0xfedc_ba98_7654_3210_0123_4567_89ab_cdef };
+    try expectControlResults(bytes, &values, &values, 3);
+}
+
+test "wasm spasm: multivalue signatures beyond native capacity fall back safely" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const bytes = try buildControlFunc(a, .{ .params = &.{}, .results = &.{} }, .{ .params = &.{}, .results = &(@as([8]u8, @splat(0x7f))) }, 1, &.{
+        0, 0x02, 1, 0x00, 0x0b, 0x1a, 0x1a, 0x1a, 0x1a, 0x1a, 0x1a, 0x1a, 0x1a, 0x0b,
+    });
+    const module = try wasm.decode(a, bytes);
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true;
+    try testing.expectError(error.Unreachable, interp.invoke(&instance, testing.allocator, 0, &.{}));
+    try testing.expectEqual(@as(u32, 0), instance.spasm_compiles);
+    try testing.expectEqual(@as(u32, 1), instance.spasm_refusals);
 }
 
 test "wasm spasm: reference branch merges preserve complete cells" {

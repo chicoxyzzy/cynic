@@ -1290,12 +1290,11 @@ useful:
    two-label frame: `cbz` to the else arm, then both arms canonicalize
    into the same result registers); and `br_table` as an indexed
    multi-way dispatch (a linear compare chain to each target plus a
-   default jump, targets carrying no values for now — the common
-   switch shape). Structured control flow is complete. Merges are
-   register-resident at the canonical depth registers via a
-   native-label control stack; the compilable block types carry no
-   loop params, so a back-edge carries nothing and loop-carried state
-   lives in locals, keeping the header merge spill-free. `div`/`rem`
+   default jump). Both backends now decode type-indexed block signatures,
+   including parameters and multiple results. Merges use canonical depth
+   registers or Cells via a native-label control stack; loop backedges carry
+   parameters while forward block/if edges carry results. The fixed operand
+   capacity still bounds native compilation. `div`/`rem`
    introduce the **trap channel**: `EntryFn` now returns a `u32` status
    (0 = ok, non-zero = a `TrapCode`), so a body that traps returns the
    code instead of writing results and `spasmRun` maps it to the matching
@@ -1433,7 +1432,7 @@ useful:
    interpret it). A red-first `wasm_js_test` (a JS export runs
    Spasm-compiled native code, `spasm_runs >= 1`) plus the full JS-wasm
    suite run under the jit-on posture gate it; non-emittable bodies
-   (type-index blocks and other unsupported shapes)
+   (oversized stacks and other unsupported shapes)
    degrade, so the suite still covers the interpreter through that fallback. The scalar ALU now spans
    the i32/i64 and f32/f64 arithmetic and comparisons, the full float unary
    set (incl. min/max/copysign), the integer bit-counts (clz/ctz/popcnt)
@@ -1784,6 +1783,25 @@ useful:
    This follows the existing [Liftoff](https://v8.dev/blog/liftoff) /
    [Wizard-SPC](https://arxiv.org/abs/2305.13241) typed-stack design and
    [Core value and vector semantics](https://webassembly.github.io/spec/core/exec/instructions.html).
+   **Type-indexed control flow** now shares one Core blocktype decoder across
+   both targets. Following
+   [Core control execution](https://webassembly.github.io/spec/core/exec/instructions.html#control-instructions)
+   and [Liftoff's loop/merge handling](https://github.com/v8/v8/blob/main/src/wasm/baseline/liftoff-compiler.cc),
+   each frame excludes its parameters from the base height and records the
+   complete signature. Parameters enter canonical runtime homes before the
+   header or condition; `else` restores their types, and terminated arms
+   restore each merge result independently. `br`, `br_if`, and `br_table`
+   transfer overlapping scalar/reference/vector results downward without
+   changing the untaken path's metadata. ARM backedge polls spill the target
+   parameter state after transfer, not the discarded source stack. Both
+   targets compile `unreachable` as an ordinary trap; x86 branches inside
+   if arms use the same terminated-arm handling as returns. The dead-code
+   scanner consumes full constructed-reference block types. Native-entry
+   regressions compare against Sarcasm across all value kinds, s33 type
+   indices, armed polls, distinct loop arities, early exits, and bounded
+   fallback. No JS API, test262, or SES policy changes are involved.
+   Branches to the implicit function label, native tail/reference calls,
+   and native-register/imported-call ABI work remain separate increments.
    Diagnostics record the first refused opcode and `0xfd` subopcode on both
    targets; unrelated unsupported instructions or control shapes can still
    cause a function to fall back. `tools/wasm_bench.zig` covers inline vector

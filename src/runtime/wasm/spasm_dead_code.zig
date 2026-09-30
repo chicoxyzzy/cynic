@@ -35,7 +35,12 @@ pub fn skipToFrameBoundary(body: []const u8, index: *usize) ?FrameBoundary {
         index.* += 1;
         switch (op) {
             .block, .loop, .@"if" => {
-                skipLeb(body, index, 5) orelse return null; // block type: s33
+                if (index.* >= body.len) return null;
+                if (body[index.*] == 0x63 or body[index.*] == 0x64) {
+                    skipValType(body, index) orelse return null;
+                } else {
+                    skipLeb(body, index, 5) orelse return null; // empty, shorthand, or s33 index
+                }
                 depth += 1;
             },
             .end => {
@@ -394,6 +399,15 @@ test "skipToFrameBoundary stops at the current if arm" {
     try std.testing.expectEqual(@as(usize, 6), index);
     try std.testing.expectEqual(FrameBoundary.end, skipToFrameBoundary(&body, &index).?);
     try std.testing.expectEqual(body.len, index);
+}
+
+test "multivalue dead blocks skip complete type indices and constructed references" {
+    for ([_][]const u8{ &.{ 0xc0, 0 }, &.{ 0x63, 0x05 }, &.{ 0x64, 0x0b } }) |block_type| {
+        var body: [6]u8 = .{ 0x02, block_type[0], block_type[1], 0x0b, 0x05, 0x0b };
+        var index: usize = 0;
+        try std.testing.expectEqual(FrameBoundary.else_arm, skipToFrameBoundary(&body, &index));
+        try std.testing.expectEqual(@as(usize, 5), index);
+    }
 }
 
 test "skipToFrameEnd skips SIMD scalar lane and bitwise operations" {

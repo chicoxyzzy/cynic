@@ -420,6 +420,7 @@ pub const Helpers = struct {
 
 // ── wasm opcodes this increment understands ─────────────────────────
 const op_end: u8 = 0x0b;
+const op_unreachable: u8 = 0x00;
 const op_nop: u8 = 0x01;
 const op_block: u8 = 0x02;
 const op_loop: u8 = 0x03;
@@ -739,16 +740,13 @@ const Ctrl = struct {
     height: usize,
     /// Values a `br`/`br_if` to this frame carries. A `block`/`if`
     /// branches forward to its `end`, carrying its result arity; a
-    /// `loop` branches backward to its header, carrying its param arity
-    /// — 0 for every block type Spasm compiles (only a type-index block
-    /// has params, and those degrade), so a back-edge carries nothing
-    /// and loop-carried state lives in locals.
+    /// `loop` branches backward to its header, carrying its param arity.
     branch_arity: u32,
     /// Values on the stack when the frame's `end` is reached by
     /// fall-through (the result arity). Equals `branch_arity` for a
     /// `block`/`if`; a `loop` differs (params vs results).
     result_arity: u32,
-    result_type: ?ValType = null,
+    block_type: metadata.BlockType,
     kind: Kind,
 
     /// `if_then`/`if_else` track which arm of an `if` is being compiled
@@ -1078,6 +1076,15 @@ fn compileAarch64(
                 if (sp >= operand_reg_count) return null;
                 stack[sp] = .{ .const_i32 = v };
                 sp += 1;
+            },
+            op_unreachable => {
+                try m.movImm64(.x0, trap_unreachable);
+                try m.jump(&epilogue);
+                if ((try closeTerminatedArm(&m, gpa, body, &i, &stack, &sp, &ctrl, &ctrl_len)) orelse return null) {
+                    sp = ftype.results.len;
+                    for (ftype.results, 0..) |rt, r| stack[r] = runtimeLoc(rt, r);
+                    break;
+                }
             },
             op_nop => {},
             op_drop => {
@@ -3874,20 +3881,29 @@ fn compileAarch64(
                 stack[sp - 1] = .{ .reg = ra };
             },
             op_block, op_loop, op_if => {
-                const result = readBlockResult(body, &i) orelse return null;
+                const block_type = metadata.readBlockType(module, body, &i) orelse return null;
+                const params = block_type.params();
+                const results = block_type.resultCount();
                 if (ctrl_len >= max_ctrl_depth) return null;
                 if (op == op_if) {
                     if (sp == 0) return null;
                     sp -= 1;
                 }
+                if (sp < params.len or results > operand_reg_count - (sp - params.len)) return null;
+                for (params) |pt| if (!isCallValue(pt)) return null;
+                for (0..results) |r| if (!isCallValue(block_type.resultType(r))) return null;
+                const height = sp - params.len;
+                // All incoming edges share runtime homes, including the first
+                // loop iteration and an if's untouched false-arm parameters.
+                for (height..sp) |d| stack[d] = try canonicalize(&m, stack[d], d, num_locals);
                 const c = &ctrl[ctrl_len];
                 c.* = .{
                     .label = .{},
                     .else_label = .{},
-                    .height = sp,
-                    .branch_arity = if (op == op_loop) 0 else result.arity,
-                    .result_arity = result.arity,
-                    .result_type = result.value_type,
+                    .height = height,
+                    .branch_arity = @intCast(if (op == op_loop) params.len else results),
+                    .result_arity = @intCast(results),
+                    .block_type = block_type,
                     .kind = if (op == op_loop) .loop else if (op == op_if) .if_then else .block,
                 };
                 // Track the frame before emitting fixups so failure cleans it up.
@@ -3910,7 +3926,8 @@ fn compileAarch64(
                 try m.jump(&c.label);
                 try m.bind(&c.else_label);
                 c.kind = .if_else;
-                sp = c.height;
+                sp = c.height + c.block_type.params().len;
+                for (c.block_type.params(), c.height..) |pt, d| stack[d] = runtimeLoc(pt, d);
             },
             op_br => {
                 const depth = readUleb32(body, &i) orelse return null;
@@ -3918,7 +3935,7 @@ fn compileAarch64(
                 const target = &ctrl[ctrl_len - 1 - depth];
                 if (!(try emitBranchValues(&m, &stack, num_locals, sp, target.height, target.branch_arity))) return null;
                 if (target.kind == .loop) {
-                    try emitExecutionPoll(&m, gpa, stack[0..sp], &epilogue, execution_poll_helper);
+                    try emitLoopExecutionPoll(&m, gpa, &stack, target, &epilogue, execution_poll_helper);
                 }
                 try m.jump(&target.label);
                 _ = (try closeTerminatedArm(&m, gpa, body, &i, &stack, &sp, &ctrl, &ctrl_len)) orelse return null;
@@ -3934,7 +3951,7 @@ fn compileAarch64(
                 try m.jumpCbz(condition, &not_taken);
                 if (!(try emitBranchValues(&m, &stack, num_locals, sp, target.height, target.branch_arity))) return null;
                 if (target.kind == .loop) {
-                    try emitExecutionPoll(&m, gpa, stack[0..sp], &epilogue, execution_poll_helper);
+                    try emitLoopExecutionPoll(&m, gpa, &stack, target, &epilogue, execution_poll_helper);
                 }
                 try m.jump(&target.label);
                 try m.bind(&not_taken);
@@ -3955,7 +3972,7 @@ fn compileAarch64(
                     try m.jumpCond(.ne, &next_case);
                     if (!(try emitBranchValues(&m, &stack, num_locals, sp, target.height, target.branch_arity))) return null;
                     if (target.kind == .loop) {
-                        try emitExecutionPoll(&m, gpa, stack[0..sp], &epilogue, execution_poll_helper);
+                        try emitLoopExecutionPoll(&m, gpa, &stack, target, &epilogue, execution_poll_helper);
                     }
                     try m.jump(&target.label);
                     try m.bind(&next_case);
@@ -3965,7 +3982,7 @@ fn compileAarch64(
                 const target = &ctrl[ctrl_len - 1 - depth];
                 if (!(try emitBranchValues(&m, &stack, num_locals, sp, target.height, target.branch_arity))) return null;
                 if (target.kind == .loop) {
-                    try emitExecutionPoll(&m, gpa, stack[0..sp], &epilogue, execution_poll_helper);
+                    try emitLoopExecutionPoll(&m, gpa, &stack, target, &epilogue, execution_poll_helper);
                 }
                 try m.jump(&target.label);
                 _ = (try closeTerminatedArm(&m, gpa, body, &i, &stack, &sp, &ctrl, &ctrl_len)) orelse return null;
@@ -4707,6 +4724,18 @@ fn canonicalize(m: *masm_mod.Masm, loc: Loc, depth: usize, num_locals: usize) Co
     }
 }
 
+/// Poll with the target loop's live state after a branch has transferred args.
+fn emitLoopExecutionPoll(m: *masm_mod.Masm, gpa: std.mem.Allocator, stack: []const Loc, target: *const Ctrl, epilogue: *masm_mod.Masm.Label, poll_helper: ExecutionPollHelperFn) CompileError!void {
+    // Branch transfer changes both the locations and kinds of live operands.
+    // Spill that destination state, not the discarded source stack, while
+    // leaving a br_if's untaken-path metadata untouched.
+    var live: [operand_reg_count]Loc = undefined;
+    @memcpy(live[0..target.height], stack[0..target.height]);
+    const params = target.block_type.params();
+    for (params, target.height..) |pt, d| live[d] = runtimeLoc(pt, d);
+    try emitExecutionPoll(m, gpa, live[0 .. target.height + params.len], epilogue, poll_helper);
+}
+
 /// Taken branches discard intervening operands and move their results down
 /// to the label's homes. Do not mutate the untaken path's abstract stack.
 fn emitBranchValues(m: *masm_mod.Masm, stack: []const Loc, num_locals: usize, sp: usize, height: usize, arity: u32) CompileError!bool {
@@ -4780,7 +4809,8 @@ fn closeTerminatedArm(m: *masm_mod.Masm, gpa: std.mem.Allocator, body: []const u
         if (current.kind != .if_then) return null;
         try m.bind(&current.else_label);
         current.kind = .if_else;
-        sp.* = current.height;
+        sp.* = current.height + current.block_type.params().len;
+        for (current.block_type.params(), current.height..) |pt, d| stack[d] = runtimeLoc(pt, d);
         return false;
     }
     switch (current.kind) {
@@ -4794,7 +4824,7 @@ fn closeTerminatedArm(m: *masm_mod.Masm, gpa: std.mem.Allocator, body: []const u
     current.label.deinit(gpa);
     current.else_label.deinit(gpa);
     sp.* = current.height + current.result_arity;
-    if (current.result_type) |rt| stack[current.height] = runtimeLoc(rt, current.height);
+    for (current.height..sp.*) |d| stack[d] = runtimeLoc(current.block_type.resultType(d - current.height), d);
     ctrl_len.* -= 1;
     return false;
 }
@@ -5022,23 +5052,6 @@ fn emitTruncTrap(
             try m.emit(if (signed) a64.fcvtzsWfromD(ra, .x16) else a64.fcvtzuWfromD(ra, .x16));
         }
     }
-}
-
-const BlockResult = struct { arity: u32, value_type: ?ValType = null };
-
-/// Single-value block types include constructed references. Type-index
-/// blocks with parameters or multiple results still fall back transactionally.
-fn readBlockResult(body: []const u8, i: *usize) ?BlockResult {
-    if (i.* >= body.len) return null;
-    if (body[i.*] == 0x40) {
-        i.* += 1;
-        return .{ .arity = 0 };
-    }
-    var reader: @import("reader.zig").Reader = .{ .bytes = body, .pos = i.* };
-    const value_type = @import("types.zig").readValType(&reader) catch return null;
-    if (!isCallValue(value_type)) return null;
-    i.* = reader.pos;
-    return .{ .arity = 1, .value_type = value_type };
 }
 
 /// Unsigned LEB128 (§5.2.2) — `local.get`'s index. Null on a malformed
