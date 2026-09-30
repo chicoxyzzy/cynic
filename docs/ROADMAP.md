@@ -2421,8 +2421,14 @@ and the per-builtin checklist; this section tracks status.
   reference values retain both halves of their Cell. Mixed-width table.copy
   uses the narrower count type, including in validation. Native-entry tests
   cover imported tables, aliases, overflow, growth failure, live values,
-  cross-instance calls, and GC in a JS callback. The native-register/imported-call
-  ABI and remaining unsupported control shapes remain next.
+  cross-instance calls, and GC in a JS callback.
+  Type-indexed block/loop/if signatures and multi-value merges now compile
+  on both targets, including loop parameters, scalar/reference/vector branch
+  transfers, terminating if arms, and catchable `unreachable`. ARM backedge
+  polls use the post-transfer live state. Native-entry regressions compare
+  against the interpreter and retain safe fallback beyond the operand cap.
+  Implicit function-label branches, native tail/reference calls, and the
+  native-register/imported-call ABI remain next.
 
   The architecture for all three tiers — the shared codegen
   substrate and the JS↔wasm call-boundary fast path included — is

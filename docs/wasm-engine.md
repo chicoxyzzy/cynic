@@ -753,8 +753,12 @@ the measured design space:
   Table64 get/set, grow/size, fill/copy/init, and indirect calls use u64
   helper arguments and width-correct results on both targets. Mixed-width
   table copies use the narrower count type; table.init keeps i32 segment
-  offsets/counts. Unsupported bodies still refuse before code publication
-  and run in Sarcasm.
+  offsets/counts. Type-indexed block/loop/if signatures now carry parameters
+  and multiple results on both targets. Branch merges preserve every scalar,
+  reference, and vector value; loop polls preserve the transferred parameter
+  state. Both backends compile catchable `unreachable` and terminating if
+  arms. Oversized stacks, implicit function-label branches, and unsupported
+  opcodes still refuse before code publication and run in Sarcasm.
   This is a coverage difference, not a semantic one: forced-Spasm sweeps on
   both architectures pass all 58,779 scored spec commands. Current native
   coverage and per-opcode refusals are in [wasm-results.md](../wasm-results.md).

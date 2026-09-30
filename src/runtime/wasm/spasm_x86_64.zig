@@ -321,7 +321,7 @@ const Ctrl = struct {
     height: usize,
     branch_arity: u32,
     result_arity: u32,
-    result_loc: Loc = .runtime,
+    block_type: metadata.BlockType,
     kind: Kind,
 
     const Kind = enum { block, loop, if_then, if_else };
@@ -356,7 +356,8 @@ fn closeTerminatedArm(
         if (current.kind != .if_then) return null;
         try m.bind(&current.else_label);
         current.kind = .if_else;
-        sp.* = current.height;
+        sp.* = current.height + current.block_type.params().len;
+        for (current.block_type.params(), current.height..) |pt, d| stack[d] = runtimeLoc(pt);
         return .continue_compilation;
     }
 
@@ -371,8 +372,7 @@ fn closeTerminatedArm(
     current.label.deinit(gpa);
     current.else_label.deinit(gpa);
     sp.* = current.height + current.result_arity;
-    var result_depth = current.height;
-    while (result_depth < sp.*) : (result_depth += 1) stack[result_depth] = current.result_loc;
+    for (current.height..sp.*) |d| stack[d] = runtimeLoc(current.block_type.resultType(d - current.height));
     ctrl_len.* -= 1;
     return .continue_compilation;
 }
@@ -495,7 +495,7 @@ pub fn compile(
                     .continue_compilation => {},
                     .function_end => {
                         sp = ftype.results.len;
-                        for (stack[0..sp]) |*loc| loc.* = .runtime;
+                        for (ftype.results, 0..) |rt, r| stack[r] = runtimeLoc(rt);
                         function_ended = true;
                         break :body_loop;
                     },
@@ -2593,31 +2593,38 @@ pub fn compile(
                     return refuse(config, .unsupported_opcode, op_misc_prefix);
                 }
             },
-            op_block => {
-                const result = readBlockResult(body, &i) orelse return null;
+            op_block, op_loop, op_if => {
+                const block_type = metadata.readBlockType(module, body, &i) orelse return null;
+                const params = block_type.params();
+                const results = block_type.resultCount();
                 if (ctrl_len >= max_ctrl_depth) return null;
-                ctrl[ctrl_len] = .{ .height = sp, .branch_arity = result.arity, .result_arity = result.arity, .result_loc = result.loc, .kind = .block };
+                if (op == op_if) {
+                    if (sp == 0) return null;
+                    sp -= 1;
+                }
+                if (sp < params.len or results > operand_stack_capacity - (sp - params.len)) return null;
+                for (params) |pt| if (!isSupportedValue(pt)) return null;
+                for (0..results) |r| if (!isSupportedValue(block_type.resultType(r))) return null;
+                const height = sp - params.len;
+                if (!(try materializeRange(&m, &stack, num_locals, height, @intCast(params.len)))) return null;
+                const current = &ctrl[ctrl_len];
+                current.* = .{
+                    .height = height,
+                    .branch_arity = @intCast(if (op == op_loop) params.len else results),
+                    .result_arity = @intCast(results),
+                    .block_type = block_type,
+                    .kind = if (op == op_loop) .loop else if (op == op_if) .if_then else .block,
+                };
+                // Own any fixups before emission so errors clean them up.
                 ctrl_len += 1;
-            },
-            op_loop => {
-                const result = readBlockResult(body, &i) orelse return null;
-                if (ctrl_len >= max_ctrl_depth) return null;
-                ctrl[ctrl_len] = .{ .height = sp, .branch_arity = 0, .result_arity = result.arity, .result_loc = result.loc, .kind = .loop };
-                try m.bind(&ctrl[ctrl_len].label);
-                ctrl_len += 1;
-            },
-            op_if => {
-                if (sp == 0) return null;
-                sp -= 1;
-                const condition = stack[sp];
-                const result = readBlockResult(body, &i) orelse return null;
-                if (ctrl_len >= max_ctrl_depth) return null;
-                try materialize(&m, condition, num_locals, sp);
-                try m.load32Disp32(.rax, .r12, scratchOffset(num_locals, sp));
-                try m.cmpRegImm32(.rax, 0);
-                ctrl[ctrl_len] = .{ .height = sp, .branch_arity = result.arity, .result_arity = result.arity, .result_loc = result.loc, .kind = .if_then };
-                try m.jumpCond(.equal, &ctrl[ctrl_len].else_label);
-                ctrl_len += 1;
+                if (op == op_loop) {
+                    try m.bind(&current.label);
+                } else if (op == op_if) {
+                    try materialize(&m, stack[sp], num_locals, sp);
+                    try m.load32Disp32(.rax, .r12, scratchOffset(num_locals, sp));
+                    try m.cmpRegImm32(.rax, 0);
+                    try m.jumpCond(.equal, &current.else_label);
+                }
             },
             op_else => {
                 if (ctrl_len == 0) return null;
@@ -2627,7 +2634,8 @@ pub fn compile(
                 try m.jump(&current.label);
                 try m.bind(&current.else_label);
                 current.kind = .if_else;
-                sp = current.height;
+                sp = current.height + current.block_type.params().len;
+                for (current.block_type.params(), current.height..) |pt, d| stack[d] = runtimeLoc(pt);
             },
             op_br => {
                 const depth = readUleb32(body, &i) orelse return null;
@@ -2639,20 +2647,7 @@ pub fn compile(
                 }
                 try m.jump(&target.label);
 
-                // The remainder of the current frame is unreachable. Parse
-                // instruction widths until its matching end; unknown forms
-                // refuse rather than desynchronize the bytecode cursor.
-                if (ctrl_len == 0) return null;
-                dead_code.skipToFrameEnd(body, &i) orelse return null;
-                const current = &ctrl[ctrl_len - 1];
-                if (current.kind == .if_then or current.kind == .if_else) return null;
-                if (current.kind == .block) try m.bind(&current.label);
-                current.label.deinit(gpa);
-                current.else_label.deinit(gpa);
-                sp = current.height + current.result_arity;
-                var result_depth = current.height;
-                while (result_depth < sp) : (result_depth += 1) stack[result_depth] = current.result_loc;
-                ctrl_len -= 1;
+                _ = (try closeTerminatedArm(&m, gpa, body, &i, &stack, &sp, &ctrl, &ctrl_len)) orelse return null;
             },
             op_br_if => {
                 const depth = readUleb32(body, &i) orelse return null;
@@ -2711,17 +2706,7 @@ pub fn compile(
                 }
                 try m.jump(&default_target.label);
 
-                if (ctrl_len == 0) return null;
-                dead_code.skipToFrameEnd(body, &i) orelse return null;
-                const current = &ctrl[ctrl_len - 1];
-                if (current.kind == .if_then or current.kind == .if_else) return null;
-                if (current.kind == .block) try m.bind(&current.label);
-                current.label.deinit(gpa);
-                current.else_label.deinit(gpa);
-                sp = current.height + current.result_arity;
-                var result_depth = current.height;
-                while (result_depth < sp) : (result_depth += 1) stack[result_depth] = current.result_loc;
-                ctrl_len -= 1;
+                _ = (try closeTerminatedArm(&m, gpa, body, &i, &stack, &sp, &ctrl, &ctrl_len)) orelse return null;
             },
             op_return => {
                 // Canonicalize the function results and join the success
@@ -2729,13 +2714,12 @@ pub fn compile(
                 // path can reach: an else-arm or a frame merge.
                 const result_arity: u32 = @intCast(ftype.results.len);
                 if (!(try emitBranchValues(&m, stack[0..], num_locals, sp, 0, result_arity))) return null;
-                var result_depth: usize = 0;
-                while (result_depth < result_arity) : (result_depth += 1) stack[result_depth] = runtimeLoc(ftype.results[result_depth]);
                 try m.jump(&explicit_return);
                 switch ((try closeTerminatedArm(&m, gpa, body, &i, &stack, &sp, &ctrl, &ctrl_len)) orelse return null) {
                     .continue_compilation => {},
                     .function_end => {
                         sp = result_arity;
+                        for (ftype.results, 0..) |rt, r| stack[r] = runtimeLoc(rt);
                         function_ended = true;
                         break :body_loop;
                     },
@@ -4192,18 +4176,6 @@ fn readSupportedValType(body: []const u8, index: *usize) ?ValType {
     if (!isSupportedValue(value_type)) return null;
     index.* = reader.pos;
     return value_type;
-}
-
-const BlockResult = struct { arity: u32, loc: Loc = .runtime };
-
-fn readBlockResult(body: []const u8, index: *usize) ?BlockResult {
-    if (index.* >= body.len) return null;
-    if (body[index.*] == 0x40) {
-        index.* += 1;
-        return .{ .arity = 0 };
-    }
-    const value_type = readSupportedValType(body, index) orelse return null;
-    return .{ .arity = 1, .loc = runtimeLoc(value_type) };
 }
 
 fn readUleb32(body: []const u8, index: *usize) ?u32 {

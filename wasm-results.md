@@ -63,6 +63,8 @@ Scalar loads/stores and size/grow/fill/copy/init now support indexed memories
 on both targets too, including mixed-width copies and aliased imports.
 Table64 get/set, grow/size, fill/copy/init, and indirect calls also enter native
 code, preserving full-width indices and complete reference values.
+Type-indexed blocks, loop/if parameters, and multi-value branch merges now
+compile on both targets, as do terminating if arms and catchable unreachable.
 
 The interpreter and forced-Spasm sweeps also reproduce this score in
 `ReleaseSafe` on both targets, under the same 600-second / 3-GB guards.
@@ -75,8 +77,8 @@ the validator guard and bounded scratch retention.
 
 | target | native entries | compiled functions | refusals |
 |---|---:|---:|---:|
-| x86_64-macos (Rosetta) | 145,676 | 5,771 | 215 |
-| AArch64-macos | 151,243 | 5,745 | 241 |
+| x86_64-macos (Rosetta) | 146,281 | 5,868 | 120 |
+| AArch64-macos | 151,392 | 5,867 | 121 |
 
 The SIMD foundation added 249 compiled functions on x86_64 and 26 on AArch64
 over the reference-parity checkpoint. The bounded AArch64 code-reservation
@@ -129,11 +131,14 @@ and both tiers copy aliased imports in the overlap-safe direction.
 Table64 adds 46 compiled functions and 141 native entries per target,
 removing 45 first refusals apiece. The helper ABI retains u64 indices through
 bounds checks, and mixed-width table.copy validation uses the narrower count.
+Type-indexed multi-value control flow and terminating-arm parity add 97
+compiled functions / 605 native entries on x86, and 122 compiled functions /
+149 native entries on AArch64. First refusals fall by 95 and 120 respectively.
 These are coverage counts, not speedups.
 
-- x86: 8 limits, 0 signatures, 136 bytecode shapes, 71 unsupported opcodes,
+- x86: 8 limits, 0 signatures, 40 bytecode shapes, 72 unsupported opcodes,
   0 emission failures, and 0 installation refusals.
-- AArch64: 8 limits, 0 signatures, 74 bytecode shapes, 159 unsupported
+- AArch64: 8 limits, 0 signatures, 41 bytecode shapes, 72 unsupported
   opcodes, 0 emission failures, and 0 installation refusals. Reusing x86's
   module-sized reservation removes all 99 installation refusals from the
   previous fixed 64 KiB arena. Both targets retain the 64 KiB minimum and
