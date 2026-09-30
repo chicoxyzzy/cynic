@@ -1412,7 +1412,7 @@
         "jsshell"
       ],
       "timeout": "normal",
-      "excluded_reason": "Shared Wasm memory and threads are outside the initial shell scope"
+      "excluded_reason": null
     },
     {
       "path": "wasm/jsapi/memory/constructor-types.tentative.any.js",
@@ -1478,7 +1478,7 @@
         "jsshell"
       ],
       "timeout": "normal",
-      "excluded_reason": "Shared Wasm memory and threads are outside the initial shell scope"
+      "excluded_reason": null
     },
     {
       "path": "wasm/jsapi/memory/to-fixed-length-buffer.any.js",
@@ -1510,7 +1510,7 @@
         "jsshell"
       ],
       "timeout": "normal",
-      "excluded_reason": "Shared Wasm memory and threads are outside the initial shell scope"
+      "excluded_reason": null
     },
     {
       "path": "wasm/jsapi/memory/to-resizable-buffer.any.js",

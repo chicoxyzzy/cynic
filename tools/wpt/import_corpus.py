@@ -79,8 +79,14 @@ def exclusion_reason(path, metadata):
             return reason
     if relative == "idlharness.any.js":
         return "WebIDL harness requires browser fetch/IDL resources and does not declare jsshell"
-    if "-shared." in relative or "/threads/" in path:
-        return "Shared Wasm memory and threads are outside the initial shell scope"
+    # These fixtures exercise same-realm shared memory, without worker/agent APIs.
+    reviewed_shared_memory = {
+        "wasm/jsapi/memory/constructor-shared.tentative.any.js",
+        "wasm/jsapi/memory/to-fixed-length-buffer-shared.any.js",
+        "wasm/jsapi/memory/to-resizable-buffer-shared.any.js",
+    }
+    if ("-shared." in relative and path not in reviewed_shared_memory) or "/threads/" in path:
+        return "Unreviewed shared Wasm memory and threads are outside the shell scope"
     if relative == "exception/identity.tentative.any.js":
         return "Fixture uses detached Promise assertions inside synchronous test(); shell lacks host rejection tracking and could falsely pass"
     if relative in {
@@ -95,7 +101,7 @@ def exclusion_reason(path, metadata):
         "exception/basic.tentative.any.js", "exception/constructor.tentative.any.js",
         "exception/getArg.tentative.any.js", "exception/is.tentative.any.js",
         "exception/toString.tentative.any.js", "tag/constructor.tentative.any.js",
-        "tag/toString.tentative.any.js",
+        "tag/toString.tentative.any.js", "memory/constructor-shared.tentative.any.js",
     }
     if ".tentative." in relative and relative not in shipped_tentative:
         raise ValueError(f"new tentative fixture needs explicit feature/shell review: {path}")

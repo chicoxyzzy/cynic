@@ -2,6 +2,7 @@
 
 import hashlib
 import importlib.util
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -12,6 +13,13 @@ SPEC = importlib.util.spec_from_file_location(
 )
 import_corpus = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(import_corpus)
+
+
+REVIEWED_SHARED_FIXTURES = (
+    "wasm/jsapi/memory/constructor-shared.tentative.any.js",
+    "wasm/jsapi/memory/to-fixed-length-buffer-shared.any.js",
+    "wasm/jsapi/memory/to-resizable-buffer-shared.any.js",
+)
 
 
 class ImportCorpusTests(unittest.TestCase):
@@ -47,11 +55,58 @@ class ImportCorpusTests(unittest.TestCase):
         for excluded in (
             "gc/casts.tentative.any.js", "jspi/notraps.any.js", "js-string/basic.any.js",
             "esm-integration/exports.tentative.any.js", "function/call.tentative.any.js",
-            "tag/type.tentative.any.js", "memory/to-resizable-buffer-shared.any.js",
+            "tag/type.tentative.any.js", "memory/unreviewed-shared.any.js",
             "idlharness.any.js",
         ):
             with self.subTest(excluded=excluded):
                 self.assertIsNotNone(import_corpus.exclusion_reason("wasm/jsapi/" + excluded, metadata))
+
+    def test_reviewed_shared_memory_fixtures_require_explicit_jsshell(self):
+        for fixture in REVIEWED_SHARED_FIXTURES:
+            with self.subTest(fixture=fixture, globals="jsshell"):
+                metadata = import_corpus.parse_metadata("// META: global=window,jsshell")
+                self.assertIsNone(import_corpus.exclusion_reason(fixture, metadata))
+            for source in ("", "// META: global=window,dedicatedworker", "// META: global=notjsshell"):
+                with self.subTest(fixture=fixture, source=source):
+                    metadata = import_corpus.parse_metadata(source)
+                    self.assertIn("does not explicitly declare", import_corpus.exclusion_reason(fixture, metadata))
+
+    def test_unreviewed_shared_memory_and_thread_fixtures_stay_excluded(self):
+        metadata = import_corpus.parse_metadata("// META: global=jsshell")
+        for fixture in (
+            "memory/new-shared.any.js", "memory/new-shared.tentative.any.js",
+            "memory/to-resizable-buffer-shared.tentative.any.js",
+            "memory/other/to-fixed-length-buffer-shared.any.js",
+            "threads/basic.any.js", "memory/threads/basic.any.js",
+            "threads/memory/constructor-shared.tentative.any.js",
+        ):
+            with self.subTest(fixture=fixture):
+                self.assertIsNotNone(import_corpus.exclusion_reason("wasm/jsapi/" + fixture, metadata))
+
+    def test_reviewed_shared_memory_dependencies_are_validated_transitively(self):
+        for fixture in REVIEWED_SHARED_FIXTURES:
+            files = {fixture: b"// META: global=jsshell\n// META: script=helper.js\n"}
+            for transitive in (False, True):
+                with self.subTest(fixture=fixture, transitive=transitive):
+                    if transitive:
+                        files["wasm/jsapi/memory/helper.js"] = b"// META: script=missing.js\n"
+                    with self.assertRaisesRegex(ValueError, "missing dependency"):
+                        import_corpus.build_manifest(files, "a" * 40)
+
+    def test_pinned_corpus_includes_only_reviewed_shared_memory_fixtures(self):
+        root = import_corpus.CORPUS_ROOT
+        manifest = json.loads((root / "manifest.json").read_text())
+        import_corpus.verify_local(root, manifest)
+        shared = {
+            test["path"]: test for test in manifest["tests"]
+            if "-shared." in test["path"] and test["excluded_reason"] is None
+        }
+        self.assertEqual(set(shared), set(REVIEWED_SHARED_FIXTURES))
+        self.assertEqual(shared[REVIEWED_SHARED_FIXTURES[0]]["scripts"], [
+            "wasm/jsapi/assertions.js", "wasm/jsapi/memory/assertions.js",
+        ])
+        for fixture in REVIEWED_SHARED_FIXTURES[1:]:
+            self.assertEqual(shared[fixture]["scripts"], ["wasm/jsapi/wasm-module-builder.js"])
 
     def test_shipped_exception_and_tag_apis_are_included_despite_tentative_names(self):
         metadata = import_corpus.parse_metadata("// META: global=jsshell")
