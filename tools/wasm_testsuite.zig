@@ -85,15 +85,17 @@ pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
 
+    var options_arena = std.heap.ArenaAllocator.init(gpa);
+    defer options_arena.deinit();
     var opts: Options = .{};
     {
         var iter = init.minimal.args.iterate();
         _ = iter.next(); // skip the binary path
         while (iter.next()) |a| {
             if (std.mem.startsWith(u8, a, "--gen-dir=")) {
-                opts.gen_dir = try gpa.dupe(u8, a["--gen-dir=".len..]);
+                opts.gen_dir = try options_arena.allocator().dupe(u8, a["--gen-dir=".len..]);
             } else if (std.mem.startsWith(u8, a, "--filter=")) {
-                opts.filter = try gpa.dupe(u8, a["--filter=".len..]);
+                opts.filter = try options_arena.allocator().dupe(u8, a["--filter=".len..]);
             } else if (std.mem.eql(u8, a, "--quiet")) {
                 opts.quiet = true;
             } else if (std.mem.eql(u8, a, "--write-results")) {
@@ -138,7 +140,7 @@ pub fn main(init: std.process.Init) !void {
 
         var arena = std.heap.ArenaAllocator.init(gpa);
         defer arena.deinit();
-        const c = runManifest(arena.allocator(), io, dir, entry.path, opts.spasm) catch |err| {
+        const c = runManifest(gpa, arena.allocator(), io, dir, entry.path, opts.spasm) catch |err| {
             if (!opts.quiet) {
                 var line: [512]u8 = undefined;
                 const msg = try std.fmt.bufPrint(&line, "  {s}: harness error {t}\n", .{ entry.path, err });
@@ -192,7 +194,7 @@ pub fn main(init: std.process.Init) !void {
 
 // ── per-manifest execution ──────────────────────────────────────────
 
-fn runManifest(arena: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, json_path: []const u8, spasm_enabled: bool) !Counts {
+fn runManifest(gpa: std.mem.Allocator, arena: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, json_path: []const u8, spasm_enabled: bool) !Counts {
     const bytes = try dir.readFileAlloc(io, json_path, arena, .limited(64 * 1024 * 1024));
     const root = try std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{});
     const commands = (root.object.get("commands") orelse return error.BadManifest).array.items;
@@ -218,6 +220,11 @@ fn runManifest(arena: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, json_path:
     for (commands) |cmd_v| {
         const cmd = cmd_v.object;
         const kind = (cmd.get("type") orelse continue).string;
+        // Call stacks and returned cells live only through this assertion;
+        // module state and imported aliases keep the manifest's lifetime.
+        var action_arena = std.heap.ArenaAllocator.init(gpa);
+        defer action_arena.deinit();
+        const scratch = action_arena.allocator();
 
         if (std.mem.eql(u8, kind, "module")) {
             const res = loadModule(arena, io, dir, cmd, &registry, spasm_enabled) catch null;
@@ -246,7 +253,7 @@ fn runManifest(arena: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, json_path:
             // A register is not a scored assertion.
         } else if (std.mem.eql(u8, kind, "assert_return")) {
             const before = counts.fail;
-            scoreReturn(arena, cmd, current, &registry, &counts);
+            scoreReturn(scratch, cmd, current, &registry, &counts);
             if (debug_loads and counts.fail > before) {
                 const action = cmd.get("action").?.object;
                 var line: [256]u8 = undefined;
@@ -255,11 +262,11 @@ fn runManifest(arena: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, json_path:
                 std.Io.File.stderr().writeStreamingAll(io, msg) catch {};
             }
         } else if (std.mem.eql(u8, kind, "assert_trap") or std.mem.eql(u8, kind, "assert_exhaustion")) {
-            scoreTrap(arena, cmd, current, &registry, &counts, std.mem.eql(u8, kind, "assert_exhaustion"));
+            scoreTrap(scratch, cmd, current, &registry, &counts, std.mem.eql(u8, kind, "assert_exhaustion"));
         } else if (std.mem.eql(u8, kind, "assert_invalid") or std.mem.eql(u8, kind, "assert_malformed")) {
             scoreRejected(arena, io, dir, cmd, &counts);
         } else if (std.mem.eql(u8, kind, "action")) {
-            const r = doAction(arena, cmd.get("action").?.object, current, &registry);
+            const r = doAction(scratch, cmd.get("action").?.object, current, &registry);
             switch (r) {
                 .values => counts.pass += 1,
                 else => counts.fail += 1,
@@ -908,6 +915,35 @@ fn testScalarNanMatch(comptime U: type, canonical: bool) !void {
         try expectScalarMatch(U, token, sign_bits | exponent | (quiet - 1), false);
         try expectScalarMatch(U, token, sign_bits | exponent | (quiet * 2 - 1), !canonical);
     }
+}
+
+test "wasm harness: action scratch does not accumulate in the manifest arena" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    const bytes = "\x00asm\x01\x00\x00\x00" ++
+        "\x01\x05\x01\x60\x00\x01\x7f" ++
+        "\x03\x02\x01\x00" ++
+        "\x07\x05\x01\x01f\x00\x00" ++
+        "\x0a\x06\x01\x04\x00\x41\x2a\x0b";
+    try tmp.dir.writeFile(io, .{ .sub_path = "constant.wasm", .data = bytes });
+    const assertion =
+        \\,{"type":"assert_return","action":{"type":"invoke","field":"f","args":[]},"expected":[{"type":"i32","value":"42"}]}
+    ;
+    var manifest: std.ArrayList(u8) = .empty;
+    defer manifest.deinit(std.testing.allocator);
+    try manifest.appendSlice(std.testing.allocator,
+        \\{"commands":[{"type":"module","filename":"constant.wasm"}
+    );
+    for (0..32) |_| try manifest.appendSlice(std.testing.allocator, assertion);
+    try manifest.appendSlice(std.testing.allocator, "]}");
+    try tmp.dir.writeFile(io, .{ .sub_path = "constant.json", .data = manifest.items });
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const counts = try runManifest(std.testing.allocator, arena.allocator(), io, tmp.dir, "constant.json", false);
+    try std.testing.expectEqual(@as(u32, 32), counts.pass);
+    try std.testing.expectEqual(@as(u32, 0), counts.fail);
+    try std.testing.expect(arena.queryCapacity() < 2 * 1024 * 1024);
 }
 
 test "wasm harness: f32 canonical NaN matching" {
