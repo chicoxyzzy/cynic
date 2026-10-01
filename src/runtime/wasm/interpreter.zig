@@ -212,6 +212,7 @@ pub const PAGE_SIZE = 1 << 16;
 const spasm_helpers: spasm.Helpers = .{
     .call = spasmCall,
     .call_indirect = spasmCallIndirect,
+    .call_ref = spasmCallRef,
     .mem_view = spasmMemoryView,
     .mem_grow = spasmMemoryGrow,
     .mem_init = spasmMemoryInit,
@@ -2161,15 +2162,81 @@ fn spasmCallIndirect(
             }
         },
     }
-    // Type-checked: run it via the direct-call helper on the defining
-    // instance. A nested trap is stashed on `def_inst`; surface it on the
-    // calling instance (the one `spasmRun` reads) when they differ.
-    // `call_indirect` has no statically known callee layout, so its compact
-    // buffer deliberately disables the direct-EntryFn path here. The helper
-    // still routes through the same generic fallback and trap channel.
+    return spasmCallResolvedRef(inst, def_inst, fidx, buf, execution_control);
+}
+
+/// Core call_ref is statically typed; host-provided refs additionally need
+/// a defensive layout check before entering the native staging buffer.
+/// Keep both halves of the reference so foreign/imported functions resolve
+/// in their defining instance, just as in the interpreter's call_ref arm.
+fn spasmCallRef(
+    instance_opaque: *anyopaque,
+    type_index: u32,
+    ref_slot: *const spasm.Cell,
+    buf: [*]spasm.Cell,
+    execution_control: ?*anyopaque,
+) callconv(.c) u32 {
+    const inst: *Instance = @ptrCast(@alignCast(instance_opaque));
+    const ref = ref_slot.*;
+    if (ref == REF_NULL) {
+        inst.spasm_call_trap = error.NullReference;
+        return spasm.trap_pending;
+    }
+    const def_inst = if (ref >> 64 == 0) inst else funcRefInstance(ref);
+    const fidx = funcRefIndex(ref);
+    const target = def_inst.resolveFunc(fidx) orelse {
+        inst.spasm_call_trap = error.UnsupportedImportCall;
+        return spasm.trap_pending;
+    };
+    if (type_index >= inst.module.types.len) {
+        inst.spasm_call_trap = error.IndirectCallTypeMismatch;
+        return spasm.trap_pending;
+    }
+    const expected = inst.module.types[type_index];
+    const actual = switch (target) {
+        .wasm => |w| w.instance.module.types[w.func.type_index],
+        .host => |h| blk: {
+            if (expected.params.len != h.params or expected.results.len != h.results) {
+                inst.spasm_call_trap = error.IndirectCallTypeMismatch;
+                return spasm.trap_pending;
+            }
+            break :blk def_inst.funcType(fidx) orelse {
+                inst.spasm_call_trap = error.UnsupportedImportCall;
+                return spasm.trap_pending;
+            };
+        },
+    };
+    if (!funcCallLayoutsMatch(expected, actual)) {
+        inst.spasm_call_trap = error.IndirectCallTypeMismatch;
+        return spasm.trap_pending;
+    }
+    return spasmCallResolvedRef(inst, def_inst, fidx, buf, execution_control);
+}
+
+// This protects buffer size and value representation, not full host-boundary
+// assignability. Concrete function type indices are module-relative; erase
+// those and nullability while keeping function/extern/exception refs distinct.
+fn callValueLayout(t: types.ValType) types.ValType {
+    const heap = t.heapOf() orelse return t;
+    return types.ValType.refType(true, if (heap < types.heap_concrete_max) types.heap_abs_func else heap);
+}
+
+fn funcCallLayoutsMatch(expected: types.FuncType, actual: types.FuncType) bool {
+    if (expected.params.len != actual.params.len or expected.results.len != actual.results.len) return false;
+    for (expected.params, actual.params) |e, a| if (callValueLayout(e) != callValueLayout(a)) return false;
+    for (expected.results, actual.results) |e, a| if (callValueLayout(e) != callValueLayout(a)) return false;
+    return true;
+}
+
+fn spasmCallResolvedRef(inst: *Instance, def_inst: *Instance, fidx: u32, buf: [*]spasm.Cell, execution_control: ?*anyopaque) u32 {
+    // Dynamic targets have no statically known frame layout, so their compact
+    // buffers use the checked invoke boundary rather than direct EntryFn.
     const status = spasmCall(@ptrCast(def_inst), fidx, buf, 0, execution_control);
     if (status == spasm.trap_pending and def_inst != inst) {
         inst.spasm_call_trap = def_inst.spasm_call_trap;
+        if (def_inst.spasm_call_trap) |trap| {
+            if (trap == error.UncaughtException) inst.pending_exn = def_inst.pending_exn;
+        }
     }
     return status;
 }

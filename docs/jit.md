@@ -1810,9 +1810,26 @@ useful:
    use a register comparison beyond the 12-bit immediate range; dispatch
    remains linear. Native-entry regressions compare all value kinds, nested
    returns, mixed block/function targets, and 4,098-entry tables with Sarcasm.
-   No ECMA-262, test262, or SES surface changes are involved. Native
-   tail/reference calls and native-register/imported-call ABI work remain
-   separate increments.
+   No ECMA-262, test262, or SES surface changes are involved.
+   **Typed reference calls** (`call_ref`) now share indirect-call staging,
+   live-value preservation, and memory-view refresh on both targets. Following
+   [Core call_ref](https://webassembly.github.io/spec/core/exec/instructions.html#exec-call-ref)
+   and [Liftoff's CallRefImpl](https://github.com/v8/v8/blob/main/src/wasm/baseline/liftoff-compiler.cc),
+   validation establishes the signature and runtime dispatch rejects null
+   before invoking the reference's defining instance. Cynic passes the complete
+   128-bit reference Cell by address and retains the existing checked helper
+   for imports, foreign instances, and interpreter fallback. It carries the
+   execution controller and forwards foreign exception records as well as
+   trap codes; the same exception fix applies to indirect calls. A defensive
+   layout guard rejects incompatible host-supplied parameter/result shapes
+   before touching the staging buffer, while accepting module-relative
+   function-reference types with the same representation. This is not full
+   JS-boundary typed-reference assignability, which remains follow-up work.
+   Native-entry tests cover all value kinds, large local frames, live operands,
+   foreign targets, incompatible call layouts, null/host/Wasm traps, memory growth,
+   GC, cancellation, and bounded ordinary recursion. Native tail calls and
+   native-register/imported-call ABI work remain separate increments;
+   ordinary calls are not tail-call lowering and still consume stack space.
    Diagnostics record the first refused opcode and `0xfd` subopcode on both
    targets; unrelated unsupported instructions or control shapes can still
    cause a function to fall back. `tools/wasm_bench.zig` covers inline vector
