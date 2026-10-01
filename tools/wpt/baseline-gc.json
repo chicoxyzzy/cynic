@@ -11,12 +11,12 @@
     "testharness.js (patched)": "fbe2e52e029bbeea3fecdedf963b69589526a8a1e3ceb18947120667443147f7",
     "wasm/jsapi/wasm-module-builder.js (patched)": "83a83b12adc7d51533c818b23fd37936d03a7203e7015356f9e6852b8625964d"
   },
-  "binary_sha256": "06609951b3b66457c9c5204618479f8c6e40340b1181dacca09b271e734be5b5",
+  "binary_sha256": "4071355a71e885c4ae6a01f132dd5f3177e950c78328ddb7a07b4351e0a94972",
   "provenance": {
-    "generated_at_utc": "2026-10-01T03:13:29Z",
+    "generated_at_utc": "2026-10-01T12:59:45Z",
     "platform": "Darwin",
     "architecture": "arm64",
-    "engine_git_head": "584ca7228ebec7f7a5d693601a37bb427a048483",
+    "engine_git_head": "1630e2ebfa1d9b953da4972c9f90cffb4114e34f",
     "engine_git_dirty": false
   },
   "configuration": {
@@ -181,12 +181,12 @@
   "summary": {
     "files": {
       "execution_error": 2,
-      "fail": 11,
-      "pass": 30
+      "fail": 10,
+      "pass": 31
     },
     "subtests": {
-      "FAIL": 12,
-      "PASS": 591
+      "FAIL": 11,
+      "PASS": 592
     },
     "excluded_files": 37
   },
@@ -261,7 +261,7 @@
       "variant": ""
     },
     {
-      "status": "fail",
+      "status": "pass",
       "subtests": [
         {
           "name": "Promise type",
@@ -525,8 +525,8 @@
         },
         {
           "name": "Synchronous options handling: Buffer argument",
-          "status": 1,
-          "message": "assert_array_equals: lengths differ, expected array [] length 0, got [\"module getter\", \"global getter\"] length 2"
+          "status": 0,
+          "message": null
         },
         {
           "name": "Synchronous options handling: Module argument",
