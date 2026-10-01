@@ -39,6 +39,72 @@ the corpus under the relevant section's directory before adding.
 ## Entries
 
 
+### Native result-iterator reads skipped callable Proxies and intrinsic prototypes
+
+- **Fixed in:** `94529462`
+- **Spec:** ECMA-262 §7.3.3 GetV, §7.1.18 ToObject, and §10.5.5 Proxy
+  [[Get]]; Wasm JS API §5.6 run a host function.
+- **Reproducer:** in a mutable-primordial realm, using the `makeCall` helper in
+  [`wasm_wpt_multivalue_test.zig`](../src/runtime/wasm_wpt_multivalue_test.zig):
+  ```js
+  const key = Symbol.iterator;
+  Number.prototype[key] = function() { return [1, 2][key](); };
+  const number = makeCall([127, 127], () => 42);
+  globalThis.Number = undefined;
+  const callable = new Proxy(function() {}, {get(target, name) {
+    if (name === key) return () => [3, 4][key]();
+  }});
+  const results = [number(), makeCall([127, 127], () => callable)()];
+  if (results[0][0] !== 1 || results[1][0] !== 3) throw new Error('GetV');
+  ```
+- **Before fix:** native property lookup skipped function-target Proxy traps,
+  and primitive lookup followed replaceable constructor globals. Both valid
+  iterable results therefore failed with TypeError when used by the new bridge.
+- **After fix:** callable Proxy reads preserve keys, receivers, getter effects,
+  invariants, and captured references across revocation/GC. Primitive reads use
+  saved, traced intrinsic prototypes, independent of global constructor names.
+- **Suggested fixture shape:** WPT multi-value import cases covering callable
+  iterable/iterator/result objects and all four primitive prototype families.
+  Focused tests also cover trapless accessors, Symbol keys, revocation during
+  getter lookup, frozen target descriptors, and collecting callbacks.
+
+
+### Wasm start and cross-realm callbacks lost transient externref roots
+
+- **Fixed in:** `94529462`
+- **Spec:** Wasm JS API §5.6 run a host function and ToWebAssemblyValue;
+  ECMA-262 §6.1.7 object identity. Allocation-failure transport is also an
+  engine host-safety contract, separate from conformance.
+- **Reproducer:** use the `consumerModule(start)` helper in
+  [`wasm_wpt_multivalue_roots_test.zig`](../src/runtime/wasm_wpt_multivalue_roots_test.zig).
+  Its Wasm body keeps the fresh externref in a local across the collecting import:
+  ```js
+  let checked = 0;
+  const imports = {m: {
+    f() { return [{answer: 42}, 7]; },
+    g() { __collectGarbage(); },
+    c(value) { if (value.answer !== 42) throw new Error('lost reference'); checked++; }
+  }};
+  new WebAssembly.Instance(consumerModule(true), imports);
+  if (checked !== 1) throw new Error('start did not finish');
+  ```
+- **Before fix:** start functions did not enter the transient-root boundary.
+  Across sharing realms, a provider callback could miss the caller's active
+  pins, or a nested provider call could clear pins still needed by the caller's
+  Wasm frame. Collection could then reclaim its live externref. Host allocation
+  failure was also mapped to `HostThrew`, losing `OutOfMemory` and potentially
+  replaying a stale pending exception.
+- **After fix:** start and exported calls share the outermost invocation's
+  root owner across the heap. Pins survive collecting and nested callbacks,
+  then clear on normal or exceptional exit. Host OOM stays distinct through
+  interpreter and Spasm calls, including multi-value result conversion.
+- **Suggested fixture shape:** WPT Wasm JS API tests, outside test262's
+  ECMAScript-only scope, with optional GC hooks or engine stress execution.
+  Local tests cover start and cross-realm calls, nested provider reentry,
+  result identity, and pin cleanup; a native quota test injects a small
+  allocation failure and checks both missing and stale pending exceptions.
+
+
 ### Wasm memory growth left a stale cached buffer pointer after GC
 
 - **Fixed in:** `3ba77e56` (object identity in `33eda59e`).
