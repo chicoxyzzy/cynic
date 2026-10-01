@@ -631,7 +631,7 @@ test "an externref round-trips JS -> wasm -> host -> wasm -> JS" {
     try expectIntWasm(src, 1);
 }
 
-test "a native externref call and table64 indirect call and call_ref retain JS objects across host GC" {
+test "wasm native tail: externref calls preserve GC roots and reentrant host exceptions" {
     if (comptime !@import("wasm/spasm.zig").supported) return error.SkipZigTest;
     const indirect_bytes =
         "new Uint8Array([0,97,115,109,1,0,0,0," ++
@@ -643,29 +643,39 @@ test "a native externref call and table64 indirect call and call_ref retain JS o
         "1,6,1,96,1,111,1,111,2,10,1,3,101,110,118,2,105,100,0,0," ++
         "3,2,1,0,7,7,1,3,114,117,110,0,1," ++
         "9,5,1,3,0,1,0,10,10,1,8,0,32,0,210,0,20,0,11])";
-    inline for (.{ extern_id_bytes, indirect_bytes, ref_bytes }) |bytes| {
-        var realm = Realm.init(testing.allocator);
-        defer realm.deinit();
-        realm.allow_wasm_compile = true;
-        realm.jit_enabled = true;
-        try realm.installBuiltins();
-        try realm.installTestGlobals();
-        const src =
-            "const token = {};" ++
-            "const inst = new WebAssembly.Instance(new WebAssembly.Module(" ++ bytes ++ ")," ++
-            "{ env: { id: (x) => { __collectGarbage(); if (x === null) throw token; return x; } } });" ++
-            "const result = inst.exports.run({ id: 7 });" ++
-            "let same = false; try { inst.exports.run(null); } catch (e) { same = e === token; }" ++
-            "result.id === 7 && same ? 1 : 0;";
-        const outcome = try lantern.evaluateScript(testing.allocator, &realm, src);
-        const value = switch (outcome) {
-            .value => |v| v,
-            else => return error.WasmThrewUnexpectedly,
-        };
-        try testing.expectEqual(@as(i32, 1), value.asInt32());
-        try testing.expectEqual(@as(usize, 1), realm.wasm_instances.items.len);
-        try testing.expect(realm.wasm_instances.items[0].spasm_runs > 0);
-        try testing.expectEqual(@as(u32, 0), realm.wasm_instances.items[0].spasm_refusals);
+    inline for (.{ extern_id_bytes, indirect_bytes, ref_bytes }, 0..) |bytes, variant| {
+        inline for (.{ false, true }) |tail| {
+            var realm = Realm.init(testing.allocator);
+            defer realm.deinit();
+            realm.allow_wasm_compile = true;
+            realm.jit_enabled = true;
+            try realm.installBuiltins();
+            try realm.installTestGlobals();
+            realm.heap.setGcThreshold(1);
+            const src =
+                "const token = {};" ++
+                "const bytes = " ++ bytes ++ ";" ++
+                (if (tail) switch (variant) {
+                    0 => "bytes[bytes.length-3] = 18;",
+                    1 => "bytes[bytes.length-4] = 19;",
+                    else => "bytes[bytes.length-3] = 21;",
+                } else "") ++
+                "const inst = new WebAssembly.Instance(new WebAssembly.Module(bytes)," ++
+                "{ env: { id: (x) => { __collectGarbage(); if (x === null) throw token;" ++
+                "if (x.id === 7 && inst.exports.run({id:8}).id !== 8) throw token; __collectGarbage(); return x; } } });" ++
+                "const result = inst.exports.run({ id: 7 });" ++
+                "let same = false; try { inst.exports.run(null); } catch (e) { same = e === token; }" ++
+                "result.id === 7 && same ? 1 : 0;";
+            const outcome = try lantern.evaluateScript(testing.allocator, &realm, src);
+            const value = switch (outcome) {
+                .value => |v| v,
+                else => return error.WasmThrewUnexpectedly,
+            };
+            try testing.expectEqual(@as(i32, 1), value.asInt32());
+            try testing.expectEqual(@as(usize, 1), realm.wasm_instances.items.len);
+            try testing.expect(realm.wasm_instances.items[0].spasm_runs > 0);
+            try testing.expectEqual(@as(u32, 0), realm.wasm_instances.items[0].spasm_refusals);
+        }
     }
 }
 

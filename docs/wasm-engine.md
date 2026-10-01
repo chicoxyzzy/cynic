@@ -775,8 +775,15 @@ the measured design space:
   A native layout guard rejects incompatible host-supplied references before
   using the call buffer. The JS boundary additionally validates the supported
   final function-reference types with their defining module context (§8).
-  Native tail calls remain deferred until they can replace the caller frame
-  without growing the host stack.
+  `return_call`, `return_call_indirect`, and `return_call_ref` now compile on
+  both targets. A bounded transfer record copies the arguments, then the
+  native caller returns before a runtime loop enters the target. The loop
+  reuses one Cell buffer, growing only for a larger target frame; tail-chain
+  length does not grow the host stack. It preserves foreign instance state,
+  execution controls, full Cells, and exception payloads. Host callbacks and
+  unsupported targets retain their checked invocation paths. This is a
+  helper-mediated implementation, not the deferred native-register tail-jump
+  ABI; each transfer still pays runtime dispatch and local initialization.
   References and vectors preserve full Cells on both targets, including
   parameters/results, locals/globals, select, calls, and single-result merges.
   The shared SIMD foundation includes `v128.const/load/store` and `i32x4.add`
