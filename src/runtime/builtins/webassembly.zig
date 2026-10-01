@@ -531,7 +531,10 @@ fn makeInstanceObject(realm: *Realm, mstate: *ModuleState, import_object: Value)
 // ── Promise entry points (compile / instantiate) ────────────────────
 
 fn promiseCtor(realm: *Realm) NativeError!*JSFunction {
-    return heap_mod.valueAsFunction(realm.globals.get("Promise") orelse Value.undefined_) orelse
+    // WebIDL "a new promise" uses the realm's intrinsic %Promise%, not
+    // the user-visible global binding (mutable only under --unhardened).
+    // https://webidl.spec.whatwg.org/#a-new-promise
+    return realm.intrinsics.promise_constructor orelse
         return intrinsics.throwTypeError(realm, "WebAssembly: %Promise% is missing");
 }
 
@@ -552,23 +555,24 @@ fn rejectFromError(realm: *Realm, cap: promise_mod.PromiseCapability, err: Nativ
 fn wasmCompile(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
     const cap = try promise_mod.newPromiseCapability(realm, try promiseCtor(realm));
-    // Keep the capability alive through compilation and settlement. Custom
-    // resolve/reject callbacks can re-enter JS and collect without retaining
-    // the capability's returned object themselves.
+    // The capability stays rooted until the queued completion takes ownership.
+    // Input conversion errors reject it immediately, as required by WebIDL.
     const scope = try realm.heap.openScope();
     defer scope.close();
     try scope.push(cap.promise);
     try scope.push(heap_mod.taggedFunction(cap.resolve));
     try scope.push(heap_mod.taggedFunction(cap.reject));
-    const result = compileToModule(realm, args) catch |err| return rejectFromError(realm, cap, err);
-    return promise_mod.capabilityResolve(realm, cap, result);
+    enqueueCompilation(realm, cap, args) catch |err| {
+        try rejectInstantiationError(realm, cap, err);
+    };
+    return cap.promise;
 }
 
-fn compileToModule(realm: *Realm, args: []const Value) NativeError!Value {
+fn enqueueCompilation(realm: *Realm, cap: promise_mod.PromiseCapability, args: []const Value) NativeError!void {
     if (!realm.allow_wasm_compile) return wasmCompileDisabled(realm);
     const bytes = bufferSourceBytes(args) orelse
         return intrinsics.throwTypeError(realm, "WebAssembly.compile expects a BufferSource");
-    return makeModuleObject(realm, bytes);
+    return queueCompilation(realm, cap, bytes, null);
 }
 
 /// Wasm JS API "asynchronously compile/instantiate a WebAssembly module".
@@ -580,6 +584,7 @@ pub const WasmInstantiationJob = struct {
     capability: promise_mod.PromiseCapability,
     import_object: Value,
     payload: union(enum) {
+        compile_result: Value,
         compiled: Value,
         compile_failed: Value,
         instantiate: struct {
@@ -596,7 +601,7 @@ pub const WasmInstantiationJob = struct {
         realm.heap.markValue(heap_mod.taggedFunction(self.capability.reject));
         realm.heap.markValue(self.import_object);
         switch (self.payload) {
-            .compiled, .compile_failed => |value| realm.heap.markValue(value),
+            .compile_result, .compiled, .compile_failed => |value| realm.heap.markValue(value),
             .instantiate => |prepared| {
                 realm.heap.markValue(prepared.module);
                 for (prepared.roots) |value| realm.heap.markValue(value);
@@ -633,6 +638,11 @@ pub const WasmInstantiationJob = struct {
         try scope.push(heap_mod.taggedFunction(self.capability.reject));
         try scope.push(self.import_object);
         switch (self.payload) {
+            .compile_result => |module| {
+                try scope.push(module);
+                // Resolve can call an observable Module.prototype.then getter.
+                _ = try promise_mod.capabilityResolve(realm, self.capability, module);
+            },
             .compiled => |module| {
                 try scope.push(module);
                 queueInstantiation(realm, self.capability, module, self.import_object, true) catch |err| {
@@ -749,6 +759,13 @@ fn enqueueInstantiation(realm: *Realm, cap: promise_mod.PromiseCapability, args:
     if (!realm.allow_wasm_compile) return wasmCompileDisabled(realm);
     const bytes = bufferSourceBytes(args) orelse
         return intrinsics.throwTypeError(realm, "WebAssembly.instantiate expects a BufferSource or Module");
+    return queueCompilation(realm, cap, bytes, import_object);
+}
+
+/// Copy/decode now, then queue observable compilation completion. A null
+/// import_object is public compile; a present value continues instantiate.
+/// https://webassembly.github.io/spec/js-api/#asynchronously-compile-a-webassembly-module
+fn queueCompilation(realm: *Realm, cap: promise_mod.PromiseCapability, bytes: []const u8, import_object: ?Value) NativeError!void {
     // Decoding has no observable callbacks, so it can happen here. Its
     // completion (including CompileError) remains a deferred host task.
     const module = makeModuleObject(realm, bytes) catch |err| switch (err) {
@@ -758,7 +775,7 @@ fn enqueueInstantiation(realm: *Realm, cap: promise_mod.PromiseCapability, args:
             realm.pending_exception = null;
             try realm.wasm_instantiation_jobs.append(realm.wasmInvocationAllocator(), .{
                 .capability = cap,
-                .import_object = import_object,
+                .import_object = import_object orelse Value.undefined_,
                 .payload = .{ .compile_failed = reason },
             });
             return;
@@ -766,8 +783,8 @@ fn enqueueInstantiation(realm: *Realm, cap: promise_mod.PromiseCapability, args:
     };
     try realm.wasm_instantiation_jobs.append(realm.wasmInvocationAllocator(), .{
         .capability = cap,
-        .import_object = import_object,
-        .payload = .{ .compiled = module },
+        .import_object = import_object orelse Value.undefined_,
+        .payload = if (import_object != null) .{ .compiled = module } else .{ .compile_result = module },
     });
 }
 

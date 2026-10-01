@@ -198,11 +198,11 @@ pub const Intrinsics = struct {
     /// `builtins/iterator.zig:install`.
     iterator_helper_prototype: ?*JSObject = null,
 
-    /// `%PromisePrototype%` — installed by `installPromise` so
-    /// instances of the realm's `Promise` constructor share one
-    /// proto. later still resolves synchronously through the
-    /// microtask queue; the prototype carries `.then` / `.catch`
-    /// / `.finally`.
+    /// WebIDL new promises and ECMA-262 %Promise% fallbacks must not
+    /// observe replacement or deletion of the unhardened global binding.
+    promise_constructor: ?*JSFunction = null,
+    /// %Promise.prototype% — shared by the realm's intrinsic promises;
+    /// carries `.then`, `.catch`, and `.finally`.
     promise_prototype: ?*JSObject = null,
     /// §27.2.4.6 `get Promise [ @@species ]` — the ORIGINAL native
     /// getter, stashed at install. `Promise.prototype.then` compares

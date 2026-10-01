@@ -102,6 +102,60 @@ the corpus under the relevant section's directory before adding.
   source mutation/detachment after calling the BufferSource overload.
 
 
+### Promise intrinsic identity followed the mutable global binding
+
+- **Fixed in:** `08136703`
+- **Spec:** ECMA-262 [§27.5.5.4 Promise.prototype.then](https://tc39.es/ecma262/multipage/control-abstraction-objects.html#sec-promise.prototype.then)
+  (SpeciesConstructor's `%Promise%` default), §27.5.4.6 Promise.reject, and
+  §27.5.4.7.1 PromiseResolve; WebIDL [a new promise](https://webidl.spec.whatwg.org/#a-new-promise).
+- **Reproducer:** in an unhardened realm:
+  ```js
+  const NativePromise = Promise;
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'Promise');
+  const source = NativePromise.resolve(17);
+  source.constructor = undefined;
+  delete globalThis.Promise;
+  try {
+    const chained = source.then(value => value);
+    assert.sameValue(Object.getPrototypeOf(chained), NativePromise.prototype);
+  } finally { Object.defineProperty(globalThis, 'Promise', descriptor); }
+  ```
+- **Before fix:** `.then` threw because `%Promise%` was looked up through the
+  global. Assigning a replacement also incorrectly selected native fast paths
+  for borrowed `resolve` / `reject`; Wasm promise creation called replacements.
+- **After fix:** intrinsic identity uses a rooted realm field, including after
+  snapshot restore. Explicit receivers and species remain observable.
+- **Suggested fixture shape:** positive runtime tests under Promise `then`,
+  `finally`, `resolve`, and `reject`, saving/restoring the global descriptor and
+  testing replacement, deletion, and an accessor. WPT should independently
+  cover all Wasm promise APIs; collection/snapshot cases stay local.
+
+### WebAssembly.compile completed before the host-task checkpoint
+
+- **Fixed in:** `08136703`
+- **Spec:** ECMA-262 §9.5 Jobs; Wasm JS API
+  [asynchronously compile a WebAssembly module](https://webassembly.github.io/spec/js-api/#asynchronously-compile-a-webassembly-module).
+- **Reproducer:** run with the WPT promise-test harness:
+  ```js
+  promise_test(() => {
+    const events = [];
+    const pending = WebAssembly.compile(new Uint8Array([0,97,115,109,1,0,0,0]));
+    const compiled = pending.then(() => events.push('compiled'));
+    Promise.resolve().then(() => events.push('job'));
+    return compiled.then(() => {
+      assert_array_equals(events, ['job', 'compiled']);
+    });
+  }, 'compile completion follows already queued promise jobs');
+  ```
+- **Before fix:** success or binary validation failure settled during the API
+  call; the compile reaction could run before ordinary queued reactions.
+- **After fix:** success and validation failure complete in rooted host tasks
+  after the ordinary checkpoint; invalid argument conversion still rejects
+  immediately, and the call-time byte copy survives mutation and detachment.
+- **Suggested fixture shape:** WPT async runtime tests for success and malformed
+  binaries, nested ordinary reactions, and an observable Module `then` getter.
+  Local tests additionally cover pending-task GC roots and realm teardown.
+
 ### Native result-iterator reads skipped callable Proxies and intrinsic prototypes
 
 - **Fixed in:** `94529462`

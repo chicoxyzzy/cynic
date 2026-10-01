@@ -87,6 +87,7 @@ pub fn install(realm: *Realm) !void {
     try installNativeMethod(realm, fn_obj, "try", promiseTry, 1);
     try installNativeMethod(realm, fn_obj, "withResolvers", promiseWithResolvers, 0);
 
+    realm.intrinsics.promise_constructor = fn_obj;
     realm.intrinsics.promise_prototype = proto;
 
     // §27.2.4.6 — get Promise [ @@species ] returns `this`.
@@ -592,7 +593,7 @@ fn promiseThen(realm: *Realm, this_value: Value, args: []const Value) NativeErro
     // A null/undefined/non-object constructor throws TypeError
     // (§7.3.22 step 3). Then read @@species; null/undefined
     // falls back to %Promise%. A non-constructor S throws.
-    const builtin_promise = heap_mod.valueAsFunction(realm.globals.get("Promise") orelse Value.undefined_) orelse return throwTypeError(realm, "Promise.prototype.then: %Promise% missing");
+    const builtin_promise = realm.intrinsics.promise_constructor orelse return throwTypeError(realm, "Promise.prototype.then: %Promise% missing");
     var c_fn: *JSFunction = builtin_promise;
     const ctor_v = getPropertyChain(realm, source, "constructor") catch return error.NativeThrew;
     if (!ctor_v.isUndefined()) {
@@ -716,7 +717,7 @@ fn promiseCatch(realm: *Realm, this_value: Value, args: []const Value) NativeErr
 /// Non-constructor results throw TypeError. Used by
 /// `Promise.prototype.{then, finally}` to honor user subclasses.
 fn promiseSpeciesConstructor(realm: *Realm, source: *JSObject) NativeError!*JSFunction {
-    const builtin_promise = heap_mod.valueAsFunction(realm.globals.get("Promise") orelse Value.undefined_) orelse return throwTypeError(realm, "%Promise% missing");
+    const builtin_promise = realm.intrinsics.promise_constructor orelse return throwTypeError(realm, "%Promise% missing");
     const ctor_v = getPropertyChain(realm, source, "constructor") catch return error.NativeThrew;
     if (ctor_v.isUndefined()) return builtin_promise;
     const c_obj = heap_mod.valueAsFunction(ctor_v) orelse return throwTypeError(realm, "SpeciesConstructor: constructor is not an object");
@@ -869,7 +870,7 @@ fn chainFinallyResult(realm: *Realm, result: Value, carry: Value, is_throw: bool
     // we still need to allocate so step 6.d / 7.d (`Invoke(promise,
     // "then", « valueThunk »)`) settles via C's reactions, not
     // by the synchronous `carry` shortcut.
-    const builtin_promise = heap_mod.valueAsFunction(realm.globals.get("Promise") orelse Value.undefined_);
+    const builtin_promise = realm.intrinsics.promise_constructor;
     const using_default = ctor == null or ctor.? == builtin_promise;
     const result_obj = heap_mod.valueAsPlainObject(result);
     const is_thenable_blk: bool = blk: {
@@ -1025,7 +1026,7 @@ fn promiseResolve(realm: *Realm, this_value: Value, args: []const Value) NativeE
     // resolve receives `v`. A thenable / Promise resolution must
     // still walk §27.2.1.3.2 — synthesize a pending Promise and
     // route through the spec resolve function.
-    const builtin_promise = heap_mod.valueAsFunction(realm.globals.get("Promise") orelse Value.undefined_);
+    const builtin_promise = realm.intrinsics.promise_constructor;
     if (builtin_promise != null and ctor == builtin_promise.?) {
         if (heap_mod.valueAsPlainObject(v)) |_| {
             const pending = allocatePromiseFor(realm, ctor, .pending, Value.undefined_) catch return error.OutOfMemory;
@@ -1052,7 +1053,7 @@ fn promiseResolve(realm: *Realm, this_value: Value, args: []const Value) NativeE
 fn promiseReject(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     const ctor = try thisAsPromiseCtor(realm, this_value, "reject");
     const reason = argOr(args, 0, Value.undefined_);
-    const builtin_promise = heap_mod.valueAsFunction(realm.globals.get("Promise") orelse Value.undefined_);
+    const builtin_promise = realm.intrinsics.promise_constructor;
     if (builtin_promise != null and ctor == builtin_promise.?) {
         return allocatePromiseFor(realm, ctor, .rejected, reason) catch return error.OutOfMemory;
     }
@@ -1838,7 +1839,7 @@ const NullCap = struct {};
 const null_cap: ?PromiseCapability = null;
 
 fn isBuiltinPromise(realm: *Realm, ctor: *JSFunction) bool {
-    const builtin = heap_mod.valueAsFunction(realm.globals.get("Promise") orelse Value.undefined_);
+    const builtin = realm.intrinsics.promise_constructor;
     return builtin != null and ctor == builtin.?;
 }
 
