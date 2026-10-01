@@ -669,7 +669,7 @@ test "a native externref call and table64 indirect call and call_ref retain JS o
     }
 }
 
-test "call_ref rejects an incompatible exported function supplied by JS" {
+test "typed reference boundary: call_ref rejects incompatible JS arguments before native entry" {
     if (comptime !@import("wasm/spasm.zig").supported) return error.SkipZigTest;
     var realm = Realm.init(testing.allocator);
     defer realm.deinit();
@@ -683,14 +683,14 @@ test "call_ref rejects an incompatible exported function supplied by JS" {
         "0,97,115,109,1,0,0,0,1,12,2,96,1,127,1,127,96,1,99,0,1,127," ++
         "3,2,1,1,7,5,1,1,102,0,0,10,10,1,8,0,65,37,32,0,20,0,11])));" ++
         "let caught = false; try { caller.exports.f(target.exports.f); }" ++
-        "catch (e) { caught = e instanceof WebAssembly.RuntimeError; } caught ? 1 : 0;";
+        "catch (e) { caught = e instanceof TypeError; } caught ? 1 : 0;";
     const outcome = try lantern.evaluateScript(testing.allocator, &realm, src);
     const value = switch (outcome) {
         .value => |v| v,
         else => return error.WasmThrewUnexpectedly,
     };
     try testing.expectEqual(@as(i32, 1), value.asInt32());
-    try testing.expectEqual(@as(u32, 1), realm.wasm_instances.items[1].spasm_runs);
+    try testing.expectEqual(@as(u32, 0), realm.wasm_instances.items[1].spasm_runs);
 }
 
 test "a native externref global retains its JS object across host GC" {

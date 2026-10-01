@@ -50,6 +50,7 @@ const promise_mod = @import("promise.zig");
 const error_mod = @import("error.zig");
 const wasm = @import("../wasm/wasm.zig");
 const wasm_types = @import("../wasm/types.zig");
+const type_matching = @import("../wasm/type_matching.zig");
 
 /// A `WebAssembly.Module`'s decoded record. Arena-owned.
 const ModuleState = struct {
@@ -72,6 +73,7 @@ const GlobalState = struct {
     g: *wasm.Global,
     cell: *u128, // == &g.value (kept for the value accessor paths)
     valtype: wasm.ValType,
+    type_context: []const wasm_types.FuncType = &.{},
     mutable: bool,
 };
 
@@ -90,7 +92,8 @@ fn valTypeFromString(s: []const u8) ?wasm.ValType {
 /// values pinned per §5). Arena-owned.
 const TableState = struct {
     table: *wasm.Table,
-    funcref: bool,
+    elem_type: wasm.ValType,
+    type_context: []const wasm_types.FuncType = &.{},
 };
 
 /// A `WebAssembly.Memory`'s backing state: the shared engine memory and
@@ -800,7 +803,7 @@ fn globalConstructor(realm: *Realm, this_value: Value, args: []const Value) Nati
     // WebIDL treats an explicit undefined optional argument as missing.
     // DefaultValue(externref) is JS undefined, not the Wasm null reference.
     const default_cell: u128 = if (vt == .externref) @as(u128, Value.undefined_.bits) else if (vt == .funcref) wasm.REF_NULL else 0;
-    const initial_cell = if (initial.isUndefined()) default_cell else try marshalArg(realm, vt, initial);
+    const initial_cell = if (initial.isUndefined()) default_cell else try marshalArg(realm, &.{}, vt, initial);
     const a = realm.wasmAllocator();
     const g = a.create(wasm.Global) catch return error.OutOfMemory;
     g.* = .{ .value = initial_cell, .mutable = mutable };
@@ -846,7 +849,7 @@ fn globalValueSet(realm: *Realm, this_value: Value, args: []const Value) NativeE
     const incoming = if (args.len > 0) args[0] else Value.undefined_;
     scope.push(incoming) catch return error.OutOfMemory;
     // Commit only after conversion succeeds; throws leave the cell unchanged.
-    st.cell.* = try marshalArg(realm, st.valtype, incoming);
+    st.cell.* = try marshalArg(realm, st.type_context, st.valtype, incoming);
     return Value.undefined_;
 }
 
@@ -858,7 +861,7 @@ fn makeGlobal(realm: *Realm, instance: *wasm.Instance, valtype: wasm.ValType, mu
     realm.heap.setObjectPrototype(obj, realm.wasm_global_prototype);
     const a = realm.wasmAllocator();
     const st = a.create(GlobalState) catch return error.OutOfMemory;
-    st.* = .{ .g = g, .cell = &g.value, .valtype = valtype, .mutable = mutable };
+    st.* = .{ .g = g, .cell = &g.value, .valtype = valtype, .type_context = instance.module.types, .mutable = mutable };
     try obj.setWasmGlobal(realm.allocator, st);
     try realm.cacheWasmObjectWrapper(.{ .global = g }, obj, instance);
     return heap_mod.taggedObject(obj);
@@ -909,7 +912,8 @@ fn tableConstructor(realm: *Realm, this_value: Value, args: []const Value) Nativ
     }
 
     // DefaultValue(externref) is JS undefined; DefaultValue(funcref) is null.
-    const fill = try tableElemFromValue(realm, is_funcref, if (args.len > 1) args[1] else Value.undefined_);
+    const elem_type: wasm.ValType = if (is_funcref) .funcref else .externref;
+    const fill = try tableElemFromValue(realm, &.{}, elem_type, if (args.len > 1) args[1] else Value.undefined_);
     const a = realm.wasmAllocator();
     const store_allocator = realm.wasmStoreAllocator();
     if (initial > max_js_table_elements)
@@ -931,7 +935,7 @@ fn tableConstructor(realm: *Realm, this_value: Value, args: []const Value) Nativ
     var backing_registered = false;
     errdefer if (!backing_registered) tbl.releaseBacking(store_allocator);
     const st = a.create(TableState) catch return error.OutOfMemory;
-    st.* = .{ .table = tbl, .funcref = is_funcref };
+    st.* = .{ .table = tbl, .elem_type = elem_type };
     try self.setWasmTable(realm.allocator, st);
     var extern_root_registered = false;
     errdefer if (extern_root_registered) realm.unregisterExternTable(tbl);
@@ -949,10 +953,13 @@ fn tableConstructor(realm: *Realm, this_value: Value, args: []const Value) Nativ
 }
 
 /// A JS value -> a table element cell, per the table's element type.
-fn tableElemFromValue(realm: *Realm, is_funcref: bool, v: Value) NativeError!u128 {
+fn tableElemFromValue(realm: *Realm, type_context: []const wasm_types.FuncType, vt: wasm.ValType, v: Value) NativeError!u128 {
     // Optional Web IDL arguments with value undefined are treated as absent.
-    if (is_funcref and v.isUndefined()) return wasm.REF_NULL;
-    return if (is_funcref) funcRefFromValue(realm, v) else marshalArg(realm, .externref, v);
+    if (v.isUndefined() and vt.heapOf() != wasm_types.heap_abs_extern) {
+        if (vt.isNullable()) return wasm.REF_NULL;
+        return intrinsics.throwTypeError(realm, "WebAssembly.Table: non-nullable element requires a value");
+    }
+    return marshalArg(realm, type_context, vt, v);
 }
 
 fn tableStateOf(realm: *Realm, this_value: Value) NativeError!*TableState {
@@ -976,7 +983,7 @@ fn tableGet(realm: *Realm, this_value: Value, args: []const Value) NativeError!V
     try scope.push(this_value);
     const idx = try tableIndex(realm, st, if (args.len > 0) args[0] else Value.undefined_);
     const cell = st.table.elems[idx];
-    return marshalResult(realm, if (st.funcref) .funcref else .externref, cell);
+    return marshalResult(realm, st.elem_type, cell);
 }
 
 fn tableSet(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
@@ -989,7 +996,7 @@ fn tableSet(realm: *Realm, this_value: Value, args: []const Value) NativeError!V
     // JS API §5.4 set: conversion of both arguments precedes table_write's
     // bounds check. A value conversion TypeError wins over an invalid index.
     const idx = try addressValueToU64(realm, if (args.len > 0) args[0] else Value.undefined_);
-    const ref = try tableElemFromValue(realm, st.funcref, value);
+    const ref = try tableElemFromValue(realm, st.type_context, st.elem_type, value);
     if (idx >= st.table.elems.len)
         return intrinsics.throwRangeError(realm, "WebAssembly.Table index is out of bounds");
     st.table.elems[@intCast(idx)] = ref;
@@ -1007,7 +1014,7 @@ fn tableGrow(realm: *Realm, this_value: Value, args: []const Value) NativeError!
     // itself grow the table, so allocation must use the refreshed size.
     const initial_size = st.table.elems.len;
     const delta: usize = @intCast(try addressValueToU64(realm, if (args.len > 0) args[0] else Value.undefined_));
-    const fill = try tableElemFromValue(realm, st.funcref, value);
+    const fill = try tableElemFromValue(realm, st.type_context, st.elem_type, value);
     const old_len = st.table.elems.len;
     const new_len = std.math.add(usize, old_len, delta) catch
         return intrinsics.throwRangeError(realm, "WebAssembly.Table.grow size is too large");
@@ -1025,16 +1032,38 @@ fn tableGrow(realm: *Realm, this_value: Value, args: []const Value) NativeError!
     return u64ToAddressValue(initial_size);
 }
 
-/// A JS value -> a funcref cell: null/undefined -> the null ref; a
-/// WebAssembly exported function -> its funcref; anything else throws.
-fn funcRefFromValue(realm: *Realm, v: Value) NativeError!u128 {
-    if (v.isUndefined() or v.isNull()) return wasm.REF_NULL;
+/// JS API ToWebAssemblyValue: only null (for nullable types) or an exported
+/// function whose store type matches the expected reference may cross.
+fn funcRefFromValue(realm: *Realm, type_context: []const wasm_types.FuncType, expected: wasm.ValType, v: Value) NativeError!u128 {
+    if (v.isNull()) {
+        if (expected.isNullable()) return wasm.REF_NULL;
+        return intrinsics.throwTypeError(realm, "WebAssembly: null is not valid for a non-nullable reference");
+    }
     const fn_obj = heap_mod.valueAsFunction(v) orelse
         return intrinsics.throwTypeError(realm, "WebAssembly.Table value must be null or an exported function");
     const raw = fn_obj.wasm_export orelse
         return intrinsics.throwTypeError(realm, "WebAssembly.Table value must be a WebAssembly exported function");
     const rec: *ExportRecord = @ptrCast(@alignCast(raw));
+    if (expected.concreteIndex()) |index| {
+        if (!try exportedFunctionMatches(realm, rec, type_context, index))
+            return intrinsics.throwTypeError(realm, "WebAssembly: function reference has an incompatible type");
+    }
     return wasm.makeFuncRef(rec.instance, rec.func_index);
+}
+
+fn exportedFunctionMatches(realm: *Realm, rec: *const ExportRecord, expected: []const wasm_types.FuncType, index: u32) NativeError!bool {
+    const actual_index = rec.instance.funcTypeIndex(rec.func_index) orelse return false;
+    return type_matching.equivalentFunctionTypes(realm.wasmStoreAllocator(), rec.instance.module.types, actual_index, expected, index) catch |err| switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.TypeComparisonLimit => intrinsics.throwRangeError(realm, "WebAssembly: type comparison exceeds implementation limit"),
+    };
+}
+
+fn matchesValueType(realm: *Realm, actual_context: []const wasm_types.FuncType, actual: wasm.ValType, expected_context: []const wasm_types.FuncType, expected: wasm.ValType) NativeError!bool {
+    return type_matching.matchValueType(realm.wasmStoreAllocator(), actual_context, actual, expected_context, expected) catch |err| switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.TypeComparisonLimit => intrinsics.throwRangeError(realm, "WebAssembly: type comparison exceeds implementation limit"),
+    };
 }
 
 /// Validate a table index argument against the table's current bounds.
@@ -1072,12 +1101,12 @@ fn optionalAddressValue(realm: *Realm, v: Value) NativeError!?u64 {
 }
 
 /// Wrap a shared engine table as a `WebAssembly.Table` (for exports).
-fn makeTable(realm: *Realm, instance: *wasm.Instance, table: *wasm.Table, funcref: bool) NativeError!Value {
+fn makeTable(realm: *Realm, instance: *wasm.Instance, table: *wasm.Table, elem_type: wasm.ValType) NativeError!Value {
     if (realm.findWasmObjectWrapper(.{ .table = table })) |cached| return heap_mod.taggedObject(cached);
     const obj = realm.heap.allocateObject() catch return error.OutOfMemory;
     realm.heap.setObjectPrototype(obj, realm.wasm_table_prototype);
     const st = realm.wasmAllocator().create(TableState) catch return error.OutOfMemory;
-    st.* = .{ .table = table, .funcref = funcref };
+    st.* = .{ .table = table, .elem_type = elem_type, .type_context = instance.module.types };
     try obj.setWasmTable(realm.allocator, st);
     try realm.cacheWasmObjectWrapper(.{ .table = table }, obj, instance);
     return heap_mod.taggedObject(obj);
@@ -1339,6 +1368,7 @@ const HostImportCtx = struct {
     js_value: u128, // root cell; registered while a resolved import remains live
     params: []const wasm.ValType,
     results: []const wasm.ValType,
+    type_context: []const wasm_types.FuncType,
 };
 
 /// Find our rooted JS callback in a direct or cross-module host import.
@@ -1396,7 +1426,7 @@ fn runHostFunction(context: *HostImportCtx, args: []const u128, results: []u128)
     if (results.len == 0) return;
     try scope.push(ret);
     if (results.len == 1) {
-        results[0] = try marshalArg(realm, context.results[0], ret);
+        results[0] = try marshalArg(realm, context.type_context, context.results[0], ret);
         return;
     }
 
@@ -1454,7 +1484,7 @@ fn runHostFunction(context: *HostImportCtx, args: []const u128, results: []u128)
     if (count != results.len)
         return intrinsics.throwTypeError(realm, "WebAssembly: host result count does not match signature");
     for (context.results, 0..) |vt, i|
-        results[i] = try marshalArg(realm, vt, values[i]);
+        results[i] = try marshalArg(realm, context.type_context, vt, values[i]);
 }
 
 fn checkHostValueType(realm: *Realm, vt: wasm.ValType) NativeError!void {
@@ -1533,6 +1563,8 @@ fn resolveImports(realm: *Realm, module: *const wasm.Module, import_obj_v: Value
     const tables = a.alloc(*wasm.Table, ntab) catch return error.OutOfMemory;
     const tags = a.alloc(*const wasm.TagType, ntag) catch return error.OutOfMemory;
     const memories = a.alloc(*wasm.Memory, nmem) catch return error.OutOfMemory;
+    const import_values = realm.wasmStoreAllocator().alloc(Value, module.imports.len) catch return error.OutOfMemory;
+    defer realm.wasmStoreAllocator().free(import_values);
     var fi: usize = 0;
     errdefer unregisterHostImports(realm, funcs[0..fi]);
     var gi: usize = 0;
@@ -1540,12 +1572,13 @@ fn resolveImports(realm: *Realm, module: *const wasm.Module, import_obj_v: Value
     var tgi: usize = 0;
     var mi: usize = 0;
 
-    for (module.imports) |imp| {
+    for (module.imports, 0..) |imp, import_index| {
         const v = try lookupImport(realm, import_obj_v, imp.module, imp.name);
         // A subsequent import getter may remove this value from its source
         // and collect. Keep fresh externrefs/wrappers until populateInstance
         // has registered the instance's durable roots (including start).
         try roots.push(v);
+        import_values[import_index] = v;
         switch (imp.desc) {
             .func => |type_idx| {
                 const function = try resolveFuncImport(realm, v, module, type_idx);
@@ -1555,7 +1588,7 @@ fn resolveImports(realm: *Realm, module: *const wasm.Module, import_obj_v: Value
                 fi += 1;
             },
             .global => |gt| {
-                globals[gi] = try resolveGlobalImport(realm, v, gt);
+                globals[gi] = try resolveGlobalImport(realm, v, module.types, gt);
                 gi += 1;
             },
             .table => {
@@ -1573,9 +1606,55 @@ fn resolveImports(realm: *Realm, module: *const wasm.Module, import_obj_v: Value
             },
         }
     }
+    // JS API "read the imports" completes ordinary Get before Core import
+    // type matching. Reuse the rooted values rather than invoking getters twice.
+    for (module.imports, import_values) |imp, value|
+        try checkImportType(realm, module, imp.desc, value);
     // JS-API imports share the provider's linear memories (writes are
     // mutually visible), unlike the spectest harness's snapshot.
     return .{ .funcs = funcs, .globals = globals, .tables = tables, .memories = memories, .share_memory = true, .tags = tags };
+}
+
+fn checkImportType(realm: *Realm, module: *const wasm.Module, desc: anytype, value: Value) NativeError!void {
+    switch (desc) {
+        .func => |index| {
+            const function = heap_mod.valueAsFunction(value) orelse return;
+            if (function.wasm_export) |raw| {
+                const rec: *const ExportRecord = @ptrCast(@alignCast(raw));
+                if (!try exportedFunctionMatches(realm, rec, module.types, index))
+                    return throwLinkError(realm, "WebAssembly: function import has an incompatible type");
+            }
+        },
+        .global => |gt| {
+            const object = heap_mod.valueAsPlainObject(value) orelse return;
+            const raw = object.getWasmGlobal() orelse return;
+            const state: *const GlobalState = @ptrCast(@alignCast(raw));
+            if (state.mutable != (gt.mut == .mutable) or
+                !try matchesValueType(realm, state.type_context, state.valtype, module.types, gt.val) or
+                (state.mutable and !try matchesValueType(realm, module.types, gt.val, state.type_context, state.valtype)))
+                return throwLinkError(realm, "WebAssembly: global import has an incompatible type");
+        },
+        .table => |tt| {
+            const object = heap_mod.valueAsPlainObject(value) orelse return;
+            const raw = object.getWasmTable() orelse return;
+            const state: *const TableState = @ptrCast(@alignCast(raw));
+            if (!try matchesValueType(realm, state.type_context, state.elem_type, module.types, tt.elem) or
+                !try matchesValueType(realm, module.types, tt.elem, state.type_context, state.elem_type))
+                return throwLinkError(realm, "WebAssembly: table import has an incompatible element type");
+        },
+        .tag => |index| {
+            const tag = tagTypeOf(value) orelse return;
+            const expected = module.types[index].params;
+            if (tag.params.len != expected.len)
+                return throwLinkError(realm, "WebAssembly: tag import has an incompatible type");
+            for (tag.params, expected) |actual, wanted| {
+                if (!try matchesValueType(realm, tag.type_context, actual, module.types, wanted) or
+                    !try matchesValueType(realm, module.types, wanted, tag.type_context, actual))
+                    return throwLinkError(realm, "WebAssembly: tag import has an incompatible type");
+            }
+        },
+        .mem => {},
+    }
 }
 
 /// JS API §5 "read the imports": ordinary Get for both components,
@@ -1605,7 +1684,7 @@ fn resolveFuncImport(realm: *Realm, v: Value, module: *const wasm.Module, type_i
     if (ft.params.len > 16 or ft.results.len > 16)
         return intrinsics.throwTypeError(realm, "WebAssembly.Instance: host import arity is not supported");
     const ctx = realm.wasmAllocator().create(HostImportCtx) catch return error.OutOfMemory;
-    ctx.* = .{ .realm = realm, .js_fn = fn_obj, .js_value = @as(u128, v.bits), .params = ft.params, .results = ft.results };
+    ctx.* = .{ .realm = realm, .js_fn = fn_obj, .js_value = @as(u128, v.bits), .params = ft.params, .results = ft.results, .type_context = module.types };
     return .{ .host = .{
         .fn_ptr = jsHostTrampoline,
         .ctx = ctx,
@@ -1614,7 +1693,7 @@ fn resolveFuncImport(realm: *Realm, v: Value, module: *const wasm.Module, type_i
     } };
 }
 
-fn resolveGlobalImport(realm: *Realm, v: Value, gt: anytype) NativeError!*wasm.Global {
+fn resolveGlobalImport(realm: *Realm, v: Value, type_context: []const wasm_types.FuncType, gt: anytype) NativeError!*wasm.Global {
     // A WebAssembly.Global is aliased: a mutable global's writes are
     // visible both ways. Primitive imports allocate a constant global.
     if (heap_mod.valueAsPlainObject(v)) |obj| {
@@ -1635,7 +1714,7 @@ fn resolveGlobalImport(realm: *Realm, v: Value, gt: anytype) NativeError!*wasm.G
         .v128 => return throwLinkError(realm, "WebAssembly: a v128 import requires WebAssembly.Global"),
         else => {},
     }
-    const value = marshalArg(realm, gt.val, v) catch |err| switch (err) {
+    const value = marshalArg(realm, type_context, gt.val, v) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.NativeThrew => return throwLinkError(realm, "WebAssembly: invalid global import value"),
     };
@@ -1696,7 +1775,7 @@ fn buildExports(realm: *Realm, ip: *wasm.Instance, module: *const wasm.Module) N
             .table => |tidx| {
                 const tbl = ip.tableRef(tidx) orelse continue;
                 const et = ip.tableElemType(tidx) orelse continue;
-                const tobj = try makeTable(realm, ip, tbl, et == .funcref);
+                const tobj = try makeTable(realm, ip, tbl, et);
                 obj.setWithFlags(realm.allocator, ex.name, tobj, export_flags) catch return error.OutOfMemory;
             },
             .mem => |midx| {
@@ -1799,7 +1878,7 @@ fn exportTrampoline(realm: *Realm, this_value: Value, args: []const Value) Nativ
 
     for (ft.params, 0..) |pt, i| {
         const v = if (i < args.len) args[i] else Value.undefined_;
-        argbuf[i] = try marshalArg(realm, pt, v);
+        argbuf[i] = try marshalArg(realm, rec.instance.module.types, pt, v);
     }
 
     const invoke_allocator = realm.wasmInvocationAllocator();
@@ -1851,7 +1930,7 @@ fn exportTrampoline(realm: *Realm, this_value: Value, args: []const Value) Nativ
 
 /// JS value -> a wasm operand cell, per the parameter's value type.
 /// (§ToWebAssemblyValue.)
-fn marshalArg(realm: *Realm, vt: wasm.ValType, v: Value) NativeError!u128 {
+fn marshalArg(realm: *Realm, type_context: []const wasm_types.FuncType, vt: wasm.ValType, v: Value) NativeError!u128 {
     switch (vt) {
         // ECMA-262 §7.1.4/§7.1.6: use the full throwing ToNumber before
         // the primitive bit conversion. Its ToPrimitive roots the receiver
@@ -1882,7 +1961,7 @@ fn marshalArg(realm: *Realm, vt: wasm.ValType, v: Value) NativeError!u128 {
             try realm.pinExternRefTransient(v);
             return @as(u128, v.bits);
         },
-        .funcref => return funcRefFromValue(realm, v),
+        .funcref => return funcRefFromValue(realm, type_context, vt, v),
         // §ToWebAssemblyValue / §ToJSValue — a v128 value cannot cross the JS
         // boundary; the spec mandates a TypeError.
         .v128 => return intrinsics.throwTypeError(realm, "WebAssembly: a v128 value cannot cross the JS boundary"),
@@ -1903,7 +1982,7 @@ fn marshalArg(realm: *Realm, vt: wasm.ValType, v: Value) NativeError!u128 {
             }
             if (heap == wasm_types.heap_abs_exn)
                 return intrinsics.throwTypeError(realm, "WebAssembly: an exnref cannot yet cross the JS boundary");
-            return funcRefFromValue(realm, v);
+            return funcRefFromValue(realm, type_context, vt, v);
         },
     }
 }
@@ -2091,7 +2170,7 @@ fn exceptionConstructor(realm: *Realm, this_value: Value, args: []const Value) N
     while (i < n) : (i += 1) {
         const value = payload_obj.tryGetIndexedOwn(i) orelse Value.undefined_;
         scope.push(value) catch return error.OutOfMemory;
-        payload[i] = try marshalArg(realm, tt.params[i], value);
+        payload[i] = try marshalArg(realm, tt.type_context, tt.params[i], value);
     }
     const st = a.create(ExceptionState) catch return error.OutOfMemory;
     st.* = .{ .tag = tt, .payload = payload };

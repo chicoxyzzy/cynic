@@ -186,6 +186,7 @@ const Handler = struct {
 /// its own. `params` is the exception payload's value types.
 pub const TagType = struct {
     params: []const ValType,
+    type_context: []const types.FuncType = &.{},
 };
 
 /// A reified thrown exception that an `exnref` refers to. Materialized
@@ -1016,17 +1017,23 @@ pub const Instance = struct {
     /// entry, spanning imports and defined functions. For the JS API's
     /// argument / result marshalling.
     pub fn funcType(self: *const Instance, func_index: u32) ?types.FuncType {
+        const index = self.funcTypeIndex(func_index) orelse return null;
+        if (index >= self.module.types.len) return null;
+        return self.module.types[index];
+    }
+
+    pub fn funcTypeIndex(self: *const Instance, func_index: u32) ?u32 {
         var k: u32 = 0;
         for (self.module.imports) |imp| switch (imp.desc) {
             .func => |ti| {
-                if (k == func_index) return self.module.types[ti];
+                if (k == func_index) return ti;
                 k += 1;
             },
             else => {},
         };
         const local = func_index - k;
         if (local >= self.module.funcs.len) return null;
-        return self.module.types[self.module.funcs[local]];
+        return self.module.funcs[local];
     }
 
     /// The live (shared) table at `idx`, for the JS API's `Table` object
@@ -1362,7 +1369,7 @@ pub fn instantiate(
                 if (imp_i < imports.tags.len) {
                     tag_identities[idx] = imports.tags[imp_i];
                 } else {
-                    owned_tag_types[idx] = .{ .params = module.types[type_idx].params };
+                    owned_tag_types[idx] = .{ .params = module.types[type_idx].params, .type_context = module.types };
                     tag_identities[idx] = &owned_tag_types[idx];
                 }
                 imp_i += 1;
@@ -1371,7 +1378,7 @@ pub fn instantiate(
             else => {},
         };
         for (module.tags) |tag| {
-            owned_tag_types[idx] = .{ .params = module.types[tag.type_index].params };
+            owned_tag_types[idx] = .{ .params = module.types[tag.type_index].params, .type_context = module.types };
             tag_identities[idx] = &owned_tag_types[idx];
             idx += 1;
         }

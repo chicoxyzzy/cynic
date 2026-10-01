@@ -2437,8 +2437,11 @@ and the per-builtin checklist; this section tracks status.
   are preserved. Both dynamic call paths forward foreign Wasm exception
   records. Native-entry tests also exercise host GC and bounded recursion.
   A defensive layout check protects native call buffers from incompatible
-  host-supplied references. Complete typed-reference assignability at JS
-  entry/return/global boundaries remains follow-up work.
+  host-supplied references. JS-boundary matching now retains module type
+  context across arguments, host results, globals, tables, and exception
+  payloads, with bounded structural matching for the supported final function
+  types. Import checks preserve getter ordering and reject incompatible store
+  wrappers before linking; explicit GC groups/subtypes remain unsupported.
   Proper native tail calls and the native-register/imported-call ABI remain
   next; tail calls must replace frames, not build another ordinary call.
 

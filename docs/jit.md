@@ -1824,7 +1824,8 @@ useful:
    layout guard rejects incompatible host-supplied parameter/result shapes
    before touching the staging buffer, while accepting module-relative
    function-reference types with the same representation. This is not full
-   JS-boundary typed-reference assignability, which remains follow-up work.
+   JS-boundary type matching; the JS boundary now checks the supported final
+   function-reference definitions separately (wasm-engine.md §8).
    Native-entry tests cover all value kinds, large local frames, live operands,
    foreign targets, incompatible call layouts, null/host/Wasm traps, memory growth,
    GC, cancellation, and bounded ordinary recursion. Native tail calls and
