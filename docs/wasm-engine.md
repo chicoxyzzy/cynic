@@ -486,15 +486,23 @@ Each constructor prototype (`Module`, `Instance`, `Memory`, `Table`,
 (`"WebAssembly.Module"`, …), installed before the hardened-realm freeze
 so the brand survives on the frozen prototype.
 
-`compile` / `instantiate` return Promises through the existing promise
-capability machinery. `instantiate` follows the Wasm JS API's
+`compile` / `instantiate` create capabilities from the realm's saved intrinsic
+`%Promise%`, following [WebIDL](https://webidl.spec.whatwg.org/#a-new-promise)
+and ECMA-262 [NewPromiseCapability](https://tc39.es/ecma262/#sec-newpromisecapability).
+Replacing or deleting the global `Promise` in an unhardened realm does not
+change these API results. Ordinary Promise chaining and builtin identity checks
+use the same saved constructor. The default hardened realm already prevents
+changes to this global binding. Both Wasm entry points follow the JS API's
 [asynchronous compilation](https://webassembly.github.io/spec/js-api/#asynchronously-compile-a-webassembly-module)
 and [asynchronous instantiation](https://webassembly.github.io/spec/js-api/#asynchronously-instantiate-a-webassembly-module)
-boundaries. The bytes overload snapshots the selected BufferSource bytes at
-call time; decoding currently also happens there, but compilation completion
-and import getters wait for a host task. The Module overload captures imports
-synchronously. Both then queue core instantiation, including active data/element
-segments and the start function. Captured functions and primitive globals are
+boundaries. Both snapshot the selected BufferSource bytes at call time; decoding
+currently also happens there, but successful compilation and byte-validation
+`CompileError` settlement wait for a host task. Argument-conversion failures
+produce already-rejected promises. Public `compile` resolves to its Module;
+the `instantiate` bytes overload continues with import lookup in that task.
+The Module overload captures imports synchronously. Both instantiation overloads
+then queue core instantiation, including active data/element segments and the
+start function. Captured functions and primitive globals are
 not reread; imported Memory/Table/Global objects retain their normal aliasing.
 Import and start exceptions reject with the original thrown value.
 
@@ -535,9 +543,12 @@ likewise retains dependencies through `DeferredWorkTimer` and schedules
 instantiation completion. [SpiderMonkey](https://github.com/mozilla-firefox/firefox/blob/main/js/src/wasm/WasmJS.cpp)
 retains source bytes/imports in `CompileBufferTask`, then captures imports
 before dispatching `AsyncInstantiateTask`. Cynic uses its existing host drain
-instead of background workers. Public `WebAssembly.compile()` still settles
-inline, and the promise constructor is still looked up through the global
-binding; those separate conformance gaps are unchanged by this scheduling work.
+instead of background workers. For compilation,
+[V8](https://github.com/v8/v8/blob/main/src/wasm/wasm-js.cc) similarly uses a native
+Promise resolver and asynchronous compilation; JSC creates an intrinsic Promise
+and retains it through deferred work. The saved constructor participates in the
+existing reflective intrinsic GC roots and snapshot capture/restore. Pending
+compilation tasks make a realm non-quiescent for snapshot capture.
 
 Argument and result marshalling is
 §ToWebAssemblyValue / §ToJSValue: `i32 ↔ Number`, `i64 ↔ BigInt`,

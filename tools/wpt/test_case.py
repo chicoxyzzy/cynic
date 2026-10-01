@@ -167,36 +167,72 @@ class ExecutorContract(CaseFixture, unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "enabled")
 
-    def assert_compile_capability_survives_collection(self, byte_source, expected_type):
-        # Independent callbacks do not retain the capability's returned object.
-        # Allocation-pressure safe points expose the missing native handle;
-        # explicit GC's conservative native-stack scan can mask it.
+    def assert_compile_survives_collection(self, byte_source, expected_type):
+        # The queue must retain its promise and result after the caller's stack
+        # disappears. A Module then getter re-enters during resolution itself.
         result = self.execute("""
-            let settled;
+            const NativePromise = Promise;
+            const events = [];
+            Object.defineProperty(WebAssembly.Module.prototype, 'then', {
+                get() {
+                    for (let i = 0; i < 1000; i++) { const temporary = {i}; }
+                    return undefined;
+                }
+            });
+            const promise = WebAssembly.compile(new Uint8Array(BYTES));
+            if (!(promise instanceof NativePromise)) throw new Error('wrong promise');
+            promise.then(value => settle(value), reason => settle(reason));
             function settle(value) {
                 for (let i = 0; i < 1000; i++) { const temporary = {i}; }
-                settled = value;
+                if (!(value instanceof EXPECTED)) throw new Error('wrong settlement');
+                if (events.join(',') !== 'first,second') throw new Error('early settlement');
+                print('retained');
             }
-            globalThis.Promise = function (executor) {
-                executor(settle, settle);
-                return {marker: 42};
-            };
-            const result = WebAssembly.compile(new Uint8Array(BYTES));
-            if (result.marker !== 42) throw new Error('collected capability result');
-            if (!(settled instanceof EXPECTED)) throw new Error('wrong settlement');
-            print('retained');
+            NativePromise.resolve().then(() => events.push('first'))
+                .then(() => events.push('second'));
         """.replace("BYTES", byte_source).replace("EXPECTED", expected_type),
             options=("--gc-threshold=1",))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "retained")
 
-    def test_compile_capability_survives_collecting_resolve(self):
-        self.assert_compile_capability_survives_collection(
+    def test_compile_promise_survives_collecting_resolution(self):
+        self.assert_compile_survives_collection(
             "[0,97,115,109,1,0,0,0]", "WebAssembly.Module")
 
-    def test_compile_capability_survives_collecting_reject(self):
-        self.assert_compile_capability_survives_collection(
+    def test_compile_promise_survives_collecting_rejection(self):
+        self.assert_compile_survives_collection(
             "[0]", "WebAssembly.CompileError")
+
+    def test_wasm_uses_intrinsic_promise_when_global_is_changed(self):
+        result = self.execute("""
+            const NativePromise = Promise;
+            const bytes = new Uint8Array([0,97,115,109,1,0,0,0]);
+            const module = new WebAssembly.Module(bytes);
+            let completed = 0;
+            for (const mode of ['replace', 'delete', 'getter']) {
+                if (mode === 'replace') globalThis.Promise = function () {
+                    throw new Error('replacement Promise called');
+                };
+                if (mode === 'delete') delete globalThis.Promise;
+                if (mode === 'getter') Object.defineProperty(globalThis, 'Promise', {
+                    configurable: true,
+                    get() { throw new Error('global Promise read'); }
+                });
+                for (const make of [() => WebAssembly.compile(bytes),
+                                    () => WebAssembly.instantiate(bytes),
+                                    () => WebAssembly.instantiate(module)]) {
+                    const promise = make();
+                    if (Object.getPrototypeOf(promise) !== NativePromise.prototype)
+                        throw new Error('wrong promise prototype');
+                    promise.then(() => {
+                        completed++;
+                        if (completed === 9) print('intrinsic');
+                    });
+                }
+            }
+        """, options=("--gc-threshold=1",))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "intrinsic")
 
 
 class HarnessContract(CaseFixture, unittest.TestCase):

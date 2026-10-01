@@ -5,6 +5,7 @@ const Realm = @import("realm.zig").Realm;
 const Value = @import("value.zig").Value;
 const heap = @import("heap.zig");
 const lantern = @import("lantern/interpreter.zig");
+const promise_mod = @import("builtins/promise.zig");
 
 fn install(realm: *Realm) !void {
     realm.hardened = false;
@@ -43,7 +44,7 @@ fn collectingSetup(comptime module_overload: bool) []const u8 {
         collecting_start_bytes;
     return
     \\globalThis.events = 0;
-    \\globalThis.Promise = function(executor) {
+    \\globalThis.testPromise = function(executor) {
     \\  executor(value => {
     \\    __collectGarbage();
     \\    globalThis.outcome = value;
@@ -63,6 +64,18 @@ fn collectingSetup(comptime module_overload: bool) []const u8 {
     ;
 }
 
+// Exercise the host job's generic capability ownership directly. Public Wasm
+// entry points must use the intrinsic Promise, so a replaced global constructor
+// can no longer supply these deliberately independent settlement callbacks.
+fn installIndependentCapability(realm: *Realm, comptime module_overload: bool) !Value {
+    _ = try evaluate(realm, collectingSetup(module_overload));
+    const ctor = heap.valueAsFunction(realm.globals.get("testPromise").?) orelse return error.ExpectedConstructor;
+    const cap = try promise_mod.newPromiseCapability(realm, ctor);
+    try std.testing.expectEqual(@as(usize, 1), realm.wasm_instantiation_jobs.items.len);
+    realm.wasm_instantiation_jobs.items[0].capability = cap;
+    return cap.promise;
+}
+
 test "WPT async instantiate: pending job retains inputs and independent capability through GC" {
     inline for ([_]bool{ false, true }) |module_overload| {
         var realm = Realm.init(std.testing.allocator);
@@ -73,7 +86,7 @@ test "WPT async instantiate: pending job retains inputs and independent capabili
         // The queued job must retain it, the imported closure, and both settlement
         // functions after all setup frames have gone away. For the Module overload,
         // its getter has already returned a fresh namespace before this collection.
-        const capability_value = try evaluate(&realm, collectingSetup(module_overload));
+        const capability_value = try installIndependentCapability(&realm, module_overload);
         try expectTrue(&realm, "globalThis.events === 0;");
         realm.collectGarbage();
         const capability = heap.valueAsPlainObject(capability_value) orelse return error.ExpectedCapabilityObject;
@@ -94,7 +107,7 @@ test "WPT async instantiate: teardown releases an undrained job without executin
         var realm = Realm.init(std.testing.allocator);
         defer realm.deinit();
         try install(&realm);
-        _ = try evaluate(&realm, collectingSetup(module_overload));
+        _ = try installIndependentCapability(&realm, module_overload);
         try expectTrue(&realm, "globalThis.events === 0;");
         realm.collectGarbage();
         // std.testing.allocator checks queue storage and every retained allocation

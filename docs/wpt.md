@@ -81,8 +81,8 @@ All share one global environment. The executor begins draining only after
 all scripts have evaluated, following ECMA-262
 [ScriptEvaluation](https://tc39.es/ecma262/#sec-runtime-semantics-scriptevaluation)
 and [Jobs](https://tc39.es/ecma262/#sec-jobs). The existing `drainMicrotasks`
-entry point also drives queued Wasm instantiation tasks: it completes the
-ordinary promise-job checkpoint before each Wasm task, including reactions
+entry point also drives queued Wasm compilation and instantiation tasks: it
+completes the ordinary promise-job checkpoint before each Wasm task, including reactions
 queued by earlier reactions. Import getters and core instantiation therefore
 have separate checkpoints. This is a host-driven queue, not an event loop or
 timer service. The upstream shell harness uses a Promise to finish loading, so
@@ -228,6 +228,21 @@ Focused tests cover byte-view offsets and later detachment, import mutation,
 throw identity, GC, allocation failure, teardown, and uncatchable host termination.
 The executor contract checks observable ordering and WPT completion in both CI
 profiles. See the [async boundary design](wasm-engine.md#8-the-js-boundary).
+
+`WebAssembly.compile` also defers successful compilation and validation-error
+settlement until after the ordinary Promise checkpoint, while invalid argument
+types return already-rejected promises. All Wasm promises use the realm's saved
+intrinsic constructor. Tests cover replaced/deleted/accessor global Promise
+bindings in the unhardened posture, buffer snapshots, pending-job GC roots,
+resolution's collecting `then` getter, teardown, and snapshot restoration.
+Compilation ordering and intrinsic Promise creation are executor contracts in
+both CI profiles; these supplement the unchanged upstream corpus.
+
+Two remaining Exception assertions use the previous exception-handling
+proposal's `try`, `catch`/`catch_all`, and `rethrow` encodings. Cynic implements
+the standardized `try_table`/`throw_ref` form; these are legacy fixture encodings,
+not missing support for the standardized instructions. See the
+[proposal's version distinction](https://github.com/WebAssembly/exception-handling/blob/main/proposals/exception-handling/Exceptions.md).
 
 The current [Wasm JS API](https://webassembly.github.io/spec/js-api/)
 defines AddressValue dictionary members as `any`: Memory/Table constructors
