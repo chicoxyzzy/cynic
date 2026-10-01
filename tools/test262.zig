@@ -729,7 +729,9 @@ fn driveAsyncAgent(realm: *cynic.runtime.Realm, state: *AgentThreadState) void {
         // queue is empty).
         const fired = cynic.runtime.lantern.fireExpiredAsyncWaits(realm.allocator, realm) catch false;
         if (fired) continue; // re-drain so the resolution propagates
-        if (realm.microtask_queue.items.len == 0 and realm.pending_async_waits.items.len == 0) break;
+        if (realm.microtask_queue.items.len == 0 and
+            realm.wasm_instantiation_jobs.items.len == 0 and
+            realm.pending_async_waits.items.len == 0) break;
         if (agentMonoMs() >= backstop_ms) break;
         if (state.group.should_exit.load(.acquire) or pool_shutdown.load(.acquire)) break;
         agentNapNs(1 * std.time.ns_per_ms);

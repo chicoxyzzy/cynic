@@ -114,6 +114,9 @@ test {
     _ = @import("runtime/wasm_wpt_alias_test.zig");
     _ = @import("runtime/wasm_wpt_interface_test.zig");
     _ = @import("runtime/wasm_wpt_instance_test.zig");
+    _ = @import("runtime/wasm_wpt_async_test.zig");
+    _ = @import("runtime/wasm_wpt_async_reentry_test.zig");
+    _ = @import("runtime/wasm_wpt_async_safety_test.zig");
     _ = @import("runtime/wasm_wpt_arguments_test.zig");
     _ = @import("runtime/wasm_wpt_import_test.zig");
     _ = @import("runtime/wasm_wpt_multivalue_test.zig");

@@ -117,7 +117,7 @@ pub fn drainMicrotasks(allocator: std.mem.Allocator, realm: *Realm) RunError!voi
     // through every microtask, observably different from V8 / JSC /
     // SpiderMonkey.
     realm.clearKeptObjects();
-    while (realm.microtask_queue.items.len > 0) {
+    while (realm.microtask_queue.items.len > 0 or realm.wasm_instantiation_jobs.items.len > 0) {
         // Host termination (docs/resource-metering.md): stop the
         // drain while the latch is set. Each remaining task would
         // only re-terminate at its first safe point anyway; stopping
@@ -145,9 +145,25 @@ pub fn drainMicrotasks(allocator: std.mem.Allocator, realm: *Realm) RunError!voi
             while (idx < realm.microtask_queue.items.len and
                 realm.microtask_queue.items[idx].kind == .module_import) : (idx += 1)
             {}
-            // Nothing but deferred import jobs left — stop draining;
-            // they'll run when the DFS unwinds to depth 0.
-            if (idx >= realm.microtask_queue.items.len) break;
+        }
+        if (idx >= realm.microtask_queue.items.len) {
+            // WebAssembly JS API §5 queues host tasks, not promise jobs.
+            // Run one only after every runnable ordinary microtask, then
+            // checkpoint again before the next Wasm task. DFS-blocked
+            // dynamic imports stay queued while a Wasm await can progress.
+            if (realm.wasm_instantiation_running or realm.wasm_instantiation_jobs.items.len == 0) break;
+            const job = realm.wasm_instantiation_jobs.orderedRemove(0);
+            realm.wasm_instantiation_running = true;
+            defer realm.wasm_instantiation_running = false;
+            defer realm.clearKeptObjects();
+            // run owns the popped payload on every exit. An uncaught native
+            // completion (including host termination) stops the drain with
+            // pending_exception intact for its caller.
+            job.run(realm) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.NativeThrew => return,
+            };
+            continue;
         }
         const task = realm.microtask_queue.orderedRemove(idx);
         // §9.10.4.2 ClearKeptObjects between microtasks — each
