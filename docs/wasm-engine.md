@@ -486,10 +486,47 @@ Each constructor prototype (`Module`, `Instance`, `Memory`, `Table`,
 (`"WebAssembly.Module"`, …), installed before the hardened-realm freeze
 so the brand survives on the frozen prototype.
 
-`compile` / `instantiate` return Promises (built on the existing
-microtask queue via §27.2.1.5 NewPromiseCapability); compilation is
-synchronous, so they resolve — or, on an abrupt completion, reject with
-the proper error class. Argument and result marshalling is
+`compile` / `instantiate` return Promises through the existing promise
+capability machinery. `instantiate` follows the Wasm JS API's
+[asynchronous compilation](https://webassembly.github.io/spec/js-api/#asynchronously-compile-a-webassembly-module)
+and [asynchronous instantiation](https://webassembly.github.io/spec/js-api/#asynchronously-instantiate-a-webassembly-module)
+boundaries. The bytes overload snapshots the selected BufferSource bytes at
+call time; decoding currently also happens there, but compilation completion
+and import getters wait for a host task. The Module overload captures imports
+synchronously. Both then queue core instantiation, including active data/element
+segments and the start function. Captured functions and primitive globals are
+not reread; imported Memory/Table/Global objects retain their normal aliasing.
+Import and start exceptions reject with the original thrown value.
+
+`Realm.wasm_instantiation_jobs` is a separate FIFO, driven by the existing
+`lantern.drainMicrotasks` entry point. It drains runnable ordinary promise jobs,
+including newly queued reactions, before each Wasm task and checkpoints again
+afterward, following ECMA-262 [Jobs](https://tc39.es/ecma262/#sec-jobs).
+Thus reactions queued by import getters run before core instantiation. A nested
+drain cannot enter another Wasm task while one is running or while the Module
+overload is capturing imports. The JS debug helper `__drainMicrotasks` drains
+ordinary microtasks only; native host/TLA checkpoints drive both queues. This
+adds no event loop or timers.
+
+Pending tasks trace their promise capability, module, import object, and
+captured import values. A popped task opens a `HandleScope` before any JS
+reentry. Queue storage and retained-value arrays use the shared heap quota;
+completion, failure, and realm teardown release their owned registrations and
+arrays, with successful instantiation transferring import ownership to the
+instance. Fuel/interrupt termination stops the drain without turning host
+termination into a catchable rejection. The popped task is not retried;
+remaining tasks stay queued for the host to resume or discard at teardown.
+
+[JavaScriptCore](https://github.com/WebKit/WebKit/blob/main/Source/JavaScriptCore/wasm/js/JSWebAssembly.cpp)
+likewise retains dependencies through `DeferredWorkTimer` and schedules
+instantiation completion. [SpiderMonkey](https://github.com/mozilla-firefox/firefox/blob/main/js/src/wasm/WasmJS.cpp)
+retains source bytes/imports in `CompileBufferTask`, then captures imports
+before dispatching `AsyncInstantiateTask`. Cynic uses its existing host drain
+instead of background workers. Public `WebAssembly.compile()` still settles
+inline, and the promise constructor is still looked up through the global
+binding; those separate conformance gaps are unchanged by this scheduling work.
+
+Argument and result marshalling is
 §ToWebAssemblyValue / §ToJSValue: `i32 ↔ Number`, `i64 ↔ BigInt`,
 `f32/f64 ↔ Number`, and `externref` as a live JS value; `v128` and a bare
 `exnref` are spec-rejected at the boundary with a TypeError (an

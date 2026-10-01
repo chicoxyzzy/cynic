@@ -247,6 +247,49 @@ class HarnessContract(CaseFixture, unittest.TestCase):
         self.assertEqual(sorted((r["name"], r["status"]) for r in records),
                          [("async pass", 0), ("promise pass", 0)])
 
+    def test_wasm_instantiation_tasks_preserve_promise_checkpoints(self):
+        result = self.execute("""
+            // Import a global and a function, then call that function from start.
+            const bytes = new Uint8Array([0,97,115,109,1,0,0,0,
+                1,4,1,96,0,0,
+                2,14,2,1,109,1,103,3,127,0,1,109,1,115,0,0,
+                3,2,1,0,7,5,1,1,103,3,0,8,1,1,10,6,1,4,0,16,0,11]);
+            function checkOrdering(useModule) {
+                const events = [];
+                const imports = {m: {g: 7, get s() {
+                    events.push('get');
+                    Promise.resolve().then(() => {
+                        events.push('import job');
+                        Promise.resolve().then(() => events.push('nested import job'));
+                    });
+                    return () => events.push('start');
+                }}};
+                const source = useModule ? new WebAssembly.Module(bytes) : bytes;
+                const pending = WebAssembly.instantiate(source, imports);
+                events.push('return');
+                Promise.resolve().then(() => {
+                    events.push('job');
+                    Promise.resolve().then(() => events.push('nested job'));
+                });
+                assert_array_equals(events, useModule ? ['get', 'return'] : ['return']);
+                return pending.then(result => {
+                    const instance = useModule ? result : result.instance;
+                    assert_equals(instance.exports.g.value, 7);
+                    assert_array_equals(events, useModule ?
+                        ['get', 'return', 'import job', 'job',
+                         'nested import job', 'nested job', 'start'] :
+                        ['return', 'job', 'nested job', 'get',
+                         'import job', 'nested import job', 'start']);
+                });
+            }
+            promise_test(() => checkOrdering(false), 'bytes instantiation checkpoints');
+            promise_test(() => checkOrdering(true), 'Module instantiation checkpoints');
+        """, harness=True)
+        records = self.completed(result)
+        self.assertEqual([(r["name"], r["status"]) for r in records],
+                         [("bytes instantiation checkpoints", 0),
+                          ("Module instantiation checkpoints", 0)])
+
     def test_rejected_promise_is_a_failed_subtest(self):
         result = self.execute("""
             promise_test(() => Promise.reject(new Error('promise-rejection')), 'promise fail');

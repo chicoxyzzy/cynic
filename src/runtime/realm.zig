@@ -984,6 +984,13 @@ pub const Realm = struct {
     /// `await` opcode site. Each entry is a function to call
     /// with one argument.
     microtask_queue: std.ArrayListUnmanaged(Microtask) = .empty,
+    /// WebAssembly JS API §5 — compilation completion and core
+    /// instantiation tasks run after an ordinary microtask checkpoint.
+    /// Entries own their captured imports and promise capability roots.
+    wasm_instantiation_jobs: std.ArrayListUnmanaged(@import("builtins/webassembly.zig").WasmInstantiationJob) = .empty,
+    /// Suppress nested host tasks while running a Wasm task, synchronously
+    /// capturing Module imports, or servicing the JS microtask-only helper.
+    wasm_instantiation_running: bool = false,
     /// §25.5.2 scratch buffers reused across `JSON.stringify` calls.
     /// A tight `JSON.stringify(obj)` hot loop would otherwise pay
     /// (allocate, grow to ~hundreds of bytes, free) for `buf`,
@@ -1557,6 +1564,10 @@ pub const Realm = struct {
         self.globals.deinit(self.allocator);
         self.output.deinit(self.allocator);
         self.microtask_queue.deinit(self.allocator);
+        // Prepared imports can borrow arena-owned host callback contexts.
+        // Release queued work before child realms and Wasm stores are torn down.
+        for (self.wasm_instantiation_jobs.items) |job| job.deinit(self);
+        self.wasm_instantiation_jobs.deinit(self.wasmInvocationAllocator());
         self.json_scratch_buf.deinit(self.allocator);
         self.json_scratch_stack.deinit(self.allocator);
         self.json_scratch_indent.deinit(self.allocator);
@@ -2440,6 +2451,9 @@ pub const Realm = struct {
             self.heap.markValue(mt.reaction_handler);
             self.heap.markValue(mt.reaction_result);
         }
+
+        // Wasm tasks outlive the native call that captured their inputs.
+        for (self.wasm_instantiation_jobs.items) |job| job.markRoots(self);
 
         // §25.4.1.4 pending async waiters — keep each unsettled
         // capability's resolve function alive until it fires or is

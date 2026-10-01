@@ -77,13 +77,18 @@ the test executor; production hardening remains covered by `test-ses`.
 
 The ordered scripts are environment metadata, `bootstrap.js`, the upstream
 harness, `reporter.js`, `META: script` dependencies, the fixture, and `finish.js`.
-All share one global environment. The executor drains microtasks only after
+All share one global environment. The executor begins draining only after
 all scripts have evaluated, following ECMA-262
 [ScriptEvaluation](https://tc39.es/ecma262/#sec-runtime-semantics-scriptevaluation)
-and [Jobs](https://tc39.es/ecma262/#sec-jobs). The upstream shell harness uses a
-Promise to finish loading, so an earlier checkpoint could complete before the
-fixture registers its tests. `explicit_done` plus `done()` ends loading but
-still waits for outstanding async tests; an empty job queue is not completion.
+and [Jobs](https://tc39.es/ecma262/#sec-jobs). The existing `drainMicrotasks`
+entry point also drives queued Wasm instantiation tasks: it completes the
+ordinary promise-job checkpoint before each Wasm task, including reactions
+queued by earlier reactions. Import getters and core instantiation therefore
+have separate checkpoints. This is a host-driven queue, not an event loop or
+timer service. The upstream shell harness uses a Promise to finish loading, so
+an earlier checkpoint could complete before the fixture registers its tests.
+`explicit_done` plus `done()` ends loading but still waits for outstanding
+async tests; empty queues are not completion.
 
 Two support-source adaptations are applied only to temporary copies. The
 harness's arrow-function-display regex gets escaped literal braces, preserving
@@ -213,6 +218,16 @@ reentry, fuel, and allocation failure in the interpreter and Spasm. Externrefs
 stay rooted through the outermost call, and allocation failure retains its
 OOM status across the host boundary. See the
 [host-function design](wasm-engine.md#8-the-js-boundary).
+
+`WebAssembly.instantiate(bytes, imports)` copies the selected bytes before
+returning and reads imports in a deferred compilation-completion task.
+The Module overload reads imports synchronously; both overloads defer active
+segments and the start function until a later host task. Nested promise
+reactions run before each task, and captured imports survive that checkpoint.
+Focused tests cover byte-view offsets and later detachment, import mutation,
+throw identity, GC, allocation failure, teardown, and uncatchable host termination.
+The executor contract checks observable ordering and WPT completion in both CI
+profiles. See the [async boundary design](wasm-engine.md#8-the-js-boundary).
 
 The current [Wasm JS API](https://webassembly.github.io/spec/js-api/)
 defines AddressValue dictionary members as `any`: Memory/Table constructors

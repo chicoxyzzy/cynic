@@ -127,6 +127,12 @@ fn promiseSpeciesGetter(realm: *Realm, this_value: Value, args: []const Value) N
 pub fn microtaskDrainNative(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
     _ = args;
+    // This JS debug helper drains ordinary microtasks, not host tasks. A
+    // nested call from a promise reaction must not start Wasm before that
+    // reaction returns. Native host/TLA checkpoints still drive both queues.
+    const was_running = realm.wasm_instantiation_running;
+    realm.wasm_instantiation_running = true;
+    defer realm.wasm_instantiation_running = was_running;
     const lantern = @import("../lantern/interpreter.zig");
     lantern.drainMicrotasks(realm.allocator, realm) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,

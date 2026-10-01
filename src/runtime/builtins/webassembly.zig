@@ -376,7 +376,14 @@ fn populateInstance(realm: *Realm, self: *JSObject, mstate: *ModuleState, import
     defer scope.close();
     scope.push(heap_mod.taggedObject(self)) catch return error.OutOfMemory;
     scope.push(import_object) catch return error.OutOfMemory;
-    var imports = try resolveImports(realm, mstate.module, import_object, scope);
+    const imports = try resolveImports(realm, mstate.module, import_object, scope);
+    try populateInstanceFromImports(realm, self, mstate, imports);
+}
+
+/// Takes ownership of the host-import registrations at entry. The caller
+/// keeps the receiver and captured import values rooted through start.
+fn populateInstanceFromImports(realm: *Realm, self: *JSObject, mstate: *ModuleState, prepared: wasm.Imports) NativeError!void {
+    var imports = prepared;
     // A start callback can publish ref.func before a later trap. Once it
     // begins, the realm-owned instance and all imported roots must survive
     // until realm teardown, even if no Instance object is returned.
@@ -386,8 +393,10 @@ fn populateInstance(realm: *Realm, self: *JSObject, mstate: *ModuleState, import
 
     const a = realm.wasmAllocator();
     const ip = a.create(wasm.Instance) catch return error.OutOfMemory;
-    wasm.instantiate(ip, a, a, mstate.module, imports) catch
-        return throwLinkError(realm, "WebAssembly.Instance: instantiation failed");
+    wasm.instantiate(ip, a, a, mstate.module, imports) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return throwLinkError(realm, "WebAssembly.Instance: instantiation failed"),
+    };
     ip.spasm_memory_ledger = realm.wasmCodeMemoryLedger();
     realm.registerWasmInstance(ip) catch {
         ip.releaseOwnedStoreBackings();
@@ -524,7 +533,7 @@ fn promiseCtor(realm: *Realm) NativeError!*JSFunction {
 }
 
 /// Turn a synchronous abrupt completion into a promise rejection (so
-/// `compile` / `instantiate` always return a settled promise).
+/// `compile` / `instantiate` return a rejected promise for JS errors).
 fn rejectFromError(realm: *Realm, cap: promise_mod.PromiseCapability, err: NativeError) NativeError!Value {
     switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -559,63 +568,204 @@ fn compileToModule(realm: *Realm, args: []const Value) NativeError!Value {
     return makeModuleObject(realm, bytes);
 }
 
+/// Wasm JS API "asynchronously compile/instantiate a WebAssembly module".
+/// Host tasks run after a complete ECMA-262 §9.5 promise-job checkpoint.
+/// Bytes compilation and core instantiation are separate tasks: import
+/// getters can enqueue promise jobs that must run before active segments/start.
+/// https://webassembly.github.io/spec/js-api/#asynchronously-instantiate-a-webassembly-module
+pub const WasmInstantiationJob = struct {
+    capability: promise_mod.PromiseCapability,
+    import_object: Value,
+    payload: union(enum) {
+        compiled: Value,
+        compile_failed: Value,
+        instantiate: struct {
+            module: Value,
+            imports: wasm.Imports,
+            roots: []Value,
+            return_pair: bool,
+        },
+    },
+
+    pub fn markRoots(self: WasmInstantiationJob, realm: *Realm) void {
+        realm.heap.markValue(self.capability.promise);
+        realm.heap.markValue(heap_mod.taggedFunction(self.capability.resolve));
+        realm.heap.markValue(heap_mod.taggedFunction(self.capability.reject));
+        realm.heap.markValue(self.import_object);
+        switch (self.payload) {
+            .compiled, .compile_failed => |value| realm.heap.markValue(value),
+            .instantiate => |prepared| {
+                realm.heap.markValue(prepared.module);
+                for (prepared.roots) |value| realm.heap.markValue(value);
+            },
+        }
+    }
+
+    /// An undrained task owns these registrations; no instance has taken
+    /// them yet. Teardown must run before the realm's Wasm arena is freed.
+    pub fn deinit(self: WasmInstantiationJob, realm: *Realm) void {
+        self.releaseImports(realm, true);
+    }
+
+    fn releaseImports(self: WasmInstantiationJob, realm: *Realm, owns_imports: bool) void {
+        switch (self.payload) {
+            .instantiate => |prepared| {
+                if (owns_imports) unregisterHostImports(realm, prepared.imports.funcs);
+                realm.wasmInvocationAllocator().free(prepared.roots);
+            },
+            else => {},
+        }
+    }
+
+    /// The drainer removes this task by value before re-entering JS. Keep
+    /// its inputs alive independently of the queue, including custom
+    /// settlement functions that do not retain their capability object.
+    pub fn run(self: WasmInstantiationJob, realm: *Realm) NativeError!void {
+        var owns_imports = true;
+        defer self.releaseImports(realm, owns_imports);
+        const scope = try realm.heap.openScope();
+        defer scope.close();
+        try scope.push(self.capability.promise);
+        try scope.push(heap_mod.taggedFunction(self.capability.resolve));
+        try scope.push(heap_mod.taggedFunction(self.capability.reject));
+        try scope.push(self.import_object);
+        switch (self.payload) {
+            .compiled => |module| {
+                try scope.push(module);
+                queueInstantiation(realm, self.capability, module, self.import_object, true) catch |err| {
+                    try rejectInstantiationError(realm, self.capability, err);
+                };
+            },
+            .compile_failed => |reason| {
+                try scope.push(reason);
+                _ = try promise_mod.capabilityReject(realm, self.capability, reason);
+            },
+            .instantiate => |prepared| {
+                try scope.push(prepared.module);
+                for (prepared.roots) |value| try scope.push(value);
+                const result = self.instantiate(realm, scope, &owns_imports) catch |err| {
+                    try rejectInstantiationError(realm, self.capability, err);
+                    return;
+                };
+                try scope.push(result);
+                _ = try promise_mod.capabilityResolve(realm, self.capability, result);
+            },
+        }
+    }
+
+    fn instantiate(self: WasmInstantiationJob, realm: *Realm, scope: *heap_mod.HandleScope, owns_imports: *bool) NativeError!Value {
+        const prepared = self.payload.instantiate;
+        const module_object = heap_mod.valueAsPlainObject(prepared.module).?;
+        const mstate: *ModuleState = @ptrCast(@alignCast(module_object.getWasmModule().?));
+        const receiver = try realm.heap.allocateObject();
+        realm.heap.setObjectPrototype(receiver, realm.wasm_instance_prototype);
+        const instance = heap_mod.taggedObject(receiver);
+        try scope.push(instance);
+        // The helper installs rollback before its first fallible operation.
+        // After start may have published ref.func it preserves durable roots.
+        owns_imports.* = false;
+        try populateInstanceFromImports(realm, receiver, mstate, prepared.imports);
+        if (!prepared.return_pair) return instance;
+        const result = try realm.heap.allocateObject();
+        realm.heap.setObjectPrototype(result, realm.intrinsics.object_prototype);
+        try result.set(realm.allocator, "module", prepared.module);
+        try result.set(realm.allocator, "instance", instance);
+        return heap_mod.taggedObject(result);
+    }
+};
+
+/// Capture imports now, retaining exactly the values produced by getters.
+/// Functions/primitive globals are snapshots; imported store objects remain
+/// aliased. Core instantiation (including active segments) waits for its task.
+fn queueInstantiation(realm: *Realm, cap: promise_mod.PromiseCapability, module: Value, import_object: Value, return_pair: bool) NativeError!void {
+    const scope = try realm.heap.openScope();
+    defer scope.close();
+    try scope.push(module);
+    try scope.push(import_object);
+    const module_object = heap_mod.valueAsPlainObject(module).?;
+    const mstate: *ModuleState = @ptrCast(@alignCast(module_object.getWasmModule().?));
+    const imports = try resolveImports(realm, mstate.module, import_object, scope);
+    errdefer unregisterHostImports(realm, imports.funcs);
+    const allocator = realm.wasmInvocationAllocator();
+    const roots = try allocator.dupe(Value, scope.handles.items);
+    errdefer allocator.free(roots);
+    try realm.wasm_instantiation_jobs.append(allocator, .{
+        .capability = cap,
+        .import_object = import_object,
+        .payload = .{ .instantiate = .{
+            .module = module,
+            .imports = imports,
+            .roots = roots,
+            .return_pair = return_pair,
+        } },
+    });
+}
+
+fn rejectInstantiationError(realm: *Realm, cap: promise_mod.PromiseCapability, err: NativeError) NativeError!void {
+    // Host termination must never become a catchable promise rejection.
+    if (err == error.NativeThrew and realm.terminationReason() != null) return error.NativeThrew;
+    _ = try rejectFromError(realm, cap, err);
+}
+
 /// `WebAssembly.instantiate(bytes, importObject?)` → Promise<{module,
 /// instance}>; `WebAssembly.instantiate(module, importObject?)` →
-/// Promise<Instance>.
+/// Promise<Instance>. WebIDL validates arguments at call time; bytes are
+/// copied before returning, while their import getters run after compilation.
 fn wasmInstantiate(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
     _ = this_value;
     const cap = try promise_mod.newPromiseCapability(realm, try promiseCtor(realm));
-    // Instantiation can call an imported start function, which may collect.
-    // Retain all capability members until fulfillment or rejection completes.
     const scope = try realm.heap.openScope();
     defer scope.close();
     try scope.push(cap.promise);
     try scope.push(heap_mod.taggedFunction(cap.resolve));
     try scope.push(heap_mod.taggedFunction(cap.reject));
-    const result = instantiateToResult(realm, args) catch |err| {
-        // Host termination is not an ECMAScript abrupt completion and must
-        // not be made catchable by converting it into a rejected Promise.
-        // Preserve the termination latch and unwind through the native-call
-        // boundary exactly like synchronous `new WebAssembly.Instance`.
-        if (err == error.NativeThrew and realm.terminationReason() != null) return error.NativeThrew;
-        return rejectFromError(realm, cap, err);
+    enqueueInstantiation(realm, cap, args) catch |err| {
+        try rejectInstantiationError(realm, cap, err);
     };
-    return promise_mod.capabilityResolve(realm, cap, result);
+    return cap.promise;
 }
 
-fn instantiateToResult(realm: *Realm, args: []const Value) NativeError!Value {
+fn enqueueInstantiation(realm: *Realm, cap: promise_mod.PromiseCapability, args: []const Value) NativeError!void {
     const import_object = if (args.len > 1) args[1] else Value.undefined_;
-
-    // A Module argument instantiates directly, resolving to the Instance.
+    // optional object, not an import dictionary: even an empty module must
+    // reject a primitive importObject, before attempting compilation.
+    if (!import_object.isUndefined() and !heap_mod.isJSObject(import_object))
+        return intrinsics.throwTypeError(realm, "WebAssembly.instantiate: importObject must be an object");
     if (args.len > 0) {
-        if (heap_mod.valueAsPlainObject(args[0])) |o| {
-            if (o.getWasmModule()) |raw| {
-                const mstate: *ModuleState = @ptrCast(@alignCast(raw));
-                return makeInstanceObject(realm, mstate, import_object);
+        if (heap_mod.valueAsPlainObject(args[0])) |object| {
+            if (object.getWasmModule() != null) {
+                // A debug drain inside a synchronous import getter must not
+                // enter another Wasm host task before this call returns.
+                const was_running = realm.wasm_instantiation_running;
+                realm.wasm_instantiation_running = true;
+                defer realm.wasm_instantiation_running = was_running;
+                return queueInstantiation(realm, cap, args[0], import_object, false);
             }
         }
     }
-
-    // Otherwise a BufferSource: compile then instantiate, resolving to
-    // `{ module, instance }`.
     if (!realm.allow_wasm_compile) return wasmCompileDisabled(realm);
     const bytes = bufferSourceBytes(args) orelse
         return intrinsics.throwTypeError(realm, "WebAssembly.instantiate expects a BufferSource or Module");
-    const module_v = try makeModuleObject(realm, bytes);
-    // The freshly compiled Module is not yet exposed to JS. Its wrapper
-    // must survive an imported start callback before joining the result.
-    const scope = try realm.heap.openScope();
-    defer scope.close();
-    try scope.push(module_v);
-    const mobj = heap_mod.valueAsPlainObject(module_v) orelse unreachable;
-    const mstate: *ModuleState = @ptrCast(@alignCast(mobj.getWasmModule() orelse unreachable));
-    const instance_v = try makeInstanceObject(realm, mstate, import_object);
-
-    const result = realm.heap.allocateObject() catch return error.OutOfMemory;
-    realm.heap.setObjectPrototype(result, realm.intrinsics.object_prototype);
-    try result.set(realm.allocator, "module", module_v);
-    try result.set(realm.allocator, "instance", instance_v);
-    return heap_mod.taggedObject(result);
+    // Decoding has no observable callbacks, so it can happen here. Its
+    // completion (including CompileError) remains a deferred host task.
+    const module = makeModuleObject(realm, bytes) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.NativeThrew => {
+            const reason = realm.pending_exception orelse Value.undefined_;
+            realm.pending_exception = null;
+            try realm.wasm_instantiation_jobs.append(realm.wasmInvocationAllocator(), .{
+                .capability = cap,
+                .import_object = import_object,
+                .payload = .{ .compile_failed = reason },
+            });
+            return;
+        },
+    };
+    try realm.wasm_instantiation_jobs.append(realm.wasmInvocationAllocator(), .{
+        .capability = cap,
+        .import_object = import_object,
+        .payload = .{ .compiled = module },
+    });
 }
 
 // ── WebAssembly.Global ──────────────────────────────────────────────
@@ -2183,8 +2333,8 @@ fn wasmModuleCustomSections(realm: *Realm, this_value: Value, args: []const Valu
     return heap_mod.taggedObject(arr);
 }
 
-/// Borrow the bytes of a BufferSource argument — an `ArrayBuffer` or any
-/// typed-array view over one. Returns null for anything else.
+/// Borrow a BufferSource's bytes using its internal bounds, including
+/// DataView offsets. Returns null for detached/out-of-bounds views.
 fn bufferSourceBytes(args: []const Value) ?[]const u8 {
     if (args.len == 0) return null;
     const obj = heap_mod.valueAsPlainObject(args[0]) orelse return null;
@@ -2193,6 +2343,14 @@ fn bufferSourceBytes(args: []const Value) ?[]const u8 {
         const end = tv.byte_offset + tv.length * tv.kind.elementSize();
         if (end > buf.len) return null;
         return buf[tv.byte_offset..end];
+    }
+    if (obj.getDataView()) |view| {
+        const buf = view.viewed.getArrayBuffer() orelse return null;
+        if (view.byte_offset > buf.len) return null;
+        const available = buf.len - view.byte_offset;
+        const length = if (view.length_tracking) available else view.byte_length;
+        if (length > available) return null;
+        return buf[view.byte_offset..][0..length];
     }
     if (obj.getArrayBuffer()) |ab| return ab;
     return null;
@@ -3153,7 +3311,7 @@ test "WebAssembly JS API: Realm.requestInterrupt wakes Spasm after native entry"
     try testing.expectEqual(@as(?Realm.TerminationReason, null), realm.terminationReason());
 }
 
-test "WebAssembly.instantiate does not turn start-function termination into a rejection" {
+test "WPT async instantiate: Module start termination remains pending and stops drain" {
     const testing = std.testing;
 
     // (module (func (loop br 0)) (start 0))
@@ -3171,12 +3329,19 @@ test "WebAssembly.instantiate does not turn start-function termination into a re
     try realm.installBuiltins();
 
     const module = try makeModuleObject(&realm, &mod_bytes);
-    realm.setFuel(1);
-    try testing.expectError(
-        error.NativeThrew,
-        wasmInstantiate(&realm, Value.undefined_, &.{module}),
-    );
+    const scope = try realm.heap.openScope();
+    defer scope.close();
+    try scope.push(module);
+    // Bound the old synchronous implementation during the RED run too.
+    realm.setFuel(1000);
+    const result = try wasmInstantiate(&realm, Value.undefined_, &.{module});
+    try scope.push(result);
+    const promise = heap_mod.valueAsPlainObject(result).?;
+    try testing.expectEqual(.pending, promise.brand.promise_state);
+    realm.setFuel(32);
+    try @import("../lantern/interpreter.zig").drainMicrotasks(testing.allocator, &realm);
     try testing.expectEqual(@as(?Realm.TerminationReason, .fuel_exhausted), realm.terminationReason());
+    try testing.expectEqual(.pending, promise.brand.promise_state);
 }
 
 test "WebAssembly.Module.customSections charges ArrayBuffer payloads to the Realm ceiling" {

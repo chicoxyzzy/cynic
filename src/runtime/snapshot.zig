@@ -574,6 +574,8 @@ const Capture = struct {
         // must be empty; a realm mid-execution (or one that has run
         // user code) is refused rather than mis-captured.
         if (realm.microtask_queue.items.len != 0 or
+            realm.wasm_instantiation_jobs.items.len != 0 or
+            realm.wasm_instantiation_running or
             realm.frame_stacks.items.len != 0 or
             realm.kept_alive.items.len != 0 or
             realm.pending_async_waits.items.len != 0 or
