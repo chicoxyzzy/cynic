@@ -528,6 +528,31 @@ Proxy methods, thrown-value identity, mixed numeric/reference results,
 allocation failure, GC pressure, start functions, and cross-realm nested calls.
 These Wasm host-integration cases are outside test262's ECMAScript-only scope.
 
+Typed function references now retain their defining type context throughout
+the JS boundary: exported arguments, single/multiple host results, global
+imports and setters, table set/grow, and exception payloads all validate before
+use. Nullable references accept `null`, not `undefined`; optional constructor
+and table arguments retain their specified defaults. Store wrappers and tag
+identities preserve that context across imports and re-exports. Incompatible
+store imports raise `LinkError` after the import getters finish; invalid
+primitive imports fail during conversion. Ordinary conversion raises
+`TypeError` before invocation or mutation.
+
+This follows [ToWebAssemblyValue](https://webassembly.github.io/spec/js-api/#towebassemblyvalue),
+[V8's module-aware JSToWasmObject](https://github.com/v8/v8/blob/main/src/wasm/wasm-objects.cc),
+and [SpiderMonkey's CheckRefType at table writes](https://github.com/mozilla-firefox/firefox/blob/main/js/src/wasm/WasmJS.cpp).
+Cynic compares the supported singleton final function definitions across
+module-local indices, including nested references and nullability, rather
+than introducing a global canonical-type registry. The worklist is iterative,
+memoized, and capped at 4,096 type pairs / 65,536 value comparisons; exhaustion
+raises a catchable exception, and temporary allocations are metered and freed. Rolled
+self references remain distinct from references to an outer type, following
+[Core type equivalence](https://webassembly.github.io/spec/core/valid/conventions.html).
+Explicit GC recursive groups and declared subtypes remain unsupported.
+Tests cover both execution tiers, GC pressure, aliasing, getter ordering,
+resource limits, and allocation failures. No SES policy or test262 surface
+changes are involved; Spasm's native call-layout guard remains a backstop.
+
 All engine state lives in **typed internal slots** on `JSObject` /
 `JSFunction`, never `__cynic_*` property keys (AGENTS.md "no engine
 state on user-visible objects"), the same pattern as `iter_helper` /
@@ -711,8 +736,8 @@ the measured design space:
   the caller's execution controller across foreign calls. Both dynamic call
   paths also forward uncaught Wasm exception records, not only trap codes.
   A native layout guard rejects incompatible host-supplied references before
-  using the call buffer; complete typed-reference assignability at the JS
-  boundary remains a separate follow-up.
+  using the call buffer. The JS boundary additionally validates the supported
+  final function-reference types with their defining module context (§8).
   Native tail calls remain deferred until they can replace the caller frame
   without growing the host stack.
   References and vectors preserve full Cells on both targets, including
