@@ -63,6 +63,7 @@ pub const Config = struct {
     execution_poll_helper: usize,
     call_helper: ?usize,
     call_indirect_helper: ?usize,
+    call_ref_helper: ?usize,
     call_gate_stub: ?usize,
     call_gates_base: ?usize,
     call_gates_len: usize,
@@ -117,6 +118,7 @@ const op_br_table: u8 = 0x0e;
 const op_return: u8 = 0x0f;
 const op_call: u8 = 0x10;
 const op_call_indirect: u8 = 0x11;
+const op_call_ref: u8 = 0x14;
 const op_drop: u8 = 0x1a;
 const op_select: u8 = 0x1b;
 const op_select_t: u8 = 0x1c;
@@ -698,14 +700,14 @@ pub fn compile(
                 try m.addRegImm32(.rsp, call_frame_bytes);
                 sp = below + result_count;
             },
-            op_call_indirect => {
-                // §5.4.1: [below..., args..., element_index] -> results.
-                // The shared helper performs table bounds/null/type checks and
-                // invokes the resolved function in its defining instance.
-                const helper = config.call_indirect_helper orelse return null;
+            op_call_indirect, op_call_ref => {
+                // [below..., args..., target] -> [below..., results...].
+                // Typed references bypass the indirect call's table lookup.
+                const ref_call = op == op_call_ref;
+                const helper = (if (ref_call) config.call_ref_helper else config.call_indirect_helper) orelse return null;
                 const type_index = readUleb32(body, &i) orelse return null;
-                const table_index = readUleb32(body, &i) orelse return null;
-                const table64 = tableIs64(module, table_index) orelse return null;
+                const table_index = if (ref_call) 0 else readUleb32(body, &i) orelse return null;
+                const table64 = if (ref_call) false else tableIs64(module, table_index) orelse return null;
                 if (type_index >= module.types.len) return null;
                 const callee = &module.types[type_index];
                 for (callee.params) |param_type| if (!isSupportedValue(param_type)) return null;
@@ -739,13 +741,20 @@ pub fn compile(
 
                 try emitCallArguments(&m, num_locals, below, callee.params);
 
-                // SysV's six register arguments fit this boundary exactly.
                 try m.load64Disp32(.rdi, .rsp, @intCast(call_frame_bytes));
-                try m.movImm64(.rsi, type_index);
-                try m.movImm64(.rdx, table_index);
-                if (table64) try m.load64Disp32(.rcx, .r12, scratchOffset(num_locals, index_depth)) else try m.load32Disp32(.rcx, .r12, scratchOffset(num_locals, index_depth));
-                try m.leaDisp32(.r8, .rsp, @intCast(call_stack_args_size));
-                try m.movReg64(.r9, .rbx);
+                if (ref_call) {
+                    try m.movImm64(.rsi, type_index);
+                    try m.leaDisp32(.rdx, .r12, scratchOffset(num_locals, index_depth));
+                    try m.leaDisp32(.rcx, .rsp, @intCast(call_stack_args_size));
+                    try m.movReg64(.r8, .rbx);
+                } else {
+                    // SysV's six register arguments fit this boundary exactly.
+                    try m.movImm64(.rsi, type_index);
+                    try m.movImm64(.rdx, table_index);
+                    if (table64) try m.load64Disp32(.rcx, .r12, scratchOffset(num_locals, index_depth)) else try m.load32Disp32(.rcx, .r12, scratchOffset(num_locals, index_depth));
+                    try m.leaDisp32(.r8, .rsp, @intCast(call_stack_args_size));
+                    try m.movReg64(.r9, .rbx);
+                }
                 try m.movImm64(.r11, helper);
                 try m.callReg(.r11);
 

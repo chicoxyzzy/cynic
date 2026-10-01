@@ -68,6 +68,10 @@ compile on both targets, as do terminating if arms and catchable unreachable.
 Function-label branches now reuse the return path for all three branch
 instructions, with zero or multiple results. AArch64 branch tables also
 compile beyond the 12-bit comparison-immediate range.
+Typed `call_ref` also compiles on both targets, preserving complete
+references, foreign instances, live values, and memory views across the
+checked invocation boundary. Native tests cover traps, exception payloads,
+host GC, cancellation, recursion limits, and incompatible host call layouts.
 
 The interpreter and forced-Spasm sweeps also reproduce this score in
 `ReleaseSafe` on both targets, under the same 600-second / 3-GB guards.
@@ -80,8 +84,8 @@ the validator guard and bounded scratch retention.
 
 | target | native entries | compiled functions | refusals |
 |---|---:|---:|---:|
-| x86_64-macos (Rosetta) | 146,333 | 5,898 | 90 |
-| AArch64-macos | 151,452 | 5,898 | 90 |
+| x86_64-macos (Rosetta) | 168,785 | 5,907 | 83 |
+| AArch64-macos | 173,904 | 5,907 | 83 |
 
 The SIMD foundation added 249 compiled functions on x86_64 and 26 on AArch64
 over the reference-parity checkpoint. The bounded AArch64 code-reservation
@@ -140,11 +144,13 @@ compiled functions / 605 native entries on x86, and 122 compiled functions /
 Function-label branches add 30 compiled functions / 52 native entries on
 x86; together with large branch-table support, they add 31 compiled
 functions / 60 native entries on AArch64. First refusals fall by 30 and 31.
+Typed reference calls add 9 compiled functions and 22,452 native entries
+per target, removing all 7 first refusals at `call_ref` in this corpus.
 These are coverage counts, not speedups.
 
-- x86: 8 limits, 0 signatures, 10 bytecode shapes, 72 unsupported opcodes,
+- x86: 8 limits, 0 signatures, 10 bytecode shapes, 65 unsupported opcodes,
   0 emission failures, and 0 installation refusals.
-- AArch64: 8 limits, 0 signatures, 10 bytecode shapes, 72 unsupported
+- AArch64: 8 limits, 0 signatures, 10 bytecode shapes, 65 unsupported
   opcodes, 0 emission failures, and 0 installation refusals. Reusing x86's
   module-sized reservation removes all 99 installation refusals from the
   previous fixed 64 KiB arena. Both targets retain the 64 KiB minimum and
@@ -174,6 +180,6 @@ tests require native entry for all eight helper paths, imported/defined
 tables, mixed-width copies, aliased overlap, high indices/counts, growth
 failure, full references, cross-instance calls, and host-callback GC.
 The leading remaining opcode refusals are `return_call_indirect` (21),
-`return_call` (18), `return_call_ref` (17), and `call_ref` (7), with the
-same counts on both targets. Unsupported bytecode shapes and the eight
+`return_call` (18), `return_call_ref` (17), and `br_on_non_null` (4), with
+the same counts on both targets. Unsupported bytecode shapes and the eight
 intentional resource limits also remain.

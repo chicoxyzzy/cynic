@@ -631,14 +631,19 @@ test "an externref round-trips JS -> wasm -> host -> wasm -> JS" {
     try expectIntWasm(src, 1);
 }
 
-test "a native externref call and table64 indirect call retain JS objects across host GC" {
+test "a native externref call and table64 indirect call and call_ref retain JS objects across host GC" {
     if (comptime !@import("wasm/spasm.zig").supported) return error.SkipZigTest;
     const indirect_bytes =
         "new Uint8Array([0,97,115,109,1,0,0,0," ++
         "1,6,1,96,1,111,1,111,2,10,1,3,101,110,118,2,105,100,0,0," ++
         "3,2,1,0,4,4,1,112,4,1,7,7,1,3,114,117,110,0,1," ++
         "9,7,1,0,66,0,11,1,0,10,11,1,9,0,32,0,66,0,17,0,0,11])";
-    inline for (.{ extern_id_bytes, indirect_bytes }) |bytes| {
+    const ref_bytes =
+        "new Uint8Array([0,97,115,109,1,0,0,0," ++
+        "1,6,1,96,1,111,1,111,2,10,1,3,101,110,118,2,105,100,0,0," ++
+        "3,2,1,0,7,7,1,3,114,117,110,0,1," ++
+        "9,5,1,3,0,1,0,10,10,1,8,0,32,0,210,0,20,0,11])";
+    inline for (.{ extern_id_bytes, indirect_bytes, ref_bytes }) |bytes| {
         var realm = Realm.init(testing.allocator);
         defer realm.deinit();
         realm.allow_wasm_compile = true;
@@ -646,10 +651,12 @@ test "a native externref call and table64 indirect call retain JS objects across
         try realm.installBuiltins();
         try realm.installTestGlobals();
         const src =
+            "const token = {};" ++
             "const inst = new WebAssembly.Instance(new WebAssembly.Module(" ++ bytes ++ ")," ++
-            "{ env: { id: (x) => { __collectGarbage(); return x; } } });" ++
+            "{ env: { id: (x) => { __collectGarbage(); if (x === null) throw token; return x; } } });" ++
             "const result = inst.exports.run({ id: 7 });" ++
-            "result.id === 7 ? 1 : 0;";
+            "let same = false; try { inst.exports.run(null); } catch (e) { same = e === token; }" ++
+            "result.id === 7 && same ? 1 : 0;";
         const outcome = try lantern.evaluateScript(testing.allocator, &realm, src);
         const value = switch (outcome) {
             .value => |v| v,
@@ -660,6 +667,30 @@ test "a native externref call and table64 indirect call retain JS objects across
         try testing.expect(realm.wasm_instances.items[0].spasm_runs > 0);
         try testing.expectEqual(@as(u32, 0), realm.wasm_instances.items[0].spasm_refusals);
     }
+}
+
+test "call_ref rejects an incompatible exported function supplied by JS" {
+    if (comptime !@import("wasm/spasm.zig").supported) return error.SkipZigTest;
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.allow_wasm_compile = true;
+    realm.jit_enabled = true;
+    try realm.installBuiltins();
+    const src =
+        "const target = new WebAssembly.Instance(new WebAssembly.Module(new Uint8Array([" ++
+        "0,97,115,109,1,0,0,0,1,5,1,96,0,1,127,3,2,1,0,7,5,1,1,102,0,0,10,6,1,4,0,65,42,11])));" ++
+        "const caller = new WebAssembly.Instance(new WebAssembly.Module(new Uint8Array([" ++
+        "0,97,115,109,1,0,0,0,1,12,2,96,1,127,1,127,96,1,99,0,1,127," ++
+        "3,2,1,1,7,5,1,1,102,0,0,10,10,1,8,0,65,37,32,0,20,0,11])));" ++
+        "let caught = false; try { caller.exports.f(target.exports.f); }" ++
+        "catch (e) { caught = e instanceof WebAssembly.RuntimeError; } caught ? 1 : 0;";
+    const outcome = try lantern.evaluateScript(testing.allocator, &realm, src);
+    const value = switch (outcome) {
+        .value => |v| v,
+        else => return error.WasmThrewUnexpectedly,
+    };
+    try testing.expectEqual(@as(i32, 1), value.asInt32());
+    try testing.expectEqual(@as(u32, 1), realm.wasm_instances.items[1].spasm_runs);
 }
 
 test "a native externref global retains its JS object across host GC" {

@@ -667,13 +667,22 @@ the measured design space:
   self-links, scalar `select`, value-carrying structured branches, `br_table`,
   nested explicit `return`, catchable `unreachable`, stable W^X-safe
   cross-function call gates,
-  scalar `call_indirect`, `ref.null` / `ref.func` / `ref.is_null`, and the
+  `call_indirect` / `call_ref`, `ref.null` / `ref.func` / `ref.is_null`, and the
   table get/set/size/copy/init/grow/fill family plus `elem.drop`. Runtime
   references use their full 128-bit scratch Cell across the helper boundary.
   Reference parameters/results/locals, typed select (including constructed
   types), single-result branches, and direct/indirect calls now preserve both
   halves throughout. Native call gates initialize reference locals to null;
   host calls and refused callees keep the checked helper boundary.
+  Typed reference calls share indirect-call staging and memory-view refresh.
+  They reject null, retain the full defining-instance reference, and preserve
+  the caller's execution controller across foreign calls. Both dynamic call
+  paths also forward uncaught Wasm exception records, not only trap codes.
+  A native layout guard rejects incompatible host-supplied references before
+  using the call buffer; complete typed-reference assignability at the JS
+  boundary remains a separate follow-up.
+  Native tail calls remain deferred until they can replace the caller frame
+  without growing the host stack.
   References and vectors preserve full Cells on both targets, including
   parameters/results, locals/globals, select, calls, and single-result merges.
   The shared SIMD foundation includes `v128.const/load/store` and `i32x4.add`

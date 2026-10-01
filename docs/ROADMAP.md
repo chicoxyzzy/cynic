@@ -2431,8 +2431,16 @@ and the per-builtin checklist; this section tracks status.
   including conditional/table branches, nested exits, and multiple results.
   AArch64 tables also compile beyond the comparison-immediate range, with
   native-entry regressions around the 4,096-entry boundary on both targets.
-  Native tail/reference calls and the native-register/imported-call ABI
-  remain next.
+  Typed `call_ref` now compiles on both targets, reusing indirect-call
+  staging and the checked invocation boundary. Full references, live values,
+  foreign instances, memory growth, cancellation, and interpreter fallback
+  are preserved. Both dynamic call paths forward foreign Wasm exception
+  records. Native-entry tests also exercise host GC and bounded recursion.
+  A defensive layout check protects native call buffers from incompatible
+  host-supplied references. Complete typed-reference assignability at JS
+  entry/return/global boundaries remains follow-up work.
+  Proper native tail calls and the native-register/imported-call ABI remain
+  next; tail calls must replace frames, not build another ordinary call.
 
   The architecture for all three tiers — the shared codegen
   substrate and the JS↔wasm call-boundary fast path included — is

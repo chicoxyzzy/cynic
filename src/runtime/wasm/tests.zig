@@ -11601,6 +11601,352 @@ test "wasm multi-memory: a memarg memory index past the count is rejected" {
 
 // ── function references (typed refs, call_ref, br_on_*) ─────────────
 
+fn buildCallRefModule(a: std.mem.Allocator, types: []const u8, callee: []const u8, caller: []const u8, host: bool, memory: bool) ![]const u8 {
+    var code: List = .empty;
+    try uleb(a, &code, if (host) 1 else 2);
+    if (!host) {
+        try uleb(a, &code, callee.len);
+        try code.appendSlice(a, callee);
+    }
+    try uleb(a, &code, caller.len);
+    try code.appendSlice(a, caller);
+    return assemble(a, &.{
+        .{ .id = 1, .body = types },
+        .{ .id = 2, .body = if (host) &.{ 1, 1, 'h', 1, 'f', 0, 0 } else &.{0} },
+        .{ .id = 3, .body = if (host) &.{ 1, 1 } else &.{ 2, 0, 1 } },
+        .{ .id = 5, .body = if (memory) &.{ 1, 1, 1, 3 } else &.{0} },
+        .{ .id = 9, .body = &.{ 1, 3, 0, 1, 0 } }, // declare ref.func 0
+        .{ .id = 10, .body = code.items },
+    });
+}
+
+test "wasm spasm: call_ref compiles constant and runtime targets with all value kinds" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const kinds = [_]u8{ 0x7f, 0x7e, 0x7d, 0x7c, 0x6f, 0x7b };
+    const values = [_]u128{ 42, 0xfedc_ba98_7654_3210, 0x8000_0000, 0x8000_0000_0000_0000, 0x1234_5678_9abc_def0_ffff_ffff_ffff_ffff, 0xabcdef01_23456789_abcdef01_23456789 };
+    for (0..7) |arity| {
+        for ([_]bool{ false, true }) |runtime_ref| {
+            var types: List = .empty;
+            try types.append(a, 2);
+            for (0..2) |index| {
+                try types.appendSlice(a, &.{ 0x60, @intCast(arity + index) });
+                try types.appendSlice(a, kinds[0..arity]);
+                if (index == 1) try types.appendSlice(a, &.{ 0x63, 0 });
+                try types.append(a, @intCast(arity));
+                try types.appendSlice(a, kinds[0..arity]);
+            }
+            var callee: List = .empty;
+            var caller: List = .empty;
+            try callee.append(a, 0);
+            try caller.append(a, 0);
+            for (0..arity) |index| {
+                try callee.appendSlice(a, &.{ 0x20, @intCast(index) });
+                try caller.appendSlice(a, &.{ 0x20, @intCast(index) });
+            }
+            try callee.append(a, 0x0b);
+            try caller.appendSlice(a, if (runtime_ref) &.{ 0x20, @intCast(arity) } else &.{ 0xd2, 0 });
+            try caller.appendSlice(a, &.{ 0x14, 0, 0x0b });
+            const bytes = try buildCallRefModule(a, types.items, callee.items, caller.items, false, false);
+            const module = try wasm.decode(a, bytes);
+            for ([_]bool{ false, true }) |native| {
+                var instance: interp.Instance = undefined;
+                try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+                defer instance.deinit();
+                instance.spasm_enabled = native;
+                for ([_]u128{ 0, interp.makeFuncRef(&instance, 0) }) |ref| {
+                    var args: [7]u128 = undefined;
+                    @memcpy(args[0..arity], values[0..arity]);
+                    args[arity] = ref;
+                    const results = try interp.invoke(&instance, testing.allocator, 1, args[0 .. arity + 1]);
+                    defer testing.allocator.free(results);
+                    try testing.expectEqualSlices(u128, values[0..arity], results);
+                }
+                if (native) {
+                    try testing.expectEqual(@as(u32, 2), instance.spasm_compiles);
+                    try testing.expectEqual(@as(u32, 4), instance.spasm_runs);
+                    try testing.expectEqual(@as(u32, 0), instance.spasm_refusals);
+                }
+            }
+        }
+    }
+}
+
+test "wasm spasm: call_ref retains foreign instances live operands and fallback traps" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const types = &[_]u8{ 2, 0x60, 1, 0x6f, 1, 0x6f, 0x60, 5, 0x7e, 0x7b, 0x6f, 0x6f, 0x63, 0, 4, 0x7e, 0x7b, 0x6f, 0x6f };
+    const caller = &[_]u8{ 0, 0x20, 0, 0x20, 1, 0x20, 2, 0x20, 3, 0x20, 4, 0x14, 0, 0x0b };
+    const consumer_module = try wasm.decode(a, try buildCallRefModule(a, types, &.{ 0, 0, 0x0b }, caller, false, false));
+    for ([_]bool{ false, true }) |fallback| {
+        const callee: []const u8 = if (fallback) &.{ 0, 0x20, 0, 0xd4, 0x0b } else &.{ 0, 0x20, 0, 0x0b };
+        const provider_module = try wasm.decode(a, try buildCallRefModule(a, types, callee, caller, false, false));
+        for ([_]bool{ false, true }) |native| {
+            var provider: interp.Instance = undefined;
+            try interp.instantiate(&provider, a, testing.allocator, &provider_module, .{});
+            defer provider.deinit();
+            provider.spasm_enabled = native;
+            var consumer: interp.Instance = undefined;
+            try interp.instantiate(&consumer, a, testing.allocator, &consumer_module, .{});
+            defer consumer.deinit();
+            consumer.spasm_enabled = native;
+            const values = [_]u128{ 0xfedc_ba98_7654_3210, simd_live_vector, table64_reference, ~table64_reference };
+            const args = values ++ [_]u128{interp.makeFuncRef(&provider, 0)};
+            const results = try interp.invoke(&consumer, testing.allocator, 1, &args);
+            defer testing.allocator.free(results);
+            try testing.expectEqualSlices(u128, &values, results);
+            if (fallback) try testing.expectError(error.NullReference, interp.invoke(&consumer, testing.allocator, 1, &.{ values[0], values[1], values[2], interp.REF_NULL, args[4] }));
+            if (native) {
+                try testing.expect(consumer.spasm_cache.?.slots[1] == .compiled);
+                try testing.expect(consumer.spasm_runs > 0);
+                try testing.expectEqual(@as(u32, 0), consumer.spasm_refusals);
+                try testing.expectEqual(@as(u32, if (fallback) 0 else 1), provider.spasm_runs);
+            }
+        }
+    }
+}
+
+test "wasm spasm: call_ref preserves foreign references with module-relative types" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const provider_module = try wasm.decode(a, try assemble(a, &.{
+        .{ .id = 1, .body = &.{ 2, 0x60, 1, 0x63, 1, 1, 0x63, 1, 0x60, 0, 1, 0x7f } },
+        .{ .id = 3, .body = &.{ 2, 0, 1 } },
+        .{ .id = 10, .body = &.{ 2, 4, 0, 0x20, 0, 0x0b, 4, 0, 0x41, 42, 0x0b } },
+    }));
+    const consumer_module = try wasm.decode(a, try assemble(a, &.{
+        .{ .id = 1, .body = &.{ 3, 0x60, 0, 1, 0x7f, 0x60, 1, 0x63, 0, 1, 0x63, 0, 0x60, 2, 0x63, 0, 0x63, 1, 1, 0x63, 0 } },
+        .{ .id = 3, .body = &.{ 1, 2 } },
+        .{ .id = 10, .body = &.{ 1, 8, 0, 0x20, 0, 0x20, 1, 0x14, 1, 0x0b } },
+    }));
+    for ([_]bool{ false, true }) |native| {
+        var provider: interp.Instance = undefined;
+        try interp.instantiate(&provider, a, testing.allocator, &provider_module, .{});
+        defer provider.deinit();
+        provider.spasm_enabled = native;
+        var consumer: interp.Instance = undefined;
+        try interp.instantiate(&consumer, a, testing.allocator, &consumer_module, .{});
+        defer consumer.deinit();
+        consumer.spasm_enabled = native;
+        const ref = interp.makeFuncRef(&provider, 1);
+        const results = try interp.invoke(&consumer, testing.allocator, 0, &.{ ref, interp.makeFuncRef(&provider, 0) });
+        defer testing.allocator.free(results);
+        try testing.expectEqualSlices(u128, &.{ref}, results);
+        if (native) {
+            try testing.expectEqual(@as(u32, 1), consumer.spasm_runs);
+            try testing.expectEqual(@as(u32, 1), provider.spasm_runs);
+        }
+    }
+}
+
+test "wasm spasm: call_ref rejects incompatible host-supplied call layouts" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const consumer_module = try wasm.decode(a, try buildCallRefModule(a, &.{ 2, 0x60, 1, 0x7f, 1, 0x7f, 0x60, 2, 0x7f, 0x63, 0, 1, 0x7f }, &.{ 0, 0, 0x0b }, &.{ 0, 0x20, 0, 0x20, 1, 0x14, 0, 0x0b }, false, false));
+    const Case = struct { params: []const u8, results: []const u8, body: []const u8 };
+    for ([_]Case{
+        .{ .params = &.{}, .results = &.{0x7f}, .body = &.{ 0, 0x41, 42, 0x0b } },
+        .{ .params = &.{0x7f}, .results = &.{ 0x7f, 0x7f }, .body = &.{ 0, 0x20, 0, 0x20, 0, 0x0b } },
+        .{ .params = &.{0x7b}, .results = &.{0x7b}, .body = &.{ 0, 0x20, 0, 0x0b } },
+        .{ .params = &.{0x70}, .results = &.{0x70}, .body = &.{ 0, 0x20, 0, 0x0b } },
+        .{ .params = &.{0x7c}, .results = &.{0x7c}, .body = &.{ 0, 0x20, 0, 0x0b } },
+        .{ .params = &.{ 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f }, .results = &.{0x7f}, .body = &.{ 0, 0x20, 0, 0x0b } },
+    }) |case| {
+        const provider_module = try wasm.decode(a, try buildFunc(a, case.params, case.results, case.body, "f"));
+        var provider: interp.Instance = undefined;
+        try interp.instantiate(&provider, a, testing.allocator, &provider_module, .{});
+        defer provider.deinit();
+        var consumer: interp.Instance = undefined;
+        try interp.instantiate(&consumer, a, testing.allocator, &consumer_module, .{});
+        defer consumer.deinit();
+        consumer.spasm_enabled = true;
+        const outcome = interp.invoke(&consumer, testing.allocator, 1, &.{ 37, interp.makeFuncRef(&provider, 0) });
+        defer if (outcome) |result| testing.allocator.free(result) else |_| {};
+        try testing.expectError(error.IndirectCallTypeMismatch, outcome);
+        try testing.expectEqual(@as(u32, 1), consumer.spasm_runs);
+    }
+}
+
+test "wasm spasm: call_ref null targets trap without falling back" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_]bool{ false, true }) |runtime_ref| {
+        for ([_]bool{ false, true }) |large_locals| {
+            const instructions: []const u8 = if (runtime_ref) &.{ 0x20, 0, 0x14, 0, 0x0b } else &.{ 0xd0, 0, 0x14, 0, 0x0b };
+            // 300 extra locals put the reference Cell beyond ARM's ADD immediate.
+            const body = try std.mem.concat(a, u8, &.{ if (large_locals) &.{ 1, 0xac, 2, 0x7f } else &.{0}, instructions });
+            const module = try wasm.decode(a, try buildCallRefModule(a, &.{ 2, 0x60, 0, 0, 0x60, 1, 0x63, 0, 0 }, &.{ 0, 0x0b }, body, false, false));
+            for ([_]bool{ false, true }) |native| {
+                var instance: interp.Instance = undefined;
+                try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+                defer instance.deinit();
+                instance.spasm_enabled = native;
+                try testing.expectError(error.NullReference, interp.invoke(&instance, testing.allocator, 1, &.{interp.REF_NULL}));
+                if (native) {
+                    try testing.expectEqual(@as(u32, 1), instance.spasm_runs);
+                    try testing.expectEqual(@as(u32, 0), instance.spasm_refusals);
+                }
+            }
+        }
+    }
+}
+
+test "wasm spasm: call_ref invokes foreign host imports and propagates their traps" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    const Host = struct {
+        calls: u32 = 0,
+        fn call(ctx: ?*anyopaque, args: []const u128, results: []u128) wasm.TrapError!void {
+            const self: *@This() = @ptrCast(@alignCast(ctx.?));
+            self.calls += 1;
+            if (args[0] == interp.REF_NULL) return error.Unreachable;
+            results[0] = args[0];
+        }
+    };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const bytes = try buildCallRefModule(a, &.{ 2, 0x60, 1, 0x6f, 1, 0x6f, 0x60, 2, 0x6f, 0x63, 0, 1, 0x6f }, &.{}, &.{ 0, 0x20, 0, 0x20, 1, 0x14, 0, 0x0b }, true, false);
+    const module = try wasm.decode(a, bytes);
+    for ([_]bool{ false, true }) |native| {
+        var provider_host: Host = .{};
+        var consumer_host: Host = .{};
+        var provider: interp.Instance = undefined;
+        try interp.instantiate(&provider, a, testing.allocator, &module, .{ .funcs = &.{.{ .host = .{ .fn_ptr = Host.call, .ctx = &provider_host, .params = 1, .results = 1 } }} });
+        defer provider.deinit();
+        var consumer: interp.Instance = undefined;
+        try interp.instantiate(&consumer, a, testing.allocator, &module, .{ .funcs = &.{.{ .host = .{ .fn_ptr = Host.call, .ctx = &consumer_host, .params = 1, .results = 1 } }} });
+        defer consumer.deinit();
+        consumer.spasm_enabled = native;
+        const ref = interp.makeFuncRef(&provider, 0);
+        const results = try interp.invoke(&consumer, testing.allocator, 1, &.{ table64_reference, ref });
+        defer testing.allocator.free(results);
+        try testing.expectEqual(table64_reference, results[0]);
+        try testing.expectError(error.Unreachable, interp.invoke(&consumer, testing.allocator, 1, &.{ interp.REF_NULL, ref }));
+        try testing.expectEqual(@as(u32, 2), provider_host.calls);
+        try testing.expectEqual(@as(u32, 0), consumer_host.calls);
+        if (native) {
+            try testing.expectEqual(@as(u32, 2), consumer.spasm_runs);
+            try testing.expectEqual(@as(u32, 0), consumer.spasm_refusals);
+        }
+    }
+}
+
+test "wasm spasm: call_ref refreshes caller memory after growth with live values" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const bytes = try buildCallRefModule(a, &.{ 2, 0x60, 0, 1, 0x7f, 0x60, 4, 0x7e, 0x7b, 0x6f, 0x63, 0, 4, 0x7e, 0x7b, 0x6f, 0x7f }, &.{ 0, 0x41, 1, 0x40, 0, 0x0b }, &.{ 0, 0x20, 0, 0x20, 1, 0x20, 2, 0x20, 3, 0x14, 0, 0x1a, 0x41, 0x80, 0x80, 4, 0x28, 2, 0, 0x0b }, false, true);
+    const module = try wasm.decode(a, bytes);
+    for ([_]bool{ false, true }) |native| {
+        var instance: interp.Instance = undefined;
+        try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+        defer instance.deinit();
+        instance.spasm_enabled = native;
+        const args = [_]u128{ 0xfedc_ba98_7654_3210, simd_live_vector, table64_reference, interp.makeFuncRef(&instance, 0) };
+        const results = try interp.invoke(&instance, testing.allocator, 1, &args);
+        defer testing.allocator.free(results);
+        try testing.expectEqualSlices(u128, &.{ args[0], args[1], args[2], 0 }, results);
+        try testing.expectEqual(@as(usize, 2 * 65536), instance.memories[0].data.len);
+        if (native) {
+            try testing.expectEqual(@as(u32, 2), instance.spasm_runs);
+            try testing.expectEqual(@as(u32, 0), instance.spasm_refusals);
+        }
+    }
+}
+
+test "wasm spasm: call_ref preserves a foreign Wasm exception tag and payload" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const provider_module = try wasm.decode(a, try assemble(a, &.{
+        .{ .id = 1, .body = &.{ 2, 0x60, 0, 0, 0x60, 1, 0x7f, 0 } },
+        .{ .id = 3, .body = &.{ 1, 0 } },
+        .{ .id = 13, .body = &.{ 1, 0, 1 } },
+        .{ .id = 10, .body = &.{ 1, 6, 0, 0x41, 37, 0x08, 0, 0x0b } },
+    }));
+    const ref_module = try wasm.decode(a, try buildCallRefModule(a, &.{ 2, 0x60, 0, 0, 0x60, 1, 0x63, 0, 0 }, &.{ 0, 0x0b }, &.{ 0, 0x20, 0, 0x14, 0, 0x0b }, false, false));
+    const indirect_module = try wasm.decode(a, try assemble(a, &.{
+        .{ .id = 1, .body = &.{ 2, 0x60, 0, 0, 0x60, 1, 0x63, 0, 0 } },
+        .{ .id = 3, .body = &.{ 1, 1 } },
+        .{ .id = 4, .body = &.{ 1, 0x70, 0, 1 } },
+        .{ .id = 10, .body = &.{ 1, 13, 0, 0x41, 0, 0x20, 0, 0x26, 0, 0x41, 0, 0x11, 0, 0, 0x0b } },
+    }));
+    for ([_]bool{ false, true }) |typed| {
+        const consumer_module = if (typed) ref_module else indirect_module;
+        for ([_]bool{ false, true }) |native| {
+            var provider: interp.Instance = undefined;
+            try interp.instantiate(&provider, a, testing.allocator, &provider_module, .{});
+            defer provider.deinit();
+            provider.spasm_enabled = native;
+            var consumer: interp.Instance = undefined;
+            try interp.instantiate(&consumer, a, testing.allocator, &consumer_module, .{});
+            defer consumer.deinit();
+            consumer.spasm_enabled = native;
+            try testing.expectError(error.UncaughtException, interp.invoke(&consumer, testing.allocator, if (typed) 1 else 0, &.{interp.makeFuncRef(&provider, 0)}));
+            if (native) try testing.expectEqual(@as(u32, 1), consumer.spasm_runs);
+            try testing.expect(consumer.pending_exn != null);
+            try testing.expectEqual(provider.tag_identities[0], consumer.pending_exn.?.tag);
+            try testing.expectEqualSlices(u128, &.{37}, consumer.pending_exn.?.payload);
+        }
+    }
+}
+
+test "wasm spasm: call_ref carries cancellation across instances and bounds recursion" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    const Control = struct {
+        polls: u32 = 0,
+        fn poll(ctx: *anyopaque) wasm.ExecutionPoll {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.polls += 1;
+            return if (self.polls >= 3) .cooperative_interrupted else .proceed;
+        }
+    };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const types = &[_]u8{ 2, 0x60, 0, 0, 0x60, 1, 0x63, 0, 0 };
+    const caller = &[_]u8{ 0, 0x20, 0, 0x14, 0, 0x0b };
+    const module = try wasm.decode(a, try buildCallRefModule(a, types, &.{ 0, 3, 0x40, 0x0c, 0, 0x0b, 0x0b }, caller, false, false));
+    for ([_]bool{ false, true }) |native| {
+        var provider: interp.Instance = undefined;
+        try interp.instantiate(&provider, a, testing.allocator, &module, .{});
+        defer provider.deinit();
+        provider.spasm_enabled = native;
+        var consumer: interp.Instance = undefined;
+        try interp.instantiate(&consumer, a, testing.allocator, &module, .{});
+        defer consumer.deinit();
+        consumer.spasm_enabled = native;
+        var control: Control = .{};
+        consumer.execution_control = .{ .ctx = &control, .poll_fn = Control.poll, .armed_fn = CountingExecutionControl.armed };
+        try testing.expectError(error.ExecutionInterrupted, interp.invoke(&consumer, testing.allocator, 1, &.{interp.makeFuncRef(&provider, 0)}));
+        try testing.expectEqual(@as(u32, 3), control.polls);
+        if (native) {
+            try testing.expectEqual(@as(u32, 1), consumer.spasm_runs);
+            try testing.expectEqual(@as(u32, 1), provider.spasm_runs);
+        }
+    }
+    const recursive = try wasm.decode(a, try buildCallRefModule(a, types, &.{ 0, 0xd2, 0, 0x14, 0, 0x0b }, caller, false, false));
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, &recursive, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true;
+    try testing.expectError(error.CallStackExhausted, interp.invoke(&instance, testing.allocator, 0, &.{}));
+    try testing.expect(instance.spasm_runs > 1);
+    try testing.expectEqual(@as(u32, 0), instance.spasm_refusals);
+}
+
 test "wasm function-references: call_ref calls through a typed reference" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();

@@ -276,6 +276,17 @@ pub const CallIndirectHelperFn = *const fn (
     execution_control: ?*anyopaque,
 ) callconv(.c) u32;
 
+/// Pass the complete reference Cell by address, avoiding target-specific
+/// u128 argument ABIs. The type index also bounds the call layout when a
+/// host supplies a reference that did not pass Wasm's static validation.
+pub const CallRefHelperFn = *const fn (
+    instance: *anyopaque,
+    type_index: u32,
+    ref_slot: *const Cell,
+    buf: [*]Cell,
+    execution_control: ?*anyopaque,
+) callconv(.c) u32;
+
 /// The native helper a Spasm-compiled `memory.grow` (§4.4.7) branches to:
 /// `(instance, mem_index, delta_pages, out_baselen) -> old_pages`. It grows
 /// the memory and returns the previous page count, or -1 on failure (grow
@@ -404,6 +415,7 @@ pub const TableFillHelperFn = *const fn (instance: *anyopaque, table_index: u32,
 pub const Helpers = struct {
     call: ?CallHelperFn = null,
     call_indirect: ?CallIndirectHelperFn = null,
+    call_ref: ?CallRefHelperFn = null,
     mem_view: ?MemViewHelperFn = null,
     mem_grow: ?MemGrowHelperFn = null,
     mem_init: ?MemInitHelperFn = null,
@@ -432,6 +444,7 @@ const op_br_table: u8 = 0x0e;
 const op_return: u8 = 0x0f;
 const op_call: u8 = 0x10;
 const op_call_indirect: u8 = 0x11;
+const op_call_ref: u8 = 0x14;
 const op_drop: u8 = 0x1a;
 const op_select: u8 = 0x1b;
 // §5.4.2 — typed select carries a result-type vector immediate (a
@@ -903,6 +916,7 @@ pub fn compileWithDiagnostics(
                 .execution_poll_helper = @intFromPtr(execution_poll_helper),
                 .call_helper = if (helpers.call) |helper| @intFromPtr(helper) else null,
                 .call_indirect_helper = if (helpers.call_indirect) |helper| @intFromPtr(helper) else null,
+                .call_ref_helper = if (helpers.call_ref) |helper| @intFromPtr(helper) else null,
                 .call_gate_stub = if (call_gate_stub) |stub| @intFromPtr(stub) else null,
                 .call_gates_base = if (call_gates.len == 0) null else @intFromPtr(call_gates.ptr),
                 .call_gates_len = call_gates.len,
@@ -4200,17 +4214,16 @@ fn compileAarch64(
                 try m.emit(a64.addSpImm(framebytes));
                 sp = below + nresults;
             },
-            op_call_indirect => {
-                // §5.4.1 call_indirect — the declared type and table indices
-                // are immediates; the runtime element index is the top
-                // operand (consumed). The args sit just below it, anything
-                // beneath them survives the call. A native helper resolves +
-                // type-checks the table element and dispatches like a direct
-                // call; its trap status flows through the shared epilogue.
-                if (helpers.call_indirect == null) return null; // helper not wired
+            op_call_indirect, op_call_ref => {
+                // Both calls consume a target above their arguments; typed
+                // references bypass the indirect call's table lookup.
+                const ref_call = op == op_call_ref;
+                if (ref_call) {
+                    if (helpers.call_ref == null) return null;
+                } else if (helpers.call_indirect == null) return null;
                 const type_idx = readUleb32(body, &i) orelse return null;
-                const table_idx = readUleb32(body, &i) orelse return null;
-                const table64 = tableIs64(module, table_idx) orelse return null;
+                const table_idx = if (ref_call) 0 else readUleb32(body, &i) orelse return null;
+                const table64 = if (ref_call) false else tableIs64(module, table_idx) orelse return null;
                 if (type_idx >= module.types.len) return null;
                 const callee = &module.types[type_idx];
                 const nparams: usize = callee.params.len;
@@ -4232,13 +4245,13 @@ fn compileAarch64(
                 const bufcells = @max(nparams, nresults);
                 const spill_off: u15 = @intCast(bufcells * @sizeOf(Cell));
                 const op_spill_off: u15 = spill_off + 40;
-                const raw_frame = @as(usize, bufcells) * @sizeOf(Cell) + 40 + below * 8;
-                const framebytes: u12 = @intCast((raw_frame + 15) & ~@as(usize, 15));
+                const framebytes = callFrameBytes(bufcells, below) orelse return null;
 
                 // Materialize the index (top). `idx_reg` is x9..x15,
                 // never a boundary register, so the helper-arg setup below
                 // does not clobber it.
-                const idx_reg = try materialize(&m, stack[idx_depth], idx_depth);
+                const idx_reg: ?a64.Reg = if (ref_call) null else try materialize(&m, stack[idx_depth], idx_depth);
+                if (ref_call) try emitRefIntoSlot(&m, stack[idx_depth], idx_depth, num_locals);
 
                 try m.emit(a64.subSpImm(framebytes));
                 try m.emit(a64.addRegSp(.x6, 0));
@@ -4264,16 +4277,31 @@ fn compileAarch64(
                 // Stage each arg as a full cell (arg k at depth below+k).
                 try emitCallArguments(&m, &stack, num_locals, below, callee.params);
 
-                // Helper ABI: x0 = instance (x19), x1 = type index, x2 =
-                // table index, x3 = element index (the popped top operand),
-                // x4 = buffer pointer, x5 = effective execution controller.
-                try m.emit(a64.movReg(.x0, .x19));
-                try m.movImm64(.x1, type_idx);
-                try m.movImm64(.x2, table_idx);
-                try m.emit(if (table64) a64.movReg(.x3, idx_reg) else a64.movRegW(.x3, idx_reg));
-                try m.emit(a64.movReg(.x4, .x6));
-                try m.emit(a64.movReg(.x5, .x21));
-                try m.callAbs(.x16, @intFromPtr(helpers.call_indirect.?));
+                if (ref_call) {
+                    // Take the reference address before replacing the locals
+                    // base in x0 with the calling instance.
+                    const ref_off = refSlotOff(num_locals, idx_depth);
+                    if (ref_off <= 4095) {
+                        try m.emit(a64.addImm(.x2, .x0, @intCast(ref_off), false));
+                    } else {
+                        try m.movImm64(.x16, ref_off);
+                        try m.emit(a64.addReg(.x2, .x0, .x16));
+                    }
+                    try m.emit(a64.movReg(.x0, .x19));
+                    try m.movImm64(.x1, type_idx);
+                    try m.emit(a64.movReg(.x3, .x6));
+                    try m.emit(a64.movReg(.x4, .x21));
+                    try m.callAbs(.x16, @intFromPtr(helpers.call_ref.?));
+                } else {
+                    // instance, type, table, element, buffer, controller.
+                    try m.emit(a64.movReg(.x0, .x19));
+                    try m.movImm64(.x1, type_idx);
+                    try m.movImm64(.x2, table_idx);
+                    try m.emit(if (table64) a64.movReg(.x3, idx_reg.?) else a64.movRegW(.x3, idx_reg.?));
+                    try m.emit(a64.movReg(.x4, .x6));
+                    try m.emit(a64.movReg(.x5, .x21));
+                    try m.callAbs(.x16, @intFromPtr(helpers.call_indirect.?));
+                }
 
                 // Trap status in w0; a nested trap (or a resolve/type-check
                 // failure) releases the frame and falls into the epilogue.
