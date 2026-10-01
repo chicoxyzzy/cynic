@@ -2637,24 +2637,24 @@ pub fn compile(
                 sp = current.height + current.block_type.params().len;
                 for (current.block_type.params(), current.height..) |pt, d| stack[d] = runtimeLoc(pt);
             },
-            op_br => {
-                const depth = readUleb32(body, &i) orelse return null;
-                if (depth >= ctrl_len) return null;
-                const target = &ctrl[ctrl_len - 1 - depth];
-                if (!(try emitBranchValues(&m, stack[0..], num_locals, sp, target.height, target.branch_arity))) return null;
-                if (target.kind == .loop) {
-                    try emitExecutionPoll(&m, &epilogue, config.execution_poll_helper, config.wake_flag_offset);
+            op_br, op_return => {
+                const depth: usize = if (op == op_br) readUleb32(body, &i) orelse return null else ctrl_len;
+                if (!(try emitBranchOrReturn(&m, &stack, num_locals, sp, depth, ctrl[0..ctrl_len], ftype.results.len, &explicit_return, &epilogue, config))) return null;
+                switch ((try closeTerminatedArm(&m, gpa, body, &i, &stack, &sp, &ctrl, &ctrl_len)) orelse return null) {
+                    .continue_compilation => {},
+                    .function_end => {
+                        sp = ftype.results.len;
+                        for (ftype.results, 0..) |rt, r| stack[r] = runtimeLoc(rt);
+                        function_ended = true;
+                        break :body_loop;
+                    },
                 }
-                try m.jump(&target.label);
-
-                _ = (try closeTerminatedArm(&m, gpa, body, &i, &stack, &sp, &ctrl, &ctrl_len)) orelse return null;
             },
             op_br_if => {
                 const depth = readUleb32(body, &i) orelse return null;
-                if (sp == 0 or depth >= ctrl_len) return null;
+                if (sp == 0) return null;
                 sp -= 1;
                 const condition = stack[sp];
-                const target = &ctrl[ctrl_len - 1 - depth];
                 try materialize(&m, condition, num_locals, sp);
                 try m.load32Disp32(.rax, .r12, scratchOffset(num_locals, sp));
                 try m.cmpRegImm32(.rax, 0);
@@ -2662,11 +2662,7 @@ pub fn compile(
                 var not_taken: x64.Masm.Label = .{};
                 defer not_taken.deinit(gpa);
                 try m.jumpCond(.equal, &not_taken);
-                if (!(try emitBranchValues(&m, stack[0..], num_locals, sp, target.height, target.branch_arity))) return null;
-                if (target.kind == .loop) {
-                    try emitExecutionPoll(&m, &epilogue, config.execution_poll_helper, config.wake_flag_offset);
-                }
-                try m.jump(&target.label);
+                if (!(try emitBranchOrReturn(&m, &stack, num_locals, sp, depth, ctrl[0..ctrl_len], ftype.results.len, &explicit_return, &epilogue, config))) return null;
                 try m.bind(&not_taken);
             },
             op_br_table => {
@@ -2683,42 +2679,20 @@ pub fn compile(
                 var case_index: u32 = 0;
                 while (case_index < count) : (case_index += 1) {
                     const depth = readUleb32(body, &i) orelse return null;
-                    if (depth >= ctrl_len) return null;
-                    const target = &ctrl[ctrl_len - 1 - depth];
                     var next_case: x64.Masm.Label = .{};
                     defer next_case.deinit(gpa);
                     try m.cmpReg32Imm32(.r10, case_index);
                     try m.jumpCond(.not_equal, &next_case);
-                    if (!(try emitBranchValues(&m, stack[0..], num_locals, sp, target.height, target.branch_arity))) return null;
-                    if (target.kind == .loop) {
-                        try emitExecutionPoll(&m, &epilogue, config.execution_poll_helper, config.wake_flag_offset);
-                    }
-                    try m.jump(&target.label);
+                    if (!(try emitBranchOrReturn(&m, &stack, num_locals, sp, depth, ctrl[0..ctrl_len], ftype.results.len, &explicit_return, &epilogue, config))) return null;
                     try m.bind(&next_case);
                 }
 
                 const default_depth = readUleb32(body, &i) orelse return null;
-                if (default_depth >= ctrl_len) return null;
-                const default_target = &ctrl[ctrl_len - 1 - default_depth];
-                if (!(try emitBranchValues(&m, stack[0..], num_locals, sp, default_target.height, default_target.branch_arity))) return null;
-                if (default_target.kind == .loop) {
-                    try emitExecutionPoll(&m, &epilogue, config.execution_poll_helper, config.wake_flag_offset);
-                }
-                try m.jump(&default_target.label);
-
-                _ = (try closeTerminatedArm(&m, gpa, body, &i, &stack, &sp, &ctrl, &ctrl_len)) orelse return null;
-            },
-            op_return => {
-                // Canonicalize the function results and join the success
-                // epilogue. Parsing resumes only where another structured
-                // path can reach: an else-arm or a frame merge.
-                const result_arity: u32 = @intCast(ftype.results.len);
-                if (!(try emitBranchValues(&m, stack[0..], num_locals, sp, 0, result_arity))) return null;
-                try m.jump(&explicit_return);
+                if (!(try emitBranchOrReturn(&m, &stack, num_locals, sp, default_depth, ctrl[0..ctrl_len], ftype.results.len, &explicit_return, &epilogue, config))) return null;
                 switch ((try closeTerminatedArm(&m, gpa, body, &i, &stack, &sp, &ctrl, &ctrl_len)) orelse return null) {
                     .continue_compilation => {},
                     .function_end => {
-                        sp = result_arity;
+                        sp = ftype.results.len;
                         for (ftype.results, 0..) |rt, r| stack[r] = runtimeLoc(rt);
                         function_ended = true;
                         break :body_loop;
@@ -3523,6 +3497,34 @@ fn materializeRange(
         try materialize(m, stack[depth], num_locals, depth);
         stack[depth] = stack[depth].materialized();
     }
+    return true;
+}
+
+/// Core br to the implicit function label shares the explicit return merge.
+/// Do not change the untaken path's operand metadata while staging results.
+fn emitBranchOrReturn(
+    m: *x64.Masm,
+    stack: []const Loc,
+    num_locals: usize,
+    sp: usize,
+    depth: usize,
+    ctrl: []Ctrl,
+    result_count: usize,
+    explicit_return: *x64.Masm.Label,
+    epilogue: *x64.Masm.Label,
+    config: Config,
+) Error!bool {
+    if (depth > ctrl.len) return false;
+    if (depth == ctrl.len) {
+        if (sp < result_count) return false;
+        if (!(try emitBranchValues(m, stack, num_locals, sp, 0, @intCast(result_count)))) return false;
+        try m.jump(explicit_return);
+        return true;
+    }
+    const target = &ctrl[ctrl.len - 1 - depth];
+    if (!(try emitBranchValues(m, stack, num_locals, sp, target.height, target.branch_arity))) return false;
+    if (target.kind == .loop) try emitExecutionPoll(m, epilogue, config.execution_poll_helper, config.wake_flag_offset);
+    try m.jump(&target.label);
     return true;
 }
 

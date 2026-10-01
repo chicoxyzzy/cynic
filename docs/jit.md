@@ -1800,8 +1800,19 @@ useful:
    regressions compare against Sarcasm across all value kinds, s33 type
    indices, armed polls, distinct loop arities, early exits, and bounded
    fallback. No JS API, test262, or SES policy changes are involved.
-   Branches to the implicit function label, native tail/reference calls,
-   and native-register/imported-call ABI work remain separate increments.
+   **Function-label branches** now share the explicit-return path on both
+   targets: `br`, taken `br_if`, and each `br_table` target can return zero
+   or multiple results from any structured depth. This follows
+   [Core branch execution](https://webassembly.github.io/spec/core/exec/instructions.html#control-instructions)
+   and [Liftoff's `BrOrRet`](https://github.com/v8/v8/blob/main/src/wasm/baseline/liftoff-compiler.cc).
+   The shared branch-or-return helper retains ordinary label transfers and
+   loop polls without modifying an untaken path's metadata. AArch64 tables
+   use a register comparison beyond the 12-bit immediate range; dispatch
+   remains linear. Native-entry regressions compare all value kinds, nested
+   returns, mixed block/function targets, and 4,098-entry tables with Sarcasm.
+   No ECMA-262, test262, or SES surface changes are involved. Native
+   tail/reference calls and native-register/imported-call ABI work remain
+   separate increments.
    Diagnostics record the first refused opcode and `0xfd` subopcode on both
    targets; unrelated unsupported instructions or control shapes can still
    cause a function to fall back. `tools/wasm_bench.zig` covers inline vector

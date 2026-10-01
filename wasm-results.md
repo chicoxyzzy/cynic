@@ -37,7 +37,7 @@ zeros. The score below is unchanged under these stricter checks.
 
 The forced-Spasm differential posture (`--spasm`) produces this exact score on
 both qualified code-generation targets: native AArch64 and x86_64-macos under
-Rosetta (2026-09-30). Gating runs add `--require-spasm-entry`; focused target
+Rosetta (2026-10-01). Gating runs add `--require-spasm-entry`; focused target
 tests additionally require generated x86 instance/cache, trap, safe-point,
 self-link, and stable-gate execution. Unsupported x86 opcode families fall
 back per function and therefore remain covered by the same semantic sweep.
@@ -65,6 +65,9 @@ Table64 get/set, grow/size, fill/copy/init, and indirect calls also enter native
 code, preserving full-width indices and complete reference values.
 Type-indexed blocks, loop/if parameters, and multi-value branch merges now
 compile on both targets, as do terminating if arms and catchable unreachable.
+Function-label branches now reuse the return path for all three branch
+instructions, with zero or multiple results. AArch64 branch tables also
+compile beyond the 12-bit comparison-immediate range.
 
 The interpreter and forced-Spasm sweeps also reproduce this score in
 `ReleaseSafe` on both targets, under the same 600-second / 3-GB guards.
@@ -77,8 +80,8 @@ the validator guard and bounded scratch retention.
 
 | target | native entries | compiled functions | refusals |
 |---|---:|---:|---:|
-| x86_64-macos (Rosetta) | 146,281 | 5,868 | 120 |
-| AArch64-macos | 151,392 | 5,867 | 121 |
+| x86_64-macos (Rosetta) | 146,333 | 5,898 | 90 |
+| AArch64-macos | 151,452 | 5,898 | 90 |
 
 The SIMD foundation added 249 compiled functions on x86_64 and 26 on AArch64
 over the reference-parity checkpoint. The bounded AArch64 code-reservation
@@ -134,11 +137,14 @@ bounds checks, and mixed-width table.copy validation uses the narrower count.
 Type-indexed multi-value control flow and terminating-arm parity add 97
 compiled functions / 605 native entries on x86, and 122 compiled functions /
 149 native entries on AArch64. First refusals fall by 95 and 120 respectively.
+Function-label branches add 30 compiled functions / 52 native entries on
+x86; together with large branch-table support, they add 31 compiled
+functions / 60 native entries on AArch64. First refusals fall by 30 and 31.
 These are coverage counts, not speedups.
 
-- x86: 8 limits, 0 signatures, 40 bytecode shapes, 72 unsupported opcodes,
+- x86: 8 limits, 0 signatures, 10 bytecode shapes, 72 unsupported opcodes,
   0 emission failures, and 0 installation refusals.
-- AArch64: 8 limits, 0 signatures, 41 bytecode shapes, 72 unsupported
+- AArch64: 8 limits, 0 signatures, 10 bytecode shapes, 72 unsupported
   opcodes, 0 emission failures, and 0 installation refusals. Reusing x86's
   module-sized reservation removes all 99 installation refusals from the
   previous fixed 64 KiB arena. Both targets retain the 64 KiB minimum and
@@ -167,5 +173,7 @@ Neither backend now records a `0xfc` refusal in this corpus. Focused table64
 tests require native entry for all eight helper paths, imported/defined
 tables, mixed-width copies, aliased overlap, high indices/counts, growth
 failure, full references, cross-instance calls, and host-callback GC.
-The leading remaining refusals are control/reference instructions and
-unsupported bytecode shapes, plus the eight intentional resource limits.
+The leading remaining opcode refusals are `return_call_indirect` (21),
+`return_call` (18), `return_call_ref` (17), and `call_ref` (7), with the
+same counts on both targets. Unsupported bytecode shapes and the eight
+intentional resource limits also remain.
