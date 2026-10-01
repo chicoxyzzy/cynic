@@ -116,6 +116,9 @@ test {
     _ = @import("runtime/wasm_wpt_instance_test.zig");
     _ = @import("runtime/wasm_wpt_arguments_test.zig");
     _ = @import("runtime/wasm_wpt_import_test.zig");
+    _ = @import("runtime/wasm_wpt_multivalue_test.zig");
+    _ = @import("runtime/wasm_wpt_multivalue_oom_test.zig");
+    _ = @import("runtime/wasm_wpt_multivalue_roots_test.zig");
     _ = @import("runtime/shared_array_buffer_test.zig");
     _ = @import("runtime/atomics_test.zig");
     _ = @import("runtime/multi_agent_test.zig");

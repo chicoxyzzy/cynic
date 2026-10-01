@@ -31,6 +31,12 @@ const CompiledFunc = code_mod.CompiledFunc;
 const Op = opcodes.Op;
 
 pub const TrapError = error{
+    /// Preserve allocation failure from host callbacks through either tier.
+    OutOfMemory,
+    /// Host callbacks can poll the enclosing Wasm caller's execution limits.
+    StepBudgetExhausted,
+    ExecutionInterrupted,
+    ExecutionTerminated,
     NullReference,
     Unreachable,
     IntegerDivideByZero,
@@ -763,7 +769,7 @@ pub const Instance = struct {
     /// The concrete error a nested `call` from Spasm-compiled code raised
     /// (§5.4.1). The call helper stashes it here and returns
     /// `spasm.trap_pending`; `spasmRun` re-raises it. This carries any of
-    /// the 17 `TrapError` variants (or `OutOfMemory`) across the C-ABI
+    /// the invocation errors across the C-ABI
     /// trap channel without the channel enumerating each one. Only valid
     /// immediately after a `trap_pending` status; never read otherwise.
     spasm_call_trap: ?Error = null,

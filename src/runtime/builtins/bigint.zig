@@ -50,6 +50,7 @@ pub fn install(realm: *Realm) !void {
     });
     const fn_obj = r.ctor;
     const proto = r.proto;
+    realm.intrinsics.bigint_prototype = proto;
 
     try installNativeMethodOnProto(realm, proto, "toString", bigintToString, 0);
     // §21.2.3.3 BigInt.prototype.toLocaleString — like Number's,

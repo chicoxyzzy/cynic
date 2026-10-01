@@ -461,6 +461,10 @@ fn populateInstance(realm: *Realm, self: *JSObject, mstate: *ModuleState, import
     }
 
     may_have_escaped = mstate.module.start != null;
+    // A start function can retain host-returned externrefs across later
+    // collecting imports, just like an exported function invocation.
+    realm.enterWasmCall();
+    defer realm.leaveWasmCall();
     wasm.runStart(ip, realm.wasmInvocationAllocator()) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.HostThrew => return error.NativeThrew, // a host import threw during start
@@ -1210,27 +1214,129 @@ fn unregisterHostImports(realm: *Realm, functions: []const wasm.FuncRef) void {
 /// and marshal its result back. A JS throw becomes `HostThrew`, re-raised
 /// at the wasm->JS boundary.
 fn jsHostTrampoline(ctx: ?*anyopaque, args: []const u128, results: []u128) wasm.TrapError!void {
-    const c: *HostImportCtx = @ptrCast(@alignCast(ctx orelse return error.HostThrew));
-    const realm = c.realm;
-    if (c.params.len > 16 or c.results.len > 1) return error.HostThrew; // arity bounds / multi-value host returns: unsupported
+    const context: *HostImportCtx = @ptrCast(@alignCast(ctx orelse return error.HostThrew));
+    runHostFunction(context, args, results) catch |err| return switch (err) {
+        error.NativeThrew => error.HostThrew,
+        else => |trap| trap,
+    };
+}
+
+const HostFunctionError = NativeError || error{ StepBudgetExhausted, ExecutionInterrupted, ExecutionTerminated };
+
+/// Wasm JS API §5.6 run a host function; both execution tiers provide
+/// separate, bounded argument/result buffers at this boundary.
+fn runHostFunction(context: *HostImportCtx, args: []const u128, results: []u128) HostFunctionError!void {
+    const realm = context.realm;
+    if (context.params.len > 16 or context.results.len > 16 or
+        args.len != context.params.len or results.len != context.results.len)
+        return intrinsics.throwTypeError(realm, "WebAssembly: unsupported host import arity");
+    // Unexposable signature types must throw before invoking user code,
+    // including when the rejected type occurs after an ordinary result.
+    for (context.params) |vt| try checkHostValueType(realm, vt);
+    for (context.results) |vt| try checkHostValueType(realm, vt);
 
     var jsargs: [16]Value = undefined;
-    const scope = realm.heap.openScope() catch return error.HostThrew;
+    const scope = try realm.heap.openScope();
     defer scope.close();
-    for (c.params, 0..) |pt, i| {
-        jsargs[i] = marshalResult(realm, pt, args[i]) catch return error.HostThrew;
-        scope.push(jsargs[i]) catch return error.HostThrew;
+    for (context.params, 0..) |pt, i| {
+        jsargs[i] = try marshalResult(realm, pt, args[i]);
+        try scope.push(jsargs[i]);
+    }
+    const ret = try callHostResultMethod(realm, heap_mod.taggedFunction(context.js_fn), Value.undefined_, jsargs[0..context.params.len]);
+    if (results.len == 0) return;
+    try scope.push(ret);
+    if (results.len == 1) {
+        results[0] = try marshalArg(realm, context.results[0], ret);
+        return;
     }
 
-    const outcome = call.callJSFunction(realm.allocator, realm, c.js_fn, Value.undefined_, jsargs[0..c.params.len]) catch return error.HostThrew;
-    const ret = switch (outcome) {
-        .value, .yielded => |v| v,
-        .thrown => |ex| {
-            realm.pending_exception = ex;
-            return error.HostThrew;
+    // ECMA-262 §7.4.3 GetIteratorFromMethod: GetV preserves primitive
+    // receivers, and iterator/result objects may themselves be functions.
+    const method = try hostResultIteratorMethod(realm, ret);
+    try scope.push(method);
+    const iterator = try callHostResultMethod(realm, method, ret, &.{});
+    if (!heap_mod.isJSObject(iterator))
+        return intrinsics.throwTypeError(realm, "WebAssembly: result iterator is not an object");
+    try scope.push(iterator);
+    const next = (try intrinsics.getPropertyChainOnValue(realm, iterator, "next")).?;
+    try scope.push(next);
+
+    // §7.4.19 IteratorToList completes BEFORE arity checking and conversion.
+    // Keep only the first required values (JSC operationIterateResults uses
+    // the same bounded storage), but still observe every excess next/done/
+    // value operation. Saturating the count at arity+1 preserves mismatch
+    // detection without overflow or attacker-sized native storage.
+    var values: [16]Value = undefined;
+    var count: usize = 0;
+    var steps: usize = 0;
+    while (true) : (steps += 1) {
+        // A provider realm may supply the callback to a metered caller.
+        // Charge that outer call too, using the same structural traps as
+        // Wasm safe points so its boundary preserves caller termination.
+        if (realm.heap.wasm_root_owner) |owner| {
+            if (owner != realm) switch (owner.pollExecution()) {
+                .proceed => {},
+                .step_budget_exhausted => return error.StepBudgetExhausted,
+                .cooperative_interrupted => return error.ExecutionInterrupted,
+                .terminated => return error.ExecutionTerminated,
+            };
+        }
+        try intrinsics.checkInterruptInNative(realm);
+        const step_scope = try realm.heap.openScope();
+        defer step_scope.close();
+        const result = try callHostResultMethod(realm, next, iterator, &.{});
+        if (!heap_mod.isJSObject(result))
+            return intrinsics.throwTypeError(realm, "WebAssembly: iterator result is not an object");
+        try step_scope.push(result);
+        const done = (try intrinsics.getPropertyChainOnValue(realm, result, "done")).?;
+        if (arith.toBoolean(done)) break;
+        if (steps == intrinsics.max_iter_length)
+            return intrinsics.throwRangeError(realm, "WebAssembly: result iterator exceeds iteration limit");
+        const value = (try intrinsics.getPropertyChainOnValue(realm, result, "value")).?;
+        if (count < results.len) {
+            values[count] = value;
+            try scope.push(value);
+        }
+        if (count <= results.len) count += 1;
+    }
+    // IteratorToList performs no IteratorClose on an abrupt completion;
+    // the mismatch and conversion paths run only after normal exhaustion.
+    if (count != results.len)
+        return intrinsics.throwTypeError(realm, "WebAssembly: host result count does not match signature");
+    for (context.results, 0..) |vt, i|
+        results[i] = try marshalArg(realm, vt, values[i]);
+}
+
+fn checkHostValueType(realm: *Realm, vt: wasm.ValType) NativeError!void {
+    if (vt == .v128 or vt.heapOf() == wasm_types.heap_abs_exn)
+        return intrinsics.throwTypeError(realm, "WebAssembly: v128 and exnref cannot cross the JS boundary");
+}
+
+/// GetV(ret, @@iterator), including a primitive receiver for an accessor.
+fn hostResultIteratorMethod(realm: *Realm, ret: Value) NativeError!Value {
+    if (try intrinsics.getPropertyChainOnValue(realm, ret, "@@iterator")) |method| return method;
+    const proto = (if (ret.isString()) realm.intrinsics.string_prototype else intrinsics.lookupPrimitivePrototype(realm, ret)) orelse
+        return intrinsics.throwTypeError(realm, "WebAssembly: host results are not iterable");
+    if (@import("../lantern/interpreter.zig").lookupAccessor(proto, "@@iterator")) |accessor| {
+        if (accessor.getter) |getter|
+            return callHostResultMethod(realm, heap_mod.taggedFunction(getter), ret, &.{});
+        return Value.undefined_;
+    }
+    return proto.get("@@iterator");
+}
+
+fn callHostResultMethod(realm: *Realm, method: Value, receiver: Value, args: []const Value) NativeError!Value {
+    const outcome = call.callValue(realm.allocator, realm, realm, method, receiver, args) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return throwRuntimeError(realm, "WebAssembly: host callback execution failed"),
+    };
+    return switch (outcome) {
+        .value, .yielded => |value| value,
+        .thrown => |exception| {
+            realm.pending_exception = exception;
+            return error.NativeThrew;
         },
     };
-    if (c.results.len == 1) results[0] = marshalArg(realm, c.results[0], ret) catch return error.HostThrew;
 }
 
 fn pollWasmExecution(ctx: *anyopaque) wasm.ExecutionPoll {
@@ -1346,7 +1452,7 @@ fn resolveFuncImport(realm: *Realm, v: Value, module: *const wasm.Module, type_i
     }
     // Any other JS function becomes a host import.
     const ft = module.types[type_idx];
-    if (ft.params.len > 16 or ft.results.len > 1)
+    if (ft.params.len > 16 or ft.results.len > 16)
         return intrinsics.throwTypeError(realm, "WebAssembly.Instance: host import arity is not supported");
     const ctx = realm.wasmAllocator().create(HostImportCtx) catch return error.OutOfMemory;
     ctx.* = .{ .realm = realm, .js_fn = fn_obj, .js_value = @as(u128, v.bits), .params = ft.params, .results = ft.results };
@@ -1619,11 +1725,11 @@ fn marshalArg(realm: *Realm, vt: wasm.ValType, v: Value) NativeError!u128 {
         // to the wasm null ref. A funcref accepts null or an exported fn.
         .externref => {
             if (v.isNull()) return wasm.REF_NULL;
-            // Pin only while inside a wasm call, where the value lives on
-            // the operand stack / in a local. At depth 0 it instead lands
-            // in a registered container (table / global) or is returned to
-            // JS — both root it precisely without a transient pin.
-            if (realm.wasm_call_depth > 0) realm.pinExternRefTransient(v) catch return error.OutOfMemory;
+            // Pin to the heap's outermost active Wasm call, which may be
+            // in a different sharing realm from this imported callback.
+            // With no active call, a registered container or JS caller
+            // owns the value and no transient pin is needed.
+            try realm.pinExternRefTransient(v);
             return @as(u128, v.bits);
         },
         .funcref => return funcRefFromValue(realm, v),
@@ -1642,7 +1748,7 @@ fn marshalArg(realm: *Realm, vt: wasm.ValType, v: Value) NativeError!u128 {
                 return intrinsics.throwTypeError(realm, "WebAssembly: null is not valid for a non-nullable reference");
             if (heap == wasm_types.heap_abs_extern) {
                 if (v.isNull()) return wasm.REF_NULL;
-                if (realm.wasm_call_depth > 0) realm.pinExternRefTransient(v) catch return error.OutOfMemory;
+                try realm.pinExternRefTransient(v);
                 return @as(u128, v.bits);
             }
             if (heap == wasm_types.heap_abs_exn)

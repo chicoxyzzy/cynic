@@ -202,6 +202,18 @@ after collecting coercion callbacks. Focused tests
 also cover allocation failure, weak registration cleanup, and child-realm
 teardown; these checks supplement the WPT score.
 
+JS-backed Wasm imports support up to 16 parameters and 16 results. Multiple
+results are consumed as an iterable before checking the count and converting
+values in signature order; abrupt iteration does not call `return()`. Native
+iterator property access handles callable Proxies and function objects, while
+primitive results use their intrinsic prototypes even if the corresponding
+global constructors are replaced. Focused coverage checks conversion order,
+throw identity, hardened realms, GC pressure, start functions, cross-realm
+reentry, fuel, and allocation failure in the interpreter and Spasm. Externrefs
+stay rooted through the outermost call, and allocation failure retains its
+OOM status across the host boundary. See the
+[host-function design](wasm-engine.md#8-the-js-boundary).
+
 The current [Wasm JS API](https://webassembly.github.io/spec/js-api/)
 defines AddressValue dictionary members as `any`: Memory/Table constructors
 read the dictionary before converting its numeric members. The pinned WPT
