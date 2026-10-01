@@ -38,6 +38,69 @@ the corpus under the relevant section's directory before adding.
 
 ## Entries
 
+### Async Wasm instantiation skipped host-task checkpoints and pending-work ownership
+
+- **Fixed in:** `ebea70b5`
+- **Spec:** ECMA-262 §9.5 Jobs and §27.2 Promise Objects; Wasm JS API
+  [asynchronously instantiate a WebAssembly module](https://webassembly.github.io/spec/js-api/#asynchronously-instantiate-a-webassembly-module).
+- **Reproducer:** using `makeStartBytes` from
+  [`wasm_wpt_async_test.zig`](../src/runtime/wasm_wpt_async_test.zig):
+  ```js
+  const events = [];
+  const module = new WebAssembly.Module(makeStartBytes());
+  const imports = {m: {g: 7, get s() {
+    events.push('get');
+    Promise.resolve().then(() => events.push('job'));
+    return () => events.push('start');
+  }}};
+  WebAssembly.instantiate(module, imports).then(() => {
+    if (events.join(',') !== 'get,return,job,start') throw new Error('order');
+  });
+  events.push('return');
+  ```
+- **Before fix:** both overloads instantiated synchronously. The bytes overload
+  read imports before returning, and both ran active segments/start before
+  promise jobs queued by import getters. Core allocation failure was also
+  converted into a LinkError rejection.
+- **After fix:** bytes compilation completion and core instantiation use
+  separate rooted host tasks. Module imports are captured synchronously; their
+  values survive the checkpoint before core instantiation. Ordinary promise
+  chains finish before each task. Pending tasks retain independent capability
+  members and imported values through collection, release temporary roots at
+  completion/teardown, and preserve host OOM and uncatchable termination.
+  The debug microtask helper cannot reenter queued Wasm work from a reaction.
+- **Suggested fixture shape:** WPT async tests for Module start/active-segment
+  deferral, nested promise chains from import getters, captured import values,
+  and original thrown-value identity. The pinned WPT already catches early
+  bytes-import access, but not all these boundaries. GC-pressure, undrained
+  teardown, quota-failure, and host cancellation tests remain Cynic embedding
+  regressions in the focused async safety suite.
+
+### Wasm BufferSource copying omitted DataView inputs
+
+- **Fixed in:** `ebea70b5`
+- **Spec:** WebIDL [get a copy of the buffer source](https://webidl.spec.whatwg.org/#dfn-get-buffer-source-copy),
+  used by Wasm JS API compilation; ECMA-262 §25.3 DataView Objects.
+- **Reproducer:**
+  ```js
+  const bytes = [0, 97, 115, 109, 1, 0, 0, 0];
+  const buffer = new ArrayBuffer(16);
+  new Uint8Array(buffer, 3, bytes.length).set(bytes);
+  const view = new DataView(buffer, 3, bytes.length);
+  const pending = WebAssembly.instantiate(view);
+  buffer.transfer();
+  pending.then(result => {
+    if (!(result.instance instanceof WebAssembly.Instance)) throw new Error('copy');
+  });
+  ```
+- **Before fix:** the common BufferSource extractor recognized ArrayBuffer and
+  typed arrays only, rejecting a valid DataView with TypeError.
+- **After fix:** DataView inputs use their internal offset and live/fixed byte
+  length, with detached/out-of-bounds checks. Instantiation keeps a call-time
+  copy independent of later source mutation or detachment.
+- **Suggested fixture shape:** WPT promise tests for offset DataViews and
+  source mutation/detachment after calling the BufferSource overload.
+
 
 ### Native result-iterator reads skipped callable Proxies and intrinsic prototypes
 
