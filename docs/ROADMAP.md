@@ -2442,8 +2442,14 @@ and the per-builtin checklist; this section tracks status.
   payloads, with bounded structural matching for the supported final function
   types. Import checks preserve getter ordering and reject incompatible store
   wrappers before linking; explicit GC groups/subtypes remain unsupported.
-  Proper native tail calls and the native-register/imported-call ABI remain
-  next; tail calls must replace frames, not build another ordinary call.
+  Proper native `return_call`, `return_call_indirect`, and `return_call_ref`
+  now compile on both targets. Native frames stage a bounded transfer record
+  and return to an iterative dispatcher, preserving constant stack space across
+  native, foreign, host, and interpreter targets. Tests cover 100,000 transfers,
+  unequal frames, fresh locals, full Cells, GC/re-entry, allocation failure,
+  cancellation, and foreign exception payloads. This still uses helper-mediated
+  Cell dispatch; the native-register/imported-call ABI and direct tail jumps
+  remain performance work.
 
   The architecture for all three tiers — the shared codegen
   substrate and the JS↔wasm call-boundary fast path included — is

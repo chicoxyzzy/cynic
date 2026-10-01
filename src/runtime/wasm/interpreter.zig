@@ -214,6 +214,10 @@ const spasm_helpers: spasm.Helpers = .{
     .call = spasmCall,
     .call_indirect = spasmCallIndirect,
     .call_ref = spasmCallRef,
+    .return_call = spasmReturnCall,
+    .return_call_indirect = spasmReturnCallIndirect,
+    .return_call_ref = spasmReturnCallRef,
+    .finish_tail_call = spasmFinishTailCall,
     .mem_view = spasmMemoryView,
     .mem_grow = spasmMemoryGrow,
     .mem_init = spasmMemoryInit,
@@ -567,10 +571,10 @@ fn spasmCodeReserveEstimate(body_bytes: usize, func_count: usize) usize {
     const body_code = std.math.mul(usize, body_bytes, 64) catch std.math.maxInt(usize);
     const func_code = std.math.mul(usize, func_count, 256) catch std.math.maxInt(usize);
     const estimate = std.math.add(usize, body_code, func_code) catch std.math.maxInt(usize);
-    // Helper-heavy bodies can sit above the average byte-expansion estimate.
-    // Leave bounded headroom so newly emittable tail functions do not fall
-    // back merely because earlier entries consumed an exact-fit reservation.
-    const provisioned = std.math.add(usize, estimate, estimate / 8) catch std.math.maxInt(usize);
+    // Short call opcodes expand into Cell staging, memory refresh, and tail
+    // completion checks. Leave bounded headroom for call-heavy modules without
+    // moving already-installed entry points or exceeding the mapping cap.
+    const provisioned = std.math.add(usize, estimate, estimate / 2) catch std.math.maxInt(usize);
     return @min(@max(provisioned, spasm_code_reserve_min), spasm_code_reserve_max);
 }
 
@@ -588,7 +592,7 @@ test "wasm spasm: code reserve scales and stays bounded" {
     try testing.expectEqual(@as(usize, 64 * 1024), spasmCodeReserveEstimate(0, 0));
     try testing.expectEqual(@as(usize, 64 * 1024), spasmCodeReserveEstimate(128, 1));
     const call_heavy_estimate = 4 * 1024 * 64 + 64 * 256;
-    try testing.expect(spasmCodeReserveEstimate(4 * 1024, 64) >= call_heavy_estimate + call_heavy_estimate / 8);
+    try testing.expect(spasmCodeReserveEstimate(4 * 1024, 64) >= call_heavy_estimate + call_heavy_estimate / 2);
     try testing.expectEqual(@as(usize, 4 * 1024 * 1024), spasmCodeReserveEstimate(std.math.maxInt(usize), 0));
     try testing.expectEqual(@as(usize, 4 * 1024 * 1024), spasmCodeReserveEstimate(0, std.math.maxInt(usize)));
     try testing.expectEqual(@as(usize, 4 * 1024 * 1024), spasmCodeReserveEstimate(std.math.maxInt(usize), std.math.maxInt(usize)));
@@ -775,6 +779,10 @@ pub const Instance = struct {
     /// trap channel without the channel enumerating each one. Only valid
     /// immediately after a `trap_pending` status; never read otherwise.
     spasm_call_trap: ?Error = null,
+    /// A no-reentry helper copies arguments here before its native caller
+    /// returns. The dispatcher consumes and clears it before any allocation
+    /// or host call. Nested JS/Wasm calls therefore cannot overwrite it.
+    spasm_tail_call: ?SpasmTailCall = null,
 
     /// Allocate an `ExnRecord` in this instance's pool — used by the JS
     /// boundary to reify a thrown JS value for a `try_table` to catch.
@@ -1828,7 +1836,9 @@ fn invokeWithControl(
     // null and falls through to the interpreter below.
     const execution_control = inherited_execution_control orelse self.execution_control orelse target.instance.execution_control;
     if (target.instance.spasm_enabled) {
-        if (try spasmRun(allocator, target.instance, target.func, args, execution_control)) |out| {
+        const native_result = spasmRun(allocator, target.instance, target.func, args, execution_control) catch |err|
+            return forwardSpasmError(self, target.instance, err);
+        if (native_result) |out| {
             return out;
         }
     }
@@ -1886,6 +1896,14 @@ threadlocal var spasm_call_depth: u32 = 0;
 const spasm_call_depth_cap: u32 = 512;
 const spasm_always_poll = std.atomic.Value(bool).init(true);
 
+const SpasmTailCall = struct {
+    instance: *Instance,
+    func_index: u32,
+    args: [spasm.operand_reg_count]Cell,
+    num_args: usize,
+    num_results: usize,
+};
+
 /// Bridge Spasm's compact native status channel to the embedding-neutral
 /// execution controller shared with Sarcasm. Generated code calls this only
 /// when its parked controller pointer is non-null.
@@ -1906,7 +1924,7 @@ fn spasmPollExecution(control_opaque: *anyopaque) callconv(.c) u32 {
 /// the interpreter at the Wasm boundary.
 fn runSpasmEntry(
     instance: *Instance,
-    entry: spasm.EntryFn,
+    entry: ?spasm.EntryFn,
     locals: [*]spasm.Cell,
     results: [*]spasm.Cell,
     nested_direct: bool,
@@ -1918,52 +1936,157 @@ fn runSpasmEntry(
     // preserved in x20 by the native prologue for linked self-recursion.
     if (stack_guard.nearLimit()) return error.CallStackExhausted;
     const stack_limit = stack_guard.nativeStackLimit();
-    const has_mem = instance.memories.len > 0;
-    const mem_base: [*]u8 = if (has_mem) instance.memories[0].data.ptr else @ptrCast(locals);
-    const mem_len: u64 = if (has_mem) instance.memories[0].data.len else 0;
-    const globals_base: [*]const *anyopaque = if (instance.globals.len > 0)
-        @ptrCast(instance.globals.ptr)
-    else
-        @ptrCast(locals);
-
-    // Counters are opt-in diagnostics, never a production hot-path cost.
-    // Wrap rather than turning a very long-running untrusted workload into a
-    // host arithmetic trap when diagnostics are requested.
-    if (instance.spasm_diagnostics) {
-        instance.spasm_runs +%= 1;
-        if (nested_direct) instance.spasm_native_calls +%= 1;
-    }
+    const allocator = instance.invocation_allocator orelse instance.gpa;
+    var tail_frame: std.ArrayList(Cell) = .empty;
+    defer tail_frame.deinit(allocator);
+    var current_instance = instance;
+    var current_entry = entry;
+    var current_locals = locals;
     var active_control = execution_control;
-    var native_control: spasm.NativeExecutionControl = undefined;
-    const execution_control_ptr: ?*anyopaque = if (active_control) |*control| blk: {
-        const wake_flag = if (control.isArmed())
-            &spasm_always_poll
+    while (true) {
+        const has_mem = current_instance.memories.len > 0;
+        const mem_base: [*]u8 = if (has_mem) current_instance.memories[0].data.ptr else @ptrCast(current_locals);
+        const mem_len: u64 = if (has_mem) current_instance.memories[0].data.len else 0;
+        const globals_base: [*]const *anyopaque = if (current_instance.globals.len > 0)
+            @ptrCast(current_instance.globals.ptr)
         else
-            control.wake_flag orelse break :blk null;
-        native_control = .{
-            .wake_flag = wake_flag,
-            .poll_context = @ptrCast(control),
-        };
-        break :blk @ptrCast(&native_control);
-    } else null;
-    switch (entry(locals, results, mem_base, mem_len, globals_base, @ptrCast(instance), stack_limit, execution_control_ptr)) {
-        spasm.trap_ok => {},
-        spasm.trap_divide_by_zero => return error.IntegerDivideByZero,
-        spasm.trap_int_overflow => return error.IntegerOverflow,
-        spasm.trap_out_of_bounds => return error.OutOfBoundsMemoryAccess,
-        spasm.trap_invalid_conversion => return error.InvalidConversionToInteger,
-        spasm.trap_call_stack_exhausted => return error.CallStackExhausted,
-        spasm.trap_step_budget_exhausted => return error.StepBudgetExhausted,
-        spasm.trap_execution_interrupted => return error.ExecutionInterrupted,
-        spasm.trap_execution_terminated => return error.ExecutionTerminated,
-        spasm.trap_unreachable => return error.Unreachable,
-        // A nested call stashed its concrete error on this entry's instance.
-        spasm.trap_pending => return instance.spasm_call_trap orelse error.UnsupportedImportCall,
-        // A generated body can only return the statuses above. Do not execute
-        // it again through the interpreter if that invariant is broken: the
-        // body may already have performed visible stores before this point.
-        else => return error.UnsupportedImportCall,
+            @ptrCast(current_locals);
+        var native_control: spasm.NativeExecutionControl = undefined;
+        const execution_control_ptr: ?*anyopaque = if (active_control) |*control| blk: {
+            const wake_flag = if (control.isArmed())
+                &spasm_always_poll
+            else
+                control.wake_flag orelse break :blk null;
+            native_control = .{
+                .wake_flag = wake_flag,
+                .poll_context = @ptrCast(control),
+            };
+            break :blk @ptrCast(&native_control);
+        } else null;
+        const status = if (current_entry) |native_entry| blk: {
+            if (current_instance.spasm_diagnostics) {
+                current_instance.spasm_runs +%= 1;
+                if (nested_direct) current_instance.spasm_native_calls +%= 1;
+            }
+            break :blk native_entry(current_locals, results, mem_base, mem_len, globals_base, @ptrCast(current_instance), stack_limit, execution_control_ptr);
+        } else spasm.status_tail_call;
+        switch (status) {
+            spasm.trap_ok => return,
+            spasm.status_tail_call => {
+                // Core return_call: discard the caller before invoking the target.
+                // The Cell ABI uses this iterative handoff instead of retaining a
+                // helper frame for each hop. Copy before resizing or re-entering JS.
+                const request = current_instance.spasm_tail_call orelse return error.UnsupportedImportCall;
+                current_instance.spasm_tail_call = null;
+                const target = request.instance.resolveFunc(request.func_index) orelse return error.UnsupportedImportCall;
+                current_instance = request.instance;
+                switch (target) {
+                    .host => |h| {
+                        if (h.params != request.num_args or h.results != request.num_results)
+                            return error.IndirectCallTypeMismatch;
+                        h.fn_ptr(h.ctx, request.args[0..request.num_args], results[0..request.num_results]) catch |err|
+                            return forwardSpasmError(instance, current_instance, err);
+                        return;
+                    },
+                    .wasm => |w| {
+                        active_control = active_control orelse request.instance.execution_control orelse w.instance.execution_control;
+                        const next_entry = if (w.instance.spasm_enabled) w.instance.spasmEntryFor(w.func) else null;
+                        if (next_entry) |native_entry| {
+                            const ft = &w.instance.module.types[w.func.type_index];
+                            const needed = spasm.nativeFrameCellCount(w.func, ft) orelse return error.UnsupportedImportCall;
+                            if (ft.params.len != request.num_args or ft.results.len != request.num_results or ft.params.len > w.func.local_types.len)
+                                return error.IndirectCallTypeMismatch;
+                            try tail_frame.resize(allocator, needed);
+                            @memset(tail_frame.items, 0);
+                            @memcpy(tail_frame.items[0..request.num_args], request.args[0..request.num_args]);
+                            for (w.func.local_types[request.num_args..], request.num_args..) |t, j| {
+                                if (t.isRef()) tail_frame.items[j] = REF_NULL;
+                            }
+                            current_instance = w.instance;
+                            current_entry = native_entry;
+                            current_locals = tail_frame.items.ptr;
+                            continue;
+                        }
+                        // Sarcasm already replaces frames throughout a refused
+                        // tail chain; do not recursively bounce it back into Spasm.
+                        const out = invokeWithControl(request.instance, allocator, request.func_index, request.args[0..request.num_args], active_control) catch |err|
+                            return forwardSpasmError(instance, current_instance, err);
+                        defer allocator.free(out);
+                        if (out.len != request.num_results) return error.IndirectCallTypeMismatch;
+                        @memcpy(results[0..out.len], out);
+                        return;
+                    },
+                }
+            },
+            spasm.trap_divide_by_zero => return error.IntegerDivideByZero,
+            spasm.trap_int_overflow => return error.IntegerOverflow,
+            spasm.trap_out_of_bounds => return error.OutOfBoundsMemoryAccess,
+            spasm.trap_invalid_conversion => return error.InvalidConversionToInteger,
+            spasm.trap_call_stack_exhausted => return error.CallStackExhausted,
+            spasm.trap_step_budget_exhausted => return error.StepBudgetExhausted,
+            spasm.trap_execution_interrupted => return error.ExecutionInterrupted,
+            spasm.trap_execution_terminated => return error.ExecutionTerminated,
+            spasm.trap_unreachable => return error.Unreachable,
+            // A nested call stashed its concrete error on this entry's instance.
+            spasm.trap_pending => return forwardSpasmError(instance, current_instance, current_instance.spasm_call_trap orelse error.UnsupportedImportCall),
+            // A generated body can only return the statuses above. Do not execute
+            // it again through the interpreter if that invariant is broken: the
+            // body may already have performed visible stores before this point.
+            else => return error.UnsupportedImportCall,
+        }
     }
+}
+
+fn forwardSpasmError(caller: *Instance, callee: *Instance, err: Error) Error {
+    if (err == error.UncaughtException and caller != callee) caller.pending_exn = callee.pending_exn;
+    return err;
+}
+
+fn spasmFinishTailCall(instance_opaque: *anyopaque, results: [*]Cell, control: ?*anyopaque) callconv(.c) u32 {
+    const instance: *Instance = @ptrCast(@alignCast(instance_opaque));
+    runSpasmEntry(instance, null, results, results, true, executionControlFromOpaque(control)) catch |err| {
+        instance.spasm_call_trap = err;
+        return spasm.trap_pending;
+    };
+    return spasm.trap_ok;
+}
+
+fn stageSpasmTailCall(instance: *Instance, target_instance: *Instance, func_index: u32, expected: types.FuncType, buf: [*]const Cell) u32 {
+    const target = target_instance.resolveFunc(func_index) orelse {
+        instance.spasm_call_trap = error.UnsupportedImportCall;
+        return spasm.trap_pending;
+    };
+    const compatible = switch (target) {
+        .wasm => |w| funcCallLayoutsMatch(expected, w.instance.module.types[w.func.type_index]),
+        .host => |h| expected.params.len == h.params and expected.results.len == h.results,
+    };
+    if (!compatible or expected.params.len > spasm.operand_reg_count or expected.results.len > spasm.operand_reg_count) {
+        instance.spasm_call_trap = error.IndirectCallTypeMismatch;
+        return spasm.trap_pending;
+    }
+    var request: SpasmTailCall = .{
+        .instance = target_instance,
+        .func_index = func_index,
+        .args = @splat(0),
+        .num_args = expected.params.len,
+        .num_results = expected.results.len,
+    };
+    @memcpy(request.args[0..request.num_args], buf[0..request.num_args]);
+    instance.spasm_tail_call = request;
+    return spasm.status_tail_call;
+}
+
+fn spasmReturnCall(instance_opaque: *anyopaque, func_index: u32, buf: [*]Cell, buf_cells: u32, _: ?*anyopaque) callconv(.c) u32 {
+    const instance: *Instance = @ptrCast(@alignCast(instance_opaque));
+    const expected = instance.funcType(func_index) orelse {
+        instance.spasm_call_trap = error.UnsupportedImportCall;
+        return spasm.trap_pending;
+    };
+    if (expected.params.len > buf_cells) {
+        instance.spasm_call_trap = error.IndirectCallTypeMismatch;
+        return spasm.trap_pending;
+    }
+    return stageSpasmTailCall(instance, instance, func_index, expected, buf);
 }
 
 const SpasmDirectCall = union(enum) {
@@ -2132,6 +2255,14 @@ fn spasmCallIndirect(
     buf: [*]u128,
     execution_control: ?*anyopaque,
 ) callconv(.c) u32 {
+    return spasmIndirectCall(false, instance_opaque, type_index, table_index, elem_index, buf, execution_control);
+}
+
+fn spasmReturnCallIndirect(instance: *anyopaque, type_index: u32, table_index: u32, elem_index: u64, buf: [*]Cell, control: ?*anyopaque) callconv(.c) u32 {
+    return spasmIndirectCall(true, instance, type_index, table_index, elem_index, buf, control);
+}
+
+fn spasmIndirectCall(comptime tail: bool, instance_opaque: *anyopaque, type_index: u32, table_index: u32, elem_index: u64, buf: [*]Cell, execution_control: ?*anyopaque) u32 {
     const inst: *Instance = @ptrCast(@alignCast(instance_opaque));
     if (table_index >= inst.tables.len) {
         inst.spasm_call_trap = error.UnsupportedImportCall;
@@ -2169,6 +2300,7 @@ fn spasmCallIndirect(
             }
         },
     }
+    if (tail) return stageSpasmTailCall(inst, def_inst, fidx, expected, buf);
     return spasmCallResolvedRef(inst, def_inst, fidx, buf, execution_control);
 }
 
@@ -2183,6 +2315,14 @@ fn spasmCallRef(
     buf: [*]spasm.Cell,
     execution_control: ?*anyopaque,
 ) callconv(.c) u32 {
+    return spasmReferenceCall(false, instance_opaque, type_index, ref_slot, buf, execution_control);
+}
+
+fn spasmReturnCallRef(instance: *anyopaque, type_index: u32, ref_slot: *const Cell, buf: [*]Cell, control: ?*anyopaque) callconv(.c) u32 {
+    return spasmReferenceCall(true, instance, type_index, ref_slot, buf, control);
+}
+
+fn spasmReferenceCall(comptime tail: bool, instance_opaque: *anyopaque, type_index: u32, ref_slot: *const Cell, buf: [*]Cell, execution_control: ?*anyopaque) u32 {
     const inst: *Instance = @ptrCast(@alignCast(instance_opaque));
     const ref = ref_slot.*;
     if (ref == REF_NULL) {
@@ -2217,6 +2357,7 @@ fn spasmCallRef(
         inst.spasm_call_trap = error.IndirectCallTypeMismatch;
         return spasm.trap_pending;
     }
+    if (tail) return stageSpasmTailCall(inst, def_inst, fidx, expected, buf);
     return spasmCallResolvedRef(inst, def_inst, fidx, buf, execution_control);
 }
 

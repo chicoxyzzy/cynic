@@ -72,6 +72,12 @@ Typed `call_ref` also compiles on both targets, preserving complete
 references, foreign instances, live values, and memory views across the
 checked invocation boundary. Native tests cover traps, exception payloads,
 host GC, cancellation, recursion limits, and incompatible host call layouts.
+All three tail-call forms now compile on both targets through a bounded
+runtime transfer protocol. Native callers return before their targets enter;
+the driver reuses a Cell frame instead of growing the host stack. Native-entry
+tests cover deep recursion, foreign instances, host callbacks, exceptions,
+GC, allocation failure, and cancellation. This still uses helper-mediated
+dispatch, not a native-register tail-jump ABI.
 
 The interpreter and forced-Spasm sweeps also reproduce this score in
 `ReleaseSafe` on both targets, under the same 600-second / 3-GB guards.
@@ -84,8 +90,8 @@ the validator guard and bounded scratch retention.
 
 | target | native entries | compiled functions | refusals |
 |---|---:|---:|---:|
-| x86_64-macos (Rosetta) | 168,785 | 5,907 | 83 |
-| AArch64-macos | 173,904 | 5,907 | 83 |
+| x86_64-macos (Rosetta) | 10,883,548 | 6,007 | 27 |
+| AArch64-macos | 10,888,667 | 6,007 | 27 |
 
 The SIMD foundation added 249 compiled functions on x86_64 and 26 on AArch64
 over the reference-parity checkpoint. The bounded AArch64 code-reservation
@@ -146,11 +152,15 @@ x86; together with large branch-table support, they add 31 compiled
 functions / 60 native entries on AArch64. First refusals fall by 30 and 31.
 Typed reference calls add 9 compiled functions and 22,452 native entries
 per target, removing all 7 first refusals at `call_ref` in this corpus.
+Native tail calls add 100 compiled functions and 10,714,763 native entries
+per target, removing all 56 first refusals at the three tail-call opcodes.
+Call-heavy modules use 50% code-estimate headroom for the new completion
+checks, retaining the 64 KiB minimum, 4 MiB cap, and full Realm memory charge.
 These are coverage counts, not speedups.
 
-- x86: 8 limits, 0 signatures, 10 bytecode shapes, 65 unsupported opcodes,
+- x86: 8 limits, 0 signatures, 10 bytecode shapes, 9 unsupported opcodes,
   0 emission failures, and 0 installation refusals.
-- AArch64: 8 limits, 0 signatures, 10 bytecode shapes, 65 unsupported
+- AArch64: 8 limits, 0 signatures, 10 bytecode shapes, 9 unsupported
   opcodes, 0 emission failures, and 0 installation refusals. Reusing x86's
   module-sized reservation removes all 99 installation refusals from the
   previous fixed 64 KiB arena. Both targets retain the 64 KiB minimum and
