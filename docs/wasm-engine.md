@@ -273,9 +273,12 @@ stack, so its representation dominates interpreter speed.
   in `realm.markRoots`:
     - **Transient** — a value on the wasm stack / in a local *during* a
       call (where a host import can trigger GC) is pinned in
-      `realm.wasm_extern_roots` (deduped by bits). The set is cleared when
-      the outermost wasm call returns to JS (`wasm_call_depth` → 0): by
-      then the stack is empty and any escapee is rooted by its JS caller.
+      `wasm_extern_roots` of the outermost calling realm (deduped by bits).
+      The heap records that owner so shared-heap child realms and imported
+      callbacks use the same dynamic lifetime. Start functions enter this
+      boundary too. The set is cleared when the outermost wasm call exits,
+      normally or exceptionally: by then the stack is empty and any escapee
+      is rooted by its JS caller. Nested calls in another realm cannot clear the outer pins.
     - **Persistent** — every `externref` table / global is registered and
       its live cells are walked each GC. Overwriting or dropping a slot
       reclaims the old value precisely.
@@ -495,6 +498,35 @@ imported JS function re-enters Lantern, which allocates, so the gc.md
 re-entry contract applies; a JS throw propagates as the engine trap
 `HostThrew` and is re-raised at the boundary. To carry a JS callable
 into the engine, `FuncRef.host` gained a `ctx` pointer.
+
+JS host imports support up to 16 parameters and 16 results, matching the
+interpreter and native host-call buffers. Zero-result imports discard the
+returned JS value; single-result imports convert it directly. Multiple results
+follow [Wasm JS API §5.6 run a host function](https://webassembly.github.io/spec/js-api/#run-a-host-function):
+get the iterator, consume it to completion, require the exact result count,
+then convert each value in signature order. `v128` and `exnref` signatures are
+rejected before calling JavaScript. Iterator failures propagate without an
+extra `return()` call, as required by ECMA-262
+[§7.4.19 IteratorToList](https://tc39.es/ecma262/#sec-iteratortolist).
+
+The bridge keeps only the signature's bounded number of values while still
+reading every excess iterator result before reporting an arity mismatch. This
+follows [JavaScriptCore's operationIterateResults](https://github.com/WebKit/WebKit/blob/main/Source/JavaScriptCore/wasm/WasmOperations.cpp).
+[V8](https://github.com/v8/v8/blob/main/src/builtins/builtins-iterator-gen.cc) and
+[SpiderMonkey](https://github.com/mozilla-firefox/firefox/blob/main/js/src/wasm/WasmInstance.cpp)
+materialize rooted collections before the same count check. Cynic also polls
+host interruption/fuel during iteration in both the callback realm and the
+outer calling realm, and applies its existing 16M-element iteration ceiling
+with a RangeError. Collected values stay rooted through
+later getters and conversions; externrefs remain pinned for the enclosing
+Wasm call. Allocation failures retain `OutOfMemory` through both interpreter
+and native host-call paths instead of becoming an unrelated JS throw.
+
+The WPT multi-value fixture checks iteration before numeric conversion.
+Focused tests add hardened realms, arbitrary iterator objects and callable
+Proxy methods, thrown-value identity, mixed numeric/reference results,
+allocation failure, GC pressure, start functions, and cross-realm nested calls.
+These Wasm host-integration cases are outside test262's ECMAScript-only scope.
 
 All engine state lives in **typed internal slots** on `JSObject` /
 `JSFunction`, never `__cynic_*` property keys (AGENTS.md "no engine

@@ -450,6 +450,9 @@ pub const Heap = struct {
     /// `installBuiltins` (stable-address) and deregister at
     /// `deinit`.
     realms: std.ArrayListUnmanaged(*Realm) = .empty,
+    /// Outermost dynamic Wasm invocation across all sharing realms. Its
+    /// transient externref bag roots host results until that call returns.
+    wasm_root_owner: ?*Realm = null,
     /// Child realms whose owning `ShadowRealm` object was found dead
     /// during the current sweep — torn down (freed) *after* the sweep
     /// completes, never inline, since freeing a `Realm` re-enters the

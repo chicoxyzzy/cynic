@@ -1338,15 +1338,16 @@ pub const Realm = struct {
     /// - **Transient** — `externref` values live on the wasm value stack /
     ///   in locals *during* a call (where a host import could trigger GC),
     ///   keyed by NaN-boxed bits (deduped; the non-moving collector makes
-    ///   the bits a stable identity). Cleared when the outermost wasm call
-    ///   returns to JS (`wasm_call_depth` hits 0) — by then the stack is
-    ///   empty and any escapee is rooted by its JS caller.
+    ///   the bits a stable identity). Stored on `heap.wasm_root_owner`;
+    ///   cleared when that owner's outermost exported call or start function
+    ///   exits, normally or exceptionally. Nested calls in sharing realms
+    ///   use the same set until the outer Wasm stack is empty.
     /// - **Persistent** — `externref` cells inside tables / globals are
     ///   marked precisely by walking the registered containers, so an
     ///   overwritten or dropped slot is reclaimed.
     wasm_extern_roots: std.AutoArrayHashMapUnmanaged(u64, void) = .empty,
-    /// Nesting of JS→wasm entries (the export trampoline). The transient
-    /// set is cleared when this returns to 0.
+    /// Nesting of exported calls / start functions in this realm. Only
+    /// the heap's outermost owner clears transient pins when its depth is 0.
     wasm_call_depth: u32 = 0,
     /// Registered `externref` tables / global cells, walked each GC so
     /// their live JS values survive. Shared imports increment the matching
@@ -2125,21 +2126,28 @@ pub const Realm = struct {
 
     /// Pin a JS value as a *transient* wasm `externref` GC root (deduped),
     /// kept until the outermost wasm call returns. Primitives (non-heap
-    /// values) are skipped — the collector never touches them.
+    /// values) are skipped — the collector never touches them. Without an
+    /// active Wasm entry this is a no-op: JS callers and registered tables /
+    /// globals root their values through the ordinary persistent paths.
     pub fn pinExternRefTransient(self: *Realm, v: Value) !void {
         if (!v.isHeapValue()) return;
-        try self.wasm_extern_roots.put(self.wasmStoreAllocator(), v.bits, {});
+        const owner = self.heap.wasm_root_owner orelse return;
+        try owner.wasm_extern_roots.put(owner.wasmStoreAllocator(), v.bits, {});
     }
 
-    /// Enter / leave a JS→wasm call (the export trampoline). On the
-    /// outermost return the stack is empty, so transient externref pins
-    /// are dropped — only container-held values stay rooted.
+    /// Enter / leave an exported call or start function. The first entry
+    /// across the shared heap owns all transient pins: a nested call in
+    /// another realm must not clear refs still held by the outer Wasm frame.
     pub fn enterWasmCall(self: *Realm) void {
+        if (self.heap.wasm_root_owner == null) self.heap.wasm_root_owner = self;
         self.wasm_call_depth += 1;
     }
     pub fn leaveWasmCall(self: *Realm) void {
         self.wasm_call_depth -= 1;
-        if (self.wasm_call_depth == 0) self.wasm_extern_roots.clearRetainingCapacity();
+        if (self.wasm_call_depth == 0 and self.heap.wasm_root_owner == self) {
+            self.wasm_extern_roots.clearRetainingCapacity();
+            self.heap.wasm_root_owner = null;
+        }
     }
 
     /// Register an externref table / global cell so its live JS values are

@@ -58,6 +58,10 @@ pub const Intrinsics = struct {
     function_apply: ?*JSFunction = null,
     array_prototype: ?*JSObject = null,
     string_prototype: ?*JSObject = null,
+    number_prototype: ?*JSObject = null,
+    boolean_prototype: ?*JSObject = null,
+    symbol_prototype: ?*JSObject = null,
+    bigint_prototype: ?*JSObject = null,
     /// §19.2.1 %eval% — the global `eval` function object. Recorded
     /// so the `direct_eval` opcode can check whether the call's
     /// resolved callee IS the intrinsic (a direct eval) or a user
@@ -476,6 +480,7 @@ pub fn install(realm: *Realm) !void {
     // `.valueOf()` calls directly on the prototype unbox it.
     if (heap_mod.valueAsFunction(realm.globals.get("Boolean").?)) |bool_ctor| {
         if (bool_ctor.prototype) |bp| {
+            realm.intrinsics.boolean_prototype = bp;
             try realm.heap.setBoxedPrimitive(bp, Value.false_);
             // §20.3.3.2 / §20.3.3.3 — install `valueOf` and
             // `toString` on `Boolean.prototype`. Without these,
@@ -1348,22 +1353,15 @@ pub fn toObjectThis(realm: *Realm, this_value: Value) NativeError!*JSObject {
     return w;
 }
 
-/// Find the matching `<Kind>.prototype` for a primitive
-/// receiver. Returns `null` on miss; caller falls back to
-/// `%Object.prototype%`. Walks `realm.globals` because the
-/// Number / Boolean / etc. prototypes aren't pinned on
-/// `Intrinsics` (only the ones the runtime fast-paths reach).
+/// §7.3.3 GetV / §7.1.18 ToObject — primitive receivers use the
+/// realm's intrinsic prototype, independent of mutable global
+/// constructor bindings. String exotic handling lives at the call sites.
 pub fn lookupPrimitivePrototype(realm: *Realm, v: Value) ?*JSObject {
-    const ctor_name: []const u8 = blk: {
-        if (v.isNumber()) break :blk "Number";
-        if (v.isBool()) break :blk "Boolean";
-        if (heap_mod.isSymbol(v)) break :blk "Symbol";
-        if (heap_mod.isBigInt(v)) break :blk "BigInt";
-        return null;
-    };
-    const ctor_v = realm.globals.get(ctor_name) orelse return null;
-    const ctor = heap_mod.valueAsFunction(ctor_v) orelse return null;
-    return ctor.prototype;
+    if (v.isNumber()) return realm.intrinsics.number_prototype;
+    if (v.isBool()) return realm.intrinsics.boolean_prototype;
+    if (heap_mod.isSymbol(v)) return realm.intrinsics.symbol_prototype;
+    if (heap_mod.isBigInt(v)) return realm.intrinsics.bigint_prototype;
+    return null;
 }
 
 /// §7.3.2 Get(O, P) for native intrinsic methods. Walks the
@@ -1387,10 +1385,10 @@ pub fn getPropertyChain(realm: *Realm, obj: *JSObject, key: []const u8) NativeEr
     // saw `length === undefined` because the proxy has no own
     // `length` and the trapless fall-through never reached the
     // wrapped array.
-    if (obj.getProxyTarget() != null or obj.brand.proxy_revoked) {
+    if (obj.getProxyTarget() != null or obj.getProxyTargetFn() != null or obj.brand.proxy_revoked) {
         const proxy_mod = @import("builtins/proxy.zig");
         var cur_proxy = obj;
-        while (cur_proxy.getProxyTarget() != null or cur_proxy.brand.proxy_revoked) {
+        while (cur_proxy.getProxyTarget() != null or cur_proxy.getProxyTargetFn() != null or cur_proxy.brand.proxy_revoked) {
             const r = try proxy_mod.nativeProxyGet(realm, cur_proxy, key, heap_mod.taggedObject(obj), null);
             switch (r) {
                 .value => |v| return v,

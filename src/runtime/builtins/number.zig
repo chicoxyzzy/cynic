@@ -34,6 +34,7 @@ pub fn install(realm: *Realm) !void {
         try installNativeMethod(realm, num_ctor, "isInteger", numberIsInteger, 1);
         try installNativeMethod(realm, num_ctor, "isSafeInteger", numberIsSafeInteger, 1);
         if (num_ctor.prototype) |np| {
+            realm.intrinsics.number_prototype = np;
             try installNativeMethodOnProto(realm, np, "toFixed", numberToFixed, 1);
             try installNativeMethodOnProto(realm, np, "toPrecision", numberToPrecision, 1);
             try installNativeMethodOnProto(realm, np, "toExponential", numberToExponential, 1);

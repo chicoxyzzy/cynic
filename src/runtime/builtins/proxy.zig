@@ -220,6 +220,8 @@ fn trapKeyValue(realm: *Realm, key: []const u8, hint: ?Value) NativeError!Value 
 /// existing Value through.
 pub fn nativeProxyGet(realm: *Realm, proxy: *JSObject, key: []const u8, receiver: Value, key_hint: ?Value) NativeError!NativeProxyOutcome {
     if (proxy.brand.proxy_revoked) return raiseRevoked(realm, "Cannot perform 'get' on a proxy that has been revoked");
+    if (proxy.getProxyTargetFn()) |target|
+        return .{ .value = try nativeFunctionProxyGet(realm, proxy, target, key, receiver, key_hint) };
     const target = proxy.getProxyTarget() orelse return .{ .fallthrough = proxy };
     const handler = proxy.getProxyHandler() orelse return raiseRevoked(realm, "proxy handler slot is null");
     // §10.5.5 step 5 — `Let trap be ? GetMethod(handler, "get")`.
@@ -260,6 +262,74 @@ pub fn nativeProxyGet(realm: *Realm, proxy: *JSObject, key: []const u8, receiver
         }
     }
     return .{ .value = v };
+}
+
+/// Proxy [[Get]] for a function target. Resolve the read here so callers
+/// keep the existing object-only fallthrough contract. A handler getter
+/// may revoke the proxy and collect, so retain the captured target/handler
+/// and anchor the property key before the first user-code re-entry.
+fn nativeFunctionProxyGet(
+    realm: *Realm,
+    proxy: *JSObject,
+    target: *@import("../function.zig").JSFunction,
+    key: []const u8,
+    receiver: Value,
+    key_hint: ?Value,
+) NativeError!Value {
+    const scope = try realm.heap.openScope();
+    defer scope.close();
+    try scope.push(heap_mod.taggedObject(proxy));
+    try scope.push(heap_mod.taggedFunction(target));
+    try scope.push(receiver);
+    const handler = proxy.getProxyHandler() orelse return raiseRevoked(realm, "proxy handler slot is null");
+    try scope.push(heap_mod.taggedObject(handler));
+    if (key_hint) |hint| try scope.push(hint);
+    const key_value = try trapKeyValue(realm, key, key_hint);
+    try scope.push(key_value);
+    const stable_key = if (heap_mod.valueAsSymbol(key_value)) |symbol|
+        symbol.prop_key
+    else blk: {
+        const string: *@import("../string.zig").JSString = @ptrCast(@alignCast(key_value.asString()));
+        break :blk string.flatBytes();
+    };
+    const trap = try intrinsics.getPropertyChain(realm, handler, "get");
+    try scope.push(trap);
+    if (trap.isUndefined() or trap.isNull()) {
+        if (@import("../lantern/helpers.zig").lookupFunctionAccessor(target, stable_key)) |accessor| {
+            if (accessor.getter) |getter|
+                return callProxyGetMethod(realm, heap_mod.taggedFunction(getter), receiver, &.{});
+            return Value.undefined_;
+        }
+        return target.get(stable_key);
+    }
+    const args = [_]Value{ heap_mod.taggedFunction(target), key_value, receiver };
+    const value = try callProxyGetMethod(realm, trap, heap_mod.taggedObject(handler), &args);
+    const flags = target.flagsForOwn(stable_key);
+    if (!flags.configurable) {
+        if (target.accessors.get(stable_key)) |accessor| {
+            if (accessor.getter == null and !value.isUndefined())
+                return throwTypeError(realm, "proxy 'get' trap returned non-undefined for non-configurable accessor with no getter");
+        } else if (target.hasOwn(stable_key) and !flags.writable and
+            !intrinsics.sameValue(target.get(stable_key), value))
+        {
+            return throwTypeError(realm, "proxy 'get' trap returned mismatched value for non-writable non-configurable data property");
+        }
+    }
+    return value;
+}
+
+fn callProxyGetMethod(realm: *Realm, method: Value, receiver: Value, args: []const Value) NativeError!Value {
+    const outcome = @import("../lantern/call.zig").callValue(realm.allocator, realm, realm, method, receiver, args) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.NativeThrew,
+    };
+    return switch (outcome) {
+        .value, .yielded => |value| value,
+        .thrown => |exception| {
+            realm.pending_exception = exception;
+            return error.NativeThrew;
+        },
+    };
 }
 
 /// §10.5.6 [[Set]] (P, V, Receiver) — native dispatcher. Returns

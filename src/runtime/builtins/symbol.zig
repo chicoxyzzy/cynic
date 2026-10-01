@@ -48,6 +48,7 @@ pub fn install(realm: *Realm) !void {
     });
     const fn_obj = r.ctor;
     const proto = r.proto;
+    realm.intrinsics.symbol_prototype = proto;
 
     // §20.4.2 Well-known Symbols. Each is a real Symbol primitive
     // with a description that doubles as the property-key string
