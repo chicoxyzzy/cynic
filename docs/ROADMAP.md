@@ -2427,8 +2427,12 @@ and the per-builtin checklist; this section tracks status.
   transfers, terminating if arms, and catchable `unreachable`. ARM backedge
   polls use the post-transfer live state. Native-entry regressions compare
   against the interpreter and retain safe fallback beyond the operand cap.
-  Implicit function-label branches, native tail/reference calls, and the
-  native-register/imported-call ABI remain next.
+  Implicit function-label branches now reuse the return path on both targets,
+  including conditional/table branches, nested exits, and multiple results.
+  AArch64 tables also compile beyond the comparison-immediate range, with
+  native-entry regressions around the 4,096-entry boundary on both targets.
+  Native tail/reference calls and the native-register/imported-call ABI
+  remain next.
 
   The architecture for all three tiers — the shared codegen
   substrate and the JS↔wasm call-boundary fast path included — is

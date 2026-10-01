@@ -6138,6 +6138,123 @@ test "wasm spasm: multivalue signatures beyond native capacity fall back safely"
     try testing.expectEqual(@as(u32, 1), instance.spasm_refusals);
 }
 
+test "wasm spasm: function labels accept empty results at function depth" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const bodies = [_][]const u8{
+        &.{ 0, 0x41, 7, 0x0c, 0, 0x00, 0x0b },
+        &.{ 0, 0x41, 7, 0x20, 0, 0x0d, 0, 0x1a, 0x0b },
+        &.{ 0, 0x41, 7, 0x20, 0, 0x0e, 0, 0, 0x00, 0x0b },
+    };
+    for (bodies) |body| {
+        const bytes = try buildFunc(a, &.{0x7f}, &.{}, body, "branch");
+        for ([_]u128{ 0, 1, 0xffff_ffff }) |condition| try expectControlResults(bytes, &.{condition}, &.{}, 1);
+    }
+}
+
+test "wasm spasm: function labels return all value kinds without changing the untaken path" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const kinds = &[_]u8{ 0x7f, 0x7e, 0x7d, 0x7c, 0x6f, 0x7b };
+    const values = [_]u128{ 42, 0xfedc_ba98_7654_3210, 0x8000_0000, 0x8000_0000_0000_0000, 0x1234_5678_9abc_def0_ffff_ffff_ffff_ffff, 0xabcdef01_23456789_abcdef01_23456789 };
+    for (1..7) |arity| {
+        for ([_]u8{ 0x0c, 0x0d, 0x0e }) |op| {
+            var body: List = .empty;
+            try body.append(a, 0);
+            if (arity < 6) try body.appendSlice(a, &.{ 0x42, 7 }); // discarded prefix
+            for (0..arity) |index| try body.appendSlice(a, &.{ 0x20, @intCast(index) });
+            if (op != 0x0c) try body.appendSlice(a, &.{ 0x20, 6 });
+            if (op == 0x0e) {
+                try body.appendSlice(a, &.{ 0x0e, 2, 0, 0, 0 });
+            } else {
+                try body.appendSlice(a, &.{ op, 0 });
+            }
+            if (op == 0x0d) {
+                for (0..arity + @intFromBool(arity < 6)) |_| try body.append(a, 0x1a);
+                for (0..arity) |index| {
+                    try body.appendSlice(a, &.{ 0x20, @intCast(index) });
+                    if (index == 0) try body.appendSlice(a, &.{ 0x41, 1, 0x6a });
+                }
+            } else {
+                try body.append(a, 0x00); // a taken function branch must bypass the trap
+            }
+            try body.append(a, 0x0b);
+            const bytes = try buildFunc(a, kinds ++ &[_]u8{0x7f}, kinds[0..arity], body.items, "branch");
+            for ([_]u128{ 0, 1, 99, 0xffff_ffff }) |condition| {
+                var expected = values;
+                if (op == 0x0d and condition == 0) expected[0] += 1;
+                try expectControlResults(bytes, &(values ++ [_]u128{condition}), expected[0..arity], 1);
+            }
+        }
+    }
+}
+
+test "wasm spasm: function labels resume reachable else arms after nested branches" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const kinds = &[_]u8{ 0x7f, 0x6f, 0x7b };
+    const values = [_]u128{ 42, 0x1234_5678_9abc_def0_ffff_ffff_ffff_ffff, 0xfedc_ba98_7654_3210_0123_4567_89ab_cdef };
+    for ([_][]const u8{ &.{ 0x0c, 2 }, &.{ 0x41, 1, 0x0d, 2 }, &.{ 0x41, 0, 0x0e, 0, 2 } }) |branch| {
+        var body: List = .empty;
+        try body.appendSlice(a, &.{ 0, 0x03, 1, 0x20, 3, 0x04, 1 }); // loop -> if -> function
+        try body.appendSlice(a, &.{ 0x42, 7, 0x20, 0, 0x20, 1, 0x20, 2 });
+        try body.appendSlice(a, branch);
+        try body.appendSlice(a, &.{ 0x00, 0x05, 0x20, 0, 0x41, 1, 0x6a, 0x20, 1, 0x20, 2, 0x0b, 0x0b, 0x0b });
+        const bytes = try buildControlFunc(a, .{ .params = kinds ++ &[_]u8{0x7f}, .results = kinds }, .{ .params = &.{}, .results = kinds }, 1, body.items);
+        for ([_]u128{ 0, 1 }) |condition| {
+            var expected = values;
+            if (condition == 0) expected[0] += 1;
+            try expectControlResults(bytes, &(values ++ [_]u128{condition}), &expected, 1);
+        }
+    }
+}
+
+test "wasm spasm: function labels coexist with block targets in branch tables" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const kinds = &[_]u8{ 0x7f, 0x6f, 0x7b };
+    const bytes = try buildControlFunc(a, .{ .params = kinds ++ &[_]u8{0x7f}, .results = kinds }, .{ .params = &.{}, .results = kinds }, 1, &.{
+        0, 0x02, 1, 0x02, 1, 0x42, 7, 0x20, 0, 0x20, 1, 0x20, 2, 0x20, 3,
+        0x0e, 2,    0,    2,    1, // inner block, function, default outer block
+        0x0b, 0x21, 2,    0x21, 1,
+        0x41, 1,    0x6a, 0x20, 1,
+        0x20, 2,    0x0b, 0x21, 2,
+        0x21, 1,    0x41, 2,    0x6a,
+        0x20, 1,    0x20, 2,    0x0b,
+    });
+    const values = [_]u128{ 42, 0x1234_5678_9abc_def0_ffff_ffff_ffff_ffff, 0xfedc_ba98_7654_3210_0123_4567_89ab_cdef };
+    for ([_]u128{ 0, 1, 2, 0xffff_ffff }) |index| {
+        var expected = values;
+        expected[0] += if (index == 0) @as(u128, 3) else if (index == 1) 0 else 2;
+        try expectControlResults(bytes, &(values ++ [_]u128{index}), &expected, 1);
+    }
+}
+
+test "wasm spasm: function labels large branch tables cross the ARM immediate boundary" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var body: List = .empty;
+    try body.appendSlice(a, &.{ 0, 0x02, 0x7f, 0x02, 0x7f, 0x41, 7, 0x20, 0, 0x0e });
+    try uleb(a, &body, 4098);
+    for (0..4098) |index| try body.append(a, if (index == 4095 or index == 4097) 1 else 0);
+    try body.appendSlice(a, &.{ 1, 0x0b, 0x41, 1, 0x6a, 0x0b, 0x0b });
+    const bytes = try buildFunc(a, &.{0x7f}, &.{0x7f}, body.items, "table");
+    for ([_]u128{ 0, 4094, 4095, 4096, 4097, 4098, 0xffff_ffff }) |index| {
+        const expected: u128 = if (index == 4095 or index >= 4097) 7 else 8;
+        try expectControlResults(bytes, &.{index}, &.{expected}, 1);
+    }
+}
+
 test "wasm spasm: reference branch merges preserve complete cells" {
     if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);

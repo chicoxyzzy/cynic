@@ -757,8 +757,11 @@ the measured design space:
   and multiple results on both targets. Branch merges preserve every scalar,
   reference, and vector value; loop polls preserve the transferred parameter
   state. Both backends compile catchable `unreachable` and terminating if
-  arms. Oversized stacks, implicit function-label branches, and unsupported
-  opcodes still refuse before code publication and run in Sarcasm.
+  arms. Branches to the implicit function label now use the return path,
+  including conditional/table branches with multiple results. AArch64 branch
+  tables also compile beyond the 12-bit comparison-immediate range; both
+  targets retain linear dispatch. Oversized stacks and unsupported opcodes
+  still refuse before code publication and run in Sarcasm.
   This is a coverage difference, not a semantic one: forced-Spasm sweeps on
   both architectures pass all 58,779 scored spec commands. Current native
   coverage and per-opcode refusals are in [wasm-results.md](../wasm-results.md).

@@ -3929,31 +3929,24 @@ fn compileAarch64(
                 sp = c.height + c.block_type.params().len;
                 for (c.block_type.params(), c.height..) |pt, d| stack[d] = runtimeLoc(pt, d);
             },
-            op_br => {
-                const depth = readUleb32(body, &i) orelse return null;
-                if (depth >= ctrl_len) return null;
-                const target = &ctrl[ctrl_len - 1 - depth];
-                if (!(try emitBranchValues(&m, &stack, num_locals, sp, target.height, target.branch_arity))) return null;
-                if (target.kind == .loop) {
-                    try emitLoopExecutionPoll(&m, gpa, &stack, target, &epilogue, execution_poll_helper);
+            op_br, op_return => {
+                const depth: usize = if (op == op_br) readUleb32(body, &i) orelse return null else ctrl_len;
+                if (!(try emitBranchOrReturn(&m, gpa, &stack, num_locals, sp, depth, ctrl[0..ctrl_len], ftype.results, &epilogue, execution_poll_helper))) return null;
+                if ((try closeTerminatedArm(&m, gpa, body, &i, &stack, &sp, &ctrl, &ctrl_len)) orelse return null) {
+                    sp = ftype.results.len;
+                    for (ftype.results, 0..) |rt, r| stack[r] = runtimeLoc(rt, r);
+                    break;
                 }
-                try m.jump(&target.label);
-                _ = (try closeTerminatedArm(&m, gpa, body, &i, &stack, &sp, &ctrl, &ctrl_len)) orelse return null;
             },
             op_br_if => {
                 const depth = readUleb32(body, &i) orelse return null;
-                if (sp == 0 or depth >= ctrl_len) return null;
+                if (sp == 0) return null;
                 sp -= 1;
                 const condition = try materialize(&m, stack[sp], sp);
-                const target = &ctrl[ctrl_len - 1 - depth];
                 var not_taken: masm_mod.Masm.Label = .{};
                 defer not_taken.deinit(gpa);
                 try m.jumpCbz(condition, &not_taken);
-                if (!(try emitBranchValues(&m, &stack, num_locals, sp, target.height, target.branch_arity))) return null;
-                if (target.kind == .loop) {
-                    try emitLoopExecutionPoll(&m, gpa, &stack, target, &epilogue, execution_poll_helper);
-                }
-                try m.jump(&target.label);
+                if (!(try emitBranchOrReturn(&m, gpa, &stack, num_locals, sp, depth, ctrl[0..ctrl_len], ftype.results, &epilogue, execution_poll_helper))) return null;
                 try m.bind(&not_taken);
             },
             op_br_table => {
@@ -3964,34 +3957,20 @@ fn compileAarch64(
                 var j: u32 = 0;
                 while (j < count) : (j += 1) {
                     const depth = readUleb32(body, &i) orelse return null;
-                    if (depth >= ctrl_len or j > std.math.maxInt(u12)) return null;
-                    const target = &ctrl[ctrl_len - 1 - depth];
                     var next_case: masm_mod.Masm.Label = .{};
                     defer next_case.deinit(gpa);
-                    try m.emit(a64.cmpImm(index_reg, @intCast(j), false));
-                    try m.jumpCond(.ne, &next_case);
-                    if (!(try emitBranchValues(&m, &stack, num_locals, sp, target.height, target.branch_arity))) return null;
-                    if (target.kind == .loop) {
-                        try emitLoopExecutionPoll(&m, gpa, &stack, target, &epilogue, execution_poll_helper);
+                    if (j <= std.math.maxInt(u12)) {
+                        try m.emit(a64.cmpImm(index_reg, @intCast(j), false));
+                    } else {
+                        try m.movImm64(.x16, j);
+                        try m.emit(a64.cmpRegW(index_reg, .x16));
                     }
-                    try m.jump(&target.label);
+                    try m.jumpCond(.ne, &next_case);
+                    if (!(try emitBranchOrReturn(&m, gpa, &stack, num_locals, sp, depth, ctrl[0..ctrl_len], ftype.results, &epilogue, execution_poll_helper))) return null;
                     try m.bind(&next_case);
                 }
                 const depth = readUleb32(body, &i) orelse return null;
-                if (depth >= ctrl_len) return null;
-                const target = &ctrl[ctrl_len - 1 - depth];
-                if (!(try emitBranchValues(&m, &stack, num_locals, sp, target.height, target.branch_arity))) return null;
-                if (target.kind == .loop) {
-                    try emitLoopExecutionPoll(&m, gpa, &stack, target, &epilogue, execution_poll_helper);
-                }
-                try m.jump(&target.label);
-                _ = (try closeTerminatedArm(&m, gpa, body, &i, &stack, &sp, &ctrl, &ctrl_len)) orelse return null;
-            },
-            op_return => {
-                if (sp < ftype.results.len) return null;
-                try emitFunctionResults(&m, &stack, num_locals, sp - ftype.results.len, ftype.results);
-                try m.movImm64(.x0, trap_ok);
-                try m.jump(&epilogue);
+                if (!(try emitBranchOrReturn(&m, gpa, &stack, num_locals, sp, depth, ctrl[0..ctrl_len], ftype.results, &epilogue, execution_poll_helper))) return null;
                 if ((try closeTerminatedArm(&m, gpa, body, &i, &stack, &sp, &ctrl, &ctrl_len)) orelse return null) {
                     sp = ftype.results.len;
                     for (ftype.results, 0..) |rt, r| stack[r] = runtimeLoc(rt, r);
@@ -4734,6 +4713,35 @@ fn emitLoopExecutionPoll(m: *masm_mod.Masm, gpa: std.mem.Allocator, stack: []con
     const params = target.block_type.params();
     for (params, target.height..) |pt, d| live[d] = runtimeLoc(pt, d);
     try emitExecutionPoll(m, gpa, live[0 .. target.height + params.len], epilogue, poll_helper);
+}
+
+/// Core br to the implicit function label is a return. Keep stack metadata
+/// unchanged so a conditional branch can continue compiling its untaken path.
+fn emitBranchOrReturn(
+    m: *masm_mod.Masm,
+    gpa: std.mem.Allocator,
+    stack: []const Loc,
+    num_locals: usize,
+    sp: usize,
+    depth: usize,
+    ctrl: []Ctrl,
+    results: []const ValType,
+    epilogue: *masm_mod.Masm.Label,
+    poll_helper: ExecutionPollHelperFn,
+) CompileError!bool {
+    if (depth > ctrl.len) return false;
+    if (depth == ctrl.len) {
+        if (sp < results.len) return false;
+        try emitFunctionResults(m, stack, num_locals, sp - results.len, results);
+        try m.movImm64(.x0, trap_ok);
+        try m.jump(epilogue);
+        return true;
+    }
+    const target = &ctrl[ctrl.len - 1 - depth];
+    if (!(try emitBranchValues(m, stack, num_locals, sp, target.height, target.branch_arity))) return false;
+    if (target.kind == .loop) try emitLoopExecutionPoll(m, gpa, stack, target, epilogue, poll_helper);
+    try m.jump(&target.label);
+    return true;
 }
 
 /// Taken branches discard intervening operands and move their results down
