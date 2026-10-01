@@ -498,6 +498,19 @@ segments and the start function. Captured functions and primitive globals are
 not reread; imported Memory/Table/Global objects retain their normal aliasing.
 Import and start exceptions reject with the original thrown value.
 
+A start index may name an imported host function directly. Core
+[`instantiate`](https://webassembly.github.io/spec/core/exec/modules.html#exec-instantiation)
+invokes that function after active segments; it does not require a defined Wasm
+wrapper. The entry boundary uses the existing host trampoline with no arguments,
+an undefined JS receiver, and an ignored return value. It polls the instance's
+execution controller before entering the host and bounds native recursion.
+V8's [`InstanceBuilder::ExecuteStartFunction`](https://github.com/v8/v8/blob/main/src/wasm/module-instantiate.cc)
+also directly invokes imported JS starts; Cynic keeps this support in the
+embedding-neutral core entry so synchronous and asynchronous APIs share it.
+The upstream core testsuite contains a direct imported start in `start.wast`.
+Local unit and executor contracts assert that it actually runs, preserving JS
+exception identity and both asynchronous overloads in both WPT CI profiles.
+
 `Realm.wasm_instantiation_jobs` is a separate FIFO, driven by the existing
 `lantern.drainMicrotasks` entry point. It drains runnable ordinary promise jobs,
 including newly queued reactions, before each Wasm task and checkpoints again

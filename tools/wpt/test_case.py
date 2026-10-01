@@ -318,6 +318,52 @@ class HarnessContract(CaseFixture, unittest.TestCase):
         self.assertTrue(any(r["type"] == "complete" for r in self.records(result)), result.stdout)
 
 
+class ImportedStartContract(CaseFixture, unittest.TestCase):
+    def test_imported_start_runs_once_and_preserves_thrown_values(self):
+        result = self.execute("""
+            const bytes = new Uint8Array([0,97,115,109,1,0,0,0,
+                1,4,1,96,0,0,2,7,1,1,109,1,102,0,0,8,1,0]);
+            const module = new WebAssembly.Module(bytes);
+            test(() => {
+                let calls = 0;
+                new WebAssembly.Instance(module, {m: {f: function(...args) {
+                    assert_equals(this, undefined);
+                    assert_equals(args.length, 0);
+                    calls++;
+                    return {get then() { assert_unreached('start return inspected'); }};
+                }}});
+                assert_equals(calls, 1);
+                const reason = {marker: 42};
+                assert_throws_exactly(reason, () => new WebAssembly.Instance(module,
+                    {m: {f() { throw reason; }}}));
+            }, 'synchronous imported start');
+            for (const useModule of [false, true]) {
+                promise_test(() => {
+                    let calls = 0;
+                    const input = useModule ? module : bytes;
+                    const pending = WebAssembly.instantiate(input, {m: {f() { calls++; }}});
+                    assert_equals(calls, 0);
+                    return pending.then(result => {
+                        assert_equals(calls, 1);
+                        assert_true((useModule ? result : result.instance) instanceof WebAssembly.Instance);
+                        const reason = {marker: 42};
+                        return WebAssembly.instantiate(input, {m: {f() { throw reason; }}})
+                            .then(() => assert_unreached('start throw resolved'),
+                                  actual => assert_equals(actual, reason));
+                    });
+                }, useModule ? 'Module imported start' : 'bytes imported start');
+            }
+        """, harness=True, options=("--gc-threshold=1",))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        records = self.records(result)
+        completions = [record for record in records if record["type"] == "complete"]
+        self.assertEqual(len(completions), 1, result.stdout)
+        self.assertEqual(completions[0]["status"], 0, result.stdout)
+        self.assertEqual([(r["name"], r["status"]) for r in records if r["type"] == "result"],
+                         [("synchronous imported start", 0),
+                          ("bytes imported start", 0), ("Module imported start", 0)])
+
+
 class ModuleBuilderContract(CaseFixture, unittest.TestCase):
     def builder_source(self):
         from run import patch_support

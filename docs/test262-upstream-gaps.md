@@ -1964,3 +1964,25 @@ the corpus under the relevant section's directory before adding.
   argument-conversion fixtures check coercion without resizing or detaching
   the source from that callback. A separate Wasm regression rejects transfer
   of borrowed linear memory; that host integration belongs in WPT.
+
+### Explicit collection restarted incomplete marks and reclaimed reachable children
+
+- **Fixed in:** `32aa12db` (2026-10-01)
+- **Spec:** [§9.9.2 Liveness](https://tc39.es/ecma262/multipage/executable-code-and-execution-contexts.html#sec-liveness).
+- **Native reproducer:** retain a three-object `root.middle.leaf` graph;
+  begin an incremental major mark, leaving `middle` on the worklist; mark
+  `leaf` through another root, then call `Realm.collectGarbage`. The precise
+  regression in `realm.zig` checks the live allocation count before touching
+  any potentially reclaimed child.
+- **Before fix:** explicit collection began a second mark while the first was
+  incomplete. The repeated color flip made an unvisited young parent appear
+  already marked, skipping its children and reclaiming a reachable leaf.
+  Collecting Wasm start callbacks exposed this as a freed closure environment
+  on a later asynchronous call; the defined-wrapper start path had the same bug.
+- **After fix:** explicit collection finishes an active mark, preserving its
+  color and worklists. Reachable objects and closure environments survive.
+- **Suggested fixture shape:** retain a closure through an object property,
+  force collection after allocation pressure, then assert its captured value
+  is usable. A portable test cannot require a particular incremental-mark
+  boundary; deterministic coverage needs an engine GC-stress configuration or
+  the native phase-control test, rather than a test262 failure-count claim.
