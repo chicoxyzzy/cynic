@@ -125,7 +125,7 @@ The remaining 11 assertions fall into these observed categories:
 
 | Category | Assertions | Status |
 | --- | ---: | --- |
-| Exception fixture binaries rejected by the decoder | 2 | Wasm encoding support gap |
+| Exception fixtures use deprecated try/catch/rethrow encodings | 2 | Legacy proposal encodings; standardized try_table/throw_ref is supported |
 | Sloppy setter expectations / undeclared loop variable | 5 | Strict-only policy |
 | Dictionary conversion order / explicit undefined Table.set | 4 | Pinned WPT expectations differ from the current JS API |
 
