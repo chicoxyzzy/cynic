@@ -2237,10 +2237,10 @@ pub const Realm = struct {
 
     pub fn collectGarbage(self: *Realm) void {
         // A major cycle, run stop-the-world as begin + finish back to
-        // back. The same two steps drive incremental marking, where the
-        // safe-point spends a mark budget between them; running them
-        // adjacently here is byte-identical to the old monolithic path.
-        self.beginIncrementalMajor();
+        // back. If a sliced mark is already active, finish its worklist:
+        // flipping colors again would make unvisited young objects appear
+        // marked and let their already-visited children be swept.
+        if (self.heap.marking_phase != .marking) self.beginIncrementalMajor();
         self.finishIncrementalMajor(false); // STW — sweep synchronously
         self.drainRealmTeardown();
     }
@@ -2782,6 +2782,31 @@ test "Realm: init / deinit round-trip" {
     // Heap is reachable through the realm and usable for allocation.
     const s = try realm.heap.allocateString("hello");
     try testing.expectEqualStrings("hello", s.flatBytes());
+}
+
+test "Realm: explicit collection preserves an in-progress major's reachable young graph" {
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    const root = try realm.heap.allocateObject();
+    const middle = try realm.heap.allocateObject();
+    const leaf = try realm.heap.allocateObject();
+    try root.set(realm.allocator, "middle", heap_mod.taggedObject(middle));
+    try middle.set(realm.allocator, "leaf", heap_mod.taggedObject(leaf));
+    try realm.globals.put(realm.allocator, "root", heap_mod.taggedObject(root));
+
+    // Model an incremental root snapshot with a former active frame that
+    // reached leaf directly, before the worklist has visited middle.
+    realm.beginIncrementalMajor();
+    realm.heap.markValue(heap_mod.taggedObject(leaf));
+    try testing.expectEqual(realm.heap.live_color, leaf.mark_color);
+    try testing.expect(middle.mark_color != realm.heap.live_color);
+    realm.collectGarbage();
+
+    // Check the live allocation count before touching leaf: restarting a
+    // partial mark used to free it while retaining its parent, leaving a UAF.
+    try testing.expectEqual(@as(usize, 3), realm.heap.objectCount());
+    try testing.expectEqual(heap_mod.taggedObject(leaf).bits, middle.get("leaf").bits);
+    try testing.expectEqual(.idle, realm.heap.marking_phase);
 }
 
 test "Realm: deinit frees heap-allocated strings" {

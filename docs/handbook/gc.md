@@ -138,7 +138,11 @@ roots, seed the worklist, arm the write barrier) and drains the mark
 worklist in bounded ~8192-item slices across subsequent safe-point
 crossings, then runs `Realm.finishIncrementalMajor` — the stop-the-world
 termination — once the worklist empties. Explicit collects
-(`collectGarbage` / `__collectGarbage`) stay monolithic STW. On the 2M
+(`collectGarbage` / `__collectGarbage`) stay monolithic STW. If a sliced mark is already
+active, an explicit collection finishes that mark with its existing color
+and worklists. It must not begin a second epoch over partially marked young
+objects: the next color flip would make unvisited parents appear marked while
+already-visited children become eligible for collection. On the 2M
 synthetic the **max GC pause dropped ~800 ms → ~1 ms (~800×)**: the mark
 is ~1 ms slices (`slice_max` under `--gc-stats`), and the termination
 **sweep** — the residual ~9.6 ms STW after the mark went incremental — is
