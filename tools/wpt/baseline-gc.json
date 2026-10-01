@@ -11,12 +11,12 @@
     "testharness.js (patched)": "fbe2e52e029bbeea3fecdedf963b69589526a8a1e3ceb18947120667443147f7",
     "wasm/jsapi/wasm-module-builder.js (patched)": "83a83b12adc7d51533c818b23fd37936d03a7203e7015356f9e6852b8625964d"
   },
-  "binary_sha256": "b8251f9d2ebdb9fe8568ba3c7f71b75d1b90c2576db28c15a565e87e99af191e",
+  "binary_sha256": "06609951b3b66457c9c5204618479f8c6e40340b1181dacca09b271e734be5b5",
   "provenance": {
-    "generated_at_utc": "2026-09-30T11:16:02Z",
+    "generated_at_utc": "2026-10-01T03:13:29Z",
     "platform": "Darwin",
     "architecture": "arm64",
-    "engine_git_head": "6af4545f1f95daa47d56dcd1706a18d73c6ca222",
+    "engine_git_head": "584ca7228ebec7f7a5d693601a37bb427a048483",
     "engine_git_dirty": false
   },
   "configuration": {
@@ -181,12 +181,12 @@
   "summary": {
     "files": {
       "execution_error": 2,
-      "fail": 12,
-      "pass": 29
+      "fail": 11,
+      "pass": 30
     },
     "subtests": {
-      "FAIL": 13,
-      "PASS": 590
+      "FAIL": 12,
+      "PASS": 591
     },
     "excluded_files": 37
   },
@@ -560,7 +560,7 @@
       "variant": ""
     },
     {
-      "status": "fail",
+      "status": "pass",
       "subtests": [
         {
           "name": "multiple return values from wasm to js",
@@ -574,8 +574,8 @@
         },
         {
           "name": "multiple return values from js to wasm",
-          "status": 1,
-          "message": "promise_test: Unhandled rejection with value: object \"TypeError: WebAssembly.Instance: host import arity is not supported\""
+          "status": 0,
+          "message": null
         }
       ],
       "harness": {
