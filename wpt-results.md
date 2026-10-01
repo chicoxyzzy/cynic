@@ -1,15 +1,15 @@
 # WPT Wasm JavaScript API results
 
-Measured baseline after multi-value JS import support: **30 of 43 included
-files pass completely**. The remaining files are 11 assertion-failure files
-and 2 strict-mode parse errors. Across files that execute, **591 subtests pass
-and 12 fail** (603 observed subtests). The two unparsed files contribute no
+Measured baseline after async instantiation scheduling: **31 of 43 included
+files pass completely**. The remaining files are 10 assertion-failure files
+and 2 strict-mode parse errors. Across files that execute, **592 subtests pass
+and 11 fail** (603 observed subtests). The two unparsed files contribute no
 observed subtests; 603 is not the complete potential subtest denominator.
 No fixture crashed, timed out, or ended without a harness result except those
 two explicit parse errors. Another 37 files are explicitly excluded.
 
-Compared with the initial measurement, **325 additional named subtests pass**
-and 16 additional files pass completely; no previously passing subtest was lost.
+Compared with the initial measurement, **326 additional named subtests pass**
+and 17 additional files pass completely; no previously passing subtest was lost.
 
 | Measurement | Passing files | Failing files | Parse errors | Passing subtests | Failing subtests |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -20,6 +20,7 @@ and 16 additional files pass completely; no previously passing subtest was lost.
 | Memory-buffer conversion / ownership | 27 | 11 | 2 | 584 | 12 |
 | Shared-memory coverage | 29 | 12 | 2 | 590 | 13 |
 | Multi-value JS imports | 30 | 11 | 2 | 591 | 12 |
+| Async instantiation | 31 | 10 | 2 | 592 | 11 |
 
 This measures a selected Wasm JavaScript API slice, not browser conformance or
 the Wasm core instruction suite. See [the integration guide](docs/wpt.md),
@@ -31,9 +32,9 @@ the Wasm core instruction suite. See [the integration guide](docs/wpt.md),
 
 | Input | Value |
 | --- | --- |
-| Captured | 2026-10-01T03:13:31Z (normal); 2026-10-01T03:13:29Z (GC pressure) |
+| Captured | 2026-10-01T12:59:44Z (normal); 2026-10-01T12:59:45Z (GC pressure) |
 | WPT revision | [`9ee707c850996c8d124809570c3ff855d67301b9`](https://github.com/web-platform-tests/wpt/tree/9ee707c850996c8d124809570c3ff855d67301b9/wasm/jsapi) |
-| Engine checkout | `584ca7228ebec7f7a5d693601a37bb427a048483` (clean source for both profiles) |
+| Engine checkout | `1630e2ebfa1d9b953da4972c9f90cffb4114e34f` (clean source for both profiles) |
 | Host | macOS arm64 |
 | Profiles | ReleaseFast / default GC; ReleaseSafe / `--gc-threshold=1` |
 | Posture | Strict-only, mutable primordials, eval and Wasm compilation enabled; JS and Wasm JITs off |
@@ -52,7 +53,7 @@ between the two profiles, including known failures.
 
 | Family | Passing files | Assertion-failure files | Parse errors | Passing subtests | Failing subtests |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Compilation / instantiation | 4 | 1 | 1 | 134 | 1 |
+| Compilation / instantiation | 5 | 0 | 1 | 135 | 0 |
 | Exception | 2 | 3 | 0 | 17 | 4 |
 | Global | 4 | 0 | 0 | 132 | 0 |
 | Instance | 3 | 1 | 1 | 35 | 1 |
@@ -62,7 +63,7 @@ between the two profiles, including known failures.
 | Prototypes | 1 | 0 | 0 | 5 | 0 |
 | Table | 2 | 3 | 0 | 85 | 3 |
 | Tag | 2 | 0 | 0 | 8 | 0 |
-| **Total** | **30** | **11** | **2** | **591** | **12** |
+| **Total** | **31** | **10** | **2** | **592** | **11** |
 
 ## Corrections and remaining failures
 
@@ -112,11 +113,18 @@ Eighteen focused unit regressions cover iterator operations and thrown values,
 primitive and callable Proxy iterables, hardened realms, GC pressure, allocation
 failure, native execution, start functions, and nested cross-realm calls.
 
-The remaining 12 assertions fall into these observed categories:
+Async instantiation now snapshots bytes before returning, defers their import
+getters, and queues core instantiation/start separately for both overloads.
+Ordinary promise chains finish before each Wasm task. This passes the named
+`Synchronous options handling: Buffer argument` assertion; the other 602 outcomes
+remain unchanged. Nineteen focused engine regressions cover timing, captured
+imports, DataView byte copies, GC, teardown, allocation failure, and termination.
+The executor also checks both overloads' promise checkpoints in both CI profiles.
+
+The remaining 11 assertions fall into these observed categories:
 
 | Category | Assertions | Status |
 | --- | ---: | --- |
-| BufferSource instantiate import-lookup timing | 1 | Engine currently instantiates synchronously |
 | Exception fixture binaries rejected by the decoder | 2 | Wasm encoding support gap |
 | Sloppy setter expectations / undeclared loop variable | 5 | Strict-only policy |
 | Dictionary conversion order / explicit undefined Table.set | 4 | Pinned WPT expectations differ from the current JS API |
