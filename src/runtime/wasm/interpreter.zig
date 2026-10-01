@@ -1639,13 +1639,7 @@ const Interp = struct {
     uncaught: ?*const ExnRecord = null,
 
     inline fn pollExecution(self: *Interp) Error!void {
-        const control = self.execution_control orelse return;
-        return switch (control.poll()) {
-            .proceed => {},
-            .step_budget_exhausted => error.StepBudgetExhausted,
-            .cooperative_interrupted => error.ExecutionInterrupted,
-            .terminated => error.ExecutionTerminated,
-        };
+        try pollExecutionControl(self.execution_control);
     }
 
     inline fn pollBackwardBranch(self: *Interp, op_ip: usize, target_pc: usize) Error!void {
@@ -1794,6 +1788,16 @@ const Interp = struct {
     }
 };
 
+fn pollExecutionControl(execution_control: ?ExecutionControl) Error!void {
+    const control = execution_control orelse return;
+    return switch (control.poll()) {
+        .proceed => {},
+        .step_budget_exhausted => error.StepBudgetExhausted,
+        .cooperative_interrupted => error.ExecutionInterrupted,
+        .terminated => error.ExecutionTerminated,
+    };
+}
+
 /// Invoke `func_index` (function-index space) with `args` already
 /// encoded as raw 128-bit cells (scalars in the low bits). Returns the
 /// result cells, allocated from `allocator`.
@@ -1819,7 +1823,19 @@ fn invokeWithControl(
     const entry_ref = self.resolveFunc(func_index) orelse return error.UnsupportedImportCall;
     const target = switch (entry_ref) {
         .wasm => |w| w,
-        .host => return error.UnsupportedImportCall,
+        .host => |h| {
+            // Core instantiate invokes the start's function address, which
+            // may name a host import directly. Use the same bounded host
+            // boundary as callHost, without fabricating a Wasm frame.
+            if (args.len != h.params or h.params > 16 or h.results > 16)
+                return error.UnsupportedImportCall;
+            if (stack_guard.nearLimit()) return error.CallStackExhausted;
+            try pollExecutionControl(inherited_execution_control orelse self.execution_control);
+            const out = try allocator.alloc(u128, h.results);
+            errdefer allocator.free(out);
+            try h.fn_ptr(h.ctx, args, out);
+            return out;
+        },
     };
 
     // Spasm baseline-JIT fast path (docs/jit.md §6): if the tier is on,
@@ -2627,7 +2643,8 @@ fn spasmRun(
 /// instantiation; a trap here means instantiation failed.
 pub fn runStart(self: *Instance, allocator: std.mem.Allocator) Error!void {
     const idx = self.module.start orelse return;
-    _ = try invoke(self, allocator, idx, &.{});
+    const results = try invoke(self, allocator, idx, &.{});
+    defer allocator.free(results);
 }
 
 /// Read the opcode at `pc` and advance past it. `pc >= body.len` is the
