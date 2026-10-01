@@ -77,8 +77,9 @@ pub const Cell = u128;
 /// increment; correctness first.
 ///
 /// The `u32` return (`w0`/`eax`) is the trap channel: `trap_ok` (0) means the
-/// body completed and `results` is valid; a non-zero `TrapCode` means
-/// the body trapped before writing results, and the caller maps it to
+/// body completed and `results` is valid; `status_tail_call` requests a
+/// frame-replacing continuation, and every other non-zero `TrapCode` means
+/// the body trapped before writing results. The caller maps traps to
 /// the matching `TrapError` (so a Spasm trap is indistinguishable from
 /// an interpreter trap at the boundary). This is the mechanism every
 /// trapping op reuses — divide-by-zero and memory bounds today.
@@ -212,6 +213,11 @@ pub const trap_step_budget_exhausted: u32 = 7;
 pub const trap_execution_interrupted: u32 = 8;
 pub const trap_execution_terminated: u32 = 9;
 pub const trap_unreachable: u32 = 10;
+/// Non-trapping completion: the native frame has returned and the runtime
+/// must run the staged tail target before resuming an ordinary caller.
+pub const status_tail_call: u32 = 11;
+
+pub const FinishTailCallHelperFn = *const fn (instance: *anyopaque, results: [*]Cell, execution_control: ?*anyopaque) callconv(.c) u32;
 
 pub const CompileError = error{
     OutOfMemory,
@@ -416,6 +422,10 @@ pub const Helpers = struct {
     call: ?CallHelperFn = null,
     call_indirect: ?CallIndirectHelperFn = null,
     call_ref: ?CallRefHelperFn = null,
+    return_call: ?CallHelperFn = null,
+    return_call_indirect: ?CallIndirectHelperFn = null,
+    return_call_ref: ?CallRefHelperFn = null,
+    finish_tail_call: ?FinishTailCallHelperFn = null,
     mem_view: ?MemViewHelperFn = null,
     mem_grow: ?MemGrowHelperFn = null,
     mem_init: ?MemInitHelperFn = null,
@@ -444,7 +454,10 @@ const op_br_table: u8 = 0x0e;
 const op_return: u8 = 0x0f;
 const op_call: u8 = 0x10;
 const op_call_indirect: u8 = 0x11;
+const op_return_call: u8 = 0x12;
+const op_return_call_indirect: u8 = 0x13;
 const op_call_ref: u8 = 0x14;
+const op_return_call_ref: u8 = 0x15;
 const op_drop: u8 = 0x1a;
 const op_select: u8 = 0x1b;
 // §5.4.2 — typed select carries a result-type vector immediate (a
@@ -917,6 +930,11 @@ pub fn compileWithDiagnostics(
                 .call_helper = if (helpers.call) |helper| @intFromPtr(helper) else null,
                 .call_indirect_helper = if (helpers.call_indirect) |helper| @intFromPtr(helper) else null,
                 .call_ref_helper = if (helpers.call_ref) |helper| @intFromPtr(helper) else null,
+                .return_call_helper = if (helpers.return_call) |helper| @intFromPtr(helper) else null,
+                .return_call_indirect_helper = if (helpers.return_call_indirect) |helper| @intFromPtr(helper) else null,
+                .return_call_ref_helper = if (helpers.return_call_ref) |helper| @intFromPtr(helper) else null,
+                .finish_tail_call_helper = if (helpers.finish_tail_call) |helper| @intFromPtr(helper) else null,
+                .status_tail_call = status_tail_call,
                 .call_gate_stub = if (call_gate_stub) |stub| @intFromPtr(stub) else null,
                 .call_gates_base = if (call_gates.len == 0) null else @intFromPtr(call_gates.ptr),
                 .call_gates_len = call_gates.len,
@@ -3991,7 +4009,7 @@ fn compileAarch64(
                     break;
                 }
             },
-            op_call => {
+            op_call, op_return_call => {
                 // §5.4.1 call — read the callee index and its signature,
                 // marshal the top `nparams` operand-stack values into a
                 // per-frame buffer, then enter either a same-instance native
@@ -4003,11 +4021,34 @@ fn compileAarch64(
                 const callee = calleeFuncType(module, fidx) orelse return null;
                 const nparams: usize = callee.params.len;
                 const nresults: usize = callee.results.len;
-                const refresh_memory = moduleHasMemory(module);
+                const tail = op == op_return_call;
+                const refresh_memory = !tail and moduleHasMemory(module);
                 if (refresh_memory and helpers.mem_view == null) return null;
                 // References and vectors travel as complete Cells.
                 for (callee.params) |t| if (!isCallValue(t)) return null;
                 for (callee.results) |t| if (!isCallValue(t)) return null;
+                if (tail) {
+                    const helper = helpers.return_call orelse return null;
+                    if (sp < nparams) return null;
+                    const framebytes = callFrameBytes(nparams, 0) orelse return null;
+                    try m.emit(a64.subSpImm(framebytes));
+                    try m.emit(a64.addRegSp(.x6, 0));
+                    try emitCallArguments(&m, &stack, num_locals, sp - nparams, callee.params);
+                    try m.emit(a64.movReg(.x0, .x19));
+                    try m.movImm64(.x1, fidx);
+                    try m.emit(a64.movReg(.x2, .x6));
+                    try m.movImm64(.x3, nparams);
+                    try m.emit(a64.movReg(.x4, .x21));
+                    try m.callAbs(.x16, @intFromPtr(helper));
+                    try m.emit(a64.addSpImm(framebytes));
+                    try m.jump(&epilogue);
+                    if ((try closeTerminatedArm(&m, gpa, body, &i, &stack, &sp, &ctrl, &ctrl_len)) orelse return null) {
+                        sp = ftype.results.len;
+                        for (ftype.results, 0..) |rt, r| stack[r] = runtimeLoc(rt, r);
+                        break;
+                    }
+                    continue;
+                }
                 const direct_self = directSelfCallEligible(func_index, fidx, func, ftype);
                 const static_callee = definedCallee(module, funcs, fidx);
                 // Operands live *below* the args (a call whose result feeds
@@ -4160,6 +4201,20 @@ fn compileAarch64(
                     try m.callAbs(.x16, @intFromPtr(helpers.call.?));
                 }
 
+                // A hot native target can return a tail-transfer request.
+                // Finish that chain before restoring this ordinary caller.
+                if (helpers.finish_tail_call) |helper| {
+                    var completed: masm_mod.Masm.Label = .{};
+                    defer completed.deinit(gpa);
+                    try m.emit(a64.cmpImm(.x0, status_tail_call, false));
+                    try m.jumpCond(.ne, &completed);
+                    try m.emit(a64.movReg(.x0, .x19));
+                    try m.emit(a64.addRegSp(.x1, 0));
+                    try m.emit(a64.movReg(.x2, .x21));
+                    try m.callAbs(.x16, @intFromPtr(helper));
+                    try m.bind(&completed);
+                }
+
                 // The helper returns the trap status in w0. On a nested
                 // trap, release this frame's reservation and fall into the
                 // shared epilogue (which pops the prologue frame and
@@ -4214,13 +4269,16 @@ fn compileAarch64(
                 try m.emit(a64.addSpImm(framebytes));
                 sp = below + nresults;
             },
-            op_call_indirect, op_call_ref => {
+            op_call_indirect, op_call_ref, op_return_call_indirect, op_return_call_ref => {
                 // Both calls consume a target above their arguments; typed
                 // references bypass the indirect call's table lookup.
-                const ref_call = op == op_call_ref;
+                const ref_call = op == op_call_ref or op == op_return_call_ref;
+                const tail = op == op_return_call_indirect or op == op_return_call_ref;
+                const ref_helper = if (tail) helpers.return_call_ref else helpers.call_ref;
+                const indirect_helper = if (tail) helpers.return_call_indirect else helpers.call_indirect;
                 if (ref_call) {
-                    if (helpers.call_ref == null) return null;
-                } else if (helpers.call_indirect == null) return null;
+                    if (ref_helper == null) return null;
+                } else if (indirect_helper == null) return null;
                 const type_idx = readUleb32(body, &i) orelse return null;
                 const table_idx = if (ref_call) 0 else readUleb32(body, &i) orelse return null;
                 const table64 = if (ref_call) false else tableIs64(module, table_idx) orelse return null;
@@ -4228,7 +4286,7 @@ fn compileAarch64(
                 const callee = &module.types[type_idx];
                 const nparams: usize = callee.params.len;
                 const nresults: usize = callee.results.len;
-                const refresh_memory = moduleHasMemory(module);
+                const refresh_memory = !tail and moduleHasMemory(module);
                 if (refresh_memory and helpers.mem_view == null) return null;
                 for (callee.params) |t| if (!isCallValue(t)) return null;
                 for (callee.results) |t| if (!isCallValue(t)) return null;
@@ -4238,7 +4296,7 @@ fn compileAarch64(
                 if (sp < 1 + nparams) return null;
                 const idx_depth = sp - 1;
                 const below = sp - 1 - nparams;
-                if (below + nresults > operand_reg_count) return null;
+                if (!tail and below + nresults > operand_reg_count) return null;
 
                 // Same per-frame buffer as `call`: cells, the five boundary
                 // registers, and one 8-byte slot per register below-operand.
@@ -4291,7 +4349,7 @@ fn compileAarch64(
                     try m.movImm64(.x1, type_idx);
                     try m.emit(a64.movReg(.x3, .x6));
                     try m.emit(a64.movReg(.x4, .x21));
-                    try m.callAbs(.x16, @intFromPtr(helpers.call_ref.?));
+                    try m.callAbs(.x16, @intFromPtr(ref_helper.?));
                 } else {
                     // instance, type, table, element, buffer, controller.
                     try m.emit(a64.movReg(.x0, .x19));
@@ -4300,7 +4358,18 @@ fn compileAarch64(
                     try m.emit(if (table64) a64.movReg(.x3, idx_reg.?) else a64.movRegW(.x3, idx_reg.?));
                     try m.emit(a64.movReg(.x4, .x6));
                     try m.emit(a64.movReg(.x5, .x21));
-                    try m.callAbs(.x16, @intFromPtr(helpers.call_indirect.?));
+                    try m.callAbs(.x16, @intFromPtr(indirect_helper.?));
+                }
+
+                if (tail) {
+                    try m.emit(a64.addSpImm(framebytes));
+                    try m.jump(&epilogue);
+                    if ((try closeTerminatedArm(&m, gpa, body, &i, &stack, &sp, &ctrl, &ctrl_len)) orelse return null) {
+                        sp = ftype.results.len;
+                        for (ftype.results, 0..) |rt, r| stack[r] = runtimeLoc(rt, r);
+                        break;
+                    }
+                    continue;
                 }
 
                 // Trap status in w0; a nested trap (or a resolve/type-check

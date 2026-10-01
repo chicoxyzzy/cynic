@@ -867,9 +867,10 @@ ever touches a syscall:
   live-byte ledger. Realm-backed Spasm charges each lazy per-instance mapping:
   both AArch64 and x86_64 use a saturating module-size estimate between 64 KiB
   and 4 MiB. The shared policy retains the conservative x86 Cell-spill estimate
-  (64 bytes per bytecode byte plus 256 per function, with 12.5% headroom).
-  Large AArch64 modules can therefore reserve more than before; a Realm that
-  cannot afford the full mapping stays in Sarcasm, even if 64 KiB would fit.
+  (64 bytes per bytecode byte plus 256 per function, with 50% headroom).
+  Extra headroom can increase a module's reservation on either backend; a
+  Realm that cannot afford the full mapping stays in Sarcasm, even if 64 KiB
+  would fit.
   Charge happens before `mmap`, rolls back if mapping fails, and
   discharges only after `munmap`. A refused reservation leaves that instance
   on Sarcasm. Bare Wasm and the shared JS-tier allocator keep the ordinary
@@ -1353,9 +1354,10 @@ useful:
    The exact differential now executes 118,903 native entries across 3,511
    compiled functions. Refusals fall to 2,450 (8 limits, 1,401 signatures,
    746 bytecode shapes, 295 opcodes), again with zero emission or install
-   failures. The module-sized code reservation keeps its 64 KiB minimum and
-   4 MiB cap but carries 12.5% headroom for helper-heavy bodies; this prevents
-   an exact-fit estimate from rejecting newly reachable tail functions.
+   failures. That checkpoint added 12.5% headroom to the module-sized code
+   reservation while retaining its 64 KiB minimum and 4 MiB cap. Native
+   tail-call completion support below raises the headroom to 50% for
+   call-heavy bodies, without changing those bounds.
    The 2026-09-24 passive-bulk/control closure adds helper-backed memory32
    `memory.init` / `data.drop`, a fixed catchable `unreachable` trap status,
    and boundary-aware dead-code scanning so `return` compiles at nested block,
@@ -1828,9 +1830,30 @@ useful:
    function-reference definitions separately (wasm-engine.md §8).
    Native-entry tests cover all value kinds, large local frames, live operands,
    foreign targets, incompatible call layouts, null/host/Wasm traps, memory growth,
-   GC, cancellation, and bounded ordinary recursion. Native tail calls and
-   native-register/imported-call ABI work remain separate increments;
-   ordinary calls are not tail-call lowering and still consume stack space.
+   GC, cancellation, and bounded ordinary recursion.
+   **Proper native tail calls** (`return_call`, `return_call_indirect`, and
+   `return_call_ref`) now compile on both targets. Following
+   [Core tail-call execution](https://webassembly.github.io/spec/core/exec/instructions.html#exec-return-call),
+   the caller frame is gone before the target executes. Prior art in
+   [V8's tail-call implementation](https://v8.dev/blog/wasm-tail-call) and
+   [JSC's BBQ tail-call lowering](https://github.com/WebKit/WebKit/blob/main/Source/JavaScriptCore/wasm/WasmBBQJIT.cpp)
+   uses frame removal and argument relocation before jumping. Cynic's current
+   Cell ABI instead stages a bounded argument record and returns a distinct
+   native completion status. The runtime consumes that record before any
+   allocation or JS re-entry, then iterates with a reusable target-frame
+   buffer. Ordinary hot call gates finish the chain before restoring their
+   caller; unsupported targets enter Sarcasm's frame-replacing path once.
+   Foreign memory/globals, fresh locals, full Cell values, execution controls,
+   and exception payloads survive the transfer. The ordinary imported-call
+   boundary also forwards exceptions from newly compilable tail-call bodies.
+   Native-entry tests exercise 100,000 transfers, cold/warm gates, mutual
+   cross-instance recursion with unequal frames, allocation failure, all
+   cancellation outcomes, and reentrant host callbacks under GC pressure.
+   This preserves constant stack space but retains helper/dispatch overhead
+   per transfer. Call-heavy modules reserve additional bounded code headroom
+   for the completion checks; the full mapping remains charged to the Realm.
+   The native-register/imported-call ABI and direct tail jumps
+   remain separate performance work. Ordinary calls still consume stack.
    Diagnostics record the first refused opcode and `0xfd` subopcode on both
    targets; unrelated unsupported instructions or control shapes can still
    cause a function to fall back. `tools/wasm_bench.zig` covers inline vector

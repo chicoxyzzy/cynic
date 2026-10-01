@@ -64,6 +64,11 @@ pub const Config = struct {
     call_helper: ?usize,
     call_indirect_helper: ?usize,
     call_ref_helper: ?usize,
+    return_call_helper: ?usize = null,
+    return_call_indirect_helper: ?usize = null,
+    return_call_ref_helper: ?usize = null,
+    finish_tail_call_helper: ?usize = null,
+    status_tail_call: u32 = 11,
     call_gate_stub: ?usize,
     call_gates_base: ?usize,
     call_gates_len: usize,
@@ -118,7 +123,10 @@ const op_br_table: u8 = 0x0e;
 const op_return: u8 = 0x0f;
 const op_call: u8 = 0x10;
 const op_call_indirect: u8 = 0x11;
+const op_return_call: u8 = 0x12;
+const op_return_call_indirect: u8 = 0x13;
 const op_call_ref: u8 = 0x14;
+const op_return_call_ref: u8 = 0x15;
 const op_drop: u8 = 0x1a;
 const op_select: u8 = 0x1b;
 const op_select_t: u8 = 0x1c;
@@ -600,7 +608,7 @@ pub fn compile(
                     .const_i32, .const_i64, .runtime, .v128 => return null,
                 }
             },
-            op_call => {
+            op_call, op_return_call => {
                 const callee_index = readUleb32(body, &i) orelse return null;
                 const callee = calleeFuncType(module, callee_index) orelse return null;
                 for (callee.params) |param_type| if (!isSupportedValue(param_type)) return null;
@@ -608,6 +616,36 @@ pub fn compile(
 
                 const param_count = callee.params.len;
                 const result_count = callee.results.len;
+                if (op == op_return_call) {
+                    const helper = config.return_call_helper orelse return null;
+                    if (sp < param_count) return null;
+                    const below = sp - param_count;
+                    for (0..param_count) |p| try materialize(&m, stack[below + p], num_locals, below + p);
+                    const call_frame_bytes = callFrameBytes(param_count) orelse return null;
+                    if (!(try emitCallStackGuard(&m, &trap_stack_exhausted, call_frame_bytes))) return null;
+                    trap_stack_exhausted_used = true;
+                    try m.subRegImm32(.rsp, call_frame_bytes);
+                    try emitCallArguments(&m, num_locals, below, callee.params);
+                    try m.load64Disp32(.rdi, .rsp, @intCast(call_frame_bytes));
+                    try m.movImm64(.rsi, callee_index);
+                    try m.leaDisp32(.rdx, .rsp, @intCast(call_stack_args_size));
+                    try m.movImm64(.rcx, param_count);
+                    try m.movReg64(.r8, .rbx);
+                    try m.movImm64(.r11, helper);
+                    try m.callReg(.r11);
+                    try m.addRegImm32(.rsp, call_frame_bytes);
+                    try m.jump(&epilogue);
+                    switch ((try closeTerminatedArm(&m, gpa, body, &i, &stack, &sp, &ctrl, &ctrl_len)) orelse return null) {
+                        .continue_compilation => {},
+                        .function_end => {
+                            sp = ftype.results.len;
+                            for (ftype.results, 0..) |rt, r| stack[r] = runtimeLoc(rt);
+                            function_ended = true;
+                            break :body_loop;
+                        },
+                    }
+                    continue;
+                }
                 const refresh_memory = memoryIs64(module, 0) != null;
                 if (refresh_memory and config.mem_view_helper == null) return null;
                 if (sp < param_count) return null;
@@ -674,6 +712,18 @@ pub fn compile(
                     try m.movImm64(.r11, config.call_helper.?);
                     try m.callReg(.r11);
                 }
+                if (config.finish_tail_call_helper) |helper| {
+                    var completed: x64.Masm.Label = .{};
+                    defer completed.deinit(gpa);
+                    try m.cmpReg32Imm32(.rax, config.status_tail_call);
+                    try m.jumpCond(.not_equal, &completed);
+                    try m.load64Disp32(.rdi, .rsp, @intCast(call_frame_bytes));
+                    try m.leaDisp32(.rsi, .rsp, @intCast(call_stack_args_size));
+                    try m.movReg64(.rdx, .rbx);
+                    try m.movImm64(.r11, helper);
+                    try m.callReg(.r11);
+                    try m.bind(&completed);
+                }
                 try m.cmpReg32Imm32(.rax, 0);
                 var call_ok: x64.Masm.Label = .{};
                 defer call_ok.deinit(gpa);
@@ -700,11 +750,15 @@ pub fn compile(
                 try m.addRegImm32(.rsp, call_frame_bytes);
                 sp = below + result_count;
             },
-            op_call_indirect, op_call_ref => {
+            op_call_indirect, op_call_ref, op_return_call_indirect, op_return_call_ref => {
                 // [below..., args..., target] -> [below..., results...].
                 // Typed references bypass the indirect call's table lookup.
-                const ref_call = op == op_call_ref;
-                const helper = (if (ref_call) config.call_ref_helper else config.call_indirect_helper) orelse return null;
+                const ref_call = op == op_call_ref or op == op_return_call_ref;
+                const tail = op == op_return_call_indirect or op == op_return_call_ref;
+                const helper = (if (ref_call)
+                    (if (tail) config.return_call_ref_helper else config.call_ref_helper)
+                else
+                    (if (tail) config.return_call_indirect_helper else config.call_indirect_helper)) orelse return null;
                 const type_index = readUleb32(body, &i) orelse return null;
                 const table_index = if (ref_call) 0 else readUleb32(body, &i) orelse return null;
                 const table64 = if (ref_call) false else tableIs64(module, table_index) orelse return null;
@@ -719,10 +773,10 @@ pub fn compile(
                 if (sp < required) return null;
                 const index_depth = sp - 1;
                 const below = index_depth - param_count;
-                if (below + result_count > operand_stack_capacity) return null;
+                if (!tail and below + result_count > operand_stack_capacity) return null;
                 const buffer_capacity = @max(param_count, result_count);
                 const call_frame_bytes = callFrameBytes(buffer_capacity) orelse return null;
-                const refresh_memory = memoryIs64(module, 0) != null;
+                const refresh_memory = !tail and memoryIs64(module, 0) != null;
                 if (refresh_memory and config.mem_view_helper == null) return null;
 
                 var param_index: usize = 0;
@@ -757,6 +811,21 @@ pub fn compile(
                 }
                 try m.movImm64(.r11, helper);
                 try m.callReg(.r11);
+
+                if (tail) {
+                    try m.addRegImm32(.rsp, call_frame_bytes);
+                    try m.jump(&epilogue);
+                    switch ((try closeTerminatedArm(&m, gpa, body, &i, &stack, &sp, &ctrl, &ctrl_len)) orelse return null) {
+                        .continue_compilation => {},
+                        .function_end => {
+                            sp = ftype.results.len;
+                            for (ftype.results, 0..) |rt, r| stack[r] = runtimeLoc(rt);
+                            function_ended = true;
+                            break :body_loop;
+                        },
+                    }
+                    continue;
+                }
 
                 try m.cmpReg32Imm32(.rax, 0);
                 var call_ok: x64.Masm.Label = .{};

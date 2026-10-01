@@ -323,6 +323,44 @@ test "wasm spasm: code reserve grows without moving live entries or call gates" 
     try testing.expectEqual(@as(u32, @intCast(instance.funcs.len)), instance.spasm_compiles);
 }
 
+test "wasm native tail: ordinary call completion fits a call-heavy code reservation" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var functions: List = .empty;
+    var code: List = .empty;
+    const count = 129;
+    try uleb(a, &functions, count);
+    try functions.appendNTimes(a, 0, count);
+    try uleb(a, &code, count);
+    const leaf = [_]u8{ 0, 0x41, 1, 0x0b };
+    const caller = [_]u8{ 0, 0x10, 0, 0x10, 0, 0x10, 0, 0x10, 0, 0x6a, 0x6a, 0x6a, 0x0b };
+    for (0..count) |i| {
+        const body: []const u8 = if (i == 0) &leaf else &caller;
+        try uleb(a, &code, body.len);
+        try code.appendSlice(a, body);
+    }
+    const module = try wasm.decode(a, try assemble(a, &.{
+        .{ .id = 1, .body = &.{ 1, 0x60, 0, 1, I32 } },
+        .{ .id = 3, .body = functions.items },
+        .{ .id = 5, .body = &.{ 1, 0, 1 } },
+        .{ .id = 10, .body = code.items },
+    }));
+    var instance: interp.Instance = undefined;
+    try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = true;
+    instance.spasm_diagnostics = true;
+    for (1..count) |i| {
+        const out = try interp.invoke(&instance, testing.allocator, @intCast(i), &.{});
+        defer testing.allocator.free(out);
+        try testing.expectEqual(@as(u128, 4), out[0]);
+    }
+    try testing.expectEqual(@as(u32, count), instance.spasm_compiles);
+    try testing.expectEqual(@as(u32, 0), instance.spasm_refusals);
+}
+
 test "wasm spasm: code reserve obeys Realm limits and releases its full charge" {
     if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -10883,6 +10921,326 @@ test "wasm interp: out-of-bounds load traps" {
     // i32.load at the last page byte + 1 (offset 65536 of a 1-page memory)
     const code = [_]u8{ 0x00, 0x41, 0x80, 0x80, 0x04, 0x28, 0x02, 0x00, 0x0b }; // i32.const 65536; i32.load
     try testing.expectError(error.OutOfBoundsMemoryAccess, runMemFunc(&.{}, &.{I32}, &code, "f", 1, &.{}));
+}
+
+fn nativeTailCountdownModule(a: std.mem.Allocator, opcode: u8) ![]const u8 {
+    var countdown: List = .empty;
+    // The extra local must be fresh on each tail transfer.
+    try countdown.appendSlice(a, &.{ 1, 1, I32, 0x20, 1, 0x45, 0x04, I32, 0x20, 0, 0x45, 0x04, I32, 0x41, 42, 0x05, 0x41, 1, 0x21, 1, 0x20, 0, 0x41, 1, 0x6b });
+    switch (opcode) {
+        0x12 => try countdown.appendSlice(a, &.{ 0x12, 0 }),
+        0x13 => try countdown.appendSlice(a, &.{ 0x41, 0, 0x13, 0, 0 }),
+        0x15 => try countdown.appendSlice(a, &.{ 0xd2, 0, 0x15, 0 }),
+        else => return error.BadTailOpcode,
+    }
+    try countdown.appendSlice(a, &.{ 0x0b, 0x05, 0x41, 0x7f, 0x0b, 0x0b });
+    var code: List = .empty;
+    try code.append(a, 2);
+    try uleb(a, &code, countdown.items.len);
+    try code.appendSlice(a, countdown.items);
+    const caller = [_]u8{ 0, 0x41, 5, 0x20, 0, 0x10, 0, 0x6a, 0x0b };
+    try uleb(a, &code, caller.len);
+    try code.appendSlice(a, &caller);
+    return assemble(a, &.{
+        .{ .id = 1, .body = &.{ 1, 0x60, 1, I32, 1, I32 } },
+        .{ .id = 3, .body = &.{ 2, 0, 0 } },
+        .{ .id = 4, .body = &.{ 1, 0x70, 0, 1 } },
+        .{ .id = 9, .body = &.{ 1, 0, 0x41, 0, 0x0b, 1, 0 } },
+        .{ .id = 10, .body = code.items },
+    });
+}
+
+const TailPoll = struct {
+    min_sp: usize = std.math.maxInt(usize),
+    max_sp: usize = 0,
+    polls: u32 = 0,
+    stop: u32 = std.math.maxInt(u32),
+    stop_result: wasm.ExecutionPoll = .step_budget_exhausted,
+
+    fn poll(ctx: *anyopaque) wasm.ExecutionPoll {
+        const self: *TailPoll = @ptrCast(@alignCast(ctx));
+        var marker: u8 = 0;
+        const address = @intFromPtr(&marker);
+        self.min_sp = @min(self.min_sp, address);
+        self.max_sp = @max(self.max_sp, address);
+        self.polls += 1;
+        return if (self.polls >= self.stop) self.stop_result else .proceed;
+    }
+
+    fn control(self: *TailPoll) wasm.ExecutionControl {
+        return .{ .ctx = self, .poll_fn = poll, .armed_fn = CountingExecutionControl.armed };
+    }
+};
+
+test "wasm native tail: all forms replace frames and resume cold and warm callers" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    for ([_]u8{ 0x12, 0x13, 0x15 }) |opcode| {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const module = try wasm.decode(a, try nativeTailCountdownModule(a, opcode));
+        var instance: interp.Instance = undefined;
+        try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+        defer instance.deinit();
+        instance.spasm_enabled = true;
+        instance.spasm_diagnostics = true;
+        var poll: TailPoll = .{};
+        instance.execution_control = poll.control();
+        for (0..2) |_| {
+            const before = instance.spasm_runs;
+            const result = try interp.invoke(&instance, testing.allocator, 1, &.{100000});
+            defer testing.allocator.free(result);
+            try testing.expectEqual(@as(u128, 47), result[0]);
+            try testing.expect(instance.spasm_runs - before >= 100001);
+        }
+        try testing.expect(poll.max_sp - poll.min_sp < 32 * 1024);
+    }
+}
+
+test "wasm native tail: execution budget interrupts every tail form" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    for ([_]u8{ 0x12, 0x13, 0x15 }) |opcode| {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const module = try wasm.decode(a, try nativeTailCountdownModule(a, opcode));
+        var instance: interp.Instance = undefined;
+        try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+        defer instance.deinit();
+        instance.spasm_enabled = true;
+        instance.spasm_diagnostics = true;
+        const stops = [_]struct { result: wasm.ExecutionPoll, err: wasm.TrapError }{
+            .{ .result = .step_budget_exhausted, .err = error.StepBudgetExhausted },
+            .{ .result = .cooperative_interrupted, .err = error.ExecutionInterrupted },
+            .{ .result = .terminated, .err = error.ExecutionTerminated },
+        };
+        for (stops) |stop| {
+            var poll: TailPoll = .{ .stop = 100, .stop_result = stop.result };
+            instance.execution_control = poll.control();
+            const before = instance.spasm_runs;
+            try testing.expectError(stop.err, interp.invoke(&instance, testing.allocator, 0, &.{100000}));
+            try testing.expect(instance.spasm_runs - before > 1);
+            try testing.expectEqual(@as(u32, 100), poll.polls);
+        }
+    }
+}
+
+fn nativeTailForwardModule(a: std.mem.Allocator, params: []const u8, results: []const u8, opcode: u8, leaf: ?[]const u8) ![]const u8 {
+    var out: List = .empty;
+    try out.appendSlice(a, &preamble);
+    var ty: List = .empty;
+    try ty.appendSlice(a, &.{ 1, 0x60 });
+    try uleb(a, &ty, params.len);
+    try ty.appendSlice(a, params);
+    try uleb(a, &ty, results.len);
+    try ty.appendSlice(a, results);
+    try section(a, &out, 1, ty.items);
+    if (leaf == null) try section(a, &out, 2, &.{ 1, 1, 'h', 1, 'f', 0, 0 });
+    try section(a, &out, 3, if (leaf != null) &.{ 2, 0, 0 } else &.{ 1, 0 });
+    try section(a, &out, 4, &.{ 1, 0x70, 0, 1 });
+    try section(a, &out, 9, &.{ 1, 0, 0x41, 0, 0x0b, 1, 0 });
+    var forward: List = .empty;
+    try forward.append(a, 0);
+    for (0..params.len) |p| {
+        try forward.append(a, 0x20);
+        try uleb(a, &forward, p);
+    }
+    switch (opcode) {
+        0x10, 0x12 => try forward.appendSlice(a, &.{ opcode, 0 }),
+        0x11, 0x13 => try forward.appendSlice(a, &.{ 0x41, 0, opcode, 0, 0 }),
+        0x14, 0x15 => try forward.appendSlice(a, &.{ 0xd2, 0, opcode, 0 }),
+        else => return error.BadTailOpcode,
+    }
+    try forward.append(a, 0x0b);
+    var code: List = .empty;
+    try code.append(a, if (leaf != null) 2 else 1);
+    if (leaf) |body| {
+        try uleb(a, &code, body.len);
+        try code.appendSlice(a, body);
+    }
+    try uleb(a, &code, forward.items.len);
+    try code.appendSlice(a, forward.items);
+    try section(a, &out, 10, code.items);
+    return out.items;
+}
+
+test "wasm native tail: mixed Cells larger frames and allocation failure" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    const signature = [_]u8{ I32, 0x7e, 0x7d, 0x7c, 0x6f, 0x7b };
+    const values = [_]u128{ 42, 0xfedcba9876543210, 0x7fc00001, 0x7ff8000000000001, 0x123456789abcdef0fedcba9876543210, 0x0123456789abcdef0123456789abcdef };
+    // 300 zero-initialized locals force the replacement frame to grow.
+    const leaf = [_]u8{ 1, 0xac, 2, I32, 0x20, 0, 0x20, 0xac, 2, 0x6a, 0x20, 1, 0x20, 2, 0x20, 3, 0x20, 4, 0x20, 5, 0x0b };
+    for ([_]u8{ 0x12, 0x13, 0x15 }) |opcode| {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const module = try wasm.decode(a, try nativeTailForwardModule(a, &signature, &signature, opcode, &leaf));
+        var instance: interp.Instance = undefined;
+        try interp.instantiate(&instance, a, testing.allocator, &module, .{});
+        defer instance.deinit();
+        instance.spasm_enabled = true;
+        instance.spasm_diagnostics = true;
+        const result = try interp.invoke(&instance, testing.allocator, 1, &values);
+        defer testing.allocator.free(result);
+        try testing.expectEqualSlices(u128, &values, result);
+        try testing.expectEqual(@as(u32, 2), instance.spasm_runs);
+
+        var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+        instance.invocation_allocator = failing.allocator();
+        try testing.expectError(error.OutOfMemory, interp.invoke(&instance, testing.allocator, 1, &values));
+        instance.invocation_allocator = null;
+        const recovered = try interp.invoke(&instance, testing.allocator, 1, &values);
+        defer testing.allocator.free(recovered);
+        try testing.expectEqualSlices(u128, &values, recovered);
+    }
+}
+
+const TailHost = struct {
+    trap: bool = false,
+    calls: u32 = 0,
+
+    fn call(ctx: ?*anyopaque, args: []const u128, results: []u128) wasm.TrapError!void {
+        const self: *TailHost = @ptrCast(@alignCast(ctx.?));
+        self.calls += 1;
+        if (self.trap) return error.HostThrew;
+        results[0] = args[0];
+    }
+};
+
+test "wasm native tail: imported host targets preserve results and traps" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    for ([_]u8{ 0x12, 0x13, 0x15 }) |opcode| {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const module = try wasm.decode(a, try nativeTailForwardModule(a, &.{I32}, &.{I32}, opcode, null));
+        var host: TailHost = .{};
+        var imports = [_]interp.FuncRef{.{ .host = .{ .fn_ptr = TailHost.call, .ctx = &host, .params = 1, .results = 1 } }};
+        var instance: interp.Instance = undefined;
+        try interp.instantiate(&instance, a, testing.allocator, &module, .{ .funcs = &imports });
+        defer instance.deinit();
+        instance.spasm_enabled = true;
+        instance.spasm_diagnostics = true;
+        const result = try interp.invoke(&instance, testing.allocator, 1, &.{37});
+        defer testing.allocator.free(result);
+        try testing.expectEqual(@as(u128, 37), result[0]);
+        host.trap = true;
+        try testing.expectError(error.HostThrew, interp.invoke(&instance, testing.allocator, 1, &.{37}));
+        try testing.expectEqual(@as(u32, 2), instance.spasm_runs);
+        try testing.expectEqual(@as(u32, 2), host.calls);
+        imports[0].host.params = 2;
+        try testing.expectError(error.IndirectCallTypeMismatch, interp.invoke(&instance, testing.allocator, 1, &.{37}));
+        try testing.expectEqual(@as(u32, 2), host.calls);
+    }
+}
+
+test "wasm native tail: foreign native and interpreter targets retain their instance" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    for ([_]u8{ 0x12, 0x13, 0x15 }) |opcode| {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const provider_module = try wasm.decode(a, try buildFunc(a, &.{I32}, &.{I32}, &.{ 0, 0x20, 0, 0x0b }, "f"));
+        var provider: interp.Instance = undefined;
+        try interp.instantiate(&provider, a, testing.allocator, &provider_module, .{});
+        defer provider.deinit();
+        provider.spasm_enabled = true;
+        provider.spasm_diagnostics = true;
+        const module = try wasm.decode(a, try nativeTailForwardModule(a, &.{I32}, &.{I32}, opcode, null));
+        const imports = [_]interp.FuncRef{.{ .wasm = .{ .instance = &provider, .func = &provider.funcs[0] } }};
+        var instance: interp.Instance = undefined;
+        try interp.instantiate(&instance, a, testing.allocator, &module, .{ .funcs = &imports });
+        defer instance.deinit();
+        instance.spasm_enabled = true;
+        instance.spasm_diagnostics = true;
+        for ([_]bool{ true, false }) |native| {
+            provider.spasm_enabled = native;
+            const before = provider.spasm_runs;
+            const result = try interp.invoke(&instance, testing.allocator, 1, &.{53});
+            defer testing.allocator.free(result);
+            try testing.expectEqual(@as(u128, 53), result[0]);
+            try testing.expectEqual(before + @as(u32, @intFromBool(native)), provider.spasm_runs);
+        }
+        try testing.expectEqual(@as(u32, 2), instance.spasm_runs);
+    }
+}
+
+test "wasm native tail: foreign exception payloads survive native and fallback transfers" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    for ([_]u8{ 0x12, 0x13, 0x15 }) |opcode| {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const provider_module = try wasm.decode(a, try assemble(a, &.{
+            .{ .id = 1, .body = &.{ 2, 0x60, 1, I32, 1, I32, 0x60, 1, I32, 0 } },
+            .{ .id = 3, .body = &.{ 2, 0, 0 } },
+            .{ .id = 13, .body = &.{ 1, 0, 1 } },
+            .{ .id = 10, .body = &.{ 2, 6, 0, 0x20, 0, 0x08, 0, 0x0b, 6, 0, 0x20, 0, 0x12, 0, 0x0b } },
+        }));
+        var provider: interp.Instance = undefined;
+        try interp.instantiate(&provider, a, testing.allocator, &provider_module, .{});
+        defer provider.deinit();
+        provider.spasm_enabled = true;
+        provider.spasm_diagnostics = true;
+        const imports = [_]interp.FuncRef{.{ .wasm = .{ .instance = &provider, .func = &provider.funcs[1] } }};
+        for ([_]bool{ true, false }) |tail| {
+            const call_opcode = if (tail) opcode else if (opcode == 0x15) 0x14 else opcode - 2;
+            const module = try wasm.decode(a, try nativeTailForwardModule(a, &.{I32}, &.{I32}, call_opcode, null));
+            var instance: interp.Instance = undefined;
+            try interp.instantiate(&instance, a, testing.allocator, &module, .{ .funcs = &imports });
+            defer instance.deinit();
+            instance.spasm_enabled = true;
+            instance.spasm_diagnostics = true;
+            const before = provider.spasm_runs;
+            try testing.expectError(error.UncaughtException, interp.invoke(&instance, testing.allocator, 1, &.{37}));
+            try testing.expectEqual(@as(u32, 1), instance.spasm_runs);
+            try testing.expectEqual(before + 1, provider.spasm_runs);
+            const exception = instance.pending_exn orelse return error.MissingException;
+            try testing.expectEqual(provider.tag_identities[0], exception.tag);
+            try testing.expectEqualSlices(u128, &.{37}, exception.payload);
+        }
+    }
+}
+
+test "wasm native tail: mutual foreign recursion changes frame sizes without growing the stack" {
+    if (comptime !@import("spasm.zig").supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var modules: [2]wasm.Module = undefined;
+    var instances: [2]interp.Instance = undefined;
+    var imports: [2][1]interp.FuncRef = undefined;
+    var placeholder: TailHost = .{};
+    var initialized: usize = 0;
+    defer for (instances[0..initialized]) |*instance| instance.deinit();
+    for (0..2) |i| {
+        imports[i][0] = .{ .host = .{ .fn_ptr = TailHost.call, .ctx = &placeholder, .params = 1, .results = 1 } };
+        var body: List = .empty;
+        if (i == 0) try body.append(a, 0) else try body.appendSlice(a, &.{ 1, 0xac, 2, I32 });
+        try body.appendSlice(a, &.{ 0x20, 0, 0x45, 0x04, I32, 0x41, 42, 0x05, 0x20, 0, 0x41, 1, 0x6b, 0x12, 0, 0x0b, 0x0b });
+        var code: List = .empty;
+        try code.append(a, 1);
+        try uleb(a, &code, body.items.len);
+        try code.appendSlice(a, body.items);
+        modules[i] = try wasm.decode(a, try assemble(a, &.{
+            .{ .id = 1, .body = &.{ 1, 0x60, 1, I32, 1, I32 } },
+            .{ .id = 2, .body = &.{ 1, 1, 'h', 1, 'f', 0, 0 } },
+            .{ .id = 3, .body = &.{ 1, 0 } },
+            .{ .id = 10, .body = code.items },
+        }));
+        try interp.instantiate(&instances[i], a, testing.allocator, &modules[i], .{ .funcs = &imports[i] });
+        initialized += 1;
+        instances[i].spasm_enabled = true;
+        instances[i].spasm_diagnostics = true;
+    }
+    for (0..2) |i| imports[i][0] = .{ .wasm = .{ .instance = &instances[1 - i], .func = &instances[1 - i].funcs[0] } };
+    var poll: TailPoll = .{};
+    instances[0].execution_control = poll.control();
+    const result = try interp.invoke(&instances[0], testing.allocator, 1, &.{100000});
+    defer testing.allocator.free(result);
+    try testing.expectEqual(@as(u128, 42), result[0]);
+    try testing.expectEqual(@as(u32, 100001), instances[0].spasm_runs + instances[1].spasm_runs);
+    try testing.expect(poll.max_sp - poll.min_sp < 32 * 1024);
 }
 
 test "wasm tail call: return_call self-recursion is constant-stack (TCO)" {
