@@ -370,7 +370,7 @@ fn collectPreciseRejectionRoots(realm: *Realm, _: Value, _: []const Value) @impo
     return Value.undefined_;
 }
 
-test "Promise rejection tracking: async return retains its state across a collecting then getter" {
+test "Promise rejection tracking: altered-constructor async return survives a collecting then getter" {
     var realm = Realm.init(std.testing.allocator);
     defer realm.deinit();
     try install(&realm);
@@ -384,6 +384,7 @@ test "Promise rejection tracking: async return retains its state across a collec
         \\(async function() {
         \\  await 0;
         \\  const inner = Promise.resolve(42);
+        \\  inner.constructor = undefined;
         \\  Object.defineProperty(inner, 'then', {get() {
         \\    getterCalls++;
         \\    __collectGarbage();
