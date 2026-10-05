@@ -612,6 +612,20 @@ pub fn build(b: *std.Build) void {
     lib_mod_test_safe.addOptions("build_options", lib_build_options);
     addTzdb(lib_mod_test_safe, b, intl_tier);
 
+    // Explicit developer experiment; never selected by a production tier.
+    const backend_mod = b.createModule(.{
+        .root_source_file = b.path("tools/backend_prototype.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+    });
+    backend_mod.addImport("cynic", lib_mod_test_safe);
+    const backend_exe = b.addExecutable(.{
+        .name = "cynic-backend-prototype",
+        .root_module = backend_mod,
+    });
+    const run_backend = b.addRunArtifact(backend_exe);
+    b.step("backend-prototype", "Run the isolated shared-backend correctness experiment").dependOn(&run_backend.step);
+
     // The WPT GC lane needs safety checks in BOTH the executor and engine.
     // Reuse the unit-test engine's ReleaseSafe/global-Intl configuration, not
     // the test262-specific Intl configuration below. Distinct executable names

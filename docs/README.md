@@ -61,6 +61,7 @@ shape exists.
 |---|---|
 | [JIT tiers](jit.md) | Shared Bistromath, Ohaimark, and Spasm architecture and rollout gates |
 | [Ohaimark](ohaimark.md) | Optimizing-JIT accepted design, deoptimization contract, OSR, and delivery ledger |
+| [Shared backend experiment](shared-backend.md) | Opt-in typed-SSA prototype, safety boundaries, and staged JS/Wasm integration plan |
 | [Sarcasm WebAssembly engine](wasm-engine.md) | Wasm decoder, validator, interpreter, JS API, and Spasm boundary |
 
 ## Verification and operations
