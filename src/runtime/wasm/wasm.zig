@@ -44,6 +44,8 @@ pub const opcodes = @import("opcodes.zig");
 pub const code = @import("code.zig");
 pub const validator = @import("validator.zig");
 pub const interpreter = @import("interpreter.zig");
+/// Isolated developer experiment; never selected by the production dispatcher.
+pub const backend_prototype = @import("backend_prototype.zig");
 
 pub const Reader = reader.Reader;
 pub const Module = module.Module;
@@ -91,4 +93,5 @@ test {
     _ = @import("validator.zig");
     _ = @import("interpreter.zig");
     _ = @import("tests.zig");
+    _ = @import("backend_prototype_test.zig");
 }
