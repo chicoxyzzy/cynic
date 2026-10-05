@@ -949,12 +949,13 @@ Plain binary module commands are scored, following
 loading and running a start function must succeed without a later assertion.
 Expected uninstantiability accepts initialization/start traps or exceptions,
 following the [reference script runner](https://github.com/WebAssembly/spec/blob/main/interpreter/script/runner.ml).
-Fixture I/O and malformed manifests, plus allocation failures while loading
-or checking modules, are fatal harness errors, not engine rejections. Explicit unsupported forms retain their skips;
+Fixture I/O, malformed manifests, and reported allocation failures are fatal
+harness errors, not engine rejections. Explicit unsupported forms retain their skips;
 conversion exclusions are reported by `wasm-testsuite-gen.sh`.
 `zig build test-wasm-testsuite` checks actual process exits and score totals,
 and runs in both architecture-specific Wasm CI jobs. Native harness tests
-also inject allocation failures before an expected trap. Scoring previously
+also inject allocation failures before an expected trap and through every
+action scorer (arguments, invocation, and global reads). Scoring previously
 omitted modules exposed two validator gaps: legacy function-index element
 segments have non-nullable reference types, and tail-call results may widen
 to a nullable or abstract reference type. The fixes follow the Core

@@ -271,7 +271,7 @@ fn runManifest(gpa: std.mem.Allocator, arena: std.mem.Allocator, io: std.Io, dir
             // A register is not a scored assertion.
         } else if (std.mem.eql(u8, kind, "assert_return")) {
             const before = counts.fail;
-            scoreReturn(scratch, cmd, current, &registry, &counts);
+            try scoreReturn(scratch, cmd, current, &registry, &counts);
             if (debug_loads and counts.fail > before) {
                 const action = cmd.get("action").?.object;
                 var line: [256]u8 = undefined;
@@ -280,11 +280,11 @@ fn runManifest(gpa: std.mem.Allocator, arena: std.mem.Allocator, io: std.Io, dir
                 std.Io.File.stderr().writeStreamingAll(io, msg) catch {};
             }
         } else if (std.mem.eql(u8, kind, "assert_trap") or std.mem.eql(u8, kind, "assert_exhaustion")) {
-            scoreTrap(scratch, cmd, current, &registry, &counts, std.mem.eql(u8, kind, "assert_exhaustion"));
+            try scoreTrap(scratch, cmd, current, &registry, &counts, std.mem.eql(u8, kind, "assert_exhaustion"));
         } else if (std.mem.eql(u8, kind, "assert_invalid") or std.mem.eql(u8, kind, "assert_malformed")) {
             try scoreRejected(arena, io, dir, cmd, &counts);
         } else if (std.mem.eql(u8, kind, "action")) {
-            const r = doAction(scratch, cmd.get("action").?.object, current, &registry);
+            const r = try doAction(scratch, cmd.get("action").?.object, current, &registry);
             switch (r) {
                 .values => counts.pass += 1,
                 else => counts.fail += 1,
@@ -659,12 +659,13 @@ fn logLoadError(io: std.Io, filename: []const u8, phase: []const u8, err: anyerr
 
 const ActionResult = union(enum) {
     values: []const u128,
+    // Guest execution errors; allocator failures propagate outside this union.
     err: anyerror,
     no_module,
     unsupported,
 };
 
-fn doAction(arena: std.mem.Allocator, action: std.json.ObjectMap, current: ?*wasm.Instance, registry: *const Registry) ActionResult {
+fn doAction(arena: std.mem.Allocator, action: std.json.ObjectMap, current: ?*wasm.Instance, registry: *const Registry) std.mem.Allocator.Error!ActionResult {
     const atype = (action.get("type") orelse return .unsupported).string;
     const field = (action.get("field") orelse return .unsupported).string;
     // An action may target a named module (cross-module linking tests);
@@ -678,7 +679,7 @@ fn doAction(arena: std.mem.Allocator, action: std.json.ObjectMap, current: ?*was
     if (std.mem.eql(u8, atype, "get")) {
         const gidx = exportIndex(m, field, .global) orelse return .no_module;
         const cell = inst.readGlobalByIndex(gidx) orelse return .unsupported;
-        const out = arena.alloc(u128, 1) catch return .{ .err = error.OutOfMemory };
+        const out = try arena.alloc(u128, 1);
         out[0] = cell;
         return .{ .values = out };
     }
@@ -686,13 +687,19 @@ fn doAction(arena: std.mem.Allocator, action: std.json.ObjectMap, current: ?*was
     if (!std.mem.eql(u8, atype, "invoke")) return .unsupported;
     const fidx = exportIndex(m, field, .func) orelse return .no_module;
 
-    const args = encodeArgs(arena, action) catch return .unsupported;
-    const result = wasm.invoke(inst, arena, fidx, args) catch |err| return .{ .err = err };
+    const args = encodeArgs(arena, action) catch |err| {
+        if (err == error.OutOfMemory) return error.OutOfMemory;
+        return .unsupported;
+    };
+    const result = wasm.invoke(inst, arena, fidx, args) catch |err| {
+        if (err == error.OutOfMemory) return error.OutOfMemory;
+        return .{ .err = err };
+    };
     return .{ .values = result };
 }
 
-fn scoreReturn(arena: std.mem.Allocator, cmd: std.json.ObjectMap, current: ?*wasm.Instance, registry: *const Registry, counts: *Counts) void {
-    const r = doAction(arena, cmd.get("action").?.object, current, registry);
+fn scoreReturn(arena: std.mem.Allocator, cmd: std.json.ObjectMap, current: ?*wasm.Instance, registry: *const Registry, counts: *Counts) !void {
+    const r = try doAction(arena, cmd.get("action").?.object, current, registry);
     const values = switch (r) {
         .values => |v| v,
         .unsupported => {
@@ -735,8 +742,8 @@ fn scoreReturn(arena: std.mem.Allocator, cmd: std.json.ObjectMap, current: ?*was
     counts.pass += 1;
 }
 
-fn scoreTrap(arena: std.mem.Allocator, cmd: std.json.ObjectMap, current: ?*wasm.Instance, registry: *const Registry, counts: *Counts, exhaustion: bool) void {
-    const r = doAction(arena, cmd.get("action").?.object, current, registry);
+fn scoreTrap(arena: std.mem.Allocator, cmd: std.json.ObjectMap, current: ?*wasm.Instance, registry: *const Registry, counts: *Counts, exhaustion: bool) !void {
+    const r = try doAction(arena, cmd.get("action").?.object, current, registry);
     switch (r) {
         .err => |err| {
             if (exhaustion) {
@@ -1072,6 +1079,77 @@ test "wasm harness: allocation failure cannot satisfy an expected instantiation 
     try std.testing.checkAllAllocationFailures(std.testing.allocator, checkManifestAllocationFailures, .{tmp.dir});
 }
 
+fn checkActionAllocationFailures(allocator: std.mem.Allocator, dir: std.Io.Dir, expected: Counts) !void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const actual = try runManifest(allocator, arena.allocator(), std.testing.io, dir, "case.json", false);
+    try std.testing.expectEqual(expected.pass, actual.pass);
+    try std.testing.expectEqual(expected.fail, actual.fail);
+    try std.testing.expectEqual(@as(u32, 0), actual.skip);
+}
+
+fn expectActionAllocationErrors(comptime kind: []const u8) !void {
+    // Exercise result allocation in `get`, then argument encoding and every
+    // interpreter allocation in `invoke`, at every scoring entry point.
+    inline for (.{
+        .{
+            .module = scoring_empty_module ++ "\x06\x06\x01\x7f\x00\x41\x2a\x0b\x07\x05\x01\x01g\x03\x00",
+            .action = "{\"type\":\"get\",\"field\":\"g\"}",
+        },
+        .{
+            .module = scoring_empty_module ++ "\x01\x06\x01\x60\x01\x7f\x01\x7f\x03\x02\x01\x00" ++
+                "\x07\x05\x01\x01f\x00\x00\x0a\x06\x01\x04\x00\x20\x00\x0b",
+            .action = "{\"type\":\"invoke\",\"field\":\"f\",\"args\":[{\"type\":\"i32\",\"value\":\"42\"}]}",
+        },
+    }) |fixture| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "case.wasm", .data = fixture.module });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "case.json", .data = "{\"commands\":[{\"type\":\"module\",\"filename\":\"case.wasm\"},{\"type\":\"" ++ kind ++
+            "\",\"action\":" ++ fixture.action ++ ",\"expected\":[{\"type\":\"i32\",\"value\":\"42\"}]}]}" });
+        // Neither successful action should satisfy a negative assertion.
+        // checkAllAllocationFailures also detects swallowed OOM when the
+        // fallback happens to leave these ordinary pass/fail counts unchanged.
+        const expected: Counts = if (comptime std.mem.eql(u8, kind, "assert_trap") or std.mem.eql(u8, kind, "assert_exhaustion"))
+            .{ .pass = 1, .fail = 1 }
+        else
+            .{ .pass = 2 };
+        try std.testing.checkAllAllocationFailures(std.testing.allocator, checkActionAllocationFailures, .{ tmp.dir, expected });
+    }
+}
+
+test "wasm harness: action OOM propagates from return assertions" {
+    try expectActionAllocationErrors("assert_return");
+}
+
+test "wasm harness: action OOM cannot satisfy trap assertions" {
+    try expectActionAllocationErrors("assert_trap");
+}
+
+test "wasm harness: action OOM propagates from exhaustion assertions" {
+    try expectActionAllocationErrors("assert_exhaustion");
+}
+
+test "wasm harness: action OOM propagates from plain actions" {
+    try expectActionAllocationErrors("action");
+}
+
+test "wasm harness: action OOM changes preserve genuine traps exhaustion and unsupported arguments" {
+    const exported_void = scoring_empty_module ++ "\x01\x04\x01\x60\x00\x00\x03\x02\x01\x00\x07\x05\x01\x01f\x00\x00";
+    try expectManifestCounts(
+        \\{"commands":[{"type":"module","filename":"case.wasm"},
+        \\{"type":"assert_trap","action":{"type":"invoke","field":"f","args":[]}}]}
+    , exported_void ++ "\x0a\x05\x01\x03\x00\x00\x0b", .{ .pass = 2 });
+    try expectManifestCounts(
+        \\{"commands":[{"type":"module","filename":"case.wasm"},
+        \\{"type":"assert_exhaustion","action":{"type":"invoke","field":"f","args":[]}}]}
+    , exported_void ++ "\x0a\x06\x01\x04\x00\x10\x00\x0b", .{ .pass = 2 });
+    inline for (.{ "action", "assert_return", "assert_trap", "assert_exhaustion" }) |kind| {
+        try expectManifestCounts("{\"commands\":[{\"type\":\"module\",\"filename\":\"case.wasm\"},{\"type\":\"" ++ kind ++
+            "\",\"action\":{\"type\":\"invoke\",\"field\":\"f\",\"args\":[{\"type\":\"unsupported\",\"value\":\"0\"}]}}]}", exported_void ++ "\x0a\x04\x01\x02\x00\x0b", if (comptime std.mem.eql(u8, kind, "action")) .{ .pass = 1, .fail = 1 } else .{ .pass = 1, .skip = 1 });
+    }
+}
+
 test "wasm harness: action scratch does not accumulate in the manifest arena" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1216,12 +1294,13 @@ fn writeResults(gpa: std.mem.Allocator, io: std.Io, total: Counts, files: u32) !
         \\text syntax; exception handling is implemented and covered by engine unit tests.
         \\
         \\Expected uninstantiability requires a genuine trap or Wasm exception during
-        \\initialization/start. Missing files, corrupt manifests, and allocation failures
-        \\while loading/checking modules are harness errors: they fail the run even with
-        \\`--quiet` and without a score floor, and prevent writing an incomplete scoreboard.
+        \\initialization/start. Missing files, corrupt manifests, and reported allocation
+        \\failures are harness errors: they fail the run even with `--quiet` and without
+        \\a score floor, and prevent writing an incomplete scoreboard. Action argument,
+        \\invocation, and global-read allocation errors cannot count as passes or skips.
         \\`assert_invalid` and `assert_malformed` still share decoding/validation rejection
-        \\checks. Distinguishing those two phases, classifying action allocation errors,
-        \\and matching trap text remain separate harness limitations.
+        \\checks; distinguishing those two phases and matching trap text remain separate
+        \\harness limitations.
         \\
         \\Scalar and vector `nan:canonical` expectations allow only the quiet
         \\payload bit; `nan:arithmetic` requires that bit and allows additional
