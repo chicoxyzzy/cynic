@@ -897,8 +897,8 @@ the measured design space:
   targets retain linear dispatch. Oversized stacks and unsupported opcodes
   still refuse before code publication and run in Sarcasm.
   This is a coverage difference, not a semantic one: forced-Spasm sweeps on
-  both architectures pass all 58,779 scored spec commands. Current native
-  coverage and per-opcode refusals are in [wasm-results.md](../wasm-results.md).
+  both architectures are gated on full spec-command parity. Current scores,
+  native coverage, and per-opcode refusals are in [wasm-results.md](../wasm-results.md).
   Both backends use the same bounded module-sized code reservation (64 KiB
   minimum, 4 MiB maximum), charged in full to a Realm's memory budget. The
   arena never relocates published code; allocation refusal or exhaustion
@@ -944,6 +944,24 @@ the measured design space:
 
 Conformance is scored against the official WebAssembly spec testsuite
 (the `.wast` corpus), the same way `test262-results.md` scores ECMA-262.
+Plain binary module commands are scored, following
+[WABT's module-command tally](https://github.com/WebAssembly/wabt/blob/main/src/tools/spectest-interp.cc):
+loading and running a start function must succeed without a later assertion.
+Expected uninstantiability accepts initialization/start traps or exceptions,
+following the [reference script runner](https://github.com/WebAssembly/spec/blob/main/interpreter/script/runner.ml).
+Fixture I/O, malformed manifests, and allocation failures are fatal harness
+errors, not engine rejections. Explicit unsupported forms retain their skips;
+conversion exclusions are reported by `wasm-testsuite-gen.sh`.
+`zig build test-wasm-testsuite` checks actual process exits and score totals,
+and runs in both architecture-specific Wasm CI jobs. Native harness tests
+also inject allocation failures before an expected trap. Scoring previously
+omitted modules exposed two validator gaps: legacy function-index element
+segments have non-nullable reference types, and tail-call results may widen
+to a nullable or abstract reference type. The fixes follow the Core
+[element encoding](https://webassembly.github.io/spec/core/binary/modules.html#element-section)
+and [tail-call matching rule](https://webassembly.github.io/spec/core/valid/instructions.html#valid-return-call),
+with positive and negative unit tests for each form. ECMA-262/test262 and
+SES policy are unaffected.
 Scalar and SIMD float expectations share a bit-based matcher for
 [Core canonical/arithmetic NaNs](https://webassembly.github.io/spec/core/syntax/values.html#syntax-float),
 following [WABT's expectation types](https://github.com/WebAssembly/wabt/blob/main/src/tools/spectest-interp.cc).

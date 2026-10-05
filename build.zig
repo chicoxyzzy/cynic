@@ -562,6 +562,10 @@ pub fn build(b: *std.Build) void {
     const wts_step = b.step("wasm-testsuite", "Run the WebAssembly spec testsuite conformance harness");
     wts_step.dependOn(&run_wts.step);
 
+    const wts_contract = b.addSystemCommand(&.{ "python3", "tools/test_wasm_testsuite.py", "--binary" });
+    wts_contract.addArtifactArg(wts_exe);
+    b.step("test-wasm-testsuite", "Test Wasm harness scoring and infrastructure-failure exits").dependOn(&wts_contract.step);
+
     // `zig build wasm-bench` — standalone ReleaseFast micro-benchmark
     // for the Sarcasm interpreter (dispatch-bound workloads), so a
     // hot-loop change can be measured against a fixed baseline.

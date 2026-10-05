@@ -128,6 +128,7 @@ pub fn main(init: std.process.Init) !void {
 
     var total: Counts = .{};
     var files: u32 = 0;
+    var harness_errors: u32 = 0;
 
     var walker = try dir.walk(gpa);
     defer walker.deinit();
@@ -141,11 +142,12 @@ pub fn main(init: std.process.Init) !void {
         var arena = std.heap.ArenaAllocator.init(gpa);
         defer arena.deinit();
         const c = runManifest(gpa, arena.allocator(), io, dir, entry.path, opts.spasm) catch |err| {
-            if (!opts.quiet) {
-                var line: [512]u8 = undefined;
-                const msg = try std.fmt.bufPrint(&line, "  {s}: harness error {t}\n", .{ entry.path, err });
-                try std.Io.File.stderr().writeStreamingAll(io, msg);
-            }
+            // A broken fixture is not an engine rejection or an excluded
+            // command. Keep it visible under --quiet and fail the whole run.
+            harness_errors += 1;
+            var line: [512]u8 = undefined;
+            const msg = try std.fmt.bufPrint(&line, "  {s}: harness error {t}\n", .{ entry.path, err });
+            try std.Io.File.stderr().writeStreamingAll(io, msg);
             continue;
         };
         total.add(c);
@@ -173,6 +175,11 @@ pub fn main(init: std.process.Init) !void {
         if (total.spasm_refusals != 0) try writeSpasmRefusalSummary(io, total);
     }
 
+    if (harness_errors != 0) {
+        const msg = try std.fmt.bufPrint(&line, "wasm spec testsuite: {d} harness error(s); results are incomplete\n", .{harness_errors});
+        try std.Io.File.stderr().writeStreamingAll(io, msg);
+        std.process.exit(2);
+    }
     if (opts.write_results) try writeResults(gpa, io, total, files);
 
     // `--min-pass-pct` — gate the run on the headline pass% floor (the
@@ -197,7 +204,10 @@ pub fn main(init: std.process.Init) !void {
 fn runManifest(gpa: std.mem.Allocator, arena: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, json_path: []const u8, spasm_enabled: bool) !Counts {
     const bytes = try dir.readFileAlloc(io, json_path, arena, .limited(64 * 1024 * 1024));
     const root = try std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{});
-    const commands = (root.object.get("commands") orelse return error.BadManifest).array.items;
+    if (root != .object) return error.BadManifest;
+    const command_list = root.object.get("commands") orelse return error.BadManifest;
+    if (command_list != .array) return error.BadManifest;
+    const commands = command_list.array.items;
 
     var counts: Counts = .{};
     var current: ?*wasm.Instance = null;
@@ -218,8 +228,9 @@ fn runManifest(gpa: std.mem.Allocator, arena: std.mem.Allocator, io: std.Io, dir
     }
 
     for (commands) |cmd_v| {
+        if (cmd_v != .object) return error.BadManifest;
         const cmd = cmd_v.object;
-        const kind = (cmd.get("type") orelse continue).string;
+        const kind = try requiredString(cmd, "type");
         // Call stacks and returned cells live only through this assertion;
         // module state and imported aliases keep the manifest's lifetime.
         var action_arena = std.heap.ArenaAllocator.init(gpa);
@@ -227,29 +238,36 @@ fn runManifest(gpa: std.mem.Allocator, arena: std.mem.Allocator, io: std.Io, dir
         const scratch = action_arena.allocator();
 
         if (std.mem.eql(u8, kind, "module")) {
-            const res = loadModule(arena, io, dir, cmd, &registry, spasm_enabled) catch null;
-            if (res) |loaded| {
-                current = loaded.instance;
-                // loadModule enabled the tier before any start function ran;
-                // retain the instance so the harness can prove native entry.
-                if (spasm_enabled) {
-                    try spasm_instances.append(arena, loaded.instance);
-                }
-                // A named module ((module $M …)) is addressable by later
-                // actions and registers via its internal name.
-                if (cmd.get("name")) |n| registry.put(arena, n.string, loaded.instance) catch {};
-            } else {
-                current = null;
+            // WABT's TallyCommand(OnModuleCommand) also counts plain module
+            // commands: decoding, linking, initialization and start must work
+            // even when the script has no later assertion against the module.
+            switch (try loadModule(arena, io, dir, cmd, &registry, spasm_enabled)) {
+                .loaded => |loaded| {
+                    current = loaded.instance;
+                    counts.pass += 1;
+                    if (spasm_enabled) try spasm_instances.append(arena, loaded.instance);
+                    if (try optionalString(cmd, "name")) |name|
+                        try registry.put(arena, name, loaded.instance);
+                },
+                .rejected => {
+                    current = null;
+                    counts.fail += 1;
+                },
+                .unsupported => {
+                    current = null;
+                    counts.skip += 1;
+                },
             }
         } else if (std.mem.eql(u8, kind, "register")) {
             // Expose an instance under its registration name so later
             // modules can import its exports. A `name` field selects a
             // specific named module; otherwise the current one is used.
-            const as = if (cmd.get("as")) |a| a.string else "";
-            const inst = if (cmd.get("name")) |n| (registry.get(n.string) orelse current) else current;
-            if (inst) |i| {
-                registry.put(arena, as, i) catch {};
-            }
+            const as = try requiredString(cmd, "as");
+            const inst = if (try optionalString(cmd, "name")) |name| registry.get(name) else current;
+            // A failed/skipped module has already recorded its outcome.
+            // Do not discard it and the remaining manifest as an IO failure
+            // merely because its following registration has no instance.
+            if (inst) |i| try registry.put(arena, as, i);
             // A register is not a scored assertion.
         } else if (std.mem.eql(u8, kind, "assert_return")) {
             const before = counts.fail;
@@ -264,7 +282,7 @@ fn runManifest(gpa: std.mem.Allocator, arena: std.mem.Allocator, io: std.Io, dir
         } else if (std.mem.eql(u8, kind, "assert_trap") or std.mem.eql(u8, kind, "assert_exhaustion")) {
             scoreTrap(scratch, cmd, current, &registry, &counts, std.mem.eql(u8, kind, "assert_exhaustion"));
         } else if (std.mem.eql(u8, kind, "assert_invalid") or std.mem.eql(u8, kind, "assert_malformed")) {
-            scoreRejected(arena, io, dir, cmd, &counts);
+            try scoreRejected(arena, io, dir, cmd, &counts);
         } else if (std.mem.eql(u8, kind, "action")) {
             const r = doAction(scratch, cmd.get("action").?.object, current, &registry);
             switch (r) {
@@ -275,10 +293,18 @@ fn runManifest(gpa: std.mem.Allocator, arena: std.mem.Allocator, io: std.Io, dir
             // Instantiate the module and expect a trap. Side effects that
             // ran before the trap (e.g. an active element segment writing
             // into a shared imported table) persist by design.
-            const res = loadModule(arena, io, dir, cmd, &registry, spasm_enabled) catch null;
-            if (res == null) counts.pass += 1 else counts.fail += 1;
+            switch (try loadModule(arena, io, dir, cmd, &registry, spasm_enabled)) {
+                .loaded => counts.fail += 1,
+                .unsupported => counts.skip += 1,
+                .rejected => |rejection| {
+                    if ((rejection.phase == .initialize or rejection.phase == .start) and isWasmTrap(rejection.err))
+                        counts.pass += 1
+                    else
+                        counts.fail += 1;
+                },
+            }
         } else {
-            // register / assert_unlinkable — not yet scored.
+            // assert_unlinkable and unsupported script commands are not scored.
             counts.skip += 1;
         }
     }
@@ -408,6 +434,46 @@ fn miscSubopcodeName(subopcode: usize) []const u8 {
 }
 
 const Loaded = struct { instance: *wasm.Instance, module: *wasm.Module };
+const LoadPhase = enum { decode, validate, link, initialize, start };
+const LoadResult = union(enum) {
+    loaded: Loaded,
+    rejected: struct { phase: LoadPhase, err: anyerror },
+    unsupported,
+};
+
+fn optionalString(object: std.json.ObjectMap, key: []const u8) !?[]const u8 {
+    const value = object.get(key) orelse return null;
+    if (value != .string) return error.BadManifest;
+    return value.string;
+}
+
+fn requiredString(object: std.json.ObjectMap, key: []const u8) ![]const u8 {
+    return (try optionalString(object, key)) orelse error.BadManifest;
+}
+
+fn binaryModule(cmd: std.json.ObjectMap) !bool {
+    const form = (try optionalString(cmd, "module_type")) orelse return true;
+    if (std.mem.eql(u8, form, "binary")) return true;
+    if (std.mem.eql(u8, form, "text")) return false;
+    return error.BadManifest;
+}
+
+fn rejectModule(io: std.Io, filename: []const u8, phase: LoadPhase, err: anyerror) !LoadResult {
+    // Exhausting the harness's allocator says nothing about whether the
+    // engine accepts the module. Never satisfy an expected rejection with it.
+    if (err == error.OutOfMemory) return error.OutOfMemory;
+    if (debug_loads) logLoadError(io, filename, @tagName(phase), err);
+    return .{ .rejected = .{ .phase = phase, .err = err } };
+}
+
+fn isWasmTrap(err: anyerror) bool {
+    return switch (err) {
+        error.NullReference, error.Unreachable, error.IntegerDivideByZero, error.IntegerOverflow, error.InvalidConversionToInteger, error.OutOfBoundsMemoryAccess, error.OutOfBoundsTableAccess, error.UndefinedElement, error.UninitializedElement, error.IndirectCallTypeMismatch, error.UncaughtException, error.NullExnRef => true,
+        // Exhaustion, host failures, unsupported calls and cancellation are
+        // distinct from the traps/exceptions accepted by assert_uninstantiable.
+        else => false,
+    };
+}
 
 var debug_loads = false;
 
@@ -557,36 +623,30 @@ fn loadModule(
     cmd: std.json.ObjectMap,
     registry: *const Registry,
     spasm_enabled: bool,
-) !?Loaded {
-    const filename = (cmd.get("filename") orelse return null).string;
-    const bytes = dir.readFileAlloc(io, filename, arena, .limited(64 * 1024 * 1024)) catch return null;
+) !LoadResult {
+    if (!try binaryModule(cmd)) return .unsupported;
+    const filename = try requiredString(cmd, "filename");
+    const bytes = try dir.readFileAlloc(io, filename, arena, .limited(64 * 1024 * 1024));
     const modp = try arena.create(wasm.Module);
-    modp.* = wasm.decode(arena, bytes) catch |err| {
-        if (debug_loads) logLoadError(io, filename, "decode", err);
-        return null;
-    };
-    const imports = resolveImports(arena, modp, registry) catch |err| {
-        if (debug_loads) logLoadError(io, filename, "link", err);
-        return null;
-    };
-    // The instance must outlive this call at a stable address: imports
-    // reference it by pointer, and its funcrefs/functions resolve to it.
+    modp.* = wasm.decode(arena, bytes) catch |err| return rejectModule(io, filename, .decode, err);
+    // Validate before looking up type-indexed imports. This also separates a
+    // validation rejection from an active-segment trap during instantiate.
+    // The prepared instance owns its own code; discard this validation scratch.
+    {
+        var validation = std.heap.ArenaAllocator.init(arena);
+        defer validation.deinit();
+        _ = wasm.validateModule(validation.allocator(), modp) catch |err|
+            return rejectModule(io, filename, .validate, err);
+    }
+    const imports = resolveImports(arena, modp, registry) catch |err| return rejectModule(io, filename, .link, err);
     const ip = try arena.create(wasm.Instance);
-    wasm.instantiate(ip, arena, arena, modp, imports) catch |err| {
-        if (debug_loads) logLoadError(io, filename, "instantiate", err);
-        return null;
-    };
+    wasm.instantiate(ip, arena, arena, modp, imports) catch |err| return rejectModule(io, filename, .initialize, err);
     if (spasm_enabled) {
         ip.spasm_enabled = true;
         ip.spasm_diagnostics = true;
     }
-    // §5.5.11 — the start function runs as part of instantiation; a trap
-    // here means the module failed to instantiate.
-    wasm.runStart(ip, arena) catch |err| {
-        if (debug_loads) logLoadError(io, filename, "start", err);
-        return null;
-    };
-    return .{ .instance = ip, .module = modp };
+    wasm.runStart(ip, arena) catch |err| return rejectModule(io, filename, .start, err);
+    return .{ .loaded = .{ .instance = ip, .module = modp } };
 }
 
 fn logLoadError(io: std.Io, filename: []const u8, phase: []const u8, err: anyerror) void {
@@ -690,46 +750,32 @@ fn scoreTrap(arena: std.mem.Allocator, cmd: std.json.ObjectMap, current: ?*wasm.
     }
 }
 
-fn scoreRejected(arena: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, cmd: std.json.ObjectMap, counts: *Counts) void {
-    // Only binary modules carry a `.wasm` we can decode.
-    const mt = cmd.get("module_type");
-    if (mt == null or !std.mem.eql(u8, mt.?.string, "binary")) {
+fn scoreRejected(arena: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, cmd: std.json.ObjectMap, counts: *Counts) !void {
+    if (!try binaryModule(cmd)) {
         counts.skip += 1;
         return;
     }
-    const filename = (cmd.get("filename") orelse {
-        counts.skip += 1;
-        return;
-    }).string;
-    const bytes = dir.readFileAlloc(io, filename, arena, .limited(64 * 1024 * 1024)) catch {
-        counts.fail += 1;
+    const filename = try requiredString(cmd, "filename");
+    const bytes = try dir.readFileAlloc(io, filename, arena, .limited(64 * 1024 * 1024));
+    const module = wasm.decode(arena, bytes) catch |err| {
+        if (err == error.OutOfMemory) return error.OutOfMemory;
+        counts.pass += 1;
         return;
     };
-    const decoded = wasm.decode(arena, bytes);
-    if (decoded) |m| {
-        const modp = arena.create(wasm.Module) catch {
-            counts.fail += 1;
-            return;
-        };
-        modp.* = m;
-        // Decoded; expect validation (via instantiate) to reject it.
-        const ip = arena.create(wasm.Instance) catch {
-            counts.fail += 1;
-            return;
-        };
-        if (wasm.instantiate(ip, arena, arena, modp, .{})) |_| {
-            counts.fail += 1; // accepted a module the spec rejects
-            if (debug_loads) {
-                const txt = if (cmd.get("text")) |t| t.string else "?";
-                var line: [256]u8 = undefined;
-                const msg = std.fmt.bufPrint(&line, "    WRONGLY-ACCEPTED {s} L{d}: {s}\n", .{ filename, if (cmd.get("line")) |l| l.integer else 0, txt }) catch return;
-                std.Io.File.stderr().writeStreamingAll(io, msg) catch {};
-            }
-        } else |_| {
-            counts.pass += 1;
-        }
-    } else |_| {
-        counts.pass += 1; // rejected at decode
+    // These assertions concern decoding/validation only. Instantiating with
+    // missing imports or trapping active segments could falsely pass a valid
+    // module, and could mutate imported state before a later command.
+    _ = wasm.validateModule(arena, &module) catch |err| {
+        if (err == error.OutOfMemory) return error.OutOfMemory;
+        counts.pass += 1;
+        return;
+    };
+    counts.fail += 1;
+    if (debug_loads) {
+        const txt = (try optionalString(cmd, "text")) orelse "?";
+        var line: [256]u8 = undefined;
+        const msg = try std.fmt.bufPrint(&line, "    WRONGLY-ACCEPTED {s}: {s}\n", .{ filename, txt });
+        try std.Io.File.stderr().writeStreamingAll(io, msg);
     }
 }
 
@@ -917,6 +963,115 @@ fn testScalarNanMatch(comptime U: type, canonical: bool) !void {
     }
 }
 
+// Small binaries keep accounting tests independent of wast2json and its feature flags.
+const scoring_empty_module = "\x00asm\x01\x00\x00\x00";
+const scoring_imported_start = scoring_empty_module ++
+    "\x01\x04\x01\x60\x00\x00" ++
+    "\x02\x12\x01\x08spectest\x05print\x00\x00" ++ "\x08\x01\x00";
+const scoring_trapping_start = scoring_empty_module ++
+    "\x01\x04\x01\x60\x00\x00\x03\x02\x01\x00\x08\x01\x00" ++
+    "\x0a\x05\x01\x03\x00\x00\x0b";
+const scoring_invalid_module = scoring_empty_module ++
+    "\x01\x05\x01\x60\x00\x01\x7f\x03\x02\x01\x00" ++
+    "\x0a\x04\x01\x02\x00\x0b";
+const scoring_unlinked_module = scoring_empty_module ++
+    "\x02\x0e\x01\x07missing\x01m\x02\x00\x01";
+const scoring_oob_data = scoring_empty_module ++
+    "\x05\x03\x01\x00\x00\x0b\x07\x01\x00\x41\x00\x0b\x01x";
+
+fn expectManifestCounts(source: []const u8, module: ?[]const u8, expected: Counts) !void {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    try tmp.dir.writeFile(io, .{ .sub_path = "case.json", .data = source });
+    if (module) |bytes| try tmp.dir.writeFile(io, .{ .sub_path = "case.wasm", .data = bytes });
+    for ([_]bool{ false, true }) |spasm| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const actual = try runManifest(std.testing.allocator, arena.allocator(), io, tmp.dir, "case.json", spasm);
+        try std.testing.expectEqual(expected.pass, actual.pass);
+        try std.testing.expectEqual(expected.fail, actual.fail);
+        try std.testing.expectEqual(expected.skip, actual.skip);
+    }
+}
+
+test "wasm harness: standalone module commands are scored without later assertions" {
+    const source =
+        \\{"commands":[{"type":"module","filename":"case.wasm"}]}
+    ;
+    for ([_][]const u8{ scoring_empty_module, scoring_imported_start }) |bytes|
+        try expectManifestCounts(source, bytes, .{ .pass = 1 });
+    for ([_][]const u8{ "\x00asm", scoring_invalid_module, scoring_unlinked_module, scoring_trapping_start, scoring_oob_data }) |bytes|
+        try expectManifestCounts(source, bytes, .{ .fail = 1 });
+}
+
+test "wasm harness: uninstantiable requires an initialization or start trap" {
+    const source =
+        \\{"commands":[{"type":"assert_uninstantiable","filename":"case.wasm","module_type":"binary"}]}
+    ;
+    for ([_][]const u8{ scoring_trapping_start, scoring_oob_data }) |bytes|
+        try expectManifestCounts(source, bytes, .{ .pass = 1 });
+    for ([_][]const u8{ scoring_empty_module, "\x00asm", scoring_invalid_module, scoring_unlinked_module }) |bytes|
+        try expectManifestCounts(source, bytes, .{ .fail = 1 });
+}
+
+test "wasm harness: rejected assertions do not confuse linking or runtime traps with validation" {
+    inline for (.{ "assert_invalid", "assert_malformed" }) |kind| {
+        const source = "{\"commands\":[{\"type\":\"" ++ kind ++ "\",\"filename\":\"case.wasm\",\"module_type\":\"binary\"}]}";
+        for ([_][]const u8{ scoring_empty_module, scoring_unlinked_module, scoring_trapping_start, scoring_oob_data }) |bytes|
+            try expectManifestCounts(source, bytes, .{ .fail = 1 });
+        for ([_][]const u8{ "\x00asm", scoring_invalid_module }) |bytes|
+            try expectManifestCounts(source, bytes, .{ .pass = 1 });
+    }
+}
+
+test "wasm harness: missing module files remain infrastructure errors for every load command" {
+    inline for (.{ "module", "assert_uninstantiable", "assert_invalid", "assert_malformed" }) |kind| {
+        const source = "{\"commands\":[{\"type\":\"" ++ kind ++ "\",\"filename\":\"case.wasm\",\"module_type\":\"binary\"}]}";
+        try std.testing.expectError(error.FileNotFound, expectManifestCounts(source, null, .{}));
+    }
+}
+
+test "wasm harness: unsupported module forms and unlinkable assertions stay explicit skips" {
+    try expectManifestCounts(
+        \\{"commands":[{"type":"module","filename":"case.wat","module_type":"text"},
+        \\{"type":"assert_uninstantiable","filename":"case.wat","module_type":"text"},
+        \\{"type":"assert_malformed","filename":"case.wat","module_type":"text"},
+        \\{"type":"assert_unlinkable","filename":"case.wasm","module_type":"binary"}]}
+    , null, .{ .skip = 4 });
+}
+
+test "wasm harness: register after a failed or skipped module preserves its outcome" {
+    try expectManifestCounts(
+        \\{"commands":[{"type":"module","filename":"case.wasm"},
+        \\{"type":"register","as":"failed"},
+        \\{"type":"assert_uninstantiable","filename":"case.wasm","module_type":"binary"}]}
+    , scoring_trapping_start, .{ .pass = 1, .fail = 1 });
+    try expectManifestCounts(
+        \\{"commands":[{"type":"module","filename":"case.wat","module_type":"text"},
+        \\{"type":"register","as":"skipped"},
+        \\{"type":"module","filename":"case.wasm"}]}
+    , scoring_empty_module, .{ .pass = 1, .skip = 1 });
+}
+
+fn checkManifestAllocationFailures(allocator: std.mem.Allocator, dir: std.Io.Dir) !void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const counts = try runManifest(allocator, arena.allocator(), std.testing.io, dir, "case.json", false);
+    try std.testing.expectEqual(@as(u32, 1), counts.pass);
+    try std.testing.expectEqual(@as(u32, 0), counts.fail);
+}
+
+test "wasm harness: allocation failure cannot satisfy an expected instantiation trap" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "case.wasm", .data = scoring_trapping_start });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "case.json", .data =
+        \\{"commands":[{"type":"assert_uninstantiable","filename":"case.wasm","module_type":"binary"}]}
+    });
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, checkManifestAllocationFailures, .{tmp.dir});
+}
+
 test "wasm harness: action scratch does not accumulate in the manifest arena" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -941,7 +1096,7 @@ test "wasm harness: action scratch does not accumulate in the manifest arena" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const counts = try runManifest(std.testing.allocator, arena.allocator(), io, tmp.dir, "constant.json", false);
-    try std.testing.expectEqual(@as(u32, 32), counts.pass);
+    try std.testing.expectEqual(@as(u32, 33), counts.pass);
     try std.testing.expectEqual(@as(u32, 0), counts.fail);
     try std.testing.expect(arena.queryCapacity() < 2 * 1024 * 1024);
 }
@@ -1045,24 +1200,28 @@ fn writeResults(gpa: std.mem.Allocator, io: std.Io, total: Counts, files: u32) !
         \\against the official WebAssembly spec testsuite (the `.wast` corpus,
         \\preprocessed with `wast2json --enable-tail-call --enable-relaxed-simd
         \\--enable-memory64 --enable-extended-const --enable-multi-memory
-        \\--enable-function-references`). Each `assert_*` / `action`
-        \\command is a plain pass or fail. Commands are counted as skips when they
-        \\cannot be scored: `assert_unlinkable` fixtures, text/quoted-module
-        \\commands `wast2json` does not lower, a few value comparisons the harness
-        \\does not model, and — importantly — **every command whose module uses a
-        \\feature Sarcasm does not implement**: that module fails to decode /
-        \\validate, so its assertions are *skipped, not failed*.
+        \\--enable-function-references`). Each supported binary `module`, assertion,
+        \\and `action` command is a plain pass or fail. A module must decode, validate,
+        \\link, initialize, and run its start function successfully, even if no later
+        \\assertion uses it. Registers are unscored. Explicit skips cover
+        \\`assert_unlinkable`, text/quoted modules, unsupported script commands, and
+        \\value forms the harness cannot compare. A decoder, validator, or start
+        \\failure in a positive module command is a failure, never an implicit skip.
         \\
         \\**What `pass%` does and does not mean.** `pass%` is `100 ×
         \\passing / (passing + failing)` — the fraction of *scored* commands that
-        \\pass, **not** "fraction of all of WebAssembly implemented". An
-        \\unimplemented standardized proposal (`gc`) sits in the *skip* column,
-        \\not *fail*, so the headline stays 100% regardless. Implementing a
-        \\proposal moves its assertions **skip → pass** — that, not the
-        \\percentage, is the real coverage signal. Exception handling is
-        \\implemented but unscored here: this `wast2json` cannot parse the
-        \\proposal's `(ref exn)` text syntax, so its `.wast` files don't lower
-        \\(its coverage is the engine unit tests instead).
+        \\pass, not the fraction of all WebAssembly implemented. Proposal files this
+        \\`wast2json` cannot lower are logged conversion exclusions; they do not enter
+        \\the command counts. This includes unimplemented WasmGC and the current exception-handling
+        \\text syntax; exception handling is implemented and covered by engine unit tests.
+        \\
+        \\Expected uninstantiability requires a genuine trap or Wasm exception during
+        \\initialization/start. Missing files, corrupt manifests, and allocation
+        \\failures are harness errors: they fail the run even with `--quiet` and
+        \\without a score floor, and prevent writing an incomplete scoreboard.
+        \\`assert_invalid` and `assert_malformed` still share decoding/validation
+        \\rejection checks; distinguishing those two phases and matching trap text
+        \\are separate harness limitations.
         \\
         \\Scalar and vector `nan:canonical` expectations allow only the quiet
         \\payload bit; `nan:arithmetic` requires that bit and allows additional
