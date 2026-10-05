@@ -1216,12 +1216,12 @@ fn writeResults(gpa: std.mem.Allocator, io: std.Io, total: Counts, files: u32) !
         \\text syntax; exception handling is implemented and covered by engine unit tests.
         \\
         \\Expected uninstantiability requires a genuine trap or Wasm exception during
-        \\initialization/start. Missing files, corrupt manifests, and allocation
-        \\failures are harness errors: they fail the run even with `--quiet` and
-        \\without a score floor, and prevent writing an incomplete scoreboard.
-        \\`assert_invalid` and `assert_malformed` still share decoding/validation
-        \\rejection checks; distinguishing those two phases and matching trap text
-        \\are separate harness limitations.
+        \\initialization/start. Missing files, corrupt manifests, and allocation failures
+        \\while loading/checking modules are harness errors: they fail the run even with
+        \\`--quiet` and without a score floor, and prevent writing an incomplete scoreboard.
+        \\`assert_invalid` and `assert_malformed` still share decoding/validation rejection
+        \\checks. Distinguishing those two phases, classifying action allocation errors,
+        \\and matching trap text remain separate harness limitations.
         \\
         \\Scalar and vector `nan:canonical` expectations allow only the quiet
         \\payload bit; `nan:arithmetic` requires that bit and allows additional
