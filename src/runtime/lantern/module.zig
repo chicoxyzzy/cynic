@@ -403,6 +403,9 @@ fn loadModuleInner(
                         // settle (or surfaces our rejection).
                         if (saved_module) |parent| {
                             parent.pending_async_deps.append(realm.allocator, mr) catch return error.OutOfMemory;
+                            // Static evaluation consumes this internal Promise;
+                            // module_link_complete propagates its rejection.
+                            realm.heap.markPromiseHandled(p_obj);
                         }
                         const final_ns = module_mod.getModuleNamespace(realm, mr) catch return error.OutOfMemory;
                         return .{ .value = heap_mod.taggedObject(final_ns), .threw = false, .mr = mr };

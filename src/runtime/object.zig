@@ -1101,8 +1101,10 @@ pub const BrandFlags = packed struct(u32) {
     /// native `enum(u8)` width (the whole word is `u32`, so there is
     /// no footprint benefit to a narrower tag).
     promise_state: PromiseState = .none,
+    /// §27.5.6 [[PromiseIsHandled]], maintained even without a host observer.
+    promise_is_handled: bool = false,
     /// Reserved padding to fill the 32-bit word.
-    _padding: u4 = 0,
+    _padding: u3 = 0,
 };
 
 pub const JSObject = struct {

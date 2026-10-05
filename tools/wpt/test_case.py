@@ -354,6 +354,127 @@ class HarnessContract(CaseFixture, unittest.TestCase):
         self.assertTrue(any(r["type"] == "complete" for r in self.records(result)), result.stdout)
 
 
+class RejectionTrackingContract(CaseFixture, unittest.TestCase):
+    def assert_unhandled(self, result):
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("unhandled Promise rejection", result.stderr)
+
+    def assert_harness_passed(self, result, names, *, allow_nonzero=False):
+        if not allow_nonzero:
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("unhandled Promise rejection", result.stderr)
+        records = self.records(result)
+        completions = [record for record in records if record["type"] == "complete"]
+        self.assertEqual(len(completions), 1, result.stdout)
+        self.assertEqual(completions[0]["status"], 0, result.stdout)
+        self.assertEqual([(r["name"], r["status"]) for r in records if r["type"] == "result"],
+                         [(name, 0) for name in names], result.stdout)
+
+    def test_bare_reject_and_throwing_executor_fail(self):
+        for source in ("Promise.reject(42);", "new Promise(() => { throw 42; });"):
+            with self.subTest(source=source):
+                result = self.execute(source, """
+                    for (let i = 0; i < 64; i++) { const temporary = {i}; }
+                    print('evaluated');
+                """, options=("--gc-threshold=1",))
+                self.assertEqual(result.stdout.strip(), "evaluated")
+                self.assert_unhandled(result)
+
+    def test_detached_reaction_invalidates_successful_wpt_completion(self):
+        result = self.execute("""
+            test(() => {
+                Promise.resolve().then(() => { throw new Error('detached reaction'); });
+            }, 'otherwise passes');
+        """, harness=True, options=("--gc-threshold=1",))
+        self.assert_harness_passed(result, ["otherwise passes"], allow_nonzero=True)
+        self.assert_unhandled(result)
+
+    def test_synchronous_and_later_microtask_handlers_succeed(self):
+        result = self.execute("""
+            for (const later of [false, true]) {
+                promise_test(() => {
+                    const reason = {marker: 42};
+                    const pending = Promise.reject(reason);
+                    const handle = () => pending.catch(actual => assert_equals(actual, reason));
+                    return later ? Promise.resolve().then(() => Promise.resolve().then(handle))
+                                 : handle();
+                }, later ? 'nested microtask handler' : 'synchronous handler');
+            }
+        """, harness=True, options=("--gc-threshold=1",))
+        self.assert_harness_passed(result, ["synchronous handler", "nested microtask handler"])
+
+    def test_forwarded_rejection_requires_a_derived_handler(self):
+        result = self.execute("""
+            test(() => {
+                const source = Promise.reject(42);
+                source.then(() => assert_unreached('rejection fulfilled'));
+                source.catch(() => {});
+            }, 'source handled');
+        """, harness=True, options=("--gc-threshold=1",))
+        self.assert_harness_passed(result, ["source handled"], allow_nonzero=True)
+        self.assert_unhandled(result)
+
+    def test_derived_handler_handles_forwarded_rejection(self):
+        result = self.execute("""
+            promise_test(() => {
+                const reason = {marker: 42};
+                const source = Promise.reject(reason);
+                return source.then(() => assert_unreached('rejection fulfilled'))
+                    .catch(actual => assert_equals(actual, reason));
+            }, 'derived handled');
+        """, harness=True, options=("--gc-threshold=1",))
+        self.assert_harness_passed(result, ["derived handled"])
+
+    def test_await_combinators_and_adoption_have_no_false_positives(self):
+        result = self.execute("""
+            const reason = {marker: 42};
+            const reject = () => Promise.reject(reason);
+            const handled = pending => pending.then(
+                () => assert_unreached('rejection fulfilled'),
+                actual => assert_equals(actual, reason));
+            promise_test(async () => {
+                let caught = false;
+                try { await reject(); }
+                catch (actual) { assert_equals(actual, reason); caught = true; }
+                assert_true(caught);
+            }, 'caught await');
+            promise_test(() => handled(Promise.all([Promise.resolve(1), reject()])), 'all');
+            promise_test(() => handled(Promise.race([reject(), Promise.resolve(1)])), 'race');
+            promise_test(() => Promise.any([reject(), Promise.resolve(7)])
+                .then(value => assert_equals(value, 7)), 'any');
+            promise_test(() => Promise.allSettled([reject(), Promise.resolve(7)])
+                .then(values => {
+                    assert_equals(values[0].status, 'rejected');
+                    assert_equals(values[0].reason, reason);
+                    assert_equals(values[1].value, 7);
+                }), 'allSettled');
+            promise_test(() => handled(new Promise(resolve => resolve(reject()))),
+                'native adoption');
+            promise_test(() => handled(Promise.resolve().then(reject)), 'reaction adoption');
+        """, harness=True, options=("--gc-threshold=1",))
+        self.assert_harness_passed(result, ["caught await", "all", "race", "any",
+                                           "allSettled", "native adoption", "reaction adoption"])
+
+    def test_diagnostic_does_not_inspect_hostile_rejection_reason(self):
+        for use_proxy in (False, True):
+            with self.subTest(use_proxy=use_proxy):
+                result = self.execute("""
+                    function hostile() { print('reason inspected'); throw 99; }
+                    const reason = {};
+                    for (const key of ['name', 'message', 'stack', 'toString',
+                                       'valueOf', Symbol.toPrimitive]) {
+                        Object.defineProperty(reason, key, {get: hostile});
+                    }
+                    Promise.reject(USE_PROXY ? new Proxy(reason, {get: hostile}) : reason);
+                    for (let i = 0; i < 64; i++) { const temporary = {i}; }
+                    print('evaluated');
+                """.replace("USE_PROXY", "true" if use_proxy else "false"),
+                    options=("--gc-threshold=1",))
+                self.assertEqual(result.stdout.strip(), "evaluated")
+                self.assertNotIn("reason inspected", result.stderr)
+                self.assert_unhandled(result)
+
+
 class ImportedStartContract(CaseFixture, unittest.TestCase):
     def test_imported_start_runs_once_and_preserves_thrown_values(self):
         result = self.execute("""

@@ -90,6 +90,22 @@ pub const kind_object: u64 = 0x1;
 pub const kind_symbol: u64 = 0x2;
 pub const kind_bigint: u64 = 0x3;
 
+/// ECMA-262 HostPromiseRejectionTracker events. A handler includes forwarding
+/// through `.then()` without an onRejected callback; its result may reject later.
+pub const PromiseRejectionOperation = enum { reject, handle };
+
+/// Optional agent-wide host observation, shared by every Realm on this heap.
+/// The callback must not execute JS or trigger GC. Retained values need explicit
+/// roots; release those roots on `handle`. Allocation failure is host policy and
+/// must not throw synchronously from a Promise rejection. Remove this observer
+/// before its context or roots are destroyed. Installing it does not replay old
+/// events, so hosts normally install it before running user code.
+/// https://tc39.es/ecma262/#sec-host-promise-rejection-tracker
+pub const PromiseRejectionTracker = struct {
+    context: ?*anyopaque = null,
+    callback: *const fn (?*anyopaque, *JSObject, PromiseRejectionOperation) void,
+};
+
 /// §26.2 FinalizationRegistry cleanup-job scheduler. The collector
 /// discovers a dead registry target during the post-mark weak pass
 /// and must enqueue a host job — `cleanupCallback(heldValue)` — to
@@ -503,6 +519,9 @@ pub const Heap = struct {
     /// is the innermost scope. Roots from every open scope are
     /// scanned during a collect.
     handle_scopes: std.ArrayListUnmanaged(*HandleScope) = .empty,
+    /// Host callback/context are borrowed and never serialized. Default-off:
+    /// ordinary embeddings retain no rejected promises or diagnostic state.
+    promise_rejection_tracker: ?PromiseRejectionTracker = null,
 
     /// Chunk-constant heap values — permanently-live non-string
     /// constants parked in a `Chunk`'s constant pool: the per-call-
@@ -4982,7 +5001,24 @@ pub const Heap = struct {
         self.writeBarrier(.{ .object = obj }, value);
         // state != .none ⇒ the typed-slot scan reads promise_value.
         obj.needs_internal_scan = true;
+        const was_unsettled = obj.brand.promise_state == .none or obj.brand.promise_state == .pending;
         obj.settlePromise(state, value);
+        if (was_unsettled and state == .rejected and !obj.brand.promise_is_handled) {
+            self.hostPromiseRejectionTracker(obj, .reject);
+        }
+    }
+
+    /// §27.5.5.4.1 PerformPromiseThen's [[PromiseIsHandled]] transition.
+    /// Call only after subscription/capability setup succeeds, including the
+    /// optimized internal consumers used by Await and async iteration.
+    pub fn markPromiseHandled(self: *Heap, obj: *JSObject) void {
+        if (!obj.isPromise() or obj.brand.promise_is_handled) return;
+        if (obj.brand.promise_state == .rejected) self.hostPromiseRejectionTracker(obj, .handle);
+        obj.brand.promise_is_handled = true;
+    }
+
+    pub fn hostPromiseRejectionTracker(self: *Heap, obj: *JSObject, operation: PromiseRejectionOperation) void {
+        if (self.promise_rejection_tracker) |tracker| tracker.callback(tracker.context, obj, operation);
     }
 
     // ─── Tier 1 typed-slot setters ──────────────────────────────────

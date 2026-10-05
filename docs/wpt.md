@@ -122,12 +122,33 @@ The shipped Exception/Tag API and shared-memory constructor are eligible even
 where upstream filenames still say `tentative`; strict-only failures inside
 those fixtures remain failures.
 
-There is no host unhandled-rejection event reporting yet. Returned promises
-inside `promise_test` are observed by the upstream harness, but detached
-rejections are not. The known `exception/identity.tentative.any.js` fixture
-launches detached asynchronous assertions inside synchronous `test()` and is
-explicitly excluded, rather than producing a misleading pass. Revisit it with
-an upstream `promise_test` correction or host rejection tracking.
+The executor installs the optional heap-wide
+[HostPromiseRejectionTracker](https://tc39.es/ecma262/#sec-host-promise-rejection-tracker)
+callback before evaluating scripts. It records rejections without a handler,
+removes them on the first successful handler subscription, and checks what
+remains after the final Promise/Wasm task checkpoint. A detached rejection
+fails the process even if WPT already printed an OK completion. Synchronous
+handlers, handlers added by later microtasks, `await`, adoption, and async
+iteration therefore do not produce false failures. `.then()` without a
+rejection handler handles its source while forwarding failure to its derived
+promise, which must itself be handled.
+
+The bounded host registry roots only outstanding promises (and therefore their
+reasons), removes roots immediately on handling, and uses a 65,536-entry cap.
+Allocation or capacity failures are sticky executor failures; they never become
+catchable JS exceptions or a misleading pass. At most eight outstanding reasons
+are diagnosed without invoking user getters or coercions. The callback is off
+by default in normal embeddings, adds no JS global, and is shared by realms on
+the same heap. Hosts must install before running code, must not reenter JS or
+collect from the callback, and must root any retained values. Snapshot capture
+refuses an installed callback because its host context cannot be serialized.
+`runtime.PendingPromiseRejections` provides the bounded registry; embedders can
+instead set `heap.promise_rejection_tracker` to their own callback.
+
+The known `exception/identity.tentative.any.js` fixture remains excluded: it
+launches asynchronous assertions inside synchronous `test()` and also uses
+legacy exception encodings. Host rejection tracking closes the executor blind
+spot, but inclusion still needs a fixture review and compatible encodings.
 
 The initial corpus has no META variants. The supervisor rejects nonempty
 variants until their host context is implemented; it does not fabricate browser
@@ -267,3 +288,17 @@ precedent for small host shims and an explicit final checkpoint.
 [Node's selective WPT imports](https://github.com/nodejs/node/blob/main/test/wpt/README.md)
 provide the per-family pinning precedent. Cynic follows those patterns while
 retaining its strict-only grammar and a separate hardened-runtime test lane.
+
+The rejection hook follows ECMA-262's optional host notification boundary,
+with separate `reject` and `handle` operations. V8 exposes the corresponding
+[rejection events](https://github.com/v8/v8/blob/main/include/v8-promise.h),
+QuickJS offers an optional engine callback and maintains pending rejections in
+[its host runtime](https://github.com/bellard/quickjs/blob/master/quickjs-libc.c),
+and JavaScriptCore marks internal consumers in
+[JSPromise](https://github.com/WebKit/WebKit/blob/main/Source/JavaScriptCore/runtime/JSPromise.cpp).
+Cynic likewise keeps host policy outside the engine, accounts for optimized
+internal consumers, and delays WPT failure reporting until its checkpoint.
+Test262 does not standardize a host rejection-notification test API; focused
+native hook tests and both WPT executor profiles cover this boundary, including
+allocation failure and GC retention/release. SES hardening does not change the
+hook or expose it to JavaScript.

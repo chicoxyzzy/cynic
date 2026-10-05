@@ -121,6 +121,7 @@ pub const wrapInPromise = promise.wrapInPromise;
 pub const drainMicrotasks = promise.drainMicrotasks;
 pub const fireExpiredAsyncWaits = promise.fireExpiredAsyncWaits;
 pub const resolvePromiseWithValue = promise.resolvePromiseWithValue;
+pub const promiseResolveForAwait = promise.promiseResolveForAwait;
 pub const resumeAsyncFunction = promise.resumeAsyncFunction;
 pub const resumeAsyncGeneratorOnSettle = promise.resumeAsyncGeneratorOnSettle;
 pub const settlePromiseInternal = promise.settlePromiseInternal;
@@ -7855,25 +7856,18 @@ pub fn runFrames(
             const gen_opt: ?*@import("../generator.zig").JSGenerator = if (f.generator) |g| (if (g.is_async) g else null) else null;
             if (gen_opt) |gen| {
                 var suspend_target: ?*JSObject = null;
+                var settled_source: ?*JSObject = null;
                 var resume_value: Value = v;
                 var resume_throws: bool = false;
                 var use_microtask: bool = true;
                 if (heap_mod.valueAsPlainObject(v)) |obj| {
                     if (obj.isPromise()) {
-                        // §27.7.5.3 Await step 1 — PromiseResolve(
-                        // %Promise%, value). §27.2.4.7 step 1.a:
-                        // when the resolution is already a Promise,
-                        // the spec reads `value.constructor` to
-                        // honour the species hook before deciding
-                        // to return `value` unchanged. Cynic never
-                        // species-dispatches (we always reuse the
-                        // %Promise%), but the read itself is
-                        // observable — a poisoned `constructor`
-                        // getter throws, and the `?` on step 1
-                        // makes that abrupt completion the result
-                        // of Await (the body resumes with a
-                        // throw). Mirrors the same read in
-                        // `awaitForReturnCompletion`.
+                        // Await first applies PromiseResolve(%Promise%, value).
+                        // The constructor read compares identity with the
+                        // intrinsic; it is not a species lookup. The helper
+                        // preserves different-constructor adoption timing when
+                        // a host observer is installed. A throwing read resumes
+                        // with that exception without handling the source.
                         const ctor_v = intrinsics_mod.getPropertyChain(realm, obj, "constructor") catch |err| switch (err) {
                             error.OutOfMemory => return error.OutOfMemory,
                             else => blk: {
@@ -7889,14 +7883,19 @@ pub fn runFrames(
                             // `constructor` getter threw — skip the
                             // ordinary settled/pending dispatch and
                             // resume the body with the thrown value.
-                        } else if (obj.brand.promise_state == .pending) {
-                            suspend_target = obj;
-                            use_microtask = false;
                         } else {
-                            resume_value = obj.promise_value;
-                            resume_throws = (obj.brand.promise_state == .rejected);
+                            // Await reaches PerformPromiseThen only after a
+                            // successful PromiseResolve constructor lookup.
+                            const awaited = try promiseResolveForAwait(realm, obj, ctor_v);
+                            if (awaited.brand.promise_state == .pending) {
+                                suspend_target = awaited;
+                                use_microtask = false;
+                            } else {
+                                resume_value = awaited.promise_value;
+                                resume_throws = (awaited.brand.promise_state == .rejected);
+                                settled_source = awaited;
+                            }
                         }
-                        _ = ctor_v;
                     } else {
                         // Thenable check — §27.7.5.3 step 1
                         // through §27.2.1.3.2 Promise Resolve
@@ -7955,9 +7954,11 @@ pub fn runFrames(
                 committed = true;
                 if (use_microtask) {
                     realm.enqueueAsyncResume(gen, resume_value, resume_throws) catch return error.OutOfMemory;
+                    if (settled_source) |obj| realm.heap.markPromiseHandled(obj);
                 } else if (suspend_target) |obj| {
                     const waiters = obj.promiseWaitersPtr(realm.allocator) catch return error.OutOfMemory;
                     waiters.append(realm.allocator, gen) catch return error.OutOfMemory;
+                    realm.heap.markPromiseHandled(obj);
                 }
                 // §27.6.3.4 — async-gen suspended in
                 // await must not pop its head request when

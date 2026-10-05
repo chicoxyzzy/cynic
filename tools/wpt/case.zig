@@ -146,6 +146,13 @@ fn execute(init: std.process.Init) !u8 {
         }
     }
 
+    // Detached reactions can reject after WPT has printed a successful
+    // completion. Keep only currently unhandled promises rooted until the
+    // final checkpoint; the cap bounds additional host bookkeeping.
+    var rejections = try cynic.runtime.PendingPromiseRejections.init(realm.heap, allocator, 65536);
+    defer rejections.deinit();
+    try rejections.install();
+
     var source_bytes: usize = 0;
     for (paths.items) |path| {
         const source = std.Io.Dir.cwd().readFileAlloc(io, path, sources, .limited(8 * 1024 * 1024)) catch |err| {
@@ -163,6 +170,10 @@ fn execute(init: std.process.Init) !u8 {
             return 1;
         }
         if (output_failed) return error.OutputLimitOrWriteFailed;
+        if (rejections.failure) |failure| {
+            try diagnostic(io, "Promise rejection tracking", @tagName(failure));
+            return 1;
+        }
     }
 
     cynic.runtime.lantern.drainMicrotasks(realm.allocator, &realm) catch |err| {
@@ -174,6 +185,17 @@ fn execute(init: std.process.Init) !u8 {
         return 1;
     }
     if (output_failed) return error.OutputLimitOrWriteFailed;
+    if (rejections.failure) |failure| {
+        try diagnostic(io, "Promise rejection tracking", @tagName(failure));
+        return 1;
+    }
+    if (rejections.values().len != 0) {
+        for (rejections.values()[0..@min(rejections.values().len, 8)]) |value| {
+            const promise = cynic.runtime.heap.valueAsPlainObject(value).?;
+            try reportThrown(io, "unhandled Promise rejection", &realm, promise.promise_value);
+        }
+        return 1;
+    }
     return 0;
 }
 

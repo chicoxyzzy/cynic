@@ -590,7 +590,8 @@ const Capture = struct {
         {
             return error.RealmNotQuiescent;
         }
-        if (heap.handle_scopes.items.len != 0 or
+        if (heap.promise_rejection_tracker != null or
+            heap.handle_scopes.items.len != 0 or
             heap.const_roots.items.len != 0 or
             heap.native_ctor_roots.items.len != 0 or
             heap.realms.items.len != 1)
@@ -1825,6 +1826,17 @@ test "snapshot: capture refuses a non-quiescent realm" {
     const realm = try makeInstalledRealm(testing.allocator, true);
     defer destroyRealm(testing.allocator, realm);
     try realm.enqueueMicrotask(Value.undefined_, Value.undefined_);
+    try testing.expectError(error.RealmNotQuiescent, Snapshot.capture(realm, testing.allocator));
+}
+
+test "snapshot: capture refuses a host Promise rejection callback without open scopes" {
+    const realm = try makeInstalledRealm(testing.allocator, true);
+    defer destroyRealm(testing.allocator, realm);
+    const Observer = struct {
+        fn notify(_: ?*anyopaque, _: *JSObject, _: heap_mod.PromiseRejectionOperation) void {}
+    };
+    realm.heap.promise_rejection_tracker = .{ .callback = Observer.notify };
+    try testing.expectEqual(0, realm.heap.handle_scopes.items.len);
     try testing.expectError(error.RealmNotQuiescent, Snapshot.capture(realm, testing.allocator));
 }
 

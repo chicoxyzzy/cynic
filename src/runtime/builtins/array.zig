@@ -3936,10 +3936,16 @@ fn awaitAndThen(
     const sc = realm.heap.openScope() catch return error.OutOfMemory;
     defer sc.close();
 
+    sc.push(value) catch return error.OutOfMemory;
     var source: *JSObject = undefined;
     if (heap_mod.valueAsPlainObject(value)) |obj| {
         if (obj.isPromise()) {
-            source = obj;
+            if (realm.heap.promise_rejection_tracker != null) {
+                const constructor = try getPropertyChain(realm, obj, "constructor");
+                source = try lantern.promiseResolveForAwait(realm, obj, constructor);
+            } else {
+                source = obj;
+            }
         } else {
             source = try wrapValueInPromise(realm, value);
         }
@@ -3964,6 +3970,7 @@ fn awaitAndThen(
             }) catch return error.OutOfMemory;
         },
     }
+    realm.heap.markPromiseHandled(source);
 }
 
 fn wrapValueInPromise(realm: *Realm, value: Value) NativeError!*JSObject {
