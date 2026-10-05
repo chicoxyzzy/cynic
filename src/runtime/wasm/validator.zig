@@ -523,8 +523,11 @@ fn validateElements(arena: std.mem.Allocator, module: *const Module, global_limi
         }
         // For an expression-form segment the byte after the offset is the
         // element reference type; for an index-form segment it is the
-        // elemkind (always funcref).
-        var elem_type: ValType = .funcref;
+        // elemkind (non-nullable ref func). Core binary element-section
+        // flags 0-3 abbreviate ref.func expressions; flag 4 alone defaults
+        // to nullable funcref, even when every initializer is ref.func.
+        // https://webassembly.github.io/spec/core/binary/modules.html#element-section
+        var elem_type: ValType = if (use_exprs) .funcref else ValType.refType(false, types.heap_abs_func);
         if (kind != 0) {
             const b = try r.byte();
             if (use_exprs) {
@@ -1092,7 +1095,7 @@ fn validateExpr(v: *Validator) ValidateError!void {
                 const fidx = try v.r.uleb(u32);
                 const ft = try funcType(v.module, fidx);
                 try v.popVals(ft.params);
-                if (!std.mem.eql(ValType, ft.results, v.results)) return error.TypeMismatch;
+                if (!matchResultType(ft.results, v.results)) return error.TypeMismatch;
                 v.setUnreachable();
             },
             // Function-references proposal: call through a typed
@@ -1112,7 +1115,7 @@ fn validateExpr(v: *Validator) ValidateError!void {
                 const ft = v.module.types[type_idx];
                 try v.popExpect(ValType.refType(true, type_idx));
                 try v.popVals(ft.params);
-                if (!std.mem.eql(ValType, ft.results, v.results)) return error.TypeMismatch;
+                if (!matchResultType(ft.results, v.results)) return error.TypeMismatch;
                 v.setUnreachable();
             },
             // `ref.as_non_null` traps on null, refining the type.
@@ -1164,7 +1167,7 @@ fn validateExpr(v: *Validator) ValidateError!void {
                 const ft = v.module.types[type_idx];
                 try v.popExpect(addr); // element index
                 try v.popVals(ft.params);
-                if (!std.mem.eql(ValType, ft.results, v.results)) return error.TypeMismatch;
+                if (!matchResultType(ft.results, v.results)) return error.TypeMismatch;
                 v.setUnreachable();
             },
 
@@ -1784,6 +1787,15 @@ fn isSubtype(a: ValType, b: ValType) bool {
     return bh == types.heap_abs_func and ah < types.heap_concrete_max;
 }
 
+// Core return_call{,_ref,_indirect}: the callee's result type matches
+// the caller's result type directionally; nullable/abstract widening is valid.
+// https://webassembly.github.io/spec/core/valid/instructions.html#valid-return-call
+fn matchResultType(actual: []const ValType, expected: []const ValType) bool {
+    if (actual.len != expected.len) return false;
+    for (actual, expected) |a, e| if (!isSubtype(a, e)) return false;
+    return true;
+}
+
 fn sameTypes(a: []const ValType, b: []const ValType) bool {
     if (a.len != b.len) return false;
     for (a, b) |x, y| if (x != y) return false;
@@ -1824,4 +1836,86 @@ test "wasm validator: branch metadata does not hide dead-code type errors" {
     const module: Module = .{ .types = &.{.{ .params = &.{}, .results = &.{.i32} }} };
     // unreachable; f32.const 0; br 0 still carries the wrong concrete type.
     try std.testing.expectError(error.TypeMismatch, validateFunc(arena.allocator(), &module, 0, &.{ 0x00, 0x00, 0x43, 0, 0, 0, 0, 0x0c, 0x00, 0x0b }, &.{}, &.{}));
+}
+
+test "wasm validator: scoring legacy element forms retain non-nullable function references" {
+    const non_null_func = ValType.refType(false, types.heap_abs_func);
+    for ([_][]const u8{
+        &.{ 0, 0x41, 0, 0x0b, 1, 0 }, // active, implicit table
+        &.{ 1, 0, 1, 0 }, // passive
+        &.{ 2, 0, 0x41, 0, 0x0b, 0, 1, 0 }, // active, explicit table
+        &.{ 3, 0, 1, 0 }, // declarative
+    }) |segment| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const module: Module = .{
+            .types = &.{.{ .params = &.{}, .results = &.{} }},
+            .funcs = &.{0},
+            .tables = &.{.{ .elem = non_null_func, .limits = .{ .min = 1 }, .init_expr = &.{ 0xd2, 0, 0x0b } }},
+            .elements_count = 1,
+            .elements_raw = segment,
+        };
+        const element_types = try validateElements(arena.allocator(), &module, 0);
+        try std.testing.expectEqualSlices(ValType, &.{non_null_func}, element_types);
+        if (segment[0] == 1) {
+            // Passive legacy indices may initialize the same non-null table.
+            _ = try validateFunc(arena.allocator(), &module, 0, &.{ 0, 0x41, 0, 0x41, 0, 0x41, 1, 0xfc, 12, 0, 0, 0x0b }, &.{true}, element_types);
+        }
+    }
+}
+
+test "wasm validator: scoring implicit expression elements remain nullable" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var module: Module = .{
+        .types = &.{.{ .params = &.{}, .results = &.{} }},
+        .funcs = &.{0},
+        .tables = &.{.{ .elem = ValType.refType(false, types.heap_abs_func), .limits = .{ .min = 1 }, .init_expr = &.{ 0xd2, 0, 0x0b } }},
+        .elements_count = 1,
+        .elements_raw = &.{ 4, 0x41, 0, 0x0b, 1, 0xd2, 0, 0x0b },
+    };
+    // Flag 4 declares funcref even when its initializer happens to be ref.func.
+    try std.testing.expectError(error.TypeMismatch, validateElements(arena.allocator(), &module, 0));
+    module.tables = &.{.{ .elem = .funcref, .limits = .{ .min = 1 } }};
+    try std.testing.expectEqualSlices(ValType, &.{.funcref}, try validateElements(arena.allocator(), &module, 0));
+}
+
+fn checkTailCallResults(actual: []const ValType, expected: []const ValType, accepted: bool) !void {
+    for ([_][]const u8{
+        &.{ 0, 0x12, 0, 0x0b }, // return_call 0
+        &.{ 0, 0xd2, 0, 0x15, 1, 0x0b }, // ref.func 0; return_call_ref 1
+        &.{ 0, 0x41, 0, 0x13, 1, 0, 0x0b }, // i32.const 0; return_call_indirect 1 0
+    }) |body| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const module: Module = .{
+            .types = &.{
+                .{ .params = &.{}, .results = &.{} },
+                .{ .params = &.{}, .results = actual },
+                .{ .params = &.{}, .results = expected },
+            },
+            .funcs = &.{1},
+            .tables = &.{.{ .elem = .funcref, .limits = .{ .min = 1 } }},
+        };
+        const result = validateFunc(arena.allocator(), &module, 2, body, &.{true}, &.{});
+        if (accepted) _ = try result else try std.testing.expectError(error.TypeMismatch, result);
+    }
+}
+
+test "wasm validator: scoring tail calls permit directional reference result widening" {
+    const concrete = ValType.refType(false, 0);
+    try checkTailCallResults(&.{concrete}, &.{ValType.refType(true, 0)}, true);
+    try checkTailCallResults(&.{concrete}, &.{ValType.refType(false, types.heap_abs_func)}, true);
+    try checkTailCallResults(&.{concrete}, &.{.funcref}, true);
+    try checkTailCallResults(&.{ concrete, .i32 }, &.{ .funcref, .i32 }, true);
+}
+
+test "wasm validator: scoring tail calls reject result narrowing and shape mismatches" {
+    const concrete = ValType.refType(false, 0);
+    try checkTailCallResults(&.{ValType.refType(true, 0)}, &.{concrete}, false);
+    try checkTailCallResults(&.{.funcref}, &.{concrete}, false);
+    try checkTailCallResults(&.{.i32}, &.{.i64}, false);
+    try checkTailCallResults(&.{concrete}, &.{}, false);
+    try checkTailCallResults(&.{}, &.{.funcref}, false);
+    try checkTailCallResults(&.{ concrete, .i32 }, &.{ .funcref, .i64 }, false);
 }
