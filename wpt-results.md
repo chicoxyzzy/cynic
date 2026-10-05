@@ -142,5 +142,6 @@ four cases. See [specification drift](docs/wpt.md#api-corrections-and-specificat
 The runner adapts only two support expressions in temporary copies: literal
 regex braces in `testharness.js`, and the module builder's legacy `unescape`
 UTF-8 encoding helper. All 143 imported upstream files remain byte-identical.
-The known detached-Promise assertion fixture is explicitly excluded until host
-rejection tracking or an upstream fixture correction makes it safe to score.
+Host rejection tracking now fails detached errors after the final checkpoint.
+The identity fixture remains excluded because it does not assert its expected
+throws and uses legacy exception encodings; it still needs an upstream correction.

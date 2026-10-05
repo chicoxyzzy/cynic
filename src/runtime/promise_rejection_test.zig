@@ -359,3 +359,41 @@ test "Promise rejection tracking: dynamic import and static dependencies consume
     try expectTrue(&realm, "caught === 2;");
     try recorder.expectUnhandled(0);
 }
+
+fn collectPreciseRejectionRoots(realm: *Realm, _: Value, _: []const Value) @import("function.zig").NativeError!Value {
+    // Verify explicit roots even on hosts with a conservative native-stack
+    // backstop, which can otherwise mask a missing root in this regression.
+    const active_native = realm.active_native_fn;
+    realm.active_native_fn = null;
+    defer realm.active_native_fn = active_native;
+    realm.collectGarbage();
+    return Value.undefined_;
+}
+
+test "Promise rejection tracking: async return retains its state across a collecting then getter" {
+    var realm = Realm.init(std.testing.allocator);
+    defer realm.deinit();
+    try install(&realm);
+    const collector = try realm.heap.allocateFunctionNative(&realm, collectPreciseRejectionRoots, 0, "__collectGarbage");
+    try realm.globals.put(realm.allocator, "__collectGarbage", heap.taggedFunction(collector));
+    var recorder = try Recorder.init(realm.heap);
+    defer recorder.deinit();
+    recorder.install();
+    _ = try evaluate(&realm,
+        \\let answer = 0, getterCalls = 0;
+        \\(async function() {
+        \\  await 0;
+        \\  const inner = Promise.resolve(42);
+        \\  Object.defineProperty(inner, 'then', {get() {
+        \\    getterCalls++;
+        \\    __collectGarbage();
+        \\    for (let i = 0; i < 80; i++) { const scratch = {value: i}; }
+        \\    return Promise.prototype.then;
+        \\  }});
+        \\  return inner;
+        \\})().then(value => { answer = value; });
+    );
+    try drain(&realm);
+    try expectTrue(&realm, "answer === 42 && getterCalls === 1;");
+    try recorder.expectUnhandled(0);
+}

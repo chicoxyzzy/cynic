@@ -38,16 +38,16 @@ The other 37 `*.any.js` files have an explicit `excluded_reason` in the manifest
 | Wasm JS string builtins | 3 |
 | Wasm JS Promise Integration | 3 |
 | Browser WebIDL harness | 1 |
-| Detached asynchronous assertions requiring host rejection tracking | 1 |
+| Detached assertions with missing throw checks / legacy exception encodings | 1 |
 
 `exception/identity.tentative.any.js` registers a synchronous `test()` but runs
-its actual identity assertions in an unreturned `WebAssembly.instantiate(...)
-.then(...)`. The shell currently has no host unhandled-rejection tracker, so a
-rejected compilation or asynchronous assertion could appear to pass. This one
-fixture remains explicitly excluded until it can be scored faithfully; its
-source is unchanged. The other exception fixtures use awaited `promise_test`
-work or synchronous assertions. Strict-only failures in the upstream `getArg`
-and `is` fixtures (undeclared loop variables) remain visible in-scope failures.
+its identity assertions in an unreturned `WebAssembly.instantiate(...).then(...)`.
+Host rejection tracking now catches detached failures. This fixture still never
+asserts that its two calls actually throw (a normal return skips every identity
+assertion), and uses legacy `try`/`catch`/`rethrow` encodings. It remains excluded
+pending an upstream assertion correction and scope review; its source is
+unchanged. Other exception fixtures remain scored, including known strict-only
+and legacy-encoding failures.
 
 Upstream HTML browser tests and support documents are preserved but are not
 `*.any.js` fixture candidates. `.any.js` alone does not mean shell-compatible:

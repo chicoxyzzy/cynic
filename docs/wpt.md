@@ -146,9 +146,10 @@ refuses an installed callback because its host context cannot be serialized.
 instead set `heap.promise_rejection_tracker` to their own callback.
 
 The known `exception/identity.tentative.any.js` fixture remains excluded: it
-launches asynchronous assertions inside synchronous `test()` and also uses
-legacy exception encodings. Host rejection tracking closes the executor blind
-spot, but inclusion still needs a fixture review and compatible encodings.
+launches asynchronous assertions inside synchronous `test()`, does not assert
+that its calls actually throw, and uses legacy exception encodings. Host rejection
+tracking closes the executor blind spot, but inclusion still needs an upstream
+assertion correction and a scope review.
 
 The initial corpus has no META variants. The supervisor rejects nonempty
 variants until their host context is implemented; it does not fabricate browser

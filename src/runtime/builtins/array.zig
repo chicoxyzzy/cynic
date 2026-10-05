@@ -3937,11 +3937,37 @@ fn awaitAndThen(
     defer sc.close();
 
     sc.push(value) catch return error.OutOfMemory;
+    // The PromiseResolve constructor/then getters can re-enter JS. These
+    // bound continuations also retain the Array.fromAsync driver state.
+    sc.push(heap_mod.taggedFunction(on_resolve)) catch return error.OutOfMemory;
+    sc.push(heap_mod.taggedFunction(on_reject)) catch return error.OutOfMemory;
     var source: *JSObject = undefined;
     if (heap_mod.valueAsPlainObject(value)) |obj| {
         if (obj.isPromise()) {
             if (realm.heap.promise_rejection_tracker != null) {
-                const constructor = try getPropertyChain(realm, obj, "constructor");
+                const constructor = getPropertyChain(realm, obj, "constructor") catch |err| {
+                    if (err == error.OutOfMemory) return error.OutOfMemory;
+                    if (realm.terminationReason() != null) return error.NativeThrew;
+                    // Await's PromiseResolve failed before suspension. Deliver
+                    // its abrupt completion to the driver's rejection branch,
+                    // which settles the public promise and closes an iterator
+                    // when required. Throwing out of this native continuation
+                    // would reject only its ignored internal result promise.
+                    const reason = realm.pending_exception orelse Value.undefined_;
+                    sc.push(reason) catch return error.OutOfMemory;
+                    realm.pending_exception = null;
+                    const outcome = lantern.callJSFunction(realm.allocator, realm, on_reject, Value.undefined_, &.{reason}) catch |call_err| switch (call_err) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        else => return error.NativeThrew,
+                    };
+                    switch (outcome) {
+                        .value, .yielded => return,
+                        .thrown => |ex| {
+                            realm.pending_exception = ex;
+                            return error.NativeThrew;
+                        },
+                    }
+                };
                 source = try lantern.promiseResolveForAwait(realm, obj, constructor);
             } else {
                 source = obj;
