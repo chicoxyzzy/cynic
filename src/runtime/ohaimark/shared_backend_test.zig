@@ -274,6 +274,10 @@ test "shared Ohaimark backend: parsed JS loop matches Lantern and resumes loop o
     defer owner.deinit();
     var program = try shared.Program.build(a, &owner, chunk);
     defer program.deinit();
+    var oracle = try shared.Program.buildWithOptions(a, &owner, chunk, .{ .allocation = .scratch });
+    defer oracle.deinit();
+    try std.testing.expect(program.compiled.scratchSlotCount() < oracle.compiled.scratchSlotCount());
+    try std.testing.expect(program.compiled.stats.loads + program.compiled.stats.stores < oracle.compiled.stats.loads + oracle.compiled.stats.stores);
     const registers = try a.alloc(Value, chunk.register_count);
     defer a.free(registers);
     for ([_]i32{ 0, 1, 10, 1000, 2000 }) |n| {
@@ -284,6 +288,17 @@ test "shared Ohaimark backend: parsed JS loop matches Lantern and resumes loop o
         const expected = try reference.resumeLantern(a, &realm, chunk);
         var outcome = try program.run(.{ .accumulator = Value.undefined_, .registers = registers, .block_budget = 10000 });
         defer outcome.deinit();
+        var oracle_outcome = try oracle.run(.{ .accumulator = Value.undefined_, .registers = registers, .block_budget = 10000 });
+        defer oracle_outcome.deinit();
+        try std.testing.expectEqual(std.meta.activeTag(oracle_outcome), std.meta.activeTag(outcome));
+        switch (outcome) {
+            .returned => |value| try std.testing.expectEqual(oracle_outcome.returned.bits, value.bits),
+            .deopt => |state| {
+                try std.testing.expectEqual(oracle_outcome.deopt.bytecode_offset, state.bytecode_offset);
+                try std.testing.expectEqual(oracle_outcome.deopt.accumulator.bits, state.accumulator.bits);
+                try std.testing.expectEqualSlices(Value, oracle_outcome.deopt.registers, state.registers);
+            },
+        }
         const actual = switch (outcome) {
             .returned => |value| blk: {
                 try std.testing.expect(n < 2000);

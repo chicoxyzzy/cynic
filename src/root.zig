@@ -186,6 +186,7 @@ test {
     _ = @import("runtime/jit/masm.zig");
     _ = @import("runtime/jit/masm_safety_test.zig");
     _ = @import("runtime/jit/layout.zig");
+    _ = @import("runtime/jit/backend/allocation_test.zig");
     _ = @import("runtime/bistromath/bistromath.zig");
     _ = @import("runtime/bistromath/x86_64_test.zig");
     _ = @import("runtime/ohaimark/ohaimark.zig");
