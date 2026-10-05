@@ -32,12 +32,18 @@ pub fn run(
         try printDiagnostics(io, &diags);
         std.process.exit(1);
     };
+    // ParseScript (ECMA-262 16.1.5): recovery may return an AST, but
+    // error diagnostics still forbid evaluation of any part of it.
+    for (diags.items) |d| if (d.severity == .err) {
+        try printDiagnostics(io, &diags);
+        std.process.exit(1);
+    };
     if (program.body.len == 0) {
         try std.Io.File.stderr().writeStreamingAll(io, "error: empty program\n");
         std.process.exit(1);
     }
     const stmt = program.body[0];
-    if (stmt != .expression) {
+    if (program.body.len != 1 or stmt != .expression) {
         try std.Io.File.stderr().writeStreamingAll(io, "error: `cynic eval` accepts a single expression\n");
         std.process.exit(1);
     }
