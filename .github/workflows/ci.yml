@@ -294,8 +294,8 @@ jobs:
     # from passing to failing drops pass% below the floor and exits 2.
     # Plain module commands are scored too, including their start function.
     # Explicit unsupported forms are skipped; decode/validation/start failures
-    # are never hidden as skips. Fixture IO/parse errors and allocation failures
-    # while loading/checking modules fail the run.
+    # are never hidden as skips. Fixture IO/parse errors and reported allocation
+    # failures fail the run, including action and negative-assertion paths.
     # Proposals this wabt cannot lower remain logged conversion exclusions.
     steps:
       - name: Audit egress (advisory)
