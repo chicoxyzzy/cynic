@@ -4,24 +4,28 @@ Scored by `zig build wasm-testsuite -Dwasm-corpus=vendor/wasm-testsuite`
 against the official WebAssembly spec testsuite (the `.wast` corpus,
 preprocessed with `wast2json --enable-tail-call --enable-relaxed-simd
 --enable-memory64 --enable-extended-const --enable-multi-memory
---enable-function-references`). Each `assert_*` / `action`
-command is a plain pass or fail. Commands are counted as skips when they
-cannot be scored: `assert_unlinkable` fixtures, text/quoted-module
-commands `wast2json` does not lower, a few value comparisons the harness
-does not model, and — importantly — **every command whose module uses a
-feature Sarcasm does not implement**: that module fails to decode /
-validate, so its assertions are *skipped, not failed*.
+--enable-function-references`). Each supported binary `module`, assertion,
+and `action` command is a plain pass or fail. A module must decode, validate,
+link, initialize, and run its start function successfully, even if no later
+assertion uses it. Registers are unscored. Explicit skips cover
+`assert_unlinkable`, text/quoted modules, unsupported script commands, and
+value forms the harness cannot compare. A decoder, validator, or start
+failure in a positive module command is a failure, never an implicit skip.
 
 **What `pass%` does and does not mean.** `pass%` is `100 ×
 passing / (passing + failing)` — the fraction of *scored* commands that
-pass, **not** "fraction of all of WebAssembly implemented". An
-unimplemented standardized proposal (`gc`) sits in the *skip* column,
-not *fail*, so the headline stays 100% regardless. Implementing a
-proposal moves its assertions **skip → pass** — that, not the
-percentage, is the real coverage signal. Exception handling is
-implemented but unscored here: this `wast2json` cannot parse the
-proposal's `(ref exn)` text syntax, so its `.wast` files don't lower
-(its coverage is the engine unit tests instead).
+pass, not the fraction of all WebAssembly implemented. Proposal files this
+`wast2json` cannot lower are logged conversion exclusions; they do not enter
+the command counts. This includes unimplemented WasmGC and the current exception-handling
+text syntax; exception handling is implemented and covered by engine unit tests.
+
+Expected uninstantiability requires a genuine trap or Wasm exception during
+initialization/start. Missing files, corrupt manifests, and allocation
+failures are harness errors: they fail the run even with `--quiet` and
+without a score floor, and prevent writing an incomplete scoreboard.
+`assert_invalid` and `assert_malformed` still share decoding/validation
+rejection checks; distinguishing those two phases and matching trap text
+are separate harness limitations.
 
 The corpus harness checks scalar and vector NaN expectations by their bits:
 `nan:canonical` allows only the quiet bit in the payload; `nan:arithmetic`
@@ -33,11 +37,18 @@ zeros. The score below is unchanged under these stricter checks.
 
 | passing | failing | pass% | skipped | files |
 |---|---|---|---|---|
-| 58779 | 0 | 100.00 | 1232 | 222 |
+| 60607 | 0 | 100.00 | 1232 | 222 |
 
-The forced-Spasm differential posture (`--spasm`) produces this exact score on
-both qualified code-generation targets: native AArch64 and x86_64-macos under
-Rosetta (2026-10-01). Gating runs add `--require-spasm-entry`; focused target
+The module-inclusive score adds 1,828 previously unscored module commands to
+the prior 58,779 assertion/action tally. Seven of those modules exposed two
+validator bugs: legacy element indices were treated as nullable, and tail-call
+results required exact types instead of allowing reference widening. Both are
+fixed; no previously scored assertion was lost and the skip count is unchanged.
+
+The interpreter and forced-Spasm posture (`--spasm`) reproduce this score on
+native AArch64-macos (2026-10-05). The prior 58,779-command tally also passed
+x86_64-macos under Rosetta (2026-10-01); CI gates both architectures with the
+module-inclusive accounting. Gating runs add `--require-spasm-entry`; focused target
 tests additionally require generated x86 instance/cache, trap, safe-point,
 self-link, and stable-gate execution. Unsupported x86 opcode families fall
 back per function and therefore remain covered by the same semantic sweep.
@@ -79,9 +90,9 @@ tests cover deep recursion, foreign instances, host callbacks, exceptions,
 GC, allocation failure, and cancellation. This still uses helper-mediated
 dispatch, not a native-register tail-jump ABI.
 
-The interpreter and forced-Spasm sweeps also reproduce this score in
-`ReleaseSafe` on both targets, under the same 600-second / 3-GB guards.
-That validation caught a pre-existing branch-metadata underflow: unreachable
+Before module commands were added, the interpreter and forced-Spasm sweeps
+also passed the 58,779-command tally in `ReleaseSafe` on both targets, under
+600-second / 3-GB guards. That validation caught a branch-metadata underflow: unreachable
 stacks now skip metadata arithmetic, and missing carried operands are rejected
 before subtraction. The harness releases action scratch after each assertion
 instead of retaining interpreter stacks for a whole manifest, and releases

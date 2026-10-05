@@ -292,10 +292,10 @@ jobs:
     # harness reads, using wabt's `wast2json`; then we score the full
     # submodule corpus. `--min-pass-pct=100` gates: a command that flips
     # from passing to failing drops pass% below the floor and exits 2.
-    # Commands for proposals Sarcasm doesn't implement fail to decode /
-    # validate and so *skip* rather than fail — they don't count against
-    # pass%, so the 100 floor is stable across wabt versions and only a
-    # real regression trips it.
+    # Plain module commands are scored too, including their start function.
+    # Explicit unsupported forms are skipped; decode/validation/start failures
+    # are never hidden as skips. Fixture IO/parse/allocation errors fail the run.
+    # Proposals this wabt cannot lower remain logged conversion exclusions.
     steps:
       - name: Audit egress (advisory)
         uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411  # v2
@@ -317,6 +317,9 @@ jobs:
         uses: xyzzylabs/setup-zig@ab632f9cc6f98d89d3b8f2c2e1577a929d0e70f3  # v1.0.4
         with:
           cache-key: wasm-testsuite
+
+      - name: Verify harness accounting and failure exits
+        run: zig build test-wasm-testsuite
 
       - name: Score the spec testsuite (gating)
         timeout-minutes: 12
@@ -358,6 +361,9 @@ jobs:
         uses: xyzzylabs/setup-zig@ab632f9cc6f98d89d3b8f2c2e1577a929d0e70f3  # v1.0.4
         with:
           cache-key: wasm-testsuite-spasm
+
+      - name: Verify harness accounting and failure exits
+        run: zig build test-wasm-testsuite
 
       - name: Score the spec testsuite through Spasm (gating)
         timeout-minutes: 15
