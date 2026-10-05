@@ -214,6 +214,10 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_exe_tests.step);
     test_step.dependOn(&run_bench_tests.step);
 
+    const test_cli_step = b.step("test-cli", "Run CLI integration tests");
+    @import("tests/cli/eval.zig").addTests(b, exe, test_cli_step);
+    if (test_filter == null) test_step.dependOn(test_cli_step);
+
     const wts_tests_mod = b.createModule(.{
         .root_source_file = b.path("tools/wasm_testsuite.zig"),
         .target = target,
@@ -662,6 +666,10 @@ pub fn build(b: *std.Build) void {
     test_fast_step.dependOn(&b.addRunArtifact(safe_bench_tests).step);
     test_fast_step.dependOn(&b.addRunArtifact(safe_wts_tests).step);
     test_fast_step.dependOn(&run_t262_tests.step);
+    if (test_filter == null) {
+        const safe_cli = b.addExecutable(.{ .name = "cynic-test-cli", .root_module = exe_mod_test_safe });
+        @import("tests/cli/eval.zig").addTests(b, safe_cli, test_fast_step);
+    }
 
     // A second harness binary, built ReleaseSafe and installed under
     // a DISTINCT name (`cynic-test262-safe`) so it coexists with the

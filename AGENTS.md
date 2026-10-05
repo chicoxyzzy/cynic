@@ -404,6 +404,7 @@ Common commands:
     zig build fetch-cldr                            # same as tools/fetch-cldr.sh
     zig build test                                  # all unit tests (Debug; canonical, stack-trace path)
     zig build test-fast                             # all unit tests, ReleaseSafe (~3 min vs 10+; safety checks + GC verifiers + leak detection kept)
+    zig build test-cli                              # CLI integration tests (also in unfiltered test / test-fast)
     zig build test-fast -Dintl=stub                 # include structural Intl unit tests (skipped at -Dintl=off)
     zig build test -Dtest-filter=<name>             # run only unit tests whose name matches (also works on test-fast)
     zig build test-ses                              # hand-written SES positive-coverage tests
@@ -596,6 +597,8 @@ weaker one. Use `test-fast` for the inner loop; keep `test`
 (Debug) for a stack-trace-on-panic. Both honour
 `-Dtest-filter=<name>` to run a single bucket in seconds once
 compiled (e.g. `zig build test-fast -Dtest-filter=Atomics`).
+Unfiltered runs also execute the CLI integration checks in `tests/cli/`;
+`zig build test-cli -Doptimize=ReleaseSafe` runs those checks alone.
 Thread/concurrency tests must never busy-spin unbounded — give
 every wait loop a finite backstop so a regression fails the test
 fast instead of wedging the whole suite.
