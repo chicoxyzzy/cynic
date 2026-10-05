@@ -1,17 +1,22 @@
 //! Language-neutral integer SSA experiment. Cross-block values use block
 //! arguments; there are no implicit heap effects or language-specific nodes.
 pub const max_values = 2048;
+pub const max_nodes = 4096;
 pub const max_blocks = 256;
 pub const max_arguments = 64;
 pub const Type = enum { i32, i64 };
 pub const Value = u32;
-pub const Op = enum { constant, add, sub, mul, eq, lt_s, lt_u, ge_s, ge_u };
+pub const Op = enum { constant, add, sub, mul, bit_and, bit_or, eq, lt_s, lt_u, ge_s, ge_u, sext_i32, zext_i32, trunc_i64, guard };
+/// An opaque frontend-owned recovery key and values captured at this exact
+/// point. Guards are ordered effects, not removable unused computations.
+pub const SideExit = struct { id: u32, values: []const Value };
 pub const Node = struct {
     op: Op,
-    out: Value,
+    out: ?Value = null,
     lhs: Value = 0,
     rhs: Value = 0,
     immediate: u64 = 0,
+    exit: ?SideExit = null,
 };
 pub const Edge = struct { target: u32, args: []const Value };
 pub const Terminator = union(enum) {
@@ -37,29 +42,48 @@ pub const Graph = struct {
         if (self.blocks.len == 0 or self.blocks[0].params.len != self.argument_types.len)
             return error.InvalidGraph;
         var defined: [max_values]bool = @splat(false);
+        var node_count: usize = 0;
         for (self.blocks, 0..) |block, block_index| {
             if (block.params.len > max_arguments) return error.PrototypeLimit;
+            if (block.nodes.len > max_nodes - node_count) return error.PrototypeLimit;
+            node_count += block.nodes.len;
             var available: [max_values]bool = @splat(false);
             for (block.params, 0..) |param, i| {
                 try self.define(param, &defined, &available);
                 if (block_index == 0 and self.types[param] != self.argument_types[i]) return error.InvalidGraph;
             }
             for (block.nodes) |node| {
-                if (node.out >= self.types.len) return error.InvalidGraph;
-                const out_type = self.types[node.out];
+                if (node.op == .guard) {
+                    if (node.out != null) return error.InvalidGraph;
+                    try self.use(node.lhs, &available);
+                    if (self.types[node.lhs] != .i32) return error.InvalidGraph;
+                    const side_exit = node.exit orelse return error.InvalidGraph;
+                    if (side_exit.values.len > max_arguments) return error.PrototypeLimit;
+                    for (side_exit.values) |value| try self.use(value, &available);
+                    continue;
+                }
+                if (node.exit != null) return error.InvalidGraph;
+                const out = node.out orelse return error.InvalidGraph;
+                if (out >= self.types.len) return error.InvalidGraph;
+                const out_type = self.types[out];
                 if (node.op == .constant) {
                     if (normalize(out_type, node.immediate) != node.immediate) return error.InvalidGraph;
+                } else if (isConversion(node.op)) {
+                    try self.use(node.lhs, &available);
+                    const source: Type = if (node.op == .trunc_i64) .i64 else .i32;
+                    const result: Type = if (node.op == .trunc_i64) .i32 else .i64;
+                    if (self.types[node.lhs] != source or out_type != result) return error.InvalidGraph;
                 } else {
                     try self.use(node.lhs, &available);
                     try self.use(node.rhs, &available);
                     if (self.types[node.lhs] != self.types[node.rhs]) return error.InvalidGraph;
                     const expected = switch (node.op) {
-                        .add, .sub, .mul => self.types[node.lhs],
+                        .add, .sub, .mul, .bit_and, .bit_or => self.types[node.lhs],
                         else => Type.i32,
                     };
                     if (out_type != expected) return error.InvalidGraph;
                 }
-                try self.define(node.out, &defined, &available);
+                try self.define(out, &defined, &available);
             }
             switch (block.terminator) {
                 .return_ => |value| {
@@ -101,6 +125,10 @@ pub const Graph = struct {
 
 pub fn normalize(ty: Type, value: u64) u64 {
     return if (ty == .i32) @as(u32, @truncate(value)) else value;
+}
+
+pub fn isConversion(op: Op) bool {
+    return op == .sext_i32 or op == .zext_i32 or op == .trunc_i64;
 }
 
 test {

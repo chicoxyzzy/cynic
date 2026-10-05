@@ -1,5 +1,6 @@
 //! Experimental leaf backend. Values live in caller-owned bounded scratch
-//! slots. No stack frame, host calls, GC pointers, or executable-page patching.
+//! slots. No stack frame, host calls, GC, or executable-page patching. Opaque
+//! frontend words may contain tagged references; the backend never dereferences them.
 const std = @import("std");
 const builtin = @import("builtin");
 const ir = @import("ir.zig");
@@ -13,6 +14,19 @@ pub const max_budget = 1_000_000;
 const is_x86 = builtin.cpu.arch == .x86_64;
 const Machine = if (is_x86) x86.Masm else arm_masm.Masm;
 const Entry = *const fn ([*]u64, u64) callconv(.c) u32;
+
+pub const Outcome = union(enum) {
+    returned: u64,
+    exited: struct { allocator: std.mem.Allocator, id: u32, values: []u64 },
+
+    pub fn deinit(self: *Outcome) void {
+        switch (self.*) {
+            .returned => {},
+            .exited => |exit| exit.allocator.free(exit.values),
+        }
+        self.* = undefined;
+    }
+};
 
 pub const Compiled = struct {
     allocator: std.mem.Allocator,
@@ -29,15 +43,38 @@ pub const Compiled = struct {
     }
 
     pub fn run(self: *const Compiled, args: []const u64, budget: u32) !u64 {
+        var outcome = try self.runOutcome(args, budget);
+        defer outcome.deinit();
+        return switch (outcome) {
+            .returned => |value| value,
+            .exited => error.UnexpectedSideExit,
+        };
+    }
+
+    pub fn runOutcome(self: *const Compiled, args: []const u64, budget: u32) !Outcome {
         if (args.len != self.params.len) return error.ArgumentCount;
         if (budget > max_budget) return error.PrototypeLimit;
-        const slots = try self.allocator.alloc(u64, self.value_count + ir.max_arguments + 1);
+        const slots = try self.allocator.alloc(u64, self.value_count + ir.max_arguments + 2);
         defer self.allocator.free(slots);
         @memset(slots, 0);
         for (args, self.params, self.argument_types) |arg, param, ty| slots[param] = ir.normalize(ty, arg);
         const entry: Entry = @ptrCast(@alignCast(self.code.entry() orelse return error.MissingCode));
-        if (entry(slots.ptr, budget) != 0) return error.BudgetExhausted;
-        return slots[self.value_count + ir.max_arguments];
+        const result_slot = self.value_count + ir.max_arguments;
+        return switch (entry(slots.ptr, budget)) {
+            0 => .{ .returned = slots[result_slot] },
+            1 => error.BudgetExhausted,
+            2 => blk: {
+                const id = slots[result_slot];
+                const count = slots[result_slot + 1];
+                if (id > std.math.maxInt(u32) or count > ir.max_arguments) return error.InvalidNativeResult;
+                break :blk .{ .exited = .{
+                    .allocator = self.allocator,
+                    .id = @intCast(id),
+                    .values = try self.allocator.dupe(u64, slots[self.value_count .. self.value_count + @as(usize, @intCast(count))]),
+                } };
+            },
+            else => error.InvalidNativeResult,
+        };
     }
 };
 
@@ -56,14 +93,30 @@ pub fn compile(a: std.mem.Allocator, owner: *code_alloc.CodeAllocator, graph: ir
         try m.bind(&labels[index]);
         try poll(&m, &exhausted);
         for (block.nodes) |node| {
-            if (node.op == .constant) {
+            if (node.op == .guard) {
+                var success: Machine.Label = .{};
+                defer success.deinit(a);
+                try load(&m, false, node.lhs);
+                if (comptime is_x86) {
+                    try m.testReg64(.rax, .rax);
+                    try m.jumpCond(.not_equal, &success);
+                } else try m.jumpCbnz(.x2, &success);
+                try emitExit(&m, graph.types.len, node.exit.?);
+                try m.bind(&success);
+                continue;
+            } else if (node.op == .constant) {
                 try constant(&m, node.immediate);
+            } else if (ir.isConversion(node.op)) {
+                try load(&m, false, node.lhs);
+                if (comptime is_x86) {
+                    if (node.op == .sext_i32) try m.signExtendReg32To64(.rax, .rax) else try m.movReg32(.rax, .rax);
+                } else try m.emit(if (node.op == .sext_i32) a64.sxtw(.x2, .x2) else a64.movRegW(.x2, .x2));
             } else {
                 try load(&m, false, node.lhs);
                 try load(&m, true, node.rhs);
                 try binary(&m, node.op, graph.types[node.lhs]);
             }
-            try store(&m, node.out);
+            try store(&m, node.out.?);
         }
         switch (block.terminator) {
             .return_ => |value| {
@@ -99,6 +152,18 @@ pub fn compile(a: std.mem.Allocator, owner: *code_alloc.CodeAllocator, graph: ir
         .argument_types = argument_types,
         .value_count = graph.types.len,
     };
+}
+
+fn emitExit(m: *Machine, value_count: usize, side_exit: ir.SideExit) !void {
+    for (side_exit.values, 0..) |value, i| {
+        try load(m, false, value);
+        try store(m, value_count + i);
+    }
+    try constant(m, side_exit.id);
+    try store(m, value_count + ir.max_arguments);
+    try constant(m, side_exit.values.len);
+    try store(m, value_count + ir.max_arguments + 1);
+    try finish(m, 2);
 }
 
 fn transfer(m: *Machine, graph: ir.Graph, edge: ir.Edge, labels: []Machine.Label) !void {
@@ -158,6 +223,8 @@ fn binary(m: *Machine, op: ir.Op, ty: ir.Type) !void {
             .add => if (ty == .i32) try m.addReg32(.rax, .r10) else try m.addReg64(.rax, .r10),
             .sub => if (ty == .i32) try m.subReg32(.rax, .r10) else try m.subReg64(.rax, .r10),
             .mul => if (ty == .i32) try m.imulReg32(.rax, .r10) else try m.imulReg64(.rax, .r10),
+            .bit_and => if (ty == .i32) try m.andReg32(.rax, .r10) else try m.andReg64(.rax, .r10),
+            .bit_or => if (ty == .i32) try m.orReg32(.rax, .r10) else try m.orReg64(.rax, .r10),
             .constant => return error.InvalidGraph,
             else => {
                 if (ty == .i32) try m.cmpReg32(.rax, .r10) else try m.cmpReg64(.rax, .r10);
@@ -177,6 +244,8 @@ fn binary(m: *Machine, op: ir.Op, ty: ir.Type) !void {
             .add => try m.emit(a64.addReg(.x2, .x2, .x3)),
             .sub => try m.emit(a64.subReg(.x2, .x2, .x3)),
             .mul => try m.emit(a64.mul(.x2, .x2, .x3)),
+            .bit_and => try m.emit(a64.andReg(.x2, .x2, .x3)),
+            .bit_or => try m.emit(a64.orrReg(.x2, .x2, .x3)),
             .constant => return error.InvalidGraph,
             else => {
                 try m.emit(if (ty == .i32) a64.cmpRegW(.x2, .x3) else a64.cmpReg(.x2, .x3));
