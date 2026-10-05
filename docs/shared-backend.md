@@ -34,6 +34,12 @@ their normal paths would spend startup time without proving a benefit.
 - [V8 Turboshaft](https://github.com/v8/v8/tree/main/src/compiler/turboshaft)
   is a useful shared-backend reference. Keep lowering distinct from language
   feedback rather than moving JS-shaped nodes into a nominally shared folder.
+- [V8 Maglev](https://v8.dev/blog/maglev) and Poletto/Sarkar's
+  [linear-scan paper](https://bernsteinbear.com/assets/img/linearscan-ra.pdf)
+  motivate a liveness prepass, forward register assignment, and a farthest-end
+  spill heuristic. This prototype reuses production Ohaimark's policy, not its
+  JS-specific allocation structures. Air's early-use/late-definition distinction
+  permits reusing a dying input's home after both operands have been read.
 - [Wasmtime/Cranelift](https://docs.wasmtime.dev/contributing-architecture.html)
   separates Wasm translation from native compilation. Block parameters are a
   compact way to make loop-carried values explicit without mutable locals in
@@ -63,14 +69,17 @@ execution test pass without running generated code.
 Run the isolated correctness demo with `zig build backend-prototype`. It
 compares the same sum-of-squares loop through both frontends: Wasm against
 Sarcasm and native Spasm, JS against Lantern, and both against independent
-arithmetic oracles. A JS case overflows Int32 after successful iterations and
+arithmetic oracles. Each frontend also runs an all-scratch allocation oracle.
+A JS case overflows Int32 after successful iterations and
 must recover in Lantern, not restart the function. It reports native entry
-and recovery counts, IR size, installed code size, compilation time, and
-bounded-call time (including
-scratch allocation). These diagnostics are not cross-engine benchmarks.
+and recovery counts, IR size, code size, per-call scratch size, static emitted
+loads/stores and register moves, compilation time, and bounded-call time
+(including scratch allocation). Instruction counts include cold guard exits
+and both branch paths; they are not dynamic memory-traffic measurements.
+These diagnostics are not cross-engine benchmarks.
 
-Focused tests: `zig build test-fast -Dtest-filter='backend prototype'` and
-`zig build test-fast -Dtest-filter='shared Ohaimark backend'`.
+Focused tests: `zig build test-fast -Dtest-filter='backend'` covers the
+allocator, native prototype, and shared Ohaimark adapter.
 Run the same tests and demo with `-Dtarget=x86_64-macos` on an Apple Silicon
 host with Rosetta, or natively on the other supported architecture.
 
@@ -86,12 +95,57 @@ single definitions, local use-before-definition, edge arity/types, i32
 branch conditions, result types, bounds, and entry-block restrictions.
 It runs before any executable code is installed.
 
-The first native lowering deliberately assigns values to bounded scratch
-slots rather than implementing another allocator. AArch64 and x86_64 SysV
-backends use the existing encoders and W^X allocator. Code is published only
-after verification and complete emission; an allocation or emission failure
-releases temporary state. This is a correctness baseline, not an efficient
-register-allocation strategy.
+AArch64 and x86_64 SysV backends use the existing encoders and W^X allocator.
+Code is published only after graph/allocation verification and complete
+emission; an allocation or emission failure releases temporary state.
+
+## Liveness-aware allocation
+
+The prototype defaults to block-local linear scan. Cross-block liveness is
+already explicit in edge arguments, so no global dataflow solver is needed.
+Lifetimes include guard captures and arguments on both successors. Reads
+precede writes: the emitter loads operands into reserved scratch registers
+before assigning a result, allowing an input's last use to share its home
+with that result.
+
+The allocator uses four caller-saved registers: AArch64 `x4`-`x7`, or SysV
+x86_64 `rcx`, `rdx`, `r8`, `r9`. The scratch pointer, block budget, arithmetic
+temporaries, and platform/callee-saved registers are excluded. Under pressure,
+the value with the farthest end is spilled when that frees a register for a
+shorter-lived value. Spill decisions apply to the whole lifetime: the emitter
+stores at the definition, with no late spill or interval splitting. Spill
+slots are reused after last use and across blocks. All homes hold 64-bit words.
+
+A separate allocation verifier recomputes lifetimes and checks every home,
+register bound, spill bound, and overlapping assignment. Its pairwise check is
+bounded by the 2,048-value IR limit. Edge transfers still snapshot all sources
+before assigning any destination, including register/spill cycles. Unused
+definitions need no home, but their computation is still emitted; this is not
+a dead-code-elimination pass.
+
+`native.compileWithOptions(..., .{ .allocation = .scratch })` retains one
+scratch slot per SSA value as the correctness oracle. The Ohaimark adapter
+exposes the same option through `Program.buildWithOptions`. Tests also force
+zero or one available register to exercise spill reuse. Seeded pressure graphs
+compare every guard's ID and captured bits; JS tests compare exact recovery
+frames before resuming Lantern. Loop transfers, budget exhaustion, malformed
+plans, and allocation-failure cleanup are covered on both native architectures.
+
+This remains a leaf-code allocator. Native calls would require explicit
+clobbers and ABI constraints; GC-capable calls additionally require root maps.
+Neither is supported implicitly. Operand shuffles and the fixed 64-word edge
+transfer area remain; reducing them is a separate measured improvement.
+
+For the fixed sum-of-squares demo (ReleaseSafe, macOS; x86_64 via Rosetta),
+the allocation milestone produces the following static sizes/counts. Each
+cell is **allocated / scratch oracle**, not a cross-engine performance score:
+
+| Frontend / target | Code bytes | Per-call scratch bytes | Emitted loads + stores |
+|---|---:|---:|---:|
+| Wasm / AArch64 | 372 / 388 | 528 / 664 | 24 / 68 |
+| Wasm / x86_64 | 444 / 632 | 528 / 664 | 24 / 68 |
+| JS / AArch64 | 2,204 / 2,252 | 560 / 1,312 | 171 / 374 |
+| JS / x86_64 | 2,879 / 3,727 | 560 / 1,312 | 171 / 374 |
 
 ## JS guards and recovery
 
@@ -180,19 +234,23 @@ conversions for JavaScript coercions.
    Unit gates cover intermediate-state and loop recovery, signed zero, integer
    boundaries, unexpected operands, GC during resumed coercion, and allocation
    failures. Full test262 pass-set equality remains a production-integration gate.
-3. **Measured optimizations:** add liveness-aware allocation, then pure constant
-   folding, dead-value removal, and common-subexpression elimination
-   individually. Add load elimination or loop motion only after effects are
-   modeled and tested. Each pass needs an on/off correctness oracle.
-4. **Wider Wasm coverage:** floating point, memory and traps, then calls and
+3. **Liveness-aware allocation, developer-only:** verified register/spill homes,
+   reused spill slots, exact guard captures, and an all-scratch oracle now serve
+   both frontends. Static code/memory diagnostics accompany correctness gates;
+   this does not establish a production throughput win.
+4. **Shared pure optimizations:** add constant folding, dead-value removal, and
+   common-subexpression elimination individually. Add load elimination or loop
+   motion only after effects are modeled and tested. Each pass needs an on/off
+   correctness oracle.
+5. **Wider Wasm coverage:** floating point, memory and traps, then calls and
    runtime integration. Preserve bounds checks, memory-growth invalidation,
    resource metering, and executable ownership before broadening the surface.
-5. **Rollout decision:** paired warm/cold execution measurements, compilation
+6. **Rollout decision:** paired warm/cold execution measurements, compilation
    latency, peak compiler allocation, installed code size, refusal/entry
    telemetry, differential fuzzing, and spec-suite gates. No automatic
    default-on graduation or new JS tier follows from finishing the prototype.
 
-The next step is liveness-aware allocation and individually measurable pure
-optimizations shared by both consumers. Keep the current scratch-slot lowering
-as an oracle. Adopt the backend in production only if those measurements
-justify its complexity.
+The next step is shared constant folding and dead-code elimination, retaining
+guards and recovery uses as observable roots. Keep each pass independently
+switchable and preserve the scratch-slot oracle. Adopt the backend in
+production only if measurements justify its complexity.

@@ -32,6 +32,10 @@ pub const Program = struct {
     register_count: u8,
 
     pub fn build(a: std.mem.Allocator, owner: *CodeAllocator, chunk: *const Chunk) !Program {
+        return buildWithOptions(a, owner, chunk, .{});
+    }
+
+    pub fn buildWithOptions(a: std.mem.Allocator, owner: *CodeAllocator, chunk: *const Chunk, options: native.Options) !Program {
         if (chunk.code.len > 16 * 1024 or chunk.register_count >= low.max_arguments) return error.PrototypeLimit;
         if (chunk.handlers.len != 0) return error.UnsupportedNode;
         var source = try ir.Graph.build(a, chunk);
@@ -77,7 +81,7 @@ pub const Program = struct {
             .allocator = a,
             .arena = arena,
             .graph = graph,
-            .compiled = try native.compile(a, owner, graph),
+            .compiled = try native.compileWithOptions(a, owner, graph, options),
             .entry_roles = roles,
             .recoveries = builder.recoveries.items,
             .register_count = chunk.register_count,

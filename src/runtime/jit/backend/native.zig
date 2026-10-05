@@ -1,9 +1,10 @@
-//! Experimental leaf backend. Values live in caller-owned bounded scratch
-//! slots. No stack frame, host calls, GC, or executable-page patching. Opaque
+//! Experimental leaf backend. Values live in caller-saved registers or bounded
+//! caller-owned spill slots. No stack frame, host calls, GC, or code patching. Opaque
 //! frontend words may contain tagged references; the backend never dereferences them.
 const std = @import("std");
 const builtin = @import("builtin");
 const ir = @import("ir.zig");
+const allocation = @import("allocation.zig");
 const code_alloc = @import("../code_alloc.zig");
 const a64 = @import("../asm_aarch64.zig");
 const arm_masm = @import("../masm.zig");
@@ -13,7 +14,11 @@ pub const supported = code_alloc.supported;
 pub const max_budget = 1_000_000;
 const is_x86 = builtin.cpu.arch == .x86_64;
 const Machine = if (is_x86) x86.Masm else arm_masm.Masm;
+const Reg = if (is_x86) x86.Reg else a64.Reg;
 const Entry = *const fn ([*]u64, u64) callconv(.c) u32;
+
+pub const Options = struct { allocation: allocation.Mode = .linear_scan, register_count: u8 = allocation.max_registers };
+pub const Stats = struct { loads: u32 = 0, stores: u32 = 0, register_moves: u32 = 0 };
 
 pub const Outcome = union(enum) {
     returned: u64,
@@ -33,7 +38,12 @@ pub const Compiled = struct {
     code: code_alloc.InstalledCode,
     params: []ir.Value,
     argument_types: []ir.Type,
-    value_count: usize,
+    spill_slot_count: usize,
+    stats: Stats = .{},
+
+    pub fn scratchSlotCount(self: *const Compiled) usize {
+        return self.spill_slot_count + ir.max_arguments + 2;
+    }
 
     pub fn deinit(self: *Compiled) void {
         self.code.deinit();
@@ -54,12 +64,12 @@ pub const Compiled = struct {
     pub fn runOutcome(self: *const Compiled, args: []const u64, budget: u32) !Outcome {
         if (args.len != self.params.len) return error.ArgumentCount;
         if (budget > max_budget) return error.PrototypeLimit;
-        const slots = try self.allocator.alloc(u64, self.value_count + ir.max_arguments + 2);
+        const slots = try self.allocator.alloc(u64, self.scratchSlotCount());
         defer self.allocator.free(slots);
         @memset(slots, 0);
-        for (args, self.params, self.argument_types) |arg, param, ty| slots[param] = ir.normalize(ty, arg);
+        for (args, self.argument_types, 0..) |arg, ty, i| slots[self.spill_slot_count + i] = ir.normalize(ty, arg);
         const entry: Entry = @ptrCast(@alignCast(self.code.entry() orelse return error.MissingCode));
-        const result_slot = self.value_count + ir.max_arguments;
+        const result_slot = self.spill_slot_count + ir.max_arguments;
         return switch (entry(slots.ptr, budget)) {
             0 => .{ .returned = slots[result_slot] },
             1 => error.BudgetExhausted,
@@ -70,7 +80,7 @@ pub const Compiled = struct {
                 break :blk .{ .exited = .{
                     .allocator = self.allocator,
                     .id = @intCast(id),
-                    .values = try self.allocator.dupe(u64, slots[self.value_count .. self.value_count + @as(usize, @intCast(count))]),
+                    .values = try self.allocator.dupe(u64, slots[self.spill_slot_count .. self.spill_slot_count + @as(usize, @intCast(count))]),
                 } };
             },
             else => error.InvalidNativeResult,
@@ -79,16 +89,28 @@ pub const Compiled = struct {
 };
 
 pub fn compile(a: std.mem.Allocator, owner: *code_alloc.CodeAllocator, graph: ir.Graph) !Compiled {
+    return compileWithOptions(a, owner, graph, .{});
+}
+
+pub fn compileWithOptions(a: std.mem.Allocator, owner: *code_alloc.CodeAllocator, graph: ir.Graph, options: Options) !Compiled {
     try graph.verify();
     if (comptime !supported) return error.UnsupportedTarget;
+    var plan = try allocation.Plan.build(a, graph, .{ .mode = options.allocation, .register_count = options.register_count });
+    defer plan.deinit();
     var m = Machine.init(a);
     defer m.deinit();
+    var emission: Emission = .{ .m = &m, .plan = &plan, .transfer_base = plan.spill_slot_count };
     const labels = try a.alloc(Machine.Label, graph.blocks.len);
     defer a.free(labels);
     @memset(labels, .{});
     defer for (labels) |*label| label.deinit(a);
     var exhausted: Machine.Label = .{};
     defer exhausted.deinit(a);
+    for (graph.blocks[0].params, 0..) |param, i| {
+        if (plan.locations[param] == .none) continue;
+        try emission.loadSlot(false, emission.transfer_base + i);
+        try emission.write(param);
+    }
     for (graph.blocks, 0..) |block, index| {
         try m.bind(&labels[index]);
         try poll(&m, &exhausted);
@@ -96,46 +118,46 @@ pub fn compile(a: std.mem.Allocator, owner: *code_alloc.CodeAllocator, graph: ir
             if (node.op == .guard) {
                 var success: Machine.Label = .{};
                 defer success.deinit(a);
-                try load(&m, false, node.lhs);
+                try emission.read(false, node.lhs);
                 if (comptime is_x86) {
                     try m.testReg64(.rax, .rax);
                     try m.jumpCond(.not_equal, &success);
                 } else try m.jumpCbnz(.x2, &success);
-                try emitExit(&m, graph.types.len, node.exit.?);
+                try emission.emitExit(node.exit.?);
                 try m.bind(&success);
                 continue;
             } else if (node.op == .constant) {
                 try constant(&m, node.immediate);
             } else if (ir.isConversion(node.op)) {
-                try load(&m, false, node.lhs);
+                try emission.read(false, node.lhs);
                 if (comptime is_x86) {
                     if (node.op == .sext_i32) try m.signExtendReg32To64(.rax, .rax) else try m.movReg32(.rax, .rax);
                 } else try m.emit(if (node.op == .sext_i32) a64.sxtw(.x2, .x2) else a64.movRegW(.x2, .x2));
             } else {
-                try load(&m, false, node.lhs);
-                try load(&m, true, node.rhs);
+                try emission.read(false, node.lhs);
+                try emission.read(true, node.rhs);
                 try binary(&m, node.op, graph.types[node.lhs]);
             }
-            try store(&m, node.out.?);
+            try emission.write(node.out.?);
         }
         switch (block.terminator) {
             .return_ => |value| {
-                try load(&m, false, value);
-                try store(&m, graph.types.len + ir.max_arguments);
+                try emission.read(false, value);
+                try emission.storeSlot(emission.transfer_base + ir.max_arguments);
                 try finish(&m, 0);
             },
-            .jump => |edge| try transfer(&m, graph, edge, labels),
+            .jump => |edge| try emission.transfer(graph, edge, labels),
             .branch => |branch| {
                 var otherwise: Machine.Label = .{};
                 defer otherwise.deinit(a);
-                try load(&m, false, branch.condition);
+                try emission.read(false, branch.condition);
                 if (comptime is_x86) {
                     try m.testReg64(.rax, .rax);
                     try m.jumpCond(.equal, &otherwise);
                 } else try m.jumpCbz(.x2, &otherwise);
-                try transfer(&m, graph, branch.taken, labels);
+                try emission.transfer(graph, branch.taken, labels);
                 try m.bind(&otherwise);
-                try transfer(&m, graph, branch.fallthrough, labels);
+                try emission.transfer(graph, branch.fallthrough, labels);
             },
         }
     }
@@ -150,34 +172,87 @@ pub fn compile(a: std.mem.Allocator, owner: *code_alloc.CodeAllocator, graph: ir
         .code = try owner.installOwned(m.code.items),
         .params = params,
         .argument_types = argument_types,
-        .value_count = graph.types.len,
+        .spill_slot_count = plan.spill_slot_count,
+        .stats = emission.stats,
     };
 }
 
-fn emitExit(m: *Machine, value_count: usize, side_exit: ir.SideExit) !void {
-    for (side_exit.values, 0..) |value, i| {
-        try load(m, false, value);
-        try store(m, value_count + i);
+const Emission = struct {
+    m: *Machine,
+    plan: *const allocation.Plan,
+    transfer_base: usize,
+    stats: Stats = .{},
+
+    fn read(self: *Emission, rhs: bool, value: ir.Value) !void {
+        switch (self.plan.locations[value]) {
+            .none => return error.InvalidAllocation,
+            .spill => |slot| try self.loadSlot(rhs, slot),
+            .register => |register| try self.move(scratchRegister(rhs), allocatedRegister(register)),
+        }
     }
-    try constant(m, side_exit.id);
-    try store(m, value_count + ir.max_arguments);
-    try constant(m, side_exit.values.len);
-    try store(m, value_count + ir.max_arguments + 1);
-    try finish(m, 2);
+
+    fn write(self: *Emission, value: ir.Value) !void {
+        switch (self.plan.locations[value]) {
+            .none => {},
+            .spill => |slot| try self.storeSlot(slot),
+            .register => |register| try self.move(allocatedRegister(register), scratchRegister(false)),
+        }
+    }
+
+    fn loadSlot(self: *Emission, rhs: bool, slot: usize) !void {
+        try load(self.m, rhs, slot);
+        self.stats.loads += 1;
+    }
+
+    fn storeSlot(self: *Emission, slot: usize) !void {
+        try store(self.m, slot);
+        self.stats.stores += 1;
+    }
+
+    fn move(self: *Emission, destination: Reg, source: Reg) !void {
+        if (comptime is_x86) try self.m.movReg64(destination, source) else try self.m.emit(a64.movReg(destination, source));
+        self.stats.register_moves += 1;
+    }
+
+    fn emitExit(self: *Emission, side_exit: ir.SideExit) !void {
+        for (side_exit.values, 0..) |value, i| {
+            try self.read(false, value);
+            try self.storeSlot(self.transfer_base + i);
+        }
+        try constant(self.m, side_exit.id);
+        try self.storeSlot(self.transfer_base + ir.max_arguments);
+        try constant(self.m, side_exit.values.len);
+        try self.storeSlot(self.transfer_base + ir.max_arguments + 1);
+        try finish(self.m, 2);
+    }
+
+    fn transfer(self: *Emission, graph: ir.Graph, edge: ir.Edge, labels: []Machine.Label) !void {
+        // Capture all sources before changing any destination home, including
+        // registers. Both register and spill permutations may contain cycles.
+        for (edge.args, 0..) |arg, i| {
+            try self.read(false, arg);
+            try self.storeSlot(self.transfer_base + i);
+        }
+        for (graph.blocks[edge.target].params, 0..) |param, i| {
+            if (self.plan.locations[param] == .none) continue;
+            try self.loadSlot(false, self.transfer_base + i);
+            try self.write(param);
+        }
+        try self.m.jump(&labels[edge.target]);
+    }
+};
+
+fn scratchRegister(rhs: bool) Reg {
+    return if (comptime is_x86) (if (rhs) .r10 else .rax) else (if (rhs) .x3 else .x2);
 }
 
-fn transfer(m: *Machine, graph: ir.Graph, edge: ir.Edge, labels: []Machine.Label) !void {
-    // Capture every source before assigning a destination: loop edges may
-    // exchange parameters, including cycles longer than two values.
-    for (edge.args, 0..) |arg, i| {
-        try load(m, false, arg);
-        try store(m, graph.types.len + i);
-    }
-    for (graph.blocks[edge.target].params, 0..) |param, i| {
-        try load(m, false, graph.types.len + i);
-        try store(m, param);
-    }
-    try m.jump(&labels[edge.target]);
+fn allocatedRegister(register: u8) Reg {
+    // Caller-saved on both supported ABIs. Excludes the scratch pointer,
+    // budget, arithmetic scratch, and all platform/callee-saved registers.
+    return if (comptime is_x86)
+        ([_]Reg{ .rcx, .rdx, .r8, .r9 })[register]
+    else
+        ([_]Reg{ .x4, .x5, .x6, .x7 })[register];
 }
 
 fn load(m: *Machine, rhs: bool, slot: usize) !void {
