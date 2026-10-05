@@ -949,7 +949,7 @@
         "jsshell"
       ],
       "timeout": "normal",
-      "excluded_reason": "Fixture uses detached Promise assertions inside synchronous test(); shell lacks host rejection tracking and could falsely pass"
+      "excluded_reason": "Fixture uses detached Promise assertions inside synchronous test(), does not assert the expected throws, and uses legacy exception encodings; requires upstream correction"
     },
     {
       "path": "wasm/jsapi/exception/is.tentative.any.js",

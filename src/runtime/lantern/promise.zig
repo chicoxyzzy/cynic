@@ -936,7 +936,18 @@ pub fn resumeAsyncFunction(
                     if (heap_mod.valueAsPlainObject(v)) |v_obj| {
                         if (v_obj.isPromise()) {
                             if (realm.heap.promise_rejection_tracker != null) {
+                                // runFrames has released its roots. Resolution
+                                // can invoke a collecting then getter: pin both
+                                // promises and finish the exhausted generator
+                                // before re-entry, so it is never accessed after
+                                // that getter may have collected it.
+                                const scope = try realm.heap.openScope();
+                                defer scope.close();
+                                try scope.push(rp);
+                                try scope.push(v);
+                                gen.state = .completed;
                                 resolvePromiseWithValue(realm, rp_obj, v) catch return error.OutOfMemory;
+                                return;
                             } else {
                                 chainPromiseToInner(realm, v_obj, rp_obj) catch return error.OutOfMemory;
                             }

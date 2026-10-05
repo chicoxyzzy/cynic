@@ -455,6 +455,32 @@ class RejectionTrackingContract(CaseFixture, unittest.TestCase):
         self.assert_harness_passed(result, ["caught await", "all", "race", "any",
                                            "allSettled", "native adoption", "reaction adoption"])
 
+    def test_from_async_constructor_throw_rejects_public_result(self):
+        result = self.execute("""
+            for (const iterable of [false, true]) {
+                promise_test(() => {
+                    const reason = {marker: 42};
+                    const mapped = Promise.resolve(7);
+                    Object.defineProperty(mapped, 'constructor', {get() { throw reason; }});
+                    let closed = 0;
+                    const input = iterable ? {[Symbol.iterator]() {
+                        return {
+                            next() { return {value: 1, done: false}; },
+                            return() { closed++; return {done: true}; }
+                        };
+                    }} : {0: 1, length: 1};
+                    return Array.fromAsync(input, () => mapped).then(
+                        () => assert_unreached('poisoned constructor fulfilled'),
+                        actual => {
+                            assert_equals(actual, reason);
+                            assert_equals(closed, iterable ? 1 : 0);
+                        });
+                }, iterable ? 'iterator mapper rejects and closes' : 'array-like mapper rejects');
+            }
+        """, harness=True, options=("--gc-threshold=1",))
+        self.assert_harness_passed(result, ["array-like mapper rejects",
+                                           "iterator mapper rejects and closes"])
+
     def test_diagnostic_does_not_inspect_hostile_rejection_reason(self):
         for use_proxy in (False, True):
             with self.subTest(use_proxy=use_proxy):

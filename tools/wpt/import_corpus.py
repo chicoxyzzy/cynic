@@ -88,7 +88,7 @@ def exclusion_reason(path, metadata):
     if ("-shared." in relative and path not in reviewed_shared_memory) or "/threads/" in path:
         return "Unreviewed shared Wasm memory and threads are outside the shell scope"
     if relative == "exception/identity.tentative.any.js":
-        return "Fixture uses detached Promise assertions inside synchronous test(); shell lacks host rejection tracking and could falsely pass"
+        return "Fixture uses detached Promise assertions inside synchronous test(), does not assert the expected throws, and uses legacy exception encodings; requires upstream correction"
     if relative in {
         "global/type.tentative.any.js", "memory/type.tentative.any.js",
         "table/type.tentative.any.js", "tag/type.tentative.any.js",

@@ -41,9 +41,9 @@ the corpus under the relevant section's directory before adding.
 
 ### Detached Promise rejections could falsely pass the WPT executor
 
-- **Fixed in:** this change (host rejection tracking).
-- **Spec:** ECMA-262 HostPromiseRejectionTracker, RejectPromise and
-  PerformPromiseThen; the host decides when to report unhandled rejections.
+- **Fixed in:** `d1288a64` (host rejection tracking).
+- **Spec:** ECMA-262 §27.5.1.9 HostPromiseRejectionTracker,
+  §27.5.1.7 RejectPromise and §27.5.5.4.1 PerformPromiseThen; the host decides when to report unhandled rejections.
 - **Reproducer:**
   ```js
   test(() => {
