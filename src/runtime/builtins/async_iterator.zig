@@ -255,7 +255,7 @@ fn processIterResult(
             (intrinsics_mod.newTypeError(realm, "iterator result .value read failed") catch return error.OutOfMemory);
         return rejectedPromise(realm, ex);
     };
-    // The `constructor` species probe and the close/wrap paths below
+    // The `constructor` identity probe and the close/wrap paths below
     // all re-enter JS (and so can GC). `value_v` came from a
     // `getPropertyChain` read and is held only in this Zig frame;
     // root it (and the iterator) so a re-entry GC can't free the
@@ -266,32 +266,38 @@ fn processIterResult(
     scope.push(value_v) catch return error.OutOfMemory;
     scope.push(sync_iter_v) catch return error.OutOfMemory;
 
-    // §27.6.1.6 step 5 — PromiseResolve(%Promise%, value). In Cynic
-    // this is the `value.constructor` read (used by `Promise.resolve`
-    // species lookup when value is a thenable). If reading
-    // `constructor` throws, step 6 closes the iterator when
+    // §27.6.1.6 step 5 — PromiseResolve(%Promise%, value) compares a
+    // Promise's constructor identity with %Promise%. A different
+    // constructor requires an adopting wrapper. If the constructor
+    // read throws, step 6 closes the iterator when
     // closeOnRejection && !done, then rejects the outer Promise.
-    if (close_on_rejection and !done and heap_mod.valueAsPlainObject(value_v) != null) {
+    var value_wrapper = value_v;
+    const source_promise = if (heap_mod.valueAsPlainObject(value_v)) |obj| obj.isPromise() else false;
+    const observe_promise = realm.heap.promise_rejection_tracker != null and source_promise;
+    if ((close_on_rejection and !done and heap_mod.valueAsPlainObject(value_v) != null) or observe_promise) {
         const v_obj = heap_mod.valueAsPlainObject(value_v).?;
-        // Probe for poisoned `constructor` accessor — mirrors
-        // §27.6.1.6 step 5 PromiseResolve which reads
-        // `value.constructor` to honour species. A throw here
-        // surfaces as IteratorClose then reject.
+        // Read constructor once; the adoption helper must reuse that
+        // value so a getter is not invoked twice. Abrupt completion
+        // closes the iterator when required, then rejects.
         const ctor_v = intrinsics_mod.getPropertyChain(realm, v_obj, "constructor") catch {
             const ex = lantern.consumePendingException(realm) orelse Value.undefined_;
-            return closeAndReject(realm, sync_iter_obj, sync_iter_v, ex);
+            if (close_on_rejection and !done) return closeAndReject(realm, sync_iter_obj, sync_iter_v, ex);
+            return rejectedPromise(realm, ex);
         };
-        _ = ctor_v;
+        if (observe_promise) {
+            value_wrapper = heap_mod.taggedObject(try lantern.promiseResolveForAwait(realm, v_obj, ctor_v));
+            scope.push(value_wrapper) catch return error.OutOfMemory;
+        }
     }
     // §27.6.1.6 step 14 — PerformPromiseThen(valueWrapper,
     // onFulfilled, onRejected, promiseCapability). When `done` is
     // false and `closeOnRejection` is true, `onRejected` closes
     // the iterator before propagating the rejection (step 13.a).
     if (close_on_rejection and !done) {
-        const wrapped = try wrapAsyncGenResultWithClose(realm, value_v, done, sync_iter_obj, sync_iter_v);
+        const wrapped = try wrapAsyncGenResultWithClose(realm, value_wrapper, done, sync_iter_obj, sync_iter_v);
         return wrapped;
     }
-    return lantern.wrapAsyncGenResult(realm, value_v, done);
+    return lantern.wrapAsyncGenResult(realm, value_wrapper, done);
 }
 
 /// §27.6.1.6 step 13.a — close iterator on rejection then reject
@@ -308,6 +314,7 @@ fn wrapAsyncGenResultWithClose(
     // surface the rejection on the outer Promise.
     if (heap_mod.valueAsPlainObject(raw)) |p| {
         if (p.brand.promise_state == .rejected) {
+            realm.heap.markPromiseHandled(p);
             return closeAndReject(realm, sync_iter_obj, sync_iter_v, p.promise_value);
         }
         if (p.brand.promise_state == .pending) {
@@ -335,6 +342,7 @@ fn wrapAsyncGenResultWithClose(
                 .on_rejected = heap_mod.taggedFunction(reject_fn),
                 .result_promise = outer,
             }) catch return error.OutOfMemory;
+            realm.heap.markPromiseHandled(p);
             return outer;
         }
     }

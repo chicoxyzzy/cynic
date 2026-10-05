@@ -118,6 +118,8 @@ test {
     _ = @import("runtime/wasm_imported_start_test.zig");
     _ = @import("runtime/wasm_wpt_async_test.zig");
     _ = @import("runtime/wasm_wpt_compile_test.zig");
+    _ = @import("runtime/promise_rejection_test.zig");
+    _ = @import("runtime/promise_rejections.zig");
     _ = @import("runtime/wasm_wpt_async_reentry_test.zig");
     _ = @import("runtime/wasm_wpt_async_safety_test.zig");
     _ = @import("runtime/wasm_wpt_arguments_test.zig");

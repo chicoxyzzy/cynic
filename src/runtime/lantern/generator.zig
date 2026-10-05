@@ -666,6 +666,7 @@ pub fn asyncGeneratorResumeNext(
                 _ = gen.queue.orderedRemove(0);
                 gen.async_state = .suspended_await;
                 if (isSyncRejectedPromise(raw)) {
+                    realm.heap.markPromiseHandled(heap_mod.valueAsPlainObject(raw).?);
                     // §27.6.3.6 with Await rejecting → the
                     // throw propagates as an uncaught
                     // exception inside the body, closing the
@@ -900,19 +901,11 @@ fn awaitForReturnCompletion(realm: *Realm, gen: *@import("../generator.zig").JSG
     // this path.
     if (heap_mod.valueAsPlainObject(v)) |obj| {
         if (obj.isPromise()) {
-            // §27.2.4.7 PromiseResolve step 1.a — when the
-            // resolution is already a Promise, the spec reads
-            // `value.constructor` to honour the species hook.
-            // Cynic doesn't actually species-dispatch (we always
-            // build a %Promise%), but the read is still
-            // observable: a poisoned `constructor` getter throws,
-            // and per §27.6.3.7 AsyncGeneratorAwaitReturn step 7 /
-            // §27.6.3.8 AsyncGeneratorYield step 13-14 the
-            // abrupt completion must surface — closing the
-            // request (suspendedStart / completed) or injecting
-            // the throw at the suspended yield site
-            // (suspendedYield) so the body's `try { yield }
-            // catch` can observe it.
+            // PromiseResolve(%Promise%, value) compares constructor identity
+            // with the intrinsic; it is not a species lookup. The helper
+            // preserves different-constructor adoption timing under a host
+            // observer. A throwing read closes the request or resumes the
+            // suspended yield with a throw; no subscription has occurred.
             const ctor_v = intrinsics_mod.getPropertyChain(realm, obj, "constructor") catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => {
@@ -922,8 +915,8 @@ fn awaitForReturnCompletion(realm: *Realm, gen: *@import("../generator.zig").JSG
                     return;
                 },
             };
-            _ = ctor_v;
-            if (obj.brand.promise_state == .pending) {
+            const awaited = try lantern.promiseResolveForAwait(realm, obj, ctor_v);
+            if (awaited.brand.promise_state == .pending) {
                 // Register the gen as a waiter on the Promise,
                 // flagging it so `settlePromiseInternal` routes
                 // the resume through
@@ -932,11 +925,13 @@ fn awaitForReturnCompletion(realm: *Realm, gen: *@import("../generator.zig").JSG
                 // normal `async_resume` (which drives a normal
                 // yield-resume).
                 gen.awaiting_return_completion = true;
-                const waiters = try obj.promiseWaitersPtr(realm.allocator);
+                const waiters = try awaited.promiseWaitersPtr(realm.allocator);
                 try waiters.append(realm.allocator, gen);
+                realm.heap.markPromiseHandled(awaited);
                 return;
             }
-            try realm.enqueueAsyncGenReturnAfterAwait(gen, obj.promise_value, obj.brand.promise_state == .rejected);
+            try realm.enqueueAsyncGenReturnAfterAwait(gen, awaited.promise_value, awaited.brand.promise_state == .rejected);
+            realm.heap.markPromiseHandled(awaited);
             return;
         }
         // Thenable check — §27.7.5.3 step 1 routes through
@@ -962,6 +957,7 @@ fn awaitForReturnCompletion(realm: *Realm, gen: *@import("../generator.zig").JSG
             gen.awaiting_return_completion = true;
             const waiters = try promise_obj.promiseWaitersPtr(realm.allocator);
             try waiters.append(realm.allocator, gen);
+            realm.heap.markPromiseHandled(promise_obj);
             return;
         }
         // Non-callable `.then` (or thenable with falsy `.then`):
@@ -1038,6 +1034,9 @@ pub fn wrapAsyncGenResult(realm: *Realm, raw: Value, done: bool) @import("../fun
             // then defers the unwrap one tick.
             try realm.enqueuePromiseReaction(wrap_v, raw, outer, false);
         },
+    }
+    if (heap_mod.valueAsPlainObject(raw)) |source| {
+        if (source.isPromise()) realm.heap.markPromiseHandled(source);
     }
     return outer;
 }

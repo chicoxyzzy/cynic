@@ -268,6 +268,7 @@ pub fn drainMicrotasks(allocator: std.mem.Allocator, realm: *Realm) RunError!voi
                             .yielded => |raw| {
                                 gen.async_state = .suspended_await;
                                 if (isSyncRejectedPromise(raw)) {
+                                    realm.heap.markPromiseHandled(heap_mod.valueAsPlainObject(raw).?);
                                     gen.state = .completed;
                                     try realm.enqueueAsyncGenYield(gen, req.capability_promise, heap_mod.valueAsPlainObject(raw).?.promise_value, false, true);
                                 } else {
@@ -315,6 +316,7 @@ pub fn drainMicrotasks(allocator: std.mem.Allocator, realm: *Realm) RunError!voi
                     .yielded => |raw| {
                         gen.async_state = .suspended_await;
                         if (isSyncRejectedPromise(raw)) {
+                            realm.heap.markPromiseHandled(heap_mod.valueAsPlainObject(raw).?);
                             gen.state = .completed;
                             try realm.enqueueAsyncGenYield(gen, req.capability_promise, heap_mod.valueAsPlainObject(raw).?.promise_value, false, true);
                         } else {
@@ -490,6 +492,7 @@ fn runModuleImportJob(
                         },
                         .none => try settlePromiseInternal(realm, promise_obj, .fulfilled, ns_value),
                     }
+                    realm.heap.markPromiseHandled(eval_p);
                     return;
                 }
             }
@@ -755,6 +758,25 @@ pub fn resolvePromiseWithValue(realm: *Realm, target: *JSObject, v: Value) !void
     try settlePromiseInternal(realm, target, .fulfilled, v);
 }
 
+/// PromiseResolve(%Promise%, source) after Await has read source.constructor.
+/// With host observation enabled the different-constructor path must retain
+/// its thenable-job boundary: only the wrapper is handled immediately.
+/// The source is handled later by the adopted .then invocation.
+pub fn promiseResolveForAwait(realm: *Realm, source: *JSObject, constructor: Value) !*JSObject {
+    if (realm.heap.promise_rejection_tracker == null) return source;
+    if (realm.intrinsics.promise_constructor) |intrinsic| {
+        if (constructor.bits == heap_mod.taggedFunction(intrinsic).bits) return source;
+    }
+    const scope = try realm.heap.openScope();
+    defer scope.close();
+    try scope.push(heap_mod.taggedObject(source));
+    const wrapper_value = try @import("../builtins/promise.zig").allocatePromise(realm, .pending, Value.undefined_);
+    try scope.push(wrapper_value);
+    const wrapper = heap_mod.valueAsPlainObject(wrapper_value).?;
+    try resolvePromiseWithValue(realm, wrapper, heap_mod.taggedObject(source));
+    return wrapper;
+}
+
 /// Fast-path predicate for §27.2.1.3.2 Promise Resolve Functions —
 /// when both `target` and `v_obj` are vanilla Promise instances (their
 /// immediate prototype is the realm's %PromisePrototype%) AND the
@@ -768,6 +790,9 @@ pub fn resolvePromiseWithValue(realm: *Realm, target: *JSObject, v: Value) !void
 pub const isVanillaPromiseChainExported = isVanillaPromiseChain;
 
 fn isVanillaPromiseChain(realm: *Realm, target: *JSObject, v_obj: *JSObject) bool {
+    // HostPromiseRejectionTracker observes when adoption handles the source.
+    // Preserve the PromiseResolveThenableJob boundary while a host listens.
+    if (realm.heap.promise_rejection_tracker != null) return false;
     const proto = realm.intrinsics.promise_prototype orelse return false;
     if (target.prototype != proto) return false;
     if (v_obj.prototype != proto) return false;
@@ -798,10 +823,12 @@ fn chainPromiseToInner(realm: *Realm, inner: *JSObject, outer: *JSObject) !void 
     switch (inner.brand.promise_state) {
         .fulfilled => {
             try realm.enqueuePromiseReaction(Value.undefined_, inner.promise_value, heap_mod.taggedObject(outer), false);
+            realm.heap.markPromiseHandled(inner);
             return;
         },
         .rejected => {
             try realm.enqueuePromiseReaction(Value.undefined_, inner.promise_value, heap_mod.taggedObject(outer), true);
+            realm.heap.markPromiseHandled(inner);
             return;
         },
         .pending, .none => {},
@@ -813,6 +840,7 @@ fn chainPromiseToInner(realm: *Realm, inner: *JSObject, outer: *JSObject) !void 
         .on_rejected = Value.undefined_,
         .result_promise = heap_mod.taggedObject(outer),
     });
+    realm.heap.markPromiseHandled(inner);
 }
 
 /// Re-enter `runFrames` to resume a suspended `async function`
@@ -907,7 +935,11 @@ pub fn resumeAsyncFunction(
                 if (heap_mod.valueAsPlainObject(rp)) |rp_obj| {
                     if (heap_mod.valueAsPlainObject(v)) |v_obj| {
                         if (v_obj.isPromise()) {
-                            chainPromiseToInner(realm, v_obj, rp_obj) catch return error.OutOfMemory;
+                            if (realm.heap.promise_rejection_tracker != null) {
+                                resolvePromiseWithValue(realm, rp_obj, v) catch return error.OutOfMemory;
+                            } else {
+                                chainPromiseToInner(realm, v_obj, rp_obj) catch return error.OutOfMemory;
+                            }
                             gen.state = .completed;
                             return;
                         }
@@ -1030,6 +1062,7 @@ pub fn resumeAsyncGeneratorOnSettle(
             // return-completion's `Await(.then)` must fire BEFORE
             // the next user microtask, not after it).
             if (isSyncRejectedPromise(v)) {
+                realm.heap.markPromiseHandled(heap_mod.valueAsPlainObject(v).?);
                 gen.state = .completed;
                 gen.async_state = .completed;
                 try rejectAsyncGenRequest(realm, req.capability_promise, heap_mod.valueAsPlainObject(v).?.promise_value);

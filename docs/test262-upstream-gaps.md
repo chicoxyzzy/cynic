@@ -38,6 +38,32 @@ the corpus under the relevant section's directory before adding.
 
 ## Entries
 
+
+### Detached Promise rejections could falsely pass the WPT executor
+
+- **Fixed in:** this change (host rejection tracking).
+- **Spec:** ECMA-262 HostPromiseRejectionTracker, RejectPromise and
+  PerformPromiseThen; the host decides when to report unhandled rejections.
+- **Reproducer:**
+  ```js
+  test(() => {
+    Promise.resolve().then(() => { throw new Error("detached failure"); });
+  }, "synchronous registration with detached work");
+  ```
+- **Before fix:** WPT could report an OK completion and the executor exit zero
+  even though the detached reaction rejected. Internal Await and async iterator
+  consumers also had no explicit PromiseIsHandled state.
+- **After fix:** an optional heap-wide callback observes first reject/handle
+  transitions. WPT retains only pending rejections and fails after the final
+  checkpoint if any remain; later handlers and internal consumers are accounted
+  for. Bookkeeping OOM/limits fail closed and handled roots are released.
+- **Suggested fixture shape:** host-native regression, not an ordinary test262
+  fixture: test262 has no portable host rejection-notification API. Executor
+  contracts cover detached reactions after successful WPT completion, forwarding,
+  later handlers and hostile reasons; native tests cover GC and host allocation
+  failure. The excluded WPT identity fixture still requires separate review of
+  its asynchronous assertion structure and legacy Wasm exception encodings.
+
 ### Async Wasm instantiation skipped host-task checkpoints and pending-work ownership
 
 - **Fixed in:** `ebea70b5`

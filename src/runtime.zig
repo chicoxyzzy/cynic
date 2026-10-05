@@ -31,6 +31,7 @@ pub const typed_array_builtin = @import("runtime/builtins/typed_array.zig");
 pub const heap = @import("runtime/heap.zig");
 pub const Heap = heap.Heap;
 pub const HandleScope = heap.HandleScope;
+pub const PendingPromiseRejections = @import("runtime/promise_rejections.zig").PendingPromiseRejections;
 
 pub const BistromathStats = @import("runtime/bistromath/stats.zig").Stats;
 pub const BistromathEntryCounter = @import("runtime/bistromath/stats.zig").SharedEntryCounter;

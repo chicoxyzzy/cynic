@@ -552,6 +552,7 @@ fn chainPromiseToInner(realm: *Realm, inner: *@import("../object.zig").JSObject,
             interp.settlePromiseInternal(realm, outer, .fulfilled, heap_mod.taggedObject(inner)) catch return error.OutOfMemory;
         },
     }
+    realm.heap.markPromiseHandled(inner);
 }
 
 fn promiseRejectImpl(realm: *Realm, this_value: Value, args: []const Value) NativeError!Value {
@@ -646,6 +647,7 @@ fn promiseThen(realm: *Realm, this_value: Value, args: []const Value) NativeErro
                 }) catch return error.OutOfMemory;
             },
         }
+        realm.heap.markPromiseHandled(source);
         return result_promise;
     }
 
@@ -665,6 +667,7 @@ fn promiseThen(realm: *Realm, this_value: Value, args: []const Value) NativeErro
             }) catch return error.OutOfMemory;
         },
     }
+    realm.heap.markPromiseHandled(source);
     return cap.promise;
 }
 
