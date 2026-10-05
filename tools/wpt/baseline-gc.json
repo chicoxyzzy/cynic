@@ -1,22 +1,22 @@
 {
   "schema_version": 1,
   "corpus_revision": "9ee707c850996c8d124809570c3ff855d67301b9",
-  "manifest_sha256": "447a0242e1e5da4b35ff654e0a432371a5bace55e3d393e472b521df27a0d615",
+  "manifest_sha256": "bf587399b1b7561f6837bddaf8e09beadb8a2681cc74f8a3cec1aaf7ac4c7e39",
   "adapter_sha256": {
     "run.py": "e32ee468cee38c130eb7b2ce80dbf85d5097e920cddb7316ce05b14f708cdcdc",
-    "case.zig": "286d8ffb542332c1fa5ea8be6db41fee5506f2df1e2afb241518224aab58fbac",
+    "case.zig": "0c0e13b0411d20ce7cf0002d2f900363b4b2024158be9cd52e10fedadde0c13e",
     "bootstrap.js": "2a7fc46fe66723bd90812a3274aa6f5695e72cf0cbe8a451d6e19b7dcdf7ff4d",
     "reporter.js": "3bf240776c67cc9fa239b450bc5406056d3c1d14dda74139b4eeeeb71b2ef1a2",
     "finish.js": "6c174bed116d8d8e1c96caf0e6a01e7c80f7a2a97c1edba81e845c9a5fb1d072",
     "testharness.js (patched)": "fbe2e52e029bbeea3fecdedf963b69589526a8a1e3ceb18947120667443147f7",
     "wasm/jsapi/wasm-module-builder.js (patched)": "83a83b12adc7d51533c818b23fd37936d03a7203e7015356f9e6852b8625964d"
   },
-  "binary_sha256": "4071355a71e885c4ae6a01f132dd5f3177e950c78328ddb7a07b4351e0a94972",
+  "binary_sha256": "2092664d4b7284ff63ccce8f87109cbb342792cc5dac6a5dd311fa18652880a0",
   "provenance": {
-    "generated_at_utc": "2026-10-01T12:59:45Z",
+    "generated_at_utc": "2026-10-05T13:28:10Z",
     "platform": "Darwin",
     "architecture": "arm64",
-    "engine_git_head": "1630e2ebfa1d9b953da4972c9f90cffb4114e34f",
+    "engine_git_head": "31c066d97927017ea0811c44d3445cf2f533434a",
     "engine_git_dirty": false
   },
   "configuration": {
@@ -91,7 +91,7 @@
     },
     {
       "path": "wasm/jsapi/exception/identity.tentative.any.js",
-      "reason": "Fixture uses detached Promise assertions inside synchronous test(); shell lacks host rejection tracking and could falsely pass"
+      "reason": "Fixture uses detached Promise assertions inside synchronous test(), does not assert the expected throws, and uses legacy exception encodings; requires upstream correction"
     },
     {
       "path": "wasm/jsapi/function/call.tentative.any.js",
