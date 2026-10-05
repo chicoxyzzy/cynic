@@ -21,6 +21,11 @@ shared `runtime/jit/` assembler substrate. A failed compile or failed runtime
 guard returns execution to Lantern; it must never change JavaScript behavior
 or abort the host.
 
+An isolated [shared-backend experiment](shared-backend.md) also consumes
+Ohaimark's SSA and frame states for a narrow guarded-Int32 subset. It is reached
+only by developer tests and `zig build backend-prototype`; it does not replace
+the production compilers, feedback policy, or tier selection described here.
+
 This document is both the accepted design and delivery ledger: §3 describes
 the optimizer and backends, §4 the deoptimization contract, §5 the rollout
 order, and §6 loop-header OSR.

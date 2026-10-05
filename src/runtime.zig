@@ -36,6 +36,8 @@ pub const PendingPromiseRejections = @import("runtime/promise_rejections.zig").P
 pub const BistromathStats = @import("runtime/bistromath/stats.zig").Stats;
 pub const BistromathEntryCounter = @import("runtime/bistromath/stats.zig").SharedEntryCounter;
 pub const OhaimarkStats = @import("runtime/ohaimark/stats.zig").Stats;
+/// Developer-only shared-backend experiment; not used by production tiering.
+pub const ohaimark_backend_prototype = @import("runtime/ohaimark/shared_backend.zig");
 
 pub const realm = @import("runtime/realm.zig");
 pub const Realm = realm.Realm;

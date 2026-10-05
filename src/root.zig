@@ -190,6 +190,7 @@ test {
     _ = @import("runtime/bistromath/x86_64_test.zig");
     _ = @import("runtime/ohaimark/ohaimark.zig");
     _ = @import("runtime/ohaimark/tests.zig");
+    _ = @import("runtime/ohaimark/shared_backend_test.zig");
     _ = @import("runtime/ohaimark/allocation_test.zig");
     _ = @import("runtime/ohaimark/lowering_aarch64_test.zig");
     _ = @import("runtime/ohaimark/emitter_aarch64_test.zig");

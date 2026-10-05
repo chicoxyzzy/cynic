@@ -701,7 +701,7 @@ same line.
 | Safepoint/interrupt convention (`host_interrupt`, budgets) | **yes** | same atomic, same back-edge discipline |
 | Tiering counter/threshold machinery | **yes** (shape) | constants differ per tier |
 | Disassembler + golden-test harness for emitters | **yes** | substrate ships with its own tests before any tier uses it |
-| T2 SSA backend | **isolated experiment** | [Typed integer SSA prototype](shared-backend.md) with a Wasm frontend; production Ohaimark and Spasm are unchanged. Require a second consumer and measurements before adopting it. |
+| T2 SSA backend | **isolated experiment** | [Typed integer SSA prototype](shared-backend.md) with Wasm and guarded Ohaimark frontends, including exact Lantern recovery; production Ohaimark and Spasm are unchanged. Allocation, optimization measurements, and runtime gates precede adoption. |
 | Baseline abstract state / "register allocation" | **no** | JS T1 has none (frame-mirrored); wasm T1's operand-stack state machine is its whole compiler. V8 keeps Sparkplug and Liftoff separate above the assembler for exactly this reason. |
 | Frame layout & calling convention | **no** | JS frames are `CallFrame`s with heap register files; wasm frames are native. |
 | Value representation handling | **no** | NaN-boxed `Value` vs raw wasm scalars/cells. |

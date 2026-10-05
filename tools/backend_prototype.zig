@@ -1,7 +1,10 @@
 //! Isolated shared-backend smoke experiment, not a throughput benchmark.
 const std = @import("std");
-const wasm = @import("cynic").wasm;
+const cynic = @import("cynic");
+const wasm = cynic.wasm;
 const prototype = wasm.backend_prototype;
+const js = cynic.runtime.ohaimark_backend_prototype;
+const Value = cynic.runtime.Value;
 
 // (i32 n) -> sum(i*i, i=0..n), with two zero-initialized i32 locals.
 const body = [_]u8{
@@ -65,11 +68,88 @@ pub fn main(init: std.process.Init) !void {
     const run_us = run_start.untilNow(init.io, .awake).toMicroseconds();
     std.debug.print(
         "Shared backend experiment (not a production tier)\n" ++
+            "Wasm frontend:\n" ++
             "  verified SSA: {d} blocks, {d} values\n" ++
             "  decode + validate + lower + emit: {d} us; installed code: {d} bytes\n" ++
             "  matching results: {d}; backend entries: {d}; Spasm entries: {d}\n" ++
-            "  100 bounded calls (scratch allocation included): {d} us; checksum: {d}\n" ++
-            "  Normal tier selection is unchanged. These are diagnostics, not a speedup claim.\n",
+            "  100 bounded calls (scratch allocation included): {d} us; checksum: {d}\n",
         .{ graph.graph.blocks.len, graph.graph.types.len, compile_us, compiled.code.bytes().?.len, native_entries, native_entries, instance.spasm_runs, run_us, checksum },
     );
+    try runJavascriptDemo(init, &owner);
+    std.debug.print("Normal tier selection is unchanged. These are diagnostics, not a speedup claim.\n", .{});
+}
+
+fn runJavascriptDemo(init: std.process.Init, owner: *prototype.CodeAllocator) !void {
+    const a = init.gpa;
+    const source = "function sum(n) { var i = 0, s = 0; while (i < n) { s = s + i * i; i = i + 1; } return s; }";
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var realm = cynic.runtime.Realm.init(a);
+    defer realm.deinit();
+    const compile_start = std.Io.Clock.now(.awake, init.io);
+    const parsed = try cynic.parser.parseScript(arena.allocator(), source, null);
+    var outer = try cynic.bytecode.compiler.compileScriptAsChunk(a, &realm, &parsed, source, null);
+    defer outer.deinit(a);
+    const chunk = &outer.function_templates[0].chunk;
+    var program = try js.Program.build(a, owner, chunk);
+    defer program.deinit();
+    const compile_us = compile_start.untilNow(init.io, .awake).toMicroseconds();
+    const registers = try a.alloc(Value, chunk.register_count);
+    defer a.free(registers);
+    var native_entries: u32 = 0;
+    var recoveries: u32 = 0;
+    for ([_]i32{ 0, 1, 2, 10, 100, 1000, 2000 }) |n| {
+        @memset(registers, Value.undefined_);
+        registers[0] = Value.fromInt32(n);
+        var outcome = try program.run(.{ .accumulator = Value.undefined_, .registers = registers, .block_budget = 10_000 });
+        defer outcome.deinit();
+        native_entries += 1;
+        const actual = switch (outcome) {
+            .returned => |value| blk: {
+                if (n == 2000) return error.MissingGuardExit;
+                break :blk value;
+            },
+            .deopt => |*state| blk: {
+                if (n != 2000 or state.bytecode_offset == 0) return error.UnexpectedGuardExit;
+                const resumed = try state.resumeLantern(a, &realm, chunk);
+                if (resumed != .value) return error.ResultMismatch;
+                recoveries += 1;
+                break :blk resumed.value;
+            },
+        };
+        const reference = try runLantern(a, &realm, chunk, registers);
+        const count: f64 = @floatFromInt(n);
+        const expected = count * (count - 1) * (2 * count - 1) / 6;
+        const numeric = if (actual.isInt32()) @as(f64, @floatFromInt(actual.asInt32())) else if (actual.isDouble()) actual.asDouble() else return error.ResultMismatch;
+        if (numeric != expected or actual.bits != reference.bits) return error.ResultMismatch;
+    }
+    std.debug.print(
+        "JS frontend (same sum-of-squares loop, checked Int32):\n" ++
+            "  verified SSA: {d} blocks, {d} values\n" ++
+            "  parse + bytecode + specialize + lower + emit: {d} us; installed code: {d} bytes\n" ++
+            "  matching Lantern/oracle results: {d}; backend entries: {d}; resumed guard exits: {d}\n",
+        .{ program.graph.blocks.len, program.graph.types.len, compile_us, program.compiled.code.bytes().?.len, native_entries, native_entries, recoveries },
+    );
+}
+
+fn runLantern(a: std.mem.Allocator, realm: *cynic.runtime.Realm, chunk: *const cynic.bytecode.Chunk, registers: []Value) !Value {
+    const lantern = cynic.runtime.lantern;
+    var frames: std.ArrayList(lantern.CallFrame) = .empty;
+    defer {
+        for (frames.items) |*frame| frame.releaseRegisters(realm, a);
+        frames.deinit(a);
+    }
+    try frames.append(a, .{
+        .chunk = chunk,
+        .ip = 0,
+        .accumulator = Value.undefined_,
+        .registers = registers,
+        .env = null,
+        .this_value = Value.undefined_,
+        .owns_registers = false,
+        .argc = 1,
+    });
+    const result = try lantern.runFrames(a, realm, &frames);
+    if (result != .value) return error.ResultMismatch;
+    return result.value;
 }
