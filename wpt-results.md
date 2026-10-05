@@ -1,6 +1,6 @@
 # WPT Wasm JavaScript API results
 
-Measured baseline after async instantiation scheduling: **31 of 43 included
+Measured baseline with host Promise rejection tracking: **31 of 43 included
 files pass completely**. The remaining files are 10 assertion-failure files
 and 2 strict-mode parse errors. Across files that execute, **592 subtests pass
 and 11 fail** (603 observed subtests). The two unparsed files contribute no
@@ -21,6 +21,7 @@ and 17 additional files pass completely; no previously passing subtest was lost.
 | Shared-memory coverage | 29 | 12 | 2 | 590 | 13 |
 | Multi-value JS imports | 30 | 11 | 2 | 591 | 12 |
 | Async instantiation | 31 | 10 | 2 | 592 | 11 |
+| Host rejection tracking | 31 | 10 | 2 | 592 | 11 |
 
 This measures a selected Wasm JavaScript API slice, not browser conformance or
 the Wasm core instruction suite. See [the integration guide](docs/wpt.md),
@@ -32,9 +33,9 @@ the Wasm core instruction suite. See [the integration guide](docs/wpt.md),
 
 | Input | Value |
 | --- | --- |
-| Captured | 2026-10-01T12:59:44Z (normal); 2026-10-01T12:59:45Z (GC pressure) |
+| Captured | 2026-10-05T13:27:44Z (normal); 2026-10-05T13:28:10Z (GC pressure) |
 | WPT revision | [`9ee707c850996c8d124809570c3ff855d67301b9`](https://github.com/web-platform-tests/wpt/tree/9ee707c850996c8d124809570c3ff855d67301b9/wasm/jsapi) |
-| Engine checkout | `1630e2ebfa1d9b953da4972c9f90cffb4114e34f` (clean source for both profiles) |
+| Engine checkout | `31c066d97927017ea0811c44d3445cf2f533434a` (clean source for both profiles) |
 | Host | macOS arm64 |
 | Profiles | ReleaseFast / default GC; ReleaseSafe / `--gc-threshold=1` |
 | Posture | Strict-only, mutable primordials, eval and Wasm compilation enabled; JS and Wasm JITs off |
