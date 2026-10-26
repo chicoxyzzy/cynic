@@ -5,6 +5,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const ir = @import("ir.zig");
 const allocation = @import("allocation.zig");
+const optimize = @import("optimize.zig");
 const code_alloc = @import("../code_alloc.zig");
 const a64 = @import("../asm_aarch64.zig");
 const arm_masm = @import("../masm.zig");
@@ -17,7 +18,11 @@ const Machine = if (is_x86) x86.Masm else arm_masm.Masm;
 const Reg = if (is_x86) x86.Reg else a64.Reg;
 const Entry = *const fn ([*]u64, u64) callconv(.c) u32;
 
-pub const Options = struct { allocation: allocation.Mode = .linear_scan, register_count: u8 = allocation.max_registers };
+pub const Options = struct {
+    allocation: allocation.Mode = .linear_scan,
+    register_count: u8 = allocation.max_registers,
+    optimization: optimize.Options = .{},
+};
 pub const Stats = struct { loads: u32 = 0, stores: u32 = 0, register_moves: u32 = 0 };
 
 pub const Outcome = union(enum) {
@@ -40,6 +45,7 @@ pub const Compiled = struct {
     argument_types: []ir.Type,
     spill_slot_count: usize,
     stats: Stats = .{},
+    optimization: optimize.Stats = .{},
 
     pub fn scratchSlotCount(self: *const Compiled) usize {
         return self.spill_slot_count + ir.max_arguments + 2;
@@ -95,6 +101,22 @@ pub fn compile(a: std.mem.Allocator, owner: *code_alloc.CodeAllocator, graph: ir
 pub fn compileWithOptions(a: std.mem.Allocator, owner: *code_alloc.CodeAllocator, graph: ir.Graph, options: Options) !Compiled {
     try graph.verify();
     if (comptime !supported) return error.UnsupportedTarget;
+    var optimized: ?optimize.Result = if (options.optimization.constant_folding or options.optimization.dead_code_elimination)
+        try optimize.run(a, graph, options.optimization)
+    else
+        null;
+    defer if (optimized) |*result| result.deinit();
+    var compiled = try emitGraph(a, owner, if (optimized) |result| result.graph else graph, options);
+    if (optimized) |result| {
+        compiled.optimization = result.stats;
+    } else {
+        for (graph.blocks) |block| compiled.optimization.input_nodes += @intCast(block.nodes.len);
+        compiled.optimization.output_nodes = compiled.optimization.input_nodes;
+    }
+    return compiled;
+}
+
+fn emitGraph(a: std.mem.Allocator, owner: *code_alloc.CodeAllocator, graph: ir.Graph, options: Options) !Compiled {
     var plan = try allocation.Plan.build(a, graph, .{ .mode = options.allocation, .register_count = options.register_count });
     defer plan.deinit();
     var m = Machine.init(a);
