@@ -19,6 +19,20 @@ fn binaryChunk(op: Op) !chunk_mod.Chunk {
     return builder.finish();
 }
 
+fn expectSameOutcome(expected: @import("evaluator.zig").Outcome, actual: @import("evaluator.zig").Outcome) !void {
+    try std.testing.expectEqual(std.meta.activeTag(expected), std.meta.activeTag(actual));
+    switch (expected) {
+        .returned => |value| try std.testing.expectEqual(value.bits, actual.returned.bits),
+        .deopt => |state| {
+            try std.testing.expectEqual(state.node, actual.deopt.node);
+            try std.testing.expectEqual(state.bytecode_offset, actual.deopt.bytecode_offset);
+            try std.testing.expectEqual(state.accumulator.bits, actual.deopt.accumulator.bits);
+            try std.testing.expectEqual(state.this_value.bits, actual.deopt.this_value.bits);
+            try std.testing.expectEqualSlices(Value, state.registers, actual.deopt.registers);
+        },
+    }
+}
+
 test "shared Ohaimark backend: checked integer arithmetic executes natively" {
     if (!shared.supported) return error.SkipZigTest;
     var owner = try shared.CodeAllocator.init(a, 256 * 1024);
@@ -272,45 +286,73 @@ test "shared Ohaimark backend: parsed JS loop matches Lantern and resumes loop o
     const chunk = &outer.function_templates[0].chunk;
     var owner = try shared.CodeAllocator.init(a, 256 * 1024);
     defer owner.deinit();
-    var program = try shared.Program.build(a, &owner, chunk);
-    defer program.deinit();
-    var oracle = try shared.Program.buildWithOptions(a, &owner, chunk, .{ .allocation = .scratch });
+    var oracle = try shared.Program.buildWithOptions(a, &owner, chunk, .{ .allocation = .scratch, .optimization = .{ .constant_folding = false, .dead_code_elimination = false } });
     defer oracle.deinit();
-    try std.testing.expect(program.compiled.scratchSlotCount() < oracle.compiled.scratchSlotCount());
-    try std.testing.expect(program.compiled.stats.loads + program.compiled.stats.stores < oracle.compiled.stats.loads + oracle.compiled.stats.stores);
     const registers = try a.alloc(Value, chunk.register_count);
     defer a.free(registers);
-    for ([_]i32{ 0, 1, 10, 1000, 2000 }) |n| {
-        @memset(registers, Value.undefined_);
-        registers[0] = Value.fromInt32(n);
-        var reference: evaluator.DeoptState = .{ .allocator = a, .node = 0, .bytecode_offset = 0, .accumulator = Value.undefined_, .registers = try a.dupe(Value, registers), .this_value = Value.undefined_ };
-        defer reference.deinit();
-        const expected = try reference.resumeLantern(a, &realm, chunk);
-        var outcome = try program.run(.{ .accumulator = Value.undefined_, .registers = registers, .block_budget = 10000 });
-        defer outcome.deinit();
-        var oracle_outcome = try oracle.run(.{ .accumulator = Value.undefined_, .registers = registers, .block_budget = 10000 });
-        defer oracle_outcome.deinit();
-        try std.testing.expectEqual(std.meta.activeTag(oracle_outcome), std.meta.activeTag(outcome));
-        switch (outcome) {
-            .returned => |value| try std.testing.expectEqual(oracle_outcome.returned.bits, value.bits),
-            .deopt => |state| {
-                try std.testing.expectEqual(oracle_outcome.deopt.bytecode_offset, state.bytecode_offset);
-                try std.testing.expectEqual(oracle_outcome.deopt.accumulator.bits, state.accumulator.bits);
-                try std.testing.expectEqualSlices(Value, oracle_outcome.deopt.registers, state.registers);
-            },
+    for ([_]bool{ false, true }) |fold| {
+        for ([_]bool{ false, true }) |dce| {
+            var program = try shared.Program.buildWithOptions(a, &owner, chunk, .{ .optimization = .{ .constant_folding = fold, .dead_code_elimination = dce } });
+            defer program.deinit();
+            try std.testing.expect(program.compiled.scratchSlotCount() < oracle.compiled.scratchSlotCount());
+            try std.testing.expect(program.compiled.stats.loads + program.compiled.stats.stores < oracle.compiled.stats.loads + oracle.compiled.stats.stores);
+            for ([_]i32{ 0, 1, 10, 1000, 2000 }) |n| {
+                @memset(registers, Value.undefined_);
+                registers[0] = Value.fromInt32(n);
+                var reference: evaluator.DeoptState = .{ .allocator = a, .node = 0, .bytecode_offset = 0, .accumulator = Value.undefined_, .registers = try a.dupe(Value, registers), .this_value = Value.undefined_ };
+                defer reference.deinit();
+                const expected = try reference.resumeLantern(a, &realm, chunk);
+                var outcome = try program.run(.{ .accumulator = Value.undefined_, .registers = registers, .block_budget = 10000 });
+                defer outcome.deinit();
+                var oracle_outcome = try oracle.run(.{ .accumulator = Value.undefined_, .registers = registers, .block_budget = 10000 });
+                defer oracle_outcome.deinit();
+                try expectSameOutcome(oracle_outcome, outcome);
+                const actual = switch (outcome) {
+                    .returned => |value| blk: {
+                        try std.testing.expect(n < 2000);
+                        break :blk value;
+                    },
+                    .deopt => |*state| blk: {
+                        try std.testing.expectEqual(@as(i32, 2000), n);
+                        try std.testing.expect(state.bytecode_offset > 0);
+                        break :blk (try state.resumeLantern(a, &realm, chunk)).value;
+                    },
+                };
+                try std.testing.expectEqual(expected.value.bits, actual.bits);
+            }
+            try std.testing.expectError(error.BudgetExhausted, program.run(.{ .accumulator = Value.undefined_, .registers = registers, .block_budget = 1 }));
         }
-        const actual = switch (outcome) {
-            .returned => |value| blk: {
-                try std.testing.expect(n < 2000);
-                break :blk value;
-            },
-            .deopt => |*state| blk: {
-                try std.testing.expectEqual(@as(i32, 2000), n);
-                try std.testing.expect(state.bytecode_offset > 0);
-                break :blk (try state.resumeLantern(a, &realm, chunk)).value;
-            },
-        };
-        try std.testing.expectEqual(expected.value.bits, actual.bits);
+    }
+}
+
+test "shared Ohaimark backend: optimization switches preserve signed zero and type exits" {
+    if (!shared.supported) return error.SkipZigTest;
+    var chunk = try binaryChunk(.mul);
+    defer chunk.deinit(a);
+    var owner = try shared.CodeAllocator.init(a, 256 * 1024);
+    defer owner.deinit();
+    var oracle = try shared.Program.buildWithOptions(a, &owner, &chunk, .{ .allocation = .scratch, .optimization = .{ .constant_folding = false, .dead_code_elimination = false } });
+    defer oracle.deinit();
+    for ([_]bool{ false, true }) |fold| {
+        for ([_]bool{ false, true }) |dce| {
+            var program = try shared.Program.buildWithOptions(a, &owner, &chunk, .{ .optimization = .{ .constant_folding = fold, .dead_code_elimination = dce } });
+            defer program.deinit();
+            for ([_][2]Value{
+                .{ Value.fromInt32(-1), Value.fromInt32(0) },
+                .{ Value.fromInt32(0), Value.fromInt32(-1) },
+                .{ Value.fromDouble(-0.0), Value.fromInt32(3) },
+                .{ Value.fromDouble(1.5), Value.fromInt32(3) },
+                .{ Value.fromInt32(46341), Value.fromInt32(46341) },
+                .{ Value.fromInt32(-3), Value.fromInt32(-7) },
+            }) |registers| {
+                const entry: shared.Entry = .{ .accumulator = Value.undefined_, .registers = &registers, .this_value = Value.fromInt32(77), .block_budget = 100 };
+                var expected = try oracle.run(entry);
+                defer expected.deinit();
+                var actual = try program.run(entry);
+                defer actual.deinit();
+                try expectSameOutcome(expected, actual);
+            }
+        }
     }
 }
 
@@ -328,7 +370,10 @@ test "shared Ohaimark backend: compilation and recovery clean up allocation fail
     defer chunk.deinit(a);
     var owner = try shared.CodeAllocator.init(a, 256 * 1024);
     defer owner.deinit();
-    try std.testing.checkAllAllocationFailures(a, buildAndRunWithFailures, .{ &owner, &chunk });
+    // In-place arena growth depends on allocator state; force allocation
+    // instead so each failure index denotes the same allocation on every run.
+    var no_resize = std.testing.FailingAllocator.init(a, .{ .resize_fail_index = 0 });
+    try std.testing.checkAllAllocationFailures(no_resize.allocator(), buildAndRunWithFailures, .{ &owner, &chunk });
 }
 
 test "shared Ohaimark backend: object coercion only runs after recovery and survives GC" {

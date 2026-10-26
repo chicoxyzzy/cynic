@@ -61,6 +61,36 @@ test "backend prototype: native i32 and i64 wraparound" {
     try std.testing.expectEqual(@as(u64, 3), try prototype.evaluate(std.testing.allocator, i64_module, 0, &.{ std.math.maxInt(u64), 2 }, 10));
 }
 
+test "backend prototype: pure optimization switches match Sarcasm for constant wraparound" {
+    if (!code_alloc.supported) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    // ((-1 + 1) * 7), plus an unused constant removed by the shared DCE pass.
+    const bytes = try moduleBytes(arena.allocator(), &.{}, 0x7f, &.{}, &.{ 0x41, 0x7f, 0x41, 1, 0x6a, 0x41, 7, 0x6c, 0x41, 9, 0x1a, 0x0b });
+    var graph = try prototype.lowerModule(a, bytes, 0);
+    defer graph.deinit();
+    const module = try wasm.decode(arena.allocator(), bytes);
+    var instance: wasm.Instance = undefined;
+    try wasm.instantiate(&instance, arena.allocator(), a, &module, .{});
+    defer instance.deinit();
+    instance.spasm_enabled = false;
+    const expected = try wasm.invoke(&instance, a, 0, &.{});
+    defer a.free(expected);
+    try std.testing.expectEqualSlices(u128, &.{0}, expected);
+    var owner = try code_alloc.CodeAllocator.init(a, 256 * 1024);
+    defer owner.deinit();
+    for ([_]bool{ false, true }) |fold| {
+        for ([_]bool{ false, true }) |dce| {
+            var compiled = try prototype.native.compileWithOptions(a, &owner, graph.graph, .{ .optimization = .{ .constant_folding = fold, .dead_code_elimination = dce } });
+            defer compiled.deinit();
+            try std.testing.expectEqual(expected[0], try compiled.run(&.{}, 1));
+            try std.testing.expectEqual(@as(u32, if (fold) 2 else 0), compiled.optimization.folded_nodes);
+            if (fold and dce) try std.testing.expectEqual(@as(u32, 1), compiled.optimization.output_nodes);
+        }
+    }
+}
+
 test "backend prototype: native loop carries locals and agrees with arithmetic oracle" {
     if (!code_alloc.supported) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
