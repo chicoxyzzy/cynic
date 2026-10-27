@@ -146,9 +146,12 @@ pub fn validateModule(arena: std.mem.Allocator, module: *const Module) ValidateE
     // §3.4.2 — a table's explicit element initializer is a constant
     // expression of the table's element type. Only imported globals
     // precede the table section, so defined globals are out of scope.
+    // The plain binary form implies ref.null, even for a zero-size table.
     for (module.tables) |t| {
         if (t.init_expr) |expr| {
             try validateConstExpr(module, expr, t.elem, glob_imports);
+        } else if (!t.elem.isNullable()) {
+            return error.TypeMismatch;
         }
     }
 
@@ -1836,6 +1839,50 @@ test "wasm validator: branch metadata does not hide dead-code type errors" {
     const module: Module = .{ .types = &.{.{ .params = &.{}, .results = &.{.i32} }} };
     // unreachable; f32.const 0; br 0 still carries the wrong concrete type.
     try std.testing.expectError(error.TypeMismatch, validateFunc(arena.allocator(), &module, 0, &.{ 0x00, 0x00, 0x43, 0, 0, 0, 0, 0x0c, 0x00, 0x0b }, &.{}, &.{}));
+}
+
+test "wasm validator: table defaults reject non-nullable references even when empty" {
+    for ([_]ValType{
+        ValType.refType(false, types.heap_abs_func),
+        ValType.refType(false, types.heap_abs_extern),
+        ValType.refType(false, 0),
+    }) |elem| {
+        for ([_]types.Limits{ .{ .min = 0 }, .{ .min = 0, .max = 0 }, .{ .min = 1 }, .{ .min = 0, .is_64 = true } }) |limits| {
+            var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+            defer arena.deinit();
+            const module: Module = .{
+                .types = &.{.{ .params = &.{}, .results = &.{} }},
+                .tables = &.{.{ .elem = elem, .limits = limits }},
+            };
+            try std.testing.expectError(error.TypeMismatch, validateModule(arena.allocator(), &module));
+        }
+    }
+}
+
+test "wasm validator: table defaults allow nullable references" {
+    for ([_]ValType{ .funcref, .externref, ValType.refType(true, 0) }) |elem| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const module: Module = .{
+            .types = &.{.{ .params = &.{}, .results = &.{} }},
+            .tables = &.{.{ .elem = elem, .limits = .{ .min = 1 } }},
+        };
+        _ = try validateModule(arena.allocator(), &module);
+    }
+}
+
+test "wasm validator: table defaults do not restrict imports or explicit initializers" {
+    const elem = ValType.refType(false, types.heap_abs_extern);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const module: Module = .{
+        .imports = &.{
+            .{ .module = "host", .name = "table", .desc = .{ .table = .{ .elem = elem, .limits = .{ .min = 1 } } } },
+            .{ .module = "host", .name = "value", .desc = .{ .global = .{ .val = elem, .mut = .immutable } } },
+        },
+        .tables = &.{.{ .elem = elem, .limits = .{ .min = 1 }, .init_expr = &.{ 0x23, 0, 0x0b } }},
+    };
+    _ = try validateModule(arena.allocator(), &module);
 }
 
 test "wasm validator: scoring legacy element forms retain non-nullable function references" {

@@ -2,12 +2,13 @@
 
 Scored by `zig build wasm-testsuite -Dwasm-corpus=vendor/wasm-testsuite`
 against the official WebAssembly spec testsuite (the `.wast` corpus,
-preprocessed with `wast2json --enable-tail-call --enable-relaxed-simd
---enable-memory64 --enable-extended-const --enable-multi-memory
---enable-function-references`). Each supported binary `module`, assertion,
-and `action` command is a plain pass or fail. A module must decode, validate,
-link, initialize, and run its start function successfully, even if no later
-assertion uses it. Registers are unscored. Explicit skips cover
+preprocessed by `tools/wasm-testsuite-gen.sh`, which selects feature flags
+for the installed `wast2json`). Each supported binary `module`, `instance`,
+assertion, and `action` command is a plain pass or fail. Ordinary modules
+must decode, validate, link, initialize, and run their start function,
+even if no later assertion uses them. Definition-only modules decode and
+validate without instantiation; explicit instances create fresh state.
+Registers are unscored. Explicit skips cover
 `assert_unlinkable`, text/quoted modules, unsupported script commands, and
 value forms the harness cannot compare. A decoder, validator, or start
 failure in a positive module command is a failure, never an implicit skip.
@@ -16,8 +17,8 @@ failure in a positive module command is a failure, never an implicit skip.
 passing / (passing + failing)` — the fraction of *scored* commands that
 pass, not the fraction of all WebAssembly implemented. Proposal files this
 `wast2json` cannot lower are logged conversion exclusions; they do not enter
-the command counts. This includes unimplemented WasmGC and the current exception-handling
-text syntax; exception handling is implemented and covered by engine unit tests.
+the command counts. These exclusions depend on the installed wabt version;
+unimplemented WasmGC remains outside the enabled conversion features.
 
 Expected uninstantiability requires a genuine trap or Wasm exception during
 initialization/start. Missing files, corrupt manifests, and reported allocation
@@ -38,17 +39,25 @@ zeros. The score below is unchanged under these stricter checks.
 
 | passing | failing | pass% | skipped | files |
 |---|---|---|---|---|
-| 60607 | 0 | 100.00 | 1232 | 222 |
+| 61051 | 0 | 100.00 | 1370 | 232 |
 
-The module-inclusive score adds 1,828 previously unscored module commands to
-the prior 58,779 assertion/action tally. Seven of those modules exposed two
-validator bugs: legacy element indices were treated as nullable, and tail-call
-results required exact types instead of allowing reference widening. Both are
-fixed; no previously scored assertion was lost and the skip count is unchanged.
+Measured on native AArch64-macos with wabt 1.0.42 (2026-10-27). Both the
+interpreter and forced Spasm (`--spasm --require-spasm-entry`) pass the same
+61,051 scored commands. Compared with the previous wabt-generated corpus,
+ten additional files contribute 444 scored commands and 138 explicit skips.
+Definition-only modules are validated without instantiation; the newly
+converted table tests exposed and fixed missing non-nullable-initializer checks.
 
-The interpreter and forced-Spasm posture (`--spasm`) reproduce this score on
-native AArch64-macos (2026-10-05). The prior 58,779-command tally also passed
-x86_64-macos under Rosetta (2026-10-01); CI gates both architectures with the
+The earlier module-inclusive score added 1,828 previously unscored module
+commands to the prior 58,779 assertion/action tally. Seven of those modules
+exposed two validator bugs: legacy element indices were treated as nullable,
+and tail-call results required exact types instead of allowing reference
+widening. Both were fixed without losing scored assertions or changing skips.
+
+The interpreter and forced-Spasm posture (`--spasm`) reproduced the earlier
+60,607-command score on native AArch64-macos (2026-10-05). The prior
+58,779-command tally also passed x86_64-macos under Rosetta (2026-10-01);
+CI gates both architectures with the
 module-inclusive accounting. Gating runs add `--require-spasm-entry`; focused target
 tests additionally require generated x86 instance/cache, trap, safe-point,
 self-link, and stable-gate execution. Unsupported x86 opcode families fall
