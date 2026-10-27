@@ -15999,8 +15999,24 @@ test "Number.prototype.toString: small-int cache durable under GC pressure" {
 // the process. The shared `nativeStackNearLimit` guard now surfaces
 // a catchable `RangeError` (matching V8 / JSC) instead of faulting.
 
+fn expectScriptStringOnBoundedStack(source: []const u8, expected: []const u8) !void {
+    const Worker = struct {
+        fn run(src: []const u8, want: []const u8, failure: *?anyerror) void {
+            expectScriptStringWithBuiltins(src, want) catch |err| {
+                failure.* = err;
+            };
+        }
+    };
+    // Exercise exhaustion independently of the test runner's stack limit
+    // and compiler-dependent frame sizes, retaining Debug's 2 MiB red zone.
+    var failure: ?anyerror = null;
+    const thread = try std.Thread.spawn(.{ .stack_size = 4 * 1024 * 1024 }, Worker.run, .{ source, expected, &failure });
+    thread.join();
+    if (failure) |err| return err;
+}
+
 test "JSON.parse: deeply nested array throws RangeError, not a crash" {
-    try expectScriptStringWithBuiltins(
+    try expectScriptStringOnBoundedStack(
         \\const depth = 100000;
         \\const src = "[".repeat(depth) + "]".repeat(depth);
         \\let saw = 'none';
@@ -16010,7 +16026,7 @@ test "JSON.parse: deeply nested array throws RangeError, not a crash" {
 }
 
 test "JSON.parse: deeply nested object throws RangeError" {
-    try expectScriptStringWithBuiltins(
+    try expectScriptStringOnBoundedStack(
         \\const depth = 100000;
         \\let src = '';
         \\for (let i = 0; i < depth; i++) src += '{"a":';
