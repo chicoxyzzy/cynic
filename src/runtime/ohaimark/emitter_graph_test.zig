@@ -1066,13 +1066,13 @@ fn executeNative(
 fn executeEntry(entry: NativeEntry, realm: *Realm, frame: *lantern.CallFrame) u32 {
     const result_bits = entry(realm, frame, frame.registers.ptr);
     if (result_bits == codegen.safepoint_sentinel_bits) {
-        return @intFromEnum(codegen.EntryResult.safe_point);
+        return @backingInt(codegen.EntryResult.safe_point);
     }
     if (result_bits == codegen.resume_sentinel_bits) {
-        return @intFromEnum(codegen.EntryResult.resume_interp);
+        return @backingInt(codegen.EntryResult.resume_interp);
     }
     frame.accumulator = .{ .bits = result_bits };
-    return @intFromEnum(codegen.EntryResult.done);
+    return @backingInt(codegen.EntryResult.done);
 }
 
 fn findNode(native: *const NativeGraph, kind: ir.NodeKind) !ir.ValueId {
@@ -1262,7 +1262,7 @@ test "Ohaimark AArch64 graph executes checked int32 add" {
     defer testing.allocator.free(registers);
     var frame = testFrame(&chunk, registers);
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.done),
+        @backingInt(codegen.EntryResult.done),
         try executeNative(&native, &realm, &frame),
     );
     try testing.expectEqual(Value.fromInt32(11).bits, frame.accumulator.bits);
@@ -1297,7 +1297,7 @@ test "Ohaimark AArch64 graph executes checked int32 sub and mul" {
         defer testing.allocator.free(registers);
         var frame = testFrame(&chunk, registers);
         try testing.expectEqual(
-            @intFromEnum(codegen.EntryResult.done),
+            @backingInt(codegen.EntryResult.done),
             try executeNative(&native, &realm, &frame),
         );
         try testing.expectEqual(Value.fromInt32(case.expected).bits, frame.accumulator.bits);
@@ -1323,7 +1323,7 @@ test "Ohaimark AArch64 graph executes exact int32 division" {
     defer testing.allocator.free(registers);
     var frame = testFrame(&chunk, registers);
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.done),
+        @backingInt(codegen.EntryResult.done),
         try executeNative(&native, &realm, &frame),
     );
     try testing.expectEqual(Value.fromInt32(42).bits, frame.accumulator.bits);
@@ -1361,7 +1361,7 @@ test "Ohaimark AArch64 int32 division guards every non-int32 result" {
         defer testing.allocator.free(registers);
         var frame = testFrame(&chunk, registers);
         try testing.expectEqual(
-            @intFromEnum(codegen.EntryResult.resume_interp),
+            @backingInt(codegen.EntryResult.resume_interp),
             try executeNative(&native, &realm, &frame),
         );
         try testing.expectEqual(native.graph.nodes[div_id].bytecode_offset, frame.ip);
@@ -1433,7 +1433,7 @@ test "Ohaimark AArch64 profiled Number shape executes and deopts exactly" {
     frame.registers[binary.lhs] = Value.fromDouble(7.5);
     frame.registers[binary.rhs] = Value.fromInt32(2);
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.done),
+        @backingInt(codegen.EntryResult.done),
         executeEntry(entry, &realm, &frame),
     );
     try testing.expectEqual(Value.fromDouble(3.75).bits, frame.accumulator.bits);
@@ -1442,7 +1442,7 @@ test "Ohaimark AArch64 profiled Number shape executes and deopts exactly" {
     frame.registers[binary.lhs] = Value.fromInt32(7);
     frame.registers[binary.rhs] = Value.fromDouble(2.5);
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.resume_interp),
+        @backingInt(codegen.EntryResult.resume_interp),
         executeEntry(entry, &realm, &frame),
     );
     try testing.expectEqual(native.graph.nodes[div_id].bytecode_offset, frame.ip);
@@ -1535,7 +1535,7 @@ test "Ohaimark AArch64 tagged Number arithmetic handles finite and infinite path
             frame.registers[binary.lhs] = case.lhs;
             frame.registers[binary.rhs] = case.rhs;
             try testing.expectEqual(
-                @intFromEnum(codegen.EntryResult.done),
+                @backingInt(codegen.EntryResult.done),
                 executeEntry(entry, &realm, &frame),
             );
             try testing.expectEqual(case.expected.bits, frame.accumulator.bits);
@@ -1603,7 +1603,7 @@ test "Ohaimark AArch64 tagged Number arithmetic deopts NaN and coercion exactly"
             frame.registers[binary.lhs] = case.lhs;
             frame.registers[binary.rhs] = case.rhs;
             try testing.expectEqual(
-                @intFromEnum(codegen.EntryResult.resume_interp),
+                @backingInt(codegen.EntryResult.resume_interp),
                 executeEntry(entry, &realm, &frame),
             );
             try testing.expectEqual(native.graph.nodes[node_id].bytecode_offset, frame.ip);
@@ -1632,7 +1632,7 @@ test "Ohaimark AArch64 graph branches on a checked int32 result" {
         defer testing.allocator.free(registers);
         var frame = testFrame(&chunk, registers);
         try testing.expectEqual(
-            @intFromEnum(codegen.EntryResult.done),
+            @backingInt(codegen.EntryResult.done),
             try executeNative(&native, &realm, &frame),
         );
         try testing.expectEqual(Value.fromInt32(case.expected).bits, frame.accumulator.bits);
@@ -1850,7 +1850,7 @@ test "Ohaimark AArch64 executes every fused strict equality branch width" {
             frame.registers[branch_chunk.rhs] = Value.fromInt32(if (equal) 7 else 8);
 
             try testing.expectEqual(
-                @intFromEnum(codegen.EntryResult.done),
+                @backingInt(codegen.EntryResult.done),
                 try executeNative(&native, &realm, &frame),
             );
             const takes_branch = (op.branchInfo().?.canonical == .jmp_if_strict_eq) == equal;
@@ -1945,7 +1945,7 @@ test "Ohaimark AArch64 executes strict inequality for int32 operands" {
         frame.registers[comparison.rhs] = Value.fromInt32(if (equal) 7 else 8);
 
         try testing.expectEqual(
-            @intFromEnum(codegen.EntryResult.done),
+            @backingInt(codegen.EntryResult.done),
             try executeNative(&native, &realm, &frame),
         );
         try testing.expectEqual(Value.fromBool(!equal).bits, frame.accumulator.bits);
@@ -1970,7 +1970,7 @@ test "Ohaimark AArch64 strict inequality deopts non-int32 operands at the exact 
     frame.registers[comparison.rhs] = rhs;
 
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.resume_interp),
+        @backingInt(codegen.EntryResult.resume_interp),
         try executeNative(&native, &realm, &frame),
     );
     try testing.expectEqual(comparison.comparison_pc, frame.ip);
@@ -2055,7 +2055,7 @@ test "Ohaimark AArch64 executes checked relational comparisons for int32 operand
         frame.registers[comparison.rhs] = Value.fromInt32(case.rhs);
 
         try testing.expectEqual(
-            @intFromEnum(codegen.EntryResult.done),
+            @backingInt(codegen.EntryResult.done),
             try executeNative(&native, &realm, &frame),
         );
         try testing.expectEqual(Value.fromBool(case.expected).bits, frame.accumulator.bits);
@@ -2085,7 +2085,7 @@ test "Ohaimark AArch64 relational comparisons deopt non-int32 operands at the ex
         frame.registers[comparison.rhs] = rhs;
 
         try testing.expectEqual(
-            @intFromEnum(codegen.EntryResult.resume_interp),
+            @backingInt(codegen.EntryResult.resume_interp),
             try executeNative(&native, &realm, &frame),
         );
         try testing.expectEqual(comparison.comparison_pc, frame.ip);
@@ -2181,7 +2181,7 @@ test "Ohaimark AArch64 executes every fused relational branch width" {
             frame.registers[branch_chunk.rhs] = Value.fromInt32(case.rhs);
 
             try testing.expectEqual(
-                @intFromEnum(codegen.EntryResult.done),
+                @backingInt(codegen.EntryResult.done),
                 try executeNative(&native, &realm, &frame),
             );
             try testing.expectEqual(
@@ -2217,7 +2217,7 @@ test "Ohaimark AArch64 fused relational branches deopt non-int32 operands at the
         frame.registers[branch_chunk.rhs] = rhs;
 
         try testing.expectEqual(
-            @intFromEnum(codegen.EntryResult.resume_interp),
+            @backingInt(codegen.EntryResult.resume_interp),
             try executeNative(&native, &realm, &frame),
         );
         try testing.expectEqual(branch_chunk.branch_pc, frame.ip);
@@ -2289,7 +2289,7 @@ test "Ohaimark AArch64 allocates fused dense array literals through rooted frame
     frame.registers[literal.base + 2] = second;
 
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.done),
+        @backingInt(codegen.EntryResult.done),
         try executeNative(&native, &realm, frame),
     );
     try scope.push(frame.accumulator);
@@ -2350,7 +2350,7 @@ test "Ohaimark AArch64 executes logical not for Boolean input" {
         frame.accumulator = Value.fromBool(input);
 
         try testing.expectEqual(
-            @intFromEnum(codegen.EntryResult.done),
+            @backingInt(codegen.EntryResult.done),
             try executeNative(&native, &realm, &frame),
         );
         try testing.expectEqual(Value.fromBool(!input).bits, frame.accumulator.bits);
@@ -2373,7 +2373,7 @@ test "Ohaimark AArch64 logical not deopts non-Boolean input at the exact opcode"
     frame.accumulator = input;
 
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.resume_interp),
+        @backingInt(codegen.EntryResult.resume_interp),
         try executeNative(&native, &realm, &frame),
     );
     try testing.expectEqual(@as(u32, 0), frame.ip);
@@ -2424,7 +2424,7 @@ test "Ohaimark direct entry recovery eliminates homes and reconstructs cycles" {
     frame.registers[cycle.rhs] = rhs;
 
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.resume_interp),
+        @backingInt(codegen.EntryResult.resume_interp),
         try executeNative(&native, &realm, &frame),
     );
     try testing.expectEqual(cycle.guard_pc, frame.ip);
@@ -2451,7 +2451,7 @@ test "Ohaimark AArch64 backedge safepoint exhausts fuel with exact loop-header s
     realm.step_budget = 0;
 
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.safe_point),
+        @backingInt(codegen.EntryResult.safe_point),
         try executeNative(&native, &realm, &frame),
     );
     try testing.expectEqual(@as(u64, 0), realm.step_budget);
@@ -2483,7 +2483,7 @@ test "Ohaimark AArch64 backedge safepoint fast path completes and consumes one u
     realm.step_budget = 5;
 
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.done),
+        @backingInt(codegen.EntryResult.done),
         try executeNative(&native, &realm, &frame),
     );
     try testing.expectEqual(@as(u64, 4), realm.step_budget);
@@ -2507,7 +2507,7 @@ test "Ohaimark AArch64 backedge safepoint preserves disabled fuel" {
     realm.step_budget = std.math.maxInt(u64);
 
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.done),
+        @backingInt(codegen.EntryResult.done),
         try executeNative(&native, &realm, &frame),
     );
     try testing.expectEqual(std.math.maxInt(u64), realm.step_budget);
@@ -2531,7 +2531,7 @@ test "Ohaimark AArch64 backedge safepoint preserves cooperative interrupt state"
     realm.requestInterrupt();
 
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.safe_point),
+        @backingInt(codegen.EntryResult.safe_point),
         try executeNative(&native, &realm, &frame),
     );
     try testing.expectEqual(budget, realm.step_budget);
@@ -2559,7 +2559,7 @@ test "Ohaimark AArch64 backedge safepoint defers interrupt hooks to Lantern" {
     realm.setInterruptHook(countingIdleHook, &polls);
 
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.safe_point),
+        @backingInt(codegen.EntryResult.safe_point),
         try executeNative(&native, &realm, &frame),
     );
     try testing.expectEqual(@as(u32, 0), polls);
@@ -2591,7 +2591,7 @@ test "Ohaimark AArch64 GC safepoint transfers a tagged root before collection" {
     const budget = realm.step_budget;
 
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.safe_point),
+        @backingInt(codegen.EntryResult.safe_point),
         try executeNative(&native, &realm, &frame),
     );
     try testing.expectEqual(budget, realm.step_budget);
@@ -2717,7 +2717,7 @@ test "Ohaimark AArch64 rooted entry environment allocation preserves frame roots
     frame.registers[root_register] = heap_mod.taggedObject(root);
 
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.done),
+        @backingInt(codegen.EntryResult.done),
         try executeNative(&native, &realm, frame),
     );
     try testing.expectEqual(heap_mod.taggedObject(root).bits, frame.accumulator.bits);
@@ -2819,7 +2819,7 @@ test "Ohaimark AArch64 rooted mid-body environment allocation preserves live val
     frame.registers[root_register] = heap_mod.taggedObject(root);
 
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.done),
+        @backingInt(codegen.EntryResult.done),
         try executeNative(&native, &realm, frame),
     );
     try testing.expectEqual(heap_mod.taggedObject(root).bits, frame.accumulator.bits);
@@ -2864,7 +2864,7 @@ test "Ohaimark AArch64 environment store preserves the accumulator and writes th
     frame.registers[root_register] = heap_mod.taggedObject(root);
 
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.done),
+        @backingInt(codegen.EntryResult.done),
         try executeNative(&native, &realm, &frame),
     );
     try testing.expectEqual(heap_mod.taggedObject(root).bits, frame.accumulator.bits);
@@ -2902,7 +2902,7 @@ test "Ohaimark AArch64 environment helper failure restores the pre-operation fra
     frame.registers[root_register] = heap_mod.taggedObject(root);
 
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.resume_interp),
+        @backingInt(codegen.EntryResult.resume_interp),
         try executeNative(&native, &realm, &frame),
     );
     try testing.expectEqual(native.graph.nodes[store_node].bytecode_offset, frame.ip);
@@ -2940,7 +2940,7 @@ test "Ohaimark AArch64 LdaArguments preserves incoming roots across allocation" 
     frame.registers[1] = heap_mod.taggedObject(second);
 
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.done),
+        @backingInt(codegen.EntryResult.done),
         try executeNative(&native, &realm, frame),
     );
     const arguments = heap_mod.valueAsPlainObject(frame.accumulator) orelse
@@ -2980,7 +2980,7 @@ test "Ohaimark AArch64 static object literals survive allocation pressure" {
         const frame = &frames.items[0];
 
         try testing.expectEqual(
-            @intFromEnum(codegen.EntryResult.done),
+            @backingInt(codegen.EntryResult.done),
             try executeNative(&native, &realm, frame),
         );
         const object = heap_mod.valueAsPlainObject(frame.accumulator) orelse
@@ -3005,7 +3005,7 @@ test "Ohaimark AArch64 static object literals survive allocation pressure" {
         const frame = &frames.items[0];
 
         try testing.expectEqual(
-            @intFromEnum(codegen.EntryResult.done),
+            @backingInt(codegen.EntryResult.done),
             try executeNative(&native, &realm, frame),
         );
         const object = heap_mod.valueAsPlainObject(frame.accumulator) orelse
@@ -3048,7 +3048,7 @@ test "Ohaimark AArch64 ordinary functions retain captured environments" {
     frame.env = environment;
 
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.done),
+        @backingInt(codegen.EntryResult.done),
         try executeNative(&native, &realm, frame),
     );
     const function = heap_mod.valueAsFunction(frame.accumulator) orelse
@@ -3108,7 +3108,7 @@ test "Ohaimark AArch64 entry zero environment preserves lexical depth" {
     frame.env = parent;
 
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.done),
+        @backingInt(codegen.EntryResult.done),
         try executeNative(&native, &realm, &frame),
     );
     try testing.expectEqual(Value.fromInt32(73).bits, frame.accumulator.bits);
@@ -3133,7 +3133,7 @@ test "Ohaimark AArch64 frame this load guards derived-constructor state" {
     var frame = testFrame(&chunk, registers);
     frame.this_value = Value.fromInt32(42);
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.done),
+        @backingInt(codegen.EntryResult.done),
         try executeNative(&native, &realm, &frame),
     );
     try testing.expectEqual(Value.fromInt32(42).bits, frame.accumulator.bits);
@@ -3144,7 +3144,7 @@ test "Ohaimark AArch64 frame this load guards derived-constructor state" {
     frame.this_value = Value.fromInt32(77);
     frame.super_called_cell = &super_called;
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.resume_interp),
+        @backingInt(codegen.EntryResult.resume_interp),
         try executeNative(&native, &realm, &frame),
     );
     try testing.expectEqual(native.graph.nodes[node_id].bytecode_offset, frame.ip);
@@ -3171,7 +3171,7 @@ test "Ohaimark AArch64 inherited environment load walks and guards the chain" {
     var frame = testFrame(&chunk, registers);
     frame.env = inner;
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.done),
+        @backingInt(codegen.EntryResult.done),
         try executeNative(&native, &realm, &frame),
     );
     try testing.expectEqual(Value.fromInt32(42).bits, frame.accumulator.bits);
@@ -3179,7 +3179,7 @@ test "Ohaimark AArch64 inherited environment load walks and guards the chain" {
     frame = testFrame(&chunk, registers);
     frame.accumulator = Value.null_;
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.resume_interp),
+        @backingInt(codegen.EntryResult.resume_interp),
         try executeNative(&native, &realm, &frame),
     );
     try testing.expectEqual(native.graph.nodes[node_id].bytecode_offset, frame.ip);
@@ -3215,7 +3215,7 @@ test "Ohaimark AArch64 global load guards live target shape and declaration revi
     defer testing.allocator.free(registers);
     var frame = testFrame(&chunk, registers);
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.done),
+        @backingInt(codegen.EntryResult.done),
         try executeNative(&native, &realm, &frame),
     );
     try testing.expectEqual(Value.fromInt32(42).bits, frame.accumulator.bits);
@@ -3237,7 +3237,7 @@ test "Ohaimark AArch64 global load guards live target shape and declaration revi
     defer testing.allocator.free(or_undefined_registers);
     var or_undefined_frame = testFrame(&or_undefined_chunk, or_undefined_registers);
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.done),
+        @backingInt(codegen.EntryResult.done),
         try executeNative(&or_undefined_native, &realm, &or_undefined_frame),
     );
     try testing.expectEqual(Value.fromInt32(42).bits, or_undefined_frame.accumulator.bits);
@@ -3247,7 +3247,7 @@ test "Ohaimark AArch64 global load guards live target shape and declaration revi
     frame = testFrame(&chunk, registers);
     frame.accumulator = Value.null_;
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.resume_interp),
+        @backingInt(codegen.EntryResult.resume_interp),
         try executeNative(&native, &realm, &frame),
     );
     try testing.expectEqual(native.graph.nodes[node_id].bytecode_offset, frame.ip);
@@ -3280,7 +3280,7 @@ test "Ohaimark AArch64 global own-data stores select the running realm and repla
     var frame = testFrame(&chunk, registers);
     frame.accumulator = Value.fromInt32(42);
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.done),
+        @backingInt(codegen.EntryResult.done),
         try executeNative(&native, &realm, &frame),
     );
     try testing.expectEqual(Value.fromInt32(42).bits, frame.accumulator.bits);
@@ -3298,7 +3298,7 @@ test "Ohaimark AArch64 global own-data stores select the running realm and repla
     frame.accumulator = Value.fromInt32(66);
     frame.running_realm = &other_realm;
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.done),
+        @backingInt(codegen.EntryResult.done),
         try executeNative(&native, &realm, &frame),
     );
     try testing.expectEqual(Value.fromInt32(42).bits, realm.globals.get("ohaimarkGlobal").?.bits);
@@ -3317,7 +3317,7 @@ test "Ohaimark AArch64 global own-data stores select the running realm and repla
     frame.accumulator = Value.fromInt32(77);
     frame.running_realm = &lexical_realm;
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.resume_interp),
+        @backingInt(codegen.EntryResult.resume_interp),
         try executeNative(&native, &realm, &frame),
     );
     try testing.expectEqual(native.graph.nodes[node_id].bytecode_offset, frame.ip);
@@ -3342,7 +3342,7 @@ test "Ohaimark AArch64 global own-data stores select the running realm and repla
     frame.accumulator = Value.fromInt32(88);
     frame.running_realm = &frozen_realm;
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.resume_interp),
+        @backingInt(codegen.EntryResult.resume_interp),
         try executeNative(&native, &realm, &frame),
     );
     try testing.expectEqual(native.graph.nodes[node_id].bytecode_offset, frame.ip);
@@ -3365,7 +3365,7 @@ test "Ohaimark AArch64 global own-data stores select the running realm and repla
         frame = testFrame(&chunk, registers);
         frame.accumulator = value;
         try testing.expectEqual(
-            @intFromEnum(codegen.EntryResult.done),
+            @backingInt(codegen.EntryResult.done),
             try executeNative(&native, &realm, &frame),
         );
         break :blk value;
@@ -3392,7 +3392,7 @@ test "Ohaimark AArch64 global lexical slot load guards the live slice" {
     defer testing.allocator.free(registers);
     var frame = testFrame(&chunk, registers);
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.done),
+        @backingInt(codegen.EntryResult.done),
         try executeNative(&native, &realm, &frame),
     );
     try testing.expectEqual(Value.fromInt32(42).bits, frame.accumulator.bits);
@@ -3403,7 +3403,7 @@ test "Ohaimark AArch64 global lexical slot load guards the live slice" {
     frame.accumulator = Value.null_;
     frame.running_realm = &empty_realm;
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.resume_interp),
+        @backingInt(codegen.EntryResult.resume_interp),
         try executeNative(&native, &realm, &frame),
     );
     try testing.expectEqual(native.graph.nodes[node_id].bytecode_offset, frame.ip);
@@ -3427,7 +3427,7 @@ test "Ohaimark AArch64 global lexical slot stores preserve bindings and replay f
     defer testing.allocator.free(init_registers);
     var init_frame = testFrame(&init_chunk, init_registers);
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.done),
+        @backingInt(codegen.EntryResult.done),
         try executeNative(&init_native, &init_realm, &init_frame),
     );
     try testing.expectEqual(Value.fromInt32(42).bits, init_frame.accumulator.bits);
@@ -3438,7 +3438,7 @@ test "Ohaimark AArch64 global lexical slot stores preserve bindings and replay f
     init_frame = testFrame(&init_chunk, init_registers);
     init_frame.running_realm = &missing_realm;
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.resume_interp),
+        @backingInt(codegen.EntryResult.resume_interp),
         try executeNative(&init_native, &init_realm, &init_frame),
     );
     try testing.expectEqual(init_native.graph.nodes[init_node].bytecode_offset, init_frame.ip);
@@ -3459,7 +3459,7 @@ test "Ohaimark AArch64 global lexical slot stores preserve bindings and replay f
     defer testing.allocator.free(store_registers);
     var store_frame = testFrame(&store_chunk, store_registers);
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.done),
+        @backingInt(codegen.EntryResult.done),
         try executeNative(&store_native, &store_realm, &store_frame),
     );
     try testing.expectEqual(Value.fromInt32(77).bits, store_frame.accumulator.bits);
@@ -3473,7 +3473,7 @@ test "Ohaimark AArch64 global lexical slot stores preserve bindings and replay f
     store_frame = testFrame(&store_chunk, store_registers);
     store_frame.running_realm = &const_realm;
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.resume_interp),
+        @backingInt(codegen.EntryResult.resume_interp),
         try executeNative(&store_native, &store_realm, &store_frame),
     );
     try testing.expectEqual(store_native.graph.nodes[store_node].bytecode_offset, store_frame.ip);
@@ -3503,7 +3503,7 @@ test "Ohaimark AArch64 pops allocated environments and elides paired empty scope
     var allocated_frame = testFrame(&allocated_chunk, allocated_registers);
     allocated_frame.env = outer;
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.done),
+        @backingInt(codegen.EntryResult.done),
         try executeNative(&allocated_native, &realm, &allocated_frame),
     );
     try testing.expect(allocated_frame.env == outer);
@@ -3519,7 +3519,7 @@ test "Ohaimark AArch64 pops allocated environments and elides paired empty scope
     var empty_frame = testFrame(&empty_chunk, empty_registers);
     empty_frame.env = outer;
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.done),
+        @backingInt(codegen.EntryResult.done),
         try executeNative(&empty_native, &realm, &empty_frame),
     );
     try testing.expect(empty_frame.env == outer);
@@ -3558,7 +3558,7 @@ test "Ohaimark AArch64 own named load guards live IC state" {
     const entry = try installNative(&native, &frame, &machine, &executable);
 
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.done),
+        @backingInt(codegen.EntryResult.done),
         executeEntry(entry, &realm, &frame),
     );
     try testing.expectEqual(Value.fromInt32(42).bits, frame.accumulator.bits);
@@ -3566,7 +3566,7 @@ test "Ohaimark AArch64 own named load guards live IC state" {
     frame = testFrame(&chunk, registers);
     frame.registers[0] = Value.fromInt32(5);
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.resume_interp),
+        @backingInt(codegen.EntryResult.resume_interp),
         executeEntry(entry, &realm, &frame),
     );
     try testing.expectEqual(native.graph.nodes[load_id].bytecode_offset, frame.ip);
@@ -3578,7 +3578,7 @@ test "Ohaimark AArch64 own named load guards live IC state" {
     frame = testFrame(&chunk, registers);
     frame.registers[0] = heap_mod.taggedObject(other);
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.resume_interp),
+        @backingInt(codegen.EntryResult.resume_interp),
         executeEntry(entry, &realm, &frame),
     );
     try testing.expectEqual(native.graph.nodes[load_id].bytecode_offset, frame.ip);
@@ -3590,7 +3590,7 @@ test "Ohaimark AArch64 own named load guards live IC state" {
     frame.registers[0] = heap_mod.taggedObject(receiver);
     chunk.inline_load_caches[0].invalidate();
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.resume_interp),
+        @backingInt(codegen.EntryResult.resume_interp),
         executeEntry(entry, &realm, &frame),
     );
     try testing.expectEqual(heap_mod.taggedObject(receiver).bits, frame.accumulator.bits);
@@ -3638,7 +3638,7 @@ test "Ohaimark AArch64 own named store guards live IC state and preserves barrie
     const entry = try installNative(&native, &frame, &machine, &executable);
 
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.done),
+        @backingInt(codegen.EntryResult.done),
         executeEntry(entry, &realm, &frame),
     );
     try testing.expectEqual(Value.fromInt32(42).bits, receiver.slotAt(slot).bits);
@@ -3657,7 +3657,7 @@ test "Ohaimark AArch64 own named store guards live IC state and preserves barrie
         frame.registers[0] = receiver_value;
         frame.accumulator = value;
         try testing.expectEqual(
-            @intFromEnum(codegen.EntryResult.done),
+            @backingInt(codegen.EntryResult.done),
             executeEntry(entry, &realm, &frame),
         );
         break :blk value;
@@ -3673,7 +3673,7 @@ test "Ohaimark AArch64 own named store guards live IC state and preserves barrie
     frame.registers[0] = receiver_value;
     frame.accumulator = Value.fromInt32(88);
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.resume_interp),
+        @backingInt(codegen.EntryResult.resume_interp),
         executeEntry(entry, &realm, &frame),
     );
     try testing.expectEqual(native.graph.nodes[store_id].bytecode_offset, frame.ip);
@@ -3693,7 +3693,7 @@ test "Ohaimark AArch64 own named store guards live IC state and preserves barrie
     frame.registers[0] = receiver_value;
     frame.accumulator = Value.fromInt32(99);
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.resume_interp),
+        @backingInt(codegen.EntryResult.resume_interp),
         executeEntry(entry, &realm, &frame),
     );
     try testing.expectEqual(native.graph.nodes[store_id].bytecode_offset, frame.ip);
@@ -3747,7 +3747,7 @@ test "Ohaimark AArch64 computed own load guards key and live IC state" {
     const entry = try installNative(&native, &frame, &machine, &executable);
 
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.done),
+        @backingInt(codegen.EntryResult.done),
         executeEntry(entry, &realm, &frame),
     );
     try testing.expectEqual(Value.fromInt32(42).bits, frame.accumulator.bits);
@@ -3758,7 +3758,7 @@ test "Ohaimark AArch64 computed own load guards key and live IC state" {
     frame.registers[0] = heap_mod.taggedObject(receiver);
     frame.accumulator = key_y;
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.resume_interp),
+        @backingInt(codegen.EntryResult.resume_interp),
         executeEntry(entry, &realm, &frame),
     );
     try testing.expectEqual(native.graph.nodes[load_id].bytecode_offset, frame.ip);
@@ -3775,7 +3775,7 @@ test "Ohaimark AArch64 computed own load guards key and live IC state" {
     frame.registers[0] = heap_mod.taggedObject(receiver);
     frame.accumulator = key_y;
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.resume_interp),
+        @backingInt(codegen.EntryResult.resume_interp),
         executeEntry(entry, &realm, &frame),
     );
     try testing.expectEqual(key_y.bits, frame.accumulator.bits);
@@ -3825,7 +3825,7 @@ test "Ohaimark AArch64 computed own store guards value and live IC state" {
     const entry = try installNative(&native, &frame, &machine, &executable);
 
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.done),
+        @backingInt(codegen.EntryResult.done),
         executeEntry(entry, &realm, &frame),
     );
     try testing.expectEqual(Value.fromInt32(42).bits, frame.accumulator.bits);
@@ -3838,7 +3838,7 @@ test "Ohaimark AArch64 computed own store guards value and live IC state" {
     frame.registers[1] = key_y;
     frame.registers[2] = Value.fromInt32(99);
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.resume_interp),
+        @backingInt(codegen.EntryResult.resume_interp),
         executeEntry(entry, &realm, &frame),
     );
     try testing.expectEqual(native.graph.nodes[store_id].bytecode_offset, frame.ip);
@@ -3858,7 +3858,7 @@ test "Ohaimark AArch64 computed own store guards value and live IC state" {
     frame.registers[1] = key_y;
     frame.registers[2] = Value.fromInt32(100);
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.resume_interp),
+        @backingInt(codegen.EntryResult.resume_interp),
         executeEntry(entry, &realm, &frame),
     );
     try testing.expectEqual(Value.fromInt32(100).bits, frame.accumulator.bits);
@@ -3903,7 +3903,7 @@ test "Ohaimark AArch64 computed own store writes an overflow slot" {
     defer executable.deinit();
     const entry = try installNative(&native, &frame, &machine, &executable);
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.done),
+        @backingInt(codegen.EntryResult.done),
         executeEntry(entry, &realm, &frame),
     );
     try testing.expectEqual(Value.fromInt32(77).bits, frame.accumulator.bits);
@@ -3953,7 +3953,7 @@ test "Ohaimark AArch64 prototype named load guards holder and revision" {
     const entry = try installNative(&native, &frame, &machine, &executable);
 
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.done),
+        @backingInt(codegen.EntryResult.done),
         executeEntry(entry, &realm, &frame),
     );
     try testing.expectEqual(Value.fromInt32(41).bits, frame.accumulator.bits);
@@ -3961,7 +3961,7 @@ test "Ohaimark AArch64 prototype named load guards holder and revision" {
     frame = testFrame(&chunk, registers);
     frame.registers[0] = heap_mod.taggedObject(receiver);
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.done),
+        @backingInt(codegen.EntryResult.done),
         executeEntry(entry, &realm, &frame),
     );
     try testing.expectEqual(Value.fromInt32(42).bits, frame.accumulator.bits);
@@ -3971,7 +3971,7 @@ test "Ohaimark AArch64 prototype named load guards holder and revision" {
     frame = testFrame(&chunk, registers);
     frame.registers[0] = heap_mod.taggedObject(receiver);
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.resume_interp),
+        @backingInt(codegen.EntryResult.resume_interp),
         executeEntry(entry, &realm, &frame),
     );
     try testing.expectEqual(Value.fromInt32(77).bits, (try resumeLantern(&realm, frame)).bits);
@@ -3981,7 +3981,7 @@ test "Ohaimark AArch64 prototype named load guards holder and revision" {
     frame = testFrame(&chunk, registers);
     frame.registers[0] = heap_mod.taggedObject(receiver);
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.done),
+        @backingInt(codegen.EntryResult.done),
         executeEntry(entry, &realm, &frame),
     );
     try testing.expectEqual(Value.fromInt32(77).bits, frame.accumulator.bits);
@@ -3990,7 +3990,7 @@ test "Ohaimark AArch64 prototype named load guards holder and revision" {
     frame = testFrame(&chunk, registers);
     frame.registers[0] = heap_mod.taggedObject(receiver);
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.resume_interp),
+        @backingInt(codegen.EntryResult.resume_interp),
         executeEntry(entry, &realm, &frame),
     );
     try testing.expectEqual(Value.fromInt32(77).bits, (try resumeLantern(&realm, frame)).bits);
@@ -3999,7 +3999,7 @@ test "Ohaimark AArch64 prototype named load guards holder and revision" {
     frame = testFrame(&chunk, registers);
     frame.registers[0] = heap_mod.taggedObject(receiver);
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.resume_interp),
+        @backingInt(codegen.EntryResult.resume_interp),
         executeEntry(entry, &realm, &frame),
     );
     try testing.expectEqual(Value.fromInt32(77).bits, (try resumeLantern(&realm, frame)).bits);
@@ -4026,7 +4026,7 @@ test "Ohaimark AArch64 throw_if_hole preserves values and resumes TDZ throws" {
     var frame = testFrame(&chunk, registers);
     frame.accumulator = Value.fromInt32(42);
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.done),
+        @backingInt(codegen.EntryResult.done),
         try executeNative(&native, &realm, &frame),
     );
     try testing.expectEqual(Value.fromInt32(42).bits, frame.accumulator.bits);
@@ -4034,7 +4034,7 @@ test "Ohaimark AArch64 throw_if_hole preserves values and resumes TDZ throws" {
     frame = testFrame(&chunk, registers);
     frame.accumulator = Value.hole_;
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.resume_interp),
+        @backingInt(codegen.EntryResult.resume_interp),
         try executeNative(&native, &realm, &frame),
     );
     try testing.expectEqual(native.graph.nodes[node_id].bytecode_offset, frame.ip);
@@ -4060,7 +4060,7 @@ test "Ohaimark AArch64 throw replays the exact Lantern frame" {
 
     var frame = testFrame(&throwing.chunk, registers);
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.resume_interp),
+        @backingInt(codegen.EntryResult.resume_interp),
         try executeNative(&native, &realm, &frame),
     );
     try testing.expectEqual(throwing.throw_pc, frame.ip);
@@ -4128,7 +4128,7 @@ test "Ohaimark AArch64 typeof uses realm-cached strings across value kinds" {
     // The lazy cache begins empty. Generated code must reconstruct the
     // original operation so Lantern fills it, then execute directly later.
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.resume_interp),
+        @backingInt(codegen.EntryResult.resume_interp),
         executeEntry(entry, &realm, &frame),
     );
     try testing.expectEqual(native.graph.nodes[node_id].bytecode_offset, frame.ip);
@@ -4141,7 +4141,7 @@ test "Ohaimark AArch64 typeof uses realm-cached strings across value kinds" {
         frame = testFrame(&chunk, &registers);
         frame.accumulator = input;
         try testing.expectEqual(
-            @intFromEnum(codegen.EntryResult.done),
+            @backingInt(codegen.EntryResult.done),
             executeEntry(entry, &realm, &frame),
         );
         try testing.expectEqual(expected.bits, frame.accumulator.bits);
@@ -4191,7 +4191,7 @@ test "Ohaimark AArch64 synthetic named load reads live value and guards mode" {
     const entry = try installNative(&native, &frame, &machine, &executable);
 
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.done),
+        @backingInt(codegen.EntryResult.done),
         executeEntry(entry, &realm, &frame),
     );
     try testing.expectEqual(Value.fromInt32(70).bits, frame.accumulator.bits);
@@ -4199,7 +4199,7 @@ test "Ohaimark AArch64 synthetic named load reads live value and guards mode" {
     frame = testFrame(&chunk, registers);
     frame.registers[0] = heap_mod.taggedObject(receiver);
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.done),
+        @backingInt(codegen.EntryResult.done),
         executeEntry(entry, &realm, &frame),
     );
     try testing.expectEqual(Value.fromInt32(71).bits, frame.accumulator.bits);
@@ -4209,7 +4209,7 @@ test "Ohaimark AArch64 synthetic named load reads live value and guards mode" {
     frame = testFrame(&chunk, registers);
     frame.registers[0] = heap_mod.taggedObject(receiver);
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.resume_interp),
+        @backingInt(codegen.EntryResult.resume_interp),
         executeEntry(entry, &realm, &frame),
     );
     try testing.expectEqual(Value.fromInt32(88).bits, (try resumeLantern(&realm, frame)).bits);
@@ -4244,7 +4244,7 @@ test "Ohaimark AArch64 guard exit reconstructs and resumes Lantern before overfl
     defer testing.allocator.free(registers);
     var frame = testFrame(&chunk, registers);
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.resume_interp),
+        @backingInt(codegen.EntryResult.resume_interp),
         try executeNative(&native, &realm, &frame),
     );
     try testing.expectEqual(native.graph.nodes[add_id].bytecode_offset, frame.ip);
@@ -4320,7 +4320,7 @@ test "Ohaimark AArch64 guard exits cover sub, mul overflow, and negative zero" {
         defer testing.allocator.free(registers);
         var frame = testFrame(&chunk, registers);
         try testing.expectEqual(
-            @intFromEnum(codegen.EntryResult.resume_interp),
+            @backingInt(codegen.EntryResult.resume_interp),
             try executeNative(&native, &realm, &frame),
         );
         try testing.expectEqual(Value.fromInt32(case.rhs).bits, frame.accumulator.bits);
@@ -4476,7 +4476,7 @@ test "Ohaimark AArch64 OSR entry completes a single-backedge loop" {
     realm.step_budget = 10;
 
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.done),
+        @backingInt(codegen.EntryResult.done),
         executeEntry(stub, &realm, &frame),
     );
     try testing.expectEqual(Value.null_.bits, frame.accumulator.bits);
@@ -4534,7 +4534,7 @@ test "Ohaimark AArch64 OSR entry then backedge safepoint restores exact header" 
     realm.step_budget = 0;
 
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.safe_point),
+        @backingInt(codegen.EntryResult.safe_point),
         executeEntry(stub, &realm, &frame),
     );
     try testing.expectEqual(loop.header, frame.ip);
@@ -4564,7 +4564,7 @@ test "Ohaimark AArch64 checked int32 add deopts on overflow" {
     defer testing.allocator.free(registers);
     var frame = testFrame(&chunk, registers);
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.resume_interp),
+        @backingInt(codegen.EntryResult.resume_interp),
         try executeNative(&native, &realm, &frame),
     );
     try testing.expectEqual(native.graph.nodes[add_id].bytecode_offset, frame.ip);
@@ -4651,7 +4651,7 @@ test "Ohaimark AArch64 executes int32 register updates and reuses the binding" {
         frame.registers[update.register] = Value.fromInt32(case.input);
 
         try testing.expectEqual(
-            @intFromEnum(codegen.EntryResult.done),
+            @backingInt(codegen.EntryResult.done),
             try executeNative(&native, &realm, &frame),
         );
         try testing.expectEqual(Value.fromInt32(case.expected).bits, frame.accumulator.bits);
@@ -4696,7 +4696,7 @@ test "Ohaimark AArch64 register updates guard before overwriting a non-int32 res
         frame.registers[update.register] = original;
 
         try testing.expectEqual(
-            @intFromEnum(codegen.EntryResult.resume_interp),
+            @backingInt(codegen.EntryResult.resume_interp),
             try executeNative(&native, &realm, &frame),
         );
         try testing.expectEqual(update.update_pc, frame.ip);
@@ -4757,7 +4757,7 @@ test "Ohaimark AArch64 executes Int32 ToNumeric update sequences" {
         frame.registers[update.register] = Value.fromInt32(case.input);
 
         try testing.expectEqual(
-            @intFromEnum(codegen.EntryResult.done),
+            @backingInt(codegen.EntryResult.done),
             try executeNative(&native, &realm, &frame),
         );
         try testing.expectEqual(Value.fromInt32(case.expected).bits, frame.accumulator.bits);
@@ -4781,7 +4781,7 @@ test "Ohaimark AArch64 compiles consumed postfix ToNumeric updates" {
         frame.registers[0] = Value.fromInt32(41);
 
         try testing.expectEqual(
-            @intFromEnum(codegen.EntryResult.done),
+            @backingInt(codegen.EntryResult.done),
             try executeNative(&native, &realm, &frame),
         );
         try testing.expectEqual(Value.fromInt32(41).bits, frame.accumulator.bits);
@@ -4828,7 +4828,7 @@ test "Ohaimark AArch64 replays ToNumeric before the bump and overflow at the bum
         frame.registers[update.register] = double;
 
         try testing.expectEqual(
-            @intFromEnum(codegen.EntryResult.resume_interp),
+            @backingInt(codegen.EntryResult.resume_interp),
             try executeNative(&native, &realm, &frame),
         );
         try testing.expectEqual(update.to_numeric_pc, frame.ip);
@@ -4840,7 +4840,7 @@ test "Ohaimark AArch64 replays ToNumeric before the bump and overflow at the bum
         const overflow = Value.fromInt32(case.input);
         frame.registers[update.register] = overflow;
         try testing.expectEqual(
-            @intFromEnum(codegen.EntryResult.resume_interp),
+            @backingInt(codegen.EntryResult.resume_interp),
             try executeNative(&native, &realm, &frame),
         );
         try testing.expectEqual(update.update_pc, frame.ip);
@@ -4889,7 +4889,7 @@ test "Ohaimark AArch64 guards ToString and RequireObjectCoercible before Lantern
             Value.fromInt32(17);
         frame.registers[unary.input] = hit;
         try testing.expectEqual(
-            @intFromEnum(codegen.EntryResult.done),
+            @backingInt(codegen.EntryResult.done),
             try executeNative(&native, &realm, &frame),
         );
         try testing.expectEqual(hit.bits, frame.accumulator.bits);
@@ -4898,7 +4898,7 @@ test "Ohaimark AArch64 guards ToString and RequireObjectCoercible before Lantern
         const miss = if (op == .to_string) Value.fromInt32(17) else Value.null_;
         frame.registers[unary.input] = miss;
         try testing.expectEqual(
-            @intFromEnum(codegen.EntryResult.resume_interp),
+            @backingInt(codegen.EntryResult.resume_interp),
             try executeNative(&native, &realm, &frame),
         );
         try testing.expectEqual(unary.operation_pc, frame.ip);
@@ -4991,7 +4991,7 @@ test "Ohaimark AArch64 tail dispatch resumes Lantern with the pre-tail frame" {
         }
 
         try testing.expectEqual(
-            @intFromEnum(codegen.EntryResult.resume_interp),
+            @backingInt(codegen.EntryResult.resume_interp),
             try executeNative(&native, &realm, &frame),
         );
         try testing.expectEqual(tail.tail_pc, frame.ip);
@@ -5039,7 +5039,7 @@ test "Ohaimark AArch64 checked_branch deopts non-int32 condition" {
     var frame = testFrame(&chunk, registers);
     frame.registers[x] = Value.fromDouble(1.5);
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.resume_interp),
+        @backingInt(codegen.EntryResult.resume_interp),
         try executeNative(&native, &realm, &frame),
     );
     try testing.expectEqual(branch_pc, frame.ip);
@@ -5075,7 +5075,7 @@ test "Ohaimark AArch64 checked_branch treats negative int32 as truthy" {
     var frame = testFrame(&chunk, registers);
     frame.registers[x] = Value.fromInt32(-3);
     try testing.expectEqual(
-        @intFromEnum(codegen.EntryResult.done),
+        @backingInt(codegen.EntryResult.done),
         try executeNative(&native, &realm, &frame),
     );
     try testing.expectEqual(Value.fromInt32(11).bits, frame.accumulator.bits);

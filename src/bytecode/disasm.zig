@@ -46,7 +46,7 @@ pub fn dump(allocator: std.mem.Allocator, chunk: *const Chunk) ![]u8 {
     var i: usize = 0;
     while (i < chunk.code.len) {
         const op_byte = chunk.code[i];
-        const op: Op = @enumFromInt(op_byte);
+        const op: Op = @fromBackingInt(@intCast(op_byte));
         const operand_size = Op.operandSize(op);
 
         try buf.append(allocator, '\n');

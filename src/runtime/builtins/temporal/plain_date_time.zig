@@ -781,16 +781,16 @@ fn differenceTemporalDateTime(realm: *Realm, this_value: Value, args: []const Va
     try requireUnitInRange(realm, smallest, .year, .nanosecond);
     // defaultLargestUnit = LargerOfTwoTemporalUnits("day", smallestUnit):
     // the coarser (smaller enum index) of "day" and the smallestUnit.
-    const default_largest: temporal.LargestUnit = @enumFromInt(@min(@intFromEnum(temporal.LargestUnit.day), @intFromEnum(smallest)));
+    const default_largest: temporal.LargestUnit = @fromBackingInt(@intCast(@min(@backingInt(temporal.LargestUnit.day), @backingInt(smallest))));
     const largest = largest_opt orelse default_largest;
-    if (@intFromEnum(largest) > @intFromEnum(smallest)) {
+    if (@backingInt(largest) > @backingInt(smallest)) {
         return throwRangeError(realm, "largestUnit must not be smaller than smallestUnit");
     }
 
     // smallestUnit "day" has no maximum increment; the finer units must
     // divide their next-larger unit evenly (non-inclusive). Calendar units
     // (year/month/week) likewise carry no increment ceiling.
-    if (smallest != .day and @intFromEnum(smallest) >= @intFromEnum(temporal.LargestUnit.day)) {
+    if (smallest != .day and @backingInt(smallest) >= @backingInt(temporal.LargestUnit.day)) {
         if (!temporal.validateRoundingIncrement(increment, differenceDividend(smallest), false)) {
             return throwRangeError(realm, "invalid roundingIncrement for the smallestUnit");
         }
@@ -800,8 +800,8 @@ fn differenceTemporalDateTime(realm: *Realm, this_value: Value, args: []const Va
 
     // Calendar units (year/month/week as either bound) need calendar-aware
     // relative rounding: difference the two wall clocks, then round/bubble.
-    if (@intFromEnum(largest) < @intFromEnum(temporal.LargestUnit.day) or
-        @intFromEnum(smallest) < @intFromEnum(temporal.LargestUnit.day))
+    if (@backingInt(largest) < @backingInt(temporal.LargestUnit.day) or
+        @backingInt(smallest) < @backingInt(temporal.LargestUnit.day))
     {
         const base_diff = if (shared.isComputedCalendar(this_dt.calendar))
             shared.differenceComputedDateTime(this_dt.calendar, this_dt, other_dt, largest)

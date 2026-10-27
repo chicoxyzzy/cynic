@@ -20,7 +20,7 @@
 #   3. ziglang.org itself                         (/builds for dev pins, /download for tagged)
 #
 # Verification: SHA-256 against the embedded known-good table below
-# (refreshed from the release's SHA256SUMS whenever the pin bumps);
+# (refreshed from upstream's release index or the mirror's SHA256SUMS);
 # for a version not in the table, against the release's SHA256SUMS;
 # failing that, minisign against upstream's key if `minisign` is on
 # PATH. An unverifiable tarball is refused unless
@@ -63,11 +63,15 @@ PREFIX="${CYNIC_ZIG_PREFIX:-$HOME/.cache/cynic-zig}"
 DEST="$PREFIX/$VERSION"
 BIN="$DEST/$TARBALL_DIR/zig"
 
-# Known-good SHA-256 per tarball, produced by the mirror-zig-toolchain
-# workflow (which minisign-verifies against upstream's key before
-# hashing). Refresh alongside every .minimum_zig_version bump.
+# Known-good SHA-256 per tarball, from ziglang.org/download/index.json
+# for stable releases or the minisign-verified mirror-zig-toolchain
+# workflow. Refresh alongside every .minimum_zig_version bump.
 embedded_sha256() {
   case "$1" in
+    zig-x86_64-linux-0.17.0.tar.xz)  echo "1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026" ;;
+    zig-aarch64-linux-0.17.0.tar.xz) echo "9e8d11661d4ae3bd57702a3832781e23ad151dde5798e16a5ccd503f65234ff8" ;;
+    zig-aarch64-macos-0.17.0.tar.xz) echo "b607e9b9234790a008116ae5bdb71c6243b84b9fb42a53a9e70fde41c06c536a" ;;
+    zig-x86_64-macos-0.17.0.tar.xz)  echo "4f9a1c5269aa17ebda5e6d3c2b89d6cbf36f7d2b22a0306e9ab98f25f95529c6" ;;
     zig-x86_64-linux-0.17.0-dev.1275+59a628c6d.tar.xz)  echo "04e8baddd0497042889d3ee9ae53238e0655c2b9777039827b131487a7465d16" ;;
     zig-aarch64-linux-0.17.0-dev.1275+59a628c6d.tar.xz) echo "8416c149489e644f81fcb517e9cf0a1e2975fbcc0e05639671054beddbbefcbb" ;;
     zig-aarch64-macos-0.17.0-dev.1275+59a628c6d.tar.xz) echo "cabf8db92c381bda5a160fda8fa54ffa64f0964316c0d5b1dc385a7437e1691b" ;;

@@ -52,7 +52,7 @@ pub const Cond = enum(u4) {
 const xzr: u32 = 31;
 
 inline fn r(reg: Reg) u32 {
-    return @intFromEnum(reg);
+    return @backingInt(reg);
 }
 
 // ---- moves and immediates -------------------------------------------------
@@ -147,7 +147,7 @@ pub fn addsImmW(rd: Reg, rn: Reg, imm12: u12) u32 {
 
 /// CSET Wd, cond — alias of CSINC Wd, WZR, WZR, invert(cond).
 pub fn csetW(rd: Reg, cond: Cond) u32 {
-    const inverted: u32 = @as(u32, @intFromEnum(cond)) ^ 1;
+    const inverted: u32 = @as(u32, @backingInt(cond)) ^ 1;
     return 0x1A9F07E0 | (inverted << 12) | r(rd);
 }
 
@@ -265,7 +265,7 @@ pub const VectorLaneSize = enum(u2) { byte, half, word };
 /// SXTL/UXTL Vd.8H/4S/2D, Vn.8B/4H/2S (SSHLL/USHLL with shift zero).
 pub fn widenLowV128(vd: Reg, vn: Reg, size: VectorLaneSize, signed: bool) u32 {
     const base: u32 = if (signed) 0x0F00A400 else 0x2F00A400;
-    const immh = @as(u32, 8) << @intFromEnum(size);
+    const immh = @as(u32, 8) << @backingInt(size);
     return base | (immh << 16) | (r(vn) << 5) | r(vd);
 }
 
@@ -277,12 +277,12 @@ pub fn extendIntegerV128(vd: Reg, vn: Reg, size: VectorLaneSize, signed: bool, h
 pub fn narrowIntegerV128(vd: Reg, vn: Reg, size: VectorLaneSize, signed: bool, high: bool) u32 {
     const base: u32 = if (signed) 0x0e214800 else 0x2e212800;
     return base | (if (high) @as(u32, 0x40000000) else 0) |
-        (@as(u32, @intFromEnum(size)) << 22) | (r(vn) << 5) | r(vd);
+        (@as(u32, @backingInt(size)) << 22) | (r(vn) << 5) | r(vd);
 }
 
 /// UQXTN: unsigned input and unsigned saturating output; upper half is zero.
 pub fn narrowUnsignedV128(vd: Reg, vn: Reg, size: VectorLaneSize) u32 {
-    return 0x2e214800 | (@as(u32, @intFromEnum(size)) << 22) | (r(vn) << 5) | r(vd);
+    return 0x2e214800 | (@as(u32, @backingInt(size)) << 22) | (r(vn) << 5) | r(vd);
 }
 
 /// FCVTZS/FCVTZU Vd.4S/2D, Vn.4S/2D (NaN -> zero, overflow saturates).
@@ -305,25 +305,25 @@ pub fn convertPrecisionV128(vd: Reg, vn: Reg, promote: bool) u32 {
 /// SADDLP/UADDLP: adjacent source lanes summed into double-width lanes.
 pub fn pairwiseAddLongV128(vd: Reg, vn: Reg, size: VectorLaneSize, signed: bool) u32 {
     const base: u32 = if (signed) 0x4e202800 else 0x6e202800;
-    return base | (@as(u32, @intFromEnum(size)) << 22) | (r(vn) << 5) | r(vd);
+    return base | (@as(u32, @backingInt(size)) << 22) | (r(vn) << 5) | r(vd);
 }
 
 pub const VectorIntegerSize = enum(u2) { byte, half, word, double };
 
 pub fn addSubtractV128(vd: Reg, vn: Reg, vm: Reg, size: VectorIntegerSize, subtract: bool) u32 {
     const base: u32 = if (subtract) 0x6e208400 else 0x4e208400;
-    return base | (@as(u32, @intFromEnum(size)) << 22) | (r(vm) << 16) | (r(vn) << 5) | r(vd);
+    return base | (@as(u32, @backingInt(size)) << 22) | (r(vm) << 16) | (r(vn) << 5) | r(vd);
 }
 
 pub fn multiplyV128(vd: Reg, vn: Reg, vm: Reg, size: VectorLaneSize) u32 {
-    return 0x4e209c00 | (@as(u32, @intFromEnum(size)) << 22) | (r(vm) << 16) | (r(vn) << 5) | r(vd);
+    return 0x4e209c00 | (@as(u32, @backingInt(size)) << 22) | (r(vm) << 16) | (r(vn) << 5) | r(vd);
 }
 
 /// SMULL/UMULL (+2): selected half-width inputs, double-width products.
 pub fn multiplyLongV128(vd: Reg, vn: Reg, vm: Reg, size: VectorLaneSize, signed: bool, high: bool) u32 {
     return 0x0e20c000 | (if (signed) @as(u32, 0) else 0x20000000) |
         (if (high) @as(u32, 0x40000000) else 0) |
-        (@as(u32, @intFromEnum(size)) << 22) | (r(vm) << 16) | (r(vn) << 5) | r(vd);
+        (@as(u32, @backingInt(size)) << 22) | (r(vm) << 16) | (r(vn) << 5) | r(vd);
 }
 
 pub fn addPairwiseV4s(vd: Reg, vn: Reg, vm: Reg) u32 {
@@ -338,7 +338,7 @@ pub fn multiplyQ15V8h(vd: Reg, vn: Reg, vm: Reg) u32 {
 pub fn saturatingAddSubtractV128(vd: Reg, vn: Reg, vm: Reg, size: VectorIntegerSize, signed: bool, subtract: bool) u32 {
     return 0x4e200c00 | (if (signed) @as(u32, 0) else 0x20000000) |
         (if (subtract) @as(u32, 0x2000) else 0) |
-        (@as(u32, @intFromEnum(size)) << 22) | (r(vm) << 16) | (r(vn) << 5) | r(vd);
+        (@as(u32, @backingInt(size)) << 22) | (r(vm) << 16) | (r(vn) << 5) | r(vd);
 }
 
 pub fn populationCountV128(vd: Reg, vn: Reg) u32 {
@@ -346,13 +346,13 @@ pub fn populationCountV128(vd: Reg, vn: Reg) u32 {
 }
 
 pub fn duplicateIntegerV128(vd: Reg, rn: Reg, size: VectorIntegerSize) u32 {
-    return 0x4e000c00 | (@as(u32, 1) << (@as(u5, @intFromEnum(size)) + 16)) | (r(rn) << 5) | r(vd);
+    return 0x4e000c00 | (@as(u32, 1) << (@as(u5, @backingInt(size)) + 16)) | (r(rn) << 5) | r(vd);
 }
 
 /// SSHL/USHL: a negative per-lane count shifts right.
 pub fn shiftIntegerV128(vd: Reg, vn: Reg, vm: Reg, size: VectorIntegerSize, signed: bool) u32 {
     const base: u32 = if (signed) 0x4e204400 else 0x6e204400;
-    return base | (@as(u32, @intFromEnum(size)) << 22) | (r(vm) << 16) | (r(vn) << 5) | r(vd);
+    return base | (@as(u32, @backingInt(size)) << 22) | (r(vm) << 16) | (r(vn) << 5) | r(vd);
 }
 
 pub const VectorComparison = enum { eq, gt, ge };
@@ -360,13 +360,13 @@ pub const VectorComparison = enum { eq, gt, ge };
 pub const FloatUnary = enum(u32) { abs = 0x4ea0f800, neg = 0x6ea0f800, sqrt = 0x6ea1f800 };
 
 pub fn unaryFloatV128(vd: Reg, vn: Reg, double_precision: bool, op: FloatUnary) u32 {
-    return @intFromEnum(op) | (if (double_precision) @as(u32, 0x00400000) else 0) | (r(vn) << 5) | r(vd);
+    return @backingInt(op) | (if (double_precision) @as(u32, 0x00400000) else 0) | (r(vn) << 5) | r(vd);
 }
 
 pub const FloatRound = enum(u32) { ceil = 0x4ea18800, floor = 0x4e219800, trunc = 0x4ea19800, nearest = 0x4e218800 };
 
 pub fn roundFloatV128(vd: Reg, vn: Reg, double_precision: bool, mode: FloatRound) u32 {
-    return @intFromEnum(mode) | (if (double_precision) @as(u32, 0x00400000) else 0) | (r(vn) << 5) | r(vd);
+    return @backingInt(mode) | (if (double_precision) @as(u32, 0x00400000) else 0) | (r(vn) << 5) | r(vd);
 }
 
 /// BSL selects Vn bits where the original Vd mask is set, otherwise Vm.
@@ -382,7 +382,7 @@ pub fn tableLookupV128(vd: Reg, vn: Reg, vm: Reg, two_tables: bool) u32 {
 pub const FloatArithmetic = enum(u32) { add = 0x4e20d400, sub = 0x4ea0d400, mul = 0x6e20dc00, div = 0x6e20fc00 };
 
 pub fn arithmeticFloatV128(vd: Reg, vn: Reg, vm: Reg, double_precision: bool, op: FloatArithmetic) u32 {
-    return @intFromEnum(op) | (if (double_precision) @as(u32, 0x00400000) else 0) | (r(vm) << 16) | (r(vn) << 5) | r(vd);
+    return @backingInt(op) | (if (double_precision) @as(u32, 0x00400000) else 0) | (r(vm) << 16) | (r(vn) << 5) | r(vd);
 }
 
 /// CMEQ / CMGT / CMGE / CMHI / CMHS, one all-ones mask per true lane.
@@ -392,7 +392,7 @@ pub fn compareIntegerV128(vd: Reg, vn: Reg, vm: Reg, size: VectorIntegerSize, re
         .gt => if (signed) 0x4E203400 else 0x6E203400,
         .ge => if (signed) 0x4E203C00 else 0x6E203C00,
     };
-    return base | (@as(u32, @intFromEnum(size)) << 22) | (r(vm) << 16) | (r(vn) << 5) | r(vd);
+    return base | (@as(u32, @backingInt(size)) << 22) | (r(vm) << 16) | (r(vn) << 5) | r(vd);
 }
 
 /// FCMEQ / FCMGT / FCMGE. Unordered lanes yield zero.
@@ -418,7 +418,7 @@ pub fn minMaxFloatV128(vd: Reg, vn: Reg, vm: Reg, double_precision: bool, maximu
 /// ABS/NEG Vd.16B/8H/4S/2D, Vn; wrapping, not saturating.
 pub fn integerUnaryV128(vd: Reg, vn: Reg, size: VectorIntegerSize, negate: bool) u32 {
     const base: u32 = if (negate) 0x6E20B800 else 0x4E20B800;
-    return base | (@as(u32, @intFromEnum(size)) << 22) | (r(vn) << 5) | r(vd);
+    return base | (@as(u32, @backingInt(size)) << 22) | (r(vn) << 5) | r(vd);
 }
 
 /// URHADD Vd.16B/8H, Vn, Vm: unsigned (a + b + 1) / 2.
@@ -430,17 +430,17 @@ pub fn roundingAverageUnsignedV128(vd: Reg, vn: Reg, vm: Reg, halfword: bool) u3
 pub fn minMaxV128(vd: Reg, vn: Reg, vm: Reg, size: VectorLaneSize, signed: bool, maximum: bool) u32 {
     const base: u32 = if (maximum) 0x4E206400 else 0x4E206C00;
     const unsigned_bit: u32 = if (signed) 0 else 0x20000000;
-    return base | unsigned_bit | (@as(u32, @intFromEnum(size)) << 22) | (r(vm) << 16) | (r(vn) << 5) | r(vd);
+    return base | unsigned_bit | (@as(u32, @backingInt(size)) << 22) | (r(vm) << 16) | (r(vn) << 5) | r(vd);
 }
 
 /// UMINV Bd/Hd/Sd, Vn.16B/8H/4S; the scalar result clears all other bits.
 pub fn uminv128(vd: Reg, vn: Reg, size: VectorLaneSize) u32 {
-    return 0x6E31A800 | (@as(u32, @intFromEnum(size)) << 22) | (r(vn) << 5) | r(vd);
+    return 0x6E31A800 | (@as(u32, @backingInt(size)) << 22) | (r(vn) << 5) | r(vd);
 }
 
 /// SSHR by lane_bits - 1 broadcasts each lane's sign into all its bits.
 pub fn sshrSign128(vd: Reg, vn: Reg, size: VectorLaneSize) u32 {
-    const lane_bits = @as(u32, 8) << @intFromEnum(size);
+    const lane_bits = @as(u32, 8) << @backingInt(size);
     return 0x4F000400 | ((lane_bits + 1) << 16) | (r(vn) << 5) | r(vd);
 }
 
@@ -549,7 +549,7 @@ pub fn msub(rd: Reg, rn: Reg, rm: Reg, ra: Reg) u32 {
 /// CSEL Wd, Wn, Wm, cond — Wd = cond ? Wn : Wm. Branchless select,
 /// wasm `select` (cond on top picks the deeper-but-one operand).
 pub fn cselW(rd: Reg, rn: Reg, rm: Reg, cond: Cond) u32 {
-    return 0x1A800000 | (r(rm) << 16) | (@as(u32, @intFromEnum(cond)) << 12) | (r(rn) << 5) | r(rd);
+    return 0x1A800000 | (r(rm) << 16) | (@as(u32, @backingInt(cond)) << 12) | (r(rn) << 5) | r(rd);
 }
 
 /// CSEL Xd, Xn, Xm, cond — the 64-bit select. wasm `select` on an i64 or
@@ -557,7 +557,7 @@ pub fn cselW(rd: Reg, rn: Reg, rm: Reg, cond: Cond) u32 {
 /// bits; the W-form would truncate. Correct for i32 too — its operands are
 /// zero-extended, so the full-width select keeps the high word clear.
 pub fn csel(rd: Reg, rn: Reg, rm: Reg, cond: Cond) u32 {
-    return 0x9A800000 | (r(rm) << 16) | (@as(u32, @intFromEnum(cond)) << 12) | (r(rn) << 5) | r(rd);
+    return 0x9A800000 | (r(rm) << 16) | (@as(u32, @backingInt(cond)) << 12) | (r(rn) << 5) | r(rd);
 }
 
 /// ORR Xd, Xn, Xm
@@ -1103,7 +1103,7 @@ pub fn bl(off_words: i26) u32 {
 /// B.cond #(off_words*4)
 pub fn bCond(cond: Cond, off_words: i19) u32 {
     return 0x54000000 | (@as(u32, @as(u19, @bitCast(off_words))) << 5) |
-        @intFromEnum(cond);
+        @backingInt(cond);
 }
 
 /// CBZ Xt, #(off_words*4)
@@ -1181,7 +1181,7 @@ test "jit asm_aarch64: SIMD float selection encodings" {
 
 test "jit asm_aarch64: SIMD comparison encodings" {
     const expected = [_]u32{ 0x6e318ca3, 0x6e718ca3, 0x6eb18ca3, 0x6ef18ca3 };
-    for (expected, 0..) |word, size| try std.testing.expectEqual(word, compareIntegerV128(.x3, .x5, .x17, @enumFromInt(size), .eq, true));
+    for (expected, 0..) |word, size| try std.testing.expectEqual(word, compareIntegerV128(.x3, .x5, .x17, @fromBackingInt(@intCast(size)), .eq, true));
     try std.testing.expectEqual(@as(u32, 0x4e3134a3), compareIntegerV128(.x3, .x5, .x17, .byte, .gt, true));
     try std.testing.expectEqual(@as(u32, 0x4e713ca3), compareIntegerV128(.x3, .x5, .x17, .half, .ge, true));
     try std.testing.expectEqual(@as(u32, 0x6eb134a3), compareIntegerV128(.x3, .x5, .x17, .word, .gt, false));
@@ -1282,9 +1282,9 @@ test "jit asm_aarch64: SIMD integer arithmetic and shift encodings" {
     const subs = [_]u32{ 0x6e3184a3, 0x6e7184a3, 0x6eb184a3, 0x6ef184a3 };
     const dups = [_]u32{ 0x4e010e23, 0x4e020e23, 0x4e040e23, 0x4e080e23 };
     for (0..4) |size| {
-        try expectEqual(adds[size], addSubtractV128(.x3, .x5, .x17, @enumFromInt(size), false));
-        try expectEqual(subs[size], addSubtractV128(.x3, .x5, .x17, @enumFromInt(size), true));
-        try expectEqual(dups[size], duplicateIntegerV128(.x3, .x17, @enumFromInt(size)));
+        try expectEqual(adds[size], addSubtractV128(.x3, .x5, .x17, @fromBackingInt(@intCast(size)), false));
+        try expectEqual(subs[size], addSubtractV128(.x3, .x5, .x17, @fromBackingInt(@intCast(size)), true));
+        try expectEqual(dups[size], duplicateIntegerV128(.x3, .x17, @fromBackingInt(@intCast(size))));
     }
     try expectEqual(@as(u32, 0x4e719ca3), multiplyV128(.x3, .x5, .x17, .half));
     try expectEqual(@as(u32, 0x4eb19ca3), multiplyV128(.x3, .x5, .x17, .word));

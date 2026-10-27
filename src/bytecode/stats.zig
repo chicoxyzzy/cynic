@@ -51,7 +51,7 @@ pub const StaticStats = struct {
         var pc: usize = 0;
         while (pc < chunk.code.len) {
             if (chunk.code[pc] >= opcode_count) return error.InvalidBytecode;
-            const op: Op = @enumFromInt(chunk.code[pc]);
+            const op: Op = @fromBackingInt(@intCast(chunk.code[pc]));
             const spec = op.spec();
             const size = spec.layout.operandSize();
             const next = std.math.add(usize, pc + 1, size) catch return error.InvalidBytecode;
@@ -59,12 +59,12 @@ pub const StaticStats = struct {
 
             self.instructions += 1;
             self.encoded_bytes += 1 + size;
-            self.opcode_counts[@intFromEnum(op)] += 1;
+            self.opcode_counts[@backingInt(op)] += 1;
 
             var cursor = pc + 1;
             for (spec.layout.operands()) |kind| {
                 const width = classifyOperand(kind, chunk.code, cursor);
-                self.operand_width_counts[@intFromEnum(kind)][@intFromEnum(width)] += 1;
+                self.operand_width_counts[@backingInt(kind)][@backingInt(width)] += 1;
                 cursor += kind.byteSize();
             }
             pc = next;
@@ -72,11 +72,11 @@ pub const StaticStats = struct {
     }
 
     pub fn opcodeCount(self: *const StaticStats, op: Op) u64 {
-        return self.opcode_counts[@intFromEnum(op)];
+        return self.opcode_counts[@backingInt(op)];
     }
 
     pub fn operandCount(self: *const StaticStats, kind: OperandKind, width: WidthClass) u64 {
-        return self.operand_width_counts[@intFromEnum(kind)][@intFromEnum(width)];
+        return self.operand_width_counts[@backingInt(kind)][@backingInt(width)];
     }
 };
 
@@ -101,7 +101,7 @@ pub const DynamicStats = struct {
 
     pub fn observe(self: *DynamicStats, op: Op) void {
         self.instructions +|= 1;
-        self.opcode_counts[@intFromEnum(op)] +|= 1;
+        self.opcode_counts[@backingInt(op)] +|= 1;
         if (self.previous_len >= 1) {
             const key = pairKey(self.previous[1], op);
             if (!incrementSequence(pair_capacity, &self.pairs, key)) self.dropped_pairs +|= 1;
@@ -130,7 +130,7 @@ pub const DynamicStats = struct {
     }
 
     pub fn opcodeCount(self: *const DynamicStats, op: Op) u64 {
-        return self.opcode_counts[@intFromEnum(op)];
+        return self.opcode_counts[@backingInt(op)];
     }
 
     pub fn pairCount(self: *const DynamicStats, first: Op, second: Op) u64 {
@@ -227,13 +227,13 @@ fn sequenceCount(comptime capacity: usize, cells: *const [capacity]SequenceCell,
 }
 
 fn pairKey(first: Op, second: Op) u32 {
-    return (@as(u32, @intFromEnum(first)) << 8) | @intFromEnum(second);
+    return (@as(u32, @backingInt(first)) << 8) | @backingInt(second);
 }
 
 fn trigramKey(first: Op, second: Op, third: Op) u32 {
-    return (@as(u32, @intFromEnum(first)) << 16) |
-        (@as(u32, @intFromEnum(second)) << 8) |
-        @intFromEnum(third);
+    return (@as(u32, @backingInt(first)) << 16) |
+        (@as(u32, @backingInt(second)) << 8) |
+        @backingInt(third);
 }
 
 fn readU16(code: []const u8, at: usize) u16 {
@@ -313,8 +313,8 @@ pub fn formatReport(
     std.mem.sort(SequenceRow, pair_rows.items, {}, rowLessThan(SequenceRow));
     try out.print(allocator, "top pairs:\n", .{});
     for (pair_rows.items[0..@min(top, pair_rows.items.len)]) |row| {
-        const first: Op = @enumFromInt(@as(u8, @truncate(row.key >> 8)));
-        const second: Op = @enumFromInt(@as(u8, @truncate(row.key)));
+        const first: Op = @fromBackingInt(@intCast(@as(u8, @truncate(row.key >> 8))));
+        const second: Op = @fromBackingInt(@intCast(@as(u8, @truncate(row.key))));
         try out.print(allocator, "  {s} -> {s} {d}\n", .{ first.mnemonic(), second.mnemonic(), row.count });
     }
 
@@ -326,9 +326,9 @@ pub fn formatReport(
     std.mem.sort(SequenceRow, trigram_rows.items, {}, rowLessThan(SequenceRow));
     try out.print(allocator, "top trigrams:\n", .{});
     for (trigram_rows.items[0..@min(top, trigram_rows.items.len)]) |row| {
-        const first: Op = @enumFromInt(@as(u8, @truncate(row.key >> 16)));
-        const second: Op = @enumFromInt(@as(u8, @truncate(row.key >> 8)));
-        const third: Op = @enumFromInt(@as(u8, @truncate(row.key)));
+        const first: Op = @fromBackingInt(@intCast(@as(u8, @truncate(row.key >> 16))));
+        const second: Op = @fromBackingInt(@intCast(@as(u8, @truncate(row.key >> 8))));
+        const third: Op = @fromBackingInt(@intCast(@as(u8, @truncate(row.key))));
         try out.print(allocator, "  {s} -> {s} -> {s} {d}\n", .{ first.mnemonic(), second.mnemonic(), third.mnemonic(), row.count });
     }
     return out.toOwnedSlice(allocator);
@@ -338,8 +338,8 @@ fn rowLessThan(comptime Row: type) fn (void, Row, Row) bool {
     return struct {
         fn lessThan(_: void, a: Row, b: Row) bool {
             if (a.count != b.count) return a.count > b.count;
-            const a_key: u32 = if (Row == OpcodeRow) @intFromEnum(a.op) else a.key;
-            const b_key: u32 = if (Row == OpcodeRow) @intFromEnum(b.op) else b.key;
+            const a_key: u32 = if (Row == OpcodeRow) @backingInt(a.op) else a.key;
+            const b_key: u32 = if (Row == OpcodeRow) @backingInt(b.op) else b.key;
             return a_key < b_key;
         }
     }.lessThan;
@@ -398,7 +398,7 @@ test "bytecode stats: report exposes encoding and dispatch hot spots" {
     var static: StaticStats = .{};
     static.instructions = 3;
     static.encoded_bytes = 7;
-    static.opcode_counts[@intFromEnum(Op.add)] = 2;
+    static.opcode_counts[@backingInt(Op.add)] = 2;
     var dynamic: DynamicStats = .{};
     dynamic.observe(.add);
     dynamic.observe(.star);

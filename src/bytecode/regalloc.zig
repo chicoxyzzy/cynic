@@ -47,7 +47,7 @@ fn isPureStore(op: Op) bool {
 fn storeTarget(op: Op, code: []const u8, i: u32) u8 {
     return switch (op) {
         .star => code[i + 1],
-        .star_0, .star_1, .star_2, .star_3 => @intFromEnum(op) - @intFromEnum(Op.star_0),
+        .star_0, .star_1, .star_2, .star_3 => @backingInt(op) - @backingInt(Op.star_0),
         else => unreachable,
     };
 }
@@ -55,7 +55,7 @@ fn storeTarget(op: Op, code: []const u8, i: u32) u8 {
 fn loadTarget(op: Op, code: []const u8, i: u32) ?u8 {
     return switch (op) {
         .ldar => code[i + 1],
-        .ldar_0, .ldar_1, .ldar_2, .ldar_3 => @intFromEnum(op) - @intFromEnum(Op.ldar_0),
+        .ldar_0, .ldar_1, .ldar_2, .ldar_3 => @backingInt(op) - @backingInt(Op.ldar_0),
         else => null,
     };
 }
@@ -85,10 +85,10 @@ fn eliminateRedundantStoreLoadsOne(allocator: std.mem.Allocator, chunk: *Chunk) 
 
     var i: u32 = 0;
     while (i < code.len) {
-        const op: Op = @enumFromInt(code[i]);
+        const op: Op = @fromBackingInt(@intCast(code[i]));
         const next = i + 1 + Op.operandSize(op);
         if (isPureStore(op) and next < code.len and !isLeaderOff(a.leaders, next)) {
-            const next_op: Op = @enumFromInt(code[next]);
+            const next_op: Op = @fromBackingInt(@intCast(code[next]));
             if (loadTarget(next_op, code, next)) |load_reg| {
                 if (load_reg == storeTarget(op, code, i)) try dead.append(allocator, next);
             }
@@ -134,10 +134,10 @@ pub fn fuseStoreLoads(allocator: std.mem.Allocator, chunk: *Chunk) !usize {
 fn hasPotentialStoreLoadFusion(code: []const u8) bool {
     var i: u32 = 0;
     while (i < code.len) {
-        const store_op: Op = @enumFromInt(code[i]);
+        const store_op: Op = @fromBackingInt(@intCast(code[i]));
         const load_start = i + 1 + Op.operandSize(store_op);
         if (isPureStore(store_op) and load_start < code.len) {
-            const load_op: Op = @enumFromInt(code[load_start]);
+            const load_op: Op = @fromBackingInt(@intCast(code[load_start]));
             if (loadTarget(load_op, code, load_start)) |src| {
                 const pair_end = load_start + 1 + Op.operandSize(load_op);
                 if (pair_end < code.len and pair_end - i >= 3 and storeTarget(store_op, code, i) != src) return true;
@@ -160,14 +160,14 @@ fn fuseStoreLoadsOne(allocator: std.mem.Allocator, chunk: *Chunk) !usize {
 
     var i: u32 = 0;
     while (i < code.len) {
-        const store_op: Op = @enumFromInt(code[i]);
+        const store_op: Op = @fromBackingInt(@intCast(code[i]));
         const load_start = i + 1 + Op.operandSize(store_op);
         if (!isPureStore(store_op) or load_start >= code.len or isLeaderOff(a.leaders, load_start)) {
             i = load_start;
             continue;
         }
 
-        const load_op: Op = @enumFromInt(code[load_start]);
+        const load_op: Op = @fromBackingInt(@intCast(code[load_start]));
         const src = loadTarget(load_op, code, load_start) orelse {
             i = load_start;
             continue;
@@ -192,7 +192,7 @@ fn fuseStoreLoadsOne(allocator: std.mem.Allocator, chunk: *Chunk) !usize {
         try replacements.append(allocator, .{
             .start = i,
             .end = pair_end,
-            .bytes = .{ @intFromEnum(Op.star_ldar), dst, src },
+            .bytes = .{ @backingInt(Op.star_ldar), dst, src },
         });
         i = pair_end;
     }
@@ -240,7 +240,7 @@ fn eliminateDeadStoresOne(allocator: std.mem.Allocator, chunk: *Chunk) !usize {
     {
         var i: u32 = 0;
         while (i < code.len) {
-            const op: Op = @enumFromInt(code[i]);
+            const op: Op = @fromBackingInt(@intCast(code[i]));
             if (isPureStore(op)) {
                 var live = try a.liveAfter(code, i);
                 defer live.deinit();
@@ -300,14 +300,14 @@ fn potentialAccumulatorCopyCount(code: []const u8) usize {
     var count: usize = 0;
     var i: u32 = 0;
     while (i < code.len) {
-        const op: Op = @enumFromInt(code[i]);
+        const op: Op = @fromBackingInt(@intCast(code[i]));
         const load_end = i + 1 + Op.operandSize(op);
         if (loadTarget(op, code, i) != null and load_end < code.len) {
-            const store_op: Op = @enumFromInt(code[load_end]);
+            const store_op: Op = @fromBackingInt(@intCast(code[load_end]));
             if (isPureStore(store_op)) {
                 const pair_end = load_end + 1 + Op.operandSize(store_op);
                 if (pair_end < code.len and pair_end - i >= 3 and
-                    definitelyOverwritesAccumulator(@enumFromInt(code[pair_end])))
+                    definitelyOverwritesAccumulator(@fromBackingInt(@intCast(code[pair_end]))))
                 {
                     count += 1;
                     i = pair_end;
@@ -361,7 +361,7 @@ fn eliminateDeadAccumulatorCopiesOneMin(allocator: std.mem.Allocator, chunk: *Ch
 
     var i: u32 = 0;
     while (i < code.len) {
-        const op: Op = @enumFromInt(code[i]);
+        const op: Op = @fromBackingInt(@intCast(code[i]));
         const load_end = i + 1 + Op.operandSize(op);
         const src = loadTarget(op, code, i) orelse {
             i = load_end;
@@ -372,7 +372,7 @@ fn eliminateDeadAccumulatorCopiesOneMin(allocator: std.mem.Allocator, chunk: *Ch
             continue;
         }
 
-        const store_op: Op = @enumFromInt(code[load_end]);
+        const store_op: Op = @fromBackingInt(@intCast(code[load_end]));
         if (!isPureStore(store_op)) {
             i = load_end;
             continue;
@@ -382,7 +382,7 @@ fn eliminateDeadAccumulatorCopiesOneMin(allocator: std.mem.Allocator, chunk: *Ch
             i = pair_end;
             continue;
         }
-        const after_op: Op = @enumFromInt(code[pair_end]);
+        const after_op: Op = @fromBackingInt(@intCast(code[pair_end]));
         if (!definitelyOverwritesAccumulator(after_op)) {
             i = pair_end;
             continue;
@@ -391,7 +391,7 @@ fn eliminateDeadAccumulatorCopiesOneMin(allocator: std.mem.Allocator, chunk: *Ch
         try replacements.append(allocator, .{
             .start = i,
             .end = pair_end,
-            .bytes = .{ @intFromEnum(Op.mov), src, storeTarget(store_op, code, load_end) },
+            .bytes = .{ @backingInt(Op.mov), src, storeTarget(store_op, code, load_end) },
         });
         i = pair_end;
     }
@@ -441,7 +441,7 @@ fn reEmit(
                 var covered = old;
                 while (covered < replacement.end) {
                     new_off[covered] = new;
-                    const covered_op: Op = @enumFromInt(code[covered]);
+                    const covered_op: Op = @fromBackingInt(@intCast(code[covered]));
                     covered += 1 + Op.operandSize(covered_op);
                 }
                 std.debug.assert(covered == replacement.end);
@@ -450,7 +450,7 @@ fn reEmit(
                 ri += 1;
                 continue;
             }
-            const op: Op = @enumFromInt(code[old]);
+            const op: Op = @fromBackingInt(@intCast(code[old]));
             const sz: u32 = 1 + Op.operandSize(op);
             if (di < dead.len and dead[di] == old) {
                 di += 1; // removed: don't advance `new`
@@ -488,7 +488,7 @@ fn reEmit(
                 ri += 1;
                 continue;
             }
-            const op: Op = @enumFromInt(code[old]);
+            const op: Op = @fromBackingInt(@intCast(code[old]));
             const sz: u32 = 1 + Op.operandSize(op);
             const is_dead = di < dead.len and dead[di] == old;
             if (is_dead) {
@@ -640,7 +640,7 @@ fn eliminateRedundantTdzChecksOne(allocator: std.mem.Allocator, chunk: *Chunk) !
     {
         var i: u32 = 0;
         while (i < code.len) {
-            const op: Op = @enumFromInt(code[i]);
+            const op: Op = @fromBackingInt(@intCast(code[i]));
             if (globalSlotOf(op, code, i)) |s| nslots = @max(nslots, s + 1);
             i += 1 + Op.operandSize(op);
         }
@@ -673,7 +673,7 @@ fn eliminateRedundantTdzChecksOne(allocator: std.mem.Allocator, chunk: *Chunk) !
         const end: u32 = if (b + 1 < nblocks) a.leaders[b + 1] else @intCast(code.len);
         var p: u32 = start;
         while (p < end) {
-            const op: Op = @enumFromInt(code[p]);
+            const op: Op = @fromBackingInt(@intCast(code[p]));
             if (writesGlobalSlot(op)) {
                 if (globalSlotOf(op, code, p)) |s| gen[b].set(s);
             }
@@ -760,12 +760,12 @@ fn eliminateRedundantTdzChecksOne(allocator: std.mem.Allocator, chunk: *Chunk) !
         const end: u32 = if (b + 1 < nblocks) a.leaders[b + 1] else @intCast(code.len);
         var p: u32 = start;
         while (p < end) {
-            const op: Op = @enumFromInt(code[p]);
+            const op: Op = @fromBackingInt(@intCast(code[p]));
             const sz: u32 = 1 + Op.operandSize(op);
             if (op == .lda_global_slot) {
                 const slot = globalSlotOf(op, code, p).?;
                 const next = p + sz;
-                if (next < end and @as(Op, @enumFromInt(code[next])) == .throw_if_hole and
+                if (next < end and @as(Op, @fromBackingInt(@intCast(code[next]))) == .throw_if_hole and
                     cur.isSet(slot) and !isLeaderOff(a.leaders, next))
                 {
                     try dead.append(allocator, next);
@@ -793,9 +793,9 @@ test "regalloc: a dead store is dropped and the value is unchanged" {
     // Build: lda_one; star r0; lda_zero; star r0; ldar r0; return
     // The first `star r0` is dead (r0 overwritten before any read).
     var code = [_]u8{
-        @intFromEnum(Op.lda_one),  @intFromEnum(Op.star), 0, // dead store
-        @intFromEnum(Op.lda_zero), @intFromEnum(Op.star), 0,
-        @intFromEnum(Op.ldar),     0,                     @intFromEnum(Op.return_),
+        @backingInt(Op.lda_one),  @backingInt(Op.star), 0, // dead store
+        @backingInt(Op.lda_zero), @backingInt(Op.star), 0,
+        @backingInt(Op.ldar),     0,                    @backingInt(Op.return_),
     };
     var chunk: Chunk = .{
         .code = try testing.allocator.dupe(u8, &code),
@@ -818,9 +818,9 @@ test "regalloc: a function with an exception handler is left untouched" {
     // Same dead-store shape as above, but with a handler present — the
     // unmodelled try/catch/finally control flow means we must not rewrite.
     var code = [_]u8{
-        @intFromEnum(Op.lda_one),  @intFromEnum(Op.star), 0, // dead store
-        @intFromEnum(Op.lda_zero), @intFromEnum(Op.star), 0,
-        @intFromEnum(Op.ldar),     0,                     @intFromEnum(Op.return_),
+        @backingInt(Op.lda_one),  @backingInt(Op.star), 0, // dead store
+        @backingInt(Op.lda_zero), @backingInt(Op.star), 0,
+        @backingInt(Op.ldar),     0,                    @backingInt(Op.return_),
     };
     var handlers = [_]Handler{.{ .start_pc = 0, .end_pc = 3, .handler_pc = 3, .catch_register = 1 }};
     var chunk: Chunk = .{
@@ -839,10 +839,10 @@ test "regalloc: a function with an exception handler is left untouched" {
 
 test "regalloc(store-load): adjacent same-register load is dropped" {
     var code = [_]u8{
-        @intFromEnum(Op.lda_one),
-        @intFromEnum(Op.star_2),
-        @intFromEnum(Op.ldar_2),
-        @intFromEnum(Op.return_),
+        @backingInt(Op.lda_one),
+        @backingInt(Op.star_2),
+        @backingInt(Op.ldar_2),
+        @backingInt(Op.return_),
     };
     var chunk: Chunk = .{
         .code = try testing.allocator.dupe(u8, &code),
@@ -857,9 +857,9 @@ test "regalloc(store-load): adjacent same-register load is dropped" {
 
     try testing.expectEqual(@as(usize, 1), try eliminateRedundantStoreLoadsOne(testing.allocator, &chunk));
     try testing.expectEqualSlices(u8, &.{
-        @intFromEnum(Op.lda_one),
-        @intFromEnum(Op.star_2),
-        @intFromEnum(Op.return_),
+        @backingInt(Op.lda_one),
+        @backingInt(Op.star_2),
+        @backingInt(Op.return_),
     }, chunk.code);
 }
 
@@ -867,8 +867,8 @@ test "regalloc(store-load): load at a branch target is kept" {
     // The jump reaches Ldar without executing the preceding Star, so the
     // accumulator cannot substitute for the register on every path.
     var code = [_]u8{
-        @intFromEnum(Op.jmp),    1,                       0, // after=3, +1 -> Ldar at 4
-        @intFromEnum(Op.star_2), @intFromEnum(Op.ldar_2), @intFromEnum(Op.return_),
+        @backingInt(Op.jmp),    1,                      0, // after=3, +1 -> Ldar at 4
+        @backingInt(Op.star_2), @backingInt(Op.ldar_2), @backingInt(Op.return_),
     };
     var chunk: Chunk = .{
         .code = try testing.allocator.dupe(u8, &code),
@@ -887,22 +887,22 @@ test "regalloc(store-load): load at a branch target is kept" {
 
 test "regalloc(store-load fusion): adjacent distinct registers emit and disassemble StarLdar" {
     var code = [_]u8{
-        @intFromEnum(Op.lda_one),
-        @intFromEnum(Op.star),
+        @backingInt(Op.lda_one),
+        @backingInt(Op.star),
         3,
-        @intFromEnum(Op.ldar_2),
-        @intFromEnum(Op.return_),
+        @backingInt(Op.ldar_2),
+        @backingInt(Op.return_),
     };
     var chunk = try mkChunk(&code);
     defer testing.allocator.free(chunk.code);
 
     try testing.expectEqual(@as(usize, 1), try fuseStoreLoadsOne(testing.allocator, &chunk));
     try testing.expectEqualSlices(u8, &.{
-        @intFromEnum(Op.lda_one),
-        @intFromEnum(Op.star_ldar),
+        @backingInt(Op.lda_one),
+        @backingInt(Op.star_ldar),
         3,
         2,
-        @intFromEnum(Op.return_),
+        @backingInt(Op.return_),
     }, chunk.code);
 
     const got = try disasm.dump(testing.allocator, &chunk);
@@ -913,41 +913,41 @@ test "regalloc(store-load fusion): adjacent distinct registers emit and disassem
 test "regalloc(store-load fusion): both mixed encodings fuse without growing code" {
     {
         var code = [_]u8{
-            @intFromEnum(Op.star_2),
-            @intFromEnum(Op.ldar),
+            @backingInt(Op.star_2),
+            @backingInt(Op.ldar),
             3,
-            @intFromEnum(Op.return_),
+            @backingInt(Op.return_),
         };
         var chunk = try mkChunk(&code);
         defer testing.allocator.free(chunk.code);
         try testing.expectEqual(@as(usize, 1), try fuseStoreLoadsOne(testing.allocator, &chunk));
         try testing.expectEqualSlices(u8, &.{
-            @intFromEnum(Op.star_ldar), 2, 3,
-            @intFromEnum(Op.return_),
+            @backingInt(Op.star_ldar), 2, 3,
+            @backingInt(Op.return_),
         }, chunk.code);
     }
     {
         var code = [_]u8{
-            @intFromEnum(Op.star),
+            @backingInt(Op.star),
             3,
-            @intFromEnum(Op.ldar_2),
-            @intFromEnum(Op.return_),
+            @backingInt(Op.ldar_2),
+            @backingInt(Op.return_),
         };
         var chunk = try mkChunk(&code);
         defer testing.allocator.free(chunk.code);
         try testing.expectEqual(@as(usize, 1), try fuseStoreLoadsOne(testing.allocator, &chunk));
         try testing.expectEqualSlices(u8, &.{
-            @intFromEnum(Op.star_ldar), 3, 2,
-            @intFromEnum(Op.return_),
+            @backingInt(Op.star_ldar), 3, 2,
+            @backingInt(Op.return_),
         }, chunk.code);
     }
 }
 
 test "regalloc(store-load fusion): compact pair is not grown" {
     var code = [_]u8{
-        @intFromEnum(Op.star_2),
-        @intFromEnum(Op.ldar_3),
-        @intFromEnum(Op.return_),
+        @backingInt(Op.star_2),
+        @backingInt(Op.ldar_3),
+        @backingInt(Op.return_),
     };
     var chunk = try mkChunk(&code);
     defer testing.allocator.free(chunk.code);
@@ -958,9 +958,9 @@ test "regalloc(store-load fusion): compact pair is not grown" {
 
 test "regalloc(store-load fusion): terminal pair keeps checked end-of-chunk decode" {
     var code = [_]u8{
-        @intFromEnum(Op.star),
+        @backingInt(Op.star),
         3,
-        @intFromEnum(Op.ldar),
+        @backingInt(Op.ldar),
         2,
     };
     var chunk = try mkChunk(&code);
@@ -974,9 +974,9 @@ test "regalloc(store-load fusion): load at a branch target is not fused" {
     // The jump reaches Ldar without executing the preceding Star. Folding
     // both into the fallthrough instruction would lose that entry point.
     var code = [_]u8{
-        @intFromEnum(Op.jmp),     1,                     0, // after=3, +1 -> Ldar at 4
-        @intFromEnum(Op.star_2),  @intFromEnum(Op.ldar), 3,
-        @intFromEnum(Op.return_),
+        @backingInt(Op.jmp),     1,                    0, // after=3, +1 -> Ldar at 4
+        @backingInt(Op.star_2),  @backingInt(Op.ldar), 3,
+        @backingInt(Op.return_),
     };
     var chunk = try mkChunk(&code);
     defer testing.allocator.free(chunk.code);
@@ -988,10 +988,10 @@ test "regalloc(store-load fusion): load at a branch target is not fused" {
 test "regalloc(store-load fusion): handler and switch targets are not fused" {
     {
         var code = [_]u8{
-            @intFromEnum(Op.star_2),
-            @intFromEnum(Op.ldar),
+            @backingInt(Op.star_2),
+            @backingInt(Op.ldar),
             4,
-            @intFromEnum(Op.return_),
+            @backingInt(Op.return_),
         };
         var handlers = [_]Handler{.{
             .start_pc = 0,
@@ -1014,9 +1014,9 @@ test "regalloc(store-load fusion): handler and switch targets are not fused" {
     }
     {
         var code = [_]u8{
-            @intFromEnum(Op.switch_smi), 0,                     0, 0,
-            @intFromEnum(Op.star_2),     @intFromEnum(Op.ldar), 4, @intFromEnum(Op.return_),
-            @intFromEnum(Op.return_),
+            @backingInt(Op.switch_smi), 0,                    0, 0,
+            @backingInt(Op.star_2),     @backingInt(Op.ldar), 4, @backingInt(Op.return_),
+            @backingInt(Op.return_),
         };
         var targets = [_]u32{5};
         var tables = [_]SwitchTable{.{ .min = 0, .targets = &targets, .default_target = 8 }};
@@ -1038,24 +1038,24 @@ test "regalloc(store-load fusion): handler and switch targets are not fused" {
 
 test "regalloc(store-load fusion): a target at Star keeps the legal fusion" {
     var code = [_]u8{
-        @intFromEnum(Op.jmp),     1,                        0, // after=3, +1 -> Star at 4
-        @intFromEnum(Op.lda_one), @intFromEnum(Op.star_2),  @intFromEnum(Op.ldar),
-        3,                        @intFromEnum(Op.return_),
+        @backingInt(Op.jmp),     1,                       0, // after=3, +1 -> Star at 4
+        @backingInt(Op.lda_one), @backingInt(Op.star_2),  @backingInt(Op.ldar),
+        3,                       @backingInt(Op.return_),
     };
     var chunk = try mkChunk(&code);
     defer testing.allocator.free(chunk.code);
 
     try testing.expectEqual(@as(usize, 1), try fuseStoreLoadsOne(testing.allocator, &chunk));
-    try testing.expectEqual(Op.star_ldar, @as(Op, @enumFromInt(chunk.code[4])));
+    try testing.expectEqual(Op.star_ldar, @as(Op, @fromBackingInt(@intCast(chunk.code[4]))));
     try testing.expectEqual(@as(u32, 4), liveness.branchTarget(.jmp, chunk.code, 0).?);
 }
 
 test "regalloc(store-load fusion): shrinking pair repatches a crossing branch" {
     var code = [_]u8{
-        @intFromEnum(Op.lda_true),
-        @intFromEnum(Op.jmp_if_false), 4,                        0, // after=4, +4 -> Return at 8
-        @intFromEnum(Op.star),         2,                        @intFromEnum(Op.ldar),
-        3,                             @intFromEnum(Op.return_),
+        @backingInt(Op.lda_true),
+        @backingInt(Op.jmp_if_false), 4,                       0, // after=4, +4 -> Return at 8
+        @backingInt(Op.star),         2,                       @backingInt(Op.ldar),
+        3,                            @backingInt(Op.return_),
     };
     var chunk = try mkChunk(&code);
     defer testing.allocator.free(chunk.code);
@@ -1063,14 +1063,14 @@ test "regalloc(store-load fusion): shrinking pair repatches a crossing branch" {
     try testing.expectEqual(@as(usize, 1), try fuseStoreLoadsOne(testing.allocator, &chunk));
     try testing.expectEqual(@as(usize, code.len - 1), chunk.code.len);
     try testing.expectEqual(@as(u32, 7), liveness.branchTarget(.jmp_if_false, chunk.code, 1).?);
-    try testing.expectEqual(Op.return_, @as(Op, @enumFromInt(chunk.code[7])));
+    try testing.expectEqual(Op.return_, @as(Op, @fromBackingInt(@intCast(chunk.code[7]))));
 }
 
 test "regalloc(store-load fusion): the public pipeline leaves same-register cleanup stronger" {
     var code = [_]u8{
-        @intFromEnum(Op.star),    3,
-        @intFromEnum(Op.ldar),    3,
-        @intFromEnum(Op.return_),
+        @backingInt(Op.star),    3,
+        @backingInt(Op.ldar),    3,
+        @backingInt(Op.return_),
     };
     var chunk = try mkChunk(&code);
     defer testing.allocator.free(chunk.code);
@@ -1078,17 +1078,17 @@ test "regalloc(store-load fusion): the public pipeline leaves same-register clea
     try testing.expectEqual(@as(usize, 1), try eliminateRedundantStoreLoadsOne(testing.allocator, &chunk));
     try testing.expectEqual(@as(usize, 0), try fuseStoreLoadsOne(testing.allocator, &chunk));
     try testing.expectEqualSlices(u8, &.{
-        @intFromEnum(Op.star),    3,
-        @intFromEnum(Op.return_),
+        @backingInt(Op.star),    3,
+        @backingInt(Op.return_),
     }, chunk.code);
 }
 
 test "regalloc(store-load fusion): recurses into a class-owned constructor chunk" {
-    var outer_code = [_]u8{@intFromEnum(Op.return_)};
+    var outer_code = [_]u8{@backingInt(Op.return_)};
     var constructor_code = [_]u8{
-        @intFromEnum(Op.star),    3,
-        @intFromEnum(Op.ldar),    2,
-        @intFromEnum(Op.return_),
+        @backingInt(Op.star),    3,
+        @backingInt(Op.ldar),    2,
+        @backingInt(Op.return_),
     };
     const constructor = try mkChunk(&constructor_code);
     var classes = [_]chunk_mod.ClassTemplate{.{
@@ -1119,8 +1119,8 @@ test "regalloc(store-load fusion): recurses into a class-owned constructor chunk
 
     try testing.expectEqual(@as(usize, 1), try fuseStoreLoads(testing.allocator, &outer));
     try testing.expectEqualSlices(u8, &.{
-        @intFromEnum(Op.star_ldar), 3, 2,
-        @intFromEnum(Op.return_),
+        @backingInt(Op.star_ldar), 3, 2,
+        @backingInt(Op.return_),
     }, classes[0].constructor_chunk.code);
 }
 
@@ -1128,22 +1128,22 @@ test "regalloc(copy): dead accumulator Ldar-Star becomes Mov" {
     // Ldar1; Star r2 copies r1 to r2. The following Ldar3 overwrites the
     // accumulator before Add observes it, so the pair can become one Mov.
     var code = [_]u8{
-        @intFromEnum(Op.ldar_1),
-        @intFromEnum(Op.star),
+        @backingInt(Op.ldar_1),
+        @backingInt(Op.star),
         2,
-        @intFromEnum(Op.ldar_3),
-        @intFromEnum(Op.add),
+        @backingInt(Op.ldar_3),
+        @backingInt(Op.add),
         2,
-        @intFromEnum(Op.return_),
+        @backingInt(Op.return_),
     };
     var chunk = try mkChunk(&code);
     defer testing.allocator.free(chunk.code);
 
     try testing.expectEqual(@as(usize, 1), try eliminateDeadAccumulatorCopiesOne(testing.allocator, &chunk));
     try testing.expectEqualSlices(u8, &.{
-        @intFromEnum(Op.mov),     1,                    2,
-        @intFromEnum(Op.ldar_3),  @intFromEnum(Op.add), 2,
-        @intFromEnum(Op.return_),
+        @backingInt(Op.mov),     1,                   2,
+        @backingInt(Op.ldar_3),  @backingInt(Op.add), 2,
+        @backingInt(Op.return_),
     }, chunk.code);
 }
 
@@ -1151,12 +1151,12 @@ test "regalloc(copy): live accumulator keeps Ldar-Star" {
     // Return observes the accumulator loaded from r1. Mov deliberately leaves
     // the accumulator untouched, so this pair is not interchangeable.
     var code = [_]u8{
-        @intFromEnum(Op.lda_one),
-        @intFromEnum(Op.ldar),
+        @backingInt(Op.lda_one),
+        @backingInt(Op.ldar),
         1,
-        @intFromEnum(Op.star),
+        @backingInt(Op.star),
         2,
-        @intFromEnum(Op.return_),
+        @backingInt(Op.return_),
     };
     var chunk = try mkChunk(&code);
     defer testing.allocator.free(chunk.code);
@@ -1169,14 +1169,14 @@ test "regalloc(copy): branch into Star keeps Ldar-Star" {
     // The taken edge reaches Star without executing Ldar. Replacing the pair
     // would make that edge store r1 instead of its incoming accumulator.
     var code = [_]u8{
-        @intFromEnum(Op.lda_zero), // 0
-        @intFromEnum(Op.jmp_if_false), 2, 0, // 1: after=4, +2 -> Star@6
-        @intFromEnum(Op.ldar), 1, // 4
-        @intFromEnum(Op.star), 2, // 6: branch target
-        @intFromEnum(Op.lda_zero), // 8: definite accumulator overwrite
-        @intFromEnum(Op.ldar),
+        @backingInt(Op.lda_zero), // 0
+        @backingInt(Op.jmp_if_false), 2, 0, // 1: after=4, +2 -> Star@6
+        @backingInt(Op.ldar), 1, // 4
+        @backingInt(Op.star), 2, // 6: branch target
+        @backingInt(Op.lda_zero), // 8: definite accumulator overwrite
+        @backingInt(Op.ldar),
         2,
-        @intFromEnum(Op.return_),
+        @backingInt(Op.return_),
     };
     var chunk = try mkChunk(&code);
     defer testing.allocator.free(chunk.code);
@@ -1189,31 +1189,31 @@ test "regalloc(copy): shrinking replacement repatches a crossing branch" {
     // Generic Ldar + Star is four bytes; Mov is three. The branch target after
     // the pair must keep pointing at Return when the replacement shrinks it.
     var code = [_]u8{
-        @intFromEnum(Op.lda_true), // 0
-        @intFromEnum(Op.jmp_if_false), 8, 0, // 1: after=4, +8 -> Return@12
-        @intFromEnum(Op.ldar), 1, // 4
-        @intFromEnum(Op.star), 2, // 6
-        @intFromEnum(Op.ldar), 3, // 8: accumulator overwrite
-        @intFromEnum(Op.add), 2, // 10: keeps r2 live
-        @intFromEnum(Op.return_), // 12
+        @backingInt(Op.lda_true), // 0
+        @backingInt(Op.jmp_if_false), 8, 0, // 1: after=4, +8 -> Return@12
+        @backingInt(Op.ldar), 1, // 4
+        @backingInt(Op.star), 2, // 6
+        @backingInt(Op.ldar), 3, // 8: accumulator overwrite
+        @backingInt(Op.add), 2, // 10: keeps r2 live
+        @backingInt(Op.return_), // 12
     };
     var chunk = try mkChunk(&code);
     defer testing.allocator.free(chunk.code);
 
     try testing.expectEqual(@as(usize, 1), try eliminateDeadAccumulatorCopiesOne(testing.allocator, &chunk));
     try testing.expectEqualSlices(u8, &.{
-        @intFromEnum(Op.lda_true),
-        @intFromEnum(Op.jmp_if_false),
+        @backingInt(Op.lda_true),
+        @backingInt(Op.jmp_if_false),
         7,
         0,
-        @intFromEnum(Op.mov),
+        @backingInt(Op.mov),
         1,
         2,
-        @intFromEnum(Op.ldar),
+        @backingInt(Op.ldar),
         3,
-        @intFromEnum(Op.add),
+        @backingInt(Op.add),
         2,
-        @intFromEnum(Op.return_),
+        @backingInt(Op.return_),
     }, chunk.code);
     try testing.expectEqual(@as(u32, 11), liveness.branchTarget(.jmp_if_false, chunk.code, 1).?);
 }
@@ -1222,12 +1222,12 @@ test "regalloc(copy): compact pair does not grow" {
     // Two operand-free compact instructions are smaller than Mov's three-byte
     // encoding, so the initial pass intentionally leaves them alone.
     var code = [_]u8{
-        @intFromEnum(Op.ldar_1),
-        @intFromEnum(Op.star_2),
-        @intFromEnum(Op.ldar_3),
-        @intFromEnum(Op.add),
+        @backingInt(Op.ldar_1),
+        @backingInt(Op.star_2),
+        @backingInt(Op.ldar_3),
+        @backingInt(Op.add),
         2,
-        @intFromEnum(Op.return_),
+        @backingInt(Op.return_),
     };
     var chunk = try mkChunk(&code);
     defer testing.allocator.free(chunk.code);
@@ -1238,13 +1238,13 @@ test "regalloc(copy): compact pair does not grow" {
 
 test "regalloc(copy): production gate skips sparse chunks" {
     var code = [_]u8{
-        @intFromEnum(Op.ldar_1),
-        @intFromEnum(Op.star),
+        @backingInt(Op.ldar_1),
+        @backingInt(Op.star),
         2,
-        @intFromEnum(Op.ldar_3),
-        @intFromEnum(Op.add),
+        @backingInt(Op.ldar_3),
+        @backingInt(Op.add),
         2,
-        @intFromEnum(Op.return_),
+        @backingInt(Op.return_),
     };
     var chunk = try mkChunk(&code);
     defer testing.allocator.free(chunk.code);
@@ -1259,23 +1259,23 @@ test "regalloc(copy): register-update overwrites permit Mov" {
     // none consumes the incoming accumulator value.
     inline for (.{ Op.inc_reg, Op.dec_reg, Op.post_inc_reg, Op.post_dec_reg }) |update| {
         var code = [_]u8{
-            @intFromEnum(Op.ldar_1),
-            @intFromEnum(Op.star),
+            @backingInt(Op.ldar_1),
+            @backingInt(Op.star),
             2,
-            @intFromEnum(update),
+            @backingInt(update),
             3,
-            @intFromEnum(Op.add),
+            @backingInt(Op.add),
             2,
-            @intFromEnum(Op.return_),
+            @backingInt(Op.return_),
         };
         var chunk = try mkChunk(&code);
         defer testing.allocator.free(chunk.code);
 
         try testing.expectEqual(@as(usize, 1), try eliminateDeadAccumulatorCopiesOne(testing.allocator, &chunk));
         try testing.expectEqualSlices(u8, &.{
-            @intFromEnum(Op.mov), 1,                        2,
-            @intFromEnum(update), 3,                        @intFromEnum(Op.add),
-            2,                    @intFromEnum(Op.return_),
+            @backingInt(Op.mov), 1,                       2,
+            @backingInt(update), 3,                       @backingInt(Op.add),
+            2,                   @backingInt(Op.return_),
         }, chunk.code);
     }
 }
@@ -1285,12 +1285,12 @@ test "regalloc(copy): abrupt LdaThis path keeps Ldar-Star" {
     // the frame's existing accumulator. It therefore is not an unconditional
     // accumulator overwrite for this deliberately local proof.
     var code = [_]u8{
-        @intFromEnum(Op.ldar),
+        @backingInt(Op.ldar),
         1,
-        @intFromEnum(Op.star),
+        @backingInt(Op.star),
         2,
-        @intFromEnum(Op.lda_this),
-        @intFromEnum(Op.return_),
+        @backingInt(Op.lda_this),
+        @backingInt(Op.return_),
     };
     var chunk = try mkChunk(&code);
     defer testing.allocator.free(chunk.code);
@@ -1300,9 +1300,9 @@ test "regalloc(copy): abrupt LdaThis path keeps Ldar-Star" {
 }
 
 const copy_oom_code = [_]u8{
-    @intFromEnum(Op.ldar),     1,
-    @intFromEnum(Op.star),     2,
-    @intFromEnum(Op.lda_zero), @intFromEnum(Op.return_),
+    @backingInt(Op.ldar),     1,
+    @backingInt(Op.star),     2,
+    @backingInt(Op.lda_zero), @backingInt(Op.return_),
 };
 
 const copy_oom_source_positions = [_]SourcePos{
@@ -1351,8 +1351,8 @@ fn exerciseCopyPassAllocationFailure(allocator: std.mem.Allocator) !void {
 
     try testing.expectEqual(@as(usize, 1), replaced);
     try testing.expectEqualSlices(u8, &.{
-        @intFromEnum(Op.mov),      1,                        2,
-        @intFromEnum(Op.lda_zero), @intFromEnum(Op.return_),
+        @backingInt(Op.mov),      1,                       2,
+        @backingInt(Op.lda_zero), @backingInt(Op.return_),
     }, chunk.code);
     try testing.expectEqual(@as(u32, 3), chunk.switch_tables[0].default_target);
     try testing.expectEqual(@as(u32, 4), chunk.switch_tables[0].targets[0]);
@@ -1379,13 +1379,13 @@ test "regalloc: a jump offset is recomputed when a store between it and its targ
     // 4: star r1                 <- dead (r1 never read), between branch & target
     // 6: lda_one; star r0; ldar r0; return
     var code = [_]u8{
-        @intFromEnum(Op.lda_zero), // 0
-        @intFromEnum(Op.jmp_if_false), 2, 0, // 1: -> (1+3)+2 = 6
-        @intFromEnum(Op.star), 1, // 4: dead, between branch and target
-        @intFromEnum(Op.lda_one), // 6: target
-        @intFromEnum(Op.star), 0, // 7
-        @intFromEnum(Op.ldar), 0, // 9
-        @intFromEnum(Op.return_), // 11
+        @backingInt(Op.lda_zero), // 0
+        @backingInt(Op.jmp_if_false), 2, 0, // 1: -> (1+3)+2 = 6
+        @backingInt(Op.star), 1, // 4: dead, between branch and target
+        @backingInt(Op.lda_one), // 6: target
+        @backingInt(Op.star), 0, // 7
+        @backingInt(Op.ldar), 0, // 9
+        @backingInt(Op.return_), // 11
     };
     var chunk: Chunk = .{
         .code = try testing.allocator.dupe(u8, &code),
@@ -1404,10 +1404,10 @@ test "regalloc: a jump offset is recomputed when a store between it and its targ
     var i: u32 = 0;
     var checked = false;
     while (i < chunk.code.len) {
-        const op: Op = @enumFromInt(chunk.code[i]);
+        const op: Op = @fromBackingInt(@intCast(chunk.code[i]));
         if (op == .jmp_if_false) {
             const t = liveness.branchTarget(.jmp_if_false, chunk.code, i).?;
-            try testing.expectEqual(@intFromEnum(Op.lda_one), chunk.code[t]);
+            try testing.expectEqual(@backingInt(Op.lda_one), chunk.code[t]);
             checked = true;
         }
         i += 1 + Op.operandSize(op);
@@ -1419,17 +1419,17 @@ test "regalloc: switch table targets follow removed instructions" {
     // The dead r1 store precedes both switch destinations. Re-emission must
     // move the table's absolute PCs along with the bytecode.
     var code = [_]u8{
-        @intFromEnum(Op.lda_one),
-        @intFromEnum(Op.star),
+        @backingInt(Op.lda_one),
+        @backingInt(Op.star),
         1,
-        @intFromEnum(Op.switch_smi),
+        @backingInt(Op.switch_smi),
         0,
         0,
         0,
-        @intFromEnum(Op.lda_zero),
-        @intFromEnum(Op.return_),
-        @intFromEnum(Op.lda_one),
-        @intFromEnum(Op.return_),
+        @backingInt(Op.lda_zero),
+        @backingInt(Op.return_),
+        @backingInt(Op.lda_one),
+        @backingInt(Op.return_),
     };
     var targets = [_]u32{9};
     var tables = [_]SwitchTable{.{
@@ -1452,8 +1452,8 @@ test "regalloc: switch table targets follow removed instructions" {
     try testing.expectEqual(@as(usize, 1), try eliminateDeadStoresOne(testing.allocator, &chunk));
     try testing.expectEqual(@as(u32, 5), chunk.switch_tables[0].default_target);
     try testing.expectEqual(@as(u32, 7), chunk.switch_tables[0].targets[0]);
-    try testing.expectEqual(Op.lda_zero, @as(Op, @enumFromInt(chunk.code[5])));
-    try testing.expectEqual(Op.lda_one, @as(Op, @enumFromInt(chunk.code[7])));
+    try testing.expectEqual(Op.lda_zero, @as(Op, @fromBackingInt(@intCast(chunk.code[5]))));
+    try testing.expectEqual(Op.lda_one, @as(Op, @fromBackingInt(@intCast(chunk.code[7]))));
 }
 
 fn mkChunk(code: []const u8) !Chunk {
@@ -1469,17 +1469,17 @@ fn mkChunk(code: []const u8) !Chunk {
 }
 
 // `sta_global_slot_init s0` / `lda_global_slot s0` are `[op][slot:u32-le]`.
-const gs_init_s0 = [_]u8{ @intFromEnum(Op.sta_global_slot_init), 0, 0, 0, 0 };
-const gl_s0 = [_]u8{ @intFromEnum(Op.lda_global_slot), 0, 0, 0, 0 };
+const gs_init_s0 = [_]u8{ @backingInt(Op.sta_global_slot_init), 0, 0, 0, 0 };
+const gl_s0 = [_]u8{ @backingInt(Op.lda_global_slot), 0, 0, 0, 0 };
 
 test "regalloc: dead-store runs on a chunk that declares a closure (make_function modelled)" {
     // make_function k0; lda_one; star r0 (dead); lda_zero; star r0; ldar r0; return
     // `make_function` has no register effect, so the chunk stays
     // fully-understood and the dead store is removed — previously the opaque
     // make_function bailed the whole pass (the common closure + loop shape).
-    var code = [_]u8{ @intFromEnum(Op.make_function), 0, 0 } // make_function k0
-        ++ [_]u8{ @intFromEnum(Op.lda_one), @intFromEnum(Op.star), 0 } // dead store r0
-        ++ [_]u8{ @intFromEnum(Op.lda_zero), @intFromEnum(Op.star), 0, @intFromEnum(Op.ldar), 0, @intFromEnum(Op.return_) };
+    var code = [_]u8{ @backingInt(Op.make_function), 0, 0 } // make_function k0
+        ++ [_]u8{ @backingInt(Op.lda_one), @backingInt(Op.star), 0 } // dead store r0
+        ++ [_]u8{ @backingInt(Op.lda_zero), @backingInt(Op.star), 0, @backingInt(Op.ldar), 0, @backingInt(Op.return_) };
     var chunk = try mkChunk(&code);
     defer testing.allocator.free(chunk.code);
     try testing.expectEqual(@as(usize, 1), try eliminateDeadStoresOne(testing.allocator, &chunk));
@@ -1487,8 +1487,8 @@ test "regalloc: dead-store runs on a chunk that declares a closure (make_functio
 
 test "regalloc(tdz): a check dominated by the slot's init is dropped" {
     // lda_zero; sta_global_slot_init s0; lda_global_slot s0; throw_if_hole; return
-    var code = [_]u8{@intFromEnum(Op.lda_zero)} ++ gs_init_s0 ++ gl_s0 ++
-        [_]u8{ @intFromEnum(Op.throw_if_hole), @intFromEnum(Op.return_) };
+    var code = [_]u8{@backingInt(Op.lda_zero)} ++ gs_init_s0 ++ gl_s0 ++
+        [_]u8{ @backingInt(Op.throw_if_hole), @backingInt(Op.return_) };
     var chunk = try mkChunk(&code);
     defer testing.allocator.free(chunk.code);
     const removed = try eliminateRedundantTdzChecksOne(testing.allocator, &chunk);
@@ -1496,15 +1496,15 @@ test "regalloc(tdz): a check dominated by the slot's init is dropped" {
     try testing.expectEqual(@as(usize, code.len - 1), chunk.code.len); // throw_if_hole (1 byte) gone
     // No throw_if_hole survives.
     var i: u32 = 0;
-    while (i < chunk.code.len) : (i += 1 + Op.operandSize(@enumFromInt(chunk.code[i]))) {
-        try testing.expect(@as(Op, @enumFromInt(chunk.code[i])) != .throw_if_hole);
+    while (i < chunk.code.len) : (i += 1 + Op.operandSize(@fromBackingInt(@intCast(chunk.code[i])))) {
+        try testing.expect(@as(Op, @fromBackingInt(@intCast(chunk.code[i]))) != .throw_if_hole);
     }
 }
 
 test "regalloc(tdz): a check before the slot's init is kept" {
     // lda_global_slot s0; throw_if_hole; lda_zero; sta_global_slot_init s0; return
-    var code = gl_s0 ++ [_]u8{ @intFromEnum(Op.throw_if_hole), @intFromEnum(Op.lda_zero) } ++
-        gs_init_s0 ++ [_]u8{@intFromEnum(Op.return_)};
+    var code = gl_s0 ++ [_]u8{ @backingInt(Op.throw_if_hole), @backingInt(Op.lda_zero) } ++
+        gs_init_s0 ++ [_]u8{@backingInt(Op.return_)};
     var chunk = try mkChunk(&code);
     defer testing.allocator.free(chunk.code);
     try testing.expectEqual(@as(usize, 0), try eliminateRedundantTdzChecksOne(testing.allocator, &chunk));
@@ -1517,12 +1517,12 @@ test "regalloc(tdz): a check after a one-armed init is kept (must, not may)" {
     // The init runs only on the fall-through arm, so at the join s0 is not
     // initialized on ALL paths — the check must stay.
     var code = [_]u8{
-        @intFromEnum(Op.lda_zero), // 0
-        @intFromEnum(Op.jmp_if_false), 6, 0, // 1: after=4, +6 -> 10 (join)
-        @intFromEnum(Op.lda_zero), // 4
+        @backingInt(Op.lda_zero), // 0
+        @backingInt(Op.jmp_if_false), 6, 0, // 1: after=4, +6 -> 10 (join)
+        @backingInt(Op.lda_zero), // 4
     } ++ gs_init_s0 // 5: sta_global_slot_init s0 -> 10
     ++ gl_s0 // 10: lda_global_slot s0 -> 15
-    ++ [_]u8{ @intFromEnum(Op.throw_if_hole), @intFromEnum(Op.return_) }; // 15, 16
+    ++ [_]u8{ @backingInt(Op.throw_if_hole), @backingInt(Op.return_) }; // 15, 16
     var chunk = try mkChunk(&code);
     defer testing.allocator.free(chunk.code);
     try testing.expectEqual(@as(usize, 0), try eliminateRedundantTdzChecksOne(testing.allocator, &chunk));
@@ -1533,11 +1533,11 @@ test "regalloc(tdz): a check on a branch dominated by an earlier init is dropped
     // lda_global_slot s0; throw_if_hole; end: return
     // The init precedes (dominates) the branch, so the in-branch read is
     // provably initialized.
-    var code = [_]u8{@intFromEnum(Op.lda_zero)} // 0
+    var code = [_]u8{@backingInt(Op.lda_zero)} // 0
         ++ gs_init_s0 // 1: init -> 6
-        ++ [_]u8{ @intFromEnum(Op.jmp_if_false), 6, 0 } // 6: after=9, +6 -> 15 (end)
+        ++ [_]u8{ @backingInt(Op.jmp_if_false), 6, 0 } // 6: after=9, +6 -> 15 (end)
         ++ gl_s0 // 9: lda_global_slot s0 -> 14
-        ++ [_]u8{ @intFromEnum(Op.throw_if_hole), @intFromEnum(Op.return_) }; // 14, 15
+        ++ [_]u8{ @backingInt(Op.throw_if_hole), @backingInt(Op.return_) }; // 14, 15
     var chunk = try mkChunk(&code);
     defer testing.allocator.free(chunk.code);
     try testing.expectEqual(@as(usize, 1), try eliminateRedundantTdzChecksOne(testing.allocator, &chunk));
@@ -1548,8 +1548,8 @@ test "regalloc(tdz): a check in a handler (catch) body is kept — handler entry
     // (handler_pc = 6). A throw can reach the catch before the init runs, so
     // the handler-entry block's must-init is ∅ and the check must stay — even
     // though a normal fall-through from the init block exists in the bytecode.
-    var code = [_]u8{@intFromEnum(Op.lda_zero)} ++ gs_init_s0 ++ gl_s0 ++
-        [_]u8{ @intFromEnum(Op.throw_if_hole), @intFromEnum(Op.return_) };
+    var code = [_]u8{@backingInt(Op.lda_zero)} ++ gs_init_s0 ++ gl_s0 ++
+        [_]u8{ @backingInt(Op.throw_if_hole), @backingInt(Op.return_) };
     var handlers = [_]Handler{.{ .start_pc = 0, .end_pc = 6, .handler_pc = 6, .catch_register = 1 }};
     var chunk = try mkChunk(&code);
     chunk.handlers = &handlers;
@@ -1565,10 +1565,10 @@ test "regalloc(tdz): a check inside a try body dominated by a pre-try init is dr
     // @0 lda_zero; @1 sta_global_slot_init s0; [try @6) @6 lda_global_slot s0;
     // @11 throw_if_hole; @12 jmp +1 -> @16; [catch @15] @15 lda_undefined;
     // @16 return.  handler: try [6,12), catch @15.
-    var code = [_]u8{@intFromEnum(Op.lda_zero)} // 0
+    var code = [_]u8{@backingInt(Op.lda_zero)} // 0
         ++ gs_init_s0 // 1: init -> 6
         ++ gl_s0 // 6: read -> 11
-        ++ [_]u8{ @intFromEnum(Op.throw_if_hole), @intFromEnum(Op.jmp), 1, 0, @intFromEnum(Op.lda_undefined), @intFromEnum(Op.return_) };
+        ++ [_]u8{ @backingInt(Op.throw_if_hole), @backingInt(Op.jmp), 1, 0, @backingInt(Op.lda_undefined), @backingInt(Op.return_) };
     // 11: throw_if_hole; 12: jmp after=15 +1 -> 16; 15: lda_undefined; 16: return
     var chunk = try mkChunk(&code);
     // Owned handlers slice — the re-emit frees and rebuilds it (a removal

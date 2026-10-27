@@ -2015,7 +2015,7 @@ const Compiler = struct {
         try self.machine.jumpCbz(.x0, &pushed);
         try self.machine.emit(a64.cmpImm(
             .x0,
-            @intFromEnum(call_mod.JitPushStatus.tier_down),
+            @backingInt(call_mod.JitPushStatus.tier_down),
             false,
         ));
         try self.machine.jumpCond(.eq, &tier_down);
@@ -2333,7 +2333,7 @@ const Compiler = struct {
     fn jumpToGuardIf(self: *Compiler, condition: a64.Cond, guard: *Masm.Label) !void {
         var passed: Masm.Label = .{};
         defer passed.deinit(self.allocator);
-        const inverse: a64.Cond = @enumFromInt(@intFromEnum(condition) ^ 1);
+        const inverse: a64.Cond = @fromBackingInt(@intCast(@backingInt(condition) ^ 1));
         try self.machine.jumpCond(inverse, &passed);
         try self.machine.jump(guard);
         try self.machine.bind(&passed);
@@ -2531,7 +2531,7 @@ const Compiler = struct {
         if (try self.canElideFallthroughEdge(block_index)) {
             var fallthrough: Masm.Label = .{};
             defer fallthrough.deinit(self.allocator);
-            const inverse: a64.Cond = @enumFromInt(@intFromEnum(taken_condition) ^ 1);
+            const inverse: a64.Cond = @fromBackingInt(@intCast(@backingInt(taken_condition) ^ 1));
             try self.machine.jumpCond(inverse, &fallthrough);
             try self.emitEdgeAndJump(try self.edgeForKind(block_index, .branch_taken));
             try self.machine.bind(&fallthrough);

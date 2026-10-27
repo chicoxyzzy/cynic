@@ -23,7 +23,7 @@ const ir = @import("ir.zig");
 pub const no_this_register: u64 = std.math.maxInt(u64);
 
 inline fn directCallTierDown() u32 {
-    return @intFromEnum(call_mod.JitPushStatus.tier_down);
+    return @backingInt(call_mod.JitPushStatus.tier_down);
 }
 
 const MonomorphicCall = struct {
@@ -253,7 +253,7 @@ pub fn afterBytecode(
     const pc = std.math.cast(usize, bytecode_offset) orelse
         return error.InvalidMetadata;
     if (pc >= chunk.code.len) return error.InvalidMetadata;
-    const op: Op = @enumFromInt(chunk.code[pc]);
+    const op: Op = @fromBackingInt(@intCast(chunk.code[pc]));
     const after = std.math.add(usize, pc, 1 + Op.operandSize(op)) catch
         return error.InvalidMetadata;
     if (after > chunk.code.len) return error.InvalidMetadata;

@@ -404,7 +404,7 @@ pub const Masm = struct {
     pub fn cmovReg64(self: *Masm, destination: Reg, source: Reg, condition: Cond) error{OutOfMemory}!void {
         try self.emitByte(rex(true, isExtended(destination), false, isExtended(source)));
         try self.emitByte(0x0f);
-        try self.emitByte(0x40 | @as(u8, @intFromEnum(condition)));
+        try self.emitByte(0x40 | @as(u8, @backingInt(condition)));
         try self.emitByte(0xc0 | (lowBits(destination) << 3) | lowBits(source));
     }
 
@@ -417,7 +417,7 @@ pub const Masm = struct {
     ) error{OutOfMemory}!void {
         try self.emitByte(rex(false, false, false, isExtended(destination)));
         try self.emitByte(0x0F);
-        try self.emitByte(0x90 | @as(u8, @intFromEnum(condition)));
+        try self.emitByte(0x90 | @as(u8, @backingInt(condition)));
         try self.emitByte(0xC0 | lowBits(destination));
 
         try self.emitByte(rex(
@@ -716,7 +716,7 @@ pub const Masm = struct {
     pub const PackedAddSize = enum(u8) { byte = 0xfc, half = 0xfd, word = 0xfe, double = 0xd4 };
 
     pub fn addPackedInteger(self: *Masm, destination: Xmm, source: Xmm, size: PackedAddSize) error{OutOfMemory}!void {
-        try self.emitXmmReg(0x66, @intFromEnum(size), destination, source);
+        try self.emitXmmReg(0x66, @backingInt(size), destination, source);
     }
 
     pub fn saturatingAddSubtractPacked128(self: *Masm, destination: Xmm, source: Xmm, halfword: bool, signed: bool, subtract: bool) error{OutOfMemory}!void {
@@ -749,7 +749,7 @@ pub const Masm = struct {
 
     /// SSE2 packed shifts read the count from the low 64 bits of source.
     pub fn shiftPackedInteger(self: *Masm, destination: Xmm, source: Xmm, op: PackedShift) error{OutOfMemory}!void {
-        try self.emitXmmReg(0x66, @intFromEnum(op), destination, source);
+        try self.emitXmmReg(0x66, @backingInt(op), destination, source);
     }
 
     pub fn subtractPackedI16(self: *Masm, destination: Xmm, source: Xmm) error{OutOfMemory}!void {
@@ -759,7 +759,7 @@ pub const Masm = struct {
     pub const PackedSubtractSize = enum(u8) { byte = 0xf8, half = 0xf9, word = 0xfa, double = 0xfb };
 
     pub fn subtractPackedInteger(self: *Masm, destination: Xmm, source: Xmm, size: PackedSubtractSize) error{OutOfMemory}!void {
-        try self.emitXmmReg(0x66, @intFromEnum(size), destination, source);
+        try self.emitXmmReg(0x66, @backingInt(size), destination, source);
     }
 
     pub fn roundingAverageUnsigned128(self: *Masm, destination: Xmm, source: Xmm, halfword: bool) error{OutOfMemory}!void {
@@ -800,12 +800,12 @@ pub const Masm = struct {
     pub const PackedFloatArithmetic = enum(u8) { add = 0x58, sub = 0x5c, mul = 0x59, div = 0x5e, sqrt = 0x51 };
 
     pub fn arithmeticPackedFloat128(self: *Masm, destination: Xmm, source: Xmm, double_precision: bool, op: PackedFloatArithmetic) error{OutOfMemory}!void {
-        try self.emitXmmReg(if (double_precision) @as(u8, 0x66) else null, @intFromEnum(op), destination, source);
+        try self.emitXmmReg(if (double_precision) @as(u8, 0x66) else null, @backingInt(op), destination, source);
     }
 
     pub fn comparePackedFloat128(self: *Masm, destination: Xmm, source: Xmm, double_precision: bool, relation: PackedFloatComparison) error{OutOfMemory}!void {
         try self.emitXmmReg(if (double_precision) @as(u8, 0x66) else null, 0xc2, destination, source);
-        try self.emitByte(@intFromEnum(relation));
+        try self.emitByte(@backingInt(relation));
     }
 
     pub fn compareUnorderedPackedFloat128(self: *Masm, destination: Xmm, source: Xmm, double_precision: bool) error{OutOfMemory}!void {
@@ -839,7 +839,7 @@ pub const Masm = struct {
     }
 
     pub fn compareEqualPacked(self: *Masm, destination: Xmm, source: Xmm, size: PackedIntSize) error{OutOfMemory}!void {
-        try self.emitXmmReg(0x66, @intFromEnum(size), destination, source);
+        try self.emitXmmReg(0x66, @backingInt(size), destination, source);
     }
 
     pub fn unpackHighPackedInteger(self: *Masm, destination: Xmm, source: Xmm, size: PackedIntSize) error{OutOfMemory}!void {
@@ -862,7 +862,7 @@ pub const Masm = struct {
 
     /// The four min/max instructions available without SSE4.1.
     pub fn minMaxPacked128(self: *Masm, destination: Xmm, source: Xmm, op: PackedMinMax) error{OutOfMemory}!void {
-        try self.emitXmmReg(0x66, @intFromEnum(op), destination, source);
+        try self.emitXmmReg(0x66, @backingInt(op), destination, source);
     }
 
     pub fn shiftRightArithmeticPackedI32(self: *Masm, destination: Xmm, amount: u8) error{OutOfMemory}!void {
@@ -1038,7 +1038,7 @@ pub const Masm = struct {
     /// `jcc rel32`.
     pub fn jumpCond(self: *Masm, condition: Cond, label: *Label) !void {
         try self.emitByte(0x0F);
-        try self.emitByte(@as(u8, 0x80) | @as(u8, @intFromEnum(condition)));
+        try self.emitByte(@as(u8, 0x80) | @as(u8, @backingInt(condition)));
         try self.emitBranchDisplacement(label);
     }
 
@@ -1218,19 +1218,19 @@ fn rex(w: bool, r: bool, x: bool, b: bool) u8 {
 }
 
 fn isExtended(register: Reg) bool {
-    return @intFromEnum(register) >= 8;
+    return @backingInt(register) >= 8;
 }
 
 fn lowBits(register: Reg) u8 {
-    return @intFromEnum(register) & 7;
+    return @backingInt(register) & 7;
 }
 
 fn isExtendedXmm(register: Xmm) bool {
-    return @intFromEnum(register) >= 8;
+    return @backingInt(register) >= 8;
 }
 
 fn lowBitsXmm(register: Xmm) u8 {
-    return @intFromEnum(register) & 7;
+    return @backingInt(register) & 7;
 }
 test "jit asm_x86_64: SIMD immediate32 masks use compact zero-extending encodings" {
     var m = Masm.init(std.testing.allocator);

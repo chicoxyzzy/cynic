@@ -225,7 +225,7 @@ fn loadPlurals(
         // Canonical evaluation order: zero, one, two, few, many.
         std.sort.block(Rule, rules.items, {}, struct {
             fn lt(_: void, a: Rule, b: Rule) bool {
-                return @intFromEnum(a.category) < @intFromEnum(b.category);
+                return @backingInt(a.category) < @backingInt(b.category);
             }
         }.lt);
         try out.append(arena, .{ .key = key, .rules = rules.items });
@@ -348,7 +348,7 @@ fn pack(
     try out.appendSlice(gpa, &.{ 0, 0, 0 }); // reserved
     try appendU32(gpa, &out, dirs.len);
     for (dirs) |d| {
-        try out.append(gpa, @intFromEnum(d.kind));
+        try out.append(gpa, @backingInt(d.kind));
         try out.appendSlice(gpa, &.{ 0, 0, 0 });
         try appendU32(gpa, &out, base + d.off);
         try appendU32(gpa, &out, d.len);
@@ -1702,7 +1702,7 @@ fn writePluralPayload(gpa: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), 
         try buf.appendSlice(gpa, loc.key);
         try buf.append(gpa, @intCast(loc.rules.len));
         for (loc.rules) |r| {
-            try buf.append(gpa, @intFromEnum(r.category));
+            try buf.append(gpa, @backingInt(r.category));
             std.debug.assert(r.cond.len <= 0xFFFF);
             try buf.append(gpa, @intCast(r.cond.len & 0xFF));
             try buf.append(gpa, @intCast((r.cond.len >> 8) & 0xFF));

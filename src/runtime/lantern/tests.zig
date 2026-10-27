@@ -116,14 +116,14 @@ fn expectScriptStringWithBuiltins(source: []const u8, expected: []const u8) !voi
 test "lantern: StarLdar stores before loading when registers alias" {
     const Op = op_mod.Op;
     const code = [_]u8{
-        @intFromEnum(Op.lda_zero),
-        @intFromEnum(Op.star),
+        @backingInt(Op.lda_zero),
+        @backingInt(Op.star),
         1,
-        @intFromEnum(Op.lda_one),
-        @intFromEnum(Op.star_ldar),
+        @backingInt(Op.lda_one),
+        @backingInt(Op.star_ldar),
         1,
         1,
-        @intFromEnum(Op.return_),
+        @backingInt(Op.return_),
     };
     const chunk: chunk_mod.Chunk = .{
         .code = &code,
@@ -2094,19 +2094,19 @@ test "lda_this property direct threading: instrumented run records transfer" {
 test "smi8 star direct threading: stores register and preserves accumulator" {
     const Op = op_mod.Op;
     const code = [_]u8{
-        @intFromEnum(Op.lda_smi8),
+        @backingInt(Op.lda_smi8),
         39,
-        @intFromEnum(Op.star),
+        @backingInt(Op.star),
         4,
-        @intFromEnum(Op.star),
+        @backingInt(Op.star),
         5,
-        @intFromEnum(Op.lda_smi8),
+        @backingInt(Op.lda_smi8),
         3,
-        @intFromEnum(Op.add),
+        @backingInt(Op.add),
         4,
-        @intFromEnum(Op.add),
+        @backingInt(Op.add),
         5,
-        @intFromEnum(Op.return_),
+        @backingInt(Op.return_),
     };
     const chunk: chunk_mod.Chunk = .{
         .code = &code,

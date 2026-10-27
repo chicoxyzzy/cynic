@@ -225,7 +225,7 @@ fn x86IntegerLoopChunk(kind: X86LoopKind) !X86LoopChunk {
 fn findOpcode(chunk: *const chunk_mod.Chunk, wanted: Op) ?u32 {
     var pc: usize = 0;
     while (pc < chunk.code.len) {
-        const op: Op = @enumFromInt(chunk.code[pc]);
+        const op: Op = @fromBackingInt(@intCast(chunk.code[pc]));
         if (op == wanted) return std.math.cast(u32, pc);
         const width = 1 + @as(usize, Op.operandSize(op));
         if (width > chunk.code.len - pc) return null;

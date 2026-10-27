@@ -133,21 +133,21 @@ pub fn pushJitDirectCallFrame(
     argc: u64,
 ) callconv(.c) u32 {
     const frames = realm.jit_active_frames orelse
-        return @intFromEnum(JitPushStatus.tier_down);
+        return @backingInt(JitPushStatus.tier_down);
     if (frames.items.len >= lantern.max_call_frames) {
-        return @intFromEnum(JitPushStatus.tier_down);
+        return @backingInt(JitPushStatus.tier_down);
     }
     const callee_chunk = callee_fn.chunk orelse
-        return @intFromEnum(JitPushStatus.tier_down);
+        return @backingInt(JitPushStatus.tier_down);
     const allocator = realm.heap.allocator;
     const ac = std.math.cast(usize, argc) orelse
-        return @intFromEnum(JitPushStatus.tier_down);
+        return @backingInt(JitPushStatus.tier_down);
     const reg_count = @max(@as(usize, callee_chunk.register_count), ac);
     var is_stack_alloc = true;
     const callee_regs = realm.allocStackRegisters(reg_count) orelse blk: {
         is_stack_alloc = false;
         break :blk realm.frame_pool.acquire(allocator, reg_count) catch
-            return @intFromEnum(JitPushStatus.host_oom);
+            return @backingInt(JitPushStatus.host_oom);
     };
     @memset(callee_regs, Value.undefined_);
     var ai: usize = 0;
@@ -184,9 +184,9 @@ pub fn pushJitDirectCallFrame(
         } else {
             realm.frame_pool.release(allocator, callee_regs);
         }
-        return @intFromEnum(JitPushStatus.host_oom);
+        return @backingInt(JitPushStatus.host_oom);
     };
-    return @intFromEnum(JitPushStatus.pushed);
+    return @backingInt(JitPushStatus.pushed);
 }
 
 /// Push a vetted ordinary bytecode constructor onto the active JIT-owned frame
@@ -203,21 +203,21 @@ pub fn pushJitConstructFrame(
     argc: u64,
 ) callconv(.c) u32 {
     const frames = realm.jit_active_frames orelse
-        return @intFromEnum(JitPushStatus.tier_down);
+        return @backingInt(JitPushStatus.tier_down);
     if (frames.items.len >= lantern.max_call_frames) {
-        return @intFromEnum(JitPushStatus.tier_down);
+        return @backingInt(JitPushStatus.tier_down);
     }
     const callee_chunk = callee_fn.chunk orelse
-        return @intFromEnum(JitPushStatus.tier_down);
+        return @backingInt(JitPushStatus.tier_down);
     const ac = std.math.cast(usize, argc) orelse
-        return @intFromEnum(JitPushStatus.tier_down);
+        return @backingInt(JitPushStatus.tier_down);
     const allocator = realm.heap.allocator;
     const reg_count = @max(@as(usize, callee_chunk.register_count), ac);
     var is_stack_alloc = true;
     const callee_regs = realm.allocStackRegisters(reg_count) orelse blk: {
         is_stack_alloc = false;
         break :blk realm.frame_pool.acquire(allocator, reg_count) catch
-            return @intFromEnum(JitPushStatus.host_oom);
+            return @backingInt(JitPushStatus.host_oom);
     };
     @memset(callee_regs, Value.undefined_);
     var ai: usize = 0;
@@ -230,7 +230,7 @@ pub fn pushJitConstructFrame(
         } else {
             realm.frame_pool.release(allocator, callee_regs);
         }
-        return @intFromEnum(JitPushStatus.host_oom);
+        return @backingInt(JitPushStatus.host_oom);
     };
     realm.heap.setObjectPrototype(instance, cell.proto);
     // §10.1.13's initial-map hint provisions slot capacity only. It must not
@@ -264,9 +264,9 @@ pub fn pushJitConstructFrame(
         } else {
             realm.frame_pool.release(allocator, callee_regs);
         }
-        return @intFromEnum(JitPushStatus.host_oom);
+        return @backingInt(JitPushStatus.host_oom);
     };
-    return @intFromEnum(JitPushStatus.pushed);
+    return @backingInt(JitPushStatus.pushed);
 }
 
 /// Phase 3 SES override-mistake fix — perform the synthetic

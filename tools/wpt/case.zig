@@ -106,7 +106,13 @@ fn execute(init: std.process.Init) !u8 {
     // Report the compiler's actual mode, never a caller-supplied expectation.
     if (std.mem.eql(u8, first, "--build-info")) {
         if (args.next() != null) return error.InvalidArgument;
-        try writeOutput("{\"schema_version\":1,\"build_mode\":\"" ++ @tagName(@import("builtin").mode) ++ "\"}\n");
+        const mode = switch (@import("builtin").optimize) {
+            .debug => "Debug",
+            .safe => "ReleaseSafe",
+            .fast => "ReleaseFast",
+            .small => "ReleaseSmall",
+        };
+        try writeOutput("{\"schema_version\":1,\"build_mode\":\"" ++ mode ++ "\"}\n");
         return 0;
     }
     var argument_next: ?[]const u8 = first;

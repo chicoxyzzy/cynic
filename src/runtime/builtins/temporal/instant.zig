@@ -363,7 +363,7 @@ fn instantRound(realm: *Realm, this_value: Value, args: []const Value) NativeErr
         const s: *JSString = @ptrCast(@alignCast(round_to.asString()));
         unit = temporal.parseTemporalUnit(s.flatBytes()) orelse
             return throwRangeError(realm, "invalid smallestUnit");
-        if (@intFromEnum(unit) < @intFromEnum(temporal.LargestUnit.hour)) {
+        if (@backingInt(unit) < @backingInt(temporal.LargestUnit.hour)) {
             return throwRangeError(realm, "smallestUnit is outside the allowed range");
         }
     } else {
@@ -431,11 +431,11 @@ fn differenceTemporalInstant(realm: *Realm, this_value: Value, args: []const Val
     try requireUnitInRange(realm, smallest, .hour, .nanosecond);
 
     // Default largestUnit is the larger of smallestUnit and "second".
-    const largest = largest_opt orelse (if (@intFromEnum(smallest) < @intFromEnum(temporal.LargestUnit.second))
+    const largest = largest_opt orelse (if (@backingInt(smallest) < @backingInt(temporal.LargestUnit.second))
         smallest
     else
         temporal.LargestUnit.second);
-    if (@intFromEnum(largest) > @intFromEnum(smallest)) {
+    if (@backingInt(largest) > @backingInt(smallest)) {
         return throwRangeError(realm, "largestUnit must not be smaller than smallestUnit");
     }
     if (!temporal.validateRoundingIncrement(increment, differenceDividend(smallest), false)) {

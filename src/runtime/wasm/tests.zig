@@ -5050,7 +5050,7 @@ test "wasm: SIMD float selection shared scalar rounds quiet signaling NaNs" {
     const a = arena.allocator();
     for (simd_float_selection_cases) |op| {
         if (!op.isUnary()) continue;
-        const scalar: u8 = (if (op.double_precision) @as(u8, 0x9b) else 0x8d) + @intFromEnum(op.op);
+        const scalar: u8 = (if (op.double_precision) @as(u8, 0x9b) else 0x8d) + @backingInt(op.op);
         const ty: u8 = if (op.double_precision) 0x7c else 0x7d;
         const module = try wasm.decode(a, try buildFunc(a, &.{ty}, &.{ty}, &.{ 0, 0x20, 0, scalar, 0x0b }, "round"));
         for ([_]bool{ false, true }) |native| {

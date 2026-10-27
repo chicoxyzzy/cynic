@@ -129,7 +129,7 @@ pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) DecodeError!Modul
         const id_byte = try r.byte();
         const size = try r.uleb(u32);
         const payload = try r.bytesN(size);
-        const id: SectionId = @enumFromInt(id_byte);
+        const id: SectionId = @fromBackingInt(@intCast(id_byte));
 
         // Ordering: custom sections are exempt; everything else must
         // strictly advance the canonical position (which also makes

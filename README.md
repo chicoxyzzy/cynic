@@ -36,7 +36,7 @@ The rationale and exact behavior are documented in
 
 ## Quick start
 
-The required Zig development build is pinned in
+Zig 0.17.0 stable is pinned in
 [`build.zig.zon`](build.zig.zon). [anyzig](https://github.com/marler8997/anyzig)
 can resolve that exact version.
 

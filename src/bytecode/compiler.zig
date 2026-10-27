@@ -15441,8 +15441,8 @@ test "compiler: smoke — chunk has the leading MakeEnvironment" {
 
     // First instruction is `MakeEnvironment`, last is `Return`.
     try testing.expect(chunk.code.len >= 2);
-    try testing.expectEqual(@intFromEnum(@import("op.zig").Op.make_environment), chunk.code[0]);
-    try testing.expectEqual(@intFromEnum(@import("op.zig").Op.return_), chunk.code[chunk.code.len - 1]);
+    try testing.expectEqual(@backingInt(@import("op.zig").Op.make_environment), chunk.code[0]);
+    try testing.expectEqual(@backingInt(@import("op.zig").Op.return_), chunk.code[chunk.code.len - 1]);
 }
 
 /// Compile `source` (one expression statement) and return its full

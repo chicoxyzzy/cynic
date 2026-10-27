@@ -141,7 +141,7 @@ pub fn build(b: *std.Build) void {
     const cynic_fuzz_mod = b.createModule(.{
         .root_source_file = b.path("tools/fuzz/fuzz_main.zig"),
         .target = target,
-        .optimize = .ReleaseSafe,
+        .optimize = .safe,
         .link_libc = true,
     });
     // Re-import the lib at ReleaseSafe so the fuzz binary is also
@@ -149,7 +149,7 @@ pub fn build(b: *std.Build) void {
     const lib_mod_fuzz = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
-        .optimize = .ReleaseSafe,
+        .optimize = .safe,
         .link_libc = true,
     });
     lib_mod_fuzz.addAnonymousImport("NormalizationTest.txt", .{
@@ -269,7 +269,7 @@ pub fn build(b: *std.Build) void {
     const gen_mod = b.createModule(.{
         .root_source_file = b.path("tools/gen_unicode_idents.zig"),
         .target = b.graph.host,
-        .optimize = .Debug,
+        .optimize = .debug,
     });
     const gen_exe = b.addExecutable(.{
         .name = "gen_unicode_idents",
@@ -289,7 +289,7 @@ pub fn build(b: *std.Build) void {
     const pack_tz_mod = b.createModule(.{
         .root_source_file = b.path("tools/pack_tzdata.zig"),
         .target = b.graph.host,
-        .optimize = .Debug,
+        .optimize = .debug,
     });
     const pack_tz_exe = b.addExecutable(.{
         .name = "pack_tzdata",
@@ -315,7 +315,7 @@ pub fn build(b: *std.Build) void {
     const pack_cldr_mod = b.createModule(.{
         .root_source_file = b.path("tools/pack_cldr.zig"),
         .target = b.graph.host,
-        .optimize = .Debug,
+        .optimize = .debug,
     });
     const pack_cldr_exe = b.addExecutable(.{
         .name = "pack_cldr",
@@ -336,7 +336,7 @@ pub fn build(b: *std.Build) void {
     const gen_props_mod = b.createModule(.{
         .root_source_file = b.path("tools/gen_unicode_props.zig"),
         .target = b.graph.host,
-        .optimize = .Debug,
+        .optimize = .debug,
     });
     const gen_props_exe = b.addExecutable(.{
         .name = "gen_unicode_props",
@@ -362,7 +362,7 @@ pub fn build(b: *std.Build) void {
     const gen_cf_mod = b.createModule(.{
         .root_source_file = b.path("tools/gen_case_fold.zig"),
         .target = b.graph.host,
-        .optimize = .Debug,
+        .optimize = .debug,
     });
     const gen_cf_exe = b.addExecutable(.{
         .name = "gen_case_fold",
@@ -380,7 +380,7 @@ pub fn build(b: *std.Build) void {
     const gen_cc_mod = b.createModule(.{
         .root_source_file = b.path("tools/gen_case_conv.zig"),
         .target = b.graph.host,
-        .optimize = .Debug,
+        .optimize = .debug,
     });
     const gen_cc_exe = b.addExecutable(.{
         .name = "gen_case_conv",
@@ -400,7 +400,7 @@ pub fn build(b: *std.Build) void {
     const gen_nf_mod = b.createModule(.{
         .root_source_file = b.path("tools/gen_normalization.zig"),
         .target = b.graph.host,
-        .optimize = .Debug,
+        .optimize = .debug,
     });
     const gen_nf_exe = b.addExecutable(.{
         .name = "gen_normalization",
@@ -441,7 +441,9 @@ pub fn build(b: *std.Build) void {
     // forces Debug for stack-traces-on-panic. The cynic library is
     // re-imported under `lib_mod_fast` so it's also ReleaseFast.
     const test262_debug = b.option(bool, "test262-debug", "Build the test262 harness in Debug for stack traces") orelse false;
-    const t262_optimize: std.builtin.OptimizeMode = if (test262_debug) .Debug else .ReleaseFast;
+    const t262_optimize: std.lang.Optimize = if (test262_debug) .debug else .fast;
+    // WPT reports retain their schema names across Zig's mode-tag rename.
+    const wpt_build_mode = if (test262_debug) "Debug" else "ReleaseFast";
     const lib_mod_fast = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
@@ -514,7 +516,7 @@ pub fn build(b: *std.Build) void {
     b.step("wpt-build", "Build the isolated WPT shell executor").dependOn(&install_wpt.step);
     const run_wpt = b.addSystemCommand(&.{ "python3", "tools/wpt/run.py", "--binary" });
     run_wpt.addArtifactArg(wpt_exe);
-    run_wpt.addArgs(&.{ "--expect-build-mode", @tagName(t262_optimize) });
+    run_wpt.addArgs(&.{ "--expect-build-mode", wpt_build_mode });
     run_wpt.step.dependOn(&install_wpt.step);
     run_wpt.addPassthruArgs();
     b.step("wpt", "Run the pinned WPT Wasm JavaScript API slice").dependOn(&run_wpt.step);
@@ -528,7 +530,7 @@ pub fn build(b: *std.Build) void {
     }
     const wpt_integration = b.addSystemCommand(&.{ "python3", "tools/wpt/test_case.py", "--binary" });
     wpt_integration.addArtifactArg(wpt_exe);
-    wpt_integration.addArgs(&.{ "--expect-build-mode", @tagName(t262_optimize) });
+    wpt_integration.addArgs(&.{ "--expect-build-mode", wpt_build_mode });
     wpt_test_step.dependOn(&wpt_integration.step);
 
     // `zig build wasm-testsuite` — Sarcasm conformance against the
@@ -607,7 +609,7 @@ pub fn build(b: *std.Build) void {
     const lib_mod_test_safe = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
-        .optimize = .ReleaseSafe,
+        .optimize = .safe,
         .link_libc = true,
     });
     lib_mod_test_safe.addAnonymousImport("NormalizationTest.txt", .{
@@ -620,7 +622,7 @@ pub fn build(b: *std.Build) void {
     const backend_mod = b.createModule(.{
         .root_source_file = b.path("tools/backend_prototype.zig"),
         .target = target,
-        .optimize = .ReleaseSafe,
+        .optimize = .safe,
     });
     backend_mod.addImport("cynic", lib_mod_test_safe);
     const backend_exe = b.addExecutable(.{
@@ -637,7 +639,7 @@ pub fn build(b: *std.Build) void {
     const wpt_safe_mod = b.createModule(.{
         .root_source_file = b.path("tools/wpt/case.zig"),
         .target = target,
-        .optimize = .ReleaseSafe,
+        .optimize = .safe,
         .link_libc = true,
     });
     wpt_safe_mod.addImport("cynic", lib_mod_test_safe);
@@ -658,7 +660,7 @@ pub fn build(b: *std.Build) void {
     const exe_mod_test_safe = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
-        .optimize = .ReleaseSafe,
+        .optimize = .safe,
         .link_libc = true,
     });
     exe_mod_test_safe.addImport("cynic", lib_mod_test_safe);
@@ -667,14 +669,14 @@ pub fn build(b: *std.Build) void {
     const safe_bench_tests_mod = b.createModule(.{
         .root_source_file = b.path("tools/bench.zig"),
         .target = target,
-        .optimize = .ReleaseSafe,
+        .optimize = .safe,
     });
     safe_bench_tests_mod.addImport("cynic", lib_mod_test_safe);
     const safe_bench_tests = b.addTest(.{ .root_module = safe_bench_tests_mod, .filters = test_filters });
     const safe_wts_tests_mod = b.createModule(.{
         .root_source_file = b.path("tools/wasm_testsuite.zig"),
         .target = target,
-        .optimize = .ReleaseSafe,
+        .optimize = .safe,
     });
     safe_wts_tests_mod.addImport("cynic", lib_mod_test_safe);
     const safe_wts_tests = b.addTest(.{ .root_module = safe_wts_tests_mod, .filters = test_filters });
@@ -704,7 +706,7 @@ pub fn build(b: *std.Build) void {
     const lib_mod_safe = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
-        .optimize = .ReleaseSafe,
+        .optimize = .safe,
         .link_libc = true,
     });
     lib_mod_safe.addAnonymousImport("NormalizationTest.txt", .{
@@ -715,7 +717,7 @@ pub fn build(b: *std.Build) void {
     const t262_mod_safe = b.createModule(.{
         .root_source_file = b.path("tools/test262.zig"),
         .target = target,
-        .optimize = .ReleaseSafe,
+        .optimize = .safe,
     });
     t262_mod_safe.addImport("cynic", lib_mod_safe);
     const t262_exe_safe = b.addExecutable(.{
@@ -743,7 +745,7 @@ pub fn build(b: *std.Build) void {
     const cynic_fast_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
-        .optimize = .ReleaseFast,
+        .optimize = .fast,
         .link_libc = true,
     });
     cynic_fast_mod.addImport("cynic", lib_mod_fast);
@@ -756,7 +758,7 @@ pub fn build(b: *std.Build) void {
     const bench_mod = b.createModule(.{
         .root_source_file = b.path("tools/bench.zig"),
         .target = target,
-        .optimize = .ReleaseFast,
+        .optimize = .fast,
     });
     bench_mod.addImport("cynic", lib_mod_fast);
     const bench_exe = b.addExecutable(.{
@@ -797,7 +799,7 @@ pub fn build(b: *std.Build) void {
     const wasm_lib_mod = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
         .target = wasm_target,
-        .optimize = .ReleaseSmall,
+        .optimize = .small,
     });
     wasm_lib_mod.addAnonymousImport("NormalizationTest.txt", .{
         .root_source_file = b.path("vendor/unicode/NormalizationTest.txt"),
@@ -809,7 +811,7 @@ pub fn build(b: *std.Build) void {
     const wasm_mod = b.createModule(.{
         .root_source_file = b.path("playground/wasm.zig"),
         .target = wasm_target,
-        .optimize = .ReleaseSmall,
+        .optimize = .small,
     });
     wasm_mod.addImport("cynic", wasm_lib_mod);
 

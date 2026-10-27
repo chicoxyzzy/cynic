@@ -1531,7 +1531,7 @@ inline fn decodeNext(code: []const u8, ip: *usize, committed: *bool) RunError!Op
     if (ip.* >= code.len) return error.InvalidOpcode;
     const b = code[ip.*];
     ip.* += 1;
-    const op: Op = @enumFromInt(b);
+    const op: Op = @fromBackingInt(@intCast(b));
     if (comptime bytecode_stats.enabled) bytecode_stats.observeActive(op);
     return op;
 }
@@ -1544,7 +1544,7 @@ inline fn decodeNextKnownPresent(code: []const u8, ip: *usize, committed: *bool)
     committed.* = false;
     const b = code[ip.*];
     ip.* += 1;
-    const op: Op = @enumFromInt(b);
+    const op: Op = @fromBackingInt(@intCast(b));
     if (comptime bytecode_stats.enabled) bytecode_stats.observeActive(op);
     return op;
 }
@@ -1578,7 +1578,7 @@ inline fn reEnterDispatch(
     const b = code.*[ip.*];
     ip.* += 1;
     // Unchecked decode — see `decodeNext`.
-    const op: Op = @enumFromInt(b);
+    const op: Op = @fromBackingInt(@intCast(b));
     if (comptime bytecode_stats.enabled) bytecode_stats.observeActive(op);
     return op;
 }
@@ -1990,7 +1990,7 @@ pub fn runFrames(
     // — see `runSafePoint`).
     if (try runSafePoint(realm)) |r| return r;
     if (ip >= code.len) return error.InvalidOpcode;
-    const first_op: Op = @enumFromInt(code[ip]);
+    const first_op: Op = @fromBackingInt(@intCast(code[ip]));
     ip += 1;
     if (comptime bytecode_stats.enabled) bytecode_stats.observeActive(first_op);
 
@@ -2034,7 +2034,7 @@ pub fn runFrames(
             // avoiding a repeated probe and dispatch. Star is an
             // unconditional frame-register store.
             if (op_tag == .lda_smi8) {
-                if (ip + 1 < code.len and code[ip] == @intFromEnum(Op.shr)) {
+                if (ip + 1 < code.len and code[ip] == @backingInt(Op.shr)) {
                     // Keep ordinary decode as fallthrough; matching Crypto
                     // shifts take the predictable side edge.
                     @branchHint(.unlikely);
@@ -2044,7 +2044,7 @@ pub fn runFrames(
                         if (comptime bytecode_stats.enabled) bytecode_stats.observeDirectActive(.shr);
                         acc = res;
                     }
-                } else if (ip + 1 < code.len and code[ip] == @intFromEnum(Op.star)) {
+                } else if (ip + 1 < code.len and code[ip] == @backingInt(Op.star)) {
                     // Splay overwhelmingly stores these compact constants in
                     // a general register. Star preserves the accumulator, so
                     // this pure frame write can complete before dispatch.
@@ -2057,7 +2057,7 @@ pub fn runFrames(
                     registers[r] = acc;
                     if (comptime bytecode_stats.enabled) bytecode_stats.observeDirectActive(.star);
                 }
-            } else if (ip + 1 < code.len and code[ip] == @intFromEnum(Op.bit_and)) {
+            } else if (ip + 1 < code.len and code[ip] == @backingInt(Op.bit_and)) {
                 // Bias ordinary decode toward the laid-out fallthrough;
                 // matching masks remain highly predictable inside Crypto.
                 @branchHint(.unlikely);
@@ -2134,11 +2134,11 @@ pub fn runFrames(
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
         .ldar_0, .ldar_1, .ldar_2, .ldar_3 => |t| {
-            acc = registers[@intFromEnum(t) - @intFromEnum(Op.ldar_0)];
+            acc = registers[@backingInt(t) - @backingInt(Op.ldar_0)];
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
         .star_0, .star_1, .star_2, .star_3 => |t| {
-            registers[@intFromEnum(t) - @intFromEnum(Op.star_0)] = acc;
+            registers[@backingInt(t) - @backingInt(Op.star_0)] = acc;
             continue :dispatch try decodeNext(code, &ip, &committed);
         },
 
@@ -5913,7 +5913,7 @@ pub fn runFrames(
             // dispatch. Keep the GetThisBinding gate above this
             // transfer so a derived constructor's uninitialised `this`
             // still throws before any property lookup.
-            if (ip < code.len and code[ip] == @intFromEnum(Op.lda_property8)) {
+            if (ip < code.len and code[ip] == @backingInt(Op.lda_property8)) {
                 ip += 1;
                 if (comptime bytecode_stats.enabled) bytecode_stats.observeDirectActive(.lda_property8);
                 continue :dispatch .lda_property8;

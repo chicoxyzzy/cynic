@@ -440,7 +440,7 @@ fn differenceTemporalTime(realm: *Realm, this_value: Value, args: []const Value,
     const smallest = smallest_opt orelse temporal.LargestUnit.nanosecond;
     try requireUnitInRange(realm, smallest, .hour, .nanosecond);
     const largest = largest_opt orelse temporal.LargestUnit.hour;
-    if (@intFromEnum(largest) > @intFromEnum(smallest)) {
+    if (@backingInt(largest) > @backingInt(smallest)) {
         return throwRangeError(realm, "largestUnit must not be smaller than smallestUnit");
     }
     if (!temporal.validateRoundingIncrement(increment, differenceDividend(smallest), false)) {

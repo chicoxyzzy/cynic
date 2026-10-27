@@ -648,7 +648,7 @@ const Builder = struct {
         var terminated = false;
         var pc: usize = start;
         while (pc < end) {
-            const op: Op = @enumFromInt(self.chunk.code[pc]);
+            const op: Op = @fromBackingInt(@intCast(self.chunk.code[pc]));
             const next = pc + 1 + Op.operandSize(op);
             if (next > end) return error.MalformedBytecode;
 
@@ -853,12 +853,12 @@ const Builder = struct {
                 ),
                 .ldar => accumulator = try readRegister(registers, self.chunk.code[pc + 1]),
                 .ldar_0, .ldar_1, .ldar_2, .ldar_3 => |compact| {
-                    const register: u8 = @intCast(@intFromEnum(compact) - @intFromEnum(Op.ldar_0));
+                    const register: u8 = @intCast(@backingInt(compact) - @backingInt(Op.ldar_0));
                     accumulator = try readRegister(registers, register);
                 },
                 .star => try writeRegister(registers, self.chunk.code[pc + 1], accumulator),
                 .star_0, .star_1, .star_2, .star_3 => |compact| {
-                    const register: u8 = @intCast(@intFromEnum(compact) - @intFromEnum(Op.star_0));
+                    const register: u8 = @intCast(@backingInt(compact) - @backingInt(Op.star_0));
                     try writeRegister(registers, register, accumulator);
                 },
                 .mov => {
@@ -1843,7 +1843,7 @@ const Builder = struct {
 
         var pc: usize = start;
         while (pc < end) {
-            const op: Op = @enumFromInt(self.chunk.code[pc]);
+            const op: Op = @fromBackingInt(@intCast(self.chunk.code[pc]));
             const next = pc + 1 + Op.operandSize(op);
             if (next > end) return error.MalformedBytecode;
             try offsets.append(self.allocator, @intCast(pc));
@@ -1857,7 +1857,7 @@ const Builder = struct {
         while (offset_index > 0) {
             offset_index -= 1;
             const offset = offsets.items[offset_index];
-            const op: Op = @enumFromInt(self.chunk.code[offset]);
+            const op: Op = @fromBackingInt(@intCast(self.chunk.code[offset]));
             liveness.applyReverseEffect(
                 &live,
                 liveness.effectOf(op, self.chunk.code, offset),

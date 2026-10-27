@@ -1949,7 +1949,7 @@ fn buildZipWrapper(
     const state = realm.allocator.create(IteratorHelperState) catch return error.OutOfMemory;
     state.* = .{
         .count = @intCast(iters.len),
-        .mode = @intCast(@intFromEnum(mode)),
+        .mode = @intCast(@backingInt(mode)),
         .keyed = keys != null,
         .kind = .zip,
     };
@@ -2193,7 +2193,7 @@ fn zipNext(realm: *Realm, this_value: Value, args: []const Value) NativeError!Va
         state.done = true;
         return doneResult(realm);
     }
-    const mode: ZipMode = @enumFromInt(@as(i32, state.mode));
+    const mode: ZipMode = @fromBackingInt(@intCast(@as(i32, state.mode)));
     const keyed = state.keyed;
 
     // Build the result holder. zip yields Array exotics, zipKeyed
