@@ -4,7 +4,7 @@
   "manifest_sha256": "bf587399b1b7561f6837bddaf8e09beadb8a2681cc74f8a3cec1aaf7ac4c7e39",
   "adapter_sha256": {
     "run.py": "e32ee468cee38c130eb7b2ce80dbf85d5097e920cddb7316ce05b14f708cdcdc",
-    "case.zig": "0c0e13b0411d20ce7cf0002d2f900363b4b2024158be9cd52e10fedadde0c13e",
+    "case.zig": "8e23f4e8b8fa0d3e34a65f6102832166f62f6e50c82b4ba138f93d4f7ad1c33c",
     "bootstrap.js": "2a7fc46fe66723bd90812a3274aa6f5695e72cf0cbe8a451d6e19b7dcdf7ff4d",
     "reporter.js": "3bf240776c67cc9fa239b450bc5406056d3c1d14dda74139b4eeeeb71b2ef1a2",
     "finish.js": "6c174bed116d8d8e1c96caf0e6a01e7c80f7a2a97c1edba81e845c9a5fb1d072",
