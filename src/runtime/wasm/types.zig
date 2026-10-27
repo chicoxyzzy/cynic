@@ -61,7 +61,7 @@ pub const ValType = enum(u32) {
             heap_abs_exn => return .exnref,
             else => {},
         };
-        return @enumFromInt(ref_flag | (if (nullable) null_flag else @as(u32, 0)) | (heap & heap_mask));
+        return @fromBackingInt(@intCast(ref_flag | (if (nullable) null_flag else @as(u32, 0)) | (heap & heap_mask)));
     }
 
     /// The heap type of any reference type (shorthand or constructed);
@@ -73,7 +73,7 @@ pub const ValType = enum(u32) {
             .exnref => heap_abs_exn,
             .i32, .i64, .f32, .f64, .v128 => null,
             _ => {
-                const raw = @intFromEnum(self);
+                const raw = @backingInt(self);
                 if (raw & ref_flag == 0) return null;
                 return raw & heap_mask;
             },
@@ -85,7 +85,7 @@ pub const ValType = enum(u32) {
         return switch (self) {
             .funcref, .externref, .exnref => true,
             .i32, .i64, .f32, .f64, .v128 => false,
-            _ => @intFromEnum(self) & null_flag != 0,
+            _ => @backingInt(self) & null_flag != 0,
         };
     }
 

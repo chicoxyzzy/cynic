@@ -515,7 +515,7 @@ fn differenceTemporalYearMonth(realm: *Realm, this_value: Value, args: []const V
     // and "year" is the coarsest unit, so the default largest is always
     // "year" regardless of smallestUnit.
     const largest = largest_opt orelse temporal.LargestUnit.year;
-    if (@intFromEnum(largest) > @intFromEnum(smallest)) {
+    if (@backingInt(largest) > @backingInt(smallest)) {
         return throwRangeError(realm, "largestUnit must not be smaller than smallestUnit");
     }
 

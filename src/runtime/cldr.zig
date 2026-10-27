@@ -83,7 +83,7 @@ const SectionKind = enum(u8) {
 // pattern in `unicode/perlex_props.zig`.
 
 const InitState = enum(u8) { uninit, building, done };
-var init_state = std.atomic.Value(u8).init(@intFromEnum(InitState.uninit));
+var init_state = std.atomic.Value(u8).init(@backingInt(InitState.uninit));
 var init_ok: bool = false;
 var card_payload: []const u8 = &.{};
 var ord_payload: []const u8 = &.{};
@@ -114,22 +114,22 @@ fn embedBlob() []const u8 {
 /// spin until the payloads are visible (`release`/`acquire` pair the parse's
 /// writes to the reading thread).
 fn ensureInit() bool {
-    if (init_state.load(.acquire) != @intFromEnum(InitState.done)) initOnce();
+    if (init_state.load(.acquire) != @backingInt(InitState.done)) initOnce();
     return init_ok;
 }
 
 fn initOnce() void {
     if (init_state.cmpxchgStrong(
-        @intFromEnum(InitState.uninit),
-        @intFromEnum(InitState.building),
+        @backingInt(InitState.uninit),
+        @backingInt(InitState.building),
         .acq_rel,
         .acquire,
     ) == null) {
         init_ok = parseContainer();
-        init_state.store(@intFromEnum(InitState.done), .release);
+        init_state.store(@backingInt(InitState.done), .release);
         return;
     }
-    while (init_state.load(.acquire) != @intFromEnum(InitState.done)) {
+    while (init_state.load(.acquire) != @backingInt(InitState.done)) {
         std.atomic.spinLoopHint();
     }
 }
@@ -158,23 +158,23 @@ fn parseContainer() bool {
         if (end > blob.len) return false;
         const payload = blob[sec_off..end];
         switch (kind) {
-            @intFromEnum(SectionKind.plural_cardinal) => card_payload = payload,
-            @intFromEnum(SectionKind.plural_ordinal) => ord_payload = payload,
-            @intFromEnum(SectionKind.numbers) => num_payload = payload,
-            @intFromEnum(SectionKind.numbering_systems) => ns_payload = payload,
-            @intFromEnum(SectionKind.dates) => dates_payload = payload,
-            @intFromEnum(SectionKind.display_names) => display_payload = payload,
-            @intFromEnum(SectionKind.currencies) => cur_payload = payload,
-            @intFromEnum(SectionKind.currency_names) => cur_names_payload = payload,
-            @intFromEnum(SectionKind.likely_subtags) => likely_payload = payload,
-            @intFromEnum(SectionKind.list_patterns) => lp_payload = payload,
-            @intFromEnum(SectionKind.relative_time) => rt_payload = payload,
-            @intFromEnum(SectionKind.compact) => cp_payload = payload,
-            @intFromEnum(SectionKind.units) => un_payload = payload,
-            @intFromEnum(SectionKind.language_aliases) => lang_alias_payload = payload,
-            @intFromEnum(SectionKind.territory_aliases) => territory_alias_payload = payload,
-            @intFromEnum(SectionKind.interval_formats) => iv_payload = payload,
-            @intFromEnum(SectionKind.metazones) => mz_payload = payload,
+            @backingInt(SectionKind.plural_cardinal) => card_payload = payload,
+            @backingInt(SectionKind.plural_ordinal) => ord_payload = payload,
+            @backingInt(SectionKind.numbers) => num_payload = payload,
+            @backingInt(SectionKind.numbering_systems) => ns_payload = payload,
+            @backingInt(SectionKind.dates) => dates_payload = payload,
+            @backingInt(SectionKind.display_names) => display_payload = payload,
+            @backingInt(SectionKind.currencies) => cur_payload = payload,
+            @backingInt(SectionKind.currency_names) => cur_names_payload = payload,
+            @backingInt(SectionKind.likely_subtags) => likely_payload = payload,
+            @backingInt(SectionKind.list_patterns) => lp_payload = payload,
+            @backingInt(SectionKind.relative_time) => rt_payload = payload,
+            @backingInt(SectionKind.compact) => cp_payload = payload,
+            @backingInt(SectionKind.units) => un_payload = payload,
+            @backingInt(SectionKind.language_aliases) => lang_alias_payload = payload,
+            @backingInt(SectionKind.territory_aliases) => territory_alias_payload = payload,
+            @backingInt(SectionKind.interval_formats) => iv_payload = payload,
+            @backingInt(SectionKind.metazones) => mz_payload = payload,
             else => {}, // unknown/future section — ignore
         }
     }
@@ -291,7 +291,7 @@ fn evalRules(rules: []const u8, ops: Operands) PluralCategory {
         const cond = rules[cur + 3 .. cur + 3 + len];
         if (evalCondition(cond, ops)) {
             // Stored categories are 0..4 (zero..many); guard defensively.
-            return if (cat <= @intFromEnum(PluralCategory.many)) @enumFromInt(cat) else .other;
+            return if (cat <= @backingInt(PluralCategory.many)) @fromBackingInt(@intCast(cat)) else .other;
         }
         cur += 3 + len;
     }
@@ -704,7 +704,7 @@ pub fn currencyUnitPattern(locale: []const u8, category: PluralCategory) ?[]cons
     var off = off0;
     _ = readStr16(cur_payload, &off) orelse return null; // std
     _ = readStr16(cur_payload, &off) orelse return null; // acct
-    const want: u8 = @intFromEnum(category);
+    const want: u8 = @backingInt(category);
     const uc = readU8(cur_payload, &off) orelse return null;
     var found: ?[]const u8 = null;
     var other: ?[]const u8 = null;
@@ -713,7 +713,7 @@ pub fn currencyUnitPattern(locale: []const u8, category: PluralCategory) ?[]cons
         const cat = readU8(cur_payload, &off) orelse return null;
         const pat = readStr16(cur_payload, &off) orelse return null;
         if (cat == want) found = pat;
-        if (cat == @intFromEnum(PluralCategory.other)) other = pat;
+        if (cat == @backingInt(PluralCategory.other)) other = pat;
     }
     return found orelse other;
 }
@@ -727,7 +727,7 @@ pub fn currencyDisplayNameCount(locale: []const u8, code: []const u8, category: 
     const off0 = withCandidates(locale, findCurrencyName) orelse return null;
     var off = off0;
     const cur_count = readU32(cur_names_payload, &off) orelse return null;
-    const want: u8 = @intFromEnum(category);
+    const want: u8 = @backingInt(category);
     var i: u32 = 0;
     while (i < cur_count) : (i += 1) {
         const c = readBytes(cur_names_payload, &off, 3) orelse return null;
@@ -741,7 +741,7 @@ pub fn currencyDisplayNameCount(locale: []const u8, code: []const u8, category: 
             const name = readStr16(cur_names_payload, &off) orelse return null;
             if (match) {
                 if (cat == want) found = name;
-                if (cat == @intFromEnum(PluralCategory.other)) other = name;
+                if (cat == @backingInt(PluralCategory.other)) other = name;
             }
         }
         if (match) return found orelse other;
@@ -855,7 +855,7 @@ pub fn listPattern(locale: []const u8, type_idx: u8, style_idx: u8, which: ListP
     const rec_off = withCandidates(locale, findListPatternLocale) orelse return null;
     // Patterns are variable-length str16s, so walk to the target: skip
     // (set_idx*4 + which) entries, where set_idx = type*3 + style.
-    const target: usize = (@as(usize, type_idx) * 3 + style_idx) * 4 + @intFromEnum(which);
+    const target: usize = (@as(usize, type_idx) * 3 + style_idx) * 4 + @backingInt(which);
     var off = rec_off;
     var idx: usize = 0;
     var pat: []const u8 = "";
@@ -915,8 +915,8 @@ pub fn compactPattern(locale: []const u8, long: bool, power: u8, cat: PluralCate
         const ct = readU8(cp_payload, &off) orelse return null;
         const pat = readStr16(cp_payload, &off) orelse return null;
         if (p == power) {
-            if (ct == @intFromEnum(cat)) return pat;
-            if (ct == @intFromEnum(PluralCategory.other)) fallback = pat;
+            if (ct == @backingInt(cat)) return pat;
+            if (ct == @backingInt(PluralCategory.other)) fallback = pat;
         }
     }
     return fallback;
@@ -998,8 +998,8 @@ pub fn unitPattern(locale: []const u8, simple: []const u8, style_idx: u8, cat: P
     while (i < pc) : (i += 1) {
         const ct = readU8(un_payload, &off) orelse return null;
         const pat = readStr16(un_payload, &off) orelse return null;
-        if (ct == @intFromEnum(cat)) return pat;
-        if (ct == @intFromEnum(PluralCategory.other)) fallback = pat;
+        if (ct == @backingInt(cat)) return pat;
+        if (ct == @backingInt(PluralCategory.other)) fallback = pat;
     }
     return fallback;
 }
@@ -1104,8 +1104,8 @@ pub fn relativeTimePattern(locale: []const u8, unit_idx: u8, style_idx: u8, futu
     const past_off = off;
     const group_off = if (future) fut_off else past_off;
     const group_count = if (future) fc else pc;
-    return readRtfPattern(group_off, group_count, @intFromEnum(cat)) orelse
-        readRtfPattern(group_off, group_count, @intFromEnum(PluralCategory.other));
+    return readRtfPattern(group_off, group_count, @backingInt(cat)) orelse
+        readRtfPattern(group_off, group_count, @backingInt(PluralCategory.other));
 }
 
 fn readRtfPattern(group_off: usize, count: u8, want_cat: u8) ?[]const u8 {
@@ -1661,7 +1661,7 @@ fn findDisplay(key: []const u8, kind: DisplayKind, code: []const u8) ?[]const u8
                 const nlen = std.mem.readInt(u16, display_payload[off..][0..2], .little);
                 off += 2;
                 const nm = readBytes(display_payload, &off, nlen) orelse return null;
-                if (match and t == @intFromEnum(kind) and asciiEqlIgnoreCase(c, code)) found = nm;
+                if (match and t == @backingInt(kind) and asciiEqlIgnoreCase(c, code)) found = nm;
             }
         }
         if (match) return found;
@@ -1825,7 +1825,7 @@ test "cldr: concurrent first-callers see a consistent numbering-system table" {
     var round: usize = 0;
     while (round < rounds) : (round += 1) {
         // Force a cold state so the CAS election runs again this round.
-        init_state.store(@intFromEnum(InitState.uninit), .seq_cst);
+        init_state.store(@backingInt(InitState.uninit), .seq_cst);
         init_ok = false;
         var threads: [n_threads]std.Thread = undefined;
         var results: [n_threads]bool = undefined;

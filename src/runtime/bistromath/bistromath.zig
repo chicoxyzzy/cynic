@@ -285,7 +285,7 @@ fn driveTop(
         const fr = &frames.items[frames.items.len - 1];
         realm.heap.bistromath_stats.recordEntry();
         const raw_result = stub(realm, fr, fr.registers.ptr);
-        switch (@as(EntryResult, @enumFromInt(raw_result))) {
+        switch (@as(EntryResult, @fromBackingInt(@intCast(raw_result)))) {
             .done => {
                 // §10.2.2 ConstructResult for construct frames.
                 var ret = fr.accumulator;
@@ -538,15 +538,15 @@ const MakeArrayStatus = enum(u32) {
 };
 
 fn makeArrayShim(r: *Realm, frame: *CallFrame, r_base: u64, n: u64) callconv(.c) u32 {
-    const base = std.math.cast(u8, r_base) orelse return @intFromEnum(MakeArrayStatus.tier_down);
-    const count = std.math.cast(u8, n) orelse return @intFromEnum(MakeArrayStatus.tier_down);
+    const base = std.math.cast(u8, r_base) orelse return @backingInt(MakeArrayStatus.tier_down);
+    const count = std.math.cast(u8, n) orelse return @backingInt(MakeArrayStatus.tier_down);
     return switch (interpreter.createDenseArrayLiteralForFrame(r, frame, base, count)) {
         .value => |value| blk: {
             frame.accumulator = value;
-            break :blk @intFromEnum(MakeArrayStatus.ok);
+            break :blk @backingInt(MakeArrayStatus.ok);
         },
-        .invalid_frame => @intFromEnum(MakeArrayStatus.tier_down),
-        .out_of_memory => @intFromEnum(MakeArrayStatus.out_of_memory),
+        .invalid_frame => @backingInt(MakeArrayStatus.tier_down),
+        .out_of_memory => @backingInt(MakeArrayStatus.out_of_memory),
     };
 }
 
@@ -610,17 +610,17 @@ fn helperCallDirect(
         .{ .bits = this_bits },
         args_ptr[0..@intCast(argc)],
     ) catch |err| switch (err) {
-        error.OutOfMemory => return @intFromEnum(HelperCallStatus.host_oom),
-        error.InvalidOpcode => return @intFromEnum(HelperCallStatus.host_oom),
+        error.OutOfMemory => return @backingInt(HelperCallStatus.host_oom),
+        error.InvalidOpcode => return @backingInt(HelperCallStatus.host_oom),
     };
     switch (res) {
         .value, .yielded => |v| {
             result_out.* = v;
-            return @intFromEnum(HelperCallStatus.value);
+            return @backingInt(HelperCallStatus.value);
         },
         .thrown => |ex| {
             realm.pending_exception = ex;
-            return @intFromEnum(HelperCallStatus.threw);
+            return @backingInt(HelperCallStatus.threw);
         },
     }
 }
@@ -647,19 +647,19 @@ fn helperCall(
         .{ .bits = this_bits },
         args_ptr[0..@intCast(argc)],
     ) catch |err| switch (err) {
-        error.OutOfMemory => return @intFromEnum(HelperCallStatus.host_oom),
+        error.OutOfMemory => return @backingInt(HelperCallStatus.host_oom),
         // Corrupted-chunk class — should never happen; surface as
         // the host-abort path rather than a JS value.
-        error.InvalidOpcode => return @intFromEnum(HelperCallStatus.host_oom),
+        error.InvalidOpcode => return @backingInt(HelperCallStatus.host_oom),
     };
     switch (res) {
         .value, .yielded => |v| {
             result_out.* = v;
-            return @intFromEnum(HelperCallStatus.value);
+            return @backingInt(HelperCallStatus.value);
         },
         .thrown => |ex| {
             realm.pending_exception = ex;
-            return @intFromEnum(HelperCallStatus.threw);
+            return @backingInt(HelperCallStatus.threw);
         },
     }
 }
@@ -810,7 +810,7 @@ const Compiler = struct {
         }
         var i: usize = 0;
         while (i < code.len) {
-            const op: Op = @enumFromInt(code[i]);
+            const op: Op = @fromBackingInt(@intCast(code[i]));
             const after = i + 1 + Op.operandSize(op);
             if (op.spec().baseline == .unsupported) return error.UnsupportedOp;
             if (op.branchInfo()) |info| {
@@ -856,7 +856,7 @@ const Compiler = struct {
         while (i < code.len) {
             const bc: u32 = @intCast(i);
             if (self.target_labels.get(bc)) |idx| try m.bind(&self.labels.items[idx]);
-            const op: Op = @enumFromInt(code[i]);
+            const op: Op = @fromBackingInt(@intCast(code[i]));
             const after = i + 1 + Op.operandSize(op);
             switch (op) {
                 .lda_undefined => try m.movImm64(acc_reg, Value.undefined_.bits),
@@ -884,8 +884,8 @@ const Compiler = struct {
                 // Compact forms — index/constant baked into the opcode.
                 .lda_zero => try m.movImm64(acc_reg, Value.fromInt32(0).bits),
                 .lda_one => try m.movImm64(acc_reg, Value.fromInt32(1).bits),
-                .ldar_0, .ldar_1, .ldar_2, .ldar_3 => try m.emit(isa.ldrImm(acc_reg, regs_reg, regSlot(@intFromEnum(op) - @intFromEnum(Op.ldar_0)))),
-                .star_0, .star_1, .star_2, .star_3 => try m.emit(isa.strImm(acc_reg, regs_reg, regSlot(@intFromEnum(op) - @intFromEnum(Op.star_0)))),
+                .ldar_0, .ldar_1, .ldar_2, .ldar_3 => try m.emit(isa.ldrImm(acc_reg, regs_reg, regSlot(@backingInt(op) - @backingInt(Op.ldar_0)))),
+                .star_0, .star_1, .star_2, .star_3 => try m.emit(isa.strImm(acc_reg, regs_reg, regSlot(@backingInt(op) - @backingInt(Op.star_0)))),
                 .mov => {
                     try m.emit(isa.ldrImm(.x9, regs_reg, regSlot(code[i + 1])));
                     try m.emit(isa.strImm(.x9, regs_reg, regSlot(code[i + 2])));
@@ -1604,7 +1604,7 @@ const Compiler = struct {
                     var done = Masm.Label{};
                     defer done.fixups.deinit(m.gpa);
                     try m.jumpCbz(.x0, &done);
-                    try m.emit(isa.cmpImm(.x0, @intFromEnum(MakeArrayStatus.tier_down), false));
+                    try m.emit(isa.cmpImm(.x0, @backingInt(MakeArrayStatus.tier_down), false));
                     try m.jumpCond(.eq, td);
                     try m.jump(&self.oom_label);
                     try m.bind(&done);
@@ -1658,7 +1658,7 @@ const Compiler = struct {
         // site already stamped the resume ip and flushed acc to the
         // frame, and pushed the callee — just report `frame_pushed`.
         try m.bind(&self.frame_pushed_label);
-        try m.emit(isa.movz(.x0, @intFromEnum(EntryResult.frame_pushed), 0));
+        try m.emit(isa.movz(.x0, @backingInt(EntryResult.frame_pushed), 0));
         try m.jump(&epilogue);
         // x9 = bytecode loop-header offset. The shared generated poll found
         // work, so return a distinct result after reconstructing the frame;
@@ -1666,7 +1666,7 @@ const Compiler = struct {
         try m.bind(&self.safe_point_label);
         try m.emit(isa.strImm(.x9, frame_reg, ip_off));
         try m.emit(isa.strImm(acc_reg, frame_reg, acc_off));
-        try m.emit(isa.movz(.x0, @intFromEnum(EntryResult.safe_point), 0));
+        try m.emit(isa.movz(.x0, @backingInt(EntryResult.safe_point), 0));
         try m.jump(&epilogue);
         // x9 = bytecode offset to resume at.
         try m.bind(&self.tier_down_label);
@@ -1954,7 +1954,7 @@ const Compiler = struct {
         var ok = Masm.Label{};
         defer ok.fixups.deinit(m.gpa);
         try m.jumpCbz(.x0, &ok);
-        try m.emit(isa.cmpImm(.x0, @intFromEnum(HelperCallStatus.threw), false));
+        try m.emit(isa.cmpImm(.x0, @backingInt(HelperCallStatus.threw), false));
         try m.jumpCond(.eq, threw);
         try m.jump(&self.oom_label);
         try m.bind(&ok);
@@ -2053,7 +2053,7 @@ const Compiler = struct {
         // op in Lantern; 2 host_oom.
         try m.emit(isa.movRegW(.x0, .x0));
         try m.jumpCbz(.x0, &self.frame_pushed_label);
-        try m.emit(isa.cmpImm(.x0, @intFromEnum(PushStatus.tier_down), false));
+        try m.emit(isa.cmpImm(.x0, @backingInt(PushStatus.tier_down), false));
         try m.jumpCond(.eq, td);
         try m.jump(&self.oom_label);
         // Miss: generic dispatch on the raw Value (nested path; handles
@@ -2133,7 +2133,7 @@ const Compiler = struct {
         try m.callAbs(.x16, @intFromPtr(&call_mod.pushJitConstructFrame));
         try m.emit(isa.movRegW(.x0, .x0));
         try m.jumpCbz(.x0, &self.frame_pushed_label);
-        try m.emit(isa.cmpImm(.x0, @intFromEnum(PushStatus.tier_down), false));
+        try m.emit(isa.cmpImm(.x0, @backingInt(PushStatus.tier_down), false));
         try m.jumpCond(.eq, td);
         try m.jump(&self.oom_label);
     }
@@ -2469,7 +2469,7 @@ test "jit bistromath: fused register updates compile without blocking tier-up" {
     var saw_dec_reg = false;
     var pc: usize = 0;
     while (pc < g_chunk.code.len) {
-        const op: Op = @enumFromInt(g_chunk.code[pc]);
+        const op: Op = @fromBackingInt(@intCast(g_chunk.code[pc]));
         saw_inc_reg = saw_inc_reg or op == .inc_reg;
         saw_dec_reg = saw_dec_reg or op == .dec_reg;
         pc += 1 + Op.operandSize(op);
@@ -2509,7 +2509,7 @@ test "jit bistromath: StarLdar compiles and preserves argument arithmetic" {
     var saw_star_ldar = false;
     var pc: usize = 0;
     while (pc < body.code.len) {
-        const op: Op = @enumFromInt(body.code[pc]);
+        const op: Op = @fromBackingInt(@intCast(body.code[pc]));
         saw_star_ldar = saw_star_ldar or op == .star_ldar;
         pc += 1 + Op.operandSize(op);
     }

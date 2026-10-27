@@ -1268,11 +1268,11 @@ pub const Heap = struct {
         if (min_capacity <= compact_element_buf_cap) {
             const buf = self.compact_element_buf_pool.create(self.allocator) catch
                 return error.OutOfMemory;
-            return .{ .items = buf[0..0], .capacity = compact_element_buf_cap };
+            return .initBuffer(buf);
         }
         const buf = self.element_buf_pool.create(self.allocator) catch
             return error.OutOfMemory;
-        return .{ .items = buf[0..0], .capacity = element_buf_cap };
+        return .initBuffer(buf);
     }
 
     /// Return a pooled dense-element list to the matching size class.
@@ -3685,8 +3685,8 @@ pub const Heap = struct {
         // the missed populating site is easy to find. The scan below
         // still runs unconditionally in these builds (the early return
         // is ReleaseFast-only), so the verifier can't mask a real edge.
-        if (comptime @import("builtin").mode == .Debug or
-            @import("builtin").mode == .ReleaseSafe)
+        if (comptime @import("builtin").optimize == .debug or
+            @import("builtin").optimize == .safe)
         {
             for (self.objects_mature.items) |o| {
                 // Exactly the ReleaseFast skip predicate (shared, so they
@@ -3716,8 +3716,8 @@ pub const Heap = struct {
         // without risking a real drop. (Distinct from the
         // `needs_internal_scan` verifier above, which checks the
         // ReleaseFast scan-skip predicate.)
-        if (comptime @import("builtin").mode == .Debug or
-            @import("builtin").mode == .ReleaseSafe)
+        if (comptime @import("builtin").optimize == .debug or
+            @import("builtin").optimize == .safe)
         {
             for (self.objects_mature.items) |o| {
                 if (o.dirty) continue;
@@ -3743,8 +3743,8 @@ pub const Heap = struct {
         // below: generators churn registers every cycle so barriering
         // them is self-defeating, and neither list is the O(mature) cost.
         // See docs/handbook/gc.md.
-        if (comptime @import("builtin").mode == .Debug or
-            @import("builtin").mode == .ReleaseSafe)
+        if (comptime @import("builtin").optimize == .debug or
+            @import("builtin").optimize == .safe)
         {
             for (self.objects_mature.items) |o| self.markObjectInternalSlots(o);
         }
@@ -4031,7 +4031,7 @@ pub const Heap = struct {
         // can't drift. ReleaseFast ONLY — in Debug / ReleaseSafe the full
         // scan always runs so the verifier exercises every edge and a
         // missed populating site surfaces as an assert, never a UAF.
-        if (@import("builtin").mode == .ReleaseFast and objectScanSkippable(o)) return;
+        if (@import("builtin").optimize == .fast and objectScanSkippable(o)) return;
         // §15.7 private instance fields — a typed internal map, not
         // the property bag, so the remembered set never covers it and
         // it must be scanned unconditionally here. The full `markValue`
@@ -4197,8 +4197,8 @@ pub const Heap = struct {
     /// scan). The field order mirrors `markObjectInternalSlots` exactly
     /// — keep the two in lockstep when adding a typed slot.
     fn objectYoungTypedSlot(o: *JSObject) ?[]const u8 {
-        if (comptime @import("builtin").mode != .Debug and
-            @import("builtin").mode != .ReleaseSafe) return null;
+        if (comptime @import("builtin").optimize != .debug and
+            @import("builtin").optimize != .safe) return null;
         if (o.privatePropertyIterator()) |ppit_outer| {
             var ppit = ppit_outer;
             while (ppit.next()) |entry| if (isYoungHeapValue(entry.value_ptr.*)) return "private_property";
@@ -4480,8 +4480,8 @@ pub const Heap = struct {
     ///
     /// Compiled to a no-op outside Debug / ReleaseSafe.
     pub fn verifyRememberedSet(self: *Heap) void {
-        if (@import("builtin").mode != .Debug and
-            @import("builtin").mode != .ReleaseSafe) return;
+        if (@import("builtin").optimize != .debug and
+            @import("builtin").optimize != .safe) return;
 
         for (self.objects_mature.items) |o| {
             // Shape slots — under Phase 3 of

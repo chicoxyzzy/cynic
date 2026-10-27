@@ -1241,7 +1241,7 @@ pub const Builder = struct {
             .span = span,
         });
         self.last_op_start = self.here();
-        try self.code.append(self.allocator, @intFromEnum(op));
+        try self.code.append(self.allocator, @backingInt(op));
     }
 
     /// True when the accumulator provably still holds register `r` at
@@ -1265,9 +1265,9 @@ pub const Builder = struct {
         // guard rejects a stale `last_op_start` (any wider op after).
         const is_store_of_r = blk: {
             if (r <= 3 and @as(usize, start) + 1 == items.len and
-                items[start] == @intFromEnum(Op.star_0) + r) break :blk true;
+                items[start] == @backingInt(Op.star_0) + r) break :blk true;
             if (@as(usize, start) + 2 == items.len and
-                items[start] == @intFromEnum(Op.star) and items[start + 1] == r) break :blk true;
+                items[start] == @backingInt(Op.star) and items[start + 1] == r) break :blk true;
             break :blk false;
         };
         if (!is_store_of_r) return false;
@@ -1293,9 +1293,9 @@ pub const Builder = struct {
         const start = self.last_op_start orelse return false;
         const items = self.code.items;
         if (@as(usize, start) + 2 != items.len) return false;
-        if (items[start] != @intFromEnum(Op.add)) return false;
+        if (items[start] != @backingInt(Op.add)) return false;
         if (self.max_jump_target >= self.here()) return false;
-        items[start] = @intFromEnum(Op.add_to_int32);
+        items[start] = @backingInt(Op.add_to_int32);
         return true;
     }
 
@@ -1317,7 +1317,7 @@ pub const Builder = struct {
     /// is reachable → `false`.
     pub fn tailIsUnreachable(self: *const Builder) bool {
         const start = self.last_op_start orelse return false;
-        const op: Op = @enumFromInt(self.code.items[start]);
+        const op: Op = @fromBackingInt(@intCast(self.code.items[start]));
         switch (op) {
             .return_, .throw_, .jmp, .tail_call, .tail_call_method => {},
             else => return false,
@@ -1356,7 +1356,7 @@ pub const Builder = struct {
     /// toggled in one place.
     pub fn emitLoadReg(self: *Builder, span: Span, r: u8) !void {
         if (r <= 3) {
-            try self.emitOp(@enumFromInt(@intFromEnum(Op.ldar_0) + r), span);
+            try self.emitOp(@fromBackingInt(@intCast(@backingInt(Op.ldar_0) + r)), span);
         } else {
             try self.emitOp(.ldar, span);
             try self.emitU8(r);
@@ -1367,7 +1367,7 @@ pub const Builder = struct {
     /// compact `Star0..3` form for the hot low slots, else `Star rN`.
     pub fn emitStoreReg(self: *Builder, span: Span, r: u8) !void {
         if (r <= 3) {
-            try self.emitOp(@enumFromInt(@intFromEnum(Op.star_0) + r), span);
+            try self.emitOp(@fromBackingInt(@intCast(@backingInt(Op.star_0) + r)), span);
         } else {
             try self.emitOp(.star, span);
             try self.emitU8(r);
@@ -1807,7 +1807,7 @@ pub const Builder = struct {
         const max_thread_hops: u8 = 16;
         var i: usize = 0;
         while (i < self.code.items.len) {
-            const op: Op = @enumFromInt(self.code.items[i]);
+            const op: Op = @fromBackingInt(@intCast(self.code.items[i]));
             const op_size = Op.operandSize(op);
 
             switch (op) {
@@ -1837,7 +1837,7 @@ pub const Builder = struct {
                         if (new_target < 0 or
                             new_target >= self.code.items.len) break;
                         const t: usize = @intCast(new_target);
-                        const next_op: Op = @enumFromInt(self.code.items[t]);
+                        const next_op: Op = @fromBackingInt(@intCast(self.code.items[t]));
                         if (next_op != .jmp) break;
                         // Don't thread through ourselves — the
                         // chain's leading jump rewriting onto its own
@@ -1891,7 +1891,7 @@ pub const Builder = struct {
         var found_count: usize = 0;
         var scan: u32 = 0;
         while (scan < old_code.len) {
-            const op: Op = @enumFromInt(old_code[scan]);
+            const op: Op = @fromBackingInt(@intCast(old_code[scan]));
             if (op.branchInfo()) |info| {
                 if (patch_by_operand.get(scan + 1 + info.operand_offset)) |patch_idx| {
                     try patch_by_start.put(self.allocator, scan, patch_idx);
@@ -1913,7 +1913,7 @@ pub const Builder = struct {
             var new: u32 = 0;
             while (old < old_code.len) {
                 new_off[old] = new;
-                const op: Op = @enumFromInt(old_code[old]);
+                const op: Op = @fromBackingInt(@intCast(old_code[old]));
                 if (patch_by_start.get(old)) |patch_idx| {
                     const info = op.branchInfo().?;
                     new += 1 + info.operand_offset + widths[patch_idx].byteSize();
@@ -1926,7 +1926,7 @@ pub const Builder = struct {
 
             for (self.branch_patches.items, 0..) |patch, patch_idx| {
                 const old_start = patch_starts[patch_idx];
-                const op: Op = @enumFromInt(old_code[old_start]);
+                const op: Op = @fromBackingInt(@intCast(old_code[old_start]));
                 const info = op.branchInfo().?;
                 var selected: @import("op.zig").BranchWidth = .i32;
                 inline for (.{ @import("op.zig").BranchWidth.i8, @import("op.zig").BranchWidth.i16 }) |candidate| {
@@ -1944,7 +1944,7 @@ pub const Builder = struct {
                         break;
                     }
                 }
-                if (@intFromEnum(selected) < @intFromEnum(widths[patch_idx])) {
+                if (@backingInt(selected) < @backingInt(widths[patch_idx])) {
                     widths[patch_idx] = selected;
                     changed = true;
                 }
@@ -1956,7 +1956,7 @@ pub const Builder = struct {
         var new: u32 = 0;
         while (old < old_code.len) {
             new_off[old] = new;
-            const op: Op = @enumFromInt(old_code[old]);
+            const op: Op = @fromBackingInt(@intCast(old_code[old]));
             if (patch_by_start.get(old)) |patch_idx| {
                 const info = op.branchInfo().?;
                 new += 1 + info.operand_offset + widths[patch_idx].byteSize();
@@ -1972,13 +1972,13 @@ pub const Builder = struct {
         try out.ensureTotalCapacity(self.allocator, new);
         old = 0;
         while (old < old_code.len) {
-            const op: Op = @enumFromInt(old_code[old]);
+            const op: Op = @fromBackingInt(@intCast(old_code[old]));
             const old_size: u32 = 1 + op.operandSize();
             if (patch_by_start.get(old)) |patch_idx| {
                 const info = op.branchInfo().?;
                 const width = widths[patch_idx];
                 const variant = op.branchVariant(width);
-                try out.append(self.allocator, @intFromEnum(variant));
+                try out.append(self.allocator, @backingInt(variant));
                 try out.appendSlice(self.allocator, old_code[old + 1 .. old + 1 + info.operand_offset]);
                 const after: i64 = @intCast(new_off[old] + 1 + info.operand_offset + width.byteSize());
                 const rel = @as(i64, new_off[self.branch_patches.items[patch_idx].target]) - after;
@@ -2080,8 +2080,8 @@ test "Builder: emit then finish round-trips a simple sequence" {
     defer chunk.deinit(testing.allocator);
 
     try testing.expectEqual(@as(usize, 6), chunk.code.len);
-    try testing.expectEqual(@intFromEnum(Op.lda_smi), chunk.code[0]);
-    try testing.expectEqual(@intFromEnum(Op.return_), chunk.code[5]);
+    try testing.expectEqual(@backingInt(Op.lda_smi), chunk.code[0]);
+    try testing.expectEqual(@backingInt(Op.return_), chunk.code[5]);
     try testing.expectEqual(@as(usize, 2), chunk.source_positions.len);
 }
 
@@ -2103,7 +2103,7 @@ test "Builder: integer immediates choose the narrowest lossless encoding" {
     var pc: usize = 0;
     const expected = [_]Op{ .lda_smi8, .lda_smi16, .lda_smi, .add_smi8, .add_smi16, .add_smi };
     for (expected) |op| {
-        try testing.expectEqual(op, @as(Op, @enumFromInt(chunk.code[pc])));
+        try testing.expectEqual(op, @as(Op, @fromBackingInt(@intCast(chunk.code[pc]))));
         pc += 1 + op.operandSize();
     }
     try testing.expectEqual(chunk.code.len, pc);
@@ -2121,10 +2121,10 @@ test "Builder: profiled arithmetic owns compact binary type profiles" {
     defer chunk.deinit(testing.allocator);
 
     try testing.expectEqual(@as(usize, 8), chunk.code.len);
-    try testing.expectEqual(Op.mul, @as(Op, @enumFromInt(chunk.code[0])));
+    try testing.expectEqual(Op.mul, @as(Op, @fromBackingInt(@intCast(chunk.code[0]))));
     try testing.expectEqual(lhs, chunk.code[1]);
     try testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, chunk.code[2..4], .little));
-    try testing.expectEqual(Op.div, @as(Op, @enumFromInt(chunk.code[4])));
+    try testing.expectEqual(Op.div, @as(Op, @fromBackingInt(@intCast(chunk.code[4]))));
     try testing.expectEqual(lhs, chunk.code[5]);
     try testing.expectEqual(@as(u16, 1), std.mem.readInt(u16, chunk.code[6..8], .little));
     try testing.expectEqual(@as(u8, 3), Op.operandSize(.mul));
@@ -2202,7 +2202,7 @@ test "Builder: hot IC sites use byte indexes and retain u16 fallbacks" {
         .call_property8,
     };
     for (expected) |op| {
-        try testing.expectEqual(op, @as(Op, @enumFromInt(chunk.code[pc])));
+        try testing.expectEqual(op, @as(Op, @fromBackingInt(@intCast(chunk.code[pc]))));
         pc += 1 + op.operandSize();
     }
 
@@ -2212,7 +2212,7 @@ test "Builder: hot IC sites use byte indexes and retain u16 fallbacks" {
     try wide.emitLdaProperty(span, 300);
     var wide_chunk = try wide.finish();
     defer wide_chunk.deinit(testing.allocator);
-    try testing.expectEqual(Op.lda_property, @as(Op, @enumFromInt(wide_chunk.code[0])));
+    try testing.expectEqual(Op.lda_property, @as(Op, @fromBackingInt(@intCast(wide_chunk.code[0]))));
 }
 
 test "Builder: property ICs use typed tables" {
@@ -2267,7 +2267,7 @@ test "Builder: store-load emission stays explicit until CFG optimization" {
     try b.emitStoreReg(span, 2);
     try b.emitLoadReg(span, 2);
 
-    try testing.expectEqualSlices(u8, &.{ @intFromEnum(Op.star_2), @intFromEnum(Op.ldar_2) }, b.code.items);
+    try testing.expectEqualSlices(u8, &.{ @backingInt(Op.star_2), @backingInt(Op.ldar_2) }, b.code.items);
 }
 
 test "Builder.peephole: jump threading rewrites first jump's target" {
@@ -2296,12 +2296,12 @@ test "Builder.peephole: jump threading rewrites first jump's target" {
 
     // Both jumps relax to i8. After threading, the first jumps directly
     // over the second to the return at byte 4: 4 - after(2) = +2.
-    try testing.expectEqual(Op.jmp8, @as(Op, @enumFromInt(chunk.code[0])));
+    try testing.expectEqual(Op.jmp8, @as(Op, @fromBackingInt(@intCast(chunk.code[0]))));
     const got_a: i8 = @bitCast(chunk.code[1]);
     try testing.expectEqual(@as(i8, 2), got_a);
 
     // The second jmp's operand is unchanged.
-    try testing.expectEqual(Op.jmp8, @as(Op, @enumFromInt(chunk.code[2])));
+    try testing.expectEqual(Op.jmp8, @as(Op, @fromBackingInt(@intCast(chunk.code[2]))));
     const got_b: i8 = @bitCast(chunk.code[3]);
     try testing.expectEqual(@as(i8, 0), got_b);
 }
@@ -2334,7 +2334,7 @@ test "Builder.peephole: conditional jump threads through unconditional jmp" {
 
     // Relaxed layout: cond8(0..2), lda(2), jmp8(3..5), return(5).
     // Threaded target is return: 5 - after(2) = +3.
-    try testing.expectEqual(Op.jmp_if_false8, @as(Op, @enumFromInt(chunk.code[0])));
+    try testing.expectEqual(Op.jmp_if_false8, @as(Op, @fromBackingInt(@intCast(chunk.code[0]))));
     const got_a: i8 = @bitCast(chunk.code[1]);
     try testing.expectEqual(@as(i8, 3), got_a);
 }
@@ -2356,7 +2356,7 @@ test "Builder.peephole: jump threading caps self-loop and doesn't infinite-loop"
     defer chunk.deinit(testing.allocator);
 
     // Self-loop detected; relaxation changes only its width.
-    try testing.expectEqual(Op.jmp8, @as(Op, @enumFromInt(chunk.code[0])));
+    try testing.expectEqual(Op.jmp8, @as(Op, @fromBackingInt(@intCast(chunk.code[0]))));
     const got: i8 = @bitCast(chunk.code[1]);
     try testing.expectEqual(@as(i8, -2), got);
 }
@@ -2390,7 +2390,7 @@ test "Builder.peephole: conditional jump targeting a conditional jump is NOT thr
     defer chunk.deinit(testing.allocator);
 
     // First jmp still points at L1; both branches happen to relax to i8.
-    try testing.expectEqual(Op.jmp8, @as(Op, @enumFromInt(chunk.code[0])));
+    try testing.expectEqual(Op.jmp8, @as(Op, @fromBackingInt(@intCast(chunk.code[0]))));
     const got_a: i8 = @bitCast(chunk.code[1]);
     try testing.expectEqual(@as(i8, 0), got_a);
 }
@@ -2414,7 +2414,7 @@ test "Builder: patchI16 sets a forward jump correctly" {
     defer chunk.deinit(testing.allocator);
 
     // Relaxed jmp8 still skips the one-byte lda: target(3)-after(2)=1.
-    try testing.expectEqual(Op.jmp8, @as(Op, @enumFromInt(chunk.code[0])));
+    try testing.expectEqual(Op.jmp8, @as(Op, @fromBackingInt(@intCast(chunk.code[0]))));
     const got: i8 = @bitCast(chunk.code[1]);
     try testing.expectEqual(@as(i8, 1), got);
 }
@@ -2433,7 +2433,7 @@ test "Builder: branch relaxation chooses i8, i16, and i32 widths" {
     try short.patchI16(short_patch, short_target);
     var short_chunk = try short.finish();
     defer short_chunk.deinit(testing.allocator);
-    try testing.expectEqual(Op.jmp8, @as(Op, @enumFromInt(short_chunk.code[0])));
+    try testing.expectEqual(Op.jmp8, @as(Op, @fromBackingInt(@intCast(short_chunk.code[0]))));
     try testing.expectEqual(@as(i8, 1), @as(i8, @bitCast(short_chunk.code[1])));
 
     var medium = Builder.init(testing.allocator);
@@ -2447,7 +2447,7 @@ test "Builder: branch relaxation chooses i8, i16, and i32 widths" {
     try medium.patchI16(medium_patch, medium_target);
     var medium_chunk = try medium.finish();
     defer medium_chunk.deinit(testing.allocator);
-    try testing.expectEqual(Op.jmp, @as(Op, @enumFromInt(medium_chunk.code[0])));
+    try testing.expectEqual(Op.jmp, @as(Op, @fromBackingInt(@intCast(medium_chunk.code[0]))));
     try testing.expectEqual(@as(i16, 200), std.mem.readInt(i16, medium_chunk.code[1..3], .little));
 
     var long = Builder.init(testing.allocator);
@@ -2461,7 +2461,7 @@ test "Builder: branch relaxation chooses i8, i16, and i32 widths" {
     try long.patchI16(long_patch, long_target);
     var long_chunk = try long.finish();
     defer long_chunk.deinit(testing.allocator);
-    try testing.expectEqual(Op.jmp32, @as(Op, @enumFromInt(long_chunk.code[0])));
+    try testing.expectEqual(Op.jmp32, @as(Op, @fromBackingInt(@intCast(long_chunk.code[0]))));
     try testing.expectEqual(@as(i32, 40_000), std.mem.readInt(i32, long_chunk.code[1..5], .little));
 }
 
@@ -2489,7 +2489,7 @@ test "Builder: branch relaxation remaps source positions and handlers" {
 
     var chunk = try b.finish();
     defer chunk.deinit(testing.allocator);
-    try testing.expectEqual(Op.jmp_if_strict_eq8, @as(Op, @enumFromInt(chunk.code[0])));
+    try testing.expectEqual(Op.jmp_if_strict_eq8, @as(Op, @fromBackingInt(@intCast(chunk.code[0]))));
     try testing.expectEqual(@as(u32, 3), chunk.source_positions[1].offset);
     try testing.expectEqual(@as(u32, 3), chunk.handlers[0].start_pc);
     try testing.expectEqual(@as(u32, 4), chunk.handlers[0].end_pc);
@@ -2518,10 +2518,10 @@ test "Builder: branch relaxation remaps switch table targets" {
 
     var chunk = try b.finish();
     defer chunk.deinit(testing.allocator);
-    try testing.expectEqual(Op.jmp8, @as(Op, @enumFromInt(chunk.code[4])));
+    try testing.expectEqual(Op.jmp8, @as(Op, @fromBackingInt(@intCast(chunk.code[4]))));
     try testing.expectEqual(@as(u32, 7), chunk.switch_tables[0].targets[0]);
     try testing.expectEqual(@as(u32, 7), chunk.switch_tables[0].default_target);
-    try testing.expectEqual(Op.return_, @as(Op, @enumFromInt(chunk.code[7])));
+    try testing.expectEqual(Op.return_, @as(Op, @fromBackingInt(@intCast(chunk.code[7]))));
 }
 
 test "Chunk TierCode retries feedback-deferred refusal only after change" {

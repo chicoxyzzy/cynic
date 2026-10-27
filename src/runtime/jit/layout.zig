@@ -173,8 +173,8 @@ pub const load_ic_cell = struct {
     pub const proto_shape: u15 = @offsetOf(LoadICCell, "proto_shape");
     pub const proto_rev: u15 = @offsetOf(LoadICCell, "proto_rev");
     pub const synthetic_value: u15 = @offsetOf(LoadICCell, "synthetic_value");
-    pub const kind_data: u8 = @intFromEnum(LoadICCell.Kind.data);
-    pub const kind_synthetic_accessor: u8 = @intFromEnum(LoadICCell.Kind.synthetic_accessor);
+    pub const kind_data: u8 = @backingInt(LoadICCell.Kind.data);
+    pub const kind_synthetic_accessor: u8 = @backingInt(LoadICCell.Kind.synthetic_accessor);
 };
 
 /// `ComputedICCell` — Ohaimark's monomorphic `obj[key]` own-data lane reads
@@ -385,7 +385,7 @@ test "jit layout: machine loads match Zig reads on live values" {
     );
     realm_v.setFuel(7);
     try testing.expectEqual(
-        @intFromEnum(Realm.FuelExhaustion.terminate),
+        @backingInt(Realm.FuelExhaustion.terminate),
         try loadViaB(&ca, realm.fuel_exhaustion, &realm_v),
     );
     try testing.expectEqual(

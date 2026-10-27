@@ -199,11 +199,11 @@ pub fn effectOf(op: Op, code: []const u8, i: usize) Effect {
         .sta_computed, .sta_computed8, .def_computed => Effect.read2(code[i + 1], code[i + 2]),
 
         // Compact register loads/stores — index baked in the opcode.
-        .ldar_0, .ldar_1, .ldar_2, .ldar_3 => Effect.read1(@intFromEnum(op) - @intFromEnum(Op.ldar_0)),
+        .ldar_0, .ldar_1, .ldar_2, .ldar_3 => Effect.read1(@backingInt(op) - @backingInt(Op.ldar_0)),
 
         // ── Register writes ──
         .star => Effect.writeReg(code[i + 1]),
-        .star_0, .star_1, .star_2, .star_3 => Effect.writeReg(@intFromEnum(op) - @intFromEnum(Op.star_0)),
+        .star_0, .star_1, .star_2, .star_3 => Effect.writeReg(@backingInt(op) - @backingInt(Op.star_0)),
         .mov => .{ .reads = .{ code[i + 1], 0, 0 }, .n_reads = 1, .write = code[i + 2] },
         // Store happens before load. For an aliasing pair, the load reads the
         // just-written value rather than the old register contents, so there
@@ -249,7 +249,7 @@ pub fn effectOf(op: Op, code: []const u8, i: usize) Effect {
         // `[op][r_callee:u8][ic:u16]` — argc folded into the opcode.
         .call0, .call1, .call2, .call3 => .{
             .win_base = code[i + 1],
-            .win_len = (@intFromEnum(op) - @intFromEnum(Op.call0)) + 1,
+            .win_len = (@backingInt(op) - @backingInt(Op.call0)) + 1,
         },
         .call0_8, .call1_8, .call2_8, .call3_8 => .{
             .win_base = code[i + 1],
@@ -424,14 +424,14 @@ pub const Analysis = struct {
         var p: u32 = self.leaders[blk];
         while (p < end) {
             if (p > off) try insn.append(self.allocator, p);
-            const op: Op = @enumFromInt(code[p]);
+            const op: Op = @fromBackingInt(@intCast(code[p]));
             p += 1 + Op.operandSize(op);
         }
         var idx: usize = insn.items.len;
         while (idx > 0) {
             idx -= 1;
             const at = insn.items[idx];
-            const op: Op = @enumFromInt(code[at]);
+            const op: Op = @fromBackingInt(@intCast(code[at]));
             applyReverseEffect(&live, effectOf(op, code, at), self.register_count);
         }
         return live;
@@ -487,7 +487,7 @@ pub fn analyze(
 
     var i: usize = 0;
     while (i < code.len) {
-        const op: Op = @enumFromInt(code[i]);
+        const op: Op = @fromBackingInt(@intCast(code[i]));
         try offsets.append(allocator, @intCast(i));
         if (effectOf(op, code, i).opaque_bail) fully_understood = false;
         if (branchTarget(op, code, i)) |t| try leader_set.put(allocator, t, {});
@@ -567,7 +567,7 @@ pub fn analyze(
         var last_op: Op = .lda_undefined;
         var last_off: usize = start;
         while (p < end) {
-            const op: Op = @enumFromInt(code[p]);
+            const op: Op = @fromBackingInt(@intCast(code[p]));
             last_op = op;
             last_off = p;
             const e = effectOf(op, code, p);
@@ -754,7 +754,7 @@ fn bitsetEql(a: std.DynamicBitSet, b: std.DynamicBitSet) bool {
 
 const testing = std.testing;
 fn byteOf(o: Op) u8 {
-    return @intFromEnum(o);
+    return @backingInt(o);
 }
 
 test "liveness: effectOf classifies register operands" {

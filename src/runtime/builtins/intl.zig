@@ -5826,7 +5826,7 @@ fn pluralRulesResolvedOptions(realm: *Realm, this_value: Value, args: []const Va
     var idx: u32 = 0;
     const order = [_]cldr.PluralCategory{ .zero, .one, .two, .few, .many };
     for (order) |c| {
-        if (mask & (@as(u8, 1) << @as(u3, @intCast(@intFromEnum(c)))) != 0) {
+        if (mask & (@as(u8, 1) << @as(u3, @intCast(@backingInt(c)))) != 0) {
             var key_buf: [12]u8 = undefined;
             const key = std.fmt.bufPrint(&key_buf, "{d}", .{idx}) catch unreachable;
             cats.set(realm.allocator, key, try makeStringValue(realm, c.name())) catch return error.OutOfMemory;

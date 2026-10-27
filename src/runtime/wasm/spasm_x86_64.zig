@@ -47,7 +47,7 @@ pub const RefusalStage = enum(u8) {
     count,
 };
 
-pub const refusal_stage_count: usize = @intFromEnum(RefusalStage.count) - 1;
+pub const refusal_stage_count: usize = @backingInt(RefusalStage.count) - 1;
 pub const misc_subopcode_count: usize = 18;
 
 pub const Diagnostics = struct {
@@ -2153,7 +2153,7 @@ pub fn compile(
                                 try m.load64Disp32(.rdi, .r12, offset)
                             else
                                 try m.load32Disp32(.rdi, .r12, offset);
-                            try m.movImm32(.rsi, @intFromEnum(round.mode));
+                            try m.movImm32(.rsi, @backingInt(round.mode));
                             try m.movImm64(.r11, if (round.double_precision) @intFromPtr(&roundF64Bits) else @intFromPtr(&roundF32Bits));
                             try m.callReg(.r11);
                             if (round.double_precision)
@@ -3644,11 +3644,11 @@ fn emitBranchValues(
 }
 
 fn roundF32Bits(bits: u32, mode: u32) callconv(.c) u32 {
-    return @bitCast(float_ops.round(f32, @bitCast(bits), @enumFromInt(mode)));
+    return @bitCast(float_ops.round(f32, @bitCast(bits), @fromBackingInt(@intCast(mode))));
 }
 
 fn roundF64Bits(bits: u64, mode: u32) callconv(.c) u64 {
-    return @bitCast(float_ops.round(f64, @bitCast(bits), @enumFromInt(mode)));
+    return @bitCast(float_ops.round(f64, @bitCast(bits), @fromBackingInt(@intCast(mode))));
 }
 
 /// Emit a §4.3.3 trapping float-to-int truncation. The operand enters in

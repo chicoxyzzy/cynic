@@ -872,7 +872,7 @@ fn funcType(module: *const Module, func_index: u32) !types.FuncType {
 fn validateExpr(v: *Validator) ValidateError!void {
     while (true) {
         const op_ip: u32 = @intCast(v.r.pos);
-        const op: Op = @enumFromInt(try v.r.byte());
+        const op: Op = @fromBackingInt(@intCast(try v.r.byte()));
         switch (op) {
             .nop => {},
             .@"unreachable" => v.setUnreachable(),

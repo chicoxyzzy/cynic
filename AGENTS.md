@@ -364,7 +364,7 @@ These are project rules — they apply to everyone.
 
 ## Build & test
 
-Zig 0.17-dev — pinned to a specific dev SHA in `build.zig.zon`
+Zig 0.17.0 stable — pinned in `build.zig.zon`
 (`.minimum_zig_version`, read by [anyzig](https://github.com/marler8997/anyzig)).
 CI uses `xyzzylabs/setup-zig` with no explicit `version:`, so it
 resolves the same field. Keep the zon pin as the single source of

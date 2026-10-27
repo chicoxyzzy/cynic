@@ -350,7 +350,7 @@ fn durationToString(realm: *Realm, this_value: Value, args: []const Value) Nativ
         const dl = temporal.defaultTemporalLargestUnit(d);
         // LargerOfTwoTemporalUnits(dl, second): coarser unit wins (coarser =
         // smaller enum index). balanceTimeDuration caps extraction at days.
-        const largest = if (@intFromEnum(dl) < @intFromEnum(temporal.LargestUnit.second)) dl else temporal.LargestUnit.second;
+        const largest = if (@backingInt(dl) < @backingInt(temporal.LargestUnit.second)) dl else temporal.LargestUnit.second;
         const bal = temporal.balanceTimeDuration(rounded, largest);
         result = .{
             .years = d.years,
@@ -444,7 +444,7 @@ fn durationFrom(realm: *Realm, this_value: Value, args: []const Value) NativeErr
 
 /// The larger-magnitude of two largest units (smaller enum index wins).
 fn largerLargestUnit(a: temporal.LargestUnit, b: temporal.LargestUnit) temporal.LargestUnit {
-    return if (@intFromEnum(a) < @intFromEnum(b)) a else b;
+    return if (@backingInt(a) < @backingInt(b)) a else b;
 }
 
 /// §7.5.x TotalTimeDuration — a span of `total_ns` expressed as a fractional
@@ -584,7 +584,7 @@ fn durationCompare(realm: *Realm, this_value: Value, args: []const Value) Native
     // short-circuiting before any anchor-dependent balancing.
     if (durationFieldsEqual(one, two)) return Value.fromInt32(0);
 
-    const day_idx = @intFromEnum(temporal.LargestUnit.day);
+    const day_idx = @backingInt(temporal.LargestUnit.day);
     const largest1 = temporal.defaultTemporalLargestUnit(one);
     const largest2 = temporal.defaultTemporalLargestUnit(two);
 
@@ -592,7 +592,7 @@ fn durationCompare(realm: *Realm, this_value: Value, args: []const Value) Native
     // (year/month/week/day) on either side orders by the reached instant.
     if (rel) |r| switch (r) {
         .zoned => |z| {
-            if (@intFromEnum(largest1) <= day_idx or @intFromEnum(largest2) <= day_idx) {
+            if (@backingInt(largest1) <= day_idx or @backingInt(largest2) <= day_idx) {
                 const after1 = temporal.addZonedDateTime(z.epoch_ns, z.time_zone, one, false) orelse
                     return throwRangeError(realm, "duration is out of range relative to relativeTo");
                 const after2 = temporal.addZonedDateTime(z.epoch_ns, z.time_zone, two, false) orelse
@@ -724,14 +724,14 @@ fn durationRound(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     }
     // LargerOfTwoTemporalUnits(largestUnit, smallestUnit) must be largestUnit:
     // largestUnit can be no finer than smallestUnit (smaller enum = coarser).
-    if (@intFromEnum(largest_u) > @intFromEnum(smallest_u)) {
+    if (@backingInt(largest_u) > @backingInt(smallest_u)) {
         return throwRangeError(realm, "largestUnit must be larger than or equal to smallestUnit");
     }
     // §7.3.21: a date unit (year/month/week/day) has no fixed sub-unit count,
     // so an increment above 1 only makes sense when the rounded unit is also
     // the largest — otherwise the result would mix it with a coarser unit it
     // cannot balance against (e.g. weeks beneath a `month` largestUnit).
-    if (increment > 1 and @intFromEnum(smallest_u) <= @intFromEnum(temporal.LargestUnit.day) and largest_u != smallest_u) {
+    if (increment > 1 and @backingInt(smallest_u) <= @backingInt(temporal.LargestUnit.day) and largest_u != smallest_u) {
         return throwRangeError(realm, "for calendar units with roundingIncrement > 1, largestUnit must equal smallestUnit");
     }
     if (temporal.maximumTemporalDurationRoundingIncrement(smallest_u)) |maximum| {
@@ -752,7 +752,7 @@ fn durationRound(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     //     which holds days fixed and rounds only the sub-day time;
     //   • otherwise (plain time-unit, or day) → NudgeToDayOrTime, folding days
     //     into the rounded span.
-    const day_idx = @intFromEnum(temporal.LargestUnit.day);
+    const day_idx = @backingInt(temporal.LargestUnit.day);
     if (start) |rel| {
         const result: temporal.DurationRecord = switch (rel) {
             // §7.3.21 plainRelativeTo: DifferencePlainDateTimeWithRounding.
@@ -769,7 +769,7 @@ fn durationRound(realm: *Realm, this_value: Value, args: []const Value) NativeEr
                 if (!temporal.isoDateTimeWithinLimits(s) or !temporal.isoDateTimeWithinLimits(target)) {
                     return throwRangeError(realm, "relativeTo or its sum is outside the representable range");
                 }
-                if (@intFromEnum(largest_u) > day_idx) {
+                if (@backingInt(largest_u) > day_idx) {
                     // largestUnit a time unit → fold the whole wall span into
                     // a uniform nanosecond count and balance to largestUnit.
                     const span = temporal.isoDateTimeToEpochNs(target) - temporal.isoDateTimeToEpochNs(s);
@@ -791,7 +791,7 @@ fn durationRound(realm: *Realm, this_value: Value, args: []const Value) NativeEr
             .zoned => |z| blk: {
                 const target_epoch = temporal.addZonedDateTime(z.epoch_ns, z.time_zone, d, false) orelse
                     return throwRangeError(realm, "duration is out of range relative to relativeTo");
-                if (@intFromEnum(largest_u) > day_idx) {
+                if (@backingInt(largest_u) > day_idx) {
                     // largestUnit a time unit → DifferenceInstant: a uniform
                     // epoch-nanosecond span balanced to largestUnit.
                     const span = target_epoch - z.epoch_ns;
@@ -814,7 +814,7 @@ fn durationRound(realm: *Realm, this_value: Value, args: []const Value) NativeEr
                 else
                     temporal.differenceISODateTime(start_wall, end_wall, largest_u);
                 if (smallest_u == .nanosecond and increment == 1) break :blk base_diff;
-                if (@intFromEnum(smallest_u) > day_idx) {
+                if (@backingInt(smallest_u) > day_idx) {
                     // smallestUnit a time unit with a zoned anchor →
                     // NudgeToZonedTime (holds days fixed, rounds the sub-day
                     // time, probes the ±1-day instant boundary).
@@ -836,7 +836,7 @@ fn durationRound(realm: *Realm, this_value: Value, args: []const Value) NativeEr
     }
 
     // §7.3.21 step 25 (no relativeTo): calendar units are unbalanceable.
-    if (temporal.hasCalendarUnits(d) or @intFromEnum(largest_u) < @intFromEnum(temporal.LargestUnit.day)) {
+    if (temporal.hasCalendarUnits(d) or @backingInt(largest_u) < @backingInt(temporal.LargestUnit.day)) {
         return throwRangeError(realm, "a relativeTo is required to round a duration with calendar units");
     }
 
@@ -876,7 +876,7 @@ fn durationTotal(realm: *Realm, this_value: Value, args: []const Value) NativeEr
         unit_opt = try getTemporalUnitOption(realm, opts, "unit");
     }
     const unit = unit_opt orelse return throwRangeError(realm, "a unit is required");
-    const day_idx = @intFromEnum(temporal.LargestUnit.day);
+    const day_idx = @backingInt(temporal.LargestUnit.day);
 
     if (start) |rel| {
         const total: f64 = switch (rel) {
@@ -892,7 +892,7 @@ fn durationTotal(realm: *Realm, this_value: Value, args: []const Value) NativeEr
                 if (!temporal.isoDateTimeWithinLimits(s) or !temporal.isoDateTimeWithinLimits(target)) {
                     return throwRangeError(realm, "relativeTo or its sum is outside the representable range");
                 }
-                if (@intFromEnum(unit) >= day_idx) {
+                if (@backingInt(unit) >= day_idx) {
                     // A day-or-finer unit totals the uniform wall span.
                     const span = temporal.isoDateTimeToEpochNs(target) - temporal.isoDateTimeToEpochNs(s);
                     break :blk totalInUnit(span, unit);
@@ -908,7 +908,7 @@ fn durationTotal(realm: *Realm, this_value: Value, args: []const Value) NativeEr
             .zoned => |z| blk: {
                 const target_epoch = temporal.addZonedDateTime(z.epoch_ns, z.time_zone, d, false) orelse
                     return throwRangeError(realm, "duration is out of range relative to relativeTo");
-                if (@intFromEnum(unit) > day_idx) {
+                if (@backingInt(unit) > day_idx) {
                     // A sub-day (time) unit totals the uniform epoch span
                     // (DifferenceInstant); each day is 24 h under a fixed offset.
                     break :blk totalInUnit(target_epoch - z.epoch_ns, unit);
@@ -932,7 +932,7 @@ fn durationTotal(realm: *Realm, this_value: Value, args: []const Value) NativeEr
 
     // No relativeTo: a calendar unit (or a calendar-bearing duration) is
     // untotalable; a day-and-time duration totals by fixed-length ratio.
-    if (@intFromEnum(unit) < day_idx or temporal.hasCalendarUnits(d)) {
+    if (@backingInt(unit) < day_idx or temporal.hasCalendarUnits(d)) {
         return throwRangeError(realm, "a relativeTo is required to total a duration with calendar units");
     }
     return Value.fromDouble(totalInUnit(temporal.dayTimeDurationNanoseconds(d), unit));
@@ -947,7 +947,7 @@ fn durationTotal(realm: *Realm, this_value: Value, args: []const Value) NativeEr
 /// reproduces the observable result. Run after every other option is read.
 fn requireDurationToStringSmallestUnit(realm: *Realm, unit: ?temporal.LargestUnit) NativeError!void {
     const u = unit orelse return;
-    if (@intFromEnum(u) < @intFromEnum(temporal.LargestUnit.second)) {
+    if (@backingInt(u) < @backingInt(temporal.LargestUnit.second)) {
         return throwRangeError(realm, "smallestUnit must be second, millisecond, microsecond, or nanosecond");
     }
 }

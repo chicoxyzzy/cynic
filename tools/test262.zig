@@ -1601,7 +1601,7 @@ test "writeNotPassing renders zero engine gaps explicitly" {
 
     var stats: Stats = .{};
     stats.fail_reject = 1;
-    stats.fail_by_class[@intFromEnum(FailClass.annex_b)] = 1;
+    stats.fail_by_class[@backingInt(FailClass.annex_b)] = 1;
 
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(std.testing.allocator);
@@ -1823,7 +1823,7 @@ const Phase = union(enum) {
         return switch (self) {
             .main => pre_stage4_mask == 0,
             .feature => |f| has: {
-                const idx: usize = @intFromEnum(f.flag);
+                const idx: usize = @backingInt(f.flag);
                 const bit = @as(PreStage4Mask, 1) << @intCast(idx);
                 break :has (pre_stage4_mask & bit) != 0;
             },
@@ -2023,7 +2023,7 @@ pub fn main(init: std.process.Init) !void {
                 main_result = res;
             },
             .feature => |f| {
-                const idx: usize = @intFromEnum(f.flag);
+                const idx: usize = @backingInt(f.flag);
                 const slot = &feature_results[idx];
                 if (slot.*) |*old| old.deinit(gpa);
                 slot.* = res;
@@ -2106,7 +2106,7 @@ pub fn main(init: std.process.Init) !void {
     // `--filter=<area> --max-gaps=0` gates just that area.
     if (opts.max_gaps) |budget| {
         if (main_result) |*mr| {
-            const gaps = mr.stats.fail_by_class[@intFromEnum(FailClass.gap)];
+            const gaps = mr.stats.fail_by_class[@backingInt(FailClass.gap)];
             if (gaps > budget) {
                 std.debug.print(
                     "test262: {d} engine gaps exceed --max-gaps={d} — run --list-gaps to triage, then fix the engine or register the fixture in tools/test262/gap_audit.zig\n",
@@ -2702,7 +2702,7 @@ fn recordOutcome(
             // the trim. See `isOutOfScopeReason`.
             if (isOutOfScopeReason(reason)) {
                 stats.oos += 1;
-                stats.oos_by_reason[@intFromEnum(reason)] += 1;
+                stats.oos_by_reason[@backingInt(reason)] += 1;
                 return;
             }
         }
@@ -2719,7 +2719,7 @@ fn recordOutcome(
         .pass_negative => stats.pass_neg += 1,
         .fail_false_reject => {
             stats.fail_reject += 1;
-            stats.fail_by_class[@intFromEnum(outcome.fail_class)] += 1;
+            stats.fail_by_class[@backingInt(outcome.fail_class)] += 1;
             try failures.append(gpa, .{
                 .path = try gpa.dupe(u8, rel),
                 .kind = .fail_false_reject,
@@ -2728,7 +2728,7 @@ fn recordOutcome(
         },
         .fail_false_accept => {
             stats.fail_accept += 1;
-            stats.fail_by_class[@intFromEnum(outcome.fail_class)] += 1;
+            stats.fail_by_class[@backingInt(outcome.fail_class)] += 1;
             try failures.append(gpa, .{
                 .path = try gpa.dupe(u8, rel),
                 .kind = .fail_false_accept,
@@ -2738,7 +2738,7 @@ fn recordOutcome(
         .skip => {
             stats.skip += 1;
             if (outcome.skip_reason) |reason| {
-                stats.skip_by_reason[@intFromEnum(reason)] += 1;
+                stats.skip_by_reason[@backingInt(reason)] += 1;
             }
         },
     }
@@ -3876,7 +3876,7 @@ fn printSkipBreakdown(io: std.Io, stats: *const Stats) !void {
         try std.Io.File.stdout().writeStreamingAll(io, "\nskip breakdown:\n");
         inline for (@typeInfo(SkipReason).@"enum".field_names) |field_name| {
             const reason: SkipReason = @field(SkipReason, field_name);
-            const count = stats.skip_by_reason[@intFromEnum(reason)];
+            const count = stats.skip_by_reason[@backingInt(reason)];
             if (count > 0) {
                 const pct: f64 = 100.0 * @as(f64, @floatFromInt(count)) / @as(f64, @floatFromInt(stats.skip));
                 const line = try std.fmt.bufPrint(&buf, "  {s:<24} {d:>6}  ({d:>5.2}%)\n", .{ field_name, count, pct });
@@ -3888,7 +3888,7 @@ fn printSkipBreakdown(io: std.Io, stats: *const Stats) !void {
         try std.Io.File.stdout().writeStreamingAll(io, "\nout-of-scope (dropped from corpus):\n");
         inline for (@typeInfo(SkipReason).@"enum".field_names) |field_name| {
             const reason: SkipReason = @field(SkipReason, field_name);
-            const count = stats.oos_by_reason[@intFromEnum(reason)];
+            const count = stats.oos_by_reason[@backingInt(reason)];
             if (count > 0) {
                 const pct: f64 = 100.0 * @as(f64, @floatFromInt(count)) / @as(f64, @floatFromInt(stats.oos));
                 const line = try std.fmt.bufPrint(&buf, "  {s:<24} {d:>6}  ({d:>5.2}%)\n", .{ field_name, count, pct });
@@ -4129,7 +4129,7 @@ fn printOhaimarkSummary(io: std.Io, stats: *const OhaimarkStats) !void {
     const stage_info = @typeInfo(OhaimarkStats.Stage).@"enum";
     var saw_stage = false;
     inline for (stage_info.field_names, stage_info.field_values) |name, value| {
-        const stage: OhaimarkStats.Stage = @enumFromInt(value);
+        const stage: OhaimarkStats.Stage = @fromBackingInt(@intCast(value));
         const count = stats.refusalCount(stage);
         if (count != 0) {
             saw_stage = true;
@@ -4191,7 +4191,7 @@ fn rankOhaimarkOpcodeRefusals(
     var len: usize = 0;
     const op_info = @typeInfo(Op).@"enum";
     inline for (op_info.field_values) |value| {
-        const op: Op = @enumFromInt(value);
+        const op: Op = @fromBackingInt(@intCast(value));
         const count = stats.unsupportedOpcodeCount(op);
         if (count != 0) {
             std.debug.assert(len < storage.len);
@@ -4202,7 +4202,7 @@ fn rankOhaimarkOpcodeRefusals(
     std.mem.sort(OhaimarkOpcodeRefusal, storage[0..len], {}, struct {
         fn lessThan(_: void, lhs: OhaimarkOpcodeRefusal, rhs: OhaimarkOpcodeRefusal) bool {
             if (lhs.count != rhs.count) return lhs.count > rhs.count;
-            return @intFromEnum(lhs.op) < @intFromEnum(rhs.op);
+            return @backingInt(lhs.op) < @backingInt(rhs.op);
         }
     }.lessThan);
     return storage[0..len];
@@ -4726,7 +4726,7 @@ fn writeNotPassing(
         .{ .idx = .gap, .label = "**engine gaps**", .detail = "the real engine work list: failures NOT explained by a policy class OR the body-audit registry. Each is either a genuine engine bug or a NEW by-design fixture not yet audited — triage the body (`--list-gaps` prints them), then fix the engine or add a line to `tools/test262/gap_audit.zig`. Includes any genuinely-unimplemented in-scope surface (e.g. `intl402/` at `-Dintl=full`)", .show_when_zero = true },
     };
     for (class_rows) |row| {
-        const n = cls[@intFromEnum(row.idx)];
+        const n = cls[@backingInt(row.idx)];
         if (n == 0 and !row.show_when_zero) continue;
         const line = try std.fmt.bufPrint(&buf, "| {s} | {d} | {s} |\n", .{ row.label, n, row.detail });
         try out.appendSlice(gpa, line);

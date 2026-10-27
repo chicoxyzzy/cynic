@@ -632,7 +632,7 @@ fn differenceTemporalDate(realm: *Realm, this_value: Value, args: []const Value,
     // Within the date group "day" is the finest unit, so the coarser of
     // the two is always the smallestUnit itself.
     const largest = largest_opt orelse smallest;
-    if (@intFromEnum(largest) > @intFromEnum(smallest)) {
+    if (@backingInt(largest) > @backingInt(smallest)) {
         return throwRangeError(realm, "largestUnit must not be smaller than smallestUnit");
     }
     // Date units have no MaximumTemporalDurationRoundingIncrement, so the

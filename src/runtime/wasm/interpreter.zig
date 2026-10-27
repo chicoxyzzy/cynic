@@ -895,7 +895,7 @@ pub const Instance = struct {
         self.spasm_last_refused_subopcode = diagnostics.subopcode;
         self.spasm_last_refusal_has_subopcode = diagnostics.has_subopcode;
 
-        const stage_index = @intFromEnum(diagnostics.stage) - 1;
+        const stage_index = @backingInt(diagnostics.stage) - 1;
         self.spasm_refusal_stages[stage_index] +%= 1;
         if (diagnostics.signature_type) |value_type| {
             if (value_type.isRef()) self.spasm_refused_reference_signatures +%= 1;
@@ -1504,7 +1504,7 @@ fn parseElements(self: *Instance, arena: std.mem.Allocator, module: *const Modul
 /// Evaluate a single element reference expression — `ref.func` (encoding
 /// `self`), `ref.null`, or `global.get` — consuming up to `end`.
 fn readElemRefExpr(self: *Instance, r: *reader_mod.Reader, globals: []const *Global) Error!u128 {
-    const op: Op = @enumFromInt(try r.byte());
+    const op: Op = @fromBackingInt(@intCast(try r.byte()));
     var val: u128 = REF_NULL;
     switch (op) {
         .ref_func => val = makeFuncRef(self, try r.uleb(u32)),
@@ -2796,7 +2796,7 @@ pub fn runStart(self: *Instance, allocator: std.mem.Allocator) Error!void {
 /// function end (`pc >= body.len`) from an interior block end.
 inline fn nextOp(body: []const u8, pc: *usize) Op {
     if (pc.* >= body.len) return .end;
-    const op: Op = @enumFromInt(body[pc.*]);
+    const op: Op = @fromBackingInt(@intCast(body[pc.*]));
     pc.* += 1;
     return op;
 }

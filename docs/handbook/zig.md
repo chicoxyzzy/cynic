@@ -1,15 +1,12 @@
 # Zig idioms in Cynic
 
-Pinned to a specific 0.17-dev SHA — see `.minimum_zig_version`
+Pinned to Zig 0.17.0 stable — see `.minimum_zig_version`
 in `build.zig.zon`. [anyzig](https://github.com/marler8997/anyzig)
 (via Homebrew) reads that field to dispatch the local `zig`
 binary to the right compiler, so `which zig` is the anyzig shim
 and `zig version` reports whatever the zon pins. CI uses
 `xyzzylabs/setup-zig` with no explicit `version:`, so it resolves
 the same field; keep the zon pin as the single source of truth.
-The master parser is strict in ways the previous release isn't
-(see "Array repeat" below for an example that ate a debug
-session).
 
 Things that surface during contribution:
 
@@ -65,7 +62,7 @@ pub fn main(init: std.process.Init) !void {
   const slots: [N]T = @splat(.{ .name = "" });
   ```
   Use this — not the older `[_]T{value} ** N`. The legacy
-  `**` form parses as two `*` tokens in master Zig and the
+  `**` form parses as two `*` tokens in Zig 0.17 and the
   parser rejects `}} ** N` because the whitespace around the
   first `*` is asymmetric (`}` left, `*` right, no space).
   `@splat` is the spec-blessed replacement and has none of the
@@ -123,7 +120,7 @@ distinct names: a function param `tok` plus a switch capture
 
 ## Build
 
-`build.zig` follows the pinned 0.17-dev shape: `b.createModule`,
+`build.zig` follows the pinned 0.17 API: `b.createModule`,
 `b.addExecutable({ .name, .root_module })`, `b.addRunArtifact`,
 `b.step`. Argument forwarding via `run.addPassthruArgs();`.
 

@@ -186,7 +186,7 @@ fn buildFrameWithStats(
         return @ptrFromInt(8); // non-null sentinel; len() reports 0
     };
     var w: usize = 0;
-    buf[w] = @intFromEnum(status);
+    buf[w] = @backingInt(status);
     w += 1;
     inline for (.{ stdout, value, err }) |section| {
         std.mem.writeInt(u32, buf[w..][0..4], @intCast(section.len), .big);

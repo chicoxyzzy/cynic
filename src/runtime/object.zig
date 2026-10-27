@@ -5248,11 +5248,14 @@ test "JSObjectExtension: footprint probe (size measurement, not an invariant)" {
     // allocation to ordinary <=4-property objects or dense arrays,
     // taking JSObject to 144 B. See
     // docs/gc-immix-rearchitecture.md "The memory axis".
-    try testing.expect(@sizeOf(JSObject) <= 148);
+    // Zig 0.17 adds a SafetyLock to each ArrayList in safe builds.
+    // DictStore also has the two existing map locks; all are zero-size in fast builds.
+    const safety_bytes = @sizeOf(std.debug.SafetyLock);
+    try testing.expect(@sizeOf(JSObject) <= 148 + safety_bytes);
     if (@sizeOf(usize) == 8) {
-        try testing.expectEqual(@as(usize, 144), @sizeOf(JSObject));
-        try testing.expectEqual(@as(usize, 104), @sizeOf(DictStore));
-        try testing.expectEqual(@as(usize, 24), @sizeOf(std.ArrayListUnmanaged(Value)));
+        try testing.expectEqual(@as(usize, 144) + safety_bytes, @sizeOf(JSObject));
+        try testing.expectEqual(@as(usize, 88) + 3 * safety_bytes, @sizeOf(DictStore));
+        try testing.expectEqual(@as(usize, 24) + safety_bytes, @sizeOf(std.ArrayListUnmanaged(Value)));
         try testing.expectEqual(@as(usize, 16), @sizeOf(ObjectAuxCombined));
     }
 }

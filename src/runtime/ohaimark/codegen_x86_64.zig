@@ -1716,7 +1716,7 @@ const CfgCompiler = struct {
         try self.machine.jumpCond(.equal, &pushed);
         try self.machine.cmpRegImm32(
             .rax,
-            @intFromEnum(call_mod.JitPushStatus.tier_down),
+            @backingInt(call_mod.JitPushStatus.tier_down),
         );
         try self.machine.jumpCond(.equal, &tier_down);
 

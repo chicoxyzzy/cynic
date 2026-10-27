@@ -166,7 +166,7 @@ fn jumpToGuardIf(
 ) !void {
     var passed: Masm.Label = .{};
     defer passed.deinit(allocator);
-    const inverse: a64.Cond = @enumFromInt(@intFromEnum(condition) ^ 1);
+    const inverse: a64.Cond = @fromBackingInt(@intCast(@backingInt(condition) ^ 1));
     try machine.jumpCond(inverse, &passed);
     try machine.jump(guard);
     try machine.bind(&passed);
