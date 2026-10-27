@@ -7,26 +7,59 @@
 #
 # The harness (tools/wasm_testsuite.zig) only reads binary `.wasm`, so
 # this preprocessing step turns the text `.wast` corpus into something
-# it can run. Missing wabt is non-fatal: the harness simply finds an
-# empty out-dir and reports zero tests.
+# it can run. A missing/broken converter or an empty generated corpus
+# is a setup failure, not a successful zero-test run.
 
-corpus="$1"
-out="$2"
+set -eu
+
+corpus="${1:-}"
+out="${2:-}"
 
 if [ -z "$corpus" ] || [ -z "$out" ]; then
     echo "usage: wasm-testsuite-gen.sh <corpus-dir> <out-dir>" >&2
     exit 2
 fi
 
-mkdir -p "$out"
-
 if ! command -v wast2json >/dev/null 2>&1; then
     echo "wasm-testsuite: wast2json not found on PATH; install wabt to run the suite" >&2
-    exit 0
+    exit 2
 fi
 
+# wabt exposes --enable-X for default-off features and --disable-X for
+# default-on ones. Several enable flags disappeared in 1.0.42 when their
+# features became defaults; support both that version and older packages.
+if ! help=$(wast2json --help); then
+    echo "wasm-testsuite: could not inspect wast2json options" >&2
+    exit 2
+fi
+set --
+for feature in tail-call relaxed-simd memory64 extended-const multi-memory function-references; do
+    case "$help" in
+        *"--enable-$feature "*) set -- "$@" "--enable-$feature" ;;
+        *"--disable-$feature "*) ;;
+        *)
+            echo "wasm-testsuite: wast2json does not support required feature $feature" >&2
+            exit 2
+            ;;
+    esac
+done
+
+# Catch global converter/option errors once, with the real diagnostic,
+# before treating unsupported proposal syntax as per-file skips.
+temporary=$(mktemp -d "${TMPDIR:-/tmp}/cynic-wast2json.XXXXXX")
+trap 'rm -rf "$temporary"' 0
+trap 'exit 2' 1 2 15
+printf '%s\n' '(module)' > "$temporary/probe.wast"
+if ! wast2json "$@" "$temporary/probe.wast" -o "$temporary/probe.json" > "$temporary/converter.log" 2>&1; then
+    echo "wasm-testsuite: wast2json smoke conversion failed" >&2
+    cat "$temporary/converter.log" >&2
+    exit 2
+fi
+
+mkdir -p "$out"
+
 # Clear stale artifacts so a removed/renamed .wast doesn't linger.
-rm -f "$out"/*.json "$out"/*.wasm 2>/dev/null
+rm -f "$out"/*.json "$out"/*.wasm
 
 n=0
 for f in "$corpus"/*.wast; do
@@ -36,18 +69,17 @@ for f in "$corpus"/*.wast; do
     # `.wast` files and the harness scores them. We deliberately do NOT
     # `--enable-all`: that also lowers `gc` tests (unimplemented) — and
     # it switches wabt to a non-standard compressed import-section
-    # encoding that no standard decoder accepts. (Exception-handling
-    # can't be lowered by this wabt regardless — its `(ref exn)` text
-    # syntax is unsupported.)
-    if wast2json --enable-tail-call --enable-relaxed-simd \
-        --enable-memory64 --enable-extended-const --enable-multi-memory \
-        --enable-function-references \
-        "$f" -o "$out/$base.json" >/dev/null 2>&1; then
+    # encoding that no standard decoder accepts.
+    if wast2json "$@" "$f" -o "$out/$base.json" > "$temporary/converter.log" 2>&1; then
         n=$((n + 1))
     else
         echo "wasm-testsuite: wast2json could not convert $base.wast (skipped)" >&2
-        rm -f "$out/$base.json" 2>/dev/null
+        sed -n '1,8p' "$temporary/converter.log" >&2
+        rm -f "$out/$base.json"
     fi
 done
 
 echo "wasm-testsuite: converted $n .wast file(s) into $out" >&2
+if [ "$n" -eq 0 ]; then
+    exit 2
+fi

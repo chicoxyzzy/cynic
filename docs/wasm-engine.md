@@ -947,11 +947,22 @@ Conformance is scored against the official WebAssembly spec testsuite
 Plain binary module commands are scored, following
 [WABT's module-command tally](https://github.com/WebAssembly/wabt/blob/main/src/tools/spectest-interp.cc):
 loading and running a start function must succeed without a later assertion.
+Definition-only modules validate without resolving imports, allocating tables
+or memories, or running a start function; explicit `instance` commands create
+fresh state from the selected definition. This follows the
+[reference runner's separate module and instance stores](https://github.com/WebAssembly/spec/blob/main/interpreter/script/runner.ml)
+and keeps large validation-only limits from becoming harness allocations.
 Expected uninstantiability accepts initialization/start traps or exceptions,
 following the [reference script runner](https://github.com/WebAssembly/spec/blob/main/interpreter/script/runner.ml).
 Fixture I/O, malformed manifests, and reported allocation failures are fatal
 harness errors, not engine rejections. Explicit unsupported forms retain their skips;
 conversion exclusions are reported by `wasm-testsuite-gen.sh`.
+The generator checks `wast2json --help` before selecting feature flags:
+[wabt exposes enable or disable options according to each feature's default](https://github.com/WebAssembly/wabt/blob/1.0.42/src/feature.cc).
+This supports both older packages and wabt 1.0.42, which removed several
+enable flags after making those features default-on. A smoke conversion
+must pass before stale output is cleared; a missing/broken converter or
+zero converted files fails setup rather than silently yielding an empty run.
 `zig build test-wasm-testsuite` checks actual process exits and score totals,
 and runs in both architecture-specific Wasm CI jobs. Native harness tests
 also inject allocation failures before an expected trap and through every
@@ -963,6 +974,11 @@ to a nullable or abstract reference type. The fixes follow the Core
 and [tail-call matching rule](https://webassembly.github.io/spec/core/valid/instructions.html#valid-return-call),
 with positive and negative unit tests for each form. ECMA-262/test262 and
 SES policy are unaffected.
+The newly converted `table.wast` also checks that non-nullable defined tables
+require an explicit initializer, even with a zero minimum. The plain binary
+form implies `ref.null`, which cannot satisfy a non-nullable element type
+under the Core [table validation rule](https://webassembly.github.io/spec/core/valid/modules.html#tables).
+Nullable tables and non-nullable imports remain valid.
 Scalar and SIMD float expectations share a bit-based matcher for
 [Core canonical/arithmetic NaNs](https://webassembly.github.io/spec/core/syntax/values.html#syntax-float),
 following [WABT's expectation types](https://github.com/WebAssembly/wabt/blob/main/src/tools/spectest-interp.cc).

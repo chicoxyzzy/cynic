@@ -4,7 +4,7 @@
 //! The `.wast` text format is preprocessed by `wast2json` (wabt) into a
 //! JSON manifest plus `.wasm` binaries (see tools/wasm-testsuite-gen.sh);
 //! Sarcasm itself only decodes binary modules. This harness walks the
-//! generated directory, replays each command — `module`, `register`,
+//! generated directory, replays each command — `module`, `instance`, `register`,
 //! `assert_return`, `assert_trap`, `assert_invalid`, `assert_malformed`,
 //! `assert_exhaustion`, `assert_uninstantiable`, `action` — including
 //! cross-module linking (a registry of named/registered instances with
@@ -211,6 +211,8 @@ fn runManifest(gpa: std.mem.Allocator, arena: std.mem.Allocator, io: std.Io, dir
 
     var counts: Counts = .{};
     var current: ?*wasm.Instance = null;
+    var current_definition: ?ModuleDefinition = null;
+    var definitions: std.StringHashMapUnmanaged(ModuleDefinition) = .empty;
     var spasm_instances: std.ArrayListUnmanaged(*wasm.Instance) = .empty;
 
     // Cross-module linking registry: registered name → instance. Names
@@ -237,16 +239,49 @@ fn runManifest(gpa: std.mem.Allocator, arena: std.mem.Allocator, io: std.Io, dir
         defer action_arena.deinit();
         const scratch = action_arena.allocator();
 
-        if (std.mem.eql(u8, kind, "module")) {
+        const is_module = std.mem.eql(u8, kind, "module");
+        if (is_module or std.mem.eql(u8, kind, "instance")) {
+            const definition: ModuleDefinition = if (is_module) blk: {
+                const definition_only = try moduleDefinitionOnly(cmd);
+                switch (try readModule(arena, io, dir, cmd)) {
+                    .defined => |loaded| {
+                        current_definition = loaded;
+                        if (try optionalString(cmd, "name")) |name|
+                            try definitions.put(arena, name, loaded);
+                        // Script module definitions validate only. In particular,
+                        // huge declared minima and start functions must not run.
+                        if (definition_only) {
+                            counts.pass += 1;
+                            continue;
+                        }
+                        break :blk loaded;
+                    },
+                    .rejected => {
+                        current_definition = null;
+                        if (!definition_only) current = null;
+                        counts.fail += 1;
+                        continue;
+                    },
+                    .unsupported => {
+                        current_definition = null;
+                        if (!definition_only) current = null;
+                        counts.skip += 1;
+                        continue;
+                    },
+                }
+            } else if (try optionalString(cmd, "definition")) |name|
+                definitions.get(name) orelse return error.BadManifest
+            else
+                current_definition orelse return error.BadManifest;
             // WABT's TallyCommand(OnModuleCommand) also counts plain module
             // commands: decoding, linking, initialization and start must work
             // even when the script has no later assertion against the module.
-            switch (try loadModule(arena, io, dir, cmd, &registry, spasm_enabled)) {
+            switch (try instantiateDefinition(arena, io, definition, &registry, spasm_enabled)) {
                 .loaded => |loaded| {
                     current = loaded.instance;
                     counts.pass += 1;
                     if (spasm_enabled) try spasm_instances.append(arena, loaded.instance);
-                    if (try optionalString(cmd, "name")) |name|
+                    if (try optionalString(cmd, if (is_module) "name" else "instance")) |name|
                         try registry.put(arena, name, loaded.instance);
                 },
                 .rejected => {
@@ -435,9 +470,12 @@ fn miscSubopcodeName(subopcode: usize) []const u8 {
 
 const Loaded = struct { instance: *wasm.Instance, module: *wasm.Module };
 const LoadPhase = enum { decode, validate, link, initialize, start };
+const Rejection = struct { phase: LoadPhase, err: anyerror };
+const ModuleDefinition = struct { module: *wasm.Module, filename: []const u8 };
+const DefinitionResult = union(enum) { defined: ModuleDefinition, rejected: Rejection, unsupported };
 const LoadResult = union(enum) {
     loaded: Loaded,
-    rejected: struct { phase: LoadPhase, err: anyerror },
+    rejected: Rejection,
     unsupported,
 };
 
@@ -458,12 +496,20 @@ fn binaryModule(cmd: std.json.ObjectMap) !bool {
     return error.BadManifest;
 }
 
-fn rejectModule(io: std.Io, filename: []const u8, phase: LoadPhase, err: anyerror) !LoadResult {
+fn moduleDefinitionOnly(cmd: std.json.ObjectMap) !bool {
+    const flag = (try optionalString(cmd, "definition")) orelse return false;
+    // wast2json encodes this flag as a string, not a JSON boolean.
+    if (std.mem.eql(u8, flag, "true")) return true;
+    if (std.mem.eql(u8, flag, "false")) return false;
+    return error.BadManifest;
+}
+
+fn rejectModule(io: std.Io, filename: []const u8, phase: LoadPhase, err: anyerror) !Rejection {
     // Exhausting the harness's allocator says nothing about whether the
     // engine accepts the module. Never satisfy an expected rejection with it.
     if (err == error.OutOfMemory) return error.OutOfMemory;
     if (debug_loads) logLoadError(io, filename, @tagName(phase), err);
-    return .{ .rejected = .{ .phase = phase, .err = err } };
+    return .{ .phase = phase, .err = err };
 }
 
 fn isWasmTrap(err: anyerror) bool {
@@ -624,11 +670,19 @@ fn loadModule(
     registry: *const Registry,
     spasm_enabled: bool,
 ) !LoadResult {
+    return switch (try readModule(arena, io, dir, cmd)) {
+        .defined => |definition| instantiateDefinition(arena, io, definition, registry, spasm_enabled),
+        .rejected => |rejection| .{ .rejected = rejection },
+        .unsupported => .unsupported,
+    };
+}
+
+fn readModule(arena: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, cmd: std.json.ObjectMap) !DefinitionResult {
     if (!try binaryModule(cmd)) return .unsupported;
     const filename = try requiredString(cmd, "filename");
     const bytes = try dir.readFileAlloc(io, filename, arena, .limited(64 * 1024 * 1024));
     const modp = try arena.create(wasm.Module);
-    modp.* = wasm.decode(arena, bytes) catch |err| return rejectModule(io, filename, .decode, err);
+    modp.* = wasm.decode(arena, bytes) catch |err| return .{ .rejected = try rejectModule(io, filename, .decode, err) };
     // Validate before looking up type-indexed imports. This also separates a
     // validation rejection from an active-segment trap during instantiate.
     // The prepared instance owns its own code; discard this validation scratch.
@@ -636,16 +690,22 @@ fn loadModule(
         var validation = std.heap.ArenaAllocator.init(arena);
         defer validation.deinit();
         _ = wasm.validateModule(validation.allocator(), modp) catch |err|
-            return rejectModule(io, filename, .validate, err);
+            return .{ .rejected = try rejectModule(io, filename, .validate, err) };
     }
-    const imports = resolveImports(arena, modp, registry) catch |err| return rejectModule(io, filename, .link, err);
+    return .{ .defined = .{ .module = modp, .filename = filename } };
+}
+
+fn instantiateDefinition(arena: std.mem.Allocator, io: std.Io, definition: ModuleDefinition, registry: *const Registry, spasm_enabled: bool) !LoadResult {
+    const modp = definition.module;
+    const filename = definition.filename;
+    const imports = resolveImports(arena, modp, registry) catch |err| return .{ .rejected = try rejectModule(io, filename, .link, err) };
     const ip = try arena.create(wasm.Instance);
-    wasm.instantiate(ip, arena, arena, modp, imports) catch |err| return rejectModule(io, filename, .initialize, err);
+    wasm.instantiate(ip, arena, arena, modp, imports) catch |err| return .{ .rejected = try rejectModule(io, filename, .initialize, err) };
     if (spasm_enabled) {
         ip.spasm_enabled = true;
         ip.spasm_diagnostics = true;
     }
-    wasm.runStart(ip, arena) catch |err| return rejectModule(io, filename, .start, err);
+    wasm.runStart(ip, arena) catch |err| return .{ .rejected = try rejectModule(io, filename, .start, err) };
     return .{ .loaded = .{ .instance = ip, .module = modp } };
 }
 
@@ -1276,12 +1336,13 @@ fn writeResults(gpa: std.mem.Allocator, io: std.Io, total: Counts, files: u32) !
         \\
         \\Scored by `zig build wasm-testsuite -Dwasm-corpus=vendor/wasm-testsuite`
         \\against the official WebAssembly spec testsuite (the `.wast` corpus,
-        \\preprocessed with `wast2json --enable-tail-call --enable-relaxed-simd
-        \\--enable-memory64 --enable-extended-const --enable-multi-memory
-        \\--enable-function-references`). Each supported binary `module`, assertion,
-        \\and `action` command is a plain pass or fail. A module must decode, validate,
-        \\link, initialize, and run its start function successfully, even if no later
-        \\assertion uses it. Registers are unscored. Explicit skips cover
+        \\preprocessed by `tools/wasm-testsuite-gen.sh`, which selects feature flags
+        \\for the installed `wast2json`). Each supported binary `module`, `instance`,
+        \\assertion, and `action` command is a plain pass or fail. Ordinary modules
+        \\must decode, validate, link, initialize, and run their start function,
+        \\even if no later assertion uses them. Definition-only modules decode and
+        \\validate without instantiation; explicit instances create fresh state.
+        \\Registers are unscored. Explicit skips cover
         \\`assert_unlinkable`, text/quoted modules, unsupported script commands, and
         \\value forms the harness cannot compare. A decoder, validator, or start
         \\failure in a positive module command is a failure, never an implicit skip.
@@ -1290,8 +1351,8 @@ fn writeResults(gpa: std.mem.Allocator, io: std.Io, total: Counts, files: u32) !
         \\passing / (passing + failing)` — the fraction of *scored* commands that
         \\pass, not the fraction of all WebAssembly implemented. Proposal files this
         \\`wast2json` cannot lower are logged conversion exclusions; they do not enter
-        \\the command counts. This includes unimplemented WasmGC and the current exception-handling
-        \\text syntax; exception handling is implemented and covered by engine unit tests.
+        \\the command counts. These exclusions depend on the installed wabt version;
+        \\unimplemented WasmGC remains outside the enabled conversion features.
         \\
         \\Expected uninstantiability requires a genuine trap or Wasm exception during
         \\initialization/start. Missing files, corrupt manifests, and reported allocation
