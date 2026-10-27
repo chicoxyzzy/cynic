@@ -1472,7 +1472,7 @@ const k_elem_called = "__cynic_elem_called__";
 fn allocAggState(realm: *Realm, kind: AggKind, cap: PromiseCapability, values: *JSObject) NativeError!*JSObject {
     const st = realm.heap.allocateObject() catch return error.OutOfMemory;
     realm.heap.setObjectPrototype(st, realm.intrinsics.object_prototype);
-    st.set(realm.allocator, k_kind, Value.fromInt32(@intFromEnum(kind))) catch return error.OutOfMemory;
+    st.set(realm.allocator, k_kind, Value.fromInt32(@backingInt(kind))) catch return error.OutOfMemory;
     // Spec starts `remainingElementsCount` at 1 to handle the
     // synchronous-iteration case (decremented once after the
     // loop ends, plus once per element resolution).
@@ -1547,7 +1547,7 @@ fn aggResolveElement(realm: *Realm, this_value: Value, args: []const Value) Nati
     const state = heap_mod.valueAsPlainObject(wrapper.get(k_elem_state)) orelse return Value.undefined_;
     const idx: u32 = @intCast(@max(0, wrapper.get(k_elem_index).asInt32()));
     const value = if (args.len > 0) args[0] else Value.undefined_;
-    const kind: AggKind = @enumFromInt(state.get(k_kind).asInt32());
+    const kind: AggKind = @fromBackingInt(@intCast(state.get(k_kind).asInt32()));
 
     const values = heap_mod.valueAsPlainObject(state.get(k_values)) orelse return Value.undefined_;
 
@@ -1579,7 +1579,7 @@ fn aggRejectElement(realm: *Realm, this_value: Value, args: []const Value) Nativ
     const state = heap_mod.valueAsPlainObject(wrapper.get(k_elem_state)) orelse return Value.undefined_;
     const idx: u32 = @intCast(@max(0, wrapper.get(k_elem_index).asInt32()));
     const reason = if (args.len > 0) args[0] else Value.undefined_;
-    const kind: AggKind = @enumFromInt(state.get(k_kind).asInt32());
+    const kind: AggKind = @fromBackingInt(@intCast(state.get(k_kind).asInt32()));
 
     switch (kind) {
         .all => {
@@ -1620,7 +1620,7 @@ fn decrementRemaining(realm: *Realm, state: *JSObject) NativeError!Value {
     const next = cur - 1;
     state.set(realm.allocator, k_remaining, Value.fromInt32(next)) catch return error.OutOfMemory;
     if (next != 0) return Value.undefined_;
-    const kind: AggKind = @enumFromInt(state.get(k_kind).asInt32());
+    const kind: AggKind = @fromBackingInt(@intCast(state.get(k_kind).asInt32()));
     const values_v = state.get(k_values);
     switch (kind) {
         .all, .all_settled => return invokeCapResolve(realm, state, values_v),

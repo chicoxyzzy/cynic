@@ -31,7 +31,7 @@ pub fn skipToFrameEnd(body: []const u8, index: *usize) ?void {
 pub fn skipToFrameBoundary(body: []const u8, index: *usize) ?FrameBoundary {
     var depth: usize = 0;
     while (index.* < body.len) {
-        const op: Op = @enumFromInt(body[index.*]);
+        const op: Op = @fromBackingInt(@intCast(body[index.*]));
         index.* += 1;
         switch (op) {
             .block, .loop, .@"if" => {
@@ -336,14 +336,14 @@ fn readUleb32(body: []const u8, index: *usize) ?u32 {
 
 test "skipToFrameEnd ignores opcode bytes inside immediates" {
     const body = [_]u8{
-        @intFromEnum(Op.i32_const), 0x0b,
-        @intFromEnum(Op.block),     0x40,
-        @intFromEnum(Op.f64_const), 0x0b,
-        0x05,                       0x0b,
-        0x05,                       0x0b,
-        0x05,                       0x0b,
-        0x05,                       @intFromEnum(Op.end),
-        @intFromEnum(Op.end),       @intFromEnum(Op.nop),
+        @backingInt(Op.i32_const), 0x0b,
+        @backingInt(Op.block),     0x40,
+        @backingInt(Op.f64_const), 0x0b,
+        0x05,                      0x0b,
+        0x05,                      0x0b,
+        0x05,                      0x0b,
+        0x05,                      @backingInt(Op.end),
+        @backingInt(Op.end),       @backingInt(Op.nop),
     };
     var index: usize = 0;
     try std.testing.expect(skipToFrameEnd(&body, &index) != null);
@@ -351,7 +351,7 @@ test "skipToFrameEnd ignores opcode bytes inside immediates" {
 }
 
 test "skipToFrameEnd refuses a truncated immediate" {
-    const body = [_]u8{ @intFromEnum(Op.i64_const), 0x80 };
+    const body = [_]u8{ @backingInt(Op.i64_const), 0x80 };
     var index: usize = 0;
     try std.testing.expect(skipToFrameEnd(&body, &index) == null);
     try std.testing.expectEqual(body.len, index);
@@ -388,11 +388,11 @@ test "skipToFrameEnd skips SIMD lane memory64 immediates and any_true" {
 
 test "skipToFrameBoundary stops at the current if arm" {
     const body = [_]u8{
-        @intFromEnum(Op.block),     0x40,
-        @intFromEnum(Op.i32_const), 0x05,
-        @intFromEnum(Op.end),       @intFromEnum(Op.@"else"),
-        @intFromEnum(Op.i32_const), 0x0b,
-        @intFromEnum(Op.end),
+        @backingInt(Op.block),     0x40,
+        @backingInt(Op.i32_const), 0x05,
+        @backingInt(Op.end),       @backingInt(Op.@"else"),
+        @backingInt(Op.i32_const), 0x0b,
+        @backingInt(Op.end),
     };
     var index: usize = 0;
     try std.testing.expectEqual(FrameBoundary.else_arm, skipToFrameBoundary(&body, &index).?);

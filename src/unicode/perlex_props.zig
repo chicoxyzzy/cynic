@@ -113,7 +113,7 @@ var orbit_map: std.AutoHashMapUnmanaged(u21, []const u21) = .empty;
 // the test262 worker pool without a mutex: one thread CAS-claims the build,
 // any racers spin until it publishes `done`.
 const OrbitState = enum(u8) { uninit, building, done };
-var orbit_state = std.atomic.Value(u8).init(@intFromEnum(OrbitState.uninit));
+var orbit_state = std.atomic.Value(u8).init(@backingInt(OrbitState.uninit));
 
 fn buildOrbitMap() void {
     orbit_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -160,7 +160,7 @@ fn buildOrbitMap() void {
 /// is built lazily (thread-safe via `std.once`) and never freed.
 pub fn nonUnicodeCanonFold(cp: u21) []const u21 {
     if (cp > 0xFFFF) return &.{};
-    if (orbit_state.load(.acquire) != @intFromEnum(OrbitState.done)) ensureOrbit();
+    if (orbit_state.load(.acquire) != @backingInt(OrbitState.done)) ensureOrbit();
     return orbit_map.get(cp) orelse &.{};
 }
 
@@ -170,16 +170,16 @@ pub fn nonUnicodeCanonFold(cp: u21) []const u21 {
 /// build's writes to the reading thread).
 fn ensureOrbit() void {
     if (orbit_state.cmpxchgStrong(
-        @intFromEnum(OrbitState.uninit),
-        @intFromEnum(OrbitState.building),
+        @backingInt(OrbitState.uninit),
+        @backingInt(OrbitState.building),
         .acq_rel,
         .acquire,
     ) == null) {
         buildOrbitMap();
-        orbit_state.store(@intFromEnum(OrbitState.done), .release);
+        orbit_state.store(@backingInt(OrbitState.done), .release);
         return;
     }
-    while (orbit_state.load(.acquire) != @intFromEnum(OrbitState.done)) {
+    while (orbit_state.load(.acquire) != @backingInt(OrbitState.done)) {
         std.atomic.spinLoopHint();
     }
 }

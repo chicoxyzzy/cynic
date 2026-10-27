@@ -111,7 +111,7 @@ const build_id: u64 = blk: {
     var h = std.hash.Fnv1a_64.init();
     h.update("CYSN\x01");
     h.update(builtin.zig_version_string);
-    h.update(@tagName(builtin.mode));
+    h.update(@tagName(builtin.optimize));
     h.update(@tagName(builtin.cpu.arch));
     h.update(if (intl_config.has_locale_data) "intl=full" else if (intl_config.enabled) "intl=stub" else "intl=off");
     break :blk h.final();
@@ -239,8 +239,8 @@ fn featureBits(set: features.FeatureSet) u64 {
     var bits: u64 = 0;
     inline for (comptime std.meta.fieldNames(features.FeatureFlag)) |name| {
         const flag = @field(features.FeatureFlag, name);
-        comptime std.debug.assert(@intFromEnum(flag) < 64);
-        if (set.contains(flag)) bits |= @as(u64, 1) << @intFromEnum(flag);
+        comptime std.debug.assert(@backingInt(flag) < 64);
+        if (set.contains(flag)) bits |= @as(u64, 1) << @backingInt(flag);
     }
     return bits;
 }
@@ -249,7 +249,7 @@ fn featureSetFromBits(bits: u64) features.FeatureSet {
     var set = features.FeatureSet.empty;
     inline for (comptime std.meta.fieldNames(features.FeatureFlag)) |name| {
         const flag = @field(features.FeatureFlag, name);
-        if (bits & (@as(u64, 1) << @intFromEnum(flag)) != 0) set.insert(flag);
+        if (bits & (@as(u64, 1) << @backingInt(flag)) != 0) set.insert(flag);
     }
     return set;
 }
@@ -757,7 +757,7 @@ const Capture = struct {
             }
             try self.writeKeyRef(w, node.key);
             try w.w8(flagsToByte(node.attrs));
-            try w.w8(@intFromEnum(node.kind));
+            try w.w8(@backingInt(node.kind));
             try w.w32(node.slot);
             try w.w32(node.property_count);
         }
@@ -978,7 +978,7 @@ const Capture = struct {
         if (f.is_async) flags0 |= 1 << 6;
         if (f.extensible) flags0 |= 1 << 7;
         try w.w8(flags0);
-        try w.w8(@intFromEnum(f.constructor_kind));
+        try w.w8(@backingInt(f.constructor_kind));
         try w.w8(f.param_count);
         try w.w32(if (f.native_callback) |cb| @intCast((try self.externRef(cb)) + 1) else 0);
 
@@ -1437,7 +1437,7 @@ const Restore = struct {
             const attrs = flagsFromByte(try r.r8());
             const kind_byte = try r.r8();
             if (kind_byte > 1) return error.SnapshotCorrupt;
-            const kind: shape_mod.PropKind = @enumFromInt(kind_byte);
+            const kind: shape_mod.PropKind = @fromBackingInt(@intCast(kind_byte));
             const slot = try r.r32();
             const property_count = try r.r32();
             if (i == 0) {
@@ -1657,7 +1657,7 @@ const Restore = struct {
         f.extensible = flags0 & (1 << 7) != 0;
         const ctor_kind = try r.r8();
         if (ctor_kind > 1) return error.SnapshotCorrupt;
-        f.constructor_kind = @enumFromInt(ctor_kind);
+        f.constructor_kind = @fromBackingInt(@intCast(ctor_kind));
         f.param_count = try r.r8();
         const cb_idx = try r.r32();
         if (cb_idx != 0) {

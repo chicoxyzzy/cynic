@@ -90,7 +90,7 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
     while (!reader.atEnd()) {
         const offset = reader.pos;
         offsets[offset] = @intCast(instructions.items.len);
-        var inst: Instruction = .{ .op = @enumFromInt(try reader.byte()) };
+        var inst: Instruction = .{ .op = @fromBackingInt(@intCast(try reader.byte())) };
         switch (inst.op) {
             .nop, .drop, .i32_eqz, .i32_eq, .i32_lt_s, .i32_lt_u, .i32_ge_s, .i32_ge_u, .i64_eqz, .i64_eq, .i64_lt_s, .i64_lt_u, .i64_ge_s, .i64_ge_u, .i32_add, .i32_sub, .i32_mul, .i64_add, .i64_sub, .i64_mul => {},
             .block, .loop => {

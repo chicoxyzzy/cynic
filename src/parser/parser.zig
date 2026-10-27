@@ -799,7 +799,7 @@ pub const Parser = struct {
         } else if (key_tok.kind == .numeric_literal or key_tok.kind == .bigint_literal) {
             _ = try self.bump();
             key = .{ .numeric = key_tok.span };
-        } else if (key_tok.kind == .identifier or @intFromEnum(key_tok.kind) >= @intFromEnum(TokenKind.kw_await)) {
+        } else if (key_tok.kind == .identifier or @backingInt(key_tok.kind) >= @backingInt(TokenKind.kw_await)) {
             _ = try self.bump();
             key = .{ .ident = key_tok.span };
             // The shorthand `{ a }` / `{ a = 1 }` path needs `a` to
@@ -2829,7 +2829,7 @@ pub const Parser = struct {
             _ = try self.bump();
             return .{ .key = .{ .numeric = tok.span }, .end = tok.span.end };
         }
-        if (tok.kind == .identifier or @intFromEnum(tok.kind) >= @intFromEnum(TokenKind.kw_await)) {
+        if (tok.kind == .identifier or @backingInt(tok.kind) >= @backingInt(TokenKind.kw_await)) {
             _ = try self.bump();
             return .{ .key = .{ .ident = tok.span }, .end = tok.span.end };
         }
@@ -3763,7 +3763,7 @@ pub const Parser = struct {
     fn parseModuleExportName(self: *Parser) ParseError!Token {
         const tok = self.current;
         if (tok.kind == .identifier or tok.kind == .string_literal or
-            @intFromEnum(tok.kind) >= @intFromEnum(TokenKind.kw_await))
+            @backingInt(tok.kind) >= @backingInt(TokenKind.kw_await))
         {
             return try self.bump();
         }
@@ -4411,7 +4411,7 @@ pub fn isPropertyNameStart(kind: TokenKind) bool {
     if (kind == .identifier or kind == .private_identifier) return true;
     if (kind == .string_literal or kind == .numeric_literal) return true;
     if (kind == .lbracket) return true;
-    return @intFromEnum(kind) >= @intFromEnum(TokenKind.kw_await);
+    return @backingInt(kind) >= @backingInt(TokenKind.kw_await);
 }
 
 fn mapLexError(err: LexError) ParseError {

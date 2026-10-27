@@ -68,8 +68,8 @@ pub fn analyze(code: []const u8) AnalyzeError!Summary {
 
 test "environment elision summarizes empty allocation" {
     const code = [_]u8{
-        @intFromEnum(Op.make_environment), 0,
-        @intFromEnum(Op.lda_undefined),    @intFromEnum(Op.return_),
+        @backingInt(Op.make_environment), 0,
+        @backingInt(Op.lda_undefined),    @backingInt(Op.return_),
     };
     const summary = try analyze(&code);
     try std.testing.expect(summary.has_make_environment);
@@ -80,8 +80,8 @@ test "environment elision summarizes empty allocation" {
 
 test "environment elision rejects a real allocation" {
     const code = [_]u8{
-        @intFromEnum(Op.make_environment), 1,
-        @intFromEnum(Op.return_),
+        @backingInt(Op.make_environment), 1,
+        @backingInt(Op.return_),
     };
     const summary = try analyze(&code);
     try std.testing.expect(summary.has_make_environment);
@@ -91,25 +91,25 @@ test "environment elision rejects a real allocation" {
 
 test "environment elision recognizes one entry allocation" {
     const entry = [_]u8{
-        @intFromEnum(Op.make_environment), 1,
-        @intFromEnum(Op.lda_undefined),    @intFromEnum(Op.return_),
+        @backingInt(Op.make_environment), 1,
+        @backingInt(Op.lda_undefined),    @backingInt(Op.return_),
     };
     const entry_summary = try analyze(&entry);
     try std.testing.expectEqual(@as(?u8, 1), entry_summary.entryAllocationSlots());
 
     const later = [_]u8{
-        @intFromEnum(Op.lda_undefined),
-        @intFromEnum(Op.make_environment),
+        @backingInt(Op.lda_undefined),
+        @backingInt(Op.make_environment),
         1,
-        @intFromEnum(Op.return_),
+        @backingInt(Op.return_),
     };
     const later_summary = try analyze(&later);
     try std.testing.expectEqual(@as(?u8, null), later_summary.entryAllocationSlots());
 
     const multiple = [_]u8{
-        @intFromEnum(Op.make_environment), 1,
-        @intFromEnum(Op.make_environment), 0,
-        @intFromEnum(Op.return_),
+        @backingInt(Op.make_environment), 1,
+        @backingInt(Op.make_environment), 0,
+        @backingInt(Op.return_),
     };
     const multiple_summary = try analyze(&multiple);
     try std.testing.expectEqual(@as(?u8, null), multiple_summary.entryAllocationSlots());
@@ -117,9 +117,9 @@ test "environment elision recognizes one entry allocation" {
 
 test "environment elision preserves depth when allocation and access coexist" {
     const load_code = [_]u8{
-        @intFromEnum(Op.make_environment), 0,
-        @intFromEnum(Op.lda_env),          3,
-        7,                                 @intFromEnum(Op.return_),
+        @backingInt(Op.make_environment), 0,
+        @backingInt(Op.lda_env),          3,
+        7,                                @backingInt(Op.return_),
     };
     const load_summary = try analyze(&load_code);
     try std.testing.expect(load_summary.has_environment_access);
@@ -127,8 +127,8 @@ test "environment elision preserves depth when allocation and access coexist" {
     try std.testing.expect(!load_summary.canElideMakeEnvironments());
 
     const store_code = [_]u8{
-        @intFromEnum(Op.sta_env),          5, 2,
-        @intFromEnum(Op.make_environment), 0, @intFromEnum(Op.return_),
+        @backingInt(Op.sta_env),          5, 2,
+        @backingInt(Op.make_environment), 0, @backingInt(Op.return_),
     };
     const store_summary = try analyze(&store_code);
     try std.testing.expect(store_summary.has_environment_access);
@@ -138,8 +138,8 @@ test "environment elision preserves depth when allocation and access coexist" {
 
 test "environment elision permits inherited environment access" {
     const code = [_]u8{
-        @intFromEnum(Op.lda_env), 2, 1,
-        @intFromEnum(Op.return_),
+        @backingInt(Op.lda_env), 2, 1,
+        @backingInt(Op.return_),
     };
     const summary = try analyze(&code);
     try std.testing.expect(!summary.has_make_environment);
@@ -148,7 +148,7 @@ test "environment elision permits inherited environment access" {
 }
 
 test "environment elision reports malformed bytecode" {
-    const truncated = [_]u8{@intFromEnum(Op.make_environment)};
+    const truncated = [_]u8{@backingInt(Op.make_environment)};
     try std.testing.expectError(error.MalformedBytecode, analyze(&truncated));
 
     const unknown = [_]u8{0xff};

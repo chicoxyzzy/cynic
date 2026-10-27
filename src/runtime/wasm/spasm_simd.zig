@@ -249,7 +249,7 @@ pub const FloatRoundOp = struct {
 
 pub fn floatRoundOp(sub: u32) ?FloatRoundOp {
     return switch (sub) {
-        103...106 => .{ .double_precision = false, .mode = @enumFromInt(sub - 103) },
+        103...106 => .{ .double_precision = false, .mode = @fromBackingInt(@intCast(sub - 103)) },
         116 => .{ .double_precision = true, .mode = .ceil },
         117 => .{ .double_precision = true, .mode = .floor },
         122 => .{ .double_precision = true, .mode = .trunc },

@@ -177,7 +177,7 @@ pub fn getTemporalUnitOption(realm: *Realm, opts: ?*JSObject, key: []const u8) N
 /// range [largest_allowed, smallest_allowed]. Run after all options are
 /// read, per GetDifferenceSettings' read-then-validate ordering.
 pub fn requireUnitInRange(realm: *Realm, unit: temporal.LargestUnit, largest_allowed: temporal.LargestUnit, smallest_allowed: temporal.LargestUnit) NativeError!void {
-    if (@intFromEnum(unit) < @intFromEnum(largest_allowed) or @intFromEnum(unit) > @intFromEnum(smallest_allowed)) {
+    if (@backingInt(unit) < @backingInt(largest_allowed) or @backingInt(unit) > @backingInt(smallest_allowed)) {
         return throwRangeError(realm, "unit is outside the allowed range");
     }
 }
@@ -2019,9 +2019,9 @@ pub fn differenceComputedDateTime(cal: temporal.CalendarId, dt1: temporal.PlainD
         adjusted_date1 = temporal.addISODate(adjusted_date1, 0, 0, 0, date_sign, false).?;
         time_rem += @as(i128, date_sign) * temporal.ns_per_day;
     }
-    const date_largest: temporal.LargestUnit = @enumFromInt(@min(@intFromEnum(largest), @intFromEnum(temporal.LargestUnit.day)));
+    const date_largest: temporal.LargestUnit = @fromBackingInt(@intCast(@min(@backingInt(largest), @backingInt(temporal.LargestUnit.day))));
     const date_diff = differenceComputedDate(cal, adjusted_date1, dt2.date(), date_largest);
-    const time_largest: temporal.LargestUnit = @enumFromInt(@max(@intFromEnum(largest), @intFromEnum(temporal.LargestUnit.hour)));
+    const time_largest: temporal.LargestUnit = @fromBackingInt(@intCast(@max(@backingInt(largest), @backingInt(temporal.LargestUnit.hour))));
     const time_dur = temporal.balanceTimeDuration(time_rem, time_largest);
     return .{
         .years = date_diff.years,
@@ -2244,7 +2244,7 @@ pub fn pow10(e: u4) i128 {
 /// Call it after the raw `timeZone` read but before the coercion.
 pub fn requireToStringSmallestUnit(realm: *Realm, unit: ?temporal.LargestUnit) NativeError!void {
     const u = unit orelse return;
-    if (@intFromEnum(u) < @intFromEnum(temporal.LargestUnit.minute)) {
+    if (@backingInt(u) < @backingInt(temporal.LargestUnit.minute)) {
         return throwRangeError(realm, "smallestUnit must be minute, second, millisecond, microsecond, or nanosecond");
     }
 }

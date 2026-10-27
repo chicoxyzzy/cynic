@@ -848,16 +848,16 @@ fn differenceTemporalZonedDateTime(realm: *Realm, this_value: Value, args: []con
     const smallest = smallest_opt orelse temporal.LargestUnit.nanosecond;
     try requireUnitInRange(realm, smallest, .year, .nanosecond);
     // smallestLargestDefaultUnit for ZonedDateTime is "hour".
-    const default_largest: temporal.LargestUnit = @enumFromInt(@min(@intFromEnum(temporal.LargestUnit.hour), @intFromEnum(smallest)));
+    const default_largest: temporal.LargestUnit = @fromBackingInt(@intCast(@min(@backingInt(temporal.LargestUnit.hour), @backingInt(smallest))));
     const largest = largest_opt orelse default_largest;
-    if (@intFromEnum(largest) > @intFromEnum(smallest)) {
+    if (@backingInt(largest) > @backingInt(smallest)) {
         return throwRangeError(realm, "largestUnit must not be smaller than smallestUnit");
     }
 
     // A date-category largestUnit (year/month/week/day) requires both
     // instants be measured in the same zone: a calendar difference across
     // two zones is undefined per spec.
-    if (@intFromEnum(largest) <= @intFromEnum(temporal.LargestUnit.day) and
+    if (@backingInt(largest) <= @backingInt(temporal.LargestUnit.day) and
         !timeZoneEquals(z.time_zone, other.time_zone))
     {
         return throwRangeError(realm, "cannot compute a calendar difference between ZonedDateTimes in different time zones");
@@ -865,7 +865,7 @@ fn differenceTemporalZonedDateTime(realm: *Realm, this_value: Value, args: []con
 
     // Time / day smallestUnits cap their increment at the next-larger unit;
     // calendar units (year/month/week) carry no ceiling.
-    if (smallest != .day and @intFromEnum(smallest) >= @intFromEnum(temporal.LargestUnit.day)) {
+    if (smallest != .day and @backingInt(smallest) >= @backingInt(temporal.LargestUnit.day)) {
         if (!temporal.validateRoundingIncrement(increment, differenceDividend(smallest), false)) {
             return throwRangeError(realm, "invalid roundingIncrement for the smallestUnit");
         }
@@ -883,14 +883,14 @@ fn differenceTemporalZonedDateTime(realm: *Realm, this_value: Value, args: []con
         .named => true,
         else => false,
     };
-    if (is_named and @intFromEnum(largest) <= @intFromEnum(temporal.LargestUnit.day)) {
+    if (is_named and @backingInt(largest) <= @backingInt(temporal.LargestUnit.day)) {
         const base_diff = shared.differenceZonedDateTime(z.epoch_ns, other.epoch_ns, z.time_zone, z.calendar, largest) orelse
             return throwRangeError(realm, "ZonedDateTime difference is outside the representable range");
         const start_wall = temporal.getISODateTimeFor(z.time_zone, z.epoch_ns);
         const end_wall = temporal.getISODateTimeFor(z.time_zone, other.epoch_ns);
         var dr = if (smallest == .nanosecond and increment == 1)
             base_diff
-        else if (@intFromEnum(smallest) > @intFromEnum(temporal.LargestUnit.day))
+        else if (@backingInt(smallest) > @backingInt(temporal.LargestUnit.day))
             (temporal.nudgeToZonedTimeDateTime(start_wall, z.time_zone, base_diff, largest, smallest, increment, eff_mode) orelse
                 return throwRangeError(realm, "rounded ZonedDateTime is outside the representable range"))
         else
@@ -915,8 +915,8 @@ fn differenceTemporalZonedDateTime(realm: *Realm, this_value: Value, args: []con
     // cancels in every epoch difference the Nudge/Bubble AOs use, so the
     // zoned difference equals the PlainDateTime difference of the two
     // wall-clock times.
-    if (@intFromEnum(largest) < @intFromEnum(temporal.LargestUnit.day) or
-        @intFromEnum(smallest) < @intFromEnum(temporal.LargestUnit.day))
+    if (@backingInt(largest) < @backingInt(temporal.LargestUnit.day) or
+        @backingInt(smallest) < @backingInt(temporal.LargestUnit.day))
     {
         const start_wall = temporal.getISODateTimeFor(z.time_zone, z.epoch_ns);
         const end_wall = temporal.getISODateTimeFor(other.time_zone, other.epoch_ns);

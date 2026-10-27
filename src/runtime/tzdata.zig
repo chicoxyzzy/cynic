@@ -39,7 +39,7 @@ var body_base: []const u8 = &.{};
 // on an acquire load until it is visible. Mirrors `cldr.zig` /
 // `unicode/perlex_props.zig`.
 const InitState = enum(u8) { uninit, building, done };
-var init_state = std.atomic.Value(u8).init(@intFromEnum(InitState.uninit));
+var init_state = std.atomic.Value(u8).init(@backingInt(InitState.uninit));
 var init_ok: bool = false;
 
 fn embedBlob() []const u8 {
@@ -54,22 +54,22 @@ fn embedBlob() []const u8 {
 /// until the zone table is visible (`release`/`acquire` pair the parse's writes
 /// to the reading thread).
 fn ensureInit() bool {
-    if (init_state.load(.acquire) != @intFromEnum(InitState.done)) initOnce();
+    if (init_state.load(.acquire) != @backingInt(InitState.done)) initOnce();
     return init_ok;
 }
 
 fn initOnce() void {
     if (init_state.cmpxchgStrong(
-        @intFromEnum(InitState.uninit),
-        @intFromEnum(InitState.building),
+        @backingInt(InitState.uninit),
+        @backingInt(InitState.building),
         .acq_rel,
         .acquire,
     ) == null) {
         init_ok = parseIndex();
-        init_state.store(@intFromEnum(InitState.done), .release);
+        init_state.store(@backingInt(InitState.done), .release);
         return;
     }
-    while (init_state.load(.acquire) != @intFromEnum(InitState.done)) {
+    while (init_state.load(.acquire) != @backingInt(InitState.done)) {
         std.atomic.spinLoopHint();
     }
 }
@@ -738,7 +738,7 @@ test "tzdata: concurrent first-callers resolve zones consistently" {
     var round: usize = 0;
     while (round < rounds) : (round += 1) {
         // Force a cold table so the CAS election runs again this round.
-        init_state.store(@intFromEnum(InitState.uninit), .seq_cst);
+        init_state.store(@backingInt(InitState.uninit), .seq_cst);
         init_ok = false;
         zone_count = 0;
         body_base = &.{};

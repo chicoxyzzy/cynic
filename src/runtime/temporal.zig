@@ -2502,7 +2502,7 @@ pub fn divRoundToF64(num: i128, den: i128) f64 {
 fn timeUnitIncluded(unit: LargestUnit, largest: LargestUnit) bool {
     // `unit` participates when its magnitude is no larger than
     // `largest` — i.e. its enum index is at or past `largest`'s.
-    return @intFromEnum(unit) >= @intFromEnum(largest);
+    return @backingInt(unit) >= @backingInt(largest);
 }
 
 fn takeTimeUnit(rem: *i128, scale: i128) f64 {
@@ -3176,12 +3176,12 @@ pub fn differenceISODateTime(dt1: PlainDateTimeRecord, dt2: PlainDateTimeRecord,
 
     // dateLargestUnit = LargerOfTwoTemporalUnits("day", largest): the
     // coarser of the two (smaller enum index), but never finer than day.
-    const date_largest: LargestUnit = @enumFromInt(@min(@intFromEnum(largest), @intFromEnum(LargestUnit.day)));
+    const date_largest: LargestUnit = @fromBackingInt(@intCast(@min(@backingInt(largest), @backingInt(LargestUnit.day))));
     const date_diff = differenceISODate(adjusted_date1, dt2.date(), date_largest);
 
     // The time remainder is < 1 day, so it never produces a `days`
     // field; balance it with the largest time unit no coarser than hour.
-    const time_largest: LargestUnit = @enumFromInt(@max(@intFromEnum(largest), @intFromEnum(LargestUnit.hour)));
+    const time_largest: LargestUnit = @fromBackingInt(@intCast(@max(@backingInt(largest), @backingInt(LargestUnit.hour))));
     const time_dur = balanceTimeDuration(time_rem, time_largest);
 
     return .{
@@ -3361,8 +3361,8 @@ fn bubbleRelativeDateTime(
     sign: i32,
     tz: ?TimeZone,
 ) ?DurationRecord {
-    const largest_idx: i64 = @intFromEnum(largest);
-    const start_unit_idx: i64 = @intFromEnum(smallest_bubble);
+    const largest_idx: i64 = @backingInt(largest);
+    const start_unit_idx: i64 = @backingInt(smallest_bubble);
     if (start_unit_idx == largest_idx) return duration; // startUnit == largestUnit.
 
     const start_date = start.date();
@@ -3372,7 +3372,7 @@ fn bubbleRelativeDateTime(
     var unit_idx: i64 = start_unit_idx - 1; // one unit coarser than the start
     var done = false;
     while (unit_idx >= largest_idx and !done) : (unit_idx -= 1) {
-        const unit: LargestUnit = @enumFromInt(@as(u4, @intCast(unit_idx)));
+        const unit: LargestUnit = @fromBackingInt(@intCast(@as(u4, @intCast(unit_idx))));
         if (unit == .week and largest != .week) continue;
 
         const cy: i64 = @intFromFloat(result.years);
@@ -3443,7 +3443,7 @@ fn nudgeToDayOrTimeDateTime(
     const did_expand_days = ddsign == tsign;
     const nudged_epoch = dest_epoch + diff_time;
 
-    const date_category = @intFromEnum(largest) <= @intFromEnum(LargestUnit.day);
+    const date_category = @backingInt(largest) <= @backingInt(LargestUnit.day);
     var days_field: i64 = 0;
     var remainder: i128 = rounded;
     var time_largest = largest;
@@ -3510,7 +3510,7 @@ pub fn roundRelativeDateTime(
     // route through NudgeToCalendarUnit. `day` is irregular too under a named
     // zone (23/25-h DST day), so it joins them there; a fixed-offset day is a
     // uniform 24 h and stays on NudgeToDayOrTime.
-    if (@intFromEnum(smallest) < @intFromEnum(LargestUnit.day) or (tz != null and smallest == .day)) {
+    if (@backingInt(smallest) < @backingInt(LargestUnit.day) or (tz != null and smallest == .day)) {
         return nudgeToCalendarUnitDateTime(start, diff, largest, smallest, increment, mode, sign, dest_epoch, origin_epoch, tz);
     }
     return nudgeToDayOrTimeDateTime(start, diff, largest, smallest, increment, mode, sign, dest_epoch);

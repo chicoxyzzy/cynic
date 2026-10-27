@@ -497,32 +497,32 @@ fn appendRecovery(
     switch (recovery) {
         .frame_accumulator => try stream.append(
             allocator,
-            @intFromEnum(RecoveryTag.frame_accumulator),
+            @backingInt(RecoveryTag.frame_accumulator),
         ),
         .frame_register => |register| {
-            try stream.append(allocator, @intFromEnum(RecoveryTag.frame_register));
+            try stream.append(allocator, @backingInt(RecoveryTag.frame_register));
             try stream.append(allocator, register);
         },
         .tagged_stack => |slot| {
-            try stream.append(allocator, @intFromEnum(RecoveryTag.tagged_stack));
+            try stream.append(allocator, @backingInt(RecoveryTag.tagged_stack));
             try codec.appendU32(stream, allocator, slot);
         },
         .int32_stack => |slot| {
-            try stream.append(allocator, @intFromEnum(RecoveryTag.int32_stack));
+            try stream.append(allocator, @backingInt(RecoveryTag.int32_stack));
             try codec.appendU32(stream, allocator, slot);
         },
         .immediate => |immediate| switch (immediate) {
-            .undefined_ => try stream.append(allocator, @intFromEnum(RecoveryTag.undefined_)),
-            .null_ => try stream.append(allocator, @intFromEnum(RecoveryTag.null_)),
-            .true_ => try stream.append(allocator, @intFromEnum(RecoveryTag.true_)),
-            .false_ => try stream.append(allocator, @intFromEnum(RecoveryTag.false_)),
-            .hole => try stream.append(allocator, @intFromEnum(RecoveryTag.hole)),
+            .undefined_ => try stream.append(allocator, @backingInt(RecoveryTag.undefined_)),
+            .null_ => try stream.append(allocator, @backingInt(RecoveryTag.null_)),
+            .true_ => try stream.append(allocator, @backingInt(RecoveryTag.true_)),
+            .false_ => try stream.append(allocator, @backingInt(RecoveryTag.false_)),
+            .hole => try stream.append(allocator, @backingInt(RecoveryTag.hole)),
             .int32 => |value| {
-                try stream.append(allocator, @intFromEnum(RecoveryTag.int32));
+                try stream.append(allocator, @backingInt(RecoveryTag.int32));
                 try codec.appendU32(stream, allocator, @bitCast(value));
             },
             .constant_pool => |index| {
-                try stream.append(allocator, @intFromEnum(RecoveryTag.constant_pool));
+                try stream.append(allocator, @backingInt(RecoveryTag.constant_pool));
                 try codec.appendU16(stream, allocator, index);
             },
         },
@@ -535,29 +535,29 @@ fn readRecovery(
     int32_slot_count: u32,
 ) !Recovery {
     return switch (try cursor.readByte()) {
-        @intFromEnum(RecoveryTag.frame_accumulator) => .frame_accumulator,
-        @intFromEnum(RecoveryTag.frame_register) => .{
+        @backingInt(RecoveryTag.frame_accumulator) => .frame_accumulator,
+        @backingInt(RecoveryTag.frame_register) => .{
             .frame_register = try cursor.readByte(),
         },
-        @intFromEnum(RecoveryTag.tagged_stack) => blk: {
+        @backingInt(RecoveryTag.tagged_stack) => blk: {
             const slot = try cursor.readU32();
             if (slot >= tagged_slot_count) return error.InvalidMetadata;
             break :blk .{ .tagged_stack = slot };
         },
-        @intFromEnum(RecoveryTag.int32_stack) => blk: {
+        @backingInt(RecoveryTag.int32_stack) => blk: {
             const slot = try cursor.readU32();
             if (slot >= int32_slot_count) return error.InvalidMetadata;
             break :blk .{ .int32_stack = slot };
         },
-        @intFromEnum(RecoveryTag.undefined_) => .{ .immediate = .undefined_ },
-        @intFromEnum(RecoveryTag.null_) => .{ .immediate = .null_ },
-        @intFromEnum(RecoveryTag.true_) => .{ .immediate = .true_ },
-        @intFromEnum(RecoveryTag.false_) => .{ .immediate = .false_ },
-        @intFromEnum(RecoveryTag.hole) => .{ .immediate = .hole },
-        @intFromEnum(RecoveryTag.int32) => .{
+        @backingInt(RecoveryTag.undefined_) => .{ .immediate = .undefined_ },
+        @backingInt(RecoveryTag.null_) => .{ .immediate = .null_ },
+        @backingInt(RecoveryTag.true_) => .{ .immediate = .true_ },
+        @backingInt(RecoveryTag.false_) => .{ .immediate = .false_ },
+        @backingInt(RecoveryTag.hole) => .{ .immediate = .hole },
+        @backingInt(RecoveryTag.int32) => .{
             .immediate = .{ .int32 = @as(i32, @bitCast(try cursor.readU32())) },
         },
-        @intFromEnum(RecoveryTag.constant_pool) => .{
+        @backingInt(RecoveryTag.constant_pool) => .{
             .immediate = .{ .constant_pool = try cursor.readU16() },
         },
         else => error.InvalidMetadata,

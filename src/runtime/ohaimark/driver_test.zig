@@ -30,7 +30,7 @@ fn templateNamed(chunk: *const chunk_mod.Chunk, name: []const u8) *const chunk_m
 fn hasOpcode(chunk: *const chunk_mod.Chunk, wanted: Op) bool {
     var pc: usize = 0;
     while (pc < chunk.code.len) {
-        const op: Op = @enumFromInt(chunk.code[pc]);
+        const op: Op = @fromBackingInt(@intCast(chunk.code[pc]));
         if (op == wanted) return true;
         pc += 1 + Op.operandSize(op);
     }
@@ -1450,7 +1450,7 @@ test "Ohaimark forced function entry compiles StarLdar" {
     var saw_star_ldar = false;
     var pc: usize = 0;
     while (pc < body.code.len) {
-        const op: Op = @enumFromInt(body.code[pc]);
+        const op: Op = @fromBackingInt(@intCast(body.code[pc]));
         saw_star_ldar = saw_star_ldar or op == .star_ldar;
         pc += 1 + Op.operandSize(op);
     }

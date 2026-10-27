@@ -58,8 +58,8 @@ extern "c" fn pthread_attr_destroy(attr: *anyopaque) c_int;
 /// agent workers, so the release zone stays modest; Debug only ever
 /// runs on the 16 MiB main thread / default workers, where 2 MiB of
 /// headroom is comfortable.
-const stack_red_zone: usize = switch (builtin.mode) {
-    .Debug => 2 * 1024 * 1024,
+const stack_red_zone: usize = switch (builtin.optimize) {
+    .debug => 2 * 1024 * 1024,
     else => 256 * 1024,
 };
 

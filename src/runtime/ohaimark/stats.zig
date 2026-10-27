@@ -95,18 +95,18 @@ pub const Stats = struct {
     }
 
     pub fn refusalCount(self: *const Stats, stage: RefusalStage) u64 {
-        return self.refusal_stages[@intFromEnum(stage)];
+        return self.refusal_stages[@backingInt(stage)];
     }
 
     pub fn unsupportedOpcodeCount(self: *const Stats, op: Op) u64 {
-        return self.unsupported_opcodes[@intFromEnum(op)];
+        return self.unsupported_opcodes[@backingInt(op)];
     }
 
     fn recordRefusal(self: *Stats, refusal: Refusal) void {
         self.compile_refusals +|= 1;
-        self.refusal_stages[@intFromEnum(refusal.stage)] +|= 1;
+        self.refusal_stages[@backingInt(refusal.stage)] +|= 1;
         if (refusal.unsupported_opcode) |op| {
-            self.unsupported_opcodes[@intFromEnum(op)] +|= 1;
+            self.unsupported_opcodes[@backingInt(op)] +|= 1;
         }
     }
 
@@ -201,7 +201,7 @@ pub const Stats = struct {
             else
                 return error.InvalidMachineLine;
 
-            const bit = @as(u16, 1) << @intFromEnum(field);
+            const bit = @as(u16, 1) << @backingInt(field);
             if (seen & bit != 0) return error.InvalidMachineLine;
             seen |= bit;
             const value = try std.fmt.parseInt(u64, token[eq + 1 ..], 10);
@@ -294,12 +294,12 @@ test "Ohaimark stats merge saturates counters and keeps maxima" {
 test "Ohaimark stats merge refusal stage and opcode histograms" {
     var first: Stats = .{ .enabled = true };
     first.recordRefusal(.{ .stage = .ir, .unsupported_opcode = .bit_or });
-    first.refusal_stages[@intFromEnum(RefusalStage.codegen)] = std.math.maxInt(u64) - 1;
+    first.refusal_stages[@backingInt(RefusalStage.codegen)] = std.math.maxInt(u64) - 1;
     var second: Stats = .{ .enabled = true };
     second.recordRefusal(.{ .stage = .ir, .unsupported_opcode = .bit_or });
     second.recordRefusal(.{ .stage = .lowering });
     second.recordRefusal(.{ .stage = .control_fusion });
-    second.refusal_stages[@intFromEnum(RefusalStage.codegen)] = 5;
+    second.refusal_stages[@backingInt(RefusalStage.codegen)] = 5;
 
     first.merge(second);
 

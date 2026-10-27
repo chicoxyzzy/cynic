@@ -156,7 +156,7 @@ pub const BranchWidth = enum(u8) {
     i32 = 4,
 
     pub fn byteSize(width: BranchWidth) u8 {
-        return @intFromEnum(width);
+        return @backingInt(width);
     }
 };
 
@@ -1719,7 +1719,7 @@ pub const Op = enum(u8) {
 
     /// Total operand bytes, derived from the authoritative layout.
     pub inline fn operandSize(op: Op) u8 {
-        return operand_size_by_opcode[@intFromEnum(op)];
+        return operand_size_by_opcode[@backingInt(op)];
     }
 
     /// Arithmetic bytecodes whose trailing u16 indexes the chunk-owned raw
@@ -1737,7 +1737,7 @@ pub const Op = enum(u8) {
     /// disassembly, and Bistromath. `null` means ordinary fallthrough or a
     /// non-relative control transfer.
     pub noinline fn branchInfo(op: Op) ?BranchInfo {
-        return unpackBranchInfo(branch_info_bits_by_opcode[@intFromEnum(op)]);
+        return unpackBranchInfo(branch_info_bits_by_opcode[@backingInt(op)]);
     }
 
     /// Lantern's merged branch-family handlers call this for every executed
@@ -1752,11 +1752,11 @@ pub const Op = enum(u8) {
     /// to justify a direct table probe. Larger branch tails retain the scalar
     /// call barrier to avoid backend tail duplication.
     pub inline fn branchInfoInlineForDispatch(op: Op) BranchInfo {
-        return unpackBranchInfo(branch_info_bits_by_opcode[@intFromEnum(op)]).?;
+        return unpackBranchInfo(branch_info_bits_by_opcode[@backingInt(op)]).?;
     }
 
     noinline fn branchInfoBits(op: Op) u16 {
-        return branch_info_bits_by_opcode[@intFromEnum(op)];
+        return branch_info_bits_by_opcode[@backingInt(op)];
     }
 
     fn branchInfoUncached(op: Op) ?BranchInfo {
@@ -1870,7 +1870,7 @@ const operand_size_by_opcode: [256]u8 = blk: {
     var sizes: [256]u8 = @splat(0);
     for (@typeInfo(Op).@"enum".field_names) |field_name| {
         const op: Op = @field(Op, field_name);
-        sizes[@intFromEnum(op)] = op.spec().layout.operandSize();
+        sizes[@backingInt(op)] = op.spec().layout.operandSize();
     }
     break :blk sizes;
 };
@@ -1884,16 +1884,16 @@ const branch_info_bits_by_opcode: [256]u16 = blk: {
     for (@typeInfo(Op).@"enum".field_names) |field_name| {
         const op: Op = @field(Op, field_name);
         if (op.branchInfoUncached()) |info| {
-            infos[@intFromEnum(op)] = packBranchInfo(info);
+            infos[@backingInt(op)] = packBranchInfo(info);
         }
     }
     break :blk infos;
 };
 
 fn packBranchInfo(info: BranchInfo) u16 {
-    const width: u3 = @intCast(@intFromEnum(info.width));
+    const width: u3 = @intCast(@backingInt(info.width));
     const operand_offset: u5 = @intCast(info.operand_offset);
-    return @as(u16, @intFromEnum(info.canonical)) |
+    return @as(u16, @backingInt(info.canonical)) |
         (@as(u16, width) << 8) |
         (@as(u16, operand_offset) << 11);
 }
@@ -1901,8 +1901,8 @@ fn packBranchInfo(info: BranchInfo) u16 {
 fn unpackBranchInfo(bits: u16) ?BranchInfo {
     if (bits == 0) return null;
     return .{
-        .canonical = @enumFromInt(@as(u8, @truncate(bits))),
-        .width = @enumFromInt(@as(u8, @truncate((bits >> 8) & 0b111))),
+        .canonical = @fromBackingInt(@intCast(@as(u8, @truncate(bits)))),
+        .width = @fromBackingInt(@intCast(@as(u8, @truncate((bits >> 8) & 0b111)))),
         .operand_offset = @as(u8, @truncate(bits >> 11)),
     };
 }

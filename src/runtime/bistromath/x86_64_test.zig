@@ -125,7 +125,7 @@ test "Bistromath x86_64: entry prologue returns done with the accumulator result
         .this_value = Value.undefined_,
     };
     const entry: bistromath.EntryFn = @ptrCast(@alignCast(body.jit_state.?.bistromath.entry().?));
-    const verdict: bistromath.EntryResult = @enumFromInt(entry(&realm, &frame, registers.ptr));
+    const verdict: bistromath.EntryResult = @fromBackingInt(@intCast(entry(&realm, &frame, registers.ptr)));
     try testing.expectEqual(bistromath.EntryResult.done, verdict);
     try testing.expectEqual(Value.fromInt32(42).bits, frame.accumulator.bits);
 }

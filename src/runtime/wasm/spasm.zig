@@ -731,7 +731,7 @@ pub fn nativeFrameCellCount(func: *const CompiledFunc, ftype: *const FuncType) ?
 }
 
 fn regForDepth(d: usize) a64.Reg {
-    return @enumFromInt(@as(u5, @intCast(9 + d)));
+    return @fromBackingInt(@intCast(@as(u5, @intCast(9 + d))));
 }
 
 /// Byte offset (off x0, the locals base) of the depth-keyed cell that holds
@@ -3593,7 +3593,7 @@ fn compileAarch64(
                 } else if (simd.narrowOp(sub)) |narrow| {
                     if (sp < 2 or stack[sp - 2] != .v128 or stack[sp - 1] != .v128) return null;
                     const target = refSlotOff(num_locals, sp - 2);
-                    const size: a64.VectorLaneSize = @enumFromInt(std.math.log2_int(u4, narrow.width));
+                    const size: a64.VectorLaneSize = @fromBackingInt(@intCast(std.math.log2_int(u4, narrow.width)));
                     try m.emit(a64.ldrQImm(.x0, .x0, target));
                     try m.emit(a64.ldrQImm(.x1, .x0, refSlotOff(num_locals, sp - 1)));
                     try m.emit(a64.narrowIntegerV128(.x0, .x0, size, narrow.signed, false));
@@ -3603,14 +3603,14 @@ fn compileAarch64(
                 } else if (simd.extendOp(sub)) |extend| {
                     if (sp == 0 or stack[sp - 1] != .v128) return null;
                     const target = refSlotOff(num_locals, sp - 1);
-                    const size: a64.VectorLaneSize = @enumFromInt(std.math.log2_int(u4, extend.width));
+                    const size: a64.VectorLaneSize = @fromBackingInt(@intCast(std.math.log2_int(u4, extend.width)));
                     try m.emit(a64.ldrQImm(.x0, .x0, target));
                     try m.emit(a64.extendIntegerV128(.x0, .x0, size, extend.signed, extend.high));
                     try m.emit(a64.strQImm(.x0, .x0, target));
                 } else if (simd.pairwiseAddOp(sub)) |pairwise| {
                     if (sp == 0 or stack[sp - 1] != .v128) return null;
                     const target = refSlotOff(num_locals, sp - 1);
-                    const size: a64.VectorLaneSize = @enumFromInt(std.math.log2_int(u4, pairwise.width));
+                    const size: a64.VectorLaneSize = @fromBackingInt(@intCast(std.math.log2_int(u4, pairwise.width)));
                     try m.emit(a64.ldrQImm(.x0, .x0, target));
                     try m.emit(a64.pairwiseAddLongV128(.x0, .x0, size, pairwise.signed));
                     try m.emit(a64.strQImm(.x0, .x0, target));
@@ -3655,7 +3655,7 @@ fn compileAarch64(
                     try m.emit(a64.ldrQImm(.x0, .x0, target));
                     try m.emit(a64.ldrQImm(.x1, .x0, refSlotOff(num_locals, sp - 1)));
                     switch (product.kind) {
-                        .extmul => try m.emit(a64.multiplyLongV128(.x0, .x0, .x1, @enumFromInt(std.math.log2_int(u4, product.width)), product.signed, product.high)),
+                        .extmul => try m.emit(a64.multiplyLongV128(.x0, .x0, .x1, @fromBackingInt(@intCast(std.math.log2_int(u4, product.width))), product.signed, product.high)),
                         .dot => {
                             try m.emit(a64.multiplyLongV128(.x2, .x0, .x1, .half, true, false));
                             try m.emit(a64.multiplyLongV128(.x0, .x0, .x1, .half, true, true));
@@ -3677,13 +3677,13 @@ fn compileAarch64(
                             try m.emit(a64.strImm(.x16, .x0, target + half));
                         }
                     } else {
-                        const size: a64.VectorIntegerSize = @enumFromInt(std.math.log2_int(u4, binary.width));
+                        const size: a64.VectorIntegerSize = @fromBackingInt(@intCast(std.math.log2_int(u4, binary.width)));
                         try m.emit(a64.ldrQImm(.x0, .x0, target));
                         try m.emit(a64.ldrQImm(.x1, .x0, source));
                         if (binary.saturating) {
                             try m.emit(a64.saturatingAddSubtractV128(.x0, .x0, .x1, size, binary.signed, binary.kind == .sub));
                         } else if (binary.kind == .mul) {
-                            try m.emit(a64.multiplyV128(.x0, .x0, .x1, @enumFromInt(@intFromEnum(size))));
+                            try m.emit(a64.multiplyV128(.x0, .x0, .x1, @fromBackingInt(@intCast(@backingInt(size)))));
                         } else {
                             try m.emit(a64.addSubtractV128(.x0, .x0, .x1, size, binary.kind == .sub));
                         }
@@ -3700,7 +3700,7 @@ fn compileAarch64(
                         try m.movImm64(.x17, 0);
                         try m.emit(a64.subReg(.x16, .x17, .x16));
                     }
-                    const size: a64.VectorIntegerSize = @enumFromInt(std.math.log2_int(u4, shift.width));
+                    const size: a64.VectorIntegerSize = @fromBackingInt(@intCast(std.math.log2_int(u4, shift.width)));
                     const target = refSlotOff(num_locals, sp - 2);
                     try m.emit(a64.duplicateIntegerV128(.x1, .x16, size));
                     try m.emit(a64.ldrQImm(.x0, .x0, target));

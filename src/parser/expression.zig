@@ -1176,7 +1176,7 @@ fn expectPropertyName(p: *Parser) ParseError!token_mod.Token {
 fn isIdentifierNameOrPrivate(kind: TokenKind) bool {
     return switch (kind) {
         .identifier, .private_identifier => true,
-        else => @intFromEnum(kind) >= @intFromEnum(TokenKind.kw_await),
+        else => @backingInt(kind) >= @backingInt(TokenKind.kw_await),
     };
 }
 
@@ -1933,7 +1933,7 @@ fn parseObjectKey(p: *Parser) ParseError!ast_expr.PropertyKey {
         _ = try p.bump();
         return .{ .numeric = tok.span };
     }
-    if (tok.kind == .identifier or @intFromEnum(tok.kind) >= @intFromEnum(TokenKind.kw_await)) {
+    if (tok.kind == .identifier or @backingInt(tok.kind) >= @backingInt(TokenKind.kw_await)) {
         _ = try p.bump();
         return .{ .ident = tok.span };
     }

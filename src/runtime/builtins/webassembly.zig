@@ -2932,7 +2932,7 @@ test "WebAssembly memory buffer conversion allocation failures preserve the prev
             // Force publication to grow the registry, so the failure sweep
             // covers its allocation after constructing the replacement too.
             const entries = try st.mem.host_views.toOwnedSlice(st.mem.host_view_allocator.?);
-            st.mem.host_views = .{ .items = entries, .capacity = entries.len };
+            st.mem.host_views = .fromOwnedSlice(entries);
             failing.resize_fail_index = failing.resize_index;
             failing.fail_index = failing.alloc_index + fail_offset;
             const result = memoryBufferConvert(&realm, memory_value, !source_resizable);
