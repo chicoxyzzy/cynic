@@ -112,7 +112,7 @@ jobs:
           submodules: false
 
       - name: Set up Zig
-        uses: xyzzylabs/setup-zig@ab632f9cc6f98d89d3b8f2c2e1577a929d0e70f3  # v1.0.4
+        uses: xyzzylabs/setup-zig@7e5af686da64007a0797898801de180e5f4d3762  # v1.0.5
         with:
           cache-key: fuzz
 
@@ -288,7 +288,7 @@ jobs:
 
       - name: Upload fuzz artifacts (stats + any new-crash reproducers)
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: fuzz-nightly-${{ github.run_id }}
           path: |
