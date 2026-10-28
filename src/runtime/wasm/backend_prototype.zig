@@ -128,7 +128,11 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
             .i64_const => inst.immediate = @bitCast(try reader.sleb(i64)),
             .f32_const => inst.immediate = try reader.u32le(),
             .f64_const => inst.immediate = std.mem.readInt(u64, (try reader.bytesN(8))[0..8], .little),
-            else => if (scalarOperation(inst.op) == null) return error.UnsupportedOpcode,
+            .prefix_fc => {
+                inst.immediate = try reader.uleb(u32);
+                if (inst.immediate > 7) return error.UnsupportedOpcode;
+            },
+            else => if (scalarOperation(inst) == null) return error.UnsupportedOpcode,
         }
         try instructions.append(a, inst);
     }
@@ -225,7 +229,7 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
                     } } else .{ .jump = edge };
                 },
                 else => {
-                    const op = scalarOperation(inst.op) orelse return error.UnsupportedOpcode;
+                    const op = scalarOperation(inst) orelse return error.UnsupportedOpcode;
                     const rhs = if (inst.op == .i32_eqz or inst.op == .i64_eqz)
                         try builder.constant(&nodes, if (inst.op == .i32_eqz) .i32 else .i64, 0)
                     else if (ir.inputCount(op) == 2)
@@ -234,10 +238,11 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
                         0;
                     const lhs = stack.pop() orelse return error.InvalidControlFlow;
                     const ty: ir.Type = if (ir.isComparison(op)) .i32 else if (ir.conversionTypes(op)) |conversion| conversion.output else switch (inst.op) {
-                        .i32_reinterpret_f32 => .i32,
-                        .i64_reinterpret_f64 => .i64,
-                        .f32_reinterpret_i32 => .f32,
-                        .f64_reinterpret_i64 => .f64,
+                        .i32_reinterpret_f32, .i32_trunc_f32_s, .i32_trunc_f32_u, .i32_trunc_f64_s, .i32_trunc_f64_u => .i32,
+                        .i64_reinterpret_f64, .i64_trunc_f32_s, .i64_trunc_f32_u, .i64_trunc_f64_s, .i64_trunc_f64_u => .i64,
+                        .f32_reinterpret_i32, .f32_convert_i32_s, .f32_convert_i32_u, .f32_convert_i64_s, .f32_convert_i64_u => .f32,
+                        .f64_reinterpret_i64, .f64_convert_i32_s, .f64_convert_i32_u, .f64_convert_i64_s, .f64_convert_i64_u => .f64,
+                        .prefix_fc => if (inst.immediate < 4) .i32 else .i64,
                         else => builder.types.items[lhs],
                     };
                     const out = try builder.value(ty);
@@ -262,8 +267,17 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
     return .{ .arena = arena, .graph = graph };
 }
 
-fn scalarOperation(op: Op) ?ir.Op {
-    return switch (op) {
+fn scalarOperation(inst: Instruction) ?ir.Op {
+    return switch (inst.op) {
+        .prefix_fc => if (inst.immediate <= 7) (if (inst.immediate % 2 == 0) ir.Op.trunc_sat_s else .trunc_sat_u) else null,
+        .i32_trunc_f32_s, .i32_trunc_f64_s, .i64_trunc_f32_s, .i64_trunc_f64_s => .trunc_s,
+        .i32_trunc_f32_u, .i32_trunc_f64_u, .i64_trunc_f32_u, .i64_trunc_f64_u => .trunc_u,
+        .f32_convert_i32_s, .f32_convert_i64_s, .f64_convert_i32_s, .f64_convert_i64_s => .convert_s,
+        .f32_convert_i32_u, .f32_convert_i64_u, .f64_convert_i32_u, .f64_convert_i64_u => .convert_u,
+        .f32_ceil, .f64_ceil => .fceil,
+        .f32_floor, .f64_floor => .ffloor,
+        .f32_trunc, .f64_trunc => .ftrunc,
+        .f32_nearest, .f64_nearest => .fnearest,
         .i32_eqz, .i32_eq, .i64_eqz, .i64_eq => .eq,
         .i32_ne, .i64_ne => .ne,
         .i32_lt_s, .i64_lt_s => .lt_s,

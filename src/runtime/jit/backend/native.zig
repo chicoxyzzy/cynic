@@ -8,6 +8,7 @@ const allocation = @import("allocation.zig");
 const optimize = @import("optimize.zig");
 const float = @import("float.zig");
 const integer = @import("integer.zig");
+const conversion = @import("conversion.zig");
 const code_alloc = @import("../code_alloc.zig");
 const a64 = @import("../asm_aarch64.zig");
 const arm_masm = @import("../masm.zig");
@@ -99,6 +100,7 @@ pub const Compiled = struct {
                     1 => .division_by_zero,
                     2 => .integer_overflow,
                     3 => .unreachable_code,
+                    4 => .invalid_conversion,
                     else => return error.InvalidNativeResult,
                 };
                 if (slots[result_slot + 1] > std.math.maxInt(u32)) return error.InvalidNativeResult;
@@ -173,7 +175,9 @@ fn emitGraph(a: std.mem.Allocator, owner: *code_alloc.CodeAllocator, graph: ir.G
             } else {
                 try emission.read(false, node.lhs);
                 if (ir.inputCount(node.op) == 2) try emission.read(true, node.rhs);
-                if (ir.isFloatOp(node.op)) {
+                if (ir.isNumericConversion(node.op)) {
+                    try emission.convert(node, graph.types[node.lhs], graph.types[node.out.?]);
+                } else if (ir.isFloatOp(node.op)) {
                     try float.emit(&m, node.op, graph.types[node.lhs]);
                 } else if (ir.mayTrap(node.op)) {
                     try emission.divide(node, graph.types[node.lhs]);
@@ -316,6 +320,24 @@ const Emission = struct {
         try self.m.bind(&overflow);
         try self.emitTrap(.{ .reason = .integer_overflow, .site = node.trap_site.? });
         try self.m.bind(&done);
+    }
+
+    fn convert(self: *Emission, node: ir.Node, input: ir.Type, output: ir.Type) !void {
+        var invalid: Machine.Label = .{};
+        defer invalid.deinit(self.m.gpa);
+        var overflow: Machine.Label = .{};
+        defer overflow.deinit(self.m.gpa);
+        var done: Machine.Label = .{};
+        defer done.deinit(self.m.gpa);
+        try conversion.emit(self.m, node.op, input, output, &invalid, &overflow);
+        if (node.trap_site) |site| {
+            try self.m.jump(&done);
+            try self.m.bind(&invalid);
+            try self.emitTrap(.{ .reason = .invalid_conversion, .site = site });
+            try self.m.bind(&overflow);
+            try self.emitTrap(.{ .reason = .integer_overflow, .site = site });
+            try self.m.bind(&done);
+        }
     }
 };
 

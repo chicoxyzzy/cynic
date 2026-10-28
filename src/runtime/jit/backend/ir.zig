@@ -52,6 +52,16 @@ pub const Op = enum {
     fabs,
     fneg,
     fsqrt,
+    fceil,
+    ffloor,
+    ftrunc,
+    fnearest,
+    convert_s,
+    convert_u,
+    trunc_s,
+    trunc_u,
+    trunc_sat_s,
+    trunc_sat_u,
     feq,
     fne,
     flt,
@@ -70,12 +80,14 @@ pub const TrapReason = enum(u32) {
     division_by_zero = 1,
     integer_overflow = 2,
     unreachable_code = 3,
+    invalid_conversion = 4,
 
-    pub fn toError(self: TrapReason) error{ IntegerDivideByZero, IntegerOverflow, Unreachable } {
+    pub fn toError(self: TrapReason) error{ IntegerDivideByZero, IntegerOverflow, Unreachable, InvalidConversionToInteger } {
         return switch (self) {
             .division_by_zero => error.IntegerDivideByZero,
             .integer_overflow => error.IntegerOverflow,
             .unreachable_code => error.Unreachable,
+            .invalid_conversion => error.InvalidConversionToInteger,
         };
     }
 };
@@ -145,6 +157,10 @@ pub const Graph = struct {
                 } else if (conversionTypes(node.op)) |conversion| {
                     try self.use(node.lhs, &available);
                     if (self.types[node.lhs] != conversion.input or out_type != conversion.output) return error.InvalidGraph;
+                } else if (isNumericConversion(node.op)) {
+                    try self.use(node.lhs, &available);
+                    const to_float = node.op == .convert_s or node.op == .convert_u;
+                    if (isFloat(self.types[node.lhs]) == to_float or isFloat(out_type) != to_float) return error.InvalidGraph;
                 } else if (node.op == .reinterpret) {
                     try self.use(node.lhs, &available);
                     const source = self.types[node.lhs];
@@ -226,7 +242,14 @@ pub fn conversionTypes(op: Op) ?struct { input: Type, output: Type } {
 
 pub fn isFloatOp(op: Op) bool {
     return switch (op) {
-        .fadd, .fsub, .fmul, .fdiv, .fmin, .fmax, .fcopysign, .fabs, .fneg, .fsqrt, .feq, .fne, .flt, .fgt, .fle, .fge, .promote_f32, .demote_f64 => true,
+        .fadd, .fsub, .fmul, .fdiv, .fmin, .fmax, .fcopysign, .fabs, .fneg, .fsqrt, .fceil, .ffloor, .ftrunc, .fnearest, .feq, .fne, .flt, .fgt, .fle, .fge, .promote_f32, .demote_f64 => true,
+        else => false,
+    };
+}
+
+pub fn isNumericConversion(op: Op) bool {
+    return switch (op) {
+        .convert_s, .convert_u, .trunc_s, .trunc_u, .trunc_sat_s, .trunc_sat_u => true,
         else => false,
     };
 }
@@ -241,6 +264,7 @@ pub fn isComparison(op: Op) bool {
 pub fn inputCount(op: Op) u2 {
     return switch (op) {
         .constant => 0,
+        .fceil, .ffloor, .ftrunc, .fnearest, .convert_s, .convert_u, .trunc_s, .trunc_u, .trunc_sat_s, .trunc_sat_u => 1,
         .guard, .sext_i32, .zext_i32, .trunc_i64, .reinterpret, .promote_f32, .demote_f64, .fabs, .fneg, .fsqrt, .clz, .ctz, .popcnt, .sext8, .sext16, .sext32 => 1,
         .add, .sub, .mul, .div_s, .div_u, .rem_s, .rem_u, .bit_and, .bit_or, .bit_xor, .shl, .shr_s, .shr_u, .rotl, .rotr, .eq, .ne, .lt_s, .lt_u, .gt_s, .gt_u, .le_s, .le_u, .ge_s, .ge_u, .fadd, .fsub, .fmul, .fdiv, .fmin, .fmax, .fcopysign, .feq, .fne, .flt, .fgt, .fle, .fge => 2,
     };
@@ -252,7 +276,8 @@ pub fn effect(op: Op) Effect {
     // Exhaustive: new operations must declare their observable effects.
     return switch (op) {
         .guard => .guard,
-        .div_s, .div_u, .rem_s, .rem_u => .may_trap,
+        .div_s, .div_u, .rem_s, .rem_u, .trunc_s, .trunc_u => .may_trap,
+        .fceil, .ffloor, .ftrunc, .fnearest, .convert_s, .convert_u, .trunc_sat_s, .trunc_sat_u => .pure,
         .constant, .add, .sub, .mul, .bit_and, .bit_or, .bit_xor, .shl, .shr_s, .shr_u, .rotl, .rotr, .clz, .ctz, .popcnt, .sext8, .sext16, .sext32, .eq, .ne, .lt_s, .lt_u, .gt_s, .gt_u, .le_s, .le_u, .ge_s, .ge_u, .sext_i32, .zext_i32, .trunc_i64, .fadd, .fsub, .fmul, .fdiv, .fmin, .fmax, .fcopysign, .fabs, .fneg, .fsqrt, .feq, .fne, .flt, .fgt, .fle, .fge, .reinterpret, .promote_f32, .demote_f64 => .pure,
     };
 }
@@ -265,4 +290,5 @@ test {
     _ = @import("tests.zig");
     _ = @import("float_test.zig");
     _ = @import("integer_test.zig");
+    _ = @import("conversion_test.zig");
 }
