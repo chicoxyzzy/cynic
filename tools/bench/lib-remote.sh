@@ -38,8 +38,8 @@ load_remote() {
 }
 
 # --- Detached remote jobs --------------------------------------------------
-# Long remote work must outlive the local ssh channel: if the laptop's
-# Claude Code restarts, a SYNCHRONOUS remote job gets SIGHUP when the ssh
+# Long remote work must outlive the local ssh channel: if the local terminal
+# or agent restarts, a SYNCHRONOUS remote job gets SIGHUP when the ssh
 # dies and its streamed-only output is lost. So we SUBMIT the job detached
 # (setsid → SIGHUP-immune), holding the flock for its whole life, writing
 # out.log + a `status` exit-sentinel into /tmp/jobs/<id>. Polling/fetching

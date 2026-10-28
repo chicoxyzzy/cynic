@@ -3,11 +3,12 @@
 Cynic is a strict-only ECMAScript and WebAssembly engine in Zig,
 built from scratch — security-hardened by default, declining
 JavaScript's legacy web-compatibility surfaces on purpose.
-This document is the entry point for any contributor — human or AI
-agent (Claude Code, Codex, Cursor, Aider, …). Tools that don't read
-this file by name can be pointed at it (`aider --read AGENTS.md`,
-Cursor `.cursor/rules/*.mdc` referencing it, etc.); Claude Code
-reads it via a one-line `CLAUDE.md` that imports this file.
+This document is the entry point for any contributor, human or AI
+agent. Project policy lives here; repeatable procedures live in
+[docs/workflows/](docs/workflows/README.md). No particular agent,
+editor, slash-command system, or local hook is required. Client-specific
+entry files such as `CLAUDE.md` are compatibility shims only: they
+reference this file rather than owning separate instructions.
 
 ## Project conventions
 
@@ -352,11 +353,11 @@ These are project rules — they apply to everyone.
 | Fuzz the engine, triage a fuzz crash, or maintain the nightly fuzz gate | [docs/fuzzing.md](docs/fuzzing.md) (Fuzzilli setup, `triage-crashes.sh`, the [carve-out registry](docs/fuzz-carveouts.md), and the nightly CI gate + how to update [`tools/fuzz/crash-baseline.txt`](tools/fuzz/crash-baseline.txt)); OSS-Fuzz fit in [docs/fuzz-ossfuzz-assessment.md](docs/fuzz-ossfuzz-assessment.md) |
 | Score current conformance | `zig build test262 -- --quiet`; history in [test262-results.md](test262-results.md) |
 | See why the remaining engine-gap failures are by-design | [docs/test262-gap-audit.md](docs/test262-gap-audit.md) (per-fixture audit — sloppy-via-dynamic-code and Annex-B-in-body classes the path/flag classifier can't see; don't re-triage these) |
-| Measure perf (micros) | `zig build bench` (or `/perf`); design in [docs/benchmarking.md](docs/benchmarking.md) |
-| Find a hot function | `tools/profile.sh "<filter>"` (or `/profile`); requires `samply` |
+| Measure perf (micros) | `zig build bench`; [performance workflow](docs/workflows/perf.md), design in [docs/benchmarking.md](docs/benchmarking.md) |
+| Find a hot function | `tools/profile.sh "<filter>"`; [profiling workflow](docs/workflows/profile.md), requires `samply` |
 | See engine memory shape | `zig build test262 -- --filter=<x> --mem-summary --top-alloc=10` (engine-side counters) |
 | Profile allocations with call stacks (macOS) | `xcrun xctrace record --template Allocations --launch -- zig-out/bin/cynic-test262 --filter=<x>` (build it first with `zig build test262`) |
-| Find spec text | [tc39.es/ecma262](https://tc39.es/ecma262/) |
+| Find spec text | [tc39.es/ecma262](https://tc39.es/ecma262/), [ECMA-402](https://tc39.es/ecma402/), or the optional `tc39` MCP server in [.mcp.json](.mcp.json); see [spec lookup](docs/workflows/README.md#spec-lookup) |
 | Look up papers (compiler / GC / interpreter / JS impl literature) | [arxiv.org](https://arxiv.org/), or via the `arxiv` MCP server in `.mcp.json` — `search_papers` (by query + categories), `download_paper`, `read_paper`. Cache lives under `/tmp/cynic-arxiv-cache`. Use this step in [`handbook/prior-art.md`](docs/handbook/prior-art.md) §3 (academic literature). |
 | Inspect test262 fixtures | `vendor/test262/test/<area>` |
 | Propose a missing test262 fixture | [docs/test262-upstream-gaps.md](docs/test262-upstream-gaps.md) (bugs Cynic patched that no existing fixture catches) |
@@ -371,8 +372,8 @@ resolves the same field. Keep the zon pin as the single source of
 truth when a Zig parser/codegen change forces a bump (use `anyzig`
 locally so `zig build` resolves to the pinned SHA).
 
-Restricted-egress environments (Claude Code cloud containers and
-similar sandboxes whose proxy only lets github.com through) can
+Restricted-egress environments (containers and other environments
+whose proxy only lets github.com through) can
 reach neither ziglang.org nor the community mirrors, so anyzig has
 nowhere to download from. `tools/fetch-zig.sh` bootstraps there:
 it reads the zon pin, tries the repo's `zig-toolchain` GitHub
@@ -568,7 +569,7 @@ test262-safe`: it installs a separate
 the GC verifiers (`verifyRememberedSet` / `verifyShapeInvariant`)
 and the 0xaa free-poison — all gated on `runtime_safety`, hence
 no-ops in ReleaseFast — while running ~2-3× faster than Debug.
-The right binary for `/gc-stress` use-after-free hunts.
+The right binary for the [GC stress workflow](docs/workflows/gc-stress.md).
 
 **Perf-measuring the `cynic` CLI? Confirm it's ReleaseFast first.**
 The same same-path clobber applies to `zig-out/bin/cynic`: `zig build`
@@ -794,19 +795,21 @@ not just because we found the section confusing.
 
 ## Repeatable workflows
 
-For Claude Code users these are slash commands under
-[`.claude/commands/`](.claude/commands/); the markdown files describe
-the workflow plainly and any agent or human can follow them by hand.
+The canonical procedures are ordinary Markdown in
+[docs/workflows/](docs/workflows/README.md). Run their shell commands
+from the repository root, or ask any agent to follow the linked file.
+Client-local shortcuts may reference these files; do not duplicate the
+procedures in an agent-specific directory.
 
 | Workflow | What it does | File |
 |---|---|---|
-| `/triage` | Survey current test262 failures, group by pattern, suggest fixes (analysis only) | [.claude/commands/triage.md](.claude/commands/triage.md) |
-| `/gc-stress` | Sweep at `--gc-threshold=1`, diff against default to surface use-after-free clusters, fix by rooting / typed slots, verify | [.claude/commands/gc-stress.md](.claude/commands/gc-stress.md) |
-| `/score` | Append a fresh score row to `test262-results.md`, report the delta | [.claude/commands/score.md](.claude/commands/score.md) |
-| `/bump-test262` | Bump the test262 submodule to upstream HEAD, rerun, score (do not commit) | [.claude/commands/bump-test262.md](.claude/commands/bump-test262.md) |
-| `/perf` | Run the Phase 1 micro-bench suite; report per-fixture medians + RSS | [.claude/commands/perf.md](.claude/commands/perf.md) |
-| `/profile` | Sample a `--filter`-scoped test262 sweep under `samply`; emit a top-N hot-function list (needs `samply` on PATH) | [.claude/commands/profile.md](.claude/commands/profile.md) |
-| `/checkpoint` | End-of-session housekeeping — refresh test262 + bench + cross-engine results, audit docs / commands for staleness | [.claude/commands/checkpoint.md](.claude/commands/checkpoint.md) |
+| Triage | Group current test262 failures and suggest fixes (analysis only) | [triage.md](docs/workflows/triage.md) |
+| GC stress | Compare allocation-pressure and default runs, fix rooting gaps, verify | [gc-stress.md](docs/workflows/gc-stress.md) |
+| Score | Refresh test262 results and report the delta | [score.md](docs/workflows/score.md) |
+| Bump test262 | Update the corpus, rerun, and score without committing | [bump-test262.md](docs/workflows/bump-test262.md) |
+| Performance | Measure same-host per-fixture timings and RSS | [perf.md](docs/workflows/perf.md) |
+| Profile | Sample a filtered test262 sweep with `samply` | [profile.md](docs/workflows/profile.md) |
+| Checkpoint | Refresh affected results and audit documentation | [checkpoint.md](docs/workflows/checkpoint.md) |
 
 ## Style & code health
 
@@ -901,7 +904,7 @@ If RTK limits, changes, blocks, or hides useful command output,
 either rerun the command without RTK or use `rtk proxy <command>`
 to bypass the filtering for that one invocation.
 
-Do not add Claude Code hooks (or similar agent-runtime hooks)
+Do not add agent-runtime hooks
 that force shell commands through RTK. The proxy is a per-call
 choice; making it mandatory removes the escape hatch when the
 firehose is the point.

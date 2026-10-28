@@ -1,6 +1,4 @@
----
-description: Stress the GC at --gc-threshold=1, find use-after-free clusters, fix by rooting or typed slots, verify
----
+# Stress the garbage collector
 
 Hunt and fix the use-after-free class where a native builtin or an
 interpreter opcode holds a raw heap pointer (`*JSObject` /
@@ -10,7 +8,7 @@ bugs are invisible at the default allocation threshold and only
 surface under `--gc-threshold=1`, where a full mark-sweep runs
 after (nearly) every allocation.
 
-Read [docs/handbook/gc.md](../../docs/handbook/gc.md) first — the
+Read [the GC handbook](../handbook/gc.md) first — the
 HandleScope contract and the "finding these bugs" section are the
 ground truth this workflow operationalises.
 
@@ -46,7 +44,7 @@ crash mid-bucket doesn't lose prior results:
                built-ins/Set built-ins/Promise built-ins/Function; do
         r=$(./zig-out/bin/cynic-test262 --gc-threshold=1 --threads=4 \
               --filter=$f --list-failures=8 --quiet 2>&1)
-        echo "$f | $(echo "$r" | grep -aE "pass:|fail:")"
+        echo "$f | $(echo "$r" | grep -aE "^passing:|^failing:")"
         echo "$r" | grep -aE "Segmentation|panic|un-barriered|\[" | head -8
       done'
 
@@ -62,7 +60,7 @@ For every bucket with `fail > 0` at gc1, run the same filter at
 the **default** threshold. A fixture that **passes at default but
 fails at gc1** is a use-after-free — that delta is the actionable
 set. A fixture that fails at both is an ordinary conformance gap
-(route it to `/triage`, not here).
+(use the [triage workflow](triage.md), not this one).
 
 ## 4. Diagnose each cluster
 
@@ -132,4 +130,4 @@ Per cluster: the fixture(s), the native / opcode, the re-entry
 site, the fix shape applied, and the verified gc1 + default
 counts. If a fix surfaces a bug no test262 fixture catches at the
 default threshold, add an entry to
-[docs/test262-upstream-gaps.md](../../docs/test262-upstream-gaps.md).
+[test262 upstream gaps](../test262-upstream-gaps.md).

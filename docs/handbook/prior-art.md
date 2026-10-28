@@ -24,6 +24,9 @@ For each non-trivial feature:
    ([tc39.es/ecma262](https://tc39.es/ecma262/)). Internal function
    names mirror spec abstract operations so test262 failures map
    cleanly. Already a project rule; this just keeps it visible.
+   The optional [TC39 MCP lookup](../workflows/README.md#spec-lookup)
+   can return structured clauses and snapshot metadata; direct spec links
+   remain usable without an MCP-capable client.
 
 2. **How the major engines do it.**
    - **V8** — Ignition (bytecode interpreter), Sparkplug

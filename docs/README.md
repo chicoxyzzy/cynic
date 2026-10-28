@@ -13,6 +13,7 @@ the complete command reference stay in [AGENTS.md](../AGENTS.md).
 | How do the major components fit together? | [ARCHITECTURE.md](ARCHITECTURE.md) |
 | What has shipped and what remains? | [ROADMAP.md](ROADMAP.md) |
 | What engineering workflow should I follow? | [Engineering handbook](handbook/README.md) |
+| How do I triage, score, profile, or refresh results? | [Repeatable workflows](workflows/README.md), usable by any contributor or agent |
 | What are the current conformance scores? | [ECMAScript](../test262-results.md), [WebAssembly core](../wasm-results.md), and [WPT Wasm JS API](../wpt-results.md) results |
 | What are the current cross-engine measurements? | [bench-cross-results.md](../bench-cross-results.md) |
 

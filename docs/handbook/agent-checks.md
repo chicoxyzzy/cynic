@@ -113,7 +113,9 @@ globals are read-only" invariant, parallel produces the same
 counts as single-thread. The bug isn't in the policy, it's in
 breaches of the policy; surface and fix the breach.
 
-## Corpus bumps (after `/bump-test262`)
+## Corpus bumps
+
+Follow the [corpus update workflow](../workflows/bump-test262.md).
 
 A `vendor/test262/` submodule bump is a different shape of
 change from an engine edit: the engine is unchanged, but the

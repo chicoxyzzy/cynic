@@ -20,17 +20,9 @@ node_modules/
 # Throwaway worktree used by the gh-pages deploy flow.
 .gh-pages-deploy/
 
-# `.claude/` is mostly per-user / per-machine scratch — agent-local
-# permissions (`settings.local.json`), runtime lock files
-# (`scheduled_tasks.lock`), spawned worktrees (`worktrees/`),
-# debugger launch configs (`launch.json`), and whatever new
-# scaffolding Claude Code lands next. Ignore the whole directory
-# by default; allowlist exactly the things the team actually
-# shares so anything new defaults to "agent-local" without an
-# edit here. Add `!.claude/<name>` when promoting a file to
-# shared.
-.claude/*
-!.claude/commands/
+# Client-local permissions, hooks, shortcuts, locks, and worktrees.
+# Shared policy and procedures live in AGENTS.md and docs/workflows/.
+.claude/
 
 # Local fuzz scratch — the nightly gate writes new-crash reproducers
 # to `fuzz-artifacts/` and resumes Fuzzilli from `fuzz-storage/`
@@ -43,7 +35,7 @@ fuzz-storage/
 # `--only-failing` cache for the test262 harness — written by
 # every full run, consumed by `--only-failing`.
 .test262-pass-cache.txt
-# Local profiling artifacts from tools/profile.sh + /profile.
+# Local profiling artifacts from tools/profile.sh.
 # `samply load profile.json` symbolicates these into the Firefox
 # Profiler UI; they're per-machine, multi-MB, and not meant to be
 # tracked.

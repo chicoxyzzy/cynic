@@ -2,7 +2,7 @@
 #
 # remote-bench.sh — interleaved A/B (a ref vs a baseline) on the configured
 # remote, off your laptop, as a DETACHED job that survives the local ssh
-# dying (e.g. a Claude Code restart). The whole A/B (+ optional --cross) runs
+# dying (e.g. a terminal or agent restart). The whole A/B (+ optional --cross) runs
 # as one flock-held job on the box; the report renders locally with
 # ab-report.ts. Submit returns a JOB_ID; resume with --wait/--fetch.
 #

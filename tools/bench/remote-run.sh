@@ -2,7 +2,7 @@
 #
 # remote-run.sh — run a command on the configured remote against a git ref,
 # off your laptop, as a DETACHED job that survives the local ssh dying (e.g.
-# a Claude Code restart). Submit launches the job under setsid+flock on the
+# a terminal or agent restart). Submit launches the job under setsid+flock on the
 # box and returns a JOB_ID; the job writes its output + an exit-sentinel to
 # /tmp/jobs/<id>. Polling is short, stateless, and re-runnable with the same
 # id after a restart — so a multi-minute sweep is no longer at the mercy of

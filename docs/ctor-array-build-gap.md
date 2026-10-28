@@ -525,7 +525,7 @@ ctor row waits on construct support.
 1. **L1** int32-keyed dense read fast path (validated −24%; do
    `sta_computed`'s mirror while in there). Gates: unit tests
    red-first, `built-ins/Array` + `language/expressions` test262
-   buckets, `/gc-stress` on the bucket, full-sweep safety net.
+   buckets, [GC stress](workflows/gc-stress.md) on the bucket, full-sweep safety net.
 2. **L3a** plain-bit deinit skip — **SHIPPED** (`6ab8ac3` +
    the lazy-`own_key_order` follow-up `927c18f`); also helps
    `object_alloc` / `class_instantiate` / `promise_chain`.

@@ -728,7 +728,7 @@ library + tests only.
      `JSON.stringify({a:[1,{b:2}]})`, a Promise `.then` ordering probe
      through `__drainMicrotasks` (test-globals variant).
 7. **GC safety:** restored realm survives `collectGarbage()` +
-   allocation-pressure sweeps; extend the `/gc-stress` methodology —
+   allocation-pressure sweeps; extend the [GC stress](workflows/gc-stress.md) methodology —
    run a filtered fixture set on a restored realm at
    `--gc-threshold=1` (ReleaseSafe binary for the verifiers per
    AGENTS.md). This is the test that catches a missed back-pointer
@@ -792,7 +792,7 @@ concrete choices / deviations:
   - `-Dintl=stub/full` capture audit (R6) — capture is exercised at
     `-Dintl=off` only.
   - The §6.3.8 differential test262 harness mode (restore-instead-of-
-    install exact-pass-set gate) and the §6.3.7 `/gc-stress` sweep
+    install exact-pass-set gate) and the §6.3.7 [GC stress](workflows/gc-stress.md) sweep
     over a restored realm.
   - `restoreWithBytesAllocator` for the test262 harness split
     allocator.

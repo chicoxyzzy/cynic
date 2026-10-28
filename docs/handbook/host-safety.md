@@ -145,7 +145,7 @@ When you add or touch a builtin, ask:
   GC-mutation-heavy buckets, on every PR. A missed root is a
   deterministic crash there even though it's invisible to the
   ReleaseFast scoring sweep. See the job in
-  `.github/workflows/ci.yml` and the `/gc-stress` workflow.
+  `.github/workflows/ci.yml` and the [GC stress](../workflows/gc-stress.md) workflow.
 - **Unit regression tests** — the `GC:` cluster runs each fixed
   re-entry path under `gc_threshold = 1`.
 - **The full ReleaseSafe sweep completes** — a host-abort mid-corpus
