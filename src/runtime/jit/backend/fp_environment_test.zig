@@ -377,3 +377,82 @@ test "backend memory: floating arithmetic and memory traps use disjoint saved st
         }
     }
 }
+
+test "backend calls: callbacks see caller FP state and cannot leak control changes" {
+    if (!native.supported) return error.SkipZigTest;
+    const Host = struct {
+        probe: *const Probe,
+        seen: State = .{},
+        changed: State,
+        fail: bool,
+        fn invoke(raw: ?*anyopaque, _: native.CallRequest) !u64 {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            self.seen = self.probe.read();
+            self.probe.write(&self.changed);
+            if (self.fail) return error.CallbackFailed;
+            return 0;
+        }
+    };
+    var owner = try code_alloc.CodeAllocator.init(a, 256 * 1024);
+    defer owner.deinit();
+    var probe = try Probe.init(&owner);
+    defer probe.deinit();
+    const graph: ir.Graph = .{ .types = &.{ .f64, .f64, .f64 }, .argument_types = &.{ .f64, .f64 }, .result_type = .f64, .blocks = &.{.{ .params = &.{ 0, 1 }, .nodes = &.{
+        .{ .op = .call, .trap_site = 1, .call = .{ .target = 0, .arguments = &.{}, .parameter_types = &.{}, .result_type = null, .safepoint = .{ .id = 0, .values = &.{} } } },
+        .{ .op = .fadd, .out = 2, .lhs = 0, .rhs = 1 },
+    }, .terminator = .{ .return_ = 2 } }} };
+    var code = try native.compile(a, &owner, graph);
+    defer code.deinit();
+    const original = probe.read();
+    defer probe.write(&original);
+    for ([_]bool{ false, true }) |fail| {
+        var host: Host = .{ .probe = &probe, .changed = probe.unusual(2), .fail = fail };
+        const requested = probe.unusual(1);
+        probe.write(&requested);
+        const before = probe.read();
+        const result = code.runOutcomeWithRuntime(&.{ 0x3ff0_0000_0000_0000, 0x3ca0_0000_0000_0000 }, &.{}, 1, .{ .context = &host, .call = Host.invoke });
+        const after = probe.read();
+        probe.write(&original);
+        try std.testing.expectEqualDeep(before, host.seen);
+        try std.testing.expectEqualDeep(before, after);
+        if (fail) {
+            try std.testing.expectError(error.CallbackFailed, result);
+        } else {
+            var outcome = try result;
+            defer outcome.deinit();
+            try std.testing.expectEqual(@as(u64, 0x3ff0_0000_0000_0000), outcome.returned);
+        }
+    }
+}
+
+test "backend calls: language runtime helpers execute with strict FP controls" {
+    if (!native.supported) return error.SkipZigTest;
+    const Host = struct {
+        fn add(_: ?*anyopaque, request: native.CallRequest) !u64 {
+            const lhs: f64 = @bitCast(request.arguments[0]);
+            const rhs: f64 = @bitCast(request.arguments[1]);
+            return @bitCast(lhs + rhs);
+        }
+    };
+    const graph: ir.Graph = .{ .types = &.{ .f64, .f64, .f64 }, .argument_types = &.{ .f64, .f64 }, .result_type = .f64, .blocks = &.{.{ .params = &.{ 0, 1 }, .nodes = &.{
+        .{ .op = .call, .out = 2, .trap_site = 0, .call = .{ .target = 0, .arguments = &.{ 0, 1 }, .parameter_types = &.{ .f64, .f64 }, .result_type = .f64, .fp_mode = .strict, .safepoint = .{ .id = 0, .values = &.{} } } },
+    }, .terminator = .{ .return_ = 2 } }} };
+    var owner = try code_alloc.CodeAllocator.init(a, 256 * 1024);
+    defer owner.deinit();
+    var probe = try Probe.init(&owner);
+    defer probe.deinit();
+    var code = try native.compile(a, &owner, graph);
+    defer code.deinit();
+    const original = probe.read();
+    defer probe.write(&original);
+    const requested = probe.unusual(if (is_x86) 2 else 1);
+    probe.write(&requested);
+    const before = probe.read();
+    const result = code.runOutcomeWithRuntime(&.{ 0x3ff0_0000_0000_0000, 0x3ca0_0000_0000_0000 }, &.{}, 1, .{ .call = Host.add });
+    const after = probe.read();
+    probe.write(&original);
+    var outcome = try result;
+    defer outcome.deinit();
+    try std.testing.expectEqual(@as(u64, 0x3ff0_0000_0000_0000), outcome.returned);
+    try std.testing.expectEqualDeep(before, after);
+}

@@ -8,7 +8,8 @@ const CompiledFunc = @import("code.zig").CompiledFunc;
 const Reader = @import("reader.zig").Reader;
 const Op = @import("opcodes.zig").Op;
 const Module = @import("module.zig").Module;
-const Instance = @import("interpreter.zig").Instance;
+const interpreter = @import("interpreter.zig");
+const Instance = interpreter.Instance;
 pub const ir = @import("../jit/backend/ir.zig");
 pub const native = @import("../jit/backend/native.zig");
 pub const CodeAllocator = @import("../jit/code_alloc.zig").CodeAllocator;
@@ -33,37 +34,120 @@ pub fn lowerModule(allocator: std.mem.Allocator, bytes: []const u8, function_ind
     const module = try decoder.decode(fixed.allocator(), bytes);
     var memory_types: [ir.max_memories]wasm_types.MemType = undefined;
     const memories = try collectMemories(&module, &memory_types);
-    if (function_index >= module.funcs.len) return error.FunctionIndex;
+    const local = try localFunctionIndex(&module, function_index);
     const functions = try validator.validateModule(fixed.allocator(), &module);
-    const function = &functions[function_index];
-    return lower(allocator, function, module.types[function.type_index], memories);
+    const function = &functions[local];
+    return lower(allocator, function, module.types[function.type_index], memories, &module);
 }
 
 /// Compile an already validated function without capturing instance pointers.
 pub fn lowerInstance(allocator: std.mem.Allocator, instance: *const Instance, function_index: u32) !OwnedGraph {
     var memory_types: [ir.max_memories]wasm_types.MemType = undefined;
     const memories = try collectMemories(instance.module, &memory_types);
-    if (function_index >= instance.funcs.len) return error.FunctionIndex;
-    const function = &instance.funcs[function_index];
-    return lower(allocator, function, instance.module.types[function.type_index], memories);
+    const local = try localFunctionIndex(instance.module, function_index);
+    const function = &instance.funcs[local];
+    return lower(allocator, function, instance.module.types[function.type_index], memories, instance.module);
 }
 
-/// Developer-only invocation of leaf code against fresh instance memory views.
-/// Production dispatch, calls, growth within compiled code, and fuel integration
-/// are separate work; no concurrent resize is permitted during this leaf call.
-pub fn runInInstance(code: *const native.Compiled, instance: *const Instance, args: []const u64, budget: u32) !native.Outcome {
+/// Developer-only invocation. Direct calls use the existing Wasm tiers under a
+/// separate bounded callee budget, not production tier selection or Realm fuel.
+pub fn runInInstance(code: *const native.Compiled, instance: *Instance, args: []const u64, budget: u32) !native.Outcome {
     if (instance.memories.len != code.memory_count or instance.memories.len > ir.max_memories) return error.MemoryCount;
     var views: [ir.max_memories]native.MemoryView = undefined;
+    try refreshMemories(instance, views[0..instance.memories.len]);
+    var context: CallContext = .{ .instance = instance, .allocator = code.allocator, .remaining = budget };
+    return code.runOutcomeWithRuntime(args, views[0..instance.memories.len], budget, if (code.call_sites.len == 0) null else .{ .context = &context, .call = CallContext.invoke });
+}
+
+fn refreshMemories(instance: *const Instance, views: []native.MemoryView) !void {
+    if (views.len != instance.memories.len) return error.MemoryCount;
     for (instance.memories, 0..) |memory, i| {
         if (memory.is_shared) return error.UnsupportedSharedMemory;
         views[i] = native.MemoryView.fromSlice(memory.data);
     }
-    return code.runOutcomeWithMemory(args, views[0..instance.memories.len], budget);
+}
+
+const CallContext = struct {
+    instance: *Instance,
+    allocator: std.mem.Allocator,
+    remaining: u32,
+
+    fn invoke(raw: ?*anyopaque, request: native.CallRequest) !u64 {
+        const self: *CallContext = @ptrCast(@alignCast(raw.?));
+        const signature = try callSignature(self.instance.module, request.target);
+        if (signature.params.len != request.arguments.len or signature.results.len != @intFromBool(request.result_type != null)) return error.CallSignatureMismatch;
+        for (signature.params, request.parameter_types) |ty, expected| {
+            if (try valueType(ty) != expected) return error.CallSignatureMismatch;
+        }
+        if (request.result_type) |expected| if (try valueType(signature.results[0]) != expected) return error.CallSignatureMismatch;
+        const target = self.instance.funcRefAt(request.target) orelse return error.FunctionIndex;
+        const inherited = self.instance.execution_control orelse switch (target) {
+            .wasm => |callee| callee.instance.execution_control,
+            .host => null,
+        };
+        var control: CalleeControl = .{ .remaining = &self.remaining, .inherited = inherited };
+        var args: [ir.max_arguments]u128 = undefined;
+        for (request.arguments, 0..) |value, i| args[i] = value;
+        const result = try interpreter.invokeWithControl(self.instance, self.allocator, request.target, args[0..request.arguments.len], .{ .ctx = &control, .poll_fn = CalleeControl.poll, .armed_fn = CalleeControl.armed });
+        defer self.allocator.free(result);
+        try refreshMemories(self.instance, request.memories);
+        if (result.len != signature.results.len) return error.CallSignatureMismatch;
+        return if (result.len == 0) 0 else @truncate(result[0]);
+    }
+};
+
+const CalleeControl = struct {
+    remaining: *u32,
+    inherited: ?interpreter.ExecutionControl,
+
+    fn armed(_: *anyopaque) bool {
+        return true;
+    }
+    fn poll(raw: *anyopaque) interpreter.ExecutionPoll {
+        const self: *CalleeControl = @ptrCast(@alignCast(raw));
+        if (self.inherited) |control| {
+            const result = control.poll();
+            if (result != .proceed) return result;
+        }
+        if (self.remaining.* == 0) return .step_budget_exhausted;
+        self.remaining.* -= 1;
+        return .proceed;
+    }
+};
+
+fn localFunctionIndex(module: *const Module, index: u32) !u32 {
+    var imports: u32 = 0;
+    for (module.imports) |entry| if (entry.desc == .func) {
+        imports += 1;
+    };
+    if (index < imports) return error.UnsupportedImportedEntry;
+    const local = index - imports;
+    if (local >= module.funcs.len) return error.FunctionIndex;
+    return local;
+}
+
+fn callSignature(module: *const Module, index: u32) !wasm_types.FuncType {
+    var current: u32 = 0;
+    const type_index = imported: {
+        for (module.imports) |entry| if (entry.desc == .func) {
+            if (current == index) break :imported entry.desc.func;
+            current += 1;
+        };
+        const local = try localFunctionIndex(module, index);
+        break :imported module.funcs[local];
+    };
+    if (type_index >= module.types.len) return error.FunctionIndex;
+    const signature = module.types[type_index];
+    if (signature.params.len > ir.max_arguments or signature.results.len > 1) return error.UnsupportedSignature;
+    for (signature.params) |ty| _ = try valueType(ty);
+    for (signature.results) |ty| _ = try valueType(ty);
+    return signature;
 }
 
 fn collectMemories(module: *const Module, out: *[ir.max_memories]wasm_types.MemType) ![]const wasm_types.MemType {
     var count: usize = 0;
     for (module.imports) |entry| {
+        if (entry.desc == .func) continue;
         if (entry.desc != .mem) return error.UnsupportedImports;
         if (count == out.len) return error.PrototypeLimit;
         out[count] = entry.desc.mem;
@@ -109,7 +193,7 @@ const Instruction = struct {
 };
 const Range = struct { start: usize, end: usize };
 
-fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature: wasm_types.FuncType, memories: []const wasm_types.MemType) !OwnedGraph {
+fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature: wasm_types.FuncType, memories: []const wasm_types.MemType, module: *const Module) !OwnedGraph {
     if (signature.results.len != 1) return error.UnsupportedSignature;
     const result_type = try valueType(signature.results[0]);
     if (function.body.len > 16 * 1024 or function.local_types.len > ir.max_arguments or
@@ -165,6 +249,10 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
             },
             .@"return", .@"unreachable" => reachable.items[reachable.items.len - 1] = false,
             .local_get, .local_set, .local_tee => inst.immediate = try reader.uleb(u32),
+            .call => {
+                inst.immediate = try reader.uleb(u32);
+                _ = try callSignature(module, @intCast(inst.immediate));
+            },
             .i32_const => inst.immediate = @as(u32, @bitCast(try reader.sleb(i32))),
             .i64_const => inst.immediate = @bitCast(try reader.sleb(i64)),
             .f32_const => inst.immediate = try reader.u32le(),
@@ -263,6 +351,27 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
                     try stack.append(a, try builder.constant(&nodes, ty, inst.immediate));
                 },
                 .@"return" => terminator = .{ .return_ = stack.pop() orelse return error.InvalidControlFlow },
+                .call => {
+                    const target: u32 = @intCast(inst.immediate);
+                    const callee = try callSignature(module, target);
+                    if (callee.params.len > stack.items.len) return error.InvalidControlFlow;
+                    const start = stack.items.len - callee.params.len;
+                    const arguments = try a.dupe(ir.Value, stack.items[start..]);
+                    stack.shrinkRetainingCapacity(start);
+                    const parameter_types = try a.alloc(ir.Type, callee.params.len);
+                    for (callee.params, parameter_types) |ty, *parameter| parameter.* = try valueType(ty);
+                    const result: ?ir.Type = if (callee.results.len == 0) null else try valueType(callee.results[0]);
+                    const out = if (result) |ty| try builder.value(ty) else null;
+                    try nodes.append(a, .{ .op = .call, .out = out, .trap_site = inst.offset, .call = .{
+                        .target = target,
+                        .arguments = arguments,
+                        .parameter_types = parameter_types,
+                        .result_type = result,
+                        .fp_mode = .strict,
+                        .safepoint = .{ .id = inst.offset, .values = &.{} },
+                    } });
+                    if (out) |value| try stack.append(a, value);
+                },
                 .@"unreachable" => terminator = .{ .trap = .{ .reason = .unreachable_code, .site = inst.offset } },
                 .br, .br_if => {
                     const condition = if (inst.op == .br_if) stack.pop() orelse return error.InvalidControlFlow else null;
