@@ -31,6 +31,12 @@ their normal paths would spend startup time without proving a benefit.
   do not pre-build a second IR or graph-coloring allocator for this experiment.
   Its [IR side exits and integer conversions](https://webkit.org/docs/b3/intermediate-representation.html)
   also motivate opaque client-owned recovery and explicit sign/zero extension.
+  Its separate Float/Double types and the
+  [Wasm numeric semantics](https://webassembly.github.io/spec/core/exec/numerics.html)
+  guide scalar FP lowering: preserve sign bits, distinguish numeric conversion
+  from reinterpretation, and do not assume algebraic identities for NaNs/zeros.
+  Cynic's existing Spasm emitters provide the local per-ISA reference, including
+  x86's unordered comparisons and signed-zero min/max handling.
 - [V8 Turboshaft](https://github.com/v8/v8/tree/main/src/compiler/turboshaft)
   is a useful shared-backend reference. Keep lowering distinct from language
   feedback rather than moving JS-shaped nodes into a nominally shared folder.
@@ -81,10 +87,10 @@ The shared code lives in `src/runtime/jit/backend/`; the adapters live in
 `src/runtime/ohaimark/shared_backend.zig`. The shared layer imports neither
 JS values/realms nor Wasm types, bytecode, instances, or Cells.
 
-The initial subset has i32/i64 constants, wrapping add/subtract/multiply,
-integer comparisons, bitwise AND/OR, explicit width conversions, ordered
-guards, block parameters, jumps, conditional branches, and a single integer
-result. The Wasm adapter accepts locals and void block/loop
+The subset has i32/i64 and f32/f64 constants, wrapping integer arithmetic,
+strict scalar FP arithmetic, comparisons, bitwise AND/OR, explicit width
+conversions, ordered guards, block parameters, jumps, conditional branches,
+and a single scalar result. The Wasm adapter accepts locals and void block/loop
 constructs with `br`/`br_if`. Unsupported instructions or types are an explicit
 refusal, even in dead bytecode; there is no silent fallback that could make an
 execution test pass without running generated code.
@@ -99,9 +105,11 @@ folding, DCE, and rematerialization.
 A JS case overflows Int32 after successful iterations and
 must recover in Lantern, not restart the function. It reports native entry
 and recovery counts, IR size, code size, per-call scratch size, static emitted
-loads/stores and register moves, compilation time, and bounded-call time
-(including scratch allocation). Instruction counts include cold guard exits
+loads/stores and allocator home/scratch register moves, compilation time, and
+bounded-call time (including scratch allocation). Instruction counts include cold guard exits
 and both branch paths; they are not dynamic memory-traffic measurements.
+The move counter excludes copies internal to an arithmetic operation, including
+GP/FP transfers in scalar floating-point emission.
 It also reports input/output node counts, folds, commoned expressions, dead
 nodes, and static rematerializations.
 These diagnostics are not cross-engine benchmarks.
@@ -214,9 +222,10 @@ reference. `Program.buildWithOptions` forwards the same options for JS.
 CSE or DCE subsequently removes that node; input nodes equal output plus
 commoned plus removed nodes.
 
-Folding evaluates only operations whose operands are known integer constants
-within the same block. It covers wrapping i32/i64 add/subtract/multiply,
-bitwise AND/OR, signed/unsigned comparisons, and explicit width conversions.
+Arithmetic folding evaluates only operations whose operands are known integer
+constants within the same block. It covers wrapping i32/i64 add/subtract/
+multiply, bitwise AND/OR, signed/unsigned comparisons, and explicit width
+conversions; same-width reinterpretation also folds by copying literal bits.
 It does not apply algebraic identities to unknown values or infer constants
 for block parameters. Integer truncation, two's-complement interpretation,
 and sign extension are explicit; this is not floating-point or JS Number
@@ -280,7 +289,8 @@ fall from 140 to 125, scratch from 584 to 568 bytes, and static loads/stores
 from 174 to 156. There are 23 emitted immediate reads in the JS graph and three
 in the Wasm graph. The fixed transfer area still dominates scratch, and CSE's
 extended live ranges still cost eight bytes versus CSE-off. These are code-size
-and storage wins, not a demonstrated throughput win; operand placement is next.
+and storage wins, not a demonstrated throughput win; operand placement remains
+an optimization opportunity.
 The Wasm loop shares one initial zero constant (seven to six nodes); its
 loop-dependent arithmetic remains unchanged.
 Compile/run timings remain diagnostic; a rollout needs paired measurements
@@ -323,10 +333,48 @@ root it before intervening GC-capable work. Once resumed, Lantern's ordinary
 frame-rooting contract applies. A test forces collection inside an object's
 `valueOf` after recovery and checks that coercion runs only there.
 
+## Scalar floating point
+
+The shared IR and Wasm adapter accept f32/f64 constants, add/subtract/multiply/
+divide, min/max, copy-sign, absolute value, negation, square root, all six
+comparisons, promotion/demotion, and same-width integer/float reinterpretation.
+The Ohaimark adapter still lowers checked Int32 operations; adding shared FP
+does not silently change JS specialization or coercion behavior.
+
+Homes and block arguments carry raw IEEE-754 bits. f32 values have zero upper
+32 bits, like i32. The verifier rejects mixed-width arithmetic, integer ops on
+float values, raw floats used as branch conditions, and mismatched
+conversions. A shared operand-count definition keeps liveness, remapping, and
+emission consistent for unary operations.
+
+FP arithmetic uses AArch64 v16/v17 or x86 xmm0/xmm1 as short-lived temporaries;
+the allocator still assigns GP homes. There is no FP-register allocation yet.
+Sign operations and reinterpretation preserve signaling-NaN payloads exactly.
+Arithmetic follows Wasm's permitted NaN classes; comparisons return false for
+unordered inputs except `ne`. x86 min/max explicitly handle unordered inputs
+and both signed-zero orders instead of using SSE MIN/MAX directly. These paths
+use the existing baseline instruction set and introduce no native helper calls.
+
+There is no FP arithmetic constant folding, reassociation, fast math, or
+commutative operand normalization. CSE may reuse identical ordered expressions;
+constant keys include the type and every bit, so +0/-0 and distinct NaN payloads
+stay distinct. Reinterpretation of a known literal can fold without evaluating
+it as a host float. Guards capture exact raw bits across all optimization and
+rematerialization combinations.
+
+Tests force native entry and compare with Sarcasm with Spasm disabled. They
+cover both widths, infinities, subnormals, signed zero, quiet/signaling NaNs,
+register pressure, constant and runtime conversions, mixed integer/float loop
+edges, budget exhaustion, invalid graphs, and allocation-failure cleanup.
+Numeric integer/float conversions, trapping truncation, and the four rounding
+operations are still explicit refusals, not interpreter fallback or complete
+scalar coverage. Production resource policy and FP-environment integration
+remain part of the rollout work.
+
 ## Safety and non-goals
 
 - No native host calls, heap dereferences, Wasm memory operations, SIMD,
-  floating-point arithmetic, exceptions, imports, inlining, OSR, or production
+  exceptions, imports, inlining, OSR, or production
   tier-up in this slice.
 - Compile-time limits cap input at 64 KiB, decoder/validator workspace at
   8 MiB, function bodies at 16 KiB, blocks at 256, SSA values at 2,048,
@@ -358,13 +406,41 @@ production JS integration, GC roots, allocation, re-entry, and exception edges
 must become explicit without importing JS object layouts into the backend.
 Those operations remain absent, not implicitly pure.
 
-Floating point needs explicit NaN, signed-zero, rounding, and conversion
+Further floating-point operations need explicit rounding and conversion-trap
 semantics. Do not enable fast-math identities or silently reuse Wasm trapping
 conversions for JavaScript coercions.
 
 ## Delivery and gates
 
-1. **Current experiment:** verified integer SSA, bounded Wasm frontend,
+### Production completion checklist
+
+The active objective is a fully functional shared backend for Cynic's JS and
+Wasm execution, not completion of the integer prototype. These gates are still
+open; a passing demo or unchanged production test262 run does not close them.
+
+- [ ] Complete scalar numeric types and operations, including strict floating
+  point, bit-preserving conversions, and explicit integer/truncation traps.
+- [ ] Model memory, calls, traps, safepoints, and ordered effects in the IR and
+  verifier before optimizing them; preserve aliasing, atomics, and trap order.
+- [ ] Support the accepted Wasm control/signature surface, memory and growth,
+  tables/references, calls/imports, globals, SIMD, and exception behavior through
+  a real instance-aware optimizing path, not just the standalone demo.
+- [ ] Integrate Ohaimark's numeric and heap operations, calls, guards, exact
+  frame recovery, OSR, GC roots/write barriers, re-entry, and exception edges.
+- [ ] Preserve Realm fuel, asynchronous interruption, memory ceilings,
+  executable ownership, and teardown in both production consumers.
+- [ ] Qualify both AArch64 and x86_64 with forced-native-entry differential
+  tests, test262 and Wasm/WPT suites, GC/allocation stress, and differential
+  fuzzing. Track refusals so fallback cannot hide missing coverage.
+- [ ] Measure warm/cold execution, compilation time and peak memory, code size,
+  and scratch use on representative JS/Wasm workloads; make the rollout
+  decision from those results, with working diagnostics and opt-outs.
+
+Each capability must have direct backend tests and frontend integration tests.
+Baseline fallback remains necessary for unsupported targets and resource
+failures, but is not evidence that an unimplemented backend capability works.
+
+1. **Current experiment:** verified scalar SSA, bounded Wasm frontend,
    native execution on both architectures, and a separate developer driver.
    Unit tests compare results, edge transfers, overflow, refusal, and budget
    exhaustion. The driver compares against Sarcasm and requires native entry.
@@ -383,15 +459,18 @@ conversions for JavaScript coercions.
    allocation, with exact unoptimized comparisons. Better instruction
    selection remains next. Add load elimination or loop motion only after
    effects are modeled and tested.
-5. **Wider Wasm coverage:** floating point, memory and traps, then calls and
-   runtime integration. Preserve bounds checks, memory-growth invalidation,
-   resource metering, and executable ownership before broadening the surface.
+5. **Wider Wasm coverage:** core scalar floating point now runs natively.
+   Finish rounding/numeric conversions and integer operations with explicit
+   traps, then memory, calls, and runtime integration. Preserve bounds checks,
+   memory-growth invalidation, resource metering, and executable ownership.
 6. **Rollout decision:** paired warm/cold execution measurements, compilation
    latency, peak compiler allocation, installed code size, refusal/entry
    telemetry, differential fuzzing, and spec-suite gates. No automatic
    default-on graduation or new JS tier follows from finishing the prototype.
 
-The next step is reducing operand moves and improving immediate/compare-branch
-selection. Keep each change independently measurable against the disabled
-variant and unoptimized references.
+The next capability work is the remaining scalar numeric surface and explicit
+trap/effect contracts. Operand-move reduction and immediate/compare-branch
+selection remain measured optimization work, not substitutes for coverage.
+Keep each change independently measurable against disabled variants and
+unoptimized references.
 Adopt the backend in production only if measurements justify its complexity.

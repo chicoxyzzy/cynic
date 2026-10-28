@@ -1,4 +1,4 @@
-//! Bounded pure integer optimizations. Guards and control flow are preserved.
+//! Bounded pure scalar optimizations. Guards and control flow are preserved.
 const std = @import("std");
 const ir = @import("ir.zig");
 
@@ -146,18 +146,20 @@ const Expression = struct {
 fn expression(node: ir.Node, types: []const ir.Type) ?Expression {
     if (!isPure(node.op)) return null;
     var key: Expression = .{ .op = node.op, .ty = types[node.out.?] };
-    switch (node.op) {
-        .constant => key.immediate = node.immediate,
-        .sext_i32, .zext_i32, .trunc_i64 => key.lhs = node.lhs,
-        .add, .mul, .bit_and, .bit_or, .eq => {
-            key.lhs = @min(node.lhs, node.rhs);
-            key.rhs = @max(node.lhs, node.rhs);
+    switch (ir.inputCount(node.op)) {
+        0 => key.immediate = node.immediate,
+        1 => key.lhs = node.lhs,
+        2 => switch (node.op) {
+            .add, .mul, .bit_and, .bit_or, .eq => {
+                key.lhs = @min(node.lhs, node.rhs);
+                key.rhs = @max(node.lhs, node.rhs);
+            },
+            else => {
+                key.lhs = node.lhs;
+                key.rhs = node.rhs;
+            },
         },
-        .sub, .lt_s, .lt_u, .ge_s, .ge_u => {
-            key.lhs = node.lhs;
-            key.rhs = node.rhs;
-        },
-        .guard => return null,
+        else => return null,
     }
     return key;
 }
@@ -165,15 +167,18 @@ fn expression(node: ir.Node, types: []const ir.Type) ?Expression {
 fn isPure(op: ir.Op) bool {
     // Exhaustive: a new operation must explicitly choose its effect contract.
     return switch (op) {
-        .constant, .add, .sub, .mul, .bit_and, .bit_or, .eq, .lt_s, .lt_u, .ge_s, .ge_u, .sext_i32, .zext_i32, .trunc_i64 => true,
+        .constant, .add, .sub, .mul, .bit_and, .bit_or, .eq, .lt_s, .lt_u, .ge_s, .ge_u, .sext_i32, .zext_i32, .trunc_i64, .fadd, .fsub, .fmul, .fdiv, .fmin, .fmax, .fcopysign, .fabs, .fneg, .fsqrt, .feq, .fne, .flt, .fgt, .fle, .fge, .reinterpret, .promote_f32, .demote_f64 => true,
         .guard => false,
     };
 }
 
 fn fold(node: ir.Node, types: []const ir.Type, constants: []const ?u64) ?u64 {
-    if (!isPure(node.op) or node.op == .constant) return null;
+    // Leave FP evaluation to the target. No host folding, fast math, or
+    // reassociation; literal keys preserve signed zero and NaN payload bits.
+    if (!isPure(node.op) or node.op == .constant or ir.isFloatOp(node.op)) return null;
     const lhs = constants[node.lhs] orelse return null;
-    if (ir.isConversion(node.op)) return switch (node.op) {
+    if (node.op == .reinterpret) return lhs;
+    if (ir.conversionTypes(node.op) != null) return switch (node.op) {
         .sext_i32 => @bitCast(signed(.i32, lhs)),
         .zext_i32, .trunc_i64 => ir.normalize(.i32, lhs),
         else => null,
@@ -191,7 +196,7 @@ fn fold(node: ir.Node, types: []const ir.Type, constants: []const ?u64) ?u64 {
         .lt_u => @intFromBool(lhs < rhs),
         .ge_s => @intFromBool(signed(ty, lhs) >= signed(ty, rhs)),
         .ge_u => @intFromBool(lhs >= rhs),
-        .constant, .guard, .sext_i32, .zext_i32, .trunc_i64 => return null,
+        else => return null,
     };
     return ir.normalize(types[node.out.?], value);
 }
@@ -205,18 +210,9 @@ fn markValues(live: []bool, values: []const ir.Value) void {
 }
 
 fn markInputs(live: []bool, node: ir.Node) void {
-    switch (node.op) {
-        .constant => {},
-        .guard => {
-            live[node.lhs] = true;
-            markValues(live, node.exit.?.values);
-        },
-        .sext_i32, .zext_i32, .trunc_i64 => live[node.lhs] = true,
-        else => {
-            live[node.lhs] = true;
-            live[node.rhs] = true;
-        },
-    }
+    if (ir.inputCount(node.op) >= 1) live[node.lhs] = true;
+    if (ir.inputCount(node.op) == 2) live[node.rhs] = true;
+    if (node.exit) |side_exit| markValues(live, side_exit.values);
 }
 
 fn remapValues(a: std.mem.Allocator, values: []const ir.Value, map: []const ir.Value) ![]const ir.Value {
@@ -231,18 +227,9 @@ fn remapEdge(a: std.mem.Allocator, edge: ir.Edge, map: []const ir.Value) !ir.Edg
 
 fn remapInputs(a: std.mem.Allocator, original: ir.Node, map: []const ir.Value) !ir.Node {
     var node = original;
-    switch (node.op) {
-        .constant => {},
-        .guard => {
-            node.lhs = map[node.lhs];
-            node.exit = .{ .id = node.exit.?.id, .values = try remapValues(a, node.exit.?.values, map) };
-        },
-        .sext_i32, .zext_i32, .trunc_i64 => node.lhs = map[node.lhs],
-        else => {
-            node.lhs = map[node.lhs];
-            node.rhs = map[node.rhs];
-        },
-    }
+    if (ir.inputCount(node.op) >= 1) node.lhs = map[node.lhs];
+    if (ir.inputCount(node.op) == 2) node.rhs = map[node.rhs];
+    if (node.exit) |side_exit| node.exit = .{ .id = side_exit.id, .values = try remapValues(a, side_exit.values, map) };
     return node;
 }
 

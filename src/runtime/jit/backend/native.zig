@@ -6,6 +6,7 @@ const builtin = @import("builtin");
 const ir = @import("ir.zig");
 const allocation = @import("allocation.zig");
 const optimize = @import("optimize.zig");
+const float = @import("float.zig");
 const code_alloc = @import("../code_alloc.zig");
 const a64 = @import("../asm_aarch64.zig");
 const arm_masm = @import("../masm.zig");
@@ -156,15 +157,18 @@ fn emitGraph(a: std.mem.Allocator, owner: *code_alloc.CodeAllocator, graph: ir.G
             } else if (node.op == .constant) {
                 if (plan.locations[node.out.?] == .immediate) continue;
                 try constant(&m, node.immediate);
-            } else if (ir.isConversion(node.op)) {
-                try emission.read(false, node.lhs);
-                if (comptime is_x86) {
-                    if (node.op == .sext_i32) try m.signExtendReg32To64(.rax, .rax) else try m.movReg32(.rax, .rax);
-                } else try m.emit(if (node.op == .sext_i32) a64.sxtw(.x2, .x2) else a64.movRegW(.x2, .x2));
             } else {
                 try emission.read(false, node.lhs);
-                try emission.read(true, node.rhs);
-                try binary(&m, node.op, graph.types[node.lhs]);
+                if (ir.inputCount(node.op) == 2) try emission.read(true, node.rhs);
+                if (ir.isFloatOp(node.op)) {
+                    try float.emit(&m, node.op, graph.types[node.lhs]);
+                } else if (node.op == .reinterpret) {
+                    // Every home contains raw bits; no numeric conversion.
+                } else if (ir.conversionTypes(node.op) != null) {
+                    if (comptime is_x86) {
+                        if (node.op == .sext_i32) try m.signExtendReg32To64(.rax, .rax) else try m.movReg32(.rax, .rax);
+                    } else try m.emit(if (node.op == .sext_i32) a64.sxtw(.x2, .x2) else a64.movRegW(.x2, .x2));
+                } else try binary(&m, node.op, graph.types[node.lhs]);
             }
             try emission.write(node.out.?);
         }

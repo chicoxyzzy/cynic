@@ -41,6 +41,16 @@ fn section(a: std.mem.Allocator, out: *std.ArrayList(u8), id: u8, bytes: []const
     try out.appendSlice(a, bytes);
 }
 
+test "backend float: Wasm f32 and f64 arithmetic executes natively" {
+    if (!code_alloc.supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const f32_module = try moduleBytes(arena.allocator(), &.{ 0x7d, 0x7d }, 0x7d, &.{}, &.{ 0x20, 0, 0x20, 1, 0x92, 0x0b });
+    try std.testing.expectEqual(@as(u64, @as(u32, @bitCast(@as(f32, 3.75)))), try prototype.evaluate(std.testing.allocator, f32_module, 0, &.{ @as(u32, @bitCast(@as(f32, 1.5))), @as(u32, @bitCast(@as(f32, 2.25))) }, 1));
+    const f64_module = try moduleBytes(arena.allocator(), &.{ 0x7c, 0x7c }, 0x7c, &.{}, &.{ 0x20, 0, 0x20, 1, 0xa2, 0x0b });
+    try std.testing.expectEqual(@as(u64, @bitCast(@as(f64, -4.5))), try prototype.evaluate(std.testing.allocator, f64_module, 0, &.{ @as(u64, @bitCast(@as(f64, -2))), @as(u64, @bitCast(@as(f64, 2.25))) }, 1));
+}
+
 pub const sum_body = [_]u8{
     0x02, 0x40, 0x03, 0x40, // block; loop
     0x20, 1,    0x20, 0,    0x4e, 0x0d, 1, // i >= n: break
@@ -155,8 +165,8 @@ test "backend prototype: unsupported operations refuse rather than falling back 
     defer arena.deinit();
     const bytes = try moduleBytes(arena.allocator(), &.{ 0x7f, 0x7f }, 0x7f, &.{}, &.{ 0x20, 0, 0x20, 1, 0x6d, 0x0b });
     try std.testing.expectError(error.UnsupportedOpcode, prototype.evaluate(std.testing.allocator, bytes, 0, &.{ 1, 0 }, 100));
-    const floats = try moduleBytes(arena.allocator(), &.{0x7d}, 0x7d, &.{}, &.{ 0x20, 0, 0x0b });
-    try std.testing.expectError(error.UnsupportedType, prototype.evaluate(std.testing.allocator, floats, 0, &.{0}, 100));
+    const vectors = try moduleBytes(arena.allocator(), &.{0x7b}, 0x7b, &.{}, &.{ 0x20, 0, 0x0b });
+    try std.testing.expectError(error.UnsupportedType, prototype.evaluate(std.testing.allocator, vectors, 0, &.{0}, 100));
 }
 
 test "backend prototype: argument count is checked before native entry" {
