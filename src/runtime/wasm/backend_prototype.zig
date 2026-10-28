@@ -189,9 +189,47 @@ const Instruction = struct {
     immediate: u64 = 0,
     target: u32 = missing,
     pop_count: u32 = 0,
+    val_count: u32 = 0,
+    table_default: bool = false,
     memory_index: u32 = 0,
 };
 const Range = struct { start: usize, end: usize };
+const Control = struct { entered_reachable: bool, reachable: bool };
+
+fn readBlockType(reader: *Reader, module: *const Module) !void {
+    const first = try reader.peek();
+    if (first == 0x40) {
+        _ = try reader.byte();
+    } else if (wasm_types.ValType.fromByte(first) != null or first == 0x63 or first == 0x64) {
+        _ = try valueType(try wasm_types.readValType(reader));
+    } else {
+        const index = try reader.sleb(i33);
+        if (index < 0 or index >= module.types.len) return error.InvalidControlFlow;
+        const signature = module.types[@intCast(index)];
+        if (signature.params.len > ir.max_arguments or signature.results.len > ir.max_arguments) return error.PrototypeLimit;
+        for (signature.params) |ty| _ = try valueType(ty);
+        for (signature.results) |ty| _ = try valueType(ty);
+    }
+}
+
+fn readBranch(inst: *Instruction, function: *const CompiledFunc, side_index: *usize) !void {
+    if (side_index.* >= function.side_table.len) return error.InvalidControlFlow;
+    const branch = function.side_table[side_index.*];
+    side_index.* += 1;
+    const target = @as(i64, inst.offset) + branch.delta_ip;
+    // A branch to the implicit function label targets the synthetic return.
+    if (target < 0 or target > function.body.len) return error.InvalidControlFlow;
+    inst.target = @intCast(target);
+    inst.pop_count = branch.pop_count;
+    inst.val_count = branch.val_count;
+}
+
+fn endsBlock(op: Op) bool {
+    return switch (op) {
+        .br, .br_if, .br_table, .@"if", .@"else", .select, .select_t, .@"return", .@"unreachable" => true,
+        else => false,
+    };
+}
 
 fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature: wasm_types.FuncType, memories: []const wasm_types.MemType, module: *const Module) !OwnedGraph {
     if (signature.results.len != 1) return error.UnsupportedSignature;
@@ -211,8 +249,8 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
     @memset(offsets, missing);
     // Mirror validator reachability: dead branches have no side-table entry.
     // Leaving an inner control restores its parent's reachability state.
-    var reachable: std.ArrayList(bool) = .empty;
-    try reachable.append(a, true);
+    var controls: std.ArrayList(Control) = .empty;
+    try controls.append(a, .{ .entered_reachable = true, .reachable = true });
     var reader = Reader.init(function.body);
     var side_index: usize = 0;
     while (!reader.atEnd()) {
@@ -220,34 +258,49 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
         offsets[offset] = @intCast(instructions.items.len);
         var inst: Instruction = .{ .op = @fromBackingInt(@intCast(try reader.byte())), .offset = @intCast(offset) };
         switch (inst.op) {
-            .nop, .drop => {},
-            .block, .loop => {
-                if (try reader.byte() != 0x40) return error.UnsupportedBlockType;
-                const parent = reachable.items[reachable.items.len - 1];
-                try reachable.append(a, parent);
+            .nop, .drop, .select => {},
+            .select_t => {
+                if (try reader.uleb(u32) != 1) return error.UnsupportedType;
+                _ = try valueType(try wasm_types.readValType(&reader));
+            },
+            .block, .loop, .@"if" => {
+                try readBlockType(&reader, module);
+                const parent = controls.items[controls.items.len - 1].reachable;
+                if (inst.op == .@"if" and parent) try readBranch(&inst, function, &side_index);
+                try controls.append(a, .{ .entered_reachable = parent, .reachable = parent });
+            },
+            .@"else" => {
+                const control = &controls.items[controls.items.len - 1];
+                // The validator emits this entry even after a terminated then arm.
+                if (control.entered_reachable) try readBranch(&inst, function, &side_index);
+                control.reachable = control.entered_reachable;
             },
             .end => {
-                _ = reachable.pop() orelse return error.InvalidControlFlow;
-                if (reachable.items.len == 0) {
-                    if (!reader.atEnd()) return error.InvalidControlFlow;
-                    inst.op = .@"return";
-                }
+                _ = controls.pop() orelse return error.InvalidControlFlow;
+                if (controls.items.len == 0 and !reader.atEnd()) return error.InvalidControlFlow;
             },
             .br, .br_if => {
                 _ = try reader.uleb(u32);
-                if (reachable.items[reachable.items.len - 1]) {
-                    if (side_index >= function.side_table.len) return error.InvalidControlFlow;
-                    const branch = function.side_table[side_index];
-                    side_index += 1;
-                    if (branch.val_count != 0) return error.UnsupportedBlockType;
-                    const target = @as(i64, @intCast(offset)) + branch.delta_ip;
-                    if (target < 0 or target >= function.body.len) return error.InvalidControlFlow;
-                    inst.target = @intCast(target);
-                    inst.pop_count = branch.pop_count;
-                }
-                if (inst.op == .br) reachable.items[reachable.items.len - 1] = false;
+                const control = &controls.items[controls.items.len - 1];
+                if (control.reachable) try readBranch(&inst, function, &side_index);
+                if (inst.op == .br) control.reachable = false;
             },
-            .@"return", .@"unreachable" => reachable.items[reachable.items.len - 1] = false,
+            .br_table => {
+                const count = try reader.uleb(u32);
+                if (count >= ir.max_blocks) return error.PrototypeLimit;
+                const control = &controls.items[controls.items.len - 1];
+                // Expand into bounded conditional edges; each failed comparison
+                // keeps the selector for the next case. No Wasm node enters the IR.
+                for (0..@as(usize, count) + 1) |case| {
+                    _ = try reader.uleb(u32);
+                    inst.immediate = case;
+                    inst.table_default = case == count;
+                    if (control.reachable) try readBranch(&inst, function, &side_index);
+                    if (case != count) try instructions.append(a, inst);
+                }
+                control.reachable = false;
+            },
+            .@"return", .@"unreachable" => controls.items[controls.items.len - 1].reachable = false,
             .local_get, .local_set, .local_tee => inst.immediate = try reader.uleb(u32),
             .call => {
                 inst.immediate = try reader.uleb(u32);
@@ -270,8 +323,10 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
         }
         try instructions.append(a, inst);
     }
-    if (reachable.items.len != 0 or side_index != function.side_table.len) return error.InvalidControlFlow;
+    if (controls.items.len != 0 or side_index != function.side_table.len) return error.InvalidControlFlow;
     if (instructions.items.len == 0) return error.InvalidControlFlow;
+    offsets[function.body.len] = @intCast(instructions.items.len);
+    try instructions.append(a, .{ .op = .@"return", .offset = @intCast(function.body.len) });
 
     // Split only at branch destinations and terminators, then lower reachable
     // blocks in queue order. Every edge carries locals plus the operand stack.
@@ -284,7 +339,7 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
             if (inst.target == missing) return error.InvalidControlFlow;
             leaders[inst.target] = true;
         }
-        if ((inst.op == .br or inst.op == .br_if or inst.op == .@"return" or inst.op == .@"unreachable") and i + 1 < leaders.len)
+        if (endsBlock(inst.op) and i + 1 < leaders.len)
             leaders[i + 1] = true;
     }
     var ranges: std.ArrayList(Range) = .empty;
@@ -373,10 +428,46 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
                     if (out) |value| try stack.append(a, value);
                 },
                 .@"unreachable" => terminator = .{ .trap = .{ .reason = .unreachable_code, .site = inst.offset } },
-                .br, .br_if => {
+                .@"if" => {
+                    const condition = stack.pop() orelse return error.InvalidControlFlow;
+                    terminator = .{ .branch = .{
+                        .condition = condition,
+                        .taken = try builder.edge(byte_block + 1, locals[0..local_types.len], stack.items),
+                        .fallthrough = try builder.branchEdge(inst, locals[0..local_types.len], stack.items),
+                    } };
+                },
+                .select, .select_t => {
+                    const condition = stack.pop() orelse return error.InvalidControlFlow;
+                    const rhs = stack.pop() orelse return error.InvalidControlFlow;
+                    if (stack.items.len == 0) return error.InvalidControlFlow;
+                    const taken = try builder.edge(byte_block + 1, locals[0..local_types.len], stack.items);
+                    stack.items[stack.items.len - 1] = rhs;
+                    terminator = .{ .branch = .{
+                        .condition = condition,
+                        .taken = taken,
+                        .fallthrough = try builder.edge(byte_block + 1, locals[0..local_types.len], stack.items),
+                    } };
+                },
+                .br_table => {
+                    const selector = stack.pop() orelse return error.InvalidControlFlow;
+                    const taken = try builder.branchEdge(inst, locals[0..local_types.len], stack.items);
+                    if (inst.table_default) {
+                        terminator = .{ .jump = taken };
+                    } else {
+                        const case = try builder.constant(&nodes, .i32, inst.immediate);
+                        const condition = try builder.value(.i32);
+                        try nodes.append(a, .{ .op = .eq, .out = condition, .lhs = selector, .rhs = case });
+                        try stack.append(a, selector);
+                        terminator = .{ .branch = .{
+                            .condition = condition,
+                            .taken = taken,
+                            .fallthrough = try builder.edge(byte_block + 1, locals[0..local_types.len], stack.items),
+                        } };
+                    }
+                },
+                .br, .br_if, .@"else" => {
                     const condition = if (inst.op == .br_if) stack.pop() orelse return error.InvalidControlFlow else null;
-                    if (inst.pop_count > stack.items.len) return error.InvalidControlFlow;
-                    const edge = try builder.edge(inst.target, locals[0..local_types.len], stack.items[0 .. stack.items.len - inst.pop_count]);
+                    const edge = try builder.branchEdge(inst, locals[0..local_types.len], stack.items);
                     terminator = if (condition) |cond| .{ .branch = .{
                         .condition = cond,
                         .taken = edge,
@@ -564,5 +655,15 @@ const Builder = struct {
             try self.queue.append(self.a, target);
         }
         return .{ .target = self.mapping[target], .args = args };
+    }
+
+    fn branchEdge(self: *Builder, inst: Instruction, locals: []const ir.Value, stack: []const ir.Value) !ir.Edge {
+        if (inst.val_count > stack.len or inst.pop_count > stack.len - inst.val_count) return error.InvalidControlFlow;
+        if (inst.pop_count == 0) return self.edge(inst.target, locals, stack);
+        const prefix = stack.len - inst.val_count - inst.pop_count;
+        const carried = try self.a.alloc(ir.Value, stack.len - inst.pop_count);
+        @memcpy(carried[0..prefix], stack[0..prefix]);
+        @memcpy(carried[prefix..], stack[stack.len - inst.val_count ..]);
+        return self.edge(inst.target, locals, carried);
     }
 };
