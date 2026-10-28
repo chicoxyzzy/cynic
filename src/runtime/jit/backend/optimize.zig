@@ -82,6 +82,7 @@ pub fn run(a: std.mem.Allocator, graph: ir.Graph, options: Options) !Result {
         // and frontend-owned recovery records remain exactly comparable.
         for (block.params) |value| live[value] = true;
         switch (block.terminator) {
+            .trap => {},
             .return_ => |value| live[value] = true,
             .jump => |edge| markValues(&live, edge.args),
             .branch => |branch| {
@@ -94,6 +95,9 @@ pub fn run(a: std.mem.Allocator, graph: ir.Graph, options: Options) !Result {
         while (i != 0) {
             i -= 1;
             const node = block.nodes[i];
+            if (!isPure(node.op)) if (node.out) |out| {
+                live[out] = true;
+            };
             if (!isPure(node.op) or live[node.out.?]) markInputs(&live, node);
         }
     };
@@ -150,7 +154,7 @@ fn expression(node: ir.Node, types: []const ir.Type) ?Expression {
         0 => key.immediate = node.immediate,
         1 => key.lhs = node.lhs,
         2 => switch (node.op) {
-            .add, .mul, .bit_and, .bit_or, .eq => {
+            .add, .mul, .bit_and, .bit_or, .bit_xor, .eq, .ne => {
                 key.lhs = @min(node.lhs, node.rhs);
                 key.rhs = @max(node.lhs, node.rhs);
             },
@@ -165,11 +169,7 @@ fn expression(node: ir.Node, types: []const ir.Type) ?Expression {
 }
 
 fn isPure(op: ir.Op) bool {
-    // Exhaustive: a new operation must explicitly choose its effect contract.
-    return switch (op) {
-        .constant, .add, .sub, .mul, .bit_and, .bit_or, .eq, .lt_s, .lt_u, .ge_s, .ge_u, .sext_i32, .zext_i32, .trunc_i64, .fadd, .fsub, .fmul, .fdiv, .fmin, .fmax, .fcopysign, .fabs, .fneg, .fsqrt, .feq, .fne, .flt, .fgt, .fle, .fge, .reinterpret, .promote_f32, .demote_f64 => true,
-        .guard => false,
-    };
+    return ir.effect(op) == .pure;
 }
 
 fn fold(node: ir.Node, types: []const ir.Type, constants: []const ?u64) ?u64 {
@@ -183,6 +183,9 @@ fn fold(node: ir.Node, types: []const ir.Type, constants: []const ?u64) ?u64 {
         .zext_i32, .trunc_i64 => ir.normalize(.i32, lhs),
         else => null,
     };
+    // New unary integer operations stay native until they have dedicated
+    // folding rules; a nonexistent second operand must never be consulted.
+    if (ir.inputCount(node.op) != 2) return null;
     const rhs = constants[node.rhs] orelse return null;
     const ty = types[node.lhs];
     const value: u64 = switch (node.op) {
@@ -191,9 +194,15 @@ fn fold(node: ir.Node, types: []const ir.Type, constants: []const ?u64) ?u64 {
         .mul => lhs *% rhs,
         .bit_and => lhs & rhs,
         .bit_or => lhs | rhs,
+        .bit_xor => lhs ^ rhs,
         .eq => @intFromBool(lhs == rhs),
+        .ne => @intFromBool(lhs != rhs),
         .lt_s => @intFromBool(signed(ty, lhs) < signed(ty, rhs)),
         .lt_u => @intFromBool(lhs < rhs),
+        .gt_s => @intFromBool(signed(ty, lhs) > signed(ty, rhs)),
+        .gt_u => @intFromBool(lhs > rhs),
+        .le_s => @intFromBool(signed(ty, lhs) <= signed(ty, rhs)),
+        .le_u => @intFromBool(lhs <= rhs),
         .ge_s => @intFromBool(signed(ty, lhs) >= signed(ty, rhs)),
         .ge_u => @intFromBool(lhs >= rhs),
         else => return null,
@@ -235,6 +244,7 @@ fn remapInputs(a: std.mem.Allocator, original: ir.Node, map: []const ir.Value) !
 
 fn remapTerminator(a: std.mem.Allocator, terminator: ir.Terminator, map: []const ir.Value) !ir.Terminator {
     return switch (terminator) {
+        .trap => terminator,
         .return_ => |value| .{ .return_ = map[value] },
         .jump => |edge| .{ .jump = try remapEdge(a, edge, map) },
         .branch => |branch| .{ .branch = .{

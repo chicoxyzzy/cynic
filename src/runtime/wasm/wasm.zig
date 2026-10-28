@@ -95,4 +95,5 @@ test {
     _ = @import("tests.zig");
     _ = @import("backend_prototype_test.zig");
     _ = @import("backend_float_test.zig");
+    _ = @import("backend_integer_test.zig");
 }

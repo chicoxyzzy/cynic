@@ -7,6 +7,7 @@ const ir = @import("ir.zig");
 const allocation = @import("allocation.zig");
 const optimize = @import("optimize.zig");
 const float = @import("float.zig");
+const integer = @import("integer.zig");
 const code_alloc = @import("../code_alloc.zig");
 const a64 = @import("../asm_aarch64.zig");
 const arm_masm = @import("../masm.zig");
@@ -29,11 +30,12 @@ pub const Stats = struct { loads: u32 = 0, stores: u32 = 0, register_moves: u32 
 
 pub const Outcome = union(enum) {
     returned: u64,
+    trapped: ir.Trap,
     exited: struct { allocator: std.mem.Allocator, id: u32, values: []u64 },
 
     pub fn deinit(self: *Outcome) void {
         switch (self.*) {
-            .returned => {},
+            .returned, .trapped => {},
             .exited => |exit| exit.allocator.free(exit.values),
         }
         self.* = undefined;
@@ -65,6 +67,7 @@ pub const Compiled = struct {
         defer outcome.deinit();
         return switch (outcome) {
             .returned => |value| value,
+            .trapped => |trap| trap.reason.toError(),
             .exited => error.UnexpectedSideExit,
         };
     }
@@ -90,6 +93,16 @@ pub const Compiled = struct {
                     .id = @intCast(id),
                     .values = try self.allocator.dupe(u64, slots[self.spill_slot_count .. self.spill_slot_count + @as(usize, @intCast(count))]),
                 } };
+            },
+            3 => blk: {
+                const reason: ir.TrapReason = switch (slots[result_slot]) {
+                    1 => .division_by_zero,
+                    2 => .integer_overflow,
+                    3 => .unreachable_code,
+                    else => return error.InvalidNativeResult,
+                };
+                if (slots[result_slot + 1] > std.math.maxInt(u32)) return error.InvalidNativeResult;
+                break :blk .{ .trapped = .{ .reason = reason, .site = @intCast(slots[result_slot + 1]) } };
             },
             else => error.InvalidNativeResult,
         };
@@ -162,17 +175,20 @@ fn emitGraph(a: std.mem.Allocator, owner: *code_alloc.CodeAllocator, graph: ir.G
                 if (ir.inputCount(node.op) == 2) try emission.read(true, node.rhs);
                 if (ir.isFloatOp(node.op)) {
                     try float.emit(&m, node.op, graph.types[node.lhs]);
+                } else if (ir.mayTrap(node.op)) {
+                    try emission.divide(node, graph.types[node.lhs]);
                 } else if (node.op == .reinterpret) {
                     // Every home contains raw bits; no numeric conversion.
                 } else if (ir.conversionTypes(node.op) != null) {
                     if (comptime is_x86) {
                         if (node.op == .sext_i32) try m.signExtendReg32To64(.rax, .rax) else try m.movReg32(.rax, .rax);
                     } else try m.emit(if (node.op == .sext_i32) a64.sxtw(.x2, .x2) else a64.movRegW(.x2, .x2));
-                } else try binary(&m, node.op, graph.types[node.lhs]);
+                } else try integer.emit(&m, node.op, graph.types[node.lhs]);
             }
             try emission.write(node.out.?);
         }
         switch (block.terminator) {
+            .trap => |trap| try emission.emitTrap(trap),
             .return_ => |value| {
                 try emission.read(false, value);
                 try emission.storeSlot(emission.transfer_base + ir.max_arguments);
@@ -277,6 +293,30 @@ const Emission = struct {
         }
         try self.m.jump(&labels[edge.target]);
     }
+
+    fn emitTrap(self: *Emission, trap: ir.Trap) !void {
+        try constant(self.m, @backingInt(trap.reason));
+        try self.storeSlot(self.transfer_base + ir.max_arguments);
+        try constant(self.m, trap.site);
+        try self.storeSlot(self.transfer_base + ir.max_arguments + 1);
+        try finish(self.m, 3);
+    }
+
+    fn divide(self: *Emission, node: ir.Node, ty: ir.Type) !void {
+        var zero: Machine.Label = .{};
+        defer zero.deinit(self.m.gpa);
+        var overflow: Machine.Label = .{};
+        defer overflow.deinit(self.m.gpa);
+        var done: Machine.Label = .{};
+        defer done.deinit(self.m.gpa);
+        try integer.divide(self.m, node.op, ty, &zero, &overflow);
+        try self.m.jump(&done);
+        try self.m.bind(&zero);
+        try self.emitTrap(.{ .reason = .division_by_zero, .site = node.trap_site.? });
+        try self.m.bind(&overflow);
+        try self.emitTrap(.{ .reason = .integer_overflow, .site = node.trap_site.? });
+        try self.m.bind(&done);
+    }
 };
 
 fn scratchRegister(rhs: bool) Reg {
@@ -326,52 +366,5 @@ fn finish(m: *Machine, status: u32) !void {
     } else {
         try m.movImm64(.x0, status);
         try m.emit(a64.ret());
-    }
-}
-
-fn binary(m: *Machine, op: ir.Op, ty: ir.Type) !void {
-    if (comptime is_x86) {
-        switch (op) {
-            .add => if (ty == .i32) try m.addReg32(.rax, .r10) else try m.addReg64(.rax, .r10),
-            .sub => if (ty == .i32) try m.subReg32(.rax, .r10) else try m.subReg64(.rax, .r10),
-            .mul => if (ty == .i32) try m.imulReg32(.rax, .r10) else try m.imulReg64(.rax, .r10),
-            .bit_and => if (ty == .i32) try m.andReg32(.rax, .r10) else try m.andReg64(.rax, .r10),
-            .bit_or => if (ty == .i32) try m.orReg32(.rax, .r10) else try m.orReg64(.rax, .r10),
-            .constant => return error.InvalidGraph,
-            else => {
-                if (ty == .i32) try m.cmpReg32(.rax, .r10) else try m.cmpReg64(.rax, .r10);
-                const condition: x86.Cond = switch (op) {
-                    .eq => .equal,
-                    .lt_s => .less,
-                    .lt_u => .below,
-                    .ge_s => .greater_or_equal,
-                    .ge_u => .above_or_equal,
-                    else => return error.InvalidGraph,
-                };
-                try m.setCond32(.rax, condition);
-            },
-        }
-    } else {
-        switch (op) {
-            .add => try m.emit(a64.addReg(.x2, .x2, .x3)),
-            .sub => try m.emit(a64.subReg(.x2, .x2, .x3)),
-            .mul => try m.emit(a64.mul(.x2, .x2, .x3)),
-            .bit_and => try m.emit(a64.andReg(.x2, .x2, .x3)),
-            .bit_or => try m.emit(a64.orrReg(.x2, .x2, .x3)),
-            .constant => return error.InvalidGraph,
-            else => {
-                try m.emit(if (ty == .i32) a64.cmpRegW(.x2, .x3) else a64.cmpReg(.x2, .x3));
-                const condition: a64.Cond = switch (op) {
-                    .eq => .eq,
-                    .lt_s => .lt,
-                    .lt_u => .cc,
-                    .ge_s => .ge,
-                    .ge_u => .cs,
-                    else => return error.InvalidGraph,
-                };
-                try m.emit(a64.csetW(.x2, condition));
-            },
-        }
-        if (ty == .i32) try m.emit(a64.movRegW(.x2, .x2));
     }
 }

@@ -79,6 +79,15 @@ their normal paths would spend startup time without proving a benefit.
   and B3's constant-materialization placement illustrate the same distinction
   between a constant and its physical home. Cynic starts with a bounded
   literal-only policy, not expression recomputation or global placement.
+- B3's [effects and trapping operations](https://webkit.org/docs/b3/intermediate-representation.html)
+  distinguish observable exits from removable calculations. Cranelift's
+  [defined-semantics design](https://cranelift.dev/) is the relevant safety
+  constraint: hostile arithmetic must not become compiler undefined behavior
+  or a host signal. Cynic explicitly checks native division and returns a
+  structured trap. The [CLIR study](https://arxiv.org/abs/2606.26977) motivates
+  liveness-dense SSA tests across architectures; tests here keep allocated
+  values live across fixed-register operations, rather than only checking
+  standalone arithmetic results.
 
 ## First executable slice
 
@@ -88,8 +97,8 @@ The shared code lives in `src/runtime/jit/backend/`; the adapters live in
 JS values/realms nor Wasm types, bytecode, instances, or Cells.
 
 The subset has i32/i64 and f32/f64 constants, wrapping integer arithmetic,
-strict scalar FP arithmetic, comparisons, bitwise AND/OR, explicit width
-conversions, ordered guards, block parameters, jumps, conditional branches,
+strict scalar FP arithmetic, comparisons, bitwise operations, explicit width
+conversions, ordered guards/traps, block parameters, jumps, conditional branches,
 and a single scalar result. The Wasm adapter accepts locals and void block/loop
 constructs with `br`/`br_if`. Unsupported instructions or types are an explicit
 refusal, even in dead bytecode; there is no silent fallback that could make an
@@ -224,7 +233,7 @@ commoned plus removed nodes.
 
 Arithmetic folding evaluates only operations whose operands are known integer
 constants within the same block. It covers wrapping i32/i64 add/subtract/
-multiply, bitwise AND/OR, signed/unsigned comparisons, and explicit width
+multiply, bitwise AND/OR/XOR, signed/unsigned comparisons, and explicit width
 conversions; same-width reinterpretation also folds by copying literal bits.
 It does not apply algebraic identities to unknown values or infer constants
 for block parameters. Integer truncation, two's-complement interpretation,
@@ -233,7 +242,7 @@ folding. Ohaimark still owns tag checks, overflow, and negative-zero guards.
 
 CSE visits definitions in block order, after each possible fold. Its key
 contains the opcode, result type, canonical operand identities, and constant
-bits where applicable. Only integer add/multiply, AND/OR, and equality use
+bits where applicable. Only integer add/multiply, AND/OR/XOR, and equality/inequality use
 unordered operand keys; subtraction, ordered comparisons, and sign/zero
 extension remain distinct. It does not reassociate arithmetic or commute JS
 operand evaluation: ECMA-262 §13.15.3-4
@@ -242,7 +251,8 @@ remain the frontend's responsibility.
 
 Each duplicate is replaced by an earlier local definition. The pass rewrites
 later operands, guard predicates/captures, returns, branch conditions, and
-edge arguments before DCE. Guards are never commoned, removed, or moved;
+edge arguments before DCE. Guards and potentially trapping operations are
+never folded, commoned, removed, or moved;
 nontrapping pure calculations can reuse values across a guard without changing
 its ordered recovery record. No definitions are shared across blocks. The
 temporary table holds at most 2,048 entries, reuses capacity between blocks,
@@ -251,13 +261,16 @@ alias chasing and do not depend on numeric value-ID order. CSE remains useful
 with folding and DCE disabled.
 
 DCE walks each block backwards from returns, branch conditions, edge
-arguments, and every guard predicate/capture. A guard is retained even if its
+arguments, trapping instructions, and every guard predicate/capture. A guard is retained even if its
 predicate is constant. Parameter lists, capture ordering (including duplicate
 values), exit IDs, edges, and block order stay unchanged. Consequently loop
 behavior and block-budget exhaustion remain directly comparable with the
 unoptimized graph. Unused pure chains disappear transitively; unused block
 parameters and unreachable blocks do not. An exhaustive purity switch forces
 every future opcode to choose an effect contract before it can be removed.
+The effect classification lives in the IR, not just in an optimizer-local
+allowlist. A trapping definition remains in SSA even if its result is unused;
+the allocator may discard the result home but never the operation.
 
 The optimizer validates its input before any removal, owns a separate output
 graph, densely renumbers surviving values, and verifies the result before
@@ -371,6 +384,50 @@ operations are still explicit refusals, not interpreter fallback or complete
 scalar coverage. Production resource policy and FP-environment integration
 remain part of the rollout work.
 
+## Integer operations and traps
+
+The Wasm adapter now lowers the complete scalar integer numeric family for
+i32/i64: arithmetic, signed/unsigned division and remainder, bitwise operations,
+masked shifts/rotates, zero/leading/trailing/population counts, comparisons,
+integer width conversions, and sign-extension operations. This does not include
+integer/float numeric conversions, memory operations, or the `select` control
+instruction. It also accepts `unreachable`, including in dead validated code.
+Unsupported operations such as calls still refuse even in dead bytecode.
+
+Division and remainder declare `may_trap` effects and require a frontend-owned
+`trap_site`; pure operations and guards reject that metadata. A terminal `trap`
+needs no result value. `Compiled.runOutcome` returns `trapped: { reason, site }`
+separately from normal return and recoverable guard exit. The Wasm frontend uses
+the opcode byte offset within the validated function's instruction stream;
+the backend does not interpret it. `Compiled.run` translates the reason to
+`IntegerDivideByZero`, `IntegerOverflow`, or `Unreachable`. Malformed native
+status/metadata is rejected before it reaches a consumer.
+
+Following [Wasm numeric semantics](https://webassembly.github.io/spec/core/exec/numerics.html),
+zero divisors trap, signed MIN/-1 division traps, but signed MIN%-1 returns zero.
+x86 checks both dangerous cases before IDIV so neither can raise a host signal;
+unsigned DIV uses a zero high dividend. AArch64 checks the same conditions
+explicitly because its integer division does not trap. Branches to trap returns
+stay at the original operation, after the block budget poll. Unused results,
+known constants, duplicate divisions, guards, and untaken branches cannot erase
+or reorder the first observable trap.
+
+These are low-level machine-integer semantics, not ECMAScript
+[Number::divide / Number::remainder](https://tc39.es/ecma262/multipage/ecmascript-data-types-and-values.html#sec-numeric-types-number-divide)
+(ECMA-262 section 6.1.6.1.5-6). JS specialization/coercion stays in Ohaimark; its
+current adapter emits no trapping integer operations and rejects an unexpected
+native trap rather than treating it as a deoptimization or a JS value. No
+JS-visible surface or SES policy changes.
+
+The x86 allocator still owns RCX/RDX. Shifts and sign extension save/restore RCX
+through R11; division saves/restores RDX after safety checks. R10/R11 are scratch
+only. CLZ/CTZ handle zero explicitly with baseline bit scans; population count
+uses a bounded SWAR sequence, not an assumed POPCNT instruction. AArch64 uses
+its baseline scalar and Advanced SIMD encoders. Tests cover both widths and
+architectures, boundary shift counts, negative dividends, exact trap reasons
+and sites, all optimizer switches, live homes across fixed-register operations,
+allocation failure, guard ordering, and untaken traps.
+
 ## Safety and non-goals
 
 - No native host calls, heap dereferences, Wasm memory operations, SIMD,
@@ -396,8 +453,8 @@ remain part of the rollout work.
 
 ## Contracts before expansion
 
-Before memory operations or code motion, add conservative explicit read/write
-effects, alias domains, trap ordering, and atomic/fence semantics. A guard,
+Scalar traps now have explicit ordering. Before memory operations or code motion,
+add conservative explicit read/write effects, alias domains, and atomic/fence semantics. A guard,
 budget poll, call, or trap must not disappear or move past an observable
 operation merely because its result is unused.
 
@@ -459,17 +516,18 @@ failures, but is not evidence that an unimplemented backend capability works.
    allocation, with exact unoptimized comparisons. Better instruction
    selection remains next. Add load elimination or loop motion only after
    effects are modeled and tested.
-5. **Wider Wasm coverage:** core scalar floating point now runs natively.
-   Finish rounding/numeric conversions and integer operations with explicit
-   traps, then memory, calls, and runtime integration. Preserve bounds checks,
+5. **Wider Wasm coverage:** core scalar floating point and the complete scalar
+   integer family now run natively, with explicit ordered integer traps.
+   Finish rounding/numeric conversions, then memory, calls, and runtime
+   integration. Preserve bounds checks,
    memory-growth invalidation, resource metering, and executable ownership.
 6. **Rollout decision:** paired warm/cold execution measurements, compilation
    latency, peak compiler allocation, installed code size, refusal/entry
    telemetry, differential fuzzing, and spec-suite gates. No automatic
    default-on graduation or new JS tier follows from finishing the prototype.
 
-The next capability work is the remaining scalar numeric surface and explicit
-trap/effect contracts. Operand-move reduction and immediate/compare-branch
+The next capability work is floating-point rounding and numeric conversions,
+then memory/call effects and runtime integration. Operand-move reduction and immediate/compare-branch
 selection remain measured optimization work, not substitutes for coverage.
 Keep each change independently measurable against disabled variants and
 unoptimized references.
