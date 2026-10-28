@@ -4,8 +4,12 @@ const ir = @import("ir.zig");
 
 pub const max_registers = 4;
 pub const Mode = enum { scratch, linear_scan };
-pub const Options = struct { mode: Mode = .linear_scan, register_count: u8 = max_registers };
-pub const Location = union(enum) { none, register: u8, spill: u32 };
+pub const Options = struct {
+    mode: Mode = .linear_scan,
+    register_count: u8 = max_registers,
+    rematerialize_constants: bool = true,
+};
+pub const Location = union(enum) { none, register: u8, spill: u32, immediate: u64 };
 pub const LiveRange = struct { block: u32, start: u32, end: u32, uses: u32 = 0 };
 
 pub const Plan = struct {
@@ -38,7 +42,13 @@ pub const Plan = struct {
             var owners: [max_registers]?ir.Value = @splat(null);
             for (block.params) |value| plan.assignRegister(value, &owners);
             for (block.nodes) |node| {
-                if (node.out) |value| plan.assignRegister(value, &owners);
+                if (node.out) |value| {
+                    if (options.rematerialize_constants and node.op == .constant and
+                        plan.ranges[value].uses != 0 and isCheapConstant(node.immediate))
+                    {
+                        plan.locations[value] = .{ .immediate = node.immediate };
+                    } else plan.assignRegister(value, &owners);
+                }
             }
             // Assign whole-lifetime spills only after register selection, so
             // evicted intervals get a definition-time home, not a late copy.
@@ -78,8 +88,15 @@ pub const Plan = struct {
                 .spill => |slot| if (slot >= self.spill_slot_count) {
                     return error.InvalidAllocation;
                 },
+                .immediate => |bits| {
+                    // Recompute the defining node from the verified lifetime;
+                    // never trust an allocator-supplied value or a block input.
+                    if (actual.start < 2) return error.InvalidAllocation;
+                    const node = graph.blocks[actual.block].nodes[(actual.start - 2) / 2];
+                    if (node.op != .constant or node.immediate != bits) return error.InvalidAllocation;
+                },
             }
-            if (location == .none) continue;
+            if (location == .none or location == .immediate) continue;
             for (self.locations[0..i], self.ranges[0..i]) |other, other_range| {
                 // Include dead definitions with a home: their writes must not
                 // clobber another value, even though they have no later use.
@@ -125,6 +142,18 @@ pub const Plan = struct {
         }
     }
 };
+
+fn isCheapConstant(bits: u64) bool {
+    // At most one nonzero 16-bit lane: one MOVZ on AArch64 and one
+    // immediate move on x86_64. Keep multi-instruction literals in homes.
+    var remaining = bits;
+    var nonzero: u3 = 0;
+    for (0..4) |_| {
+        if (@as(u16, @truncate(remaining)) != 0) nonzero += 1;
+        remaining >>= 16;
+    }
+    return nonzero <= 1;
+}
 
 fn computeRanges(graph: ir.Graph, ranges: []LiveRange) void {
     for (graph.blocks, 0..) |block, block_index| {

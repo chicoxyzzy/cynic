@@ -42,12 +42,16 @@ pub fn main(init: std.process.Init) !void {
     var compiled = try prototype.native.compile(a, &owner, graph.graph);
     defer compiled.deinit();
     const compile_us = compile_start.untilNow(init.io, .awake).toMicroseconds();
+    const no_remat_start = std.Io.Clock.now(.awake, init.io);
+    var no_remat = try prototype.native.compileWithOptions(a, &owner, graph.graph, .{ .rematerialize_constants = false });
+    defer no_remat.deinit();
+    const no_remat_us = no_remat_start.untilNow(init.io, .awake).toMicroseconds();
     const no_cse_start = std.Io.Clock.now(.awake, init.io);
     var no_cse = try prototype.native.compileWithOptions(a, &owner, graph.graph, .{ .optimization = .{ .common_subexpression_elimination = false } });
     defer no_cse.deinit();
     const no_cse_us = no_cse_start.untilNow(init.io, .awake).toMicroseconds();
     const allocated_start = std.Io.Clock.now(.awake, init.io);
-    var allocated = try prototype.native.compileWithOptions(a, &owner, graph.graph, .{ .optimization = no_optimization });
+    var allocated = try prototype.native.compileWithOptions(a, &owner, graph.graph, .{ .optimization = no_optimization, .rematerialize_constants = false });
     defer allocated.deinit();
     const allocated_us = allocated_start.untilNow(init.io, .awake).toMicroseconds();
     const oracle_start = std.Io.Clock.now(.awake, init.io);
@@ -68,6 +72,7 @@ pub fn main(init: std.process.Init) !void {
         for (0..n) |i| expected +%= @as(u32, @intCast(i)) *% @as(u32, @intCast(i));
         const actual = try compiled.run(&.{n}, 10_000);
         native_entries += 1;
+        if (actual != try no_remat.run(&.{n}, 10_000)) return error.ResultMismatch;
         if (actual != expected or actual != try no_cse.run(&.{n}, 10_000) or actual != try oracle.run(&.{n}, 10_000) or actual != try allocated.run(&.{n}, 10_000)) return error.ResultMismatch;
         for ([_]bool{ false, true }) |spasm| {
             instance.spasm_enabled = spasm;
@@ -81,6 +86,10 @@ pub fn main(init: std.process.Init) !void {
     var checksum: u64 = 0;
     for (0..100) |_| checksum +%= try compiled.run(&.{1000}, 10_000);
     const run_us = run_start.untilNow(init.io, .awake).toMicroseconds();
+    const no_remat_run_start = std.Io.Clock.now(.awake, init.io);
+    var no_remat_checksum: u64 = 0;
+    for (0..100) |_| no_remat_checksum +%= try no_remat.run(&.{1000}, 10_000);
+    const no_remat_run_us = no_remat_run_start.untilNow(init.io, .awake).toMicroseconds();
     const no_cse_run_start = std.Io.Clock.now(.awake, init.io);
     var no_cse_checksum: u64 = 0;
     for (0..100) |_| no_cse_checksum +%= try no_cse.run(&.{1000}, 10_000);
@@ -93,18 +102,18 @@ pub fn main(init: std.process.Init) !void {
     var oracle_checksum: u64 = 0;
     for (0..100) |_| oracle_checksum +%= try oracle.run(&.{1000}, 10_000);
     const oracle_run_us = oracle_run_start.untilNow(init.io, .awake).toMicroseconds();
-    if (checksum != oracle_checksum or checksum != allocated_checksum or checksum != no_cse_checksum) return error.ResultMismatch;
+    if (checksum != oracle_checksum or checksum != allocated_checksum or checksum != no_cse_checksum or checksum != no_remat_checksum) return error.ResultMismatch;
     std.debug.print(
         "Shared backend experiment (not a production tier)\n" ++
-            "Columns: optimized / CSE-off / allocation-only / unoptimized scratch\n" ++
+            "Columns: optimized / rematerialization-off / CSE-off / allocation-only / unoptimized scratch\n" ++
             "Wasm frontend:\n" ++
             "  verified SSA: {d} blocks, {d} values\n" ++
-            "  decode + validate + lower: {d} us; optimize + allocate + emit: {d} / {d} / {d} / {d} us\n" ++
+            "  decode + validate + lower: {d} us; optimize + allocate + emit: {d} / {d} / {d} / {d} / {d} us\n" ++
             "  matching results: {d}; entries per variant: {d}; Spasm entries: {d}\n" ++
-            "  100 bounded calls, including scratch allocation: {d} / {d} / {d} / {d} us; checksum: {d}\n",
-        .{ graph.graph.blocks.len, graph.graph.types.len, lower_us, compile_us, no_cse_us, allocated_us, oracle_us, native_entries, native_entries, instance.spasm_runs, run_us, no_cse_run_us, allocated_run_us, oracle_run_us, checksum },
+            "  100 bounded calls, including scratch allocation: {d} / {d} / {d} / {d} / {d} us; checksum: {d}\n",
+        .{ graph.graph.blocks.len, graph.graph.types.len, lower_us, compile_us, no_remat_us, no_cse_us, allocated_us, oracle_us, native_entries, native_entries, instance.spasm_runs, run_us, no_remat_run_us, no_cse_run_us, allocated_run_us, oracle_run_us, checksum },
     );
-    try reportAllocation(&compiled, &no_cse, &allocated, &oracle);
+    try reportAllocation(&compiled, &no_remat, &no_cse, &allocated, &oracle);
     try runJavascriptDemo(init, &owner);
     std.debug.print("Normal tier selection is unchanged. These are diagnostics, not a speedup claim.\n", .{});
 }
@@ -126,12 +135,16 @@ fn runJavascriptDemo(init: std.process.Init, owner: *prototype.CodeAllocator) !v
     var program = try js.Program.build(a, owner, chunk);
     defer program.deinit();
     const compile_us = compile_start.untilNow(init.io, .awake).toMicroseconds();
+    const no_remat_start = std.Io.Clock.now(.awake, init.io);
+    var no_remat = try js.Program.buildWithOptions(a, owner, chunk, .{ .rematerialize_constants = false });
+    defer no_remat.deinit();
+    const no_remat_us = no_remat_start.untilNow(init.io, .awake).toMicroseconds();
     const no_cse_start = std.Io.Clock.now(.awake, init.io);
     var no_cse = try js.Program.buildWithOptions(a, owner, chunk, .{ .optimization = .{ .common_subexpression_elimination = false } });
     defer no_cse.deinit();
     const no_cse_us = no_cse_start.untilNow(init.io, .awake).toMicroseconds();
     const allocated_start = std.Io.Clock.now(.awake, init.io);
-    var allocated = try js.Program.buildWithOptions(a, owner, chunk, .{ .optimization = no_optimization });
+    var allocated = try js.Program.buildWithOptions(a, owner, chunk, .{ .optimization = no_optimization, .rematerialize_constants = false });
     defer allocated.deinit();
     const allocated_us = allocated_start.untilNow(init.io, .awake).toMicroseconds();
     const oracle_start = std.Io.Clock.now(.awake, init.io);
@@ -153,6 +166,9 @@ fn runJavascriptDemo(init: std.process.Init, owner: *prototype.CodeAllocator) !v
         defer allocated_outcome.deinit();
         var no_cse_outcome = try no_cse.run(.{ .accumulator = Value.undefined_, .registers = registers, .block_budget = 10_000 });
         defer no_cse_outcome.deinit();
+        var no_remat_outcome = try no_remat.run(.{ .accumulator = Value.undefined_, .registers = registers, .block_budget = 10_000 });
+        defer no_remat_outcome.deinit();
+        try compareOutcomes(outcome, no_remat_outcome);
         try compareOutcomes(outcome, no_cse_outcome);
         try compareOutcomes(outcome, allocated_outcome);
         try compareOutcomes(outcome, oracle_outcome);
@@ -179,11 +195,11 @@ fn runJavascriptDemo(init: std.process.Init, owner: *prototype.CodeAllocator) !v
     std.debug.print(
         "JS frontend (same sum-of-squares loop, checked Int32):\n" ++
             "  verified SSA: {d} blocks, {d} values\n" ++
-            "  parse + bytecode: {d} us; specialize + lower + optimize + allocate + emit: {d} / {d} / {d} / {d} us\n" ++
+            "  parse + bytecode: {d} us; specialize + lower + optimize + allocate + emit: {d} / {d} / {d} / {d} / {d} us\n" ++
             "  matching Lantern/oracle results: {d}; entries per variant: {d}; resumed guard exits: {d}\n",
-        .{ program.graph.blocks.len, program.graph.types.len, frontend_us, compile_us, no_cse_us, allocated_us, oracle_us, native_entries, native_entries, recoveries },
+        .{ program.graph.blocks.len, program.graph.types.len, frontend_us, compile_us, no_remat_us, no_cse_us, allocated_us, oracle_us, native_entries, native_entries, recoveries },
     );
-    try reportAllocation(&program.compiled, &no_cse.compiled, &allocated.compiled, &oracle.compiled);
+    try reportAllocation(&program.compiled, &no_remat.compiled, &no_cse.compiled, &allocated.compiled, &oracle.compiled);
 }
 
 fn compareOutcomes(actual: anytype, expected: @TypeOf(actual)) !void {
@@ -203,16 +219,17 @@ fn compareOutcomes(actual: anytype, expected: @TypeOf(actual)) !void {
     }
 }
 
-fn reportAllocation(compiled: *const prototype.native.Compiled, no_cse: *const prototype.native.Compiled, allocated: *const prototype.native.Compiled, oracle: *const prototype.native.Compiled) !void {
+fn reportAllocation(compiled: *const prototype.native.Compiled, no_remat: *const prototype.native.Compiled, no_cse: *const prototype.native.Compiled, allocated: *const prototype.native.Compiled, oracle: *const prototype.native.Compiled) !void {
     const memory_ops = compiled.stats.loads + compiled.stats.stores;
     const oracle_memory_ops = oracle.stats.loads + oracle.stats.stores;
     if (compiled.scratchSlotCount() >= oracle.scratchSlotCount() or memory_ops >= oracle_memory_ops)
         return error.MissingAllocationImprovement;
     std.debug.print(
         "  IR nodes: {d} -> {d}; folded: {d}; commoned: {d}; dead: {d}\n" ++
-            "  code: {d} / {d} / {d} / {d} bytes; call scratch: {d} / {d} / {d} / {d} bytes\n" ++
-            "  static emitted loads + stores: {d} / {d} / {d} / {d}; register moves: {d} / {d} / {d} / {d}\n",
-        .{ compiled.optimization.input_nodes, compiled.optimization.output_nodes, compiled.optimization.folded_nodes, compiled.optimization.commoned_nodes, compiled.optimization.removed_nodes, compiled.code.bytes().?.len, no_cse.code.bytes().?.len, allocated.code.bytes().?.len, oracle.code.bytes().?.len, compiled.scratchSlotCount() * 8, no_cse.scratchSlotCount() * 8, allocated.scratchSlotCount() * 8, oracle.scratchSlotCount() * 8, memory_ops, no_cse.stats.loads + no_cse.stats.stores, allocated.stats.loads + allocated.stats.stores, oracle_memory_ops, compiled.stats.register_moves, no_cse.stats.register_moves, allocated.stats.register_moves, oracle.stats.register_moves },
+            "  code: {d} / {d} / {d} / {d} / {d} bytes; call scratch: {d} / {d} / {d} / {d} / {d} bytes\n" ++
+            "  static emitted loads + stores: {d} / {d} / {d} / {d} / {d}; register moves: {d} / {d} / {d} / {d} / {d}\n" ++
+            "  static rematerializations: {d} / {d} / {d} / {d} / {d}\n",
+        .{ compiled.optimization.input_nodes, compiled.optimization.output_nodes, compiled.optimization.folded_nodes, compiled.optimization.commoned_nodes, compiled.optimization.removed_nodes, compiled.code.bytes().?.len, no_remat.code.bytes().?.len, no_cse.code.bytes().?.len, allocated.code.bytes().?.len, oracle.code.bytes().?.len, compiled.scratchSlotCount() * 8, no_remat.scratchSlotCount() * 8, no_cse.scratchSlotCount() * 8, allocated.scratchSlotCount() * 8, oracle.scratchSlotCount() * 8, memory_ops, no_remat.stats.loads + no_remat.stats.stores, no_cse.stats.loads + no_cse.stats.stores, allocated.stats.loads + allocated.stats.stores, oracle_memory_ops, compiled.stats.register_moves, no_remat.stats.register_moves, no_cse.stats.register_moves, allocated.stats.register_moves, oracle.stats.register_moves, compiled.stats.rematerializations, no_remat.stats.rematerializations, no_cse.stats.rematerializations, allocated.stats.rematerializations, oracle.stats.rematerializations },
     );
 }
 

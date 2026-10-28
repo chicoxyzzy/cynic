@@ -1,5 +1,5 @@
-//! Experimental leaf backend. Values live in caller-saved registers or bounded
-//! caller-owned spill slots. No stack frame, host calls, GC, or code patching. Opaque
+//! Experimental leaf backend. Values use caller-saved registers, bounded spills,
+//! or rematerialized literals. No stack frame, host calls, GC, or code patching. Opaque
 //! frontend words may contain tagged references; the backend never dereferences them.
 const std = @import("std");
 const builtin = @import("builtin");
@@ -21,9 +21,10 @@ const Entry = *const fn ([*]u64, u64) callconv(.c) u32;
 pub const Options = struct {
     allocation: allocation.Mode = .linear_scan,
     register_count: u8 = allocation.max_registers,
+    rematerialize_constants: bool = true,
     optimization: optimize.Options = .{},
 };
-pub const Stats = struct { loads: u32 = 0, stores: u32 = 0, register_moves: u32 = 0 };
+pub const Stats = struct { loads: u32 = 0, stores: u32 = 0, register_moves: u32 = 0, rematerializations: u32 = 0 };
 
 pub const Outcome = union(enum) {
     returned: u64,
@@ -117,7 +118,11 @@ pub fn compileWithOptions(a: std.mem.Allocator, owner: *code_alloc.CodeAllocator
 }
 
 fn emitGraph(a: std.mem.Allocator, owner: *code_alloc.CodeAllocator, graph: ir.Graph, options: Options) !Compiled {
-    var plan = try allocation.Plan.build(a, graph, .{ .mode = options.allocation, .register_count = options.register_count });
+    var plan = try allocation.Plan.build(a, graph, .{
+        .mode = options.allocation,
+        .register_count = options.register_count,
+        .rematerialize_constants = options.rematerialize_constants,
+    });
     defer plan.deinit();
     var m = Machine.init(a);
     defer m.deinit();
@@ -149,6 +154,7 @@ fn emitGraph(a: std.mem.Allocator, owner: *code_alloc.CodeAllocator, graph: ir.G
                 try m.bind(&success);
                 continue;
             } else if (node.op == .constant) {
+                if (plan.locations[node.out.?] == .immediate) continue;
                 try constant(&m, node.immediate);
             } else if (ir.isConversion(node.op)) {
                 try emission.read(false, node.lhs);
@@ -210,6 +216,10 @@ const Emission = struct {
             .none => return error.InvalidAllocation,
             .spill => |slot| try self.loadSlot(rhs, slot),
             .register => |register| try self.move(scratchRegister(rhs), allocatedRegister(register)),
+            .immediate => |bits| {
+                try self.m.movImm64(scratchRegister(rhs), bits);
+                self.stats.rematerializations += 1;
+            },
         }
     }
 
@@ -218,6 +228,7 @@ const Emission = struct {
             .none => {},
             .spill => |slot| try self.storeSlot(slot),
             .register => |register| try self.move(allocatedRegister(register), scratchRegister(false)),
+            .immediate => return error.InvalidAllocation,
         }
     }
 

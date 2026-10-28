@@ -15,6 +15,13 @@ const chain: ir.Graph = .{
     }, .terminator = .{ .return_ = 4 } }},
 };
 
+test "backend rematerialization: cheap constants do not occupy spill homes" {
+    var plan = try allocation.Plan.build(a, chain, .{ .register_count = 0 });
+    defer plan.deinit();
+    try std.testing.expectEqual(@as(u32, 1), plan.spill_slot_count);
+    try plan.verify(chain);
+}
+
 test "backend allocation: read-before-write lifetimes reuse registers and spill slots" {
     var plan = try allocation.Plan.build(a, chain, .{ .register_count = 2 });
     defer plan.deinit();
@@ -22,7 +29,7 @@ test "backend allocation: read-before-write lifetimes reuse registers and spill 
     try std.testing.expect(std.meta.eql(plan.locations[0], plan.locations[2]));
     try std.testing.expect(plan.ranges[0].end < plan.ranges[2].start);
     try plan.verify(chain);
-    var spilled = try allocation.Plan.build(a, chain, .{ .register_count = 0 });
+    var spilled = try allocation.Plan.build(a, chain, .{ .register_count = 0, .rematerialize_constants = false });
     defer spilled.deinit();
     try std.testing.expectEqual(@as(u32, 2), spilled.spill_slot_count);
     var reference = try allocation.Plan.build(a, chain, .{ .mode = .scratch });

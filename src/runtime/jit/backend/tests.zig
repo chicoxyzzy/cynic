@@ -3,6 +3,30 @@ const ir = @import("ir.zig");
 const native = @import("native.zig");
 const CodeAllocator = @import("../code_alloc.zig").CodeAllocator;
 
+test "backend rematerialization: constant return needs no spill or register moves" {
+    if (!native.supported) return error.SkipZigTest;
+    const graph: ir.Graph = .{
+        .types = &.{.i64},
+        .argument_types = &.{},
+        .result_type = .i64,
+        .blocks = &.{.{ .params = &.{}, .nodes = &.{
+            .{ .op = .constant, .out = 0, .immediate = 0xffff_0000_0000_0000 },
+        }, .terminator = .{ .return_ = 0 } }},
+    };
+    var owner = try CodeAllocator.init(std.testing.allocator, 64 * 1024);
+    defer owner.deinit();
+    for ([_]u8{ 0, 1, 4 }) |registers| {
+        var code = try native.compileWithOptions(std.testing.allocator, &owner, graph, .{ .register_count = registers });
+        defer code.deinit();
+        try std.testing.expectEqual(@as(u64, 0xffff_0000_0000_0000), try code.run(&.{}, 1));
+        try std.testing.expectEqual(@as(usize, 0), code.spill_slot_count);
+        try std.testing.expectEqual(@as(u32, 0), code.stats.loads);
+        try std.testing.expectEqual(@as(u32, 1), code.stats.stores);
+        try std.testing.expectEqual(@as(u32, 0), code.stats.register_moves);
+        try std.testing.expectError(error.BudgetExhausted, code.run(&.{}, 0));
+    }
+}
+
 test "backend prototype: verifier rejects malformed definitions and types" {
     var types = [_]ir.Type{ .i32, .i32 };
     var nodes = [_]ir.Node{.{ .op = .constant, .out = 1 }};

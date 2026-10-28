@@ -67,6 +67,12 @@ their normal paths would spend startup time without proving a benefit.
   Briggs/Cooper/Simpson's [Value Numbering](https://bernsteinbear.com/assets/img/briggs-gvn.pdf)
   supplies the local hash-based algorithm; global value numbering and code
   motion remain outside this pass.
+- [Briggs, Cooper, and Torczon's rematerialization work](https://doi.org/10.1145/143095.143143)
+  motivates recreating cheap values instead of spilling them. V8 Maglev's
+  [constant gap moves](https://github.com/v8/v8/blob/main/src/maglev/maglev-regalloc.cc)
+  and B3's constant-materialization placement illustrate the same distinction
+  between a constant and its physical home. Cynic starts with a bounded
+  literal-only policy, not expression recomputation or global placement.
 
 ## First executable slice
 
@@ -86,17 +92,18 @@ execution test pass without running generated code.
 Run the isolated correctness demo with `zig build backend-prototype`. It
 compares the same sum-of-squares loop through both frontends: Wasm against
 Sarcasm and native Spasm, JS against Lantern, and both against independent
-arithmetic oracles. Each frontend also runs CSE-off, allocation-only, and
-unoptimized all-scratch variants, separating CSE, other passes, and allocator
-gains.
+arithmetic oracles. Each frontend also runs rematerialization-off, CSE-off,
+allocation-only, and unoptimized all-scratch variants. Allocation-only disables
+all graph transformations and constant rematerialization; CSE-off retains
+folding, DCE, and rematerialization.
 A JS case overflows Int32 after successful iterations and
 must recover in Lantern, not restart the function. It reports native entry
 and recovery counts, IR size, code size, per-call scratch size, static emitted
 loads/stores and register moves, compilation time, and bounded-call time
 (including scratch allocation). Instruction counts include cold guard exits
 and both branch paths; they are not dynamic memory-traffic measurements.
-It also reports input/output node counts, folds, commoned expressions, and
-dead nodes.
+It also reports input/output node counts, folds, commoned expressions, dead
+nodes, and static rematerializations.
 These diagnostics are not cross-engine benchmarks.
 
 Focused tests: `zig build test-fast -Dtest-filter='backend'` covers the
@@ -156,6 +163,33 @@ This remains a leaf-code allocator. Native calls would require explicit
 clobbers and ABI constraints; GC-capable calls additionally require root maps.
 Neither is supported implicitly. Operand shuffles and the fixed 64-word edge
 transfer area remain; reducing them is a separate measured improvement.
+
+### Cheap constant rematerialization
+
+Linear-scan allocation gives live cheap literals an `immediate` location
+instead of reserving a register or spill slot. Cheap means zero or at most
+one nonzero 16-bit lane: the existing AArch64 emitter uses one MOVZ, and
+x86_64 uses one immediate move. This shared conservative policy leaves larger
+literals in ordinary homes even though x86_64 can load them in one instruction.
+Instruction count is only a cost proxy; it does not establish a speedup.
+
+The emitter skips the original materialization and recreates the exact bits
+in the requested scratch operand at each use. This includes returns, guard
+predicates, ordered/duplicate guard captures, and edge sources. Parameters
+retain normal homes, and all edge sources are captured before any destination
+is overwritten. Arithmetic, guards, budget polls, and control-flow edges stay
+in place.
+The allocation verifier independently checks an immediate against its defining
+constant node; parameters, arithmetic results, and forged bits are rejected.
+
+Set `.rematerialize_constants = false` in `native.Options` or
+`Program.buildWithOptions` to isolate the change. It defaults on only in this
+developer backend; scratch allocation ignores it and retains a slot for every
+SSA value. `Compiled.stats.rematerializations` counts emitted immediate reads,
+including cold exits and both branch paths, not dynamic executions. Tests cover
+all 16 combinations with folding/CSE/DCE, zero/one/four registers, typed integer
+boundaries, exact captures, loop transfers, and budget exhaustion. Existing
+allocation-failure tests also exercise the immediate path.
 
 ## Shared pure optimizations
 
@@ -227,23 +261,26 @@ frontend compares exact recovery frames and the Wasm frontend compares with
 Sarcasm. Neither frontend gains a new production execution path.
 
 For the fixed sum-of-squares demo (ReleaseSafe, macOS; x86_64 via Rosetta),
-each cell below is **optimized / CSE-off / allocation-only / unoptimized scratch**.
+each cell below is **optimized / rematerialization-off / CSE-off /
+allocation-only / unoptimized scratch**.
 These are static sizes/counts, not cross-engine performance scores:
 
 | Frontend / target | Code bytes | Per-call scratch bytes | Emitted loads + stores |
 |---|---:|---:|---:|
-| Wasm / AArch64 | 364 / 372 / 372 / 388 | 528 / 528 / 528 / 664 | 24 / 24 / 24 / 68 |
-| Wasm / x86_64 | 431 / 444 / 444 / 632 | 528 / 528 / 528 / 664 | 24 / 24 / 24 / 68 |
-| JS / AArch64 | 1,868 / 2,124 / 2,204 / 2,252 | 584 / 560 / 560 / 1,312 | 174 / 163 / 171 / 374 |
-| JS / x86_64 | 2,506 / 2,764 / 2,879 / 3,727 | 584 / 560 / 560 / 1,312 | 174 / 163 / 171 / 374 |
+| Wasm / AArch64 | 348 / 364 / 348 / 372 / 388 | 528 / 528 / 528 / 528 / 664 | 24 / 24 / 24 / 24 / 68 |
+| Wasm / x86_64 | 426 / 431 / 426 / 444 / 632 | 528 / 528 / 528 / 528 / 664 | 24 / 24 / 24 / 24 / 68 |
+| JS / AArch64 | 1,788 / 1,868 / 1,932 / 2,204 / 2,252 | 568 / 584 / 560 / 560 / 1,312 | 156 / 174 / 156 / 171 / 374 |
+| JS / x86_64 | 2,465 / 2,506 / 2,620 / 2,879 / 3,727 | 568 / 584 / 560 / 560 / 1,312 | 156 / 174 / 156 / 171 / 374 |
 
 The JS loop folds four computations, commons 28 expressions, and removes two
-dead nodes (98 to 68); CSE-off leaves 91 nodes. CSE cuts code size by 12.1% on
-AArch64 and 9.3% on x86_64 relative to folding/DCE alone, and register moves
-fall from 188 to 140 on both. Sharing also extends live ranges: with the current
-allocator, scratch rises from 560 to 584 bytes and static loads/stores from
-163 to 174. This is a code-size win, not a demonstrated throughput win.
-Cheap-constant rematerialization and operand placement deserve measurement next.
+dead nodes (98 to 68); CSE-off leaves 91 nodes. Rematerialization leaves the
+graph unchanged and reduces code size by 4.3% on AArch64 and 1.6% on x86_64
+relative to the same graph with rematerialization disabled. Register moves
+fall from 140 to 125, scratch from 584 to 568 bytes, and static loads/stores
+from 174 to 156. There are 23 emitted immediate reads in the JS graph and three
+in the Wasm graph. The fixed transfer area still dominates scratch, and CSE's
+extended live ranges still cost eight bytes versus CSE-off. These are code-size
+and storage wins, not a demonstrated throughput win; operand placement is next.
 The Wasm loop shares one initial zero constant (seven to six nodes); its
 loop-dependent arithmetic remains unchanged.
 Compile/run timings remain diagnostic; a rollout needs paired measurements
@@ -337,9 +374,10 @@ conversions for JavaScript coercions.
    boundaries, unexpected operands, GC during resumed coercion, and allocation
    failures. Full test262 pass-set equality remains a production-integration gate.
 3. **Liveness-aware allocation, developer-only:** verified register/spill homes,
-   reused spill slots, exact guard captures, and an all-scratch oracle now serve
-   both frontends. Static code/memory diagnostics accompany correctness gates;
-   this does not establish a production throughput win.
+   reused spill slots, cheap-constant rematerialization, exact guard captures,
+   and an all-scratch oracle now serve both frontends. Static code/memory
+   diagnostics accompany correctness gates; this does not establish a
+   production throughput win.
 4. **Shared pure optimizations, developer-only:** independently switchable
    block-local constant folding, CSE, and dead-code elimination now run before
    allocation, with exact unoptimized comparisons. Better instruction
@@ -353,7 +391,7 @@ conversions for JavaScript coercions.
    telemetry, differential fuzzing, and spec-suite gates. No automatic
    default-on graduation or new JS tier follows from finishing the prototype.
 
-The next step is reducing operand moves, measuring cheap-constant
-rematerialization, and improving immediate/compare-branch selection. Keep each
-change independently measurable against the CSE-off and unoptimized references.
+The next step is reducing operand moves and improving immediate/compare-branch
+selection. Keep each change independently measurable against the disabled
+variant and unoptimized references.
 Adopt the backend in production only if measurements justify its complexity.
