@@ -1,12 +1,47 @@
-//! Language-neutral integer SSA experiment. Cross-block values use block
+//! Language-neutral scalar SSA experiment. Cross-block values use block
 //! arguments; there are no implicit heap effects or language-specific nodes.
 pub const max_values = 2048;
 pub const max_nodes = 4096;
 pub const max_blocks = 256;
 pub const max_arguments = 64;
-pub const Type = enum { i32, i64 };
+pub const Type = enum { i32, i64, f32, f64 };
 pub const Value = u32;
-pub const Op = enum { constant, add, sub, mul, bit_and, bit_or, eq, lt_s, lt_u, ge_s, ge_u, sext_i32, zext_i32, trunc_i64, guard };
+pub const Op = enum {
+    constant,
+    add,
+    sub,
+    mul,
+    bit_and,
+    bit_or,
+    eq,
+    lt_s,
+    lt_u,
+    ge_s,
+    ge_u,
+    sext_i32,
+    zext_i32,
+    trunc_i64,
+    fadd,
+    fsub,
+    fmul,
+    fdiv,
+    fmin,
+    fmax,
+    fcopysign,
+    fabs,
+    fneg,
+    fsqrt,
+    feq,
+    fne,
+    flt,
+    fgt,
+    fle,
+    fge,
+    reinterpret,
+    promote_f32,
+    demote_f64,
+    guard,
+};
 /// An opaque frontend-owned recovery key and values captured at this exact
 /// point. Guards are ordered effects, not removable unused computations.
 pub const SideExit = struct { id: u32, values: []const Value };
@@ -68,19 +103,22 @@ pub const Graph = struct {
                 const out_type = self.types[out];
                 if (node.op == .constant) {
                     if (normalize(out_type, node.immediate) != node.immediate) return error.InvalidGraph;
-                } else if (isConversion(node.op)) {
+                } else if (conversionTypes(node.op)) |conversion| {
                     try self.use(node.lhs, &available);
-                    const source: Type = if (node.op == .trunc_i64) .i64 else .i32;
-                    const result: Type = if (node.op == .trunc_i64) .i32 else .i64;
-                    if (self.types[node.lhs] != source or out_type != result) return error.InvalidGraph;
+                    if (self.types[node.lhs] != conversion.input or out_type != conversion.output) return error.InvalidGraph;
+                } else if (node.op == .reinterpret) {
+                    try self.use(node.lhs, &available);
+                    const source = self.types[node.lhs];
+                    if (isFloat(source) == isFloat(out_type) or is32(source) != is32(out_type)) return error.InvalidGraph;
                 } else {
                     try self.use(node.lhs, &available);
-                    try self.use(node.rhs, &available);
-                    if (self.types[node.lhs] != self.types[node.rhs]) return error.InvalidGraph;
-                    const expected = switch (node.op) {
-                        .add, .sub, .mul, .bit_and, .bit_or => self.types[node.lhs],
-                        else => Type.i32,
-                    };
+                    const input_type = self.types[node.lhs];
+                    if (isFloatOp(node.op) != isFloat(input_type)) return error.InvalidGraph;
+                    if (inputCount(node.op) == 2) {
+                        try self.use(node.rhs, &available);
+                        if (input_type != self.types[node.rhs]) return error.InvalidGraph;
+                    }
+                    const expected = if (isComparison(node.op)) Type.i32 else input_type;
                     if (out_type != expected) return error.InvalidGraph;
                 }
                 try self.define(out, &defined, &available);
@@ -124,13 +162,50 @@ pub const Graph = struct {
 };
 
 pub fn normalize(ty: Type, value: u64) u64 {
-    return if (ty == .i32) @as(u32, @truncate(value)) else value;
+    return if (is32(ty)) @as(u32, @truncate(value)) else value;
 }
 
-pub fn isConversion(op: Op) bool {
-    return op == .sext_i32 or op == .zext_i32 or op == .trunc_i64;
+pub fn is32(ty: Type) bool {
+    return ty == .i32 or ty == .f32;
+}
+
+pub fn isFloat(ty: Type) bool {
+    return ty == .f32 or ty == .f64;
+}
+
+pub fn conversionTypes(op: Op) ?struct { input: Type, output: Type } {
+    return switch (op) {
+        .sext_i32, .zext_i32 => .{ .input = .i32, .output = .i64 },
+        .trunc_i64 => .{ .input = .i64, .output = .i32 },
+        .promote_f32 => .{ .input = .f32, .output = .f64 },
+        .demote_f64 => .{ .input = .f64, .output = .f32 },
+        else => null,
+    };
+}
+
+pub fn isFloatOp(op: Op) bool {
+    return switch (op) {
+        .fadd, .fsub, .fmul, .fdiv, .fmin, .fmax, .fcopysign, .fabs, .fneg, .fsqrt, .feq, .fne, .flt, .fgt, .fle, .fge, .promote_f32, .demote_f64 => true,
+        else => false,
+    };
+}
+
+pub fn isComparison(op: Op) bool {
+    return switch (op) {
+        .eq, .lt_s, .lt_u, .ge_s, .ge_u, .feq, .fne, .flt, .fgt, .fle, .fge => true,
+        else => false,
+    };
+}
+
+pub fn inputCount(op: Op) u2 {
+    return switch (op) {
+        .constant => 0,
+        .guard, .sext_i32, .zext_i32, .trunc_i64, .reinterpret, .promote_f32, .demote_f64, .fabs, .fneg, .fsqrt => 1,
+        .add, .sub, .mul, .bit_and, .bit_or, .eq, .lt_s, .lt_u, .ge_s, .ge_u, .fadd, .fsub, .fmul, .fdiv, .fmin, .fmax, .fcopysign, .feq, .fne, .flt, .fgt, .fle, .fge => 2,
+    };
 }
 
 test {
     _ = @import("tests.zig");
+    _ = @import("float_test.zig");
 }

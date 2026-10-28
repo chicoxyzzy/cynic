@@ -52,6 +52,8 @@ fn valueType(ty: wasm_types.ValType) !ir.Type {
     return switch (ty) {
         .i32 => .i32,
         .i64 => .i64,
+        .f32 => .f32,
+        .f64 => .f64,
         else => error.UnsupportedType,
     };
 }
@@ -92,7 +94,7 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
         offsets[offset] = @intCast(instructions.items.len);
         var inst: Instruction = .{ .op = @fromBackingInt(@intCast(try reader.byte())) };
         switch (inst.op) {
-            .nop, .drop, .i32_eqz, .i32_eq, .i32_lt_s, .i32_lt_u, .i32_ge_s, .i32_ge_u, .i64_eqz, .i64_eq, .i64_lt_s, .i64_lt_u, .i64_ge_s, .i64_ge_u, .i32_add, .i32_sub, .i32_mul, .i64_add, .i64_sub, .i64_mul => {},
+            .nop, .drop => {},
             .block, .loop => {
                 if (try reader.byte() != 0x40) return error.UnsupportedBlockType;
                 const parent = reachable.items[reachable.items.len - 1];
@@ -123,7 +125,9 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
             .local_get, .local_set, .local_tee => inst.immediate = try reader.uleb(u32),
             .i32_const => inst.immediate = @as(u32, @bitCast(try reader.sleb(i32))),
             .i64_const => inst.immediate = @bitCast(try reader.sleb(i64)),
-            else => return error.UnsupportedOpcode,
+            .f32_const => inst.immediate = try reader.u32le(),
+            .f64_const => inst.immediate = std.mem.readInt(u64, (try reader.bytesN(8))[0..8], .little),
+            else => if (scalarOperation(inst.op) == null) return error.UnsupportedOpcode,
         }
         try instructions.append(a, inst);
     }
@@ -198,7 +202,15 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
                 .drop => {
                     _ = stack.pop() orelse return error.InvalidControlFlow;
                 },
-                .i32_const, .i64_const => try stack.append(a, try builder.constant(&nodes, if (inst.op == .i32_const) .i32 else .i64, inst.immediate)),
+                .i32_const, .i64_const, .f32_const, .f64_const => {
+                    const ty: ir.Type = switch (inst.op) {
+                        .i32_const => .i32,
+                        .i64_const => .i64,
+                        .f32_const => .f32,
+                        else => .f64,
+                    };
+                    try stack.append(a, try builder.constant(&nodes, ty, inst.immediate));
+                },
                 .@"return" => terminator = .{ .return_ = stack.pop() orelse return error.InvalidControlFlow },
                 .br, .br_if => {
                     const condition = if (inst.op == .br_if) stack.pop() orelse return error.InvalidControlFlow else null;
@@ -211,25 +223,20 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
                     } } else .{ .jump = edge };
                 },
                 else => {
+                    const op = scalarOperation(inst.op) orelse return error.UnsupportedOpcode;
                     const rhs = if (inst.op == .i32_eqz or inst.op == .i64_eqz)
                         try builder.constant(&nodes, if (inst.op == .i32_eqz) .i32 else .i64, 0)
+                    else if (ir.inputCount(op) == 2)
+                        stack.pop() orelse return error.InvalidControlFlow
                     else
-                        stack.pop() orelse return error.InvalidControlFlow;
+                        0;
                     const lhs = stack.pop() orelse return error.InvalidControlFlow;
-                    const op: ir.Op = switch (inst.op) {
-                        .i32_eqz, .i32_eq, .i64_eqz, .i64_eq => .eq,
-                        .i32_lt_s, .i64_lt_s => .lt_s,
-                        .i32_lt_u, .i64_lt_u => .lt_u,
-                        .i32_ge_s, .i64_ge_s => .ge_s,
-                        .i32_ge_u, .i64_ge_u => .ge_u,
-                        .i32_add, .i64_add => .add,
-                        .i32_sub, .i64_sub => .sub,
-                        .i32_mul, .i64_mul => .mul,
-                        else => return error.UnsupportedOpcode,
-                    };
-                    const ty: ir.Type = switch (op) {
-                        .add, .sub, .mul => builder.types.items[lhs],
-                        else => .i32,
+                    const ty: ir.Type = if (ir.isComparison(op)) .i32 else if (ir.conversionTypes(op)) |conversion| conversion.output else switch (inst.op) {
+                        .i32_reinterpret_f32 => .i32,
+                        .i64_reinterpret_f64 => .i64,
+                        .f32_reinterpret_i32 => .f32,
+                        .f64_reinterpret_i64 => .f64,
+                        else => builder.types.items[lhs],
                     };
                     const out = try builder.value(ty);
                     try nodes.append(a, .{ .op = op, .out = out, .lhs = lhs, .rhs = rhs });
@@ -251,6 +258,39 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
     };
     try graph.verify();
     return .{ .arena = arena, .graph = graph };
+}
+
+fn scalarOperation(op: Op) ?ir.Op {
+    return switch (op) {
+        .i32_eqz, .i32_eq, .i64_eqz, .i64_eq => .eq,
+        .i32_lt_s, .i64_lt_s => .lt_s,
+        .i32_lt_u, .i64_lt_u => .lt_u,
+        .i32_ge_s, .i64_ge_s => .ge_s,
+        .i32_ge_u, .i64_ge_u => .ge_u,
+        .i32_add, .i64_add => .add,
+        .i32_sub, .i64_sub => .sub,
+        .i32_mul, .i64_mul => .mul,
+        .f32_add, .f64_add => .fadd,
+        .f32_sub, .f64_sub => .fsub,
+        .f32_mul, .f64_mul => .fmul,
+        .f32_div, .f64_div => .fdiv,
+        .f32_min, .f64_min => .fmin,
+        .f32_max, .f64_max => .fmax,
+        .f32_copysign, .f64_copysign => .fcopysign,
+        .f32_abs, .f64_abs => .fabs,
+        .f32_neg, .f64_neg => .fneg,
+        .f32_sqrt, .f64_sqrt => .fsqrt,
+        .f32_eq, .f64_eq => .feq,
+        .f32_ne, .f64_ne => .fne,
+        .f32_lt, .f64_lt => .flt,
+        .f32_gt, .f64_gt => .fgt,
+        .f32_le, .f64_le => .fle,
+        .f32_ge, .f64_ge => .fge,
+        .f32_demote_f64 => .demote_f64,
+        .f64_promote_f32 => .promote_f32,
+        .i32_reinterpret_f32, .i64_reinterpret_f64, .f32_reinterpret_i32, .f64_reinterpret_i64 => .reinterpret,
+        else => null,
+    };
 }
 
 const Builder = struct {

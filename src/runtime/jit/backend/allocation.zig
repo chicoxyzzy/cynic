@@ -162,18 +162,11 @@ fn computeRanges(graph: ir.Graph, ranges: []LiveRange) void {
             // Operands and guard captures are read before an output is written.
             // Dedicated emitter scratch registers make dying-input reuse safe.
             const read_position: u32 = @intCast(2 * i + 1);
-            switch (node.op) {
-                .constant => {},
-                .guard => {
-                    use(ranges, node.lhs, read_position);
-                    for (node.exit.?.values) |value| use(ranges, value, read_position);
-                },
-                .sext_i32, .zext_i32, .trunc_i64 => use(ranges, node.lhs, read_position),
-                else => {
-                    use(ranges, node.lhs, read_position);
-                    use(ranges, node.rhs, read_position);
-                },
-            }
+            if (ir.inputCount(node.op) >= 1) use(ranges, node.lhs, read_position);
+            if (ir.inputCount(node.op) == 2) use(ranges, node.rhs, read_position);
+            if (node.exit) |side_exit| for (side_exit.values) |value| {
+                use(ranges, value, read_position);
+            };
             if (node.out) |value| ranges[value] = .{ .block = @intCast(block_index), .start = read_position + 1, .end = read_position + 1 };
         }
         const terminal_position: u32 = @intCast(2 * block.nodes.len + 1);
