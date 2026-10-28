@@ -74,6 +74,7 @@ pub const Op = enum {
     demote_f64,
     load,
     store,
+    call,
     guard,
 };
 pub const MemoryWidth = enum(u8) {
@@ -92,6 +93,17 @@ pub const MemoryAccess = struct { region: u32 = 0, width: MemoryWidth, offset: u
 /// An opaque frontend-owned recovery key and values captured at this exact
 /// point. Guards are ordered effects, not removable unused computations.
 pub const SideExit = struct { id: u32, values: []const Value };
+/// Symbolic runtime call. The frontend owns the target and root interpretation;
+/// snapshots are read-only because the current collector does not move objects.
+pub const Call = struct {
+    target: u32,
+    arguments: []const Value,
+    parameter_types: []const Type,
+    result_type: ?Type,
+    /// Raw host callbacks see caller controls; language helpers keep strict FP.
+    fp_mode: enum { host, strict } = .host,
+    safepoint: SideExit,
+};
 pub const TrapReason = enum(u32) {
     division_by_zero = 1,
     integer_overflow = 2,
@@ -120,6 +132,7 @@ pub const Node = struct {
     exit: ?SideExit = null,
     trap_site: ?u32 = null,
     memory: ?MemoryAccess = null,
+    call: ?Call = null,
 };
 pub const Edge = struct { target: u32, args: []const Value };
 pub const Terminator = union(enum) {
@@ -160,6 +173,7 @@ pub const Graph = struct {
             for (block.nodes) |node| {
                 if (mayTrap(node.op) != (node.trap_site != null)) return error.InvalidGraph;
                 if (isMemoryOp(node.op) != (node.memory != null)) return error.InvalidGraph;
+                if ((node.op == .call) != (node.call != null)) return error.InvalidGraph;
                 if (node.op == .guard) {
                     if (node.out != null) return error.InvalidGraph;
                     try self.use(node.lhs, &available);
@@ -170,6 +184,21 @@ pub const Graph = struct {
                     continue;
                 }
                 if (node.exit != null) return error.InvalidGraph;
+                if (node.call) |call| {
+                    if (call.arguments.len > max_arguments or call.safepoint.values.len > max_arguments) return error.PrototypeLimit;
+                    if (call.arguments.len != call.parameter_types.len) return error.InvalidGraph;
+                    for (call.arguments, call.parameter_types) |value, ty| {
+                        try self.use(value, &available);
+                        if (self.types[value] != ty) return error.InvalidGraph;
+                    }
+                    for (call.safepoint.values) |value| try self.use(value, &available);
+                    if (call.result_type) |ty| {
+                        const out = node.out orelse return error.InvalidGraph;
+                        try self.define(out, &defined, &available);
+                        if (self.types[out] != ty) return error.InvalidGraph;
+                    } else if (node.out != null) return error.InvalidGraph;
+                    continue;
+                }
                 if (node.memory) |access| {
                     if (access.region >= self.memory_count) return error.InvalidGraph;
                     try self.use(node.lhs, &available);
@@ -307,7 +336,7 @@ pub fn isComparison(op: Op) bool {
 
 pub fn inputCount(op: Op) u2 {
     return switch (op) {
-        .constant => 0,
+        .constant, .call => 0,
         .load => 1,
         .store => 2,
         .fceil, .ffloor, .ftrunc, .fnearest, .convert_s, .convert_u, .trunc_s, .trunc_u, .trunc_sat_s, .trunc_sat_u => 1,
@@ -321,9 +350,10 @@ pub const Effects = struct {
     writes_memory: bool = false,
     may_trap: bool = false,
     exits: bool = false,
+    safepoint: bool = false,
 
     pub fn isPure(self: Effects) bool {
-        return !self.reads_memory and !self.writes_memory and !self.may_trap and !self.exits;
+        return !self.reads_memory and !self.writes_memory and !self.may_trap and !self.exits and !self.safepoint;
     }
 };
 
@@ -334,6 +364,7 @@ pub fn effects(op: Op) Effects {
         .div_s, .div_u, .rem_s, .rem_u, .trunc_s, .trunc_u => .{ .may_trap = true },
         .load => .{ .reads_memory = true, .may_trap = true },
         .store => .{ .writes_memory = true, .may_trap = true },
+        .call => .{ .reads_memory = true, .writes_memory = true, .may_trap = true, .safepoint = true },
         .fceil, .ffloor, .ftrunc, .fnearest, .convert_s, .convert_u, .trunc_sat_s, .trunc_sat_u => .{},
         .constant, .add, .sub, .mul, .bit_and, .bit_or, .bit_xor, .shl, .shr_s, .shr_u, .rotl, .rotr, .clz, .ctz, .popcnt, .sext8, .sext16, .sext32, .eq, .ne, .lt_s, .lt_u, .gt_s, .gt_u, .le_s, .le_u, .ge_s, .ge_u, .sext_i32, .zext_i32, .trunc_i64, .fadd, .fsub, .fmul, .fdiv, .fmin, .fmax, .fcopysign, .fabs, .fneg, .fsqrt, .feq, .fne, .flt, .fgt, .fle, .fge, .reinterpret, .promote_f32, .demote_f64 => .{},
     };
@@ -350,4 +381,5 @@ test {
     _ = @import("conversion_test.zig");
     _ = @import("fp_environment_test.zig");
     _ = @import("memory_test.zig");
+    _ = @import("call_test.zig");
 }

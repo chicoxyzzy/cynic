@@ -1,5 +1,5 @@
-//! Experimental leaf backend. Values use caller-saved registers, bounded spills,
-//! or rematerialized literals. No stack frame, host calls, GC, or code patching. Opaque
+//! Experimental backend. Values use caller-saved registers, bounded spills,
+//! or rematerialized literals. Runtime calls use explicit snapshots. Opaque
 //! frontend words may contain tagged references; the backend never dereferences them.
 const std = @import("std");
 const builtin = @import("builtin");
@@ -11,6 +11,8 @@ const integer = @import("integer.zig");
 const conversion = @import("conversion.zig");
 const fp_environment = @import("fp_environment.zig");
 const memory = @import("memory.zig");
+const call = @import("call.zig");
+const stack_guard = @import("../../../stack_guard.zig");
 const code_alloc = @import("../code_alloc.zig");
 const a64 = @import("../asm_aarch64.zig");
 const arm_masm = @import("../masm.zig");
@@ -19,6 +21,8 @@ const x86 = @import("../asm_x86_64.zig");
 pub const supported = code_alloc.supported;
 pub const max_budget = 1_000_000;
 pub const MemoryView = memory.View;
+pub const CallRequest = call.Request;
+pub const Runtime = call.Runtime;
 const is_x86 = builtin.cpu.arch == .x86_64;
 const Machine = if (is_x86) x86.Masm else arm_masm.Masm;
 const Reg = if (is_x86) x86.Reg else a64.Reg;
@@ -54,10 +58,15 @@ pub const Compiled = struct {
     spill_slot_count: usize,
     uses_fp_environment: bool = false,
     memory_count: u32 = 0,
+    call_sites: []const call.Site,
     stats: Stats = .{},
     optimization: optimize.Stats = .{},
 
     pub fn scratchSlotCount(self: *const Compiled) usize {
+        return self.callBase() + @as(usize, if (self.call_sites.len != 0) call.slot_count else 0);
+    }
+
+    fn callBase(self: *const Compiled) usize {
         return self.memoryViewsSlot() + @as(usize, @intFromBool(self.memory_count != 0));
     }
 
@@ -70,6 +79,7 @@ pub const Compiled = struct {
         self.code.deinit();
         self.allocator.free(self.params);
         self.allocator.free(self.argument_types);
+        self.allocator.free(self.call_sites);
         self.* = undefined;
     }
 
@@ -92,13 +102,29 @@ pub const Compiled = struct {
     }
 
     pub fn runOutcomeWithMemory(self: *const Compiled, args: []const u64, views: []const MemoryView, budget: u32) !Outcome {
+        return self.runOutcomeWithRuntime(args, views, budget, null);
+    }
+
+    pub fn runOutcomeWithRuntime(self: *const Compiled, args: []const u64, views: []const MemoryView, budget: u32, runtime: ?Runtime) !Outcome {
         if (args.len != self.params.len) return error.ArgumentCount;
         if (views.len != self.memory_count) return error.MemoryCount;
+        if (self.call_sites.len != 0 and runtime == null) return error.MissingRuntime;
         if (budget > max_budget) return error.PrototypeLimit;
+        if (stack_guard.nearLimit()) return error.CallStackExhausted;
         const slots = try self.allocator.alloc(u64, self.scratchSlotCount());
         defer self.allocator.free(slots);
         @memset(slots, 0);
-        if (self.memory_count != 0) slots[self.memoryViewsSlot()] = @intFromPtr(views.ptr);
+        var current_views: [ir.max_memories]MemoryView = undefined;
+        @memcpy(current_views[0..views.len], views);
+        if (self.memory_count != 0) slots[self.memoryViewsSlot()] = @intFromPtr(&current_views);
+        var invocation: ?call.Invocation = if (runtime) |host| .{
+            .runtime = host,
+            .sites = self.call_sites,
+            .memories = current_views[0..views.len],
+            .transfer_base = self.spill_slot_count,
+            .call_base = self.callBase(),
+        } else null;
+        if (self.call_sites.len != 0) slots[self.callBase()] = @intFromPtr(&invocation.?);
         for (args, self.argument_types, 0..) |arg, ty, i| slots[self.spill_slot_count + i] = ir.normalize(ty, arg);
         const entry: Entry = @ptrCast(@alignCast(self.code.entry() orelse return error.MissingCode));
         const result_slot = self.spill_slot_count + ir.max_arguments;
@@ -127,6 +153,7 @@ pub const Compiled = struct {
                 if (slots[result_slot + 1] > std.math.maxInt(u32)) return error.InvalidNativeResult;
                 break :blk .{ .trapped = .{ .reason = reason, .site = @intCast(slots[result_slot + 1]) } };
             },
+            4 => if (invocation) |host| host.failure orelse error.InvalidNativeResult else error.InvalidNativeResult,
             else => error.InvalidNativeResult,
         };
     }
@@ -164,6 +191,12 @@ fn emitGraph(a: std.mem.Allocator, owner: *code_alloc.CodeAllocator, graph: ir.G
     var m = Machine.init(a);
     defer m.deinit();
     var emission: Emission = .{ .m = &m, .plan = &plan, .transfer_base = plan.spill_slot_count };
+    var call_count: usize = 0;
+    for (graph.blocks) |block| for (block.nodes) |node| {
+        if (node.op == .call) call_count += 1;
+    };
+    const call_sites = try a.alloc(call.Site, call_count);
+    errdefer a.free(call_sites);
     if (fp_environment.required(graph)) {
         emission.fp_state_slot = emission.transfer_base + ir.max_arguments + 2;
         try fp_environment.enter(&m, emission.fp_state_slot.?);
@@ -172,6 +205,9 @@ fn emitGraph(a: std.mem.Allocator, owner: *code_alloc.CodeAllocator, graph: ir.G
     }
     if (graph.memory_count != 0) emission.memory_views_slot = emission.transfer_base + ir.max_arguments + 2 +
         @as(usize, if (emission.fp_state_slot != null) fp_environment.slot_count else 0);
+    if (call_count != 0) emission.call_base = emission.transfer_base + ir.max_arguments + 2 + fp_environment.slot_count +
+        @as(usize, @intFromBool(graph.memory_count != 0));
+    var call_index: u32 = 0;
     const labels = try a.alloc(Machine.Label, graph.blocks.len);
     defer a.free(labels);
     @memset(labels, .{});
@@ -186,7 +222,7 @@ fn emitGraph(a: std.mem.Allocator, owner: *code_alloc.CodeAllocator, graph: ir.G
     for (graph.blocks, 0..) |block, index| {
         try m.bind(&labels[index]);
         try poll(&m, &exhausted);
-        for (block.nodes) |node| {
+        for (block.nodes, 0..) |node, node_index| {
             if (node.op == .guard) {
                 var success: Machine.Label = .{};
                 defer success.deinit(a);
@@ -197,6 +233,12 @@ fn emitGraph(a: std.mem.Allocator, owner: *code_alloc.CodeAllocator, graph: ir.G
                 } else try m.jumpCbnz(.x2, &success);
                 try emission.emitExit(node.exit.?);
                 try m.bind(&success);
+                continue;
+            } else if (node.call) |runtime_call| {
+                call_sites[call_index] = .{ .target = runtime_call.target, .site = node.trap_site.?, .safepoint = runtime_call.safepoint.id, .argument_count = runtime_call.arguments.len, .capture_count = runtime_call.safepoint.values.len, .result_type = runtime_call.result_type };
+                @memcpy(call_sites[call_index].parameter_types[0..runtime_call.parameter_types.len], runtime_call.parameter_types);
+                try emission.invoke(node, @intCast(index), @intCast(2 * node_index + 1), call_index);
+                call_index += 1;
                 continue;
             } else if (ir.isMemoryOp(node.op)) {
                 try emission.read(false, node.lhs);
@@ -262,6 +304,7 @@ fn emitGraph(a: std.mem.Allocator, owner: *code_alloc.CodeAllocator, graph: ir.G
         .spill_slot_count = plan.spill_slot_count,
         .uses_fp_environment = emission.fp_state_slot != null,
         .memory_count = graph.memory_count,
+        .call_sites = call_sites,
         .stats = emission.stats,
     };
 }
@@ -272,6 +315,7 @@ const Emission = struct {
     transfer_base: usize,
     fp_state_slot: ?usize = null,
     memory_views_slot: ?usize = null,
+    call_base: ?usize = null,
     stats: Stats = .{},
 
     fn read(self: *Emission, rhs: bool, value: ir.Value) !void {
@@ -391,6 +435,57 @@ const Emission = struct {
         try self.m.bind(&oob);
         try self.emitTrap(.{ .reason = .memory_out_of_bounds, .site = node.trap_site.? });
         try self.m.bind(&done);
+    }
+
+    fn invoke(self: *Emission, node: ir.Node, block: u32, position: u32, index: u32) !void {
+        const runtime_call = node.call.?;
+        const base = self.call_base.?;
+        var live: [allocation.max_registers]bool = @splat(false);
+        for (self.plan.locations, self.plan.ranges) |location, range| {
+            if (range.block == block and range.start < position and range.end > position and location == .register)
+                live[location.register] = true;
+        }
+        for (runtime_call.arguments, 0..) |value, i| {
+            try self.read(false, value);
+            try self.storeSlot(self.transfer_base + i);
+        }
+        for (runtime_call.safepoint.values, 0..) |value, i| {
+            try self.read(false, value);
+            try self.storeSlot(base + call.captures_offset + i);
+        }
+        for (live, 0..) |used, register| if (used) {
+            try self.move(scratchRegister(false), allocatedRegister(@intCast(register)));
+            try self.storeSlot(base + call.saved_registers_offset + register);
+        };
+        if (runtime_call.fp_mode == .host) {
+            try fp_environment.leave(self.m, self.fp_state_slot.?);
+            self.stats.loads += fp_environment.leave_loads;
+        }
+        try call.emit(self.m, base, index);
+        var success: Machine.Label = .{};
+        defer success.deinit(self.m.gpa);
+        if (comptime is_x86) {
+            try self.m.testReg64(.rax, .rax);
+            try self.m.jumpCond(.equal, &success);
+        } else try self.m.jumpCbz(.x2, &success);
+        try self.finish(4);
+        try self.m.bind(&success);
+        try fp_environment.reenter(self.m, self.fp_state_slot.?);
+        self.stats.loads += fp_environment.leave_loads;
+        // call.emit also saves and restores the context and budget on the stack.
+        self.stats.loads += call.emit_loads;
+        self.stats.stores += call.emit_stores;
+        for (live, 0..) |used, register| if (used) {
+            try self.loadSlot(false, base + call.saved_registers_offset + register);
+            try self.move(allocatedRegister(@intCast(register)), scratchRegister(false));
+        };
+        if (node.out) |out| {
+            try self.loadSlot(false, self.transfer_base + ir.max_arguments);
+            if (ir.is32(runtime_call.result_type.?)) {
+                if (comptime is_x86) try self.m.movReg32(.rax, .rax) else try self.m.emit(a64.movRegW(.x2, .x2));
+            }
+            try self.write(out);
+        }
     }
 
     fn finish(self: *Emission, status: u32) !void {

@@ -1,4 +1,4 @@
-//! Leaf-entry FP state. Saved per invocation, outside SSA spill/transfer slots.
+//! Entry/callback FP state. Saved per invocation, outside SSA spill/transfer slots.
 const builtin = @import("builtin");
 const ir = @import("ir.zig");
 const arm = @import("../asm_aarch64.zig");
@@ -14,7 +14,7 @@ pub const leave_loads = if (is_x86) 1 else 2;
 
 pub fn required(graph: ir.Graph) bool {
     for (graph.blocks) |block| for (block.nodes) |node| {
-        if (ir.isFloatOp(node.op) or ir.isNumericConversion(node.op)) return true;
+        if (ir.isFloatOp(node.op) or ir.isNumericConversion(node.op) or node.op == .call) return true;
     };
     return false;
 }
@@ -54,5 +54,23 @@ pub fn leave(m: *Machine, slot: usize) !void {
         try m.emit(arm.writeFpsr(.x16));
         try m.emit(arm.ldrImm(.x16, .x0, @intCast(offset)));
         try m.emit(arm.writeFpcr(.x16));
+    }
+}
+
+/// Re-establish strict arithmetic after a callback without overwriting the
+/// original caller state. Callback changes must not leak through our return.
+pub fn reenter(m: *Machine, slot: usize) !void {
+    const offset = slot * 8;
+    if (comptime is_x86) {
+        try m.loadMxcsr(.rdi, @intCast(offset + 8));
+    } else {
+        try m.emit(arm.ldrImm(.x16, .x0, @intCast(offset)));
+        try m.movImm64(.x17, ~@as(u64, 0x03c0_9f07));
+        try m.emit(arm.andReg(.x16, .x16, .x17));
+        try m.emit(arm.writeFpcr(.x16));
+        try m.emit(arm.ldrImm(.x16, .x0, @intCast(offset + 8)));
+        try m.movImm64(.x17, ~@as(u64, 0x0800_009f));
+        try m.emit(arm.andReg(.x16, .x16, .x17));
+        try m.emit(arm.writeFpsr(.x16));
     }
 }
