@@ -97,4 +97,5 @@ test {
     _ = @import("backend_float_test.zig");
     _ = @import("backend_integer_test.zig");
     _ = @import("backend_conversion_test.zig");
+    _ = @import("backend_memory_test.zig");
 }

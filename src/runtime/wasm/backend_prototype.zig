@@ -7,6 +7,8 @@ const wasm_types = @import("types.zig");
 const CompiledFunc = @import("code.zig").CompiledFunc;
 const Reader = @import("reader.zig").Reader;
 const Op = @import("opcodes.zig").Op;
+const Module = @import("module.zig").Module;
+const Instance = @import("interpreter.zig").Instance;
 pub const ir = @import("../jit/backend/ir.zig");
 pub const native = @import("../jit/backend/native.zig");
 pub const CodeAllocator = @import("../jit/code_alloc.zig").CodeAllocator;
@@ -29,11 +31,49 @@ pub fn lowerModule(allocator: std.mem.Allocator, bytes: []const u8, function_ind
     defer allocator.free(workspace);
     var fixed = std.heap.FixedBufferAllocator.init(workspace);
     const module = try decoder.decode(fixed.allocator(), bytes);
-    if (module.imports.len != 0) return error.UnsupportedImports;
+    var memory_types: [ir.max_memories]wasm_types.MemType = undefined;
+    const memories = try collectMemories(&module, &memory_types);
     if (function_index >= module.funcs.len) return error.FunctionIndex;
     const functions = try validator.validateModule(fixed.allocator(), &module);
     const function = &functions[function_index];
-    return lower(allocator, function, module.types[function.type_index]);
+    return lower(allocator, function, module.types[function.type_index], memories);
+}
+
+/// Compile an already validated function without capturing instance pointers.
+pub fn lowerInstance(allocator: std.mem.Allocator, instance: *const Instance, function_index: u32) !OwnedGraph {
+    var memory_types: [ir.max_memories]wasm_types.MemType = undefined;
+    const memories = try collectMemories(instance.module, &memory_types);
+    if (function_index >= instance.funcs.len) return error.FunctionIndex;
+    const function = &instance.funcs[function_index];
+    return lower(allocator, function, instance.module.types[function.type_index], memories);
+}
+
+/// Developer-only invocation of leaf code against fresh instance memory views.
+/// Production dispatch, calls, growth within compiled code, and fuel integration
+/// are separate work; no concurrent resize is permitted during this leaf call.
+pub fn runInInstance(code: *const native.Compiled, instance: *const Instance, args: []const u64, budget: u32) !native.Outcome {
+    if (instance.memories.len != code.memory_count or instance.memories.len > ir.max_memories) return error.MemoryCount;
+    var views: [ir.max_memories]native.MemoryView = undefined;
+    for (instance.memories, 0..) |memory, i| {
+        if (memory.is_shared) return error.UnsupportedSharedMemory;
+        views[i] = native.MemoryView.fromSlice(memory.data);
+    }
+    return code.runOutcomeWithMemory(args, views[0..instance.memories.len], budget);
+}
+
+fn collectMemories(module: *const Module, out: *[ir.max_memories]wasm_types.MemType) ![]const wasm_types.MemType {
+    var count: usize = 0;
+    for (module.imports) |entry| {
+        if (entry.desc != .mem) return error.UnsupportedImports;
+        if (count == out.len) return error.PrototypeLimit;
+        out[count] = entry.desc.mem;
+        count += 1;
+    }
+    if (module.mems.len > out.len - count) return error.PrototypeLimit;
+    @memcpy(out[count..][0..module.mems.len], module.mems);
+    count += module.mems.len;
+    for (out[0..count]) |memory| if (memory.limits.shared) return error.UnsupportedSharedMemory;
+    return out[0..count];
 }
 
 pub fn evaluate(allocator: std.mem.Allocator, bytes: []const u8, function_index: u32, args: []const u64, budget: u32) !u64 {
@@ -65,10 +105,11 @@ const Instruction = struct {
     immediate: u64 = 0,
     target: u32 = missing,
     pop_count: u32 = 0,
+    memory_index: u32 = 0,
 };
 const Range = struct { start: usize, end: usize };
 
-fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature: wasm_types.FuncType) !OwnedGraph {
+fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature: wasm_types.FuncType, memories: []const wasm_types.MemType) !OwnedGraph {
     if (signature.results.len != 1) return error.UnsupportedSignature;
     const result_type = try valueType(signature.results[0]);
     if (function.body.len > 16 * 1024 or function.local_types.len > ir.max_arguments or
@@ -132,7 +173,12 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
                 inst.immediate = try reader.uleb(u32);
                 if (inst.immediate > 7) return error.UnsupportedOpcode;
             },
-            else => if (scalarOperation(inst) == null) return error.UnsupportedOpcode,
+            else => if (memoryOperation(inst.op) != null) {
+                const alignment = try reader.uleb(u32);
+                if (alignment & 0x40 != 0) inst.memory_index = try reader.uleb(u32);
+                if (inst.memory_index >= memories.len) return error.InvalidMemory;
+                inst.immediate = if (memories[inst.memory_index].limits.is_64) try reader.uleb(u64) else try reader.uleb(u32);
+            } else if (scalarOperation(inst) == null) return error.UnsupportedOpcode,
         }
         try instructions.append(a, inst);
     }
@@ -229,6 +275,14 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
                     } } else .{ .jump = edge };
                 },
                 else => {
+                    if (memoryOperation(inst.op)) |operation| {
+                        const value = if (operation.store) stack.pop() orelse return error.InvalidControlFlow else 0;
+                        const address = stack.pop() orelse return error.InvalidControlFlow;
+                        const out = if (operation.store) null else try builder.value(operation.ty);
+                        try nodes.append(a, .{ .op = if (operation.store) .store else .load, .out = out, .lhs = address, .rhs = value, .memory = .{ .region = inst.memory_index, .offset = inst.immediate, .width = operation.width, .signed = operation.signed }, .trap_site = inst.offset });
+                        if (out) |result| try stack.append(a, result);
+                        continue;
+                    }
                     const op = scalarOperation(inst) orelse return error.UnsupportedOpcode;
                     const rhs = if (inst.op == .i32_eqz or inst.op == .i64_eqz)
                         try builder.constant(&nodes, if (inst.op == .i32_eqz) .i32 else .i64, 0)
@@ -262,9 +316,41 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
         .blocks = builder.blocks.items,
         .argument_types = argument_types,
         .result_type = result_type,
+        .memory_count = @intCast(memories.len),
     };
     try graph.verify();
     return .{ .arena = arena, .graph = graph };
+}
+
+const MemoryOperation = struct { ty: ir.Type, width: ir.MemoryWidth, signed: bool = false, store: bool = false };
+
+fn memoryOperation(op: Op) ?MemoryOperation {
+    return switch (op) {
+        .i32_load => .{ .ty = .i32, .width = .word },
+        .i64_load => .{ .ty = .i64, .width = .double },
+        .f32_load => .{ .ty = .f32, .width = .word },
+        .f64_load => .{ .ty = .f64, .width = .double },
+        .i32_load8_s => .{ .ty = .i32, .width = .byte, .signed = true },
+        .i32_load8_u => .{ .ty = .i32, .width = .byte },
+        .i32_load16_s => .{ .ty = .i32, .width = .half, .signed = true },
+        .i32_load16_u => .{ .ty = .i32, .width = .half },
+        .i64_load8_s => .{ .ty = .i64, .width = .byte, .signed = true },
+        .i64_load8_u => .{ .ty = .i64, .width = .byte },
+        .i64_load16_s => .{ .ty = .i64, .width = .half, .signed = true },
+        .i64_load16_u => .{ .ty = .i64, .width = .half },
+        .i64_load32_s => .{ .ty = .i64, .width = .word, .signed = true },
+        .i64_load32_u => .{ .ty = .i64, .width = .word },
+        .i32_store => .{ .ty = .i32, .width = .word, .store = true },
+        .i64_store => .{ .ty = .i64, .width = .double, .store = true },
+        .f32_store => .{ .ty = .f32, .width = .word, .store = true },
+        .f64_store => .{ .ty = .f64, .width = .double, .store = true },
+        .i32_store8 => .{ .ty = .i32, .width = .byte, .store = true },
+        .i32_store16 => .{ .ty = .i32, .width = .half, .store = true },
+        .i64_store8 => .{ .ty = .i64, .width = .byte, .store = true },
+        .i64_store16 => .{ .ty = .i64, .width = .half, .store = true },
+        .i64_store32 => .{ .ty = .i64, .width = .word, .store = true },
+        else => null,
+    };
 }
 
 fn scalarOperation(inst: Instruction) ?ir.Op {

@@ -134,6 +134,7 @@ pub fn run(a: std.mem.Allocator, graph: ir.Graph, options: Options) !Result {
         .blocks = blocks,
         .argument_types = try allocator.dupe(ir.Type, graph.argument_types),
         .result_type = graph.result_type,
+        .memory_count = graph.memory_count,
     };
     try result.verify();
     return .{ .arena = arena, .graph = result, .stats = stats };
@@ -169,7 +170,7 @@ fn expression(node: ir.Node, types: []const ir.Type) ?Expression {
 }
 
 fn isPure(op: ir.Op) bool {
-    return ir.effect(op) == .pure;
+    return ir.effects(op).isPure();
 }
 
 fn fold(node: ir.Node, types: []const ir.Type, constants: []const ?u64) ?u64 {

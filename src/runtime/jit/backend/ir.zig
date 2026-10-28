@@ -4,6 +4,7 @@ pub const max_values = 2048;
 pub const max_nodes = 4096;
 pub const max_blocks = 256;
 pub const max_arguments = 64;
+pub const max_memories = 64;
 pub const Type = enum { i32, i64, f32, f64 };
 pub const Value = u32;
 pub const Op = enum {
@@ -71,8 +72,23 @@ pub const Op = enum {
     reinterpret,
     promote_f32,
     demote_f64,
+    load,
+    store,
     guard,
 };
+pub const MemoryWidth = enum(u8) {
+    byte = 1,
+    half = 2,
+    word = 4,
+    double = 8,
+
+    pub fn bytes(self: MemoryWidth) usize {
+        return @backingInt(self);
+    }
+};
+/// Bounded little-endian byte access. Region IDs select frontend-provided
+/// views; they are not non-aliasing promises. Offset addition never wraps.
+pub const MemoryAccess = struct { region: u32 = 0, width: MemoryWidth, offset: u64 = 0, signed: bool = false };
 /// An opaque frontend-owned recovery key and values captured at this exact
 /// point. Guards are ordered effects, not removable unused computations.
 pub const SideExit = struct { id: u32, values: []const Value };
@@ -81,13 +97,15 @@ pub const TrapReason = enum(u32) {
     integer_overflow = 2,
     unreachable_code = 3,
     invalid_conversion = 4,
+    memory_out_of_bounds = 5,
 
-    pub fn toError(self: TrapReason) error{ IntegerDivideByZero, IntegerOverflow, Unreachable, InvalidConversionToInteger } {
+    pub fn toError(self: TrapReason) error{ IntegerDivideByZero, IntegerOverflow, Unreachable, InvalidConversionToInteger, OutOfBoundsMemoryAccess } {
         return switch (self) {
             .division_by_zero => error.IntegerDivideByZero,
             .integer_overflow => error.IntegerOverflow,
             .unreachable_code => error.Unreachable,
             .invalid_conversion => error.InvalidConversionToInteger,
+            .memory_out_of_bounds => error.OutOfBoundsMemoryAccess,
         };
     }
 };
@@ -101,6 +119,7 @@ pub const Node = struct {
     immediate: u64 = 0,
     exit: ?SideExit = null,
     trap_site: ?u32 = null,
+    memory: ?MemoryAccess = null,
 };
 pub const Edge = struct { target: u32, args: []const Value };
 pub const Terminator = union(enum) {
@@ -120,10 +139,11 @@ pub const Graph = struct {
     blocks: []const Block,
     argument_types: []const Type,
     result_type: Type,
+    memory_count: u32 = 0,
 
     pub fn verify(self: Graph) !void {
         if (self.types.len > max_values or self.blocks.len > max_blocks or
-            self.argument_types.len > max_arguments) return error.PrototypeLimit;
+            self.argument_types.len > max_arguments or self.memory_count > max_memories) return error.PrototypeLimit;
         if (self.blocks.len == 0 or self.blocks[0].params.len != self.argument_types.len)
             return error.InvalidGraph;
         var defined: [max_values]bool = @splat(false);
@@ -139,6 +159,7 @@ pub const Graph = struct {
             }
             for (block.nodes) |node| {
                 if (mayTrap(node.op) != (node.trap_site != null)) return error.InvalidGraph;
+                if (isMemoryOp(node.op) != (node.memory != null)) return error.InvalidGraph;
                 if (node.op == .guard) {
                     if (node.out != null) return error.InvalidGraph;
                     try self.use(node.lhs, &available);
@@ -149,6 +170,25 @@ pub const Graph = struct {
                     continue;
                 }
                 if (node.exit != null) return error.InvalidGraph;
+                if (node.memory) |access| {
+                    if (access.region >= self.memory_count) return error.InvalidGraph;
+                    try self.use(node.lhs, &available);
+                    if (isFloat(self.types[node.lhs])) return error.InvalidGraph;
+                    const value = if (node.op == .load) node.out orelse return error.InvalidGraph else node.rhs;
+                    if (value >= self.types.len) return error.InvalidGraph;
+                    const ty = self.types[value];
+                    const width: usize = if (is32(ty)) 4 else 8;
+                    if (access.width.bytes() > width or
+                        (isFloat(ty) and access.width.bytes() != width) or
+                        (access.signed and (node.op == .store or isFloat(ty) or access.width.bytes() == width))) return error.InvalidGraph;
+                    if (node.op == .load) {
+                        try self.define(value, &defined, &available);
+                    } else {
+                        if (node.out != null) return error.InvalidGraph;
+                        try self.use(value, &available);
+                    }
+                    continue;
+                }
                 const out = node.out orelse return error.InvalidGraph;
                 if (out >= self.types.len) return error.InvalidGraph;
                 const out_type = self.types[out];
@@ -254,6 +294,10 @@ pub fn isNumericConversion(op: Op) bool {
     };
 }
 
+pub fn isMemoryOp(op: Op) bool {
+    return op == .load or op == .store;
+}
+
 pub fn isComparison(op: Op) bool {
     return switch (op) {
         .eq, .ne, .lt_s, .lt_u, .gt_s, .gt_u, .le_s, .le_u, .ge_s, .ge_u, .feq, .fne, .flt, .fgt, .fle, .fge => true,
@@ -264,26 +308,39 @@ pub fn isComparison(op: Op) bool {
 pub fn inputCount(op: Op) u2 {
     return switch (op) {
         .constant => 0,
+        .load => 1,
+        .store => 2,
         .fceil, .ffloor, .ftrunc, .fnearest, .convert_s, .convert_u, .trunc_s, .trunc_u, .trunc_sat_s, .trunc_sat_u => 1,
         .guard, .sext_i32, .zext_i32, .trunc_i64, .reinterpret, .promote_f32, .demote_f64, .fabs, .fneg, .fsqrt, .clz, .ctz, .popcnt, .sext8, .sext16, .sext32 => 1,
         .add, .sub, .mul, .div_s, .div_u, .rem_s, .rem_u, .bit_and, .bit_or, .bit_xor, .shl, .shr_s, .shr_u, .rotl, .rotr, .eq, .ne, .lt_s, .lt_u, .gt_s, .gt_u, .le_s, .le_u, .ge_s, .ge_u, .fadd, .fsub, .fmul, .fdiv, .fmin, .fmax, .fcopysign, .feq, .fne, .flt, .fgt, .fle, .fge => 2,
     };
 }
 
-pub const Effect = enum { pure, guard, may_trap };
+pub const Effects = struct {
+    reads_memory: bool = false,
+    writes_memory: bool = false,
+    may_trap: bool = false,
+    exits: bool = false,
 
-pub fn effect(op: Op) Effect {
+    pub fn isPure(self: Effects) bool {
+        return !self.reads_memory and !self.writes_memory and !self.may_trap and !self.exits;
+    }
+};
+
+pub fn effects(op: Op) Effects {
     // Exhaustive: new operations must declare their observable effects.
     return switch (op) {
-        .guard => .guard,
-        .div_s, .div_u, .rem_s, .rem_u, .trunc_s, .trunc_u => .may_trap,
-        .fceil, .ffloor, .ftrunc, .fnearest, .convert_s, .convert_u, .trunc_sat_s, .trunc_sat_u => .pure,
-        .constant, .add, .sub, .mul, .bit_and, .bit_or, .bit_xor, .shl, .shr_s, .shr_u, .rotl, .rotr, .clz, .ctz, .popcnt, .sext8, .sext16, .sext32, .eq, .ne, .lt_s, .lt_u, .gt_s, .gt_u, .le_s, .le_u, .ge_s, .ge_u, .sext_i32, .zext_i32, .trunc_i64, .fadd, .fsub, .fmul, .fdiv, .fmin, .fmax, .fcopysign, .fabs, .fneg, .fsqrt, .feq, .fne, .flt, .fgt, .fle, .fge, .reinterpret, .promote_f32, .demote_f64 => .pure,
+        .guard => .{ .exits = true },
+        .div_s, .div_u, .rem_s, .rem_u, .trunc_s, .trunc_u => .{ .may_trap = true },
+        .load => .{ .reads_memory = true, .may_trap = true },
+        .store => .{ .writes_memory = true, .may_trap = true },
+        .fceil, .ffloor, .ftrunc, .fnearest, .convert_s, .convert_u, .trunc_sat_s, .trunc_sat_u => .{},
+        .constant, .add, .sub, .mul, .bit_and, .bit_or, .bit_xor, .shl, .shr_s, .shr_u, .rotl, .rotr, .clz, .ctz, .popcnt, .sext8, .sext16, .sext32, .eq, .ne, .lt_s, .lt_u, .gt_s, .gt_u, .le_s, .le_u, .ge_s, .ge_u, .sext_i32, .zext_i32, .trunc_i64, .fadd, .fsub, .fmul, .fdiv, .fmin, .fmax, .fcopysign, .fabs, .fneg, .fsqrt, .feq, .fne, .flt, .fgt, .fle, .fge, .reinterpret, .promote_f32, .demote_f64 => .{},
     };
 }
 
 pub fn mayTrap(op: Op) bool {
-    return effect(op) == .may_trap;
+    return effects(op).may_trap;
 }
 
 test {
@@ -292,4 +349,5 @@ test {
     _ = @import("integer_test.zig");
     _ = @import("conversion_test.zig");
     _ = @import("fp_environment_test.zig");
+    _ = @import("memory_test.zig");
 }
