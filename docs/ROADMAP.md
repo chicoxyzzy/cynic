@@ -968,9 +968,9 @@ predictable latency. Correctness still leads, but the perf work
 has started: the dispatch loop, the GC, and string concatenation
 have all had a pass (see **Shipped** below). Cross-engine
 measurement infrastructure lives at
-[docs/benchmarking.md](benchmarking.md); per-commit micro-bench
-deltas are produced by the `/perf` slash command and hot-function
-sampling by `/profile`.
+[docs/benchmarking.md](benchmarking.md); follow the
+[performance](workflows/perf.md) and [profiling](workflows/profile.md)
+workflows for per-commit measurements and hot-function sampling.
 
 **Shipped.**
 
@@ -1888,9 +1888,9 @@ sampling by `/profile`.
 
 - **Profile-driven hotspot list** — `samply` over a test262
   runtime sweep, top-N hot functions. Drives what gets optimized
-  next. Driver lives at `tools/profile.sh`; slash command at
-  `/profile`.
-- **`/perf` micro-bench harness** — `zig build bench` builds a
+  next. Driver lives at `tools/profile.sh`; procedure in the
+  [profiling workflow](workflows/profile.md).
+- **Micro-bench harness** — `zig build bench` builds a
   dedicated ReleaseFast `cynic-bench` binary and times the fixed
   micro-bench suite in `bench/micros/`, median of 10, for focused local
   A/B diagnosis. Decision-relevant results live with their owning design

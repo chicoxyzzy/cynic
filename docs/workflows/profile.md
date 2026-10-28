@@ -1,6 +1,4 @@
----
-description: Profile a test262 sweep under samply; emit a top-N hot-function list
----
+# Profile a test262 sweep
 
 Sample the test262 runtime path and surface the hottest functions
 in the interpreter. Use this when planning a perf-shaped change to

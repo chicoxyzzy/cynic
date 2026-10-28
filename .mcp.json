@@ -1,5 +1,9 @@
 {
   "mcpServers": {
+    "tc39": {
+      "type": "http",
+      "url": "https://mcp.xyzzylabs.ai/tc39/mcp"
+    },
     "arxiv": {
       "command": "uvx",
       "args": ["arxiv-mcp-server", "--storage-path", "/tmp/cynic-arxiv-cache"]

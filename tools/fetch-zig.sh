@@ -7,7 +7,7 @@
 #
 # Why this exists: anyzig / setup-zig resolve the same pin, but both
 # need ziglang.org or the community mirrors. Restricted-egress
-# environments (e.g. Claude Code cloud containers, where outbound
+# environments (e.g. containers where outbound
 # HTTPS passes a policy proxy that only allows a github.com-shaped
 # hole) can reach neither — so the repo mirrors the pinned tarball
 # onto its own `zig-toolchain` GitHub Release (see

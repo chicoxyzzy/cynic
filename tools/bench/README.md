@@ -38,8 +38,8 @@ ref. `--cross` adds the cross-engine table.
 **Detached jobs (survive a local restart).** Both submit the work as a
 detached job on the box (under `setsid`+`flock`) and return a `JOB_ID`
 immediately; the job writes its output + an exit-sentinel to
-`/tmp/jobs/<id>`, so it keeps running even if your laptop's Claude Code
-restarts and the ssh dies. The default invocation submits then waits, but
+`/tmp/jobs/<id>`, so it keeps running even if the local terminal or agent
+restarts and the SSH connection closes. The default invocation submits then waits, but
 the wait is just stateless polling — **re-runnable after a restart**:
 
     JOB=$(tools/bench/remote-run.sh --submit origin/<branch> zig build test262 -- --quiet)

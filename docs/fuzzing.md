@@ -84,7 +84,7 @@ wall-clock poisoned and the race tips toward detection:
 exec rate. A mid value (e.g. `256`) trades some sensitivity for
 throughput. Unset is the engine default (fastest). Worth a
 dedicated campaign separate from the headline coverage run,
-the same way `/gc-stress` complements a normal test262 sweep.
+the same way [GC stress](workflows/gc-stress.md) complements a normal test262 sweep.
 
 ### Guard-page byte-payload campaign
 
@@ -379,7 +379,7 @@ bumping.
 campaign), `jobs` (Fuzzilli parallelism), and `gc_threshold`. Setting
 `gc_threshold=1` runs the [GC-stress posture](#stressing-the-gc-for-use-after-free-detection)
 (`FUZZ_GC_THRESHOLD=1`, collect on every allocation) for a use-after-free
-hunt — the fuzzing analogue of [`/gc-stress`](../.claude/commands/gc-stress.md).
+hunt — the fuzzing analogue of [GC stress](workflows/gc-stress.md).
 
 ### OSS-Fuzz?
 

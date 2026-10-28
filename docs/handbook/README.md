@@ -14,6 +14,9 @@ The normal change sequence is:
 5. Run focused checks, then the broader bucket required by the touched
    machinery.
 
+For task-specific procedures, use the [repeatable workflows](../workflows/README.md).
+They require no agent-specific command system.
+
 | Document | What it covers |
 |---|---|
 | [tdd.md](tdd.md) | Tests-first discipline. The order is: write the failing test, run, implement, re-run. |

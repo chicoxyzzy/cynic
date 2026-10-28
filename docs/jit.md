@@ -440,7 +440,7 @@ it is **every loop back-edge and every call boundary**:
 
 A compiled infinite loop therefore still hits the step budget and
 the watchdog; `--gc-threshold=1` stress (the
-[/gc-stress](../.claude/commands/gc-stress.md) workflow) exercises
+[GC stress](workflows/gc-stress.md) workflow) exercises
 compiled frames the same as interpreted ones. **Any future emitter
 change that adds a loop without a back-edge check is a host-safety
 bug**, same class as an unrooted handle.
@@ -473,7 +473,7 @@ Counters follow the JSC/SM structure with Cynic-sized constants
   not gospel);
 - compilation is **synchronous** on first crossing — Sparkplug
   compiles synchronously because baseline compilation is nearly
-  free; if compile time ever shows up in `/perf`, batching (V8) or
+  free; if compile time ever shows up in [performance](workflows/perf.md), batching (V8) or
   a thread (JSC) are known answers, deferred (§14);
 - a failed compile (allocator exhaustion) sets `dont_compile`;
   there is no recompilation ladder until Ohaimark exists.
@@ -906,7 +906,7 @@ code: every GC change touches the JIT"
   IC's barrier behavior is the spec; T1 emits exactly what
   `sta_property`'s hit path does, helper-call included if that's
   what it does**). Any divergence here is what
-  `verifyRememberedSet` + `/gc-stress` exist to catch.
+  `verifyRememberedSet` + [GC stress](workflows/gc-stress.md) exist to catch.
 - Embedded pointers: legal (non-moving heap; arena-stable shapes;
   chunk constants rooted via `markChunk` for exactly the code's
   lifetime) but v1 barely uses them — IC state stays data-driven
@@ -951,7 +951,7 @@ The tier ships dark, proves equivalence, then flips on:
    compiled frames must survive the same rooting torture as
    interpreted ones (§4.2 says they're the same frames; this is
    where that claim gets audited).
-4. **Bench gates.** `/perf` suite p50s with the JIT on must beat
+4. **Bench gates.** [performance](workflows/perf.md) suite p50s with the JIT on must beat
    Lantern on the dispatch-bound fixtures (§11) and regress nothing
    >5% elsewhere (compile-time inclusion makes warm-up visible —
    the fixtures are sized 50–100 ms, so a millisecond-class compile
