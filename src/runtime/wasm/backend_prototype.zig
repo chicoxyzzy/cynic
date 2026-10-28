@@ -61,6 +61,7 @@ fn valueType(ty: wasm_types.ValType) !ir.Type {
 const missing = std.math.maxInt(u32);
 const Instruction = struct {
     op: Op,
+    offset: u32,
     immediate: u64 = 0,
     target: u32 = missing,
     pop_count: u32 = 0,
@@ -92,7 +93,7 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
     while (!reader.atEnd()) {
         const offset = reader.pos;
         offsets[offset] = @intCast(instructions.items.len);
-        var inst: Instruction = .{ .op = @fromBackingInt(@intCast(try reader.byte())) };
+        var inst: Instruction = .{ .op = @fromBackingInt(@intCast(try reader.byte())), .offset = @intCast(offset) };
         switch (inst.op) {
             .nop, .drop => {},
             .block, .loop => {
@@ -121,7 +122,7 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
                 }
                 if (inst.op == .br) reachable.items[reachable.items.len - 1] = false;
             },
-            .@"return" => reachable.items[reachable.items.len - 1] = false,
+            .@"return", .@"unreachable" => reachable.items[reachable.items.len - 1] = false,
             .local_get, .local_set, .local_tee => inst.immediate = try reader.uleb(u32),
             .i32_const => inst.immediate = @as(u32, @bitCast(try reader.sleb(i32))),
             .i64_const => inst.immediate = @bitCast(try reader.sleb(i64)),
@@ -145,7 +146,7 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
             if (inst.target == missing) return error.InvalidControlFlow;
             leaders[inst.target] = true;
         }
-        if ((inst.op == .br or inst.op == .br_if or inst.op == .@"return") and i + 1 < leaders.len)
+        if ((inst.op == .br or inst.op == .br_if or inst.op == .@"return" or inst.op == .@"unreachable") and i + 1 < leaders.len)
             leaders[i + 1] = true;
     }
     var ranges: std.ArrayList(Range) = .empty;
@@ -212,6 +213,7 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
                     try stack.append(a, try builder.constant(&nodes, ty, inst.immediate));
                 },
                 .@"return" => terminator = .{ .return_ = stack.pop() orelse return error.InvalidControlFlow },
+                .@"unreachable" => terminator = .{ .trap = .{ .reason = .unreachable_code, .site = inst.offset } },
                 .br, .br_if => {
                     const condition = if (inst.op == .br_if) stack.pop() orelse return error.InvalidControlFlow else null;
                     if (inst.pop_count > stack.items.len) return error.InvalidControlFlow;
@@ -239,7 +241,7 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
                         else => builder.types.items[lhs],
                     };
                     const out = try builder.value(ty);
-                    try nodes.append(a, .{ .op = op, .out = out, .lhs = lhs, .rhs = rhs });
+                    try nodes.append(a, .{ .op = op, .out = out, .lhs = lhs, .rhs = rhs, .trap_site = if (ir.mayTrap(op)) inst.offset else null });
                     try stack.append(a, out);
                 },
             }
@@ -263,13 +265,39 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
 fn scalarOperation(op: Op) ?ir.Op {
     return switch (op) {
         .i32_eqz, .i32_eq, .i64_eqz, .i64_eq => .eq,
+        .i32_ne, .i64_ne => .ne,
         .i32_lt_s, .i64_lt_s => .lt_s,
         .i32_lt_u, .i64_lt_u => .lt_u,
+        .i32_gt_s, .i64_gt_s => .gt_s,
+        .i32_gt_u, .i64_gt_u => .gt_u,
+        .i32_le_s, .i64_le_s => .le_s,
+        .i32_le_u, .i64_le_u => .le_u,
         .i32_ge_s, .i64_ge_s => .ge_s,
         .i32_ge_u, .i64_ge_u => .ge_u,
         .i32_add, .i64_add => .add,
         .i32_sub, .i64_sub => .sub,
         .i32_mul, .i64_mul => .mul,
+        .i32_div_s, .i64_div_s => .div_s,
+        .i32_div_u, .i64_div_u => .div_u,
+        .i32_rem_s, .i64_rem_s => .rem_s,
+        .i32_rem_u, .i64_rem_u => .rem_u,
+        .i32_and, .i64_and => .bit_and,
+        .i32_or, .i64_or => .bit_or,
+        .i32_xor, .i64_xor => .bit_xor,
+        .i32_shl, .i64_shl => .shl,
+        .i32_shr_s, .i64_shr_s => .shr_s,
+        .i32_shr_u, .i64_shr_u => .shr_u,
+        .i32_rotl, .i64_rotl => .rotl,
+        .i32_rotr, .i64_rotr => .rotr,
+        .i32_clz, .i64_clz => .clz,
+        .i32_ctz, .i64_ctz => .ctz,
+        .i32_popcnt, .i64_popcnt => .popcnt,
+        .i32_extend8_s, .i64_extend8_s => .sext8,
+        .i32_extend16_s, .i64_extend16_s => .sext16,
+        .i64_extend32_s => .sext32,
+        .i32_wrap_i64 => .trunc_i64,
+        .i64_extend_i32_s => .sext_i32,
+        .i64_extend_i32_u => .zext_i32,
         .f32_add, .f64_add => .fadd,
         .f32_sub, .f64_sub => .fsub,
         .f32_mul, .f64_mul => .fmul,

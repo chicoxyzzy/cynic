@@ -171,6 +171,7 @@ fn computeRanges(graph: ir.Graph, ranges: []LiveRange) void {
         }
         const terminal_position: u32 = @intCast(2 * block.nodes.len + 1);
         switch (block.terminator) {
+            .trap => {},
             .return_ => |value| use(ranges, value, terminal_position),
             .jump => |edge| for (edge.args) |value| {
                 use(ranges, value, terminal_position);

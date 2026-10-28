@@ -11,11 +11,32 @@ pub const Op = enum {
     add,
     sub,
     mul,
+    div_s,
+    div_u,
+    rem_s,
+    rem_u,
     bit_and,
     bit_or,
+    bit_xor,
+    shl,
+    shr_s,
+    shr_u,
+    rotl,
+    rotr,
+    clz,
+    ctz,
+    popcnt,
+    sext8,
+    sext16,
+    sext32,
     eq,
+    ne,
     lt_s,
     lt_u,
+    gt_s,
+    gt_u,
+    le_s,
+    le_u,
     ge_s,
     ge_u,
     sext_i32,
@@ -45,6 +66,21 @@ pub const Op = enum {
 /// An opaque frontend-owned recovery key and values captured at this exact
 /// point. Guards are ordered effects, not removable unused computations.
 pub const SideExit = struct { id: u32, values: []const Value };
+pub const TrapReason = enum(u32) {
+    division_by_zero = 1,
+    integer_overflow = 2,
+    unreachable_code = 3,
+
+    pub fn toError(self: TrapReason) error{ IntegerDivideByZero, IntegerOverflow, Unreachable } {
+        return switch (self) {
+            .division_by_zero => error.IntegerDivideByZero,
+            .integer_overflow => error.IntegerOverflow,
+            .unreachable_code => error.Unreachable,
+        };
+    }
+};
+/// The location is opaque to the backend; Wasm uses an instruction byte offset.
+pub const Trap = struct { reason: TrapReason, site: u32 };
 pub const Node = struct {
     op: Op,
     out: ?Value = null,
@@ -52,9 +88,11 @@ pub const Node = struct {
     rhs: Value = 0,
     immediate: u64 = 0,
     exit: ?SideExit = null,
+    trap_site: ?u32 = null,
 };
 pub const Edge = struct { target: u32, args: []const Value };
 pub const Terminator = union(enum) {
+    trap: Trap,
     return_: Value,
     jump: Edge,
     branch: struct { condition: Value, taken: Edge, fallthrough: Edge },
@@ -88,6 +126,7 @@ pub const Graph = struct {
                 if (block_index == 0 and self.types[param] != self.argument_types[i]) return error.InvalidGraph;
             }
             for (block.nodes) |node| {
+                if (mayTrap(node.op) != (node.trap_site != null)) return error.InvalidGraph;
                 if (node.op == .guard) {
                     if (node.out != null) return error.InvalidGraph;
                     try self.use(node.lhs, &available);
@@ -113,6 +152,7 @@ pub const Graph = struct {
                 } else {
                     try self.use(node.lhs, &available);
                     const input_type = self.types[node.lhs];
+                    if (node.op == .sext32 and input_type != .i64) return error.InvalidGraph;
                     if (isFloatOp(node.op) != isFloat(input_type)) return error.InvalidGraph;
                     if (inputCount(node.op) == 2) {
                         try self.use(node.rhs, &available);
@@ -124,6 +164,7 @@ pub const Graph = struct {
                 try self.define(out, &defined, &available);
             }
             switch (block.terminator) {
+                .trap => {},
                 .return_ => |value| {
                     try self.use(value, &available);
                     if (self.types[value] != self.result_type) return error.InvalidGraph;
@@ -192,7 +233,7 @@ pub fn isFloatOp(op: Op) bool {
 
 pub fn isComparison(op: Op) bool {
     return switch (op) {
-        .eq, .lt_s, .lt_u, .ge_s, .ge_u, .feq, .fne, .flt, .fgt, .fle, .fge => true,
+        .eq, .ne, .lt_s, .lt_u, .gt_s, .gt_u, .le_s, .le_u, .ge_s, .ge_u, .feq, .fne, .flt, .fgt, .fle, .fge => true,
         else => false,
     };
 }
@@ -200,12 +241,28 @@ pub fn isComparison(op: Op) bool {
 pub fn inputCount(op: Op) u2 {
     return switch (op) {
         .constant => 0,
-        .guard, .sext_i32, .zext_i32, .trunc_i64, .reinterpret, .promote_f32, .demote_f64, .fabs, .fneg, .fsqrt => 1,
-        .add, .sub, .mul, .bit_and, .bit_or, .eq, .lt_s, .lt_u, .ge_s, .ge_u, .fadd, .fsub, .fmul, .fdiv, .fmin, .fmax, .fcopysign, .feq, .fne, .flt, .fgt, .fle, .fge => 2,
+        .guard, .sext_i32, .zext_i32, .trunc_i64, .reinterpret, .promote_f32, .demote_f64, .fabs, .fneg, .fsqrt, .clz, .ctz, .popcnt, .sext8, .sext16, .sext32 => 1,
+        .add, .sub, .mul, .div_s, .div_u, .rem_s, .rem_u, .bit_and, .bit_or, .bit_xor, .shl, .shr_s, .shr_u, .rotl, .rotr, .eq, .ne, .lt_s, .lt_u, .gt_s, .gt_u, .le_s, .le_u, .ge_s, .ge_u, .fadd, .fsub, .fmul, .fdiv, .fmin, .fmax, .fcopysign, .feq, .fne, .flt, .fgt, .fle, .fge => 2,
     };
+}
+
+pub const Effect = enum { pure, guard, may_trap };
+
+pub fn effect(op: Op) Effect {
+    // Exhaustive: new operations must declare their observable effects.
+    return switch (op) {
+        .guard => .guard,
+        .div_s, .div_u, .rem_s, .rem_u => .may_trap,
+        .constant, .add, .sub, .mul, .bit_and, .bit_or, .bit_xor, .shl, .shr_s, .shr_u, .rotl, .rotr, .clz, .ctz, .popcnt, .sext8, .sext16, .sext32, .eq, .ne, .lt_s, .lt_u, .gt_s, .gt_u, .le_s, .le_u, .ge_s, .ge_u, .sext_i32, .zext_i32, .trunc_i64, .fadd, .fsub, .fmul, .fdiv, .fmin, .fmax, .fcopysign, .fabs, .fneg, .fsqrt, .feq, .fne, .flt, .fgt, .fle, .fge, .reinterpret, .promote_f32, .demote_f64 => .pure,
+    };
+}
+
+pub fn mayTrap(op: Op) bool {
+    return effect(op) == .may_trap;
 }
 
 test {
     _ = @import("tests.zig");
     _ = @import("float_test.zig");
+    _ = @import("integer_test.zig");
 }

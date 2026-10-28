@@ -302,6 +302,7 @@ test "backend allocation: seeded live-range pressure matches scratch at every gu
                 defer actual.deinit();
                 try std.testing.expectEqual(std.meta.activeTag(expected), std.meta.activeTag(actual));
                 switch (expected) {
+                    .trapped => return error.UnexpectedNativeTrap,
                     .returned => |value| try std.testing.expectEqual(value, actual.returned),
                     .exited => |exit| {
                         try std.testing.expectEqual(exit.id, actual.exited.id);

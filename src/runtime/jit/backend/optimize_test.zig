@@ -255,6 +255,7 @@ test "backend optimization: seeded native cases match the unoptimized scratch or
                             defer actual.deinit();
                             try std.testing.expectEqual(std.meta.activeTag(expected), std.meta.activeTag(actual));
                             switch (expected) {
+                                .trapped => return error.UnexpectedNativeTrap,
                                 .returned => |value| try std.testing.expectEqual(value, actual.returned),
                                 .exited => |exit| {
                                     try std.testing.expectEqual(exit.id, actual.exited.id);

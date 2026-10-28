@@ -108,6 +108,7 @@ pub const Program = struct {
         var outcome = try self.compiled.runOutcome(args[0..self.entry_roles.len], entry.block_budget);
         defer outcome.deinit();
         switch (outcome) {
+            .trapped => return error.UnexpectedNativeTrap,
             .returned => |bits| return .{ .returned = .{ .bits = bits } },
             .exited => |exit| {
                 if (exit.id >= self.recoveries.len) return error.InvalidMetadata;
