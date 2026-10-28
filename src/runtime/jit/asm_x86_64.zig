@@ -87,6 +87,22 @@ pub const Masm = struct {
         self.* = undefined;
     }
 
+    /// STMXCSR m32 / LDMXCSR m32 (SSE control and sticky status bits).
+    pub fn storeMxcsr(self: *Masm, base: Reg, displacement: i32) error{OutOfMemory}!void {
+        try self.mxcsrMemory(3, base, displacement);
+    }
+
+    pub fn loadMxcsr(self: *Masm, base: Reg, displacement: i32) error{OutOfMemory}!void {
+        try self.mxcsrMemory(2, base, displacement);
+    }
+
+    fn mxcsrMemory(self: *Masm, field: u8, base: Reg, displacement: i32) error{OutOfMemory}!void {
+        if (isExtended(base)) try self.emitByte(0x41);
+        try self.emitByte(0x0f);
+        try self.emitByte(0xae);
+        try self.emitDisp32ModRm(field, base, displacement);
+    }
+
     /// `mov r64, imm64`.
     pub fn movImm64(self: *Masm, destination: Reg, value: u64) error{OutOfMemory}!void {
         try self.emitByte(rex(true, false, false, isExtended(destination)));
@@ -1232,6 +1248,21 @@ fn isExtendedXmm(register: Xmm) bool {
 fn lowBitsXmm(register: Xmm) u8 {
     return @backingInt(register) & 7;
 }
+
+test "jit asm_x86_64: FP environment encodings" {
+    var m = Masm.init(std.testing.allocator);
+    defer m.deinit();
+    try m.storeMxcsr(.rdi, 512);
+    try m.loadMxcsr(.r12, -16);
+    try m.storeMxcsr(.rsp, 0);
+    try std.testing.expectEqualSlices(u8, &.{
+        0x0f, 0xae, 0x9f, 0x00, 0x02, 0x00, 0x00,
+        0x41, 0x0f, 0xae, 0x94, 0x24, 0xf0, 0xff,
+        0xff, 0xff, 0x0f, 0xae, 0x9c, 0x24, 0x00,
+        0x00, 0x00, 0x00,
+    }, m.code.items);
+}
+
 test "jit asm_x86_64: SIMD immediate32 masks use compact zero-extending encodings" {
     var m = Masm.init(std.testing.allocator);
     defer m.deinit();

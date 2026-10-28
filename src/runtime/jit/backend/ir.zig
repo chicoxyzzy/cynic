@@ -291,4 +291,5 @@ test {
     _ = @import("float_test.zig");
     _ = @import("integer_test.zig");
     _ = @import("conversion_test.zig");
+    _ = @import("fp_environment_test.zig");
 }

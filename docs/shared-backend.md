@@ -380,9 +380,56 @@ Tests force native entry and compare with Sarcasm with Spasm disabled. They
 cover both widths, infinities, subnormals, signed zero, quiet/signaling NaNs,
 register pressure, constant and runtime conversions, mixed integer/float loop
 edges, budget exhaustion, invalid graphs, and allocation-failure cleanup.
-Production resource policy and FP-environment integration remain part of the
-rollout work; generated code currently assumes the ordinary round-to-nearest,
-non-flush-to-zero, masked-exception host environment, as the existing emitters do.
+Production resource policy remains part of the rollout work. Native leaf entry
+now establishes the FP environment described below; it does not rely on the
+embedding application's rounding mode or exception masks.
+
+### Floating-point entry and exit
+
+ECMA-262 [Number operations (section 6.1.6.1)](https://tc39.es/ecma262/multipage/ecmascript-data-types-and-values.html#sec-ecmascript-language-types-number-type)
+and [Wasm floating-point operations](https://webassembly.github.io/spec/core/exec/numerics.html#floating-point-operations)
+must not inherit an embedder's directed rounding or flush-to-zero mode.
+The generated leaf prologue saves the caller's state and establishes
+nearest-even rounding, gradual underflow, masked hardware exceptions, and
+cleared status flags. Every native return restores the exact saved controls
+and flags, including guard exits, arithmetic/conversion traps, terminal traps,
+and budget exhaustion before or after a loop. Direct native entry receives the
+same protection as `Compiled.runOutcome`; this is not a wrapper-only fix.
+
+On x86_64, STMXCSR/LDMXCSR save and restore MXCSR, with `0x1f80` used inside
+generated code. The independent x87 state stays untouched because this backend
+emits no x87 arithmetic. On AArch64, MRS/MSR save FPCR and FPSR; entry clears the
+f32/f64 rounding, flush, alternate/NaN-handling, exception-enable, and status
+bits while preserving unrelated controls. Exit restores FPSR before FPCR.
+State lives in two extra scratch words per invocation, not global storage.
+The graph is checked after optimization: integer-only graphs, raw float-bit
+transfers, and graphs whose only FP arithmetic was removed by DCE receive no
+extra entry/exit instructions or scratch slots.
+
+The instruction/register model follows [Arm AAPCS64](https://github.com/ARM-software/abi-aa/blob/main/aapcs64/aapcs64.rst#simd-and-floating-point-registers)
+and [LLVM libc's MXCSR handling](https://github.com/llvm/llvm-project/blob/main/libc/src/__support/FPUtil/x86_64/fenv_mxcsr_utils.h).
+[V8's AssertFPCRState](https://github.com/v8/v8/blob/main/src/codegen/arm64/macro-assembler-arm64.cc)
+illustrates the same dependence on rounding and denormal controls. Cynic
+normalizes and restores instead of requiring that an arbitrary host already
+has those settings. Exact sticky-flag restoration is a stronger contract than
+the ordinary AArch64 calling convention requires.
+
+Static memory-traffic counters include this machinery: both targets emit two
+stores on entry; x86 additionally loads the canonical MXCSR and reloads saved
+MXCSR at each exit, while AArch64 loads two saved words at each exit. This
+adds code and 16 bytes of scratch to FP functions; no speedup is claimed.
+Tests exercise all rounding modes, input/output subnormals, unmasked exceptions
+where supported by the hardware, preexisting flags, each exit kind, direct
+Wasm-lowered entry, optimizer/allocation variants, and allocation failures.
+The hardware-exception test checks actual control-register readback. It reports
+a skip on Arm hardware without exception-enable support, or when Rosetta forces
+MXCSR masks on; native x86 must really enable the exceptions. An emulated pass
+is not counted as native hardware-exception coverage.
+
+This contract currently covers leaf code only. Future native calls and host
+callbacks must explicitly handle FP state across calls and re-entry; entry
+normalization alone does not qualify those boundaries or non-local unwinding.
+Production Ohaimark and Spasm are not rerouted by this change.
 
 ### Rounding and numeric conversions
 
@@ -505,8 +552,8 @@ must become explicit without importing JS object layouts into the backend.
 Those operations remain absent, not implicitly pure.
 
 Do not enable fast-math identities or silently reuse Wasm trapping conversions
-for JavaScript coercions. Production entry must establish or verify the required
-FP environment before running this code in arbitrary embedding contexts.
+for JavaScript coercions. Preserve the generated leaf FP entry/exit contract
+when adding call boundaries, re-entry, and production execution paths.
 
 ## Delivery and gates
 
@@ -518,8 +565,8 @@ open; a passing demo or unchanged production test262 run does not close them.
 
 - [ ] Complete scalar numeric types and operations, including strict floating
   point, bit-preserving conversions, and explicit integer/truncation traps.
-  Operation coverage is implemented and tested on both architectures; the
-  production entry contract for arbitrary host FP environments remains open.
+  Operation coverage and protected native leaf entry are implemented; native
+  call boundaries remain part of the effects and integration gates below.
 - [ ] Model memory, calls, traps, safepoints, and ordered effects in the IR and
   verifier before optimizing them; preserve aliasing, atomics, and trap order.
 - [ ] Support the accepted Wasm control/signature surface, memory and growth,
@@ -569,8 +616,8 @@ failures, but is not evidence that an unimplemented backend capability works.
    telemetry, differential fuzzing, and spec-suite gates. No automatic
    default-on graduation or new JS tier follows from finishing the prototype.
 
-The next capability work is the runtime entry contract (including the FP
-environment), memory/call effects, and production integration. Operand-move
+The next capability work is memory/call effects and production integration,
+including FP state at future callback boundaries. Operand-move
 reduction and immediate/compare-branch selection remain measured optimization
 work, not substitutes for coverage.
 Keep each change independently measurable against disabled variants and
