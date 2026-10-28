@@ -119,9 +119,10 @@ JS values/realms nor Wasm types, bytecode, instances, or Cells.
 The subset has i32/i64 and f32/f64 constants, wrapping integer arithmetic,
 strict scalar FP arithmetic, comparisons, bitwise operations, explicit width
 conversions, ordered guards/traps, block parameters, jumps, conditional branches,
-bounded scalar loads/stores, typed runtime calls, and a single scalar result. The Wasm adapter
-accepts locals and void block/loop
-constructs with `br`/`br_if`. Unsupported instructions or types are an explicit
+bounded scalar loads/stores, typed runtime calls, and a single scalar result.
+The Wasm adapter accepts locals, scalar-typed block/loop/if constructs (including
+multiple block parameters/results), `br`/`br_if`/`br_table`, and scalar `select`.
+Unsupported instructions or types are an explicit
 refusal, even in dead bytecode; there is no silent fallback that could make an
 execution test pass without running generated code.
 
@@ -504,10 +505,9 @@ The Wasm adapter now lowers the complete scalar integer numeric family for
 i32/i64: arithmetic, signed/unsigned division and remainder, bitwise operations,
 masked shifts/rotates, zero/leading/trailing/population counts, comparisons,
 integer width conversions, and sign-extension operations. Numeric integer/float
-conversions are described above and memory accesses below. The `select` control
-instruction remains outside this adapter. It also accepts `unreachable`,
-including in dead validated code.
-Unsupported operations such as `select` still refuse even in dead bytecode.
+conversions are described above and memory accesses below. It also accepts
+`unreachable`, including in dead validated code. Unsupported operations such
+as reference instructions still refuse even in dead bytecode.
 
 Division and remainder declare `may_trap` effects and require a frontend-owned
 `trap_site`; pure operations and guards reject that metadata. A terminal `trap`
@@ -698,6 +698,58 @@ Do not enable fast-math identities or silently reuse Wasm trapping conversions
 for JavaScript coercions. Preserve the generated FP entry/exit and callback
 contracts when adding production execution paths.
 
+## Structured Wasm control
+
+The Wasm adapter lowers scalar-typed `block`, `loop`, and `if`/`else`, including
+type-index signatures with multiple parameters/results; `br`, `br_if`, and
+`br_table`; explicit return and branches to the implicit function label; and
+typed/untyped scalar `select`. Function entry/results and runtime-call results
+retain their existing limits: this is not multi-result function support,
+reference/SIMD control support, tail calls, or exception handling.
+
+The [Wasm control instruction rules](https://webassembly.github.io/spec/core/exec/instructions.html#control-instructions)
+distinguish loop parameters from block results. Wasmtime's
+[Cranelift translator](https://github.com/bytecodealliance/wasmtime/blob/main/crates/cranelift/src/translate/code_translator.rs)
+expresses both through block arguments. Cynic uses the same SSA boundary but
+reuses its validator's branch side table for destinations, carried arity, and
+discard counts. That metadata originated with the
+[in-place interpreter design](https://arxiv.org/abs/2205.01183); no second Wasm
+validator or machine-code control stack is introduced. ECMA-262/test262 and
+SES semantics are unchanged; the direct gates here are Wasm differentials.
+
+Taken branches preserve the stack prefix and carried values, discarding only
+the operands between them. Untaken conditional branches preserve all operands.
+`else` consumes its validator metadata even after a terminated then arm and
+restores the reachability of the enclosing `if`. Dead unsupported signatures
+still refuse. The function's implicit label targets a synthetic return, so a
+branch to it uses the same carried-value rule as other labels.
+
+`select` evaluates both operands before a branch passes the chosen bits into
+a common successor. This preserves eager traps, NaN payloads, and signed zero;
+it does not turn `select` into short-circuit evaluation. Branch tables expand
+into comparison/branch blocks, with an unsigned i32 index and a default edge.
+There is no jump-table performance claim. Expansion is bounded by the existing
+256-block/2048-value graph limits and refuses excessive tables normally. Each
+dispatch block consumes the developer execution budget, as do loop backedges.
+
+Control tests compare explicit result oracles with Sarcasm, forced native
+Spasm entry, and shared native execution under all 16 optimization/rematerialization
+combinations at zero/one/four allocated registers. They cover typed merges,
+loop parameters, stack discard, branch-table defaults, function-label exits,
+dead arms, exact eager-trap locations, raw scalar selection bits, allocation
+failures, resource limits, and finite interruption of infinite typed loops.
+These are frontend coverage gates, not production rollout qualification.
+
+Local validation for this increment: the full AArch64 ReleaseSafe unit/CLI
+suite passed 4,144 tests with 303 skips (all 52 build steps successful); the
+x86_64 backend suite under Rosetta passed 177 tests with one skip. The latter
+is not native x86_64 hardware qualification. The RSS precheck stayed within
+its 512 MiB cap; the full test262 sweep retained 48,653 passing and 1,324
+existing failing fixtures, with a byte-identical pass cache. That sweep is a
+production non-regression check, not shared-backend conformance coverage.
+Both architecture demos retained their existing IR/code-size, scratch,
+load/store, and recovery counts. Timings are diagnostic, not a speedup claim.
+
 ## Delivery and gates
 
 ### Production completion checklist
@@ -755,8 +807,10 @@ failures, but is not evidence that an unimplemented backend capability works.
    conversions), the complete scalar integer family, and bounded scalar memory
    now run natively, with explicit ordered arithmetic/conversion/memory traps.
    Direct scalar calls now bridge through existing runtime dispatch, including
-   function imports and callee memory growth. Continue with the remaining
-   signatures/control/call surface and production integration. Preserve bounds checks,
+   function imports and callee memory growth. Scalar structured control now
+   includes multi-value block parameters/results, branch tables, and selection.
+   Continue with function signatures, references/exceptions, indirect/native
+   calls, and production integration. Preserve bounds checks,
    memory-growth invalidation, resource metering, and executable ownership.
 6. **Rollout decision:** paired warm/cold execution measurements, compilation
    latency, peak compiler allocation, installed code size, refusal/entry
