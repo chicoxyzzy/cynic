@@ -2,8 +2,18 @@
 const std = @import("std");
 const ir = @import("ir.zig");
 
-pub const Options = struct { constant_folding: bool = true, dead_code_elimination: bool = true };
-pub const Stats = struct { input_nodes: u32 = 0, output_nodes: u32 = 0, folded_nodes: u32 = 0, removed_nodes: u32 = 0 };
+pub const Options = struct {
+    constant_folding: bool = true,
+    common_subexpression_elimination: bool = true,
+    dead_code_elimination: bool = true,
+};
+pub const Stats = struct {
+    input_nodes: u32 = 0,
+    output_nodes: u32 = 0,
+    folded_nodes: u32 = 0,
+    commoned_nodes: u32 = 0,
+    removed_nodes: u32 = 0,
+};
 pub const Result = struct {
     arena: std.heap.ArenaAllocator,
     graph: ir.Graph,
@@ -23,20 +33,46 @@ pub fn run(a: std.mem.Allocator, graph: ir.Graph, options: Options) !Result {
     const blocks = try allocator.dupe(ir.Block, graph.blocks);
     var stats: Stats = .{};
     var constants: [ir.max_values]?u64 = @splat(null);
+    var representatives: [ir.max_values]ir.Value = undefined;
+    for (&representatives, 0..) |*value, i| value.* = @intCast(i);
+    var expressions: std.AutoHashMapUnmanaged(Expression, ir.Value) = .empty;
+    defer expressions.deinit(a);
     for (blocks) |*block| {
         const nodes = try allocator.dupe(ir.Node, block.nodes);
-        block.nodes = nodes;
         stats.input_nodes += @intCast(nodes.len);
-        if (!options.constant_folding) continue;
-        for (nodes) |*node| {
-            const out = node.out orelse continue;
-            if (node.op == .constant) {
-                constants[out] = node.immediate;
-            } else if (fold(node.*, graph.types, &constants)) |value| {
-                constants[out] = value;
-                node.* = .{ .op = .constant, .out = out, .immediate = value };
-                stats.folded_nodes += 1;
-            }
+        expressions.clearRetainingCapacity();
+        var count: usize = 0;
+        for (nodes) |original| {
+            var node = if (options.common_subexpression_elimination)
+                try remapInputs(allocator, original, &representatives)
+            else
+                original;
+            if (options.constant_folding) if (node.out) |out| {
+                if (node.op == .constant) {
+                    constants[out] = node.immediate;
+                } else if (fold(node, graph.types, &constants)) |value| {
+                    constants[out] = value;
+                    node = .{ .op = .constant, .out = out, .immediate = value };
+                    stats.folded_nodes += 1;
+                }
+            };
+            if (options.common_subexpression_elimination) if (expression(node, graph.types)) |key| {
+                const entry = try expressions.getOrPut(a, key);
+                if (entry.found_existing) {
+                    // Inputs already name canonical definitions, so aliases never
+                    // form chains, even when value IDs are not in program order.
+                    representatives[node.out.?] = entry.value_ptr.*;
+                    stats.commoned_nodes += 1;
+                    continue;
+                }
+                entry.value_ptr.* = node.out.?;
+            };
+            nodes[count] = node;
+            count += 1;
+        }
+        block.nodes = nodes[0..count];
+        if (options.common_subexpression_elimination) {
+            block.terminator = try remapTerminator(allocator, block.terminator, &representatives);
         }
     }
 
@@ -66,7 +102,7 @@ pub fn run(a: std.mem.Allocator, graph: ir.Graph, options: Options) !Result {
     const types = try allocator.alloc(ir.Type, graph.types.len);
     var value_count: usize = 0;
     for (graph.types, 0..) |ty, value| {
-        if (!live[value]) continue;
+        if (!live[value] or representatives[value] != value) continue;
         map[value] = @intCast(value_count);
         types[value_count] = ty;
         value_count += 1;
@@ -80,34 +116,14 @@ pub fn run(a: std.mem.Allocator, graph: ir.Graph, options: Options) !Result {
                 stats.removed_nodes += 1;
                 continue;
             }
-            var node = original;
+            var node = try remapInputs(allocator, original, &map);
             if (node.out) |out| node.out = map[out];
-            switch (node.op) {
-                .constant => {},
-                .guard => {
-                    node.lhs = map[node.lhs];
-                    node.exit = .{ .id = node.exit.?.id, .values = try remapValues(allocator, node.exit.?.values, &map) };
-                },
-                .sext_i32, .zext_i32, .trunc_i64 => node.lhs = map[node.lhs],
-                else => {
-                    node.lhs = map[node.lhs];
-                    node.rhs = map[node.rhs];
-                },
-            }
             nodes[count] = node;
             count += 1;
         }
         block.nodes = nodes[0..count];
         stats.output_nodes += @intCast(count);
-        block.terminator = switch (block.terminator) {
-            .return_ => |value| .{ .return_ = map[value] },
-            .jump => |edge| .{ .jump = try remapEdge(allocator, edge, &map) },
-            .branch => |branch| .{ .branch = .{
-                .condition = map[branch.condition],
-                .taken = try remapEdge(allocator, branch.taken, &map),
-                .fallthrough = try remapEdge(allocator, branch.fallthrough, &map),
-            } },
-        };
+        block.terminator = try remapTerminator(allocator, block.terminator, &map);
     }
     const result: ir.Graph = .{
         .types = types[0..value_count],
@@ -117,6 +133,33 @@ pub fn run(a: std.mem.Allocator, graph: ir.Graph, options: Options) !Result {
     };
     try result.verify();
     return .{ .arena = arena, .graph = result, .stats = stats };
+}
+
+const Expression = struct {
+    op: ir.Op,
+    ty: ir.Type,
+    lhs: ir.Value = 0,
+    rhs: ir.Value = 0,
+    immediate: u64 = 0,
+};
+
+fn expression(node: ir.Node, types: []const ir.Type) ?Expression {
+    if (!isPure(node.op)) return null;
+    var key: Expression = .{ .op = node.op, .ty = types[node.out.?] };
+    switch (node.op) {
+        .constant => key.immediate = node.immediate,
+        .sext_i32, .zext_i32, .trunc_i64 => key.lhs = node.lhs,
+        .add, .mul, .bit_and, .bit_or, .eq => {
+            key.lhs = @min(node.lhs, node.rhs);
+            key.rhs = @max(node.lhs, node.rhs);
+        },
+        .sub, .lt_s, .lt_u, .ge_s, .ge_u => {
+            key.lhs = node.lhs;
+            key.rhs = node.rhs;
+        },
+        .guard => return null,
+    }
+    return key;
 }
 
 fn isPure(op: ir.Op) bool {
@@ -184,4 +227,33 @@ fn remapValues(a: std.mem.Allocator, values: []const ir.Value, map: []const ir.V
 
 fn remapEdge(a: std.mem.Allocator, edge: ir.Edge, map: []const ir.Value) !ir.Edge {
     return .{ .target = edge.target, .args = try remapValues(a, edge.args, map) };
+}
+
+fn remapInputs(a: std.mem.Allocator, original: ir.Node, map: []const ir.Value) !ir.Node {
+    var node = original;
+    switch (node.op) {
+        .constant => {},
+        .guard => {
+            node.lhs = map[node.lhs];
+            node.exit = .{ .id = node.exit.?.id, .values = try remapValues(a, node.exit.?.values, map) };
+        },
+        .sext_i32, .zext_i32, .trunc_i64 => node.lhs = map[node.lhs],
+        else => {
+            node.lhs = map[node.lhs];
+            node.rhs = map[node.rhs];
+        },
+    }
+    return node;
+}
+
+fn remapTerminator(a: std.mem.Allocator, terminator: ir.Terminator, map: []const ir.Value) !ir.Terminator {
+    return switch (terminator) {
+        .return_ => |value| .{ .return_ = map[value] },
+        .jump => |edge| .{ .jump = try remapEdge(a, edge, map) },
+        .branch => |branch| .{ .branch = .{
+            .condition = map[branch.condition],
+            .taken = try remapEdge(a, branch.taken, map),
+            .fallthrough = try remapEdge(a, branch.fallthrough, map),
+        } },
+    };
 }

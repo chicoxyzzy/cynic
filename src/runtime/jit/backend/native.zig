@@ -101,7 +101,7 @@ pub fn compile(a: std.mem.Allocator, owner: *code_alloc.CodeAllocator, graph: ir
 pub fn compileWithOptions(a: std.mem.Allocator, owner: *code_alloc.CodeAllocator, graph: ir.Graph, options: Options) !Compiled {
     try graph.verify();
     if (comptime !supported) return error.UnsupportedTarget;
-    var optimized: ?optimize.Result = if (options.optimization.constant_folding or options.optimization.dead_code_elimination)
+    var optimized: ?optimize.Result = if (options.optimization.constant_folding or options.optimization.common_subexpression_elimination or options.optimization.dead_code_elimination)
         try optimize.run(a, graph, options.optimization)
     else
         null;

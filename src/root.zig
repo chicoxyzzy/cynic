@@ -188,6 +188,7 @@ test {
     _ = @import("runtime/jit/layout.zig");
     _ = @import("runtime/jit/backend/allocation_test.zig");
     _ = @import("runtime/jit/backend/optimize_test.zig");
+    _ = @import("runtime/jit/backend/cse_test.zig");
     _ = @import("runtime/bistromath/bistromath.zig");
     _ = @import("runtime/bistromath/x86_64_test.zig");
     _ = @import("runtime/ohaimark/ohaimark.zig");

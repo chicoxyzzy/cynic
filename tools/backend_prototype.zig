@@ -5,7 +5,7 @@ const wasm = cynic.wasm;
 const prototype = wasm.backend_prototype;
 const js = cynic.runtime.ohaimark_backend_prototype;
 const Value = cynic.runtime.Value;
-const no_optimization = (prototype.native.Options{ .optimization = .{ .constant_folding = false, .dead_code_elimination = false } }).optimization;
+const no_optimization = (prototype.native.Options{ .optimization = .{ .constant_folding = false, .common_subexpression_elimination = false, .dead_code_elimination = false } }).optimization;
 
 // (i32 n) -> sum(i*i, i=0..n), with two zero-initialized i32 locals.
 const body = [_]u8{
@@ -42,6 +42,10 @@ pub fn main(init: std.process.Init) !void {
     var compiled = try prototype.native.compile(a, &owner, graph.graph);
     defer compiled.deinit();
     const compile_us = compile_start.untilNow(init.io, .awake).toMicroseconds();
+    const no_cse_start = std.Io.Clock.now(.awake, init.io);
+    var no_cse = try prototype.native.compileWithOptions(a, &owner, graph.graph, .{ .optimization = .{ .common_subexpression_elimination = false } });
+    defer no_cse.deinit();
+    const no_cse_us = no_cse_start.untilNow(init.io, .awake).toMicroseconds();
     const allocated_start = std.Io.Clock.now(.awake, init.io);
     var allocated = try prototype.native.compileWithOptions(a, &owner, graph.graph, .{ .optimization = no_optimization });
     defer allocated.deinit();
@@ -64,7 +68,7 @@ pub fn main(init: std.process.Init) !void {
         for (0..n) |i| expected +%= @as(u32, @intCast(i)) *% @as(u32, @intCast(i));
         const actual = try compiled.run(&.{n}, 10_000);
         native_entries += 1;
-        if (actual != expected or actual != try oracle.run(&.{n}, 10_000) or actual != try allocated.run(&.{n}, 10_000)) return error.ResultMismatch;
+        if (actual != expected or actual != try no_cse.run(&.{n}, 10_000) or actual != try oracle.run(&.{n}, 10_000) or actual != try allocated.run(&.{n}, 10_000)) return error.ResultMismatch;
         for ([_]bool{ false, true }) |spasm| {
             instance.spasm_enabled = spasm;
             const result = try wasm.invoke(&instance, a, 0, &.{n});
@@ -77,6 +81,10 @@ pub fn main(init: std.process.Init) !void {
     var checksum: u64 = 0;
     for (0..100) |_| checksum +%= try compiled.run(&.{1000}, 10_000);
     const run_us = run_start.untilNow(init.io, .awake).toMicroseconds();
+    const no_cse_run_start = std.Io.Clock.now(.awake, init.io);
+    var no_cse_checksum: u64 = 0;
+    for (0..100) |_| no_cse_checksum +%= try no_cse.run(&.{1000}, 10_000);
+    const no_cse_run_us = no_cse_run_start.untilNow(init.io, .awake).toMicroseconds();
     const allocated_run_start = std.Io.Clock.now(.awake, init.io);
     var allocated_checksum: u64 = 0;
     for (0..100) |_| allocated_checksum +%= try allocated.run(&.{1000}, 10_000);
@@ -85,18 +93,18 @@ pub fn main(init: std.process.Init) !void {
     var oracle_checksum: u64 = 0;
     for (0..100) |_| oracle_checksum +%= try oracle.run(&.{1000}, 10_000);
     const oracle_run_us = oracle_run_start.untilNow(init.io, .awake).toMicroseconds();
-    if (checksum != oracle_checksum or checksum != allocated_checksum) return error.ResultMismatch;
+    if (checksum != oracle_checksum or checksum != allocated_checksum or checksum != no_cse_checksum) return error.ResultMismatch;
     std.debug.print(
         "Shared backend experiment (not a production tier)\n" ++
-            "Columns: optimized / allocation-only / unoptimized scratch\n" ++
+            "Columns: optimized / CSE-off / allocation-only / unoptimized scratch\n" ++
             "Wasm frontend:\n" ++
             "  verified SSA: {d} blocks, {d} values\n" ++
-            "  decode + validate + lower: {d} us; optimize + allocate + emit: {d} / {d} / {d} us\n" ++
+            "  decode + validate + lower: {d} us; optimize + allocate + emit: {d} / {d} / {d} / {d} us\n" ++
             "  matching results: {d}; entries per variant: {d}; Spasm entries: {d}\n" ++
-            "  100 bounded calls, including scratch allocation: {d} / {d} / {d} us; checksum: {d}\n",
-        .{ graph.graph.blocks.len, graph.graph.types.len, lower_us, compile_us, allocated_us, oracle_us, native_entries, native_entries, instance.spasm_runs, run_us, allocated_run_us, oracle_run_us, checksum },
+            "  100 bounded calls, including scratch allocation: {d} / {d} / {d} / {d} us; checksum: {d}\n",
+        .{ graph.graph.blocks.len, graph.graph.types.len, lower_us, compile_us, no_cse_us, allocated_us, oracle_us, native_entries, native_entries, instance.spasm_runs, run_us, no_cse_run_us, allocated_run_us, oracle_run_us, checksum },
     );
-    try reportAllocation(&compiled, &allocated, &oracle);
+    try reportAllocation(&compiled, &no_cse, &allocated, &oracle);
     try runJavascriptDemo(init, &owner);
     std.debug.print("Normal tier selection is unchanged. These are diagnostics, not a speedup claim.\n", .{});
 }
@@ -118,6 +126,10 @@ fn runJavascriptDemo(init: std.process.Init, owner: *prototype.CodeAllocator) !v
     var program = try js.Program.build(a, owner, chunk);
     defer program.deinit();
     const compile_us = compile_start.untilNow(init.io, .awake).toMicroseconds();
+    const no_cse_start = std.Io.Clock.now(.awake, init.io);
+    var no_cse = try js.Program.buildWithOptions(a, owner, chunk, .{ .optimization = .{ .common_subexpression_elimination = false } });
+    defer no_cse.deinit();
+    const no_cse_us = no_cse_start.untilNow(init.io, .awake).toMicroseconds();
     const allocated_start = std.Io.Clock.now(.awake, init.io);
     var allocated = try js.Program.buildWithOptions(a, owner, chunk, .{ .optimization = no_optimization });
     defer allocated.deinit();
@@ -139,6 +151,9 @@ fn runJavascriptDemo(init: std.process.Init, owner: *prototype.CodeAllocator) !v
         defer oracle_outcome.deinit();
         var allocated_outcome = try allocated.run(.{ .accumulator = Value.undefined_, .registers = registers, .block_budget = 10_000 });
         defer allocated_outcome.deinit();
+        var no_cse_outcome = try no_cse.run(.{ .accumulator = Value.undefined_, .registers = registers, .block_budget = 10_000 });
+        defer no_cse_outcome.deinit();
+        try compareOutcomes(outcome, no_cse_outcome);
         try compareOutcomes(outcome, allocated_outcome);
         try compareOutcomes(outcome, oracle_outcome);
         native_entries += 1;
@@ -164,11 +179,11 @@ fn runJavascriptDemo(init: std.process.Init, owner: *prototype.CodeAllocator) !v
     std.debug.print(
         "JS frontend (same sum-of-squares loop, checked Int32):\n" ++
             "  verified SSA: {d} blocks, {d} values\n" ++
-            "  parse + bytecode: {d} us; specialize + lower + optimize + allocate + emit: {d} / {d} / {d} us\n" ++
+            "  parse + bytecode: {d} us; specialize + lower + optimize + allocate + emit: {d} / {d} / {d} / {d} us\n" ++
             "  matching Lantern/oracle results: {d}; entries per variant: {d}; resumed guard exits: {d}\n",
-        .{ program.graph.blocks.len, program.graph.types.len, frontend_us, compile_us, allocated_us, oracle_us, native_entries, native_entries, recoveries },
+        .{ program.graph.blocks.len, program.graph.types.len, frontend_us, compile_us, no_cse_us, allocated_us, oracle_us, native_entries, native_entries, recoveries },
     );
-    try reportAllocation(&program.compiled, &allocated.compiled, &oracle.compiled);
+    try reportAllocation(&program.compiled, &no_cse.compiled, &allocated.compiled, &oracle.compiled);
 }
 
 fn compareOutcomes(actual: anytype, expected: @TypeOf(actual)) !void {
@@ -188,16 +203,16 @@ fn compareOutcomes(actual: anytype, expected: @TypeOf(actual)) !void {
     }
 }
 
-fn reportAllocation(compiled: *const prototype.native.Compiled, allocated: *const prototype.native.Compiled, oracle: *const prototype.native.Compiled) !void {
+fn reportAllocation(compiled: *const prototype.native.Compiled, no_cse: *const prototype.native.Compiled, allocated: *const prototype.native.Compiled, oracle: *const prototype.native.Compiled) !void {
     const memory_ops = compiled.stats.loads + compiled.stats.stores;
     const oracle_memory_ops = oracle.stats.loads + oracle.stats.stores;
     if (compiled.scratchSlotCount() >= oracle.scratchSlotCount() or memory_ops >= oracle_memory_ops)
         return error.MissingAllocationImprovement;
     std.debug.print(
-        "  IR nodes: {d} -> {d}; folded: {d}; removed: {d}\n" ++
-            "  code: {d} / {d} / {d} bytes; call scratch: {d} / {d} / {d} bytes\n" ++
-            "  static emitted loads + stores: {d} / {d} / {d}; register moves: {d} / {d} / {d}\n",
-        .{ compiled.optimization.input_nodes, compiled.optimization.output_nodes, compiled.optimization.folded_nodes, compiled.optimization.removed_nodes, compiled.code.bytes().?.len, allocated.code.bytes().?.len, oracle.code.bytes().?.len, compiled.scratchSlotCount() * 8, allocated.scratchSlotCount() * 8, oracle.scratchSlotCount() * 8, memory_ops, allocated.stats.loads + allocated.stats.stores, oracle_memory_ops, compiled.stats.register_moves, allocated.stats.register_moves, oracle.stats.register_moves },
+        "  IR nodes: {d} -> {d}; folded: {d}; commoned: {d}; dead: {d}\n" ++
+            "  code: {d} / {d} / {d} / {d} bytes; call scratch: {d} / {d} / {d} / {d} bytes\n" ++
+            "  static emitted loads + stores: {d} / {d} / {d} / {d}; register moves: {d} / {d} / {d} / {d}\n",
+        .{ compiled.optimization.input_nodes, compiled.optimization.output_nodes, compiled.optimization.folded_nodes, compiled.optimization.commoned_nodes, compiled.optimization.removed_nodes, compiled.code.bytes().?.len, no_cse.code.bytes().?.len, allocated.code.bytes().?.len, oracle.code.bytes().?.len, compiled.scratchSlotCount() * 8, no_cse.scratchSlotCount() * 8, allocated.scratchSlotCount() * 8, oracle.scratchSlotCount() * 8, memory_ops, no_cse.stats.loads + no_cse.stats.stores, allocated.stats.loads + allocated.stats.stores, oracle_memory_ops, compiled.stats.register_moves, no_cse.stats.register_moves, allocated.stats.register_moves, oracle.stats.register_moves },
     );
 }
 
