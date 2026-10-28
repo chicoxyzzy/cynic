@@ -27,9 +27,22 @@ updates unless the user requests it. Preserve unrelated working-tree changes.
 [ECMA-262](https://tc39.es/ecma262/) and [ECMA-402](https://tc39.es/ecma402/)
 remain the normative sources. The optional `tc39` entry in
 [.mcp.json](../../.mcp.json) connects to the maintained, independent
-[xyzzylabs/tc39-mcp](https://github.com/xyzzylabs/tc39-mcp) service at
-`https://mcp.xyzzylabs.ai/tc39/mcp`. It is a lookup aid, not an official
-Ecma/TC39 publication.
+[xyzzylabs/tc39-mcp](https://github.com/xyzzylabs/tc39-mcp) through local stdio:
+`npx --yes tc39-mcp@0.6.5`. This pins the server package version, not the spec
+snapshots. It is a lookup aid, not an official Ecma/TC39 publication.
+
+### Local default
+
+Requires Node.js 20 or newer and npm/npx on PATH. `--yes` avoids an interactive
+installation prompt. The first launch may download the package; install or
+cache it before working without network access. Update the version in
+`.mcp.json` and this command together after verifying a new release.
+
+Local does not mean network-disabled: snapshots are cached locally and
+refreshed from the hosted service when missing or stale. Bundled snapshots
+provide offline fallback, but may lag the working draft. Check the returned
+snapshot metadata instead of assuming offline data is current. See the
+[upstream setup and cache behavior](https://github.com/xyzzylabs/tc39-mcp#install--first-call).
 
 Use `spec.about` to inspect snapshot metadata, `spec.search` to locate a clause,
 and `clause.get` to read it. Specify `spec: "262"` or `"402"` and
@@ -38,7 +51,25 @@ the stable edition, not the draft. Retain clause links and snapshot SHAs when
 citing results. `test262.search` and `proposal.list` cover related fixtures and
 proposals.
 
-Clients that do not read `.mcp.json` can use the same endpoint in their own
-configuration. Without MCP, follow the spec links directly. A connectivity
-failure is not evidence that a service is abandoned; report the error and
-use the direct sources without silently deleting the shared configuration.
+### Optional HTTP fallback
+
+For clients without local subprocess support or Node/npm, replace the `tc39`
+entry in their local configuration with:
+
+```json
+{
+  "mcpServers": {
+    "tc39": {
+      "type": "http",
+      "url": "https://mcp.xyzzylabs.ai/tc39/mcp"
+    }
+  }
+}
+```
+
+This is an optional transport alternative, not automatic failover. Configure
+one transport at a time. Clients that do not read `.mcp.json` can use the same
+command or endpoint in their own configuration. Without MCP, follow the spec
+links directly. A connectivity failure is not evidence that a service is
+abandoned; report the error and use the direct sources without silently
+deleting the shared configuration.
