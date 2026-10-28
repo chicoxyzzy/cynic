@@ -101,6 +101,13 @@ consumers use the same contract, not merely similar-looking instructions.
   distinguish aliasing, alignment, and trapping assumptions. Cynic's bounded
   accesses assume neither disjoint regions nor aligned/non-trapping addresses.
   The existing Spasm bounds checks provide the local instruction-level reference.
+- B3's [CCall and patchpoint contracts](https://webkit.org/docs/b3/intermediate-representation.html)
+  make call effects and ABI constraints explicit. V8 Maglev's
+  [allocation design](https://v8.dev/blog/maglev) and LLVM's
+  [statepoint model](https://llvm.org/docs/Statepoints.html) motivate preserving
+  live values and identifying roots at call boundaries. Cynic uses frontend-owned
+  snapshots for its non-moving collector, not LLVM relocation semantics or
+  conservative scanning of arbitrary integer words.
 
 ## First executable slice
 
@@ -112,7 +119,7 @@ JS values/realms nor Wasm types, bytecode, instances, or Cells.
 The subset has i32/i64 and f32/f64 constants, wrapping integer arithmetic,
 strict scalar FP arithmetic, comparisons, bitwise operations, explicit width
 conversions, ordered guards/traps, block parameters, jumps, conditional branches,
-bounded scalar loads/stores, and a single scalar result. The Wasm adapter
+bounded scalar loads/stores, typed runtime calls, and a single scalar result. The Wasm adapter
 accepts locals and void block/loop
 constructs with `br`/`br_if`. Unsupported instructions or types are an explicit
 refusal, even in dead bytecode; there is no silent fallback that could make an
@@ -190,9 +197,11 @@ compare every guard's ID and captured bits; JS tests compare exact recovery
 frames before resuming Lantern. Loop transfers, budget exhaustion, malformed
 plans, and allocation-failure cleanup are covered on both native architectures.
 
-This remains a leaf-code allocator. Native calls would require explicit
-clobbers and ABI constraints; GC-capable calls additionally require root maps.
-Neither is supported implicitly. Operand shuffles and the fixed 64-word edge
+At runtime calls the emitter saves live allocated registers into bounded
+invocation scratch, stages arguments and frontend root snapshots, and restores
+the live registers before assigning the result. Spill homes remain stable.
+Root interpretation is a frontend contract, not inferred from i64 bits.
+Operand shuffles and the fixed 64-word edge
 transfer area remain; reducing them is a separate measured improvement.
 
 ### Cheap constant rematerialization
@@ -352,7 +361,8 @@ production adoption must instead preserve the driver's active-frame identity.
 The verifier checks capture availability and bounds, including use-before-def;
 guards remain ordered effects even when none of their captures are used later.
 
-Generated entries neither allocate nor call JS, and cannot trigger GC. Heap
+The current Ohaimark adapter's generated entries neither allocate nor call JS,
+and cannot trigger GC. Heap
 constants are refused because the experiment has no compiled-code root table.
 Incoming tagged references may be copied but are never dereferenced. The
 returned value/recovery record is **not a GC root**: resume immediately, or
@@ -440,8 +450,11 @@ a skip on Arm hardware without exception-enable support, or when Rosetta forces
 MXCSR masks on; native x86 must really enable the exceptions. An emulated pass
 is not counted as native hardware-exception coverage.
 
-This contract currently covers leaf code only. Future native calls and host
-callbacks must explicitly handle FP state across calls and re-entry; entry
+Runtime calls explicitly choose the caller's FP environment for raw host
+callbacks or strict controls for language-execution helpers. On return they
+re-establish strict controls without overwriting the entry snapshot; every exit
+restores the original state, including callback errors and nested entry. This
+does not add FP-environment isolation to unrelated production tiers; entry
 normalization alone does not qualify those boundaries or non-local unwinding.
 Production Ohaimark and Spasm are not rerouted by this change.
 
@@ -494,7 +507,7 @@ integer width conversions, and sign-extension operations. Numeric integer/float
 conversions are described above and memory accesses below. The `select` control
 instruction remains outside this adapter. It also accepts `unreachable`,
 including in dead validated code.
-Unsupported operations such as calls still refuse even in dead bytecode.
+Unsupported operations such as `select` still refuse even in dead bytecode.
 
 Division and remainder declare `may_trap` effects and require a frontend-owned
 `trap_site`; pure operations and guards reject that metadata. A terminal `trap`
@@ -538,7 +551,8 @@ bytes. Integer loads sign- or zero-extend; narrow stores truncate; f32/f64
 accesses preserve raw bits without FP arithmetic. Addresses are i32/i64 byte
 indices into frontend-owned `MemoryView` descriptors, not raw JS heap pointers.
 The host must keep the descriptors and their backing stores alive and stable
-through each leaf invocation. Concurrent mutation/resizing is not supported.
+through each span of generated execution. A runtime callback may replace a
+descriptor before native execution resumes. Concurrent mutation/resizing is not supported.
 
 Every access checks address-plus-offset overflow and compares against
 `length - width`, trapping on subtraction underflow before using that bound.
@@ -577,8 +591,9 @@ Wasm tests compare results and backing bytes with Sarcasm and Spasm, require
 Spasm entry, and cover real instance growth, imported aliasing, replacement
 stores, multi-memory, memory64, loop-carried addresses, partial writes before
 later traps, and source trap locations. This is still a developer-only path:
-calls, growth inside generated code, resource metering,
-and production dispatch are not implemented by this adapter.
+direct `memory.grow` lowering, production resource metering,
+and production dispatch are not implemented by this adapter. Growth in a callee
+now refreshes descriptors through the runtime-call bridge described below.
 
 The memory increment passes the focused backend tests on native AArch64 and
 x86_64 under Rosetta (146 passed, one skipped on each), the full ReleaseSafe
@@ -588,10 +603,63 @@ test262 pass set is also unchanged at 48,653 passing and 1,324 failing fixtures;
 that is a non-regression check, not qualification of this experimental path.
 Native x86_64 hardware coverage remains a CI gate.
 
+## Runtime calls and root snapshots
+
+`call` is an ordered read/write/trapping safepoint with an explicit scalar
+signature, symbolic frontend target, source site, and root-snapshot ID/values.
+It supports zero or one scalar result and up to 64 arguments/captures. The
+verifier checks all argument/result types and capture availability; optimization
+retains even unused or void calls and remaps their inputs and captures.
+
+`runOutcomeWithRuntime` supplies the frontend callback and invocation context.
+Generated code stages arguments and captures in bounded scratch, saves live
+caller-saved registers, and invokes a C-ABI trampoline with an aligned stack.
+The context pointer, native return address, and block budget survive the call.
+The trampoline catches Zig errors and returns status; generated code restores
+FP state and returns normally, propagating the original error. It never unwinds
+an exception through generated frames. Re-entry uses independent invocation
+storage and the common native-stack exhaustion guard.
+
+Raw host calls default to the original caller FP controls. A frontend marks
+language-execution helpers `.fp_mode = .strict`; the Wasm bridge does so, keeping
+nearest-even/gradual-underflow/masked-exception semantics in its callees.
+Both modes restore the initial host state at every final exit, even when a
+callback changes controls or returns an error. FP state and memory descriptors
+occupy separate scratch areas from arguments, captures, and saved registers.
+
+Snapshots are borrowed, read-only values for Cynic's non-moving collector.
+The frontend must register all live references, including arguments, in a
+`HandleScope` before allocation or JS re-entry; the backend cannot infer roots
+from raw integer bits. A regression adapter calls the existing
+ECMA-262 [Call](https://tc39.es/ecma262/multipage/abstract-operations.html#sec-call)
+machinery, forces GC inside the callee, and checks a capture-only object after
+native resumption. This establishes the boundary, not complete Ohaimark call
+lowering. Moving-GC relocation is not supported; JS frame maps, exception
+handlers, and OSR remain production-integration requirements.
+
+The Wasm frontend lowers scalar direct `call`, including function imports and
+cross-instance targets, following the [Core call rules](https://webassembly.github.io/spec/core/exec/instructions.html#exec-call).
+Its callback uses existing Sarcasm/Spasm dispatch, then refreshes all caller
+memory views before resumption. Callees share a bounded poll allowance across
+the invocation, in addition to the caller's native block budget. The bridge
+forwards the existing caller or defining-instance execution controller without
+mutating either instance. These prototype bounds are not a production fuel
+cost model; host callbacks remain trusted and cooperative. Indirect/reference
+calls, multi-result signatures, native shared-backend callee linking, and
+complete JS/Wasm exception integration remain open.
+
+Local checks cover caller-saved values, duplicate captures, every scalar result
+type, void effects, nested entry, stack exhaustion, repeated-call budgets,
+callback errors, FP modes, allocation failures, GC during JS callbacks, Wasm
+callee growth, and cross-instance controller forwarding. The full AArch64
+unit/CLI suite passes (4,129 passed, 303 skipped), as does the focused x86_64
+suite under Rosetta (162 passed, one hardware-specific skip). The production
+test262 pass set remains byte-identical; this is not production qualification.
+
 ## Safety and non-goals
 
-- No native host calls, JS heap-object dereferences, shared-memory accesses,
-  atomics, SIMD, exceptions, non-memory imports, inlining, OSR, or production
+- No JS heap-object dereferences, shared-memory accesses,
+  atomics, SIMD, exception handlers, table/global/tag imports, inlining, OSR, or production
   tier-up in this slice.
 - Compile-time limits cap input at 64 KiB, decoder/validator workspace at
   8 MiB, function bodies at 16 KiB, blocks at 256, SSA values at 2,048,
@@ -621,13 +689,14 @@ budget poll, call, or trap must not disappear or move past an observable
 operation merely because its result is unused.
 
 Opaque frontend-owned recovery IDs and captured-value maps now exist. Before
-production JS integration, GC roots, allocation, re-entry, and exception edges
-must become explicit without importing JS object layouts into the backend.
-Those operations remain absent, not implicitly pure.
+production JS integration, the JS frontend must generate complete roots, frame
+recovery, allocation/re-entry, and exception metadata without importing JS
+object layouts into the backend. The runtime-call snapshots alone do not prove
+that production lowering supplies all of it.
 
 Do not enable fast-math identities or silently reuse Wasm trapping conversions
-for JavaScript coercions. Preserve the generated leaf FP entry/exit contract
-when adding call boundaries, re-entry, and production execution paths.
+for JavaScript coercions. Preserve the generated FP entry/exit and callback
+contracts when adding production execution paths.
 
 ## Delivery and gates
 
@@ -639,12 +708,12 @@ open; a passing demo or unchanged production test262 run does not close them.
 
 - [ ] Complete scalar numeric types and operations, including strict floating
   point, bit-preserving conversions, and explicit integer/truncation traps.
-  Operation coverage and protected native leaf entry are implemented; native
-  call boundaries remain part of the effects and integration gates below.
+  Operation coverage, protected native entry, and explicit callback FP modes are
+  implemented; production integration and qualification remain below.
 - [ ] Model memory, calls, traps, safepoints, and ordered effects in the IR and
   verifier before optimizing them; preserve aliasing, atomics, and trap order.
-  Bounded scalar memory and conservative read/write/trap effects are implemented;
-  calls, safepoints, atomic/fence semantics, and production integration remain.
+  Bounded scalar memory, runtime calls, root snapshots, and conservative effects
+  are implemented; atomic/fence semantics and complete frontend integration remain.
 - [ ] Support the accepted Wasm control/signature surface, memory and growth,
   tables/references, calls/imports, globals, SIMD, and exception behavior through
   a real instance-aware optimizing path, not just the standalone demo.
@@ -685,17 +754,18 @@ failures, but is not evidence that an unimplemented backend capability works.
 5. **Wider Wasm coverage:** scalar floating point (including rounding and
    conversions), the complete scalar integer family, and bounded scalar memory
    now run natively, with explicit ordered arithmetic/conversion/memory traps.
-   The instance adapter refreshes memory views between calls. Continue with calls
-   and runtime integration. Preserve bounds checks,
+   Direct scalar calls now bridge through existing runtime dispatch, including
+   function imports and callee memory growth. Continue with the remaining
+   signatures/control/call surface and production integration. Preserve bounds checks,
    memory-growth invalidation, resource metering, and executable ownership.
 6. **Rollout decision:** paired warm/cold execution measurements, compilation
    latency, peak compiler allocation, installed code size, refusal/entry
    telemetry, differential fuzzing, and spec-suite gates. No automatic
    default-on graduation or new JS tier follows from finishing the prototype.
 
-The next capability work is calls/safepoints, the remaining Wasm surface,
-and production integration,
-including FP state at future callback boundaries. Operand-move
+The next capability work is the remaining Wasm signature/control/call surface,
+production Ohaimark root/frame lowering, and resource-policy integration.
+Operand-move
 reduction and immediate/compare-branch selection remain measured optimization
 work, not substitutes for coverage.
 Keep each change independently measurable against disabled variants and

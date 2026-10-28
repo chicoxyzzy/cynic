@@ -194,7 +194,7 @@ test "backend prototype: branch discard and dead branch metadata" {
 test "backend prototype: unsupported dead operations and resource limits refuse" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const bytes = try moduleBytes(arena.allocator(), &.{}, 0x7f, &.{}, &.{ 0x41, 1, 0x0f, 0x10, 0, 0x0b });
+    const bytes = try moduleBytes(arena.allocator(), &.{}, 0x7f, &.{}, &.{ 0x41, 1, 0x0f, 0x1b, 0x0b });
     try std.testing.expectError(error.UnsupportedOpcode, prototype.lowerModule(std.testing.allocator, bytes, 0));
     const oversized = try arena.allocator().alloc(u8, 64 * 1024 + 1);
     try std.testing.expectError(error.PrototypeLimit, prototype.lowerModule(std.testing.allocator, oversized, 0));

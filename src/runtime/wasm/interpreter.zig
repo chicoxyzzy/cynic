@@ -1818,7 +1818,9 @@ pub fn invoke(
     return invokeWithControl(self, allocator, func_index, args, null);
 }
 
-fn invokeWithControl(
+/// Invoke through the existing tiers with an inherited execution controller.
+/// The caller owns the controller context for the entire synchronous call.
+pub fn invokeWithControl(
     self: *Instance,
     allocator: std.mem.Allocator,
     func_index: u32,

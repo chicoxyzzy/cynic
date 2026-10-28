@@ -223,6 +223,10 @@ fn markInputs(live: []bool, node: ir.Node) void {
     if (ir.inputCount(node.op) >= 1) live[node.lhs] = true;
     if (ir.inputCount(node.op) == 2) live[node.rhs] = true;
     if (node.exit) |side_exit| markValues(live, side_exit.values);
+    if (node.call) |call| {
+        markValues(live, call.arguments);
+        markValues(live, call.safepoint.values);
+    }
 }
 
 fn remapValues(a: std.mem.Allocator, values: []const ir.Value, map: []const ir.Value) ![]const ir.Value {
@@ -240,6 +244,14 @@ fn remapInputs(a: std.mem.Allocator, original: ir.Node, map: []const ir.Value) !
     if (ir.inputCount(node.op) >= 1) node.lhs = map[node.lhs];
     if (ir.inputCount(node.op) == 2) node.rhs = map[node.rhs];
     if (node.exit) |side_exit| node.exit = .{ .id = side_exit.id, .values = try remapValues(a, side_exit.values, map) };
+    if (node.call) |call| node.call = .{
+        .target = call.target,
+        .arguments = try remapValues(a, call.arguments, map),
+        .parameter_types = try a.dupe(ir.Type, call.parameter_types),
+        .result_type = call.result_type,
+        .fp_mode = call.fp_mode,
+        .safepoint = .{ .id = call.safepoint.id, .values = try remapValues(a, call.safepoint.values, map) },
+    };
     return node;
 }
 

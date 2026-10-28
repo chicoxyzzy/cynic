@@ -167,6 +167,10 @@ fn computeRanges(graph: ir.Graph, ranges: []LiveRange) void {
             if (node.exit) |side_exit| for (side_exit.values) |value| {
                 use(ranges, value, read_position);
             };
+            if (node.call) |call| {
+                for (call.arguments) |value| use(ranges, value, read_position);
+                for (call.safepoint.values) |value| use(ranges, value, read_position);
+            }
             if (node.out) |value| ranges[value] = .{ .block = @intCast(block_index), .start = read_position + 1, .end = read_position + 1 };
         }
         const terminal_position: u32 = @intCast(2 * block.nodes.len + 1);
