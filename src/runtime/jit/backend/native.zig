@@ -9,6 +9,7 @@ const optimize = @import("optimize.zig");
 const float = @import("float.zig");
 const integer = @import("integer.zig");
 const conversion = @import("conversion.zig");
+const fp_environment = @import("fp_environment.zig");
 const code_alloc = @import("../code_alloc.zig");
 const a64 = @import("../asm_aarch64.zig");
 const arm_masm = @import("../masm.zig");
@@ -49,11 +50,13 @@ pub const Compiled = struct {
     params: []ir.Value,
     argument_types: []ir.Type,
     spill_slot_count: usize,
+    uses_fp_environment: bool = false,
     stats: Stats = .{},
     optimization: optimize.Stats = .{},
 
     pub fn scratchSlotCount(self: *const Compiled) usize {
-        return self.spill_slot_count + ir.max_arguments + 2;
+        return self.spill_slot_count + ir.max_arguments + 2 +
+            @as(usize, if (self.uses_fp_environment) fp_environment.slot_count else 0);
     }
 
     pub fn deinit(self: *Compiled) void {
@@ -143,6 +146,12 @@ fn emitGraph(a: std.mem.Allocator, owner: *code_alloc.CodeAllocator, graph: ir.G
     var m = Machine.init(a);
     defer m.deinit();
     var emission: Emission = .{ .m = &m, .plan = &plan, .transfer_base = plan.spill_slot_count };
+    if (fp_environment.required(graph)) {
+        emission.fp_state_slot = emission.transfer_base + ir.max_arguments + 2;
+        try fp_environment.enter(&m, emission.fp_state_slot.?);
+        emission.stats.loads += fp_environment.enter_loads;
+        emission.stats.stores += fp_environment.enter_stores;
+    }
     const labels = try a.alloc(Machine.Label, graph.blocks.len);
     defer a.free(labels);
     @memset(labels, .{});
@@ -196,7 +205,7 @@ fn emitGraph(a: std.mem.Allocator, owner: *code_alloc.CodeAllocator, graph: ir.G
             .return_ => |value| {
                 try emission.read(false, value);
                 try emission.storeSlot(emission.transfer_base + ir.max_arguments);
-                try finish(&m, 0);
+                try emission.finish(0);
             },
             .jump => |edge| try emission.transfer(graph, edge, labels),
             .branch => |branch| {
@@ -214,7 +223,7 @@ fn emitGraph(a: std.mem.Allocator, owner: *code_alloc.CodeAllocator, graph: ir.G
         }
     }
     try m.bind(&exhausted);
-    try finish(&m, 1);
+    try emission.finish(1);
     const params = try a.dupe(ir.Value, graph.blocks[0].params);
     errdefer a.free(params);
     const argument_types = try a.dupe(ir.Type, graph.argument_types);
@@ -225,6 +234,7 @@ fn emitGraph(a: std.mem.Allocator, owner: *code_alloc.CodeAllocator, graph: ir.G
         .params = params,
         .argument_types = argument_types,
         .spill_slot_count = plan.spill_slot_count,
+        .uses_fp_environment = emission.fp_state_slot != null,
         .stats = emission.stats,
     };
 }
@@ -233,6 +243,7 @@ const Emission = struct {
     m: *Machine,
     plan: *const allocation.Plan,
     transfer_base: usize,
+    fp_state_slot: ?usize = null,
     stats: Stats = .{},
 
     fn read(self: *Emission, rhs: bool, value: ir.Value) !void {
@@ -280,7 +291,7 @@ const Emission = struct {
         try self.storeSlot(self.transfer_base + ir.max_arguments);
         try constant(self.m, side_exit.values.len);
         try self.storeSlot(self.transfer_base + ir.max_arguments + 1);
-        try finish(self.m, 2);
+        try self.finish(2);
     }
 
     fn transfer(self: *Emission, graph: ir.Graph, edge: ir.Edge, labels: []Machine.Label) !void {
@@ -303,7 +314,7 @@ const Emission = struct {
         try self.storeSlot(self.transfer_base + ir.max_arguments);
         try constant(self.m, trap.site);
         try self.storeSlot(self.transfer_base + ir.max_arguments + 1);
-        try finish(self.m, 3);
+        try self.finish(3);
     }
 
     fn divide(self: *Emission, node: ir.Node, ty: ir.Type) !void {
@@ -337,6 +348,20 @@ const Emission = struct {
             try self.m.bind(&overflow);
             try self.emitTrap(.{ .reason = .integer_overflow, .site = site });
             try self.m.bind(&done);
+        }
+    }
+
+    fn finish(self: *Emission, status: u32) !void {
+        if (self.fp_state_slot) |slot| {
+            try fp_environment.leave(self.m, slot);
+            self.stats.loads += fp_environment.leave_loads;
+        }
+        if (comptime is_x86) {
+            try self.m.movImm32(.rax, status);
+            try self.m.ret();
+        } else {
+            try self.m.movImm64(.x0, status);
+            try self.m.emit(a64.ret());
         }
     }
 };
@@ -378,15 +403,5 @@ fn poll(m: *Machine, exhausted: *Machine.Label) !void {
     } else {
         try m.jumpCbz(.x1, exhausted);
         try m.emit(a64.subImm(.x1, .x1, 1, false));
-    }
-}
-
-fn finish(m: *Machine, status: u32) !void {
-    if (comptime is_x86) {
-        try m.movImm32(.rax, status);
-        try m.ret();
-    } else {
-        try m.movImm64(.x0, status);
-        try m.emit(a64.ret());
     }
 }

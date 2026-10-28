@@ -186,6 +186,7 @@ test {
     _ = @import("runtime/jit/masm.zig");
     _ = @import("runtime/jit/masm_safety_test.zig");
     _ = @import("runtime/jit/layout.zig");
+    _ = @import("runtime/jit/backend/ir.zig");
     _ = @import("runtime/jit/backend/allocation_test.zig");
     _ = @import("runtime/jit/backend/optimize_test.zig");
     _ = @import("runtime/jit/backend/cse_test.zig");

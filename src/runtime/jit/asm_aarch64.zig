@@ -57,6 +57,23 @@ inline fn r(reg: Reg) u32 {
 
 // ---- moves and immediates -------------------------------------------------
 
+/// MRS Xt, FPCR / FPSR and MSR FPCR / FPSR, Xt (Arm ARM DDI 0487).
+pub fn readFpcr(rt: Reg) u32 {
+    return 0xd53b4400 | r(rt);
+}
+
+pub fn writeFpcr(rt: Reg) u32 {
+    return 0xd51b4400 | r(rt);
+}
+
+pub fn readFpsr(rt: Reg) u32 {
+    return 0xd53b4420 | r(rt);
+}
+
+pub fn writeFpsr(rt: Reg) u32 {
+    return 0xd51b4420 | r(rt);
+}
+
 /// MOVZ Xd, #imm16, LSL #(hw*16)
 pub fn movz(rd: Reg, imm16: u16, hw: u2) u32 {
     return 0xD2800000 | (@as(u32, hw) << 21) | (@as(u32, imm16) << 5) | r(rd);
@@ -1161,6 +1178,13 @@ pub fn brk(imm16: u16) u32 {
 // Byte-exact encodings, cross-checked against `llvm-mc -triple
 // arm64 -show-encoding` output. These pin the bit layouts; the
 // execution tests in masm.zig prove them on hardware.
+
+test "jit asm_aarch64: FP environment encodings" {
+    try std.testing.expectEqual(@as(u32, 0xd53b4410), readFpcr(.x16));
+    try std.testing.expectEqual(@as(u32, 0xd51b4411), writeFpcr(.x17));
+    try std.testing.expectEqual(@as(u32, 0xd53b4422), readFpsr(.x2));
+    try std.testing.expectEqual(@as(u32, 0xd51b4423), writeFpsr(.x3));
+}
 
 test "jit asm_aarch64: SIMD permutation table encodings" {
     try std.testing.expectEqual(@as(u32, 0x4e1100a3), tableLookupV128(.x3, .x5, .x17, false));
