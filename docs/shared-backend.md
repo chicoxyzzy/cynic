@@ -59,6 +59,14 @@ their normal paths would spend startup time without proving a benefit.
   Wegman/Zadeck's [conditional constant propagation](https://cs.brown.edu/research/pubs/techreports/reports/CS-89-36.html)
   is the reference for a possible later cross-block analysis, not an algorithm
   implemented by this block-local pass.
+- B3's [PureCSE](https://github.com/WebKit/WebKit/blob/main/Source/JavaScriptCore/b3/B3PureCSE.cpp)
+  and [Turboshaft value numbering](https://github.com/v8/v8/blob/main/src/compiler/turboshaft/value-numbering-reducer.h)
+  reuse matching expressions only where an earlier definition dominates the
+  use. Cynic takes the smaller block-local case: a hash table of typed pure
+  expressions, cleared at each block, with no memory or throwing operations.
+  Briggs/Cooper/Simpson's [Value Numbering](https://bernsteinbear.com/assets/img/briggs-gvn.pdf)
+  supplies the local hash-based algorithm; global value numbering and code
+  motion remain outside this pass.
 
 ## First executable slice
 
@@ -78,15 +86,17 @@ execution test pass without running generated code.
 Run the isolated correctness demo with `zig build backend-prototype`. It
 compares the same sum-of-squares loop through both frontends: Wasm against
 Sarcasm and native Spasm, JS against Lantern, and both against independent
-arithmetic oracles. Each frontend also runs allocation-only code and an
-unoptimized all-scratch oracle, separating pass gains from allocator gains.
+arithmetic oracles. Each frontend also runs CSE-off, allocation-only, and
+unoptimized all-scratch variants, separating CSE, other passes, and allocator
+gains.
 A JS case overflows Int32 after successful iterations and
 must recover in Lantern, not restart the function. It reports native entry
 and recovery counts, IR size, code size, per-call scratch size, static emitted
 loads/stores and register moves, compilation time, and bounded-call time
 (including scratch allocation). Instruction counts include cold guard exits
 and both branch paths; they are not dynamic memory-traffic measurements.
-It also reports input/output node counts, folds, and removed computations.
+It also reports input/output node counts, folds, commoned expressions, and
+dead nodes.
 These diagnostics are not cross-engine benchmarks.
 
 Focused tests: `zig build test-fast -Dtest-filter='backend'` covers the
@@ -149,22 +159,26 @@ transfer area remain; reducing them is a separate measured improvement.
 
 ## Shared pure optimizations
 
-The prototype now runs constant folding followed by dead-code elimination
-before register allocation. Both default on in this developer path and have
-independent switches under `native.Options.optimization`:
+The prototype runs constant folding and block-local common-subexpression
+elimination (CSE), followed by dead-code elimination before register allocation.
+All three default on in this developer path and have independent switches
+under `native.Options.optimization`:
 
 ```zig
 .{ .optimization = .{
     .constant_folding = false,
+    .common_subexpression_elimination = false,
     .dead_code_elimination = false,
 } }
 ```
 
-With both off, native compilation bypasses graph transformation. Combine
+With all three off, native compilation bypasses graph transformation. Combine
 those switches with `.allocation = .scratch` for the unoptimized scratch
 reference. `Program.buildWithOptions` forwards the same options for JS.
-`Compiled.optimization` reports input/output nodes, folded nodes, and removed
-nodes; folds count replacements even if DCE subsequently removes that node.
+`Compiled.optimization` reports input/output nodes, folded nodes, CSE's
+`commoned_nodes`, and DCE's `removed_nodes`. Folds count replacements even if
+CSE or DCE subsequently removes that node; input nodes equal output plus
+commoned plus removed nodes.
 
 Folding evaluates only operations whose operands are known integer constants
 within the same block. It covers wrapping i32/i64 add/subtract/multiply,
@@ -173,6 +187,25 @@ It does not apply algebraic identities to unknown values or infer constants
 for block parameters. Integer truncation, two's-complement interpretation,
 and sign extension are explicit; this is not floating-point or JS Number
 folding. Ohaimark still owns tag checks, overflow, and negative-zero guards.
+
+CSE visits definitions in block order, after each possible fold. Its key
+contains the opcode, result type, canonical operand identities, and constant
+bits where applicable. Only integer add/multiply, AND/OR, and equality use
+unordered operand keys; subtraction, ordered comparisons, and sign/zero
+extension remain distinct. It does not reassociate arithmetic or commute JS
+operand evaluation: ECMA-262 §13.15.3-4
+[binary evaluation and coercion](https://tc39.es/ecma262/multipage/ecmascript-language-expressions.html#sec-applystringornumericbinaryoperator)
+remain the frontend's responsibility.
+
+Each duplicate is replaced by an earlier local definition. The pass rewrites
+later operands, guard predicates/captures, returns, branch conditions, and
+edge arguments before DCE. Guards are never commoned, removed, or moved;
+nontrapping pure calculations can reuse values across a guard without changing
+its ordered recovery record. No definitions are shared across blocks. The
+temporary table holds at most 2,048 entries, reuses capacity between blocks,
+and propagates allocation failures. Canonical representatives avoid recursive
+alias chasing and do not depend on numeric value-ID order. CSE remains useful
+with folding and DCE disabled.
 
 DCE walks each block backwards from returns, branch conditions, edge
 arguments, and every guard predicate/capture. A guard is retained even if its
@@ -187,25 +220,32 @@ The optimizer validates its input before any removal, owns a separate output
 graph, densely renumbers surviving values, and verifies the result before
 emission. Malformed dead nodes are still errors. All passes are bounded by
 the existing graph limits and use no recursive graph traversal. Tests cover
-all switch combinations, integer boundaries, mixed register pressure, seeded
-native differential cases, input ownership, and allocation failures. The JS
+all eight switch combinations, integer boundaries, commutative/ordered keys,
+block isolation, mixed register pressure, seeded native differential cases,
+input ownership, table growth, graph limits, and allocation failures. The JS
 frontend compares exact recovery frames and the Wasm frontend compares with
 Sarcasm. Neither frontend gains a new production execution path.
 
 For the fixed sum-of-squares demo (ReleaseSafe, macOS; x86_64 via Rosetta),
-each cell below is **optimized / allocation-only / unoptimized scratch**.
+each cell below is **optimized / CSE-off / allocation-only / unoptimized scratch**.
 These are static sizes/counts, not cross-engine performance scores:
 
 | Frontend / target | Code bytes | Per-call scratch bytes | Emitted loads + stores |
 |---|---:|---:|---:|
-| Wasm / AArch64 | 372 / 372 / 388 | 528 / 528 / 664 | 24 / 24 / 68 |
-| Wasm / x86_64 | 444 / 444 / 632 | 528 / 528 / 664 | 24 / 24 / 68 |
-| JS / AArch64 | 2,124 / 2,204 / 2,252 | 560 / 560 / 1,312 | 163 / 171 / 374 |
-| JS / x86_64 | 2,764 / 2,879 / 3,727 | 560 / 560 / 1,312 | 163 / 171 / 374 |
+| Wasm / AArch64 | 364 / 372 / 372 / 388 | 528 / 528 / 528 / 664 | 24 / 24 / 24 / 68 |
+| Wasm / x86_64 | 431 / 444 / 444 / 632 | 528 / 528 / 528 / 664 | 24 / 24 / 24 / 68 |
+| JS / AArch64 | 1,868 / 2,124 / 2,204 / 2,252 | 584 / 560 / 560 / 1,312 | 174 / 163 / 171 / 374 |
+| JS / x86_64 | 2,506 / 2,764 / 2,879 / 3,727 | 584 / 560 / 560 / 1,312 | 174 / 163 / 171 / 374 |
 
-The JS loop folds four computations and removes seven nodes (98 to 91).
-The Wasm loop remains at seven nodes: its arithmetic depends on loop
-parameters, so this conservative local pass has nothing to fold or remove.
+The JS loop folds four computations, commons 28 expressions, and removes two
+dead nodes (98 to 68); CSE-off leaves 91 nodes. CSE cuts code size by 12.1% on
+AArch64 and 9.3% on x86_64 relative to folding/DCE alone, and register moves
+fall from 188 to 140 on both. Sharing also extends live ranges: with the current
+allocator, scratch rises from 560 to 584 bytes and static loads/stores from
+163 to 174. This is a code-size win, not a demonstrated throughput win.
+Cheap-constant rematerialization and operand placement deserve measurement next.
+The Wasm loop shares one initial zero constant (seven to six nodes); its
+loop-dependent arithmetic remains unchanged.
 Compile/run timings remain diagnostic; a rollout needs paired measurements
 that account for warmup, ordering, and the extra compiler work.
 
@@ -301,10 +341,10 @@ conversions for JavaScript coercions.
    both frontends. Static code/memory diagnostics accompany correctness gates;
    this does not establish a production throughput win.
 4. **Shared pure optimizations, developer-only:** independently switchable
-   block-local constant folding and dead-code elimination now run before
-   allocation, with exact unoptimized comparisons. Common-subexpression
-   elimination and better instruction selection remain next. Add load
-   elimination or loop motion only after effects are modeled and tested.
+   block-local constant folding, CSE, and dead-code elimination now run before
+   allocation, with exact unoptimized comparisons. Better instruction
+   selection remains next. Add load elimination or loop motion only after
+   effects are modeled and tested.
 5. **Wider Wasm coverage:** floating point, memory and traps, then calls and
    runtime integration. Preserve bounds checks, memory-growth invalidation,
    resource metering, and executable ownership before broadening the surface.
@@ -313,7 +353,7 @@ conversions for JavaScript coercions.
    telemetry, differential fuzzing, and spec-suite gates. No automatic
    default-on graduation or new JS tier follows from finishing the prototype.
 
-The next step is local common-subexpression elimination, then reducing
-operand moves and improving immediate/compare-branch selection. Keep each
-change independently measurable against the unoptimized references. Adopt
-the backend in production only if measurements justify its complexity.
+The next step is reducing operand moves, measuring cheap-constant
+rematerialization, and improving immediate/compare-branch selection. Keep each
+change independently measurable against the CSE-off and unoptimized references.
+Adopt the backend in production only if measurements justify its complexity.

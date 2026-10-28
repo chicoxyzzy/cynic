@@ -81,12 +81,50 @@ test "backend prototype: pure optimization switches match Sarcasm for constant w
     var owner = try code_alloc.CodeAllocator.init(a, 256 * 1024);
     defer owner.deinit();
     for ([_]bool{ false, true }) |fold| {
-        for ([_]bool{ false, true }) |dce| {
-            var compiled = try prototype.native.compileWithOptions(a, &owner, graph.graph, .{ .optimization = .{ .constant_folding = fold, .dead_code_elimination = dce } });
-            defer compiled.deinit();
-            try std.testing.expectEqual(expected[0], try compiled.run(&.{}, 1));
-            try std.testing.expectEqual(@as(u32, if (fold) 2 else 0), compiled.optimization.folded_nodes);
-            if (fold and dce) try std.testing.expectEqual(@as(u32, 1), compiled.optimization.output_nodes);
+        for ([_]bool{ false, true }) |cse| {
+            for ([_]bool{ false, true }) |dce| {
+                var compiled = try prototype.native.compileWithOptions(a, &owner, graph.graph, .{ .optimization = .{ .constant_folding = fold, .common_subexpression_elimination = cse, .dead_code_elimination = dce } });
+                defer compiled.deinit();
+                try std.testing.expectEqual(expected[0], try compiled.run(&.{}, 1));
+                try std.testing.expectEqual(@as(u32, if (fold) 2 else 0), compiled.optimization.folded_nodes);
+                if (fold and dce) try std.testing.expectEqual(@as(u32, 1), compiled.optimization.output_nodes);
+            }
+        }
+    }
+}
+
+test "backend prototype: CSE shares nonconstant i32 and i64 expressions" {
+    if (!code_alloc.supported) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var owner = try code_alloc.CodeAllocator.init(a, 256 * 1024);
+    defer owner.deinit();
+    for ([_]u8{ 0x7f, 0x7e }) |ty| {
+        const add: u8 = if (ty == 0x7f) 0x6a else 0x7c;
+        const mul: u8 = if (ty == 0x7f) 0x6c else 0x7e;
+        const bytes = try moduleBytes(arena.allocator(), &.{ ty, ty }, ty, &.{}, &.{ 0x20, 0, 0x20, 1, add, 0x20, 1, 0x20, 0, add, mul, 0x0b });
+        var graph = try prototype.lowerModule(a, bytes, 0);
+        defer graph.deinit();
+        const module = try wasm.decode(arena.allocator(), bytes);
+        var instance: wasm.Instance = undefined;
+        try wasm.instantiate(&instance, arena.allocator(), a, &module, .{});
+        defer instance.deinit();
+        instance.spasm_enabled = false;
+        const high: u64 = if (ty == 0x7f) 0xffff_ffff else 0xffff_ffff_ffff_ffff;
+        for ([_]bool{ false, true }) |fold| {
+            for ([_]bool{ false, true }) |cse| {
+                for ([_]bool{ false, true }) |dce| {
+                    var compiled = try prototype.native.compileWithOptions(a, &owner, graph.graph, .{ .optimization = .{ .constant_folding = fold, .common_subexpression_elimination = cse, .dead_code_elimination = dce } });
+                    defer compiled.deinit();
+                    try std.testing.expectEqual(@as(u32, if (cse) 1 else 0), compiled.optimization.commoned_nodes);
+                    for ([_][2]u64{ .{ 7, 11 }, .{ high, 2 }, .{ high, high }, .{ 0, 0 } }) |args| {
+                        const expected = try wasm.invoke(&instance, a, 0, &.{ args[0], args[1] });
+                        defer a.free(expected);
+                        try std.testing.expectEqual(expected[0], try compiled.run(&args, 1));
+                    }
+                }
+            }
         }
     }
 }

@@ -9,7 +9,7 @@ fn expectNativeBits(graph: ir.Graph, bits: u64) !void {
     if (!native.supported) return;
     var owner = try CodeAllocator.init(a, 64 * 1024);
     defer owner.deinit();
-    var reference = try native.compileWithOptions(a, &owner, graph, .{ .allocation = .scratch, .optimization = .{ .constant_folding = false, .dead_code_elimination = false } });
+    var reference = try native.compileWithOptions(a, &owner, graph, .{ .allocation = .scratch, .optimization = .{ .constant_folding = false, .common_subexpression_elimination = false, .dead_code_elimination = false } });
     defer reference.deinit();
     var optimized = try native.compile(a, &owner, graph);
     defer optimized.deinit();
@@ -190,7 +190,7 @@ test "backend optimization: native switches reduce code and preserve guard captu
     if (!native.supported) return error.SkipZigTest;
     var owner = try CodeAllocator.init(a, 256 * 1024);
     defer owner.deinit();
-    var reference = try native.compileWithOptions(a, &owner, chain, .{ .allocation = .scratch, .optimization = .{ .constant_folding = false, .dead_code_elimination = false } });
+    var reference = try native.compileWithOptions(a, &owner, chain, .{ .allocation = .scratch, .optimization = .{ .constant_folding = false, .common_subexpression_elimination = false, .dead_code_elimination = false } });
     defer reference.deinit();
     for ([_]bool{ false, true }) |fold| {
         for ([_]bool{ false, true }) |dce| {
@@ -231,30 +231,36 @@ test "backend optimization: seeded native cases match the unoptimized scratch or
                 .{ .op = .constant, .out = out, .immediate = random.int(u64) }
             else
                 .{ .op = ops[random.int(u32) % ops.len], .out = out, .lhs = if (i == 2) 2 else 1 + random.int(u32) % (out - 1), .rhs = if (i == 2) 3 else 1 + random.int(u32) % (out - 1) };
+            if (i % 4 == 3) {
+                nodes[i] = nodes[i - 1];
+                nodes[i].out = out;
+            }
         }
         nodes[32] = .{ .op = .guard, .lhs = 0, .exit = .{ .id = 51, .values = &.{ 1, 4, 32, 4 } } };
         const blocks = [_]ir.Block{.{ .params = &.{ 0, 1 }, .nodes = &nodes, .terminator = .{ .return_ = 33 } }};
         const graph: ir.Graph = .{ .types = &types, .blocks = &blocks, .argument_types = types[0..2], .result_type = .i64 };
-        var reference = try native.compileWithOptions(a, &owner, graph, .{ .allocation = .scratch, .optimization = .{ .constant_folding = false, .dead_code_elimination = false } });
+        var reference = try native.compileWithOptions(a, &owner, graph, .{ .allocation = .scratch, .optimization = .{ .constant_folding = false, .common_subexpression_elimination = false, .dead_code_elimination = false } });
         defer reference.deinit();
         const input = random.int(u64);
         for ([_]bool{ false, true }) |fold| {
-            for ([_]bool{ false, true }) |dce| {
-                for ([_]u8{ 0, 1, 4 }) |registers| {
-                    var compiled = try native.compileWithOptions(a, &owner, graph, .{ .register_count = registers, .optimization = .{ .constant_folding = fold, .dead_code_elimination = dce } });
-                    defer compiled.deinit();
-                    for ([_]u64{ 0, 1 }) |predicate| {
-                        var expected = try reference.runOutcome(&.{ predicate, input }, 1);
-                        defer expected.deinit();
-                        var actual = try compiled.runOutcome(&.{ predicate, input }, 1);
-                        defer actual.deinit();
-                        try std.testing.expectEqual(std.meta.activeTag(expected), std.meta.activeTag(actual));
-                        switch (expected) {
-                            .returned => |value| try std.testing.expectEqual(value, actual.returned),
-                            .exited => |exit| {
-                                try std.testing.expectEqual(exit.id, actual.exited.id);
-                                try std.testing.expectEqualSlices(u64, exit.values, actual.exited.values);
-                            },
+            for ([_]bool{ false, true }) |cse| {
+                for ([_]bool{ false, true }) |dce| {
+                    for ([_]u8{ 0, 1, 4 }) |registers| {
+                        var compiled = try native.compileWithOptions(a, &owner, graph, .{ .register_count = registers, .optimization = .{ .constant_folding = fold, .common_subexpression_elimination = cse, .dead_code_elimination = dce } });
+                        defer compiled.deinit();
+                        for ([_]u64{ 0, 1 }) |predicate| {
+                            var expected = try reference.runOutcome(&.{ predicate, input }, 1);
+                            defer expected.deinit();
+                            var actual = try compiled.runOutcome(&.{ predicate, input }, 1);
+                            defer actual.deinit();
+                            try std.testing.expectEqual(std.meta.activeTag(expected), std.meta.activeTag(actual));
+                            switch (expected) {
+                                .returned => |value| try std.testing.expectEqual(value, actual.returned),
+                                .exited => |exit| {
+                                    try std.testing.expectEqual(exit.id, actual.exited.id);
+                                    try std.testing.expectEqualSlices(u64, exit.values, actual.exited.values);
+                                },
+                            }
                         }
                     }
                 }
