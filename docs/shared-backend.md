@@ -108,6 +108,10 @@ consumers use the same contract, not merely similar-looking instructions.
   live values and identifying roots at call boundaries. Cynic uses frontend-owned
   snapshots for its non-moving collector, not LLVM relocation semantics or
   conservative scanning of arbitrary integer words.
+- Cranelift's [instruction result lists](https://docs.rs/cranelift-codegen/latest/cranelift_codegen/ir/dfg/struct.DataFlowGraph.html#method.inst_results)
+  and the [Wasm call rules](https://webassembly.github.io/spec/core/exec/instructions.html#exec-call)
+  motivate explicit typed result vectors. Calls define all their SSA results
+  together; void calls are the empty case, not a fabricated scalar value.
 
 ## First executable slice
 
@@ -119,7 +123,8 @@ JS values/realms nor Wasm types, bytecode, instances, or Cells.
 The subset has i32/i64 and f32/f64 constants, wrapping integer arithmetic,
 strict scalar FP arithmetic, comparisons, bitwise operations, explicit width
 conversions, ordered guards/traps, block parameters, jumps, conditional branches,
-bounded scalar loads/stores, typed runtime calls, and a single scalar result.
+bounded scalar loads/stores, and typed runtime calls. Functions and calls
+support zero to 64 scalar results through one result-list model.
 The Wasm adapter accepts locals, scalar-typed block/loop/if constructs (including
 multiple block parameters/results), `br`/`br_if`/`br_table`, and scalar `select`.
 Unsupported instructions or types are an explicit
@@ -200,7 +205,7 @@ plans, and allocation-failure cleanup are covered on both native architectures.
 
 At runtime calls the emitter saves live allocated registers into bounded
 invocation scratch, stages arguments and frontend root snapshots, and restores
-the live registers before assigning the result. Spill homes remain stable.
+the live registers before assigning the results. Spill homes remain stable.
 Root interpretation is a frontend contract, not inferred from i64 bits.
 Operand shuffles and the fixed 64-word edge
 transfer area remain; reducing them is a separate measured improvement.
@@ -607,11 +612,12 @@ Native x86_64 hardware coverage remains a CI gate.
 
 `call` is an ordered read/write/trapping safepoint with an explicit scalar
 signature, symbolic frontend target, source site, and root-snapshot ID/values.
-It supports zero or one scalar result and up to 64 arguments/captures. The
+It supports up to 64 scalar arguments, results, and captures. The
 verifier checks all argument/result types and capture availability; optimization
-retains even unused or void calls and remaps their inputs and captures.
+retains even unused or void calls and remaps their inputs, outputs, and captures.
 
-`runOutcomeWithRuntime` supplies the frontend callback and invocation context.
+`runInto` supplies the frontend callback, invocation context, and caller-owned
+result buffer. `runOutcomeWithRuntime` is its checked single-result convenience.
 Generated code stages arguments and captures in bounded scratch, saves live
 caller-saved registers, and invokes a C-ABI trampoline with an aligned stack.
 The context pointer, native return address, and block budget survive the call.
@@ -645,16 +651,18 @@ the invocation, in addition to the caller's native block budget. The bridge
 forwards the existing caller or defining-instance execution controller without
 mutating either instance. These prototype bounds are not a production fuel
 cost model; host callbacks remain trusted and cooperative. Indirect/reference
-calls, multi-result signatures, native shared-backend callee linking, and
+calls, native shared-backend callee linking, and
 complete JS/Wasm exception integration remain open.
 
-Local checks cover caller-saved values, duplicate captures, every scalar result
-type, void effects, nested entry, stack exhaustion, repeated-call budgets,
+The initial runtime-call checks covered caller-saved values, duplicate captures,
+every scalar result type, void effects, nested entry, stack exhaustion,
+repeated-call budgets,
 callback errors, FP modes, allocation failures, GC during JS callbacks, Wasm
-callee growth, and cross-instance controller forwarding. The full AArch64
-unit/CLI suite passes (4,129 passed, 303 skipped), as does the focused x86_64
-suite under Rosetta (162 passed, one hardware-specific skip). The production
-test262 pass set remains byte-identical; this is not production qualification.
+callee growth, and cross-instance controller forwarding. At that increment,
+the full AArch64 unit/CLI suite passed (4,129 passed, 303 skipped), as did the
+focused x86_64 suite under Rosetta (162 passed, one hardware-specific skip).
+The production test262 pass set remained byte-identical; this was not
+production qualification.
 
 ## Safety and non-goals
 
@@ -663,7 +671,7 @@ test262 pass set remains byte-identical; this is not production qualification.
   tier-up in this slice.
 - Compile-time limits cap input at 64 KiB, decoder/validator workspace at
   8 MiB, function bodies at 16 KiB, blocks at 256, SSA values at 2,048,
-  IR nodes (including guards) at 4,096, block arguments/captures at 64, and
+  IR nodes (including guards) at 4,096, arguments/results/captures at 64, and
   memory views at 64.
   The JS adapter caps bytecode at 16 KiB and registers at 63. Runtime scratch
   storage is heap-allocated and bounded by those limits; the execution budget
@@ -703,9 +711,9 @@ contracts when adding production execution paths.
 The Wasm adapter lowers scalar-typed `block`, `loop`, and `if`/`else`, including
 type-index signatures with multiple parameters/results; `br`, `br_if`, and
 `br_table`; explicit return and branches to the implicit function label; and
-typed/untyped scalar `select`. Function entry/results and runtime-call results
-retain their existing limits: this is not multi-result function support,
-reference/SIMD control support, tail calls, or exception handling.
+typed/untyped scalar `select`. Function and runtime-call signatures now also
+support void/multiple scalar results as described below. Reference/SIMD control,
+tail calls, and exception handling remain outside this adapter.
 
 The [Wasm control instruction rules](https://webassembly.github.io/spec/core/exec/instructions.html#control-instructions)
 distinguish loop parameters from block results. Wasmtime's
@@ -749,6 +757,59 @@ existing failing fixtures, with a byte-identical pass cache. That sweep is a
 production non-regression check, not shared-backend conformance coverage.
 Both architecture demos retained their existing IR/code-size, scratch,
 load/store, and recovery counts. Timings are diagnostic, not a speedup claim.
+
+## Void and multiple scalar results
+
+Function signatures and return terminators carry result lists. Calls own typed
+lists of SSA definitions rather than using the scalar node-output field. The
+verifier rejects mismatched arity/types, duplicate definitions, and captures of
+results that do not exist until after the call. Allocation and liveness treat
+all call outputs as simultaneous definitions after input use; optimization owns
+and remaps every list, including outputs that are unused but belong to an
+effectful call. Scalar arithmetic keeps its existing single-output encoding.
+
+`Compiled.runInto` accepts an exact-sized caller-owned `[]u64` result buffer and
+returns a completion: normal return, trap, or a side exit with owned captures.
+It publishes no result values on errors, traps, budget exhaustion, or side exits.
+This does not roll back native stores or callback side effects, including writes
+through aliases of the result buffer.
+The scalar `run`/`runOutcome` APIs check for exactly one result before native
+entry. The Wasm adapter offers `runResultsInInstance` with the same contract;
+its scalar `runInInstance` remains a checked convenience.
+
+Normal native returns stage results in the existing 64-word transfer area, also
+used for edges and call arguments. Trap/exit metadata remains separate. Runtime
+callbacks return `!void` and fill `Request.results`; a bounded temporary C-frame
+array keeps those writes separate from borrowed arguments and root snapshots.
+Only successful callbacks publish results to transfer storage. Restoring live
+registers precedes assignment of every result, with i32/f32 upper bits cleared.
+This does not enlarge generated invocation scratch. Caller result buffers may
+alias caller argument buffers because argument staging precedes native entry
+and result publication follows it.
+
+The Wasm frontend handles void and multi-result entry signatures, explicit
+returns and implicit-function-label branches, defined direct calls, and imported
+host/cross-instance calls. It validates the complete result signature and
+converts the existing runtime's returned Cells to scalar words. Callees still
+run through Sarcasm/Spasm; this is not native shared-backend callee linking or
+production tier activation.
+
+Tests cover mixed scalar types, order and duplicates, NaN payloads, 64-result
+calls, simultaneous live caller values, discarded outputs, aliasing, allocation
+failures, and result-list ownership. Wasm tests include binary decoding and
+compare against Sarcasm and forced Spasm entry. Direct call tests exercise both
+allocation modes, zero/one/four registers, and all 16 optimization/rematerialization
+combinations. These tests establish the result ABI, not production readiness.
+
+Local validation: the full AArch64 ReleaseSafe unit/CLI suite passed 4,159 tests
+with 303 skips (52/52 build steps), and the x86_64 backend suite under Rosetta
+passed 192 with one skip. The expression-suite RSS precheck stayed within
+512 MiB with no reported fixture delta at or above the 8 MiB reporting
+threshold. The full test262 sweep retained 48,653 passing and 1,324 existing
+failing fixtures with a byte-identical pass cache. Native x86_64 hardware and
+production integration remain separate qualification gates. Both architecture
+demos retained their IR/code size, scratch use, emitted load/store counts, and
+recovery counts; their timings are diagnostic, not a performance claim.
 
 ## Delivery and gates
 
@@ -809,7 +870,8 @@ failures, but is not evidence that an unimplemented backend capability works.
    Direct scalar calls now bridge through existing runtime dispatch, including
    function imports and callee memory growth. Scalar structured control now
    includes multi-value block parameters/results, branch tables, and selection.
-   Continue with function signatures, references/exceptions, indirect/native
+   Function and call signatures support void and multiple scalar results.
+   Continue with references/exceptions, indirect/native
    calls, and production integration. Preserve bounds checks,
    memory-growth invalidation, resource metering, and executable ownership.
 6. **Rollout decision:** paired warm/cold execution measurements, compilation
@@ -817,7 +879,7 @@ failures, but is not evidence that an unimplemented backend capability works.
    telemetry, differential fuzzing, and spec-suite gates. No automatic
    default-on graduation or new JS tier follows from finishing the prototype.
 
-The next capability work is the remaining Wasm signature/control/call surface,
+The next capability work is the remaining Wasm reference/control/call surface,
 production Ohaimark root/frame lowering, and resource-policy integration.
 Operand-move
 reduction and immediate/compare-branch selection remain measured optimization

@@ -52,11 +52,18 @@ pub fn lowerInstance(allocator: std.mem.Allocator, instance: *const Instance, fu
 /// Developer-only invocation. Direct calls use the existing Wasm tiers under a
 /// separate bounded callee budget, not production tier selection or Realm fuel.
 pub fn runInInstance(code: *const native.Compiled, instance: *Instance, args: []const u64, budget: u32) !native.Outcome {
+    if (code.result_types.len != 1) return error.ResultCount;
+    var result: [1]u64 = .{0};
+    const completion = try runResultsInInstance(code, instance, args, budget, &result);
+    return native.Outcome.fromCompletion(completion, result[0]);
+}
+
+pub fn runResultsInInstance(code: *const native.Compiled, instance: *Instance, args: []const u64, budget: u32, results: []u64) !native.Completion {
     if (instance.memories.len != code.memory_count or instance.memories.len > ir.max_memories) return error.MemoryCount;
     var views: [ir.max_memories]native.MemoryView = undefined;
     try refreshMemories(instance, views[0..instance.memories.len]);
     var context: CallContext = .{ .instance = instance, .allocator = code.allocator, .remaining = budget };
-    return code.runOutcomeWithRuntime(args, views[0..instance.memories.len], budget, if (code.call_sites.len == 0) null else .{ .context = &context, .call = CallContext.invoke });
+    return code.runInto(args, views[0..instance.memories.len], budget, if (code.call_sites.len == 0) null else .{ .context = &context, .call = CallContext.invoke }, results);
 }
 
 fn refreshMemories(instance: *const Instance, views: []native.MemoryView) !void {
@@ -72,14 +79,16 @@ const CallContext = struct {
     allocator: std.mem.Allocator,
     remaining: u32,
 
-    fn invoke(raw: ?*anyopaque, request: native.CallRequest) !u64 {
+    fn invoke(raw: ?*anyopaque, request: native.CallRequest) !void {
         const self: *CallContext = @ptrCast(@alignCast(raw.?));
         const signature = try callSignature(self.instance.module, request.target);
-        if (signature.params.len != request.arguments.len or signature.results.len != @intFromBool(request.result_type != null)) return error.CallSignatureMismatch;
+        if (signature.params.len != request.arguments.len or signature.results.len != request.results.len) return error.CallSignatureMismatch;
         for (signature.params, request.parameter_types) |ty, expected| {
             if (try valueType(ty) != expected) return error.CallSignatureMismatch;
         }
-        if (request.result_type) |expected| if (try valueType(signature.results[0]) != expected) return error.CallSignatureMismatch;
+        for (signature.results, request.result_types) |ty, expected| {
+            if (try valueType(ty) != expected) return error.CallSignatureMismatch;
+        }
         const target = self.instance.funcRefAt(request.target) orelse return error.FunctionIndex;
         const inherited = self.instance.execution_control orelse switch (target) {
             .wasm => |callee| callee.instance.execution_control,
@@ -92,7 +101,7 @@ const CallContext = struct {
         defer self.allocator.free(result);
         try refreshMemories(self.instance, request.memories);
         if (result.len != signature.results.len) return error.CallSignatureMismatch;
-        return if (result.len == 0) 0 else @truncate(result[0]);
+        for (result, request.results) |value, *out| out.* = @truncate(value);
     }
 };
 
@@ -138,7 +147,7 @@ fn callSignature(module: *const Module, index: u32) !wasm_types.FuncType {
     };
     if (type_index >= module.types.len) return error.FunctionIndex;
     const signature = module.types[type_index];
-    if (signature.params.len > ir.max_arguments or signature.results.len > 1) return error.UnsupportedSignature;
+    if (signature.params.len > ir.max_arguments or signature.results.len > ir.max_arguments) return error.UnsupportedSignature;
     for (signature.params) |ty| _ = try valueType(ty);
     for (signature.results) |ty| _ = try valueType(ty);
     return signature;
@@ -232,13 +241,14 @@ fn endsBlock(op: Op) bool {
 }
 
 fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature: wasm_types.FuncType, memories: []const wasm_types.MemType, module: *const Module) !OwnedGraph {
-    if (signature.results.len != 1) return error.UnsupportedSignature;
-    const result_type = try valueType(signature.results[0]);
+    if (signature.results.len > ir.max_arguments) return error.UnsupportedSignature;
     if (function.body.len > 16 * 1024 or function.local_types.len > ir.max_arguments or
         function.max_stack > ir.max_arguments - function.local_types.len) return error.PrototypeLimit;
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
     const a = arena.allocator();
+    const result_types = try a.alloc(ir.Type, signature.results.len);
+    for (signature.results, result_types) |ty, *out| out.* = try valueType(ty);
     const argument_types = try a.alloc(ir.Type, signature.params.len);
     for (signature.params, argument_types) |ty, *out| out.* = try valueType(ty);
     const local_types = try a.alloc(ir.Type, function.local_types.len);
@@ -405,7 +415,10 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
                     };
                     try stack.append(a, try builder.constant(&nodes, ty, inst.immediate));
                 },
-                .@"return" => terminator = .{ .return_ = stack.pop() orelse return error.InvalidControlFlow },
+                .@"return" => {
+                    if (stack.items.len < result_types.len) return error.InvalidControlFlow;
+                    terminator = .{ .return_ = try a.dupe(ir.Value, stack.items[stack.items.len - result_types.len ..]) };
+                },
                 .call => {
                     const target: u32 = @intCast(inst.immediate);
                     const callee = try callSignature(module, target);
@@ -415,17 +428,22 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
                     stack.shrinkRetainingCapacity(start);
                     const parameter_types = try a.alloc(ir.Type, callee.params.len);
                     for (callee.params, parameter_types) |ty, *parameter| parameter.* = try valueType(ty);
-                    const result: ?ir.Type = if (callee.results.len == 0) null else try valueType(callee.results[0]);
-                    const out = if (result) |ty| try builder.value(ty) else null;
-                    try nodes.append(a, .{ .op = .call, .out = out, .trap_site = inst.offset, .call = .{
+                    const call_result_types = try a.alloc(ir.Type, callee.results.len);
+                    const results = try a.alloc(ir.Value, callee.results.len);
+                    for (callee.results, call_result_types, results) |ty, *result_ty, *out| {
+                        result_ty.* = try valueType(ty);
+                        out.* = try builder.value(result_ty.*);
+                    }
+                    try nodes.append(a, .{ .op = .call, .trap_site = inst.offset, .call = .{
                         .target = target,
                         .arguments = arguments,
                         .parameter_types = parameter_types,
-                        .result_type = result,
+                        .results = results,
+                        .result_types = call_result_types,
                         .fp_mode = .strict,
                         .safepoint = .{ .id = inst.offset, .values = &.{} },
                     } });
-                    if (out) |value| try stack.append(a, value);
+                    try stack.appendSlice(a, results);
                 },
                 .@"unreachable" => terminator = .{ .trap = .{ .reason = .unreachable_code, .site = inst.offset } },
                 .@"if" => {
@@ -515,7 +533,7 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
         .types = builder.types.items,
         .blocks = builder.blocks.items,
         .argument_types = argument_types,
-        .result_type = result_type,
+        .result_types = result_types,
         .memory_count = @intCast(memories.len),
     };
     try graph.verify();

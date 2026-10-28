@@ -100,4 +100,5 @@ test {
     _ = @import("backend_memory_test.zig");
     _ = @import("backend_call_test.zig");
     _ = @import("backend_control_test.zig");
+    _ = @import("backend_results_test.zig");
 }

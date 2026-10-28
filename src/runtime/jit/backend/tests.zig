@@ -8,10 +8,10 @@ test "backend rematerialization: constant return needs no spill or register move
     const graph: ir.Graph = .{
         .types = &.{.i64},
         .argument_types = &.{},
-        .result_type = .i64,
+        .result_types = &.{.i64},
         .blocks = &.{.{ .params = &.{}, .nodes = &.{
             .{ .op = .constant, .out = 0, .immediate = 0xffff_0000_0000_0000 },
-        }, .terminator = .{ .return_ = 0 } }},
+        }, .terminator = .{ .return_ = &.{0} } }},
     };
     var owner = try CodeAllocator.init(std.testing.allocator, 64 * 1024);
     defer owner.deinit();
@@ -30,8 +30,8 @@ test "backend rematerialization: constant return needs no spill or register move
 test "backend prototype: verifier rejects malformed definitions and types" {
     var types = [_]ir.Type{ .i32, .i32 };
     var nodes = [_]ir.Node{.{ .op = .constant, .out = 1 }};
-    var blocks = [_]ir.Block{.{ .params = &.{0}, .nodes = &nodes, .terminator = .{ .return_ = 1 } }};
-    var graph: ir.Graph = .{ .types = &types, .blocks = &blocks, .argument_types = &.{.i32}, .result_type = .i32 };
+    var blocks = [_]ir.Block{.{ .params = &.{0}, .nodes = &nodes, .terminator = .{ .return_ = &.{1} } }};
+    var graph: ir.Graph = .{ .types = &types, .blocks = &blocks, .argument_types = &.{.i32}, .result_types = &.{.i32} };
     try graph.verify();
     nodes[0].out = 0;
     try std.testing.expectError(error.InvalidGraph, graph.verify());
@@ -45,24 +45,24 @@ test "backend prototype: verifier rejects malformed definitions and types" {
     types[0] = .i64;
     try std.testing.expectError(error.InvalidGraph, graph.verify());
     types[0] = .i32;
-    graph.result_type = .i64;
+    graph.result_types = &.{.i64};
     try std.testing.expectError(error.InvalidGraph, graph.verify());
-    graph.result_type = .i32;
-    blocks[0].terminator = .{ .return_ = 2 };
+    graph.result_types = &.{.i32};
+    blocks[0].terminator = .{ .return_ = &.{2} };
     try std.testing.expectError(error.InvalidGraph, graph.verify());
 }
 
 test "backend prototype: verifier rejects invalid edges and implicit cross-block uses" {
     var blocks = [_]ir.Block{
         .{ .params = &.{0}, .terminator = .{ .jump = .{ .target = 1, .args = &.{0} } } },
-        .{ .params = &.{1}, .terminator = .{ .return_ = 1 } },
+        .{ .params = &.{1}, .terminator = .{ .return_ = &.{1} } },
     };
     var types = [_]ir.Type{ .i32, .i32 };
-    const graph: ir.Graph = .{ .types = &types, .blocks = &blocks, .argument_types = &.{.i32}, .result_type = .i32 };
+    const graph: ir.Graph = .{ .types = &types, .blocks = &blocks, .argument_types = &.{.i32}, .result_types = &.{.i32} };
     try graph.verify();
-    blocks[1].terminator = .{ .return_ = 0 };
+    blocks[1].terminator = .{ .return_ = &.{0} };
     try std.testing.expectError(error.InvalidGraph, graph.verify());
-    blocks[1].terminator = .{ .return_ = 1 };
+    blocks[1].terminator = .{ .return_ = &.{1} };
     blocks[0].terminator.jump.target = 0;
     try std.testing.expectError(error.InvalidGraph, graph.verify());
     blocks[0].terminator.jump.target = 2;
@@ -78,7 +78,7 @@ test "backend prototype: verifier rejects invalid edges and implicit cross-block
 const swap_graph: ir.Graph = .{
     .types = &@as([13]ir.Type, @splat(.i32)),
     .argument_types = &.{ .i32, .i32, .i32 },
-    .result_type = .i32,
+    .result_types = &.{.i32},
     .blocks = &.{
         .{ .params = &.{ 0, 1, 2 }, .terminator = .{ .jump = .{ .target = 1, .args = &.{ 0, 1, 2 } } } },
         .{ .params = &.{ 3, 4, 5 }, .nodes = &.{
@@ -91,7 +91,7 @@ const swap_graph: ir.Graph = .{
             .taken = .{ .target = 2, .args = &.{ 3, 4 } },
             .fallthrough = .{ .target = 1, .args = &.{ 4, 3, 9 } },
         } } },
-        .{ .params = &.{ 10, 11 }, .nodes = &.{.{ .op = .sub, .out = 12, .lhs = 10, .rhs = 11 }}, .terminator = .{ .return_ = 12 } },
+        .{ .params = &.{ 10, 11 }, .nodes = &.{.{ .op = .sub, .out = 12, .lhs = 10, .rhs = 11 }}, .terminator = .{ .return_ = &.{12} } },
     },
 };
 
@@ -127,8 +127,8 @@ test "backend prototype: ordered guards capture pre-operation values" {
         .{ .op = .add, .out = 4, .lhs = 1, .rhs = 2 },
         .{ .op = .guard, .lhs = 3, .exit = .{ .id = 43, .values = &.{4} } },
     };
-    const blocks = [_]ir.Block{.{ .params = &.{ 0, 1, 2, 3 }, .nodes = &nodes, .terminator = .{ .return_ = 4 } }};
-    const graph: ir.Graph = .{ .types = &.{ .i32, .i64, .i64, .i32, .i64 }, .argument_types = &.{ .i32, .i64, .i64, .i32 }, .result_type = .i64, .blocks = &blocks };
+    const blocks = [_]ir.Block{.{ .params = &.{ 0, 1, 2, 3 }, .nodes = &nodes, .terminator = .{ .return_ = &.{4} } }};
+    const graph: ir.Graph = .{ .types = &.{ .i32, .i64, .i64, .i32, .i64 }, .argument_types = &.{ .i32, .i64, .i64, .i32 }, .result_types = &.{.i64}, .blocks = &blocks };
     var owner = try CodeAllocator.init(std.testing.allocator, 64 * 1024);
     defer owner.deinit();
     var compiled = try native.compile(std.testing.allocator, &owner, graph);
@@ -169,8 +169,8 @@ test "backend prototype: guards cannot bypass node and capture limits" {
     const nodes = try std.testing.allocator.alloc(ir.Node, ir.max_nodes + 1);
     defer std.testing.allocator.free(nodes);
     @memset(nodes, .{ .op = .guard, .lhs = 0, .exit = .{ .id = 0, .values = &.{} } });
-    var blocks = [_]ir.Block{.{ .params = &.{0}, .nodes = nodes, .terminator = .{ .return_ = 0 } }};
-    const graph: ir.Graph = .{ .types = &.{.i32}, .argument_types = &.{.i32}, .result_type = .i32, .blocks = &blocks };
+    var blocks = [_]ir.Block{.{ .params = &.{0}, .nodes = nodes, .terminator = .{ .return_ = &.{0} } }};
+    const graph: ir.Graph = .{ .types = &.{.i32}, .argument_types = &.{.i32}, .result_types = &.{.i32}, .blocks = &blocks };
     try std.testing.expectError(error.PrototypeLimit, graph.verify());
     blocks[0].nodes = nodes[0..1];
     try graph.verify();
@@ -184,8 +184,8 @@ test "backend prototype: signed and unsigned width conversions" {
         .{ .op = .trunc_i64, .out = 1, .lhs = 0 },
         .{ .op = .sext_i32, .out = 2, .lhs = 1 },
     };
-    const blocks = [_]ir.Block{.{ .params = &.{0}, .nodes = &nodes, .terminator = .{ .return_ = 2 } }};
-    const graph: ir.Graph = .{ .types = &.{ .i64, .i32, .i64 }, .argument_types = &.{.i64}, .result_type = .i64, .blocks = &blocks };
+    const blocks = [_]ir.Block{.{ .params = &.{0}, .nodes = &nodes, .terminator = .{ .return_ = &.{2} } }};
+    const graph: ir.Graph = .{ .types = &.{ .i64, .i32, .i64 }, .argument_types = &.{.i64}, .result_types = &.{.i64}, .blocks = &blocks };
     var owner = try CodeAllocator.init(std.testing.allocator, 64 * 1024);
     defer owner.deinit();
     {
@@ -204,7 +204,7 @@ test "backend prototype: signed and unsigned width conversions" {
 const pressure_graph: ir.Graph = .{
     .types = &(.{ir.Type.i32} ++ @as([15]ir.Type, @splat(.i64))),
     .argument_types = &(.{ir.Type.i32} ++ @as([8]ir.Type, @splat(.i64))),
-    .result_type = .i64,
+    .result_types = &.{.i64},
     .blocks = &.{.{ .params = &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8 }, .nodes = &.{
         .{ .op = .add, .out = 9, .lhs = 1, .rhs = 2 },
         .{ .op = .add, .out = 10, .lhs = 9, .rhs = 3 },
@@ -214,7 +214,7 @@ const pressure_graph: ir.Graph = .{
         .{ .op = .add, .out = 13, .lhs = 12, .rhs = 6 },
         .{ .op = .add, .out = 14, .lhs = 13, .rhs = 7 },
         .{ .op = .add, .out = 15, .lhs = 14, .rhs = 8 },
-    }, .terminator = .{ .return_ = 15 } }},
+    }, .terminator = .{ .return_ = &.{15} } }},
 };
 
 test "backend allocation: native pressure and guard captures match scratch oracle" {
@@ -284,8 +284,8 @@ test "backend allocation: seeded live-range pressure matches scratch at every gu
                 node_index += 1;
             }
         }
-        const blocks = [_]ir.Block{.{ .params = &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 }, .nodes = &nodes, .terminator = .{ .return_ = 59 } }};
-        const graph: ir.Graph = .{ .types = &types, .argument_types = types[0..12], .result_type = .i64, .blocks = &blocks };
+        const blocks = [_]ir.Block{.{ .params = &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 }, .nodes = &nodes, .terminator = .{ .return_ = &.{59} } }};
+        const graph: ir.Graph = .{ .types = &types, .argument_types = types[0..12], .result_types = &.{.i64}, .blocks = &blocks };
         var reference = try native.compileWithOptions(a, &owner, graph, .{ .allocation = .scratch });
         defer reference.deinit();
         var args: [12]u64 = undefined;

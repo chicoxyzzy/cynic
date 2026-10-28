@@ -19,8 +19,9 @@ pub const Site = struct {
     safepoint: u32,
     argument_count: usize,
     capture_count: usize,
+    result_count: usize,
     parameter_types: [ir.max_arguments]ir.Type = @splat(.i64),
-    result_type: ?ir.Type,
+    result_types: [ir.max_arguments]ir.Type = @splat(.i64),
 };
 pub const Request = struct {
     target: u32,
@@ -28,7 +29,9 @@ pub const Request = struct {
     safepoint: u32,
     arguments: []const u64,
     parameter_types: []const ir.Type,
-    result_type: ?ir.Type,
+    result_types: []const ir.Type,
+    /// Fill every result. Separate from inputs; published only on success.
+    results: []u64,
     captures: []const u64,
     /// Refresh descriptors here if the callback grows or replaces a store.
     memories: []memory.View,
@@ -37,7 +40,7 @@ pub const Runtime = struct {
     context: ?*anyopaque = null,
     /// Root frontend-owned references before allocation or language re-entry.
     /// Snapshots are borrowed for this call only and must not be retained.
-    call: *const fn (?*anyopaque, Request) anyerror!u64,
+    call: *const fn (?*anyopaque, Request) anyerror!void,
 };
 pub const Invocation = struct {
     runtime: Runtime,
@@ -54,20 +57,22 @@ fn dispatch(invocation: *Invocation, slots: [*]u64, index: u32) callconv(.c) u32
         return 1;
     }
     const site = invocation.sites[index];
-    const result = invocation.runtime.call(invocation.runtime.context, .{
+    var results: [ir.max_arguments]u64 = @splat(0);
+    invocation.runtime.call(invocation.runtime.context, .{
         .target = site.target,
         .site = site.site,
         .safepoint = site.safepoint,
         .arguments = slots[invocation.transfer_base..][0..site.argument_count],
         .parameter_types = site.parameter_types[0..site.argument_count],
-        .result_type = site.result_type,
+        .result_types = site.result_types[0..site.result_count],
+        .results = results[0..site.result_count],
         .captures = slots[invocation.call_base + captures_offset ..][0..site.capture_count],
         .memories = invocation.memories,
     }) catch |err| {
         invocation.failure = err;
         return 1;
     };
-    slots[invocation.transfer_base + ir.max_arguments] = result;
+    @memcpy(slots[invocation.transfer_base..][0..site.result_count], results[0..site.result_count]);
     return 0;
 }
 

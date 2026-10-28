@@ -6,13 +6,13 @@ const a = std.testing.allocator;
 const chain: ir.Graph = .{
     .types = &.{ .i64, .i64, .i64, .i64, .i64 },
     .argument_types = &.{.i64},
-    .result_type = .i64,
+    .result_types = &.{.i64},
     .blocks = &.{.{ .params = &.{0}, .nodes = &.{
         .{ .op = .constant, .out = 1, .immediate = 1 },
         .{ .op = .add, .out = 2, .lhs = 0, .rhs = 1 },
         .{ .op = .constant, .out = 3, .immediate = 2 },
         .{ .op = .mul, .out = 4, .lhs = 2, .rhs = 3 },
-    }, .terminator = .{ .return_ = 4 } }},
+    }, .terminator = .{ .return_ = &.{4} } }},
 };
 
 test "backend rematerialization: cheap constants do not occupy spill homes" {
@@ -40,13 +40,13 @@ test "backend allocation: read-before-write lifetimes reuse registers and spill 
 const guarded: ir.Graph = .{
     .types = &.{ .i32, .i64, .i64, .i64, .i64 },
     .argument_types = &.{ .i32, .i64 },
-    .result_type = .i64,
+    .result_types = &.{.i64},
     .blocks = &.{.{ .params = &.{ 0, 1 }, .nodes = &.{
         .{ .op = .constant, .out = 2, .immediate = 1 },
         .{ .op = .add, .out = 3, .lhs = 1, .rhs = 2 },
         .{ .op = .guard, .lhs = 0, .exit = .{ .id = 9, .values = &.{ 1, 3 } } },
         .{ .op = .constant, .out = 4, .immediate = 99 },
-    }, .terminator = .{ .return_ = 3 } }},
+    }, .terminator = .{ .return_ = &.{3} } }},
 };
 
 test "backend allocation: guard-only uses remain live and unused outputs need no home" {
@@ -82,15 +82,15 @@ test "backend allocation: branch arguments from both successors remain live" {
     const graph: ir.Graph = .{
         .types = &.{ .i32, .i64, .i64, .i64, .i64 },
         .argument_types = &.{ .i32, .i64, .i64 },
-        .result_type = .i64,
+        .result_types = &.{.i64},
         .blocks = &.{
             .{ .params = &.{ 0, 1, 2 }, .terminator = .{ .branch = .{
                 .condition = 0,
                 .taken = .{ .target = 1, .args = &.{1} },
                 .fallthrough = .{ .target = 2, .args = &.{2} },
             } } },
-            .{ .params = &.{3}, .terminator = .{ .return_ = 3 } },
-            .{ .params = &.{4}, .terminator = .{ .return_ = 4 } },
+            .{ .params = &.{3}, .terminator = .{ .return_ = &.{3} } },
+            .{ .params = &.{4}, .terminator = .{ .return_ = &.{4} } },
         },
     };
     var plan = try allocation.Plan.build(a, graph, .{ .register_count = 1 });

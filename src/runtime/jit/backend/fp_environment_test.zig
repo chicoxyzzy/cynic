@@ -101,6 +101,7 @@ fn observe(probe: *const Probe, code: *const native.Compiled, requested: State, 
 
 fn observeWithMemory(probe: *const Probe, code: *const native.Compiled, requested: State, args: []const u64, views: []const native.MemoryView, budget: u32) !Observation {
     try std.testing.expectEqual(code.memory_count, views.len);
+    try std.testing.expectEqual(@as(usize, 1), code.result_types.len);
     const slots = try a.alloc(u64, code.scratchSlotCount());
     defer a.free(slots);
     @memset(slots, 0);
@@ -115,8 +116,8 @@ fn observeWithMemory(probe: *const Probe, code: *const native.Compiled, requeste
     const after = probe.read();
     // Restore before the allocator, assertions, or test diagnostics can run.
     probe.write(&original);
-    const base = code.spill_slot_count + ir.max_arguments;
-    return .{ .before = before, .after = after, .status = status, .result = slots[base..][0..2].*, .captures = slots[code.spill_slot_count..][0..ir.max_arguments].* };
+    const base = code.spill_slot_count + @as(usize, if (status == 0) 0 else ir.max_arguments);
+    return .{ .before = before, .after = after, .status = status, .result = if (status == 0) .{ slots[base], 0 } else slots[base..][0..2].*, .captures = slots[code.spill_slot_count..][0..ir.max_arguments].* };
 }
 
 test "backend FP environment: direct native entry ignores caller rounding and flush modes" {
@@ -126,7 +127,7 @@ test "backend FP environment: direct native entry ignores caller rounding and fl
     var probe = try Probe.init(&owner);
     defer probe.deinit();
     for ([_]ir.Type{ .f32, .f64 }) |ty| for ([_]ir.Op{ .fadd, .fmul }) |op| {
-        const graph: ir.Graph = .{ .types = &.{ ty, ty, ty }, .argument_types = &.{ ty, ty }, .result_type = ty, .blocks = &.{.{ .params = &.{ 0, 1 }, .nodes = &.{.{ .op = op, .out = 2, .lhs = 0, .rhs = 1 }}, .terminator = .{ .return_ = 2 } }} };
+        const graph: ir.Graph = .{ .types = &.{ ty, ty, ty }, .argument_types = &.{ ty, ty }, .result_types = &.{ty}, .blocks = &.{.{ .params = &.{ 0, 1 }, .nodes = &.{.{ .op = op, .out = 2, .lhs = 0, .rhs = 1 }}, .terminator = .{ .return_ = &.{2} } }} };
         var code = try native.compile(a, &owner, graph);
         defer code.deinit();
         const one: u64 = if (ty == .f32) 0x3f80_0000 else 0x3ff0_0000_0000_0000;
@@ -154,7 +155,7 @@ test "backend FP environment: native return preserves incoming sticky exception 
     defer owner.deinit();
     var probe = try Probe.init(&owner);
     defer probe.deinit();
-    const graph: ir.Graph = .{ .types = &.{ .f64, .f64, .f64 }, .argument_types = &.{ .f64, .f64 }, .result_type = .f64, .blocks = &.{.{ .params = &.{ 0, 1 }, .nodes = &.{.{ .op = .fdiv, .out = 2, .lhs = 0, .rhs = 1 }}, .terminator = .{ .return_ = 2 } }} };
+    const graph: ir.Graph = .{ .types = &.{ .f64, .f64, .f64 }, .argument_types = &.{ .f64, .f64 }, .result_types = &.{.f64}, .blocks = &.{.{ .params = &.{ 0, 1 }, .nodes = &.{.{ .op = .fdiv, .out = 2, .lhs = 0, .rhs = 1 }}, .terminator = .{ .return_ = &.{2} } }} };
     var code = try native.compile(a, &owner, graph);
     defer code.deinit();
     const observed = try observe(&probe, &code, probe.unusual(0), &.{ 0x3ff0_0000_0000_0000, 0 }, 1);
@@ -186,7 +187,7 @@ test "backend FP environment: enabled hardware exceptions cannot escape native a
             .{ .op = .fmul, .lhs = 1, .rhs = half, .expected = 0 },
             .{ .op = .fdiv, .lhs = one, .rhs = three, .expected = if (ty == .f32) 0x3eaa_aaab else 0x3fd5_5555_5555_5555 },
         }) |case| {
-            const graph: ir.Graph = .{ .types = &.{ ty, ty, ty }, .argument_types = &.{ ty, ty }, .result_type = ty, .blocks = &.{.{ .params = &.{ 0, 1 }, .nodes = &.{.{ .op = case.op, .out = 2, .lhs = 0, .rhs = 1 }}, .terminator = .{ .return_ = 2 } }} };
+            const graph: ir.Graph = .{ .types = &.{ ty, ty, ty }, .argument_types = &.{ ty, ty }, .result_types = &.{ty}, .blocks = &.{.{ .params = &.{ 0, 1 }, .nodes = &.{.{ .op = case.op, .out = 2, .lhs = 0, .rhs = 1 }}, .terminator = .{ .return_ = &.{2} } }} };
             var code = try native.compile(a, &owner, graph);
             defer code.deinit();
             var requested = probe.unusual(1);
@@ -229,13 +230,13 @@ test "backend FP environment: every guard trap and return restores caller state"
         const graph: ir.Graph = .{
             .types = &.{ .i32, .f64, .f64, .i64, .i64, .f64, .i32, .i64 },
             .argument_types = &.{ .i32, .f64, .f64, .i64, .i64 },
-            .result_type = .f64,
+            .result_types = &.{.f64},
             .blocks = &.{.{ .params = &.{ 0, 1, 2, 3, 4 }, .nodes = &.{
                 .{ .op = .fdiv, .out = 5, .lhs = 1, .rhs = 2 },
                 .{ .op = .guard, .lhs = 0, .exit = .{ .id = 10, .values = &.{ 5, 3, 4 } } },
                 .{ .op = .trunc_s, .out = 6, .lhs = 5, .trap_site = 77 },
                 .{ .op = .div_s, .out = 7, .lhs = 3, .rhs = 4, .trap_site = 88 },
-            }, .terminator = if (terminal_trap) .{ .trap = .{ .reason = .unreachable_code, .site = 99 } } else .{ .return_ = 5 } }},
+            }, .terminator = if (terminal_trap) .{ .trap = .{ .reason = .unreachable_code, .site = 99 } } else .{ .return_ = &.{5} } }},
         };
         for (0..16) |flags| for ([_]u8{ 0, 1, 4 }) |registers| {
             var code = try native.compileWithOptions(a, &owner, graph, .{ .register_count = registers, .rematerialize_constants = flags & 8 != 0, .optimization = .{ .constant_folding = flags & 1 != 0, .common_subexpression_elimination = flags & 2 != 0, .dead_code_elimination = flags & 4 != 0 } });
@@ -267,7 +268,7 @@ test "backend FP environment: loop exhaustion restores state after repeated back
     defer owner.deinit();
     var probe = try Probe.init(&owner);
     defer probe.deinit();
-    const graph: ir.Graph = .{ .types = &.{ .f64, .f64, .f64 }, .argument_types = &.{.f64}, .result_type = .f64, .blocks = &.{
+    const graph: ir.Graph = .{ .types = &.{ .f64, .f64, .f64 }, .argument_types = &.{.f64}, .result_types = &.{.f64}, .blocks = &.{
         .{ .params = &.{0}, .nodes = &.{}, .terminator = .{ .jump = .{ .target = 1, .args = &.{0} } } },
         .{ .params = &.{1}, .nodes = &.{.{ .op = .fadd, .out = 2, .lhs = 1, .rhs = 1 }}, .terminator = .{ .jump = .{ .target = 1, .args = &.{2} } } },
     } };
@@ -294,7 +295,7 @@ test "backend FP environment: conversions normalize rounding without arithmetic 
         .{ .input = .f64, .output = .f32, .op = .demote_f64, .bits = 0x3ff0_0000_0800_0000, .expected = 0x3f80_0000 },
         .{ .input = .f32, .output = .f64, .op = .promote_f32, .bits = 1, .expected = 0x36a0_0000_0000_0000 },
     }) |case| {
-        const graph: ir.Graph = .{ .types = &.{ case.input, case.output }, .argument_types = &.{case.input}, .result_type = case.output, .blocks = &.{.{ .params = &.{0}, .nodes = &.{.{ .op = case.op, .out = 1, .lhs = 0 }}, .terminator = .{ .return_ = 1 } }} };
+        const graph: ir.Graph = .{ .types = &.{ case.input, case.output }, .argument_types = &.{case.input}, .result_types = &.{case.output}, .blocks = &.{.{ .params = &.{0}, .nodes = &.{.{ .op = case.op, .out = 1, .lhs = 0 }}, .terminator = .{ .return_ = &.{1} } }} };
         var code = try native.compile(a, &owner, graph);
         defer code.deinit();
         try std.testing.expect(code.uses_fp_environment);
@@ -311,7 +312,7 @@ test "backend FP environment: dead float operations and raw bits need no state s
     if (!native.supported) return error.SkipZigTest;
     var owner = try code_alloc.CodeAllocator.init(a, 256 * 1024);
     defer owner.deinit();
-    const graph: ir.Graph = .{ .types = &.{ .f64, .f64, .f64 }, .argument_types = &.{ .f64, .f64 }, .result_type = .f64, .blocks = &.{.{ .params = &.{ 0, 1 }, .nodes = &.{.{ .op = .fadd, .out = 2, .lhs = 0, .rhs = 1 }}, .terminator = .{ .return_ = 0 } }} };
+    const graph: ir.Graph = .{ .types = &.{ .f64, .f64, .f64 }, .argument_types = &.{ .f64, .f64 }, .result_types = &.{.f64}, .blocks = &.{.{ .params = &.{ 0, 1 }, .nodes = &.{.{ .op = .fadd, .out = 2, .lhs = 0, .rhs = 1 }}, .terminator = .{ .return_ = &.{0} } }} };
     var optimized = try native.compile(a, &owner, graph);
     defer optimized.deinit();
     try std.testing.expect(!optimized.uses_fp_environment);
@@ -357,10 +358,10 @@ test "backend memory: floating arithmetic and memory traps use disjoint saved st
     defer owner.deinit();
     var probe = try Probe.init(&owner);
     defer probe.deinit();
-    const graph: ir.Graph = .{ .types = &.{ .f64, .f64, .i64, .f64 }, .argument_types = &.{ .f64, .f64, .i64 }, .result_type = .f64, .memory_count = 1, .blocks = &.{.{ .params = &.{ 0, 1, 2 }, .nodes = &.{
+    const graph: ir.Graph = .{ .types = &.{ .f64, .f64, .i64, .f64 }, .argument_types = &.{ .f64, .f64, .i64 }, .result_types = &.{.f64}, .memory_count = 1, .blocks = &.{.{ .params = &.{ 0, 1, 2 }, .nodes = &.{
         .{ .op = .fdiv, .out = 3, .lhs = 0, .rhs = 1 },
         .{ .op = .store, .lhs = 2, .rhs = 3, .memory = .{ .width = .double }, .trap_site = 77 },
-    }, .terminator = .{ .return_ = 3 } }} };
+    }, .terminator = .{ .return_ = &.{3} } }} };
     var code = try native.compile(a, &owner, graph);
     defer code.deinit();
     for ([_]u64{ 0, 1 }) |address| {
@@ -385,22 +386,21 @@ test "backend calls: callbacks see caller FP state and cannot leak control chang
         seen: State = .{},
         changed: State,
         fail: bool,
-        fn invoke(raw: ?*anyopaque, _: native.CallRequest) !u64 {
+        fn invoke(raw: ?*anyopaque, _: native.CallRequest) !void {
             const self: *@This() = @ptrCast(@alignCast(raw.?));
             self.seen = self.probe.read();
             self.probe.write(&self.changed);
             if (self.fail) return error.CallbackFailed;
-            return 0;
         }
     };
     var owner = try code_alloc.CodeAllocator.init(a, 256 * 1024);
     defer owner.deinit();
     var probe = try Probe.init(&owner);
     defer probe.deinit();
-    const graph: ir.Graph = .{ .types = &.{ .f64, .f64, .f64 }, .argument_types = &.{ .f64, .f64 }, .result_type = .f64, .blocks = &.{.{ .params = &.{ 0, 1 }, .nodes = &.{
-        .{ .op = .call, .trap_site = 1, .call = .{ .target = 0, .arguments = &.{}, .parameter_types = &.{}, .result_type = null, .safepoint = .{ .id = 0, .values = &.{} } } },
+    const graph: ir.Graph = .{ .types = &.{ .f64, .f64, .f64 }, .argument_types = &.{ .f64, .f64 }, .result_types = &.{.f64}, .blocks = &.{.{ .params = &.{ 0, 1 }, .nodes = &.{
+        .{ .op = .call, .trap_site = 1, .call = .{ .target = 0, .arguments = &.{}, .parameter_types = &.{}, .results = &.{}, .result_types = &.{}, .safepoint = .{ .id = 0, .values = &.{} } } },
         .{ .op = .fadd, .out = 2, .lhs = 0, .rhs = 1 },
-    }, .terminator = .{ .return_ = 2 } }} };
+    }, .terminator = .{ .return_ = &.{2} } }} };
     var code = try native.compile(a, &owner, graph);
     defer code.deinit();
     const original = probe.read();
@@ -428,15 +428,15 @@ test "backend calls: callbacks see caller FP state and cannot leak control chang
 test "backend calls: language runtime helpers execute with strict FP controls" {
     if (!native.supported) return error.SkipZigTest;
     const Host = struct {
-        fn add(_: ?*anyopaque, request: native.CallRequest) !u64 {
+        fn add(_: ?*anyopaque, request: native.CallRequest) !void {
             const lhs: f64 = @bitCast(request.arguments[0]);
             const rhs: f64 = @bitCast(request.arguments[1]);
-            return @bitCast(lhs + rhs);
+            request.results[0] = @bitCast(lhs + rhs);
         }
     };
-    const graph: ir.Graph = .{ .types = &.{ .f64, .f64, .f64 }, .argument_types = &.{ .f64, .f64 }, .result_type = .f64, .blocks = &.{.{ .params = &.{ 0, 1 }, .nodes = &.{
-        .{ .op = .call, .out = 2, .trap_site = 0, .call = .{ .target = 0, .arguments = &.{ 0, 1 }, .parameter_types = &.{ .f64, .f64 }, .result_type = .f64, .fp_mode = .strict, .safepoint = .{ .id = 0, .values = &.{} } } },
-    }, .terminator = .{ .return_ = 2 } }} };
+    const graph: ir.Graph = .{ .types = &.{ .f64, .f64, .f64 }, .argument_types = &.{ .f64, .f64 }, .result_types = &.{.f64}, .blocks = &.{.{ .params = &.{ 0, 1 }, .nodes = &.{
+        .{ .op = .call, .trap_site = 0, .call = .{ .target = 0, .arguments = &.{ 0, 1 }, .parameter_types = &.{ .f64, .f64 }, .results = &.{2}, .result_types = &.{.f64}, .fp_mode = .strict, .safepoint = .{ .id = 0, .values = &.{} } } },
+    }, .terminator = .{ .return_ = &.{2} } }} };
     var owner = try code_alloc.CodeAllocator.init(a, 256 * 1024);
     defer owner.deinit();
     var probe = try Probe.init(&owner);

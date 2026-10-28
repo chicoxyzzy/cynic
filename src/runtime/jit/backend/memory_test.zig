@@ -9,7 +9,7 @@ const a = std.testing.allocator;
 const LoadFixture = struct {
     types: [2]ir.Type,
     nodes: [1]ir.Node,
-    blocks: [1]ir.Block = .{.{ .params = &.{0}, .terminator = .{ .return_ = 1 } }},
+    blocks: [1]ir.Block = .{.{ .params = &.{0}, .terminator = .{ .return_ = &.{1} } }},
 
     fn init(ty: ir.Type, access: ir.MemoryAccess) LoadFixture {
         return .{ .types = .{ .i64, ty }, .nodes = .{.{ .op = .load, .out = 1, .lhs = 0, .memory = access, .trap_site = 9 }} };
@@ -17,7 +17,7 @@ const LoadFixture = struct {
 
     fn graph(self: *LoadFixture) ir.Graph {
         self.blocks[0].nodes = &self.nodes;
-        return .{ .types = &self.types, .argument_types = &.{.i64}, .result_type = self.types[1], .memory_count = 1, .blocks = &self.blocks };
+        return .{ .types = &self.types, .argument_types = &.{.i64}, .result_types = self.types[1..2], .memory_count = 1, .blocks = &self.blocks };
     }
 };
 
@@ -77,7 +77,7 @@ test "backend memory: bounds checks reject overflow and retain unused trapping l
     defer owner.deinit();
     var bytes: [8]u8 = @splat(0x55);
     for ([_]u64{ 0, 1, 0xffff_ffff_ffff_ffff }) |offset| {
-        const graph: ir.Graph = .{ .types = &.{ .i64, .i64 }, .argument_types = &.{.i64}, .result_type = .i64, .memory_count = 1, .blocks = &.{.{ .params = &.{0}, .nodes = &.{.{ .op = .load, .out = 1, .lhs = 0, .memory = .{ .width = .double, .offset = offset }, .trap_site = 77 }}, .terminator = .{ .return_ = 0 } }} };
+        const graph: ir.Graph = .{ .types = &.{ .i64, .i64 }, .argument_types = &.{.i64}, .result_types = &.{.i64}, .memory_count = 1, .blocks = &.{.{ .params = &.{0}, .nodes = &.{.{ .op = .load, .out = 1, .lhs = 0, .memory = .{ .width = .double, .offset = offset }, .trap_site = 77 }}, .terminator = .{ .return_ = &.{0} } }} };
         var optimized = try optimize.run(a, graph, .{});
         defer optimized.deinit();
         try std.testing.expectEqual(@as(usize, 1), optimized.graph.blocks[0].nodes.len);
@@ -101,14 +101,14 @@ test "backend memory: aliased writes stay ordered across loads and guard exits" 
     const graph: ir.Graph = .{
         .types = &.{ .i32, .i64, .i64, .i64, .i64 },
         .argument_types = &.{ .i32, .i64, .i64 },
-        .result_type = .i64,
+        .result_types = &.{.i64},
         .memory_count = 2,
         .blocks = &.{.{ .params = &.{ 0, 1, 2 }, .nodes = &.{
             .{ .op = .load, .out = 3, .lhs = 1, .memory = .{ .width = .double }, .trap_site = 1 },
             .{ .op = .store, .lhs = 1, .rhs = 2, .memory = .{ .width = .double, .region = 1 }, .trap_site = 2 },
             .{ .op = .load, .out = 4, .lhs = 1, .memory = .{ .width = .double }, .trap_site = 3 },
             .{ .op = .guard, .lhs = 0, .exit = .{ .id = 4, .values = &.{ 3, 4 } } },
-        }, .terminator = .{ .return_ = 4 } }},
+        }, .terminator = .{ .return_ = &.{4} } }},
     };
     for ([_]AllocationMode{ .linear_scan, .scratch }) |mode| for (0..16) |flags| for ([_]u8{ 0, 1, 4 }) |registers| {
         var code = try native.compileWithOptions(a, &owner, graph, .{ .allocation = mode, .register_count = registers, .rematerialize_constants = flags & 8 != 0, .optimization = .{ .constant_folding = flags & 1 != 0, .common_subexpression_elimination = flags & 2 != 0, .dead_code_elimination = flags & 4 != 0 } });
@@ -131,14 +131,14 @@ test "backend memory: stores cannot cross traps guards or budget polls" {
     const graph: ir.Graph = .{
         .types = &.{ .i32, .i64, .i64, .i64 },
         .argument_types = &.{ .i32, .i64, .i64 },
-        .result_type = .i64,
+        .result_types = &.{.i64},
         .memory_count = 1,
         .blocks = &.{.{ .params = &.{ 0, 1, 2 }, .nodes = &.{
             .{ .op = .guard, .lhs = 0, .exit = .{ .id = 1, .values = &.{} } },
             .{ .op = .store, .lhs = 1, .rhs = 2, .memory = .{ .width = .double }, .trap_site = 2 },
             .{ .op = .load, .out = 3, .lhs = 1, .memory = .{ .width = .double, .offset = 8 }, .trap_site = 3 },
             .{ .op = .store, .lhs = 1, .rhs = 1, .memory = .{ .width = .double }, .trap_site = 4 },
-        }, .terminator = .{ .return_ = 1 } }},
+        }, .terminator = .{ .return_ = &.{1} } }},
     };
     var code = try native.compile(a, &owner, graph);
     defer code.deinit();
@@ -164,7 +164,7 @@ test "backend memory: stores cannot cross traps guards or budget polls" {
 
 test "backend memory: verifier rejects malformed store and stray memory metadata" {
     var nodes = [_]ir.Node{.{ .op = .store, .lhs = 0, .rhs = 1, .memory = .{ .width = .double }, .trap_site = 2 }};
-    const graph: ir.Graph = .{ .types = &.{ .i64, .i64 }, .argument_types = &.{ .i64, .i64 }, .result_type = .i64, .memory_count = 1, .blocks = &.{.{ .params = &.{ 0, 1 }, .nodes = &nodes, .terminator = .{ .return_ = 0 } }} };
+    const graph: ir.Graph = .{ .types = &.{ .i64, .i64 }, .argument_types = &.{ .i64, .i64 }, .result_types = &.{.i64}, .memory_count = 1, .blocks = &.{.{ .params = &.{ 0, 1 }, .nodes = &nodes, .terminator = .{ .return_ = &.{0} } }} };
     try graph.verify();
     const original = nodes[0];
     nodes[0].out = 0;
@@ -178,7 +178,7 @@ test "backend memory: verifier rejects malformed store and stray memory metadata
     nodes[0] = original;
     nodes[0].memory.?.signed = true;
     try std.testing.expectError(error.InvalidGraph, graph.verify());
-    const stray: ir.Graph = .{ .types = &.{.i64}, .argument_types = &.{}, .result_type = .i64, .blocks = &.{.{ .params = &.{}, .nodes = &.{.{ .op = .constant, .out = 0, .immediate = 1, .memory = .{ .width = .byte } }}, .terminator = .{ .return_ = 0 } }} };
+    const stray: ir.Graph = .{ .types = &.{.i64}, .argument_types = &.{}, .result_types = &.{.i64}, .blocks = &.{.{ .params = &.{}, .nodes = &.{.{ .op = .constant, .out = 0, .immediate = 1, .memory = .{ .width = .byte } }}, .terminator = .{ .return_ = &.{0} } }} };
     try std.testing.expectError(error.InvalidGraph, stray.verify());
 }
 

@@ -42,7 +42,8 @@ pub const Plan = struct {
             var owners: [max_registers]?ir.Value = @splat(null);
             for (block.params) |value| plan.assignRegister(value, &owners);
             for (block.nodes) |node| {
-                if (node.out) |value| {
+                var outputs = node.outputs();
+                while (outputs.next()) |value| {
                     if (options.rematerialize_constants and node.op == .constant and
                         plan.ranges[value].uses != 0 and isCheapConstant(node.immediate))
                     {
@@ -55,7 +56,8 @@ pub const Plan = struct {
             var spill_ends: [ir.max_values]?u32 = @splat(null);
             for (block.params) |value| plan.assignSpill(value, &spill_ends);
             for (block.nodes) |node| {
-                if (node.out) |value| plan.assignSpill(value, &spill_ends);
+                var outputs = node.outputs();
+                while (outputs.next()) |value| plan.assignSpill(value, &spill_ends);
             }
         }
         try plan.verify(graph);
@@ -171,12 +173,15 @@ fn computeRanges(graph: ir.Graph, ranges: []LiveRange) void {
                 for (call.arguments) |value| use(ranges, value, read_position);
                 for (call.safepoint.values) |value| use(ranges, value, read_position);
             }
-            if (node.out) |value| ranges[value] = .{ .block = @intCast(block_index), .start = read_position + 1, .end = read_position + 1 };
+            var outputs = node.outputs();
+            while (outputs.next()) |value| ranges[value] = .{ .block = @intCast(block_index), .start = read_position + 1, .end = read_position + 1 };
         }
         const terminal_position: u32 = @intCast(2 * block.nodes.len + 1);
         switch (block.terminator) {
             .trap => {},
-            .return_ => |value| use(ranges, value, terminal_position),
+            .return_ => |values| for (values) |value| {
+                use(ranges, value, terminal_position);
+            },
             .jump => |edge| for (edge.args) |value| {
                 use(ranges, value, terminal_position);
             },

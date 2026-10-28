@@ -12,7 +12,7 @@ test "backend conversion: verifier checks numeric domains and trapping metadata"
     for ([_]ir.Op{ .convert_s, .convert_u, .trunc_s, .trunc_u, .trunc_sat_s, .trunc_sat_u }) |op| {
         for ([_]ir.Type{ .i32, .i64, .f32, .f64 }) |input| for ([_]ir.Type{ .i32, .i64, .f32, .f64 }) |output| {
             var nodes = [_]ir.Node{.{ .op = op, .out = 1, .lhs = 0, .rhs = 999, .trap_site = if (ir.mayTrap(op)) 7 else null }};
-            const graph: ir.Graph = .{ .types = &.{ input, output }, .argument_types = &.{input}, .result_type = output, .blocks = &.{.{ .params = &.{0}, .nodes = &nodes, .terminator = .{ .return_ = 1 } }} };
+            const graph: ir.Graph = .{ .types = &.{ input, output }, .argument_types = &.{input}, .result_types = &.{output}, .blocks = &.{.{ .params = &.{0}, .nodes = &nodes, .terminator = .{ .return_ = &.{1} } }} };
             const to_float = op == .convert_s or op == .convert_u;
             if (ir.isFloat(input) == to_float or ir.isFloat(output) != to_float) {
                 try std.testing.expectError(error.InvalidGraph, graph.verify());
@@ -28,12 +28,12 @@ test "backend conversion: verifier checks numeric domains and trapping metadata"
 const ordered: ir.Graph = .{
     .types = &.{ .i32, .f64, .i32, .i32 },
     .argument_types = &.{ .i32, .f64 },
-    .result_type = .i32,
+    .result_types = &.{.i32},
     .blocks = &.{.{ .params = &.{ 0, 1 }, .nodes = &.{
         .{ .op = .guard, .lhs = 0, .exit = .{ .id = 1, .values = &.{1} } },
         .{ .op = .trunc_s, .out = 2, .lhs = 1, .trap_site = 77 },
         .{ .op = .trunc_s, .out = 3, .lhs = 1, .trap_site = 88 },
-    }, .terminator = .{ .return_ = 0 } }},
+    }, .terminator = .{ .return_ = &.{0} } }},
 };
 
 test "backend conversion: unused checked conversions preserve first trap and guard order" {
@@ -69,11 +69,11 @@ test "backend conversion: all operations preserve live integer and float homes" 
             const graph: ir.Graph = .{
                 .types = &.{ .i32, input, .i64, .f64, .i64, output },
                 .argument_types = &.{ .i32, input, .i64, .f64, .i64 },
-                .result_type = output,
+                .result_types = &.{output},
                 .blocks = &.{.{ .params = &.{ 0, 1, 2, 3, 4 }, .nodes = &.{
                     .{ .op = op, .out = 5, .lhs = 1, .rhs = 999, .trap_site = if (ir.mayTrap(op)) 9 else null },
                     .{ .op = .guard, .lhs = 0, .exit = .{ .id = 4, .values = &.{ 0, 1, 2, 3, 4, 5 } } },
-                }, .terminator = .{ .return_ = 5 } }},
+                }, .terminator = .{ .return_ = &.{5} } }},
             };
             const bits: u64 = if (from_int) ir.normalize(input, 0xffff_ffff_ffff_ffff) else if (single) 0x4060_0000 else 0x400c_0000_0000_0000;
             const args = [_]u64{ 0, bits, 0xaabb_ccdd_eeff_0011, 0xfff0_0000_0000_0011, 0x1234_5678_ffff_0000 };
@@ -106,7 +106,7 @@ test "backend conversion: constant operands retain checked operations and common
     const graph: ir.Graph = .{
         .types = &.{ .i32, .f64, .i64, .i64, .f64, .f64, .f32, .f32 },
         .argument_types = &.{.i32},
-        .result_type = .i64,
+        .result_types = &.{.i64},
         .blocks = &.{.{ .params = &.{0}, .nodes = &.{
             .{ .op = .constant, .out = 1, .immediate = 0x3ff8_0000_0000_0000 },
             .{ .op = .trunc_s, .out = 2, .lhs = 1, .rhs = 999, .trap_site = 10 },
@@ -116,7 +116,7 @@ test "backend conversion: constant operands retain checked operations and common
             .{ .op = .convert_u, .out = 6, .lhs = 2, .rhs = 999 },
             .{ .op = .convert_u, .out = 7, .lhs = 2, .rhs = 999 },
             .{ .op = .guard, .lhs = 0, .exit = .{ .id = 5, .values = &.{ 2, 3, 4, 5, 6, 7 } } },
-        }, .terminator = .{ .return_ = 2 } }},
+        }, .terminator = .{ .return_ = &.{2} } }},
     };
     var owner = try CodeAllocator.init(a, 256 * 1024);
     defer owner.deinit();

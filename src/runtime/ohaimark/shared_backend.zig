@@ -74,7 +74,7 @@ pub const Program = struct {
             .types = builder.types.items,
             .blocks = builder.blocks.items,
             .argument_types = argument_types,
-            .result_type = .i64,
+            .result_types = &.{.i64},
         };
         try graph.verify();
         return .{
@@ -324,7 +324,7 @@ const Builder = struct {
                 },
                 .return_ => {
                     if (inputs.len != 1) return error.UnsupportedNode;
-                    terminator = .{ .return_ = try self.get(inputs[0]) };
+                    terminator = .{ .return_ = try self.a.dupe(low.Value, &.{try self.get(inputs[0])}) };
                 },
                 else => return error.UnsupportedNode,
             }

@@ -36,10 +36,30 @@ pub const Options = struct {
 };
 pub const Stats = struct { loads: u32 = 0, stores: u32 = 0, register_moves: u32 = 0, rematerializations: u32 = 0 };
 
+const SideExit = struct { allocator: std.mem.Allocator, id: u32, values: []u64 };
+pub const Completion = union(enum) {
+    returned,
+    trapped: ir.Trap,
+    exited: SideExit,
+
+    pub fn deinit(self: *Completion) void {
+        if (self.* == .exited) self.exited.allocator.free(self.exited.values);
+        self.* = undefined;
+    }
+};
 pub const Outcome = union(enum) {
     returned: u64,
     trapped: ir.Trap,
-    exited: struct { allocator: std.mem.Allocator, id: u32, values: []u64 },
+    exited: SideExit,
+
+    /// Transfers ownership of any side-exit capture buffer.
+    pub fn fromCompletion(completion: Completion, value: u64) Outcome {
+        return switch (completion) {
+            .returned => .{ .returned = value },
+            .trapped => |trap| .{ .trapped = trap },
+            .exited => |exit| .{ .exited = exit },
+        };
+    }
 
     pub fn deinit(self: *Outcome) void {
         switch (self.*) {
@@ -55,6 +75,7 @@ pub const Compiled = struct {
     code: code_alloc.InstalledCode,
     params: []ir.Value,
     argument_types: []ir.Type,
+    result_types: []ir.Type,
     spill_slot_count: usize,
     uses_fp_environment: bool = false,
     memory_count: u32 = 0,
@@ -79,6 +100,7 @@ pub const Compiled = struct {
         self.code.deinit();
         self.allocator.free(self.params);
         self.allocator.free(self.argument_types);
+        self.allocator.free(self.result_types);
         self.allocator.free(self.call_sites);
         self.* = undefined;
     }
@@ -106,7 +128,17 @@ pub const Compiled = struct {
     }
 
     pub fn runOutcomeWithRuntime(self: *const Compiled, args: []const u64, views: []const MemoryView, budget: u32, runtime: ?Runtime) !Outcome {
+        if (self.result_types.len != 1) return error.ResultCount;
+        var result: [1]u64 = .{0};
+        const completion = try self.runInto(args, views, budget, runtime, &result);
+        return Outcome.fromCompletion(completion, result[0]);
+    }
+
+    /// Writes caller-owned results only after a normal return. Stores and callbacks
+    /// retain their ordinary side effects, including through aliases of this buffer.
+    pub fn runInto(self: *const Compiled, args: []const u64, views: []const MemoryView, budget: u32, runtime: ?Runtime, results: []u64) !Completion {
         if (args.len != self.params.len) return error.ArgumentCount;
+        if (results.len != self.result_types.len) return error.ResultCount;
         if (views.len != self.memory_count) return error.MemoryCount;
         if (self.call_sites.len != 0 and runtime == null) return error.MissingRuntime;
         if (budget > max_budget) return error.PrototypeLimit;
@@ -129,7 +161,10 @@ pub const Compiled = struct {
         const entry: Entry = @ptrCast(@alignCast(self.code.entry() orelse return error.MissingCode));
         const result_slot = self.spill_slot_count + ir.max_arguments;
         return switch (entry(slots.ptr, budget)) {
-            0 => .{ .returned = slots[result_slot] },
+            0 => blk: {
+                for (results, self.result_types, 0..) |*out, ty, i| out.* = ir.normalize(ty, slots[self.spill_slot_count + i]);
+                break :blk .returned;
+            },
             1 => error.BudgetExhausted,
             2 => blk: {
                 const id = slots[result_slot];
@@ -235,8 +270,9 @@ fn emitGraph(a: std.mem.Allocator, owner: *code_alloc.CodeAllocator, graph: ir.G
                 try m.bind(&success);
                 continue;
             } else if (node.call) |runtime_call| {
-                call_sites[call_index] = .{ .target = runtime_call.target, .site = node.trap_site.?, .safepoint = runtime_call.safepoint.id, .argument_count = runtime_call.arguments.len, .capture_count = runtime_call.safepoint.values.len, .result_type = runtime_call.result_type };
+                call_sites[call_index] = .{ .target = runtime_call.target, .site = node.trap_site.?, .safepoint = runtime_call.safepoint.id, .argument_count = runtime_call.arguments.len, .capture_count = runtime_call.safepoint.values.len, .result_count = runtime_call.results.len };
                 @memcpy(call_sites[call_index].parameter_types[0..runtime_call.parameter_types.len], runtime_call.parameter_types);
+                @memcpy(call_sites[call_index].result_types[0..runtime_call.result_types.len], runtime_call.result_types);
                 try emission.invoke(node, @intCast(index), @intCast(2 * node_index + 1), call_index);
                 call_index += 1;
                 continue;
@@ -270,9 +306,11 @@ fn emitGraph(a: std.mem.Allocator, owner: *code_alloc.CodeAllocator, graph: ir.G
         }
         switch (block.terminator) {
             .trap => |trap| try emission.emitTrap(trap),
-            .return_ => |value| {
-                try emission.read(false, value);
-                try emission.storeSlot(emission.transfer_base + ir.max_arguments);
+            .return_ => |values| {
+                for (values, 0..) |value, i| {
+                    try emission.read(false, value);
+                    try emission.storeSlot(emission.transfer_base + i);
+                }
                 try emission.finish(0);
             },
             .jump => |edge| try emission.transfer(graph, edge, labels),
@@ -296,11 +334,14 @@ fn emitGraph(a: std.mem.Allocator, owner: *code_alloc.CodeAllocator, graph: ir.G
     errdefer a.free(params);
     const argument_types = try a.dupe(ir.Type, graph.argument_types);
     errdefer a.free(argument_types);
+    const result_types = try a.dupe(ir.Type, graph.result_types);
+    errdefer a.free(result_types);
     return .{
         .allocator = a,
         .code = try owner.installOwned(m.code.items),
         .params = params,
         .argument_types = argument_types,
+        .result_types = result_types,
         .spill_slot_count = plan.spill_slot_count,
         .uses_fp_environment = emission.fp_state_slot != null,
         .memory_count = graph.memory_count,
@@ -479,9 +520,9 @@ const Emission = struct {
             try self.loadSlot(false, base + call.saved_registers_offset + register);
             try self.move(allocatedRegister(@intCast(register)), scratchRegister(false));
         };
-        if (node.out) |out| {
-            try self.loadSlot(false, self.transfer_base + ir.max_arguments);
-            if (ir.is32(runtime_call.result_type.?)) {
+        for (runtime_call.results, runtime_call.result_types, 0..) |out, ty, i| {
+            try self.loadSlot(false, self.transfer_base + i);
+            if (ir.is32(ty)) {
                 if (comptime is_x86) try self.m.movReg32(.rax, .rax) else try self.m.emit(a64.movRegW(.x2, .x2));
             }
             try self.write(out);

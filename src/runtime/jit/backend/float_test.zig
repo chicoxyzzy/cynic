@@ -32,13 +32,13 @@ test "backend float: verifier enforces numeric domains widths and predicates" {
         const graph: ir.Graph = .{
             .types = &.{ case.input, case.output },
             .argument_types = &.{case.input},
-            .result_type = case.output,
-            .blocks = &.{.{ .params = &.{0}, .nodes = &.{.{ .op = case.op, .out = 1, .lhs = 0, .rhs = if (ir.inputCount(case.op) == 2) 0 else 999 }}, .terminator = .{ .return_ = 1 } }},
+            .result_types = &.{case.output},
+            .blocks = &.{.{ .params = &.{0}, .nodes = &.{.{ .op = case.op, .out = 1, .lhs = 0, .rhs = if (ir.inputCount(case.op) == 2) 0 else 999 }}, .terminator = .{ .return_ = &.{1} } }},
         };
         if (case.valid) try graph.verify() else try std.testing.expectError(error.InvalidGraph, graph.verify());
     }
     var nodes = [_]ir.Node{.{ .op = .constant, .out = 0, .immediate = 0x1_0000_0000 }};
-    const graph: ir.Graph = .{ .types = &.{.f32}, .argument_types = &.{}, .result_type = .f32, .blocks = &.{.{ .params = &.{}, .nodes = &nodes, .terminator = .{ .return_ = 0 } }} };
+    const graph: ir.Graph = .{ .types = &.{.f32}, .argument_types = &.{}, .result_types = &.{.f32}, .blocks = &.{.{ .params = &.{}, .nodes = &nodes, .terminator = .{ .return_ = &.{0} } }} };
     try std.testing.expectError(error.InvalidGraph, graph.verify());
     nodes[0].immediate = 0x8000_0000;
     try graph.verify();
@@ -48,7 +48,7 @@ test "backend float: optimization and guard recovery preserve typed literal bits
     const graph: ir.Graph = .{
         .types = &.{ .i32, .f64, .f64, .f64, .f64, .f64, .f64, .f64, .f64, .f64, .i64 },
         .argument_types = &.{.i32},
-        .result_type = .f64,
+        .result_types = &.{.f64},
         .blocks = &.{.{ .params = &.{0}, .nodes = &.{
             .{ .op = .constant, .out = 1, .immediate = 0 },
             .{ .op = .constant, .out = 2, .immediate = 0x8000_0000_0000_0000 },
@@ -61,7 +61,7 @@ test "backend float: optimization and guard recovery preserve typed literal bits
             .{ .op = .fneg, .out = 9, .lhs = 3, .rhs = 999 },
             .{ .op = .reinterpret, .out = 10, .lhs = 3, .rhs = 999 },
             .{ .op = .guard, .lhs = 0, .exit = .{ .id = 23, .values = &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 2 } } },
-        }, .terminator = .{ .return_ = 9 } }},
+        }, .terminator = .{ .return_ = &.{9} } }},
     };
     var optimized = try optimize.run(a, graph, .{});
     defer optimized.deinit();
@@ -98,11 +98,11 @@ fn compileWithFailures(allocator: std.mem.Allocator, owner: *CodeAllocator) !voi
     const graph: ir.Graph = .{
         .types = &.{ .f64, .f64, .f64, .i32 },
         .argument_types = &.{ .f64, .f64 },
-        .result_type = .i32,
+        .result_types = &.{.i32},
         .blocks = &.{.{ .params = &.{ 0, 1 }, .nodes = &.{
             .{ .op = .fmin, .out = 2, .lhs = 0, .rhs = 1 },
             .{ .op = .fne, .out = 3, .lhs = 0, .rhs = 2 },
-        }, .terminator = .{ .return_ = 3 } }},
+        }, .terminator = .{ .return_ = &.{3} } }},
     };
     var compiled = try native.compile(allocator, owner, graph);
     defer compiled.deinit();
