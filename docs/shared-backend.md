@@ -350,7 +350,8 @@ frame-rooting contract applies. A test forces collection inside an object's
 
 The shared IR and Wasm adapter accept f32/f64 constants, add/subtract/multiply/
 divide, min/max, copy-sign, absolute value, negation, square root, all six
-comparisons, promotion/demotion, and same-width integer/float reinterpretation.
+comparisons, ceil/floor/trunc/nearest, promotion/demotion, numeric integer/float
+conversions, and same-width integer/float reinterpretation.
 The Ohaimark adapter still lowers checked Int32 operations; adding shared FP
 does not silently change JS specialization or coercion behavior.
 
@@ -379,19 +380,59 @@ Tests force native entry and compare with Sarcasm with Spasm disabled. They
 cover both widths, infinities, subnormals, signed zero, quiet/signaling NaNs,
 register pressure, constant and runtime conversions, mixed integer/float loop
 edges, budget exhaustion, invalid graphs, and allocation-failure cleanup.
-Numeric integer/float conversions, trapping truncation, and the four rounding
-operations are still explicit refusals, not interpreter fallback or complete
-scalar coverage. Production resource policy and FP-environment integration
-remain part of the rollout work.
+Production resource policy and FP-environment integration remain part of the
+rollout work; generated code currently assumes the ordinary round-to-nearest,
+non-flush-to-zero, masked-exception host environment, as the existing emitters do.
+
+### Rounding and numeric conversions
+
+The language-neutral `convert_s` / `convert_u` operations convert i32/i64 to
+f32/f64 with signedness on the operation, not the storage type. `trunc_s` /
+`trunc_u` convert in the other direction with ordered, location-bearing traps:
+NaN produces `invalid_conversion`, while infinity and out-of-range finite
+inputs produce `integer_overflow`. `trunc_sat_s` / `trunc_sat_u` are separate
+pure operations, clamping overflow and mapping NaN to zero. The verifier checks
+both domains and requires trap metadata only on checked conversions.
+
+These follow [Wasm numeric conversions](https://webassembly.github.io/spec/core/exec/numerics.html#conversions),
+not ECMAScript [ToInt32 (currently section 7.1.8)](https://tc39.es/ecma262/multipage/abstract-operations.html#sec-toint32).
+The latter wraps to 32 bits and cannot be replaced by a trapping or saturating
+conversion. B3's [typed conversion boundary](https://webkit.org/docs/b3/intermediate-representation.html)
+is the shared-IR precedent; Cynic's existing Spasm implementations supply the
+architecture-specific reference. No new JS coercion or SES surface is exposed.
+
+Checks precede conversion instructions. Signed f64-to-i32 accepts fractions
+strictly above -2147483649; the other signed combinations use an inclusive
+minimum because their input format cannot represent that extra interval.
+Unsigned truncation accepts inputs strictly above -1. AArch64 FCVTZ directly
+implements saturation. x86 uses explicit clamps and a split at 2^63 for u64
+truncation; u64-to-float preserves the low sticky bit before converting and
+doubling the high half. All temporaries avoid allocated GP homes.
+
+AArch64 rounds with FRINT instructions. The x86 path uses SSE2 only: finite
+fractional magnitudes fit an exact integer conversion, ties are resolved by
+integer parity, and the original sign is restored, including for zero. Already
+integral large values and infinities pass through; signaling NaNs are quieted.
+There are no helper calls or optional SSE4.1 requirements. Numeric conversions
+and rounding are not host-folded, reassociated, or given fast-math identities.
+
+Differentials cover every scalar rounding/conversion opcode, both precisions,
+adjacent values at range/exponent boundaries, ties, subnormals, infinities,
+NaNs, and seeded arbitrary bit patterns. Direct IR tests exercise all sixteen
+optimization/rematerialization combinations with zero/one/four allocated
+registers, exact guard captures, discarded trapping results, invalid type
+combinations, and allocation failures. Wasm tests retain opcode locations and
+decode saturating-conversion sub-opcodes as LEBs.
 
 ## Integer operations and traps
 
 The Wasm adapter now lowers the complete scalar integer numeric family for
 i32/i64: arithmetic, signed/unsigned division and remainder, bitwise operations,
 masked shifts/rotates, zero/leading/trailing/population counts, comparisons,
-integer width conversions, and sign-extension operations. This does not include
-integer/float numeric conversions, memory operations, or the `select` control
-instruction. It also accepts `unreachable`, including in dead validated code.
+integer width conversions, and sign-extension operations. Numeric integer/float
+conversions are described above. Memory operations and the `select` control
+instruction remain outside this adapter. It also accepts `unreachable`,
+including in dead validated code.
 Unsupported operations such as calls still refuse even in dead bytecode.
 
 Division and remainder declare `may_trap` effects and require a frontend-owned
@@ -463,9 +504,9 @@ production JS integration, GC roots, allocation, re-entry, and exception edges
 must become explicit without importing JS object layouts into the backend.
 Those operations remain absent, not implicitly pure.
 
-Further floating-point operations need explicit rounding and conversion-trap
-semantics. Do not enable fast-math identities or silently reuse Wasm trapping
-conversions for JavaScript coercions.
+Do not enable fast-math identities or silently reuse Wasm trapping conversions
+for JavaScript coercions. Production entry must establish or verify the required
+FP environment before running this code in arbitrary embedding contexts.
 
 ## Delivery and gates
 
@@ -477,6 +518,8 @@ open; a passing demo or unchanged production test262 run does not close them.
 
 - [ ] Complete scalar numeric types and operations, including strict floating
   point, bit-preserving conversions, and explicit integer/truncation traps.
+  Operation coverage is implemented and tested on both architectures; the
+  production entry contract for arbitrary host FP environments remains open.
 - [ ] Model memory, calls, traps, safepoints, and ordered effects in the IR and
   verifier before optimizing them; preserve aliasing, atomics, and trap order.
 - [ ] Support the accepted Wasm control/signature surface, memory and growth,
@@ -516,19 +559,20 @@ failures, but is not evidence that an unimplemented backend capability works.
    allocation, with exact unoptimized comparisons. Better instruction
    selection remains next. Add load elimination or loop motion only after
    effects are modeled and tested.
-5. **Wider Wasm coverage:** core scalar floating point and the complete scalar
-   integer family now run natively, with explicit ordered integer traps.
-   Finish rounding/numeric conversions, then memory, calls, and runtime
-   integration. Preserve bounds checks,
+5. **Wider Wasm coverage:** scalar floating point (including rounding and
+   conversions) and the complete scalar integer family now run natively, with
+   explicit ordered arithmetic/conversion traps. Continue with memory, calls,
+   and runtime integration. Preserve bounds checks,
    memory-growth invalidation, resource metering, and executable ownership.
 6. **Rollout decision:** paired warm/cold execution measurements, compilation
    latency, peak compiler allocation, installed code size, refusal/entry
    telemetry, differential fuzzing, and spec-suite gates. No automatic
    default-on graduation or new JS tier follows from finishing the prototype.
 
-The next capability work is floating-point rounding and numeric conversions,
-then memory/call effects and runtime integration. Operand-move reduction and immediate/compare-branch
-selection remain measured optimization work, not substitutes for coverage.
+The next capability work is the runtime entry contract (including the FP
+environment), memory/call effects, and production integration. Operand-move
+reduction and immediate/compare-branch selection remain measured optimization
+work, not substitutes for coverage.
 Keep each change independently measurable against disabled variants and
 unoptimized references.
 Adopt the backend in production only if measurements justify its complexity.

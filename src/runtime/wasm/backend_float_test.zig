@@ -7,14 +7,14 @@ const a = std.testing.allocator;
 const values32 = [_]u64{ 0, 0x8000_0000, 0x3f80_0000, 0xbf80_0000, 0x3fc0_0000, 0xc010_0000, 0x7f80_0000, 0xff80_0000, 0x7fc0_0000, 0x7fc0_0011, 0x7f80_0011, 1, 0x7f7f_ffff };
 const values64 = [_]u64{ 0, 0x8000_0000_0000_0000, 0x3ff0_0000_0000_0000, 0xbff0_0000_0000_0000, 0x3ff8_0000_0000_0000, 0xc002_0000_0000_0000, 0x7ff0_0000_0000_0000, 0xfff0_0000_0000_0000, 0x7ff8_0000_0000_0000, 0x7ff8_0000_0000_0011, 0x7ff0_0000_0000_0011, 1, 0x7fef_ffff_ffff_ffff };
 
-fn canonicalNaNOrNumber(ty: u8, bits: u64) bool {
+pub fn canonicalNaNOrNumber(ty: u8, bits: u64) bool {
     const exponent: u64 = if (ty == 0x7d) 0x7f80_0000 else 0x7ff0_0000_0000_0000;
     const fraction: u64 = if (ty == 0x7d) 0x007f_ffff else 0x000f_ffff_ffff_ffff;
     const quiet: u64 = if (ty == 0x7d) 0x0040_0000 else 0x0008_0000_0000_0000;
     return bits & exponent != exponent or bits & fraction == 0 or bits & fraction == quiet;
 }
 
-fn expectBits(ty: u8, exact_nan: bool, canonical_nan: bool, expected: u64, actual: u64) !void {
+pub fn expectBits(ty: u8, exact_nan: bool, canonical_nan: bool, expected: u64, actual: u64) !void {
     if (exact_nan or ty == 0x7f or ty == 0x7e) return std.testing.expectEqual(expected, actual);
     const exponent: u64 = if (ty == 0x7d) 0x7f80_0000 else 0x7ff0_0000_0000_0000;
     const fraction: u64 = if (ty == 0x7d) 0x007f_ffff else 0x000f_ffff_ffff_ffff;

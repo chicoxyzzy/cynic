@@ -74,6 +74,10 @@ fn emitArm(m: *arm_masm.Masm, op: ir.Op, single: bool) !void {
         .fmin => if (single) arm.fminS(.x16, .x16, .x17) else arm.fminD(.x16, .x16, .x17),
         .fmax => if (single) arm.fmaxS(.x16, .x16, .x17) else arm.fmaxD(.x16, .x16, .x17),
         .fsqrt => if (single) arm.fsqrtS(.x16, .x16) else arm.fsqrtD(.x16, .x16),
+        .fceil => if (single) arm.frintpS(.x16, .x16) else arm.frintpD(.x16, .x16),
+        .ffloor => if (single) arm.frintmS(.x16, .x16) else arm.frintmD(.x16, .x16),
+        .ftrunc => if (single) arm.frintzS(.x16, .x16) else arm.frintzD(.x16, .x16),
+        .fnearest => if (single) arm.frintnS(.x16, .x16) else arm.frintnD(.x16, .x16),
         .promote_f32 => arm.fcvtStoD(.x16, .x16),
         .demote_f64 => arm.fcvtDtoS(.x16, .x16),
         else => return error.InvalidGraph,
@@ -83,6 +87,7 @@ fn emitArm(m: *arm_masm.Masm, op: ir.Op, single: bool) !void {
 }
 
 fn emitX86(m: *x86.Masm, op: ir.Op, single: bool) !void {
+    if (op == .fceil or op == .ffloor or op == .ftrunc or op == .fnearest) return roundX86(m, op, single);
     if (single) try m.movDXmmFromReg(.xmm0, .rax) else try m.movQXmmFromReg(.xmm0, .rax);
     if (ir.inputCount(op) == 2) {
         if (single) try m.movDXmmFromReg(.xmm1, .r10) else try m.movQXmmFromReg(.xmm1, .r10);
@@ -104,6 +109,75 @@ fn emitX86(m: *x86.Masm, op: ir.Op, single: bool) !void {
     }
     const output_single = if (ir.conversionTypes(op)) |conversion| conversion.output == .f32 else single;
     if (output_single) try m.movDRegFromXmm(.rax, .xmm0) else try m.movQRegFromXmm(.rax, .xmm0);
+}
+
+fn roundX86(m: *x86.Masm, op: ir.Op, single: bool) !void {
+    // SSE2 baseline: round the finite magnitude through an exactly representable
+    // integer, then restore the sign (including zero). No SSE4.1 or host calls.
+    const sign_bit: u64 = if (single) 0x8000_0000 else 0x8000_0000_0000_0000;
+    var ordinary: x86.Masm.Label = .{};
+    defer ordinary.deinit(m.gpa);
+    var assemble: x86.Masm.Label = .{};
+    defer assemble.deinit(m.gpa);
+    var increment: x86.Masm.Label = .{};
+    defer increment.deinit(m.gpa);
+    var done: x86.Masm.Label = .{};
+    defer done.deinit(m.gpa);
+    try m.movReg64(.r10, .rax);
+    try m.movImm64(.r11, sign_bit - 1);
+    try m.andReg64(.r10, .r11);
+    try m.movImm64(.r11, if (single) 0x4b00_0000 else 0x4330_0000_0000_0000);
+    try m.cmpReg64(.r10, .r11);
+    try m.jumpCond(.below, &ordinary);
+    // Large finite inputs are already integral. Infinities stay unchanged;
+    // signaling NaNs must become arithmetic NaNs, not leak unchanged bits.
+    try m.movImm64(.r11, if (single) 0x7f80_0000 else 0x7ff0_0000_0000_0000);
+    try m.cmpReg64(.r10, .r11);
+    try m.jumpCond(.below_or_equal, &done);
+    try m.movImm64(.r11, if (single) 0x0040_0000 else 0x0008_0000_0000_0000);
+    try m.orReg64(.rax, .r11);
+    try m.jump(&done);
+    try m.bind(&ordinary);
+    try m.movImm64(.r11, sign_bit);
+    try m.andReg64(.r11, .rax);
+    if (single) {
+        try m.movDXmmFromReg(.xmm0, .r10);
+        try m.cvtFloatToDouble(.xmm0, .xmm0);
+    } else try m.movQXmmFromReg(.xmm0, .r10);
+    try m.cvttDoubleToI64(.rax, .xmm0);
+    if (op != .ftrunc) {
+        try m.cvtI64ToDouble(.xmm1, .rax);
+        if (op == .fnearest) {
+            try m.subDouble(.xmm0, .xmm1);
+            try m.movImm64(.r10, 0x3fe0_0000_0000_0000);
+            try m.movQXmmFromReg(.xmm1, .r10);
+            try m.ucomisDouble(.xmm0, .xmm1);
+            try m.jumpCond(.below, &assemble);
+            try m.jumpCond(.above, &increment);
+            try m.movReg64(.r10, .rax);
+            try m.movImm64(.rax, 1);
+            try m.andReg64(.rax, .r10);
+            try m.testReg64(.rax, .rax);
+            try m.movReg64(.rax, .r10);
+            try m.jumpCond(.equal, &assemble);
+        } else {
+            try m.ucomisDouble(.xmm0, .xmm1);
+            try m.jumpCond(.equal, &assemble);
+            try m.testReg64(.r11, .r11);
+            try m.jumpCond(if (op == .fceil) .not_equal else .equal, &assemble);
+        }
+        try m.bind(&increment);
+        try m.movImm64(.r10, 1);
+        try m.addReg64(.rax, .r10);
+    }
+    try m.bind(&assemble);
+    try m.cvtI64ToDouble(.xmm0, .rax);
+    if (single) {
+        try m.cvtDoubleToFloat(.xmm0, .xmm0);
+        try m.movDRegFromXmm(.rax, .xmm0);
+    } else try m.movQRegFromXmm(.rax, .xmm0);
+    try m.orReg64(.rax, .r11);
+    try m.bind(&done);
 }
 
 fn compareX86(m: *x86.Masm, op: ir.Op) !void {
