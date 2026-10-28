@@ -18,7 +18,7 @@ test "shared Ohaimark backend calls: root snapshots survive a collecting JS call
             realm.collectGarbage();
             return Value.undefined_;
         }
-        fn invoke(raw: ?*anyopaque, request: native.CallRequest) !u64 {
+        fn invoke(raw: ?*anyopaque, request: native.CallRequest) !void {
             const realm: *Realm = @ptrCast(@alignCast(raw.?));
             const roots = try realm.heap.openScope();
             defer roots.close();
@@ -26,15 +26,15 @@ test "shared Ohaimark backend calls: root snapshots survive a collecting JS call
             for (request.captures) |bits| try roots.push(.{ .bits = bits });
             const result = try @import("../lantern/call.zig").callValue(a, realm, realm, .{ .bits = request.arguments[0] }, Value.undefined_, &.{});
             return switch (result) {
-                .value => |value| value.bits,
+                .value => {},
                 .thrown => error.HostThrew,
                 .yielded => error.UnexpectedYield,
             };
         }
     };
-    const graph: ir.Graph = .{ .types = &.{ .i64, .i64 }, .argument_types = &.{ .i64, .i64 }, .result_type = .i64, .blocks = &.{.{ .params = &.{ 0, 1 }, .nodes = &.{
-        .{ .op = .call, .trap_site = 0, .call = .{ .target = 0, .arguments = &.{0}, .parameter_types = &.{.i64}, .result_type = null, .safepoint = .{ .id = 7, .values = &.{1} } } },
-    }, .terminator = .{ .return_ = 1 } }} };
+    const graph: ir.Graph = .{ .types = &.{ .i64, .i64 }, .argument_types = &.{ .i64, .i64 }, .result_types = &.{.i64}, .blocks = &.{.{ .params = &.{ 0, 1 }, .nodes = &.{
+        .{ .op = .call, .trap_site = 0, .call = .{ .target = 0, .arguments = &.{0}, .parameter_types = &.{.i64}, .results = &.{}, .result_types = &.{}, .safepoint = .{ .id = 7, .values = &.{1} } } },
+    }, .terminator = .{ .return_ = &.{1} } }} };
     var owner = try shared.CodeAllocator.init(a, 256 * 1024);
     defer owner.deinit();
     for ([_]u8{ 0, 4 }) |registers| {

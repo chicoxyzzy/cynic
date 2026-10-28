@@ -13,7 +13,7 @@ const unoptimized = @import("optimize.zig").Options{
 const guarded: ir.Graph = .{
     .types = &(.{ ir.Type.i32, ir.Type.i32 } ++ @as([9]ir.Type, @splat(.i64)) ++ .{ir.Type.i32}),
     .argument_types = &.{ .i32, .i32, .i64 },
-    .result_type = .i64,
+    .result_types = &.{.i64},
     .blocks = &.{
         .{ .params = &.{ 0, 1, 2 }, .nodes = &.{
             .{ .op = .constant, .out = 3, .immediate = 7 },
@@ -30,7 +30,7 @@ const guarded: ir.Graph = .{
         .{ .params = &.{ 8, 9, 10 }, .nodes = &.{
             .{ .op = .constant, .out = 11, .immediate = 0 },
             .{ .op = .guard, .lhs = 11, .exit = .{ .id = 20, .values = &.{ 8, 9, 10, 8 } } },
-        }, .terminator = .{ .return_ = 8 } },
+        }, .terminator = .{ .return_ = &.{8} } },
     },
 };
 
@@ -51,8 +51,8 @@ test "backend rematerialization: only single-lane literals are cheap and dead co
             .{ .op = .constant, .out = 0, .immediate = case.bits },
             .{ .op = .constant, .out = 1, .immediate = case.bits },
         };
-        const blocks = [_]ir.Block{.{ .params = &.{}, .nodes = &nodes, .terminator = .{ .return_ = 0 } }};
-        const graph: ir.Graph = .{ .types = &.{ .i64, .i64 }, .argument_types = &.{}, .result_type = .i64, .blocks = &blocks };
+        const blocks = [_]ir.Block{.{ .params = &.{}, .nodes = &nodes, .terminator = .{ .return_ = &.{0} } }};
+        const graph: ir.Graph = .{ .types = &.{ .i64, .i64 }, .argument_types = &.{}, .result_types = &.{.i64}, .blocks = &blocks };
         var plan = try allocation.Plan.build(a, graph, .{ .register_count = 0 });
         defer plan.deinit();
         try std.testing.expectEqual(case.cheap, plan.locations[0] == .immediate);
@@ -101,13 +101,13 @@ test "backend rematerialization: verifier checks constant definitions and exact 
     const graph: ir.Graph = .{
         .types = &.{ .i64, .i64, .i64, .i64, .i64 },
         .argument_types = &.{.i64},
-        .result_type = .i64,
+        .result_types = &.{.i64},
         .blocks = &.{.{ .params = &.{0}, .nodes = &.{
             .{ .op = .constant, .out = 1, .immediate = 7 },
             .{ .op = .constant, .out = 2, .immediate = 7 },
             .{ .op = .add, .out = 3, .lhs = 0, .rhs = 1 },
             .{ .op = .add, .out = 4, .lhs = 3, .rhs = 2 },
-        }, .terminator = .{ .return_ = 4 } }},
+        }, .terminator = .{ .return_ = &.{4} } }},
     };
     var plan = try allocation.Plan.build(a, graph, .{});
     defer plan.deinit();
@@ -145,8 +145,8 @@ test "backend rematerialization: typed constants use either scratch operand with
                 .{ .op = .sub, .out = 3, .lhs = 1, .rhs = 2 },
                 .{ .op = .add, .out = 4, .lhs = 3, .rhs = 1 },
             };
-            const blocks = [_]ir.Block{.{ .params = &.{0}, .nodes = &nodes, .terminator = .{ .return_ = 4 } }};
-            const graph: ir.Graph = .{ .types = &types, .argument_types = types[0..1], .result_type = ty, .blocks = &blocks };
+            const blocks = [_]ir.Block{.{ .params = &.{0}, .nodes = &nodes, .terminator = .{ .return_ = &.{4} } }};
+            const graph: ir.Graph = .{ .types = &types, .argument_types = types[0..1], .result_types = &.{ty}, .blocks = &blocks };
             var oracle = try native.compileWithOptions(a, &owner, graph, .{ .allocation = .scratch, .optimization = unoptimized });
             defer oracle.deinit();
             for ([_]u8{ 0, 1, 4 }) |registers| {

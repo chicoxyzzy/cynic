@@ -83,7 +83,7 @@ pub fn run(a: std.mem.Allocator, graph: ir.Graph, options: Options) !Result {
         for (block.params) |value| live[value] = true;
         switch (block.terminator) {
             .trap => {},
-            .return_ => |value| live[value] = true,
+            .return_ => |values| markValues(&live, values),
             .jump => |edge| markValues(&live, edge.args),
             .branch => |branch| {
                 live[branch.condition] = true;
@@ -95,9 +95,10 @@ pub fn run(a: std.mem.Allocator, graph: ir.Graph, options: Options) !Result {
         while (i != 0) {
             i -= 1;
             const node = block.nodes[i];
-            if (!isPure(node.op)) if (node.out) |out| {
-                live[out] = true;
-            };
+            if (!isPure(node.op)) {
+                var outputs = node.outputs();
+                while (outputs.next()) |out| live[out] = true;
+            }
             if (!isPure(node.op) or live[node.out.?]) markInputs(&live, node);
         }
     };
@@ -122,6 +123,7 @@ pub fn run(a: std.mem.Allocator, graph: ir.Graph, options: Options) !Result {
             }
             var node = try remapInputs(allocator, original, &map);
             if (node.out) |out| node.out = map[out];
+            if (node.call) |*call| call.results = try remapValues(allocator, call.results, &map);
             nodes[count] = node;
             count += 1;
         }
@@ -133,7 +135,7 @@ pub fn run(a: std.mem.Allocator, graph: ir.Graph, options: Options) !Result {
         .types = types[0..value_count],
         .blocks = blocks,
         .argument_types = try allocator.dupe(ir.Type, graph.argument_types),
-        .result_type = graph.result_type,
+        .result_types = try allocator.dupe(ir.Type, graph.result_types),
         .memory_count = graph.memory_count,
     };
     try result.verify();
@@ -248,7 +250,8 @@ fn remapInputs(a: std.mem.Allocator, original: ir.Node, map: []const ir.Value) !
         .target = call.target,
         .arguments = try remapValues(a, call.arguments, map),
         .parameter_types = try a.dupe(ir.Type, call.parameter_types),
-        .result_type = call.result_type,
+        .results = try a.dupe(ir.Value, call.results),
+        .result_types = try a.dupe(ir.Type, call.result_types),
         .fp_mode = call.fp_mode,
         .safepoint = .{ .id = call.safepoint.id, .values = try remapValues(a, call.safepoint.values, map) },
     };
@@ -258,7 +261,7 @@ fn remapInputs(a: std.mem.Allocator, original: ir.Node, map: []const ir.Value) !
 fn remapTerminator(a: std.mem.Allocator, terminator: ir.Terminator, map: []const ir.Value) !ir.Terminator {
     return switch (terminator) {
         .trap => terminator,
-        .return_ => |value| .{ .return_ = map[value] },
+        .return_ => |values| .{ .return_ = try remapValues(a, values, map) },
         .jump => |edge| .{ .jump = try remapEdge(a, edge, map) },
         .branch => |branch| .{ .branch = .{
             .condition = map[branch.condition],

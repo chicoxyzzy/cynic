@@ -13,7 +13,7 @@ test "backend integer: trap sites are verified and trapping dead results survive
         .{ .op = .div_s, .out = 3, .lhs = 0, .rhs = 1, .trap_site = 4 },
         .{ .op = .constant, .out = 4, .immediate = 7 },
     };
-    const graph: ir.Graph = .{ .types = &@as([5]ir.Type, @splat(.i32)), .argument_types = &.{}, .result_type = .i32, .blocks = &.{.{ .params = &.{}, .nodes = &nodes, .terminator = .{ .return_ = 4 } }} };
+    const graph: ir.Graph = .{ .types = &@as([5]ir.Type, @splat(.i32)), .argument_types = &.{}, .result_types = &.{.i32}, .blocks = &.{.{ .params = &.{}, .nodes = &nodes, .terminator = .{ .return_ = &.{4} } }} };
     try graph.verify();
     nodes[2].trap_site = null;
     try std.testing.expectError(error.InvalidGraph, graph.verify());
@@ -45,7 +45,7 @@ fn options(flags: usize, registers: u8) native.Options {
 const ordered: ir.Graph = .{
     .types = &.{ .i32, .i32, .i64, .i64, .i64 },
     .argument_types = &.{ .i32, .i32, .i64, .i64 },
-    .result_type = .i64,
+    .result_types = &.{.i64},
     .blocks = &.{.{ .params = &.{ 0, 1, 2, 3 }, .nodes = &.{
         .{ .op = .guard, .lhs = 0, .exit = .{ .id = 1, .values = &.{2} } },
         .{ .op = .div_s, .out = 4, .lhs = 2, .rhs = 3, .trap_site = 11 },
@@ -88,11 +88,11 @@ test "backend integer: fixed-register operations preserve live register homes" {
         const graph: ir.Graph = .{
             .types = &.{ .i32, ty, ty, ty, ty, ty },
             .argument_types = &.{ .i32, ty, ty, ty, ty },
-            .result_type = ty,
+            .result_types = &.{ty},
             .blocks = &.{.{ .params = &.{ 0, 1, 2, 3, 4 }, .nodes = &.{
                 .{ .op = op, .out = 5, .lhs = 1, .rhs = if (ir.inputCount(op) == 2) 2 else 999, .trap_site = if (ir.mayTrap(op)) 7 else null },
                 .{ .op = .guard, .lhs = 0, .exit = .{ .id = 99, .values = &.{ 0, 1, 2, 3, 4, 5 } } },
-            }, .terminator = .{ .return_ = 5 } }},
+            }, .terminator = .{ .return_ = &.{5} } }},
         };
         const args = [_]u64{ 0, ir.normalize(ty, 0xfedc_ba98_7654_3210), 7, ir.normalize(ty, 0x1234_5678_0123_4567), ir.normalize(ty, 0xaabb_ccdd_eeff_7788) };
         var oracle = try native.compileWithOptions(a, &owner, graph, .{ .allocation = .scratch, .optimization = .{ .constant_folding = false, .common_subexpression_elimination = false, .dead_code_elimination = false } });

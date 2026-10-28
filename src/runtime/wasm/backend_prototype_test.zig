@@ -258,10 +258,10 @@ test "backend prototype: arithmetic agrees with Sarcasm and native Spasm" {
         var seed: u64 = 0x1234_5678_9abc_def0;
         for (0..64) |_| {
             seed = seed *% 6364136223846793005 +% 1;
-            const lhs = prototype.ir.normalize(graph.graph.result_type, seed);
+            const lhs = prototype.ir.normalize(graph.graph.result_types[0], seed);
             seed = seed *% 6364136223846793005 +% 1;
-            const rhs = prototype.ir.normalize(graph.graph.result_type, seed);
-            const expected = prototype.ir.normalize(graph.graph.result_type, (lhs +% rhs) *% rhs);
+            const rhs = prototype.ir.normalize(graph.graph.result_types[0], seed);
+            const expected = prototype.ir.normalize(graph.graph.result_types[0], (lhs +% rhs) *% rhs);
             try std.testing.expectEqual(expected, try compiled.run(&.{ lhs, rhs }, 10));
             for ([_]bool{ false, true }) |spasm| {
                 instance.spasm_enabled = spasm;

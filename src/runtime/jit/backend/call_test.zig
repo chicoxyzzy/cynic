@@ -8,20 +8,21 @@ const a = std.testing.allocator;
 const graph: ir.Graph = .{
     .types = &.{ .i64, .i64, .i64, .i64, .i64, .i64, .i64, .i64, .i64 },
     .argument_types = &.{ .i64, .i64, .i64, .i64 },
-    .result_type = .i64,
+    .result_types = &.{.i64},
     .blocks = &.{.{ .params = &.{ 0, 1, 2, 3 }, .nodes = &.{
-        .{ .op = .call, .out = 4, .trap_site = 17, .call = .{
+        .{ .op = .call, .trap_site = 17, .call = .{
             .target = 42,
             .arguments = &.{ 3, 1, 3 },
             .parameter_types = &.{ .i64, .i64, .i64 },
-            .result_type = .i64,
+            .result_types = &.{.i64},
+            .results = &.{4},
             .safepoint = .{ .id = 99, .values = &.{ 2, 0, 2 } },
         } },
         .{ .op = .add, .out = 5, .lhs = 0, .rhs = 1 },
         .{ .op = .add, .out = 6, .lhs = 2, .rhs = 3 },
         .{ .op = .add, .out = 7, .lhs = 5, .rhs = 6 },
         .{ .op = .add, .out = 8, .lhs = 7, .rhs = 4 },
-    }, .terminator = .{ .return_ = 8 } }},
+    }, .terminator = .{ .return_ = &.{8} } }},
 };
 
 const Context = struct {
@@ -29,7 +30,7 @@ const Context = struct {
     fail: bool = false,
     nested: ?*const native.Compiled = null,
 
-    fn invoke(raw: ?*anyopaque, request: native.CallRequest) !u64 {
+    fn invoke(raw: ?*anyopaque, request: native.CallRequest) !void {
         const self: *Context = @ptrCast(@alignCast(raw.?));
         self.calls += 1;
         try std.testing.expectEqual(@as(u32, 42), request.target);
@@ -38,8 +39,7 @@ const Context = struct {
         try std.testing.expectEqualSlices(u64, &.{ 40, 20, 40 }, request.arguments);
         try std.testing.expectEqualSlices(u64, &.{ 30, 10, 30 }, request.captures);
         if (self.fail) return error.CallbackFailed;
-        if (self.nested) |code| return code.run(&.{7}, 1);
-        return request.arguments[0] + request.arguments[1];
+        request.results[0] = if (self.nested) |code| try code.run(&.{7}, 1) else request.arguments[0] + request.arguments[1];
     }
 };
 
@@ -65,7 +65,7 @@ test "backend calls: nested native entry has independent scratch and budget" {
     if (!native.supported) return error.SkipZigTest;
     var owner = try CodeAllocator.init(a, 256 * 1024);
     defer owner.deinit();
-    const inner: ir.Graph = .{ .types = &.{.i64}, .argument_types = &.{.i64}, .result_type = .i64, .blocks = &.{.{ .params = &.{0}, .terminator = .{ .return_ = 0 } }} };
+    const inner: ir.Graph = .{ .types = &.{.i64}, .argument_types = &.{.i64}, .result_types = &.{.i64}, .blocks = &.{.{ .params = &.{0}, .terminator = .{ .return_ = &.{0} } }} };
     var nested = try native.compile(a, &owner, inner);
     defer nested.deinit();
     var outer = try native.compile(a, &owner, graph);
@@ -85,7 +85,7 @@ test "backend calls: verifier checks signatures captures and ordered effects" {
     var nodes = graph.blocks[0].nodes[0..1].*;
     var blocks = graph.blocks[0..1].*;
     blocks[0].nodes = &nodes;
-    blocks[0].terminator = .{ .return_ = 4 };
+    blocks[0].terminator = .{ .return_ = &.{4} };
     var invalid = graph;
     invalid.types = graph.types[0..5];
     invalid.blocks = &blocks;
@@ -97,7 +97,7 @@ test "backend calls: verifier checks signatures captures and ordered effects" {
     nodes[0].call.?.safepoint.values = &.{4};
     try std.testing.expectError(error.InvalidGraph, invalid.verify());
     nodes[0] = original;
-    nodes[0].call.?.result_type = null;
+    nodes[0].call.?.result_types = &.{};
     try std.testing.expectError(error.InvalidGraph, invalid.verify());
     nodes[0] = original;
     nodes[0].call = null;
@@ -112,7 +112,7 @@ test "backend calls: verifier checks signatures captures and ordered effects" {
     nodes[0].call.?.safepoint.values = &@as([ir.max_arguments + 1]ir.Value, @splat(0));
     try std.testing.expectError(error.PrototypeLimit, invalid.verify());
     nodes[0] = original;
-    nodes[0].out = null;
+    nodes[0].call.?.results = &.{};
     try std.testing.expectError(error.InvalidGraph, invalid.verify());
 }
 
@@ -138,19 +138,18 @@ test "backend calls: void effects refresh memory and errors prevent subsequent s
         bytes: [8]u8 = @splat(0),
         fail: bool = false,
         calls: usize = 0,
-        fn invoke(raw: ?*anyopaque, request: native.CallRequest) !u64 {
+        fn invoke(raw: ?*anyopaque, request: native.CallRequest) !void {
             const self: *@This() = @ptrCast(@alignCast(raw.?));
             self.calls += 1;
             request.memories[0] = native.MemoryView.fromSlice(&self.bytes);
             if (self.fail) return error.HostThrew;
-            return 0;
         }
     };
-    const memory_graph: ir.Graph = .{ .types = &.{ .i32, .i64, .i64 }, .argument_types = &.{ .i32, .i64 }, .result_type = .i64, .memory_count = 1, .blocks = &.{.{ .params = &.{ 0, 1 }, .nodes = &.{
-        .{ .op = .call, .trap_site = 1, .call = .{ .target = 0, .arguments = &.{}, .parameter_types = &.{}, .result_type = null, .safepoint = .{ .id = 0, .values = &.{} } } },
+    const memory_graph: ir.Graph = .{ .types = &.{ .i32, .i64, .i64 }, .argument_types = &.{ .i32, .i64 }, .result_types = &.{.i64}, .memory_count = 1, .blocks = &.{.{ .params = &.{ 0, 1 }, .nodes = &.{
+        .{ .op = .call, .trap_site = 1, .call = .{ .target = 0, .arguments = &.{}, .parameter_types = &.{}, .results = &.{}, .result_types = &.{}, .safepoint = .{ .id = 0, .values = &.{} } } },
         .{ .op = .store, .lhs = 0, .rhs = 1, .memory = .{ .width = .double }, .trap_site = 2 },
         .{ .op = .load, .out = 2, .lhs = 0, .memory = .{ .width = .double }, .trap_site = 3 },
-    }, .terminator = .{ .return_ = 2 } }} };
+    }, .terminator = .{ .return_ = &.{2} } }} };
     var owner = try CodeAllocator.init(a, 256 * 1024);
     defer owner.deinit();
     var code = try native.compile(a, &owner, memory_graph);
@@ -172,16 +171,16 @@ test "backend calls: void effects refresh memory and errors prevent subsequent s
 test "backend calls: callback scalar results preserve raw bits and narrow upper lanes" {
     if (!native.supported) return error.SkipZigTest;
     const Host = struct {
-        fn invoke(_: ?*anyopaque, request: native.CallRequest) !u64 {
-            return request.arguments[0] | 0xffff_ffff_0000_0000;
+        fn invoke(_: ?*anyopaque, request: native.CallRequest) !void {
+            request.results[0] = request.arguments[0] | 0xffff_ffff_0000_0000;
         }
     };
     var owner = try CodeAllocator.init(a, 256 * 1024);
     defer owner.deinit();
     for ([_]ir.Type{ .i32, .i64, .f32, .f64 }) |ty| {
-        const call_graph: ir.Graph = .{ .types = &.{ ty, ty }, .argument_types = &.{ty}, .result_type = ty, .blocks = &.{.{ .params = &.{0}, .nodes = &.{
-            .{ .op = .call, .out = 1, .trap_site = 0, .call = .{ .target = 0, .arguments = &.{0}, .parameter_types = &.{ty}, .result_type = ty, .safepoint = .{ .id = 0, .values = &.{} } } },
-        }, .terminator = .{ .return_ = 1 } }} };
+        const call_graph: ir.Graph = .{ .types = &.{ ty, ty }, .argument_types = &.{ty}, .result_types = &.{ty}, .blocks = &.{.{ .params = &.{0}, .nodes = &.{
+            .{ .op = .call, .trap_site = 0, .call = .{ .target = 0, .arguments = &.{0}, .parameter_types = &.{ty}, .results = &.{1}, .result_types = &.{ty}, .safepoint = .{ .id = 0, .values = &.{} } } },
+        }, .terminator = .{ .return_ = &.{1} } }} };
         var code = try native.compile(a, &owner, call_graph);
         defer code.deinit();
         for ([_]u64{ 0, 0x8000_0000, 0x7f80_0001, 0x7ff0_0000_0000_0001 }) |bits| {
@@ -197,17 +196,17 @@ test "backend calls: recursive host re-entry returns stack exhaustion without ab
     const Host = struct {
         code: *const native.Compiled,
         calls: usize = 0,
-        fn invoke(raw: ?*anyopaque, _: native.CallRequest) anyerror!u64 {
+        fn invoke(raw: ?*anyopaque, request: native.CallRequest) anyerror!void {
             const self: *@This() = @ptrCast(@alignCast(raw.?));
             self.calls += 1;
             var result = try self.code.runOutcomeWithRuntime(&.{}, &.{}, 1, .{ .context = self, .call = invoke });
             defer result.deinit();
-            return result.returned;
+            request.results[0] = result.returned;
         }
     };
-    const recursive: ir.Graph = .{ .types = &.{.i64}, .argument_types = &.{}, .result_type = .i64, .blocks = &.{.{ .params = &.{}, .nodes = &.{
-        .{ .op = .call, .out = 0, .trap_site = 0, .call = .{ .target = 0, .arguments = &.{}, .parameter_types = &.{}, .result_type = .i64, .safepoint = .{ .id = 0, .values = &.{} } } },
-    }, .terminator = .{ .return_ = 0 } }} };
+    const recursive: ir.Graph = .{ .types = &.{.i64}, .argument_types = &.{}, .result_types = &.{.i64}, .blocks = &.{.{ .params = &.{}, .nodes = &.{
+        .{ .op = .call, .trap_site = 0, .call = .{ .target = 0, .arguments = &.{}, .parameter_types = &.{}, .results = &.{0}, .result_types = &.{.i64}, .safepoint = .{ .id = 0, .values = &.{} } } },
+    }, .terminator = .{ .return_ = &.{0} } }} };
     var owner = try CodeAllocator.init(a, 256 * 1024);
     defer owner.deinit();
     var code = try native.compile(a, &owner, recursive);
@@ -221,16 +220,16 @@ test "backend calls: repeated native continuations retain the caller block budge
     if (!native.supported) return error.SkipZigTest;
     const Host = struct {
         calls: usize = 0,
-        fn invoke(raw: ?*anyopaque, request: native.CallRequest) !u64 {
+        fn invoke(raw: ?*anyopaque, request: native.CallRequest) !void {
             const self: *@This() = @ptrCast(@alignCast(raw.?));
             self.calls += 1;
-            return request.arguments[0] - 1;
+            request.results[0] = request.arguments[0] - 1;
         }
     };
-    const loop: ir.Graph = .{ .types = &.{ .i32, .i32, .i32, .i32 }, .argument_types = &.{.i32}, .result_type = .i32, .blocks = &.{
+    const loop: ir.Graph = .{ .types = &.{ .i32, .i32, .i32, .i32 }, .argument_types = &.{.i32}, .result_types = &.{.i32}, .blocks = &.{
         .{ .params = &.{0}, .terminator = .{ .jump = .{ .target = 1, .args = &.{0} } } },
-        .{ .params = &.{1}, .nodes = &.{.{ .op = .call, .out = 2, .trap_site = 0, .call = .{ .target = 0, .arguments = &.{1}, .parameter_types = &.{.i32}, .result_type = .i32, .safepoint = .{ .id = 0, .values = &.{} } } }}, .terminator = .{ .branch = .{ .condition = 2, .taken = .{ .target = 1, .args = &.{2} }, .fallthrough = .{ .target = 2, .args = &.{2} } } } },
-        .{ .params = &.{3}, .terminator = .{ .return_ = 3 } },
+        .{ .params = &.{1}, .nodes = &.{.{ .op = .call, .trap_site = 0, .call = .{ .target = 0, .arguments = &.{1}, .parameter_types = &.{.i32}, .results = &.{2}, .result_types = &.{.i32}, .safepoint = .{ .id = 0, .values = &.{} } } }}, .terminator = .{ .branch = .{ .condition = 2, .taken = .{ .target = 1, .args = &.{2} }, .fallthrough = .{ .target = 2, .args = &.{2} } } } },
+        .{ .params = &.{3}, .terminator = .{ .return_ = &.{3} } },
     } };
     var owner = try CodeAllocator.init(a, 256 * 1024);
     defer owner.deinit();

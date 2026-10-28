@@ -20,7 +20,7 @@ fn expectNativeBits(graph: ir.Graph, bits: u64) !void {
 const chain: ir.Graph = .{
     .types = &@as([6]ir.Type, @splat(.i64)),
     .argument_types = &.{},
-    .result_type = .i64,
+    .result_types = &.{.i64},
     .blocks = &.{.{ .params = &.{}, .nodes = &.{
         .{ .op = .constant, .out = 0, .immediate = 7 },
         .{ .op = .constant, .out = 1, .immediate = 9 },
@@ -28,7 +28,7 @@ const chain: ir.Graph = .{
         .{ .op = .mul, .out = 3, .lhs = 2, .rhs = 1 },
         .{ .op = .constant, .out = 4, .immediate = 99 },
         .{ .op = .add, .out = 5, .lhs = 4, .rhs = 0 },
-    }, .terminator = .{ .return_ = 3 } }},
+    }, .terminator = .{ .return_ = &.{3} } }},
 };
 
 test "backend optimization: independent switches and transitive dead computations" {
@@ -84,8 +84,8 @@ test "backend optimization: constant integer arithmetic and comparisons preserve
             .{ .op = case.op, .out = 2, .lhs = 0, .rhs = 1 },
         };
         const types = [_]ir.Type{ case.ty, case.ty, output_type };
-        const blocks = [_]ir.Block{.{ .params = &.{}, .nodes = &nodes, .terminator = .{ .return_ = 2 } }};
-        const graph: ir.Graph = .{ .types = &types, .blocks = &blocks, .argument_types = &.{}, .result_type = output_type };
+        const blocks = [_]ir.Block{.{ .params = &.{}, .nodes = &nodes, .terminator = .{ .return_ = &.{2} } }};
+        const graph: ir.Graph = .{ .types = &types, .blocks = &blocks, .argument_types = &.{}, .result_types = &.{output_type} };
         var result = try optimize.run(a, graph, .{});
         defer result.deinit();
         try std.testing.expectEqual(@as(usize, 1), result.graph.blocks[0].nodes.len);
@@ -105,8 +105,8 @@ test "backend optimization: constant width conversions preserve signedness" {
     for (cases) |case| {
         const nodes = [_]ir.Node{ .{ .op = .constant, .out = 0, .immediate = case.bits }, .{ .op = case.op, .out = 1, .lhs = 0 } };
         const types = [_]ir.Type{ case.input, case.output };
-        const blocks = [_]ir.Block{.{ .params = &.{}, .nodes = &nodes, .terminator = .{ .return_ = 1 } }};
-        const graph: ir.Graph = .{ .types = &types, .blocks = &blocks, .argument_types = &.{}, .result_type = case.output };
+        const blocks = [_]ir.Block{.{ .params = &.{}, .nodes = &nodes, .terminator = .{ .return_ = &.{1} } }};
+        const graph: ir.Graph = .{ .types = &types, .blocks = &blocks, .argument_types = &.{}, .result_types = &.{case.output} };
         var result = try optimize.run(a, graph, .{});
         defer result.deinit();
         try std.testing.expectEqual(@as(usize, 1), result.graph.blocks[0].nodes.len);
@@ -118,7 +118,7 @@ test "backend optimization: constant width conversions preserve signedness" {
 const guarded: ir.Graph = .{
     .types = &.{ .i32, .i64, .i64, .i64, .i64, .i32 },
     .argument_types = &.{},
-    .result_type = .i64,
+    .result_types = &.{.i64},
     .blocks = &.{.{ .params = &.{}, .nodes = &.{
         .{ .op = .constant, .out = 0, .immediate = 0 },
         .{ .op = .constant, .out = 1, .immediate = 0x8000_0000_1234_5678 },
@@ -128,7 +128,7 @@ const guarded: ir.Graph = .{
         .{ .op = .constant, .out = 5, .immediate = 1 },
         .{ .op = .guard, .lhs = 5, .exit = .{ .id = 77, .values = &.{ 2, 1, 2 } } },
         .{ .op = .guard, .lhs = 0, .exit = .{ .id = 78, .values = &.{1} } },
-    }, .terminator = .{ .return_ = 1 } }},
+    }, .terminator = .{ .return_ = &.{1} } }},
 };
 
 test "backend optimization: guards stay ordered even with constant predicates" {
@@ -148,11 +148,11 @@ test "backend optimization: loop parameters stay unknown and edges retain their 
     const graph: ir.Graph = .{
         .types = &@as([6]ir.Type, @splat(.i32)),
         .argument_types = &.{},
-        .result_type = .i32,
+        .result_types = &.{.i32},
         .blocks = &.{
             .{ .params = &.{}, .nodes = &.{ .{ .op = .constant, .out = 4, .immediate = 1 }, .{ .op = .constant, .out = 2, .immediate = 99 } }, .terminator = .{ .jump = .{ .target = 1, .args = &.{4} } } },
             .{ .params = &.{0}, .nodes = &.{ .{ .op = .constant, .out = 3, .immediate = 1 }, .{ .op = .sub, .out = 5, .lhs = 0, .rhs = 3 } }, .terminator = .{ .branch = .{ .condition = 0, .taken = .{ .target = 1, .args = &.{5} }, .fallthrough = .{ .target = 2, .args = &.{0} } } } },
-            .{ .params = &.{1}, .terminator = .{ .return_ = 1 } },
+            .{ .params = &.{1}, .terminator = .{ .return_ = &.{1} } },
         },
     };
     var result = try optimize.run(a, graph, .{});
@@ -170,8 +170,8 @@ test "backend optimization: malformed dead definitions are rejected before remov
     const graph: ir.Graph = .{
         .types = &.{ .i32, .i32 },
         .argument_types = &.{},
-        .result_type = .i32,
-        .blocks = &.{.{ .params = &.{}, .nodes = &.{ .{ .op = .constant, .out = 0, .immediate = 0x1_0000_0000 }, .{ .op = .constant, .out = 1 } }, .terminator = .{ .return_ = 1 } }},
+        .result_types = &.{.i32},
+        .blocks = &.{.{ .params = &.{}, .nodes = &.{ .{ .op = .constant, .out = 0, .immediate = 0x1_0000_0000 }, .{ .op = .constant, .out = 1 } }, .terminator = .{ .return_ = &.{1} } }},
     };
     try std.testing.expectError(error.InvalidGraph, optimize.run(a, graph, .{}));
 }
@@ -237,8 +237,8 @@ test "backend optimization: seeded native cases match the unoptimized scratch or
             }
         }
         nodes[32] = .{ .op = .guard, .lhs = 0, .exit = .{ .id = 51, .values = &.{ 1, 4, 32, 4 } } };
-        const blocks = [_]ir.Block{.{ .params = &.{ 0, 1 }, .nodes = &nodes, .terminator = .{ .return_ = 33 } }};
-        const graph: ir.Graph = .{ .types = &types, .blocks = &blocks, .argument_types = types[0..2], .result_type = .i64 };
+        const blocks = [_]ir.Block{.{ .params = &.{ 0, 1 }, .nodes = &nodes, .terminator = .{ .return_ = &.{33} } }};
+        const graph: ir.Graph = .{ .types = &types, .blocks = &blocks, .argument_types = types[0..2], .result_types = &.{.i64} };
         var reference = try native.compileWithOptions(a, &owner, graph, .{ .allocation = .scratch, .optimization = .{ .constant_folding = false, .common_subexpression_elimination = false, .dead_code_elimination = false } });
         defer reference.deinit();
         const input = random.int(u64);
@@ -280,9 +280,9 @@ test "backend optimization: output owns argument edges and guard captures" {
     var nodes = [_]ir.Node{.{ .op = .guard, .lhs = 1, .exit = .{ .id = 31, .values = &captures } }};
     var blocks = [_]ir.Block{
         .{ .params = &entry_params, .terminator = .{ .jump = .{ .target = 1, .args = &args } } },
-        .{ .params = &target_params, .nodes = &nodes, .terminator = .{ .return_ = 1 } },
+        .{ .params = &target_params, .nodes = &nodes, .terminator = .{ .return_ = &.{1} } },
     };
-    const graph: ir.Graph = .{ .types = &types, .argument_types = &argument_types, .result_type = .i32, .blocks = &blocks };
+    const graph: ir.Graph = .{ .types = &types, .argument_types = &argument_types, .result_types = &.{.i32}, .blocks = &blocks };
     var result = try optimize.run(a, graph, .{});
     defer result.deinit();
     types[0] = .i64;

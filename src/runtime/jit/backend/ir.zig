@@ -99,7 +99,8 @@ pub const Call = struct {
     target: u32,
     arguments: []const Value,
     parameter_types: []const Type,
-    result_type: ?Type,
+    results: []const Value,
+    result_types: []const Type,
     /// Raw host callbacks see caller controls; language helpers keep strict FP.
     fp_mode: enum { host, strict } = .host,
     safepoint: SideExit,
@@ -133,30 +134,49 @@ pub const Node = struct {
     trap_site: ?u32 = null,
     memory: ?MemoryAccess = null,
     call: ?Call = null,
+
+    pub fn outputs(self: Node) OutputIterator {
+        return if (self.call) |call| .{ .many = call.results } else .{ .single = self.out };
+    }
+};
+pub const OutputIterator = struct {
+    single: ?Value = null,
+    many: []const Value = &.{},
+
+    pub fn next(self: *OutputIterator) ?Value {
+        if (self.single) |value| {
+            self.single = null;
+            return value;
+        }
+        if (self.many.len == 0) return null;
+        const value = self.many[0];
+        self.many = self.many[1..];
+        return value;
+    }
 };
 pub const Edge = struct { target: u32, args: []const Value };
 pub const Terminator = union(enum) {
     trap: Trap,
-    return_: Value,
+    return_: []const Value,
     jump: Edge,
     branch: struct { condition: Value, taken: Edge, fallthrough: Edge },
 };
 pub const Block = struct {
     params: []const Value,
     nodes: []const Node = &.{},
-    terminator: Terminator = .{ .return_ = 0 },
+    terminator: Terminator = .{ .return_ = &.{} },
 };
 
 pub const Graph = struct {
     types: []const Type,
     blocks: []const Block,
     argument_types: []const Type,
-    result_type: Type,
+    result_types: []const Type,
     memory_count: u32 = 0,
 
     pub fn verify(self: Graph) !void {
         if (self.types.len > max_values or self.blocks.len > max_blocks or
-            self.argument_types.len > max_arguments or self.memory_count > max_memories) return error.PrototypeLimit;
+            self.argument_types.len > max_arguments or self.result_types.len > max_arguments or self.memory_count > max_memories) return error.PrototypeLimit;
         if (self.blocks.len == 0 or self.blocks[0].params.len != self.argument_types.len)
             return error.InvalidGraph;
         var defined: [max_values]bool = @splat(false);
@@ -185,18 +205,17 @@ pub const Graph = struct {
                 }
                 if (node.exit != null) return error.InvalidGraph;
                 if (node.call) |call| {
-                    if (call.arguments.len > max_arguments or call.safepoint.values.len > max_arguments) return error.PrototypeLimit;
-                    if (call.arguments.len != call.parameter_types.len) return error.InvalidGraph;
+                    if (call.arguments.len > max_arguments or call.results.len > max_arguments or call.result_types.len > max_arguments or call.safepoint.values.len > max_arguments) return error.PrototypeLimit;
+                    if (node.out != null or call.arguments.len != call.parameter_types.len or call.results.len != call.result_types.len) return error.InvalidGraph;
                     for (call.arguments, call.parameter_types) |value, ty| {
                         try self.use(value, &available);
                         if (self.types[value] != ty) return error.InvalidGraph;
                     }
                     for (call.safepoint.values) |value| try self.use(value, &available);
-                    if (call.result_type) |ty| {
-                        const out = node.out orelse return error.InvalidGraph;
+                    for (call.results, call.result_types) |out, ty| {
                         try self.define(out, &defined, &available);
                         if (self.types[out] != ty) return error.InvalidGraph;
-                    } else if (node.out != null) return error.InvalidGraph;
+                    }
                     continue;
                 }
                 if (node.memory) |access| {
@@ -250,9 +269,12 @@ pub const Graph = struct {
             }
             switch (block.terminator) {
                 .trap => {},
-                .return_ => |value| {
-                    try self.use(value, &available);
-                    if (self.types[value] != self.result_type) return error.InvalidGraph;
+                .return_ => |values| {
+                    if (values.len != self.result_types.len) return error.InvalidGraph;
+                    for (values, self.result_types) |value, ty| {
+                        try self.use(value, &available);
+                        if (self.types[value] != ty) return error.InvalidGraph;
+                    }
                 },
                 .jump => |edge| try self.verifyEdge(edge, &available),
                 .branch => |branch| {
@@ -382,4 +404,5 @@ test {
     _ = @import("fp_environment_test.zig");
     _ = @import("memory_test.zig");
     _ = @import("call_test.zig");
+    _ = @import("results_test.zig");
 }
