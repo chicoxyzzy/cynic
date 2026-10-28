@@ -96,9 +96,15 @@ const Probe = struct {
 const Observation = struct { before: State, after: State, status: u32, result: [2]u64, captures: [ir.max_arguments]u64 };
 
 fn observe(probe: *const Probe, code: *const native.Compiled, requested: State, args: []const u64, budget: u32) !Observation {
+    return observeWithMemory(probe, code, requested, args, &.{}, budget);
+}
+
+fn observeWithMemory(probe: *const Probe, code: *const native.Compiled, requested: State, args: []const u64, views: []const native.MemoryView, budget: u32) !Observation {
+    try std.testing.expectEqual(code.memory_count, views.len);
     const slots = try a.alloc(u64, code.scratchSlotCount());
     defer a.free(slots);
     @memset(slots, 0);
+    if (code.memory_count != 0) slots[code.scratchSlotCount() - 1] = @intFromPtr(views.ptr);
     for (args, code.argument_types, 0..) |arg, ty, i| slots[code.spill_slot_count + i] = ir.normalize(ty, arg);
     const entry: Entry = @ptrCast(@alignCast(code.code.entry().?));
     const original = probe.read();
@@ -342,5 +348,32 @@ test "backend FP environment: Wasm frontend shares protected native entry" {
         try std.testing.expectEqual(@as(u32, 0), observed.status);
         try std.testing.expectEqual(@as(u64, 2), observed.result[0]);
         try std.testing.expectEqualDeep(observed.before, observed.after);
+    }
+}
+
+test "backend memory: floating arithmetic and memory traps use disjoint saved state" {
+    if (!native.supported) return error.SkipZigTest;
+    var owner = try code_alloc.CodeAllocator.init(a, 256 * 1024);
+    defer owner.deinit();
+    var probe = try Probe.init(&owner);
+    defer probe.deinit();
+    const graph: ir.Graph = .{ .types = &.{ .f64, .f64, .i64, .f64 }, .argument_types = &.{ .f64, .f64, .i64 }, .result_type = .f64, .memory_count = 1, .blocks = &.{.{ .params = &.{ 0, 1, 2 }, .nodes = &.{
+        .{ .op = .fdiv, .out = 3, .lhs = 0, .rhs = 1 },
+        .{ .op = .store, .lhs = 2, .rhs = 3, .memory = .{ .width = .double }, .trap_site = 77 },
+    }, .terminator = .{ .return_ = 3 } }} };
+    var code = try native.compile(a, &owner, graph);
+    defer code.deinit();
+    for ([_]u64{ 0, 1 }) |address| {
+        var bytes: [8]u8 = @splat(0);
+        const views = [_]native.MemoryView{native.MemoryView.fromSlice(&bytes)};
+        const result = try observeWithMemory(&probe, &code, probe.unusual(1), &.{ 0x3ff0_0000_0000_0000, 0, address }, &views, 1);
+        try std.testing.expectEqualDeep(result.before, result.after);
+        try std.testing.expectEqual(@as(u32, if (address == 0) 0 else 3), result.status);
+        if (address == 0) {
+            try std.testing.expectEqual(@as(u64, 0x7ff0_0000_0000_0000), std.mem.readInt(u64, &bytes, .little));
+        } else {
+            try std.testing.expectEqualDeep([2]u64{ 5, 77 }, result.result);
+            try std.testing.expectEqual(@as(u64, 0), std.mem.readInt(u64, &bytes, .little));
+        }
     }
 }

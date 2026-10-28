@@ -10,6 +10,7 @@ const float = @import("float.zig");
 const integer = @import("integer.zig");
 const conversion = @import("conversion.zig");
 const fp_environment = @import("fp_environment.zig");
+const memory = @import("memory.zig");
 const code_alloc = @import("../code_alloc.zig");
 const a64 = @import("../asm_aarch64.zig");
 const arm_masm = @import("../masm.zig");
@@ -17,6 +18,7 @@ const x86 = @import("../asm_x86_64.zig");
 
 pub const supported = code_alloc.supported;
 pub const max_budget = 1_000_000;
+pub const MemoryView = memory.View;
 const is_x86 = builtin.cpu.arch == .x86_64;
 const Machine = if (is_x86) x86.Masm else arm_masm.Masm;
 const Reg = if (is_x86) x86.Reg else a64.Reg;
@@ -51,10 +53,15 @@ pub const Compiled = struct {
     argument_types: []ir.Type,
     spill_slot_count: usize,
     uses_fp_environment: bool = false,
+    memory_count: u32 = 0,
     stats: Stats = .{},
     optimization: optimize.Stats = .{},
 
     pub fn scratchSlotCount(self: *const Compiled) usize {
+        return self.memoryViewsSlot() + @as(usize, @intFromBool(self.memory_count != 0));
+    }
+
+    fn memoryViewsSlot(self: *const Compiled) usize {
         return self.spill_slot_count + ir.max_arguments + 2 +
             @as(usize, if (self.uses_fp_environment) fp_environment.slot_count else 0);
     }
@@ -67,7 +74,11 @@ pub const Compiled = struct {
     }
 
     pub fn run(self: *const Compiled, args: []const u64, budget: u32) !u64 {
-        var outcome = try self.runOutcome(args, budget);
+        return self.runWithMemory(args, &.{}, budget);
+    }
+
+    pub fn runWithMemory(self: *const Compiled, args: []const u64, views: []const MemoryView, budget: u32) !u64 {
+        var outcome = try self.runOutcomeWithMemory(args, views, budget);
         defer outcome.deinit();
         return switch (outcome) {
             .returned => |value| value,
@@ -77,11 +88,17 @@ pub const Compiled = struct {
     }
 
     pub fn runOutcome(self: *const Compiled, args: []const u64, budget: u32) !Outcome {
+        return self.runOutcomeWithMemory(args, &.{}, budget);
+    }
+
+    pub fn runOutcomeWithMemory(self: *const Compiled, args: []const u64, views: []const MemoryView, budget: u32) !Outcome {
         if (args.len != self.params.len) return error.ArgumentCount;
+        if (views.len != self.memory_count) return error.MemoryCount;
         if (budget > max_budget) return error.PrototypeLimit;
         const slots = try self.allocator.alloc(u64, self.scratchSlotCount());
         defer self.allocator.free(slots);
         @memset(slots, 0);
+        if (self.memory_count != 0) slots[self.memoryViewsSlot()] = @intFromPtr(views.ptr);
         for (args, self.argument_types, 0..) |arg, ty, i| slots[self.spill_slot_count + i] = ir.normalize(ty, arg);
         const entry: Entry = @ptrCast(@alignCast(self.code.entry() orelse return error.MissingCode));
         const result_slot = self.spill_slot_count + ir.max_arguments;
@@ -104,6 +121,7 @@ pub const Compiled = struct {
                     2 => .integer_overflow,
                     3 => .unreachable_code,
                     4 => .invalid_conversion,
+                    5 => .memory_out_of_bounds,
                     else => return error.InvalidNativeResult,
                 };
                 if (slots[result_slot + 1] > std.math.maxInt(u32)) return error.InvalidNativeResult;
@@ -152,6 +170,8 @@ fn emitGraph(a: std.mem.Allocator, owner: *code_alloc.CodeAllocator, graph: ir.G
         emission.stats.loads += fp_environment.enter_loads;
         emission.stats.stores += fp_environment.enter_stores;
     }
+    if (graph.memory_count != 0) emission.memory_views_slot = emission.transfer_base + ir.max_arguments + 2 +
+        @as(usize, if (emission.fp_state_slot != null) fp_environment.slot_count else 0);
     const labels = try a.alloc(Machine.Label, graph.blocks.len);
     defer a.free(labels);
     @memset(labels, .{});
@@ -177,6 +197,12 @@ fn emitGraph(a: std.mem.Allocator, owner: *code_alloc.CodeAllocator, graph: ir.G
                 } else try m.jumpCbnz(.x2, &success);
                 try emission.emitExit(node.exit.?);
                 try m.bind(&success);
+                continue;
+            } else if (ir.isMemoryOp(node.op)) {
+                try emission.read(false, node.lhs);
+                if (node.op == .store) try emission.read(true, node.rhs);
+                try emission.accessMemory(node, graph.types[if (node.op == .store) node.rhs else node.out.?]);
+                if (node.out) |out| try emission.write(out);
                 continue;
             } else if (node.op == .constant) {
                 if (plan.locations[node.out.?] == .immediate) continue;
@@ -235,6 +261,7 @@ fn emitGraph(a: std.mem.Allocator, owner: *code_alloc.CodeAllocator, graph: ir.G
         .argument_types = argument_types,
         .spill_slot_count = plan.spill_slot_count,
         .uses_fp_environment = emission.fp_state_slot != null,
+        .memory_count = graph.memory_count,
         .stats = emission.stats,
     };
 }
@@ -244,6 +271,7 @@ const Emission = struct {
     plan: *const allocation.Plan,
     transfer_base: usize,
     fp_state_slot: ?usize = null,
+    memory_views_slot: ?usize = null,
     stats: Stats = .{},
 
     fn read(self: *Emission, rhs: bool, value: ir.Value) !void {
@@ -349,6 +377,20 @@ const Emission = struct {
             try self.emitTrap(.{ .reason = .integer_overflow, .site = site });
             try self.m.bind(&done);
         }
+    }
+
+    fn accessMemory(self: *Emission, node: ir.Node, ty: ir.Type) !void {
+        var oob: Machine.Label = .{};
+        defer oob.deinit(self.m.gpa);
+        var done: Machine.Label = .{};
+        defer done.deinit(self.m.gpa);
+        try memory.emit(self.m, node.op, ty, node.memory.?, self.memory_views_slot.?, &oob);
+        self.stats.loads += 4 + @as(u32, @intFromBool(node.op == .load));
+        self.stats.stores += @intFromBool(node.op == .store);
+        try self.m.jump(&done);
+        try self.m.bind(&oob);
+        try self.emitTrap(.{ .reason = .memory_out_of_bounds, .site = node.trap_site.? });
+        try self.m.bind(&done);
     }
 
     fn finish(self: *Emission, status: u32) !void {

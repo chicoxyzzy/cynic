@@ -23,6 +23,14 @@ Wasm validation -> optimizing Wasm frontend ----+
 Bistromath and Spasm remain direct-emitting baseline tiers. Adding an IR to
 their normal paths would spend startup time without proving a benefit.
 
+Cleanup follows production migration, not prototype coverage. Keep Lantern and
+Sarcasm as interpreters and differential references, and keep both baseline
+compilers. Retire duplicated Ohaimark optimization/allocation/emission code
+only when its production replacement passes the same correctness, recovery,
+resource, and performance gates. JS specialization/GC/deoptimization and Wasm
+validation/instance semantics remain frontend-owned. Share a helper when both
+consumers use the same contract, not merely similar-looking instructions.
+
 ## Prior art
 
 - [WebKit B3](https://webkit.org/docs/b3/) separates C-like typed SSA from
@@ -88,6 +96,11 @@ their normal paths would spend startup time without proving a benefit.
   liveness-dense SSA tests across architectures; tests here keep allocated
   values live across fixed-register operations, rather than only checking
   standalone arithmetic results.
+- B3's memory effects and Cranelift's
+  [memory flags](https://docs.rs/cranelift-codegen/latest/cranelift_codegen/ir/struct.MemFlagsData.html)
+  distinguish aliasing, alignment, and trapping assumptions. Cynic's bounded
+  accesses assume neither disjoint regions nor aligned/non-trapping addresses.
+  The existing Spasm bounds checks provide the local instruction-level reference.
 
 ## First executable slice
 
@@ -99,7 +112,8 @@ JS values/realms nor Wasm types, bytecode, instances, or Cells.
 The subset has i32/i64 and f32/f64 constants, wrapping integer arithmetic,
 strict scalar FP arithmetic, comparisons, bitwise operations, explicit width
 conversions, ordered guards/traps, block parameters, jumps, conditional branches,
-and a single scalar result. The Wasm adapter accepts locals and void block/loop
+bounded scalar loads/stores, and a single scalar result. The Wasm adapter
+accepts locals and void block/loop
 constructs with `br`/`br_if`. Unsupported instructions or types are an explicit
 refusal, even in dead bytecode; there is no silent fallback that could make an
 execution test pass without running generated code.
@@ -477,8 +491,8 @@ The Wasm adapter now lowers the complete scalar integer numeric family for
 i32/i64: arithmetic, signed/unsigned division and remainder, bitwise operations,
 masked shifts/rotates, zero/leading/trailing/population counts, comparisons,
 integer width conversions, and sign-extension operations. Numeric integer/float
-conversions are described above. Memory operations and the `select` control
-instruction remain outside this adapter. It also accepts `unreachable`,
+conversions are described above and memory accesses below. The `select` control
+instruction remains outside this adapter. It also accepts `unreachable`,
 including in dead validated code.
 Unsupported operations such as calls still refuse even in dead bytecode.
 
@@ -488,7 +502,8 @@ needs no result value. `Compiled.runOutcome` returns `trapped: { reason, site }`
 separately from normal return and recoverable guard exit. The Wasm frontend uses
 the opcode byte offset within the validated function's instruction stream;
 the backend does not interpret it. `Compiled.run` translates the reason to
-`IntegerDivideByZero`, `IntegerOverflow`, or `Unreachable`. Malformed native
+`IntegerDivideByZero`, `IntegerOverflow`, `Unreachable`,
+`InvalidConversionToInteger`, or `OutOfBoundsMemoryAccess`. Malformed native
 status/metadata is rejected before it reaches a consumer.
 
 Following [Wasm numeric semantics](https://webassembly.github.io/spec/core/exec/numerics.html),
@@ -516,14 +531,72 @@ architectures, boundary shift counts, negative dividends, exact trap reasons
 and sites, all optimizer switches, live homes across fixed-register operations,
 allocation failure, guard ordering, and untaken traps.
 
+## Bounded memory and effects
+
+The backend has scalar little-endian loads/stores of one, two, four, or eight
+bytes. Integer loads sign- or zero-extend; narrow stores truncate; f32/f64
+accesses preserve raw bits without FP arithmetic. Addresses are i32/i64 byte
+indices into frontend-owned `MemoryView` descriptors, not raw JS heap pointers.
+The host must keep the descriptors and their backing stores alive and stable
+through each leaf invocation. Concurrent mutation/resizing is not supported.
+
+Every access checks address-plus-offset overflow and compares against
+`length - width`, trapping on subtraction underflow before using that bound.
+No access can touch bytes before its check succeeds, including an unaligned access or
+a store that straddles the end. Failure returns a structured
+`memory_out_of_bounds` trap at the original frontend site; it does not rely on
+a host page fault. Memory trap exits restore saved FP state just like other exits.
+
+`Effects` combines reads, writes, trapping, and exits. Loads are reads that
+may trap, and stores are writes that may trap. The optimizer retains unused
+loads and all stores, and neither folds nor commons them. Region numbers only
+select descriptors: different regions may alias. No memory motion, load
+elimination, no-alias promise, or atomic/fence semantics is inferred.
+
+The Wasm adapter lowers all 23 scalar load/store opcodes for memory32/memory64,
+including explicit multi-memory indices and memory imports. `lowerInstance`
+uses an already validated instance; `runInInstance` rebuilds descriptors from
+its current stores on every invocation. Host growth or replacement between
+invocations therefore updates both base and length without recompilation.
+Neither the base nor the length is embedded in generated code. Imported stores
+alias when the instance uses the existing `Imports.share_memory` contract; snapshot imports
+remain separate copies. Shared memories explicitly refuse compilation and
+invocation until their concurrency contract is implemented.
+
+These accesses follow [Wasm memory instruction semantics](https://webassembly.github.io/spec/core/exec/instructions.html#memory-instructions).
+They do not implement JS buffer coercion, detachment, witness records, or
+shared-memory ordering from ECMA-262
+[GetValueFromBuffer / SetValueInBuffer](https://tc39.es/ecma262/multipage/structured-data.html#sec-getvaluefrombuffer)
+(sections 25.1.3.16 and 25.1.3.18); those stay frontend responsibilities.
+No JS-visible API or SES policy changes.
+
+Direct tests cover width/type validation, overflowing offsets, empty/short
+views, sign extension, raw float bits, aliasing across optimizer switches and
+register/scratch allocation, guard/budget/trap ordering, and allocation failure.
+Wasm tests compare results and backing bytes with Sarcasm and Spasm, require
+Spasm entry, and cover real instance growth, imported aliasing, replacement
+stores, multi-memory, memory64, loop-carried addresses, partial writes before
+later traps, and source trap locations. This is still a developer-only path:
+calls, growth inside generated code, resource metering,
+and production dispatch are not implemented by this adapter.
+
+The memory increment passes the focused backend tests on native AArch64 and
+x86_64 under Rosetta (146 passed, one skipped on each), the full ReleaseSafe
+unit/CLI suite, and both architecture demos. The memory-free demo code sizes,
+scratch sizes, and emitted load/store counts are unchanged. The production
+test262 pass set is also unchanged at 48,653 passing and 1,324 failing fixtures;
+that is a non-regression check, not qualification of this experimental path.
+Native x86_64 hardware coverage remains a CI gate.
+
 ## Safety and non-goals
 
-- No native host calls, heap dereferences, Wasm memory operations, SIMD,
-  exceptions, imports, inlining, OSR, or production
+- No native host calls, JS heap-object dereferences, shared-memory accesses,
+  atomics, SIMD, exceptions, non-memory imports, inlining, OSR, or production
   tier-up in this slice.
 - Compile-time limits cap input at 64 KiB, decoder/validator workspace at
   8 MiB, function bodies at 16 KiB, blocks at 256, SSA values at 2,048,
-  IR nodes (including guards) at 4,096, and block arguments/captures at 64.
+  IR nodes (including guards) at 4,096, block arguments/captures at 64, and
+  memory views at 64.
   The JS adapter caps bytecode at 16 KiB and registers at 63. Runtime scratch
   storage is heap-allocated and bounded by those limits; the execution budget
   is at most 1,000,000 visits.
@@ -541,8 +614,9 @@ allocation failure, guard ordering, and untaken traps.
 
 ## Contracts before expansion
 
-Scalar traps now have explicit ordering. Before memory operations or code motion,
-add conservative explicit read/write effects, alias domains, and atomic/fence semantics. A guard,
+Scalar traps and bounded memory accesses now have explicit ordering. Before
+memory code motion, introduce and verify any stronger alias guarantees; before
+concurrent accesses, add atomic/fence semantics. A guard,
 budget poll, call, or trap must not disappear or move past an observable
 operation merely because its result is unused.
 
@@ -569,6 +643,8 @@ open; a passing demo or unchanged production test262 run does not close them.
   call boundaries remain part of the effects and integration gates below.
 - [ ] Model memory, calls, traps, safepoints, and ordered effects in the IR and
   verifier before optimizing them; preserve aliasing, atomics, and trap order.
+  Bounded scalar memory and conservative read/write/trap effects are implemented;
+  calls, safepoints, atomic/fence semantics, and production integration remain.
 - [ ] Support the accepted Wasm control/signature surface, memory and growth,
   tables/references, calls/imports, globals, SIMD, and exception behavior through
   a real instance-aware optimizing path, not just the standalone demo.
@@ -607,8 +683,9 @@ failures, but is not evidence that an unimplemented backend capability works.
    selection remains next. Add load elimination or loop motion only after
    effects are modeled and tested.
 5. **Wider Wasm coverage:** scalar floating point (including rounding and
-   conversions) and the complete scalar integer family now run natively, with
-   explicit ordered arithmetic/conversion traps. Continue with memory, calls,
+   conversions), the complete scalar integer family, and bounded scalar memory
+   now run natively, with explicit ordered arithmetic/conversion/memory traps.
+   The instance adapter refreshes memory views between calls. Continue with calls
    and runtime integration. Preserve bounds checks,
    memory-growth invalidation, resource metering, and executable ownership.
 6. **Rollout decision:** paired warm/cold execution measurements, compilation
@@ -616,7 +693,8 @@ failures, but is not evidence that an unimplemented backend capability works.
    telemetry, differential fuzzing, and spec-suite gates. No automatic
    default-on graduation or new JS tier follows from finishing the prototype.
 
-The next capability work is memory/call effects and production integration,
+The next capability work is calls/safepoints, the remaining Wasm surface,
+and production integration,
 including FP state at future callback boundaries. Operand-move
 reduction and immediate/compare-branch selection remain measured optimization
 work, not substitutes for coverage.
