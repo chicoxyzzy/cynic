@@ -444,6 +444,7 @@ fn populateInstanceFromImports(realm: *Realm, self: *JSObject, mstate: *ModuleSt
         .wake_flag = realm.executionWakeFlag(),
     };
     ip.invocation_allocator = realm.wasmInvocationAllocator();
+    ip.shared_backend_allocator = realm.wasmStoreAllocator();
 
     // Baseline-compile this instance's functions through Spasm when the
     // JIT is on (docs/jit.md §6) — the production wasm posture every
@@ -454,6 +455,7 @@ fn populateInstanceFromImports(realm: *Realm, self: *JSObject, mstate: *ModuleSt
     // `--no-jit` (jit_enabled = false) keeps the pure interpreter for both
     // the JS and wasm tiers.
     ip.spasm_enabled = realm.jit_enabled;
+    ip.shared_backend_enabled = realm.jit_enabled and realm.wasm_shared_backend_enabled;
 
     // Register the instance's externref tables / globals as GC roots, so a
     // JS value a wasm body stores into one survives past the call that put
@@ -2481,6 +2483,7 @@ const RealmInterruptBarrier = struct {
     enabled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     entered: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     released: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    timed_out: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     fn invoke(ctx: ?*anyopaque, args: []const u128, results: []u128) wasm.TrapError!void {
         _ = args;
@@ -2488,7 +2491,14 @@ const RealmInterruptBarrier = struct {
         const self: *RealmInterruptBarrier = @ptrCast(@alignCast(ctx orelse return));
         if (!self.enabled.load(.acquire)) return;
         self.entered.store(true, .release);
-        while (!self.released.load(.acquire)) std.atomic.spinLoopHint();
+        const start = std.Io.Clock.now(.awake, std.testing.io);
+        while (!self.released.load(.acquire)) {
+            if (start.durationTo(std.Io.Clock.now(.awake, std.testing.io)).toNanoseconds() > 10 * std.time.ns_per_s) {
+                self.timed_out.store(true, .release);
+                return error.Unreachable;
+            }
+            std.atomic.spinLoopHint();
+        }
     }
 };
 
@@ -3260,14 +3270,59 @@ test "WebAssembly.Instance retains store state once a start function executes" {
     }
 }
 
+test "backend tier: child Realm inherits opt-in but honors the master JIT switch" {
+    const testing = std.testing;
+    const lantern = @import("../lantern/interpreter.zig");
+    if (comptime !wasm.backend_prototype.native.supported) return error.SkipZigTest;
+    for ([_]bool{ false, true }) |jit_enabled| {
+        var parent = Realm.init(testing.allocator);
+        defer parent.deinit();
+        try testing.expect(!parent.wasm_shared_backend_enabled);
+        parent.allow_wasm_compile = true;
+        parent.jit_enabled = jit_enabled;
+        parent.wasm_shared_backend_enabled = true;
+        try parent.installBuiltins();
+        var child = Realm.initChild(&parent);
+        defer child.deinit();
+        try testing.expect(child.wasm_shared_backend_enabled);
+        try child.installBuiltins();
+        const evaluated = try lantern.evaluateScript(
+            testing.allocator,
+            &child,
+            "const nativePolicyInstance=new WebAssembly.Instance(new WebAssembly.Module(new Uint8Array([0,97,115,109,1,0,0,0,1,5,1,96,0,1,127,3,2,1,0,7,5,1,1,102,0,0,10,6,1,4,0,65,42,11])));nativePolicyInstance.exports.f;",
+        );
+        const value = switch (evaluated) {
+            .value => |value| value,
+            else => return error.TestUnexpectedResult,
+        };
+        const function = heap_mod.valueAsFunction(value) orelse return error.TestUnexpectedResult;
+        const record: *ExportRecord = @ptrCast(@alignCast(function.wasm_export.?));
+        try testing.expectEqual(jit_enabled, record.instance.shared_backend_enabled);
+        const result = try call.callJSFunction(child.allocator, &child, function, Value.undefined_, &.{});
+        switch (result) {
+            .value => |out| try testing.expectEqual(@as(i32, 42), out.asInt32()),
+            else => return error.TestUnexpectedResult,
+        }
+        try testing.expectEqual(@as(u64, @intFromBool(jit_enabled)), record.instance.shared_backend_stats.entries);
+        try testing.expectEqual(@as(u32, 0), record.instance.spasm_runs);
+    }
+}
+
 test "WebAssembly JS API: a fuel-metered loop remains in Spasm" {
+    try testFuelMeteredNativeLoop(false);
+}
+
+test "backend tier: JS API fuel termination uses the shared native loop" {
+    try testFuelMeteredNativeLoop(true);
+}
+
+fn testFuelMeteredNativeLoop(shared_backend: bool) !void {
     const testing = std.testing;
     const lantern = @import("../lantern/interpreter.zig");
     const spasm = @import("../wasm/spasm.zig");
     if (comptime !spasm.supported) return error.SkipZigTest;
 
-    // `(func (export "spin") (loop br 0))` -- the backedge must enter
-    // Spasm's execution poll and propagate Realm fuel termination.
+    // `(func (export "spin") (loop br 0))` must propagate Realm termination.
     const mod_bytes = [_]u8{
         0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
         0x01, 0x04, 0x01, 0x60, 0x00, 0x00, 0x03, 0x02,
@@ -3290,6 +3345,7 @@ test "WebAssembly JS API: a fuel-metered loop remains in Spasm" {
     defer realm.deinit();
     realm.allow_wasm_compile = true;
     realm.jit_enabled = true;
+    realm.wasm_shared_backend_enabled = shared_backend;
     try realm.installBuiltins();
 
     const fn_result = try lantern.evaluateScript(testing.allocator, &realm, src.items);
@@ -3299,26 +3355,35 @@ test "WebAssembly JS API: a fuel-metered loop remains in Spasm" {
     };
     const fn_obj = heap_mod.valueAsFunction(fn_val) orelse return error.TestUnexpectedResult;
     const rec: *ExportRecord = @ptrCast(@alignCast(fn_obj.wasm_export orelse return error.TestUnexpectedResult));
-    const runs_before = rec.instance.spasm_runs;
+    const runs_before = if (shared_backend) rec.instance.shared_backend_stats.entries else rec.instance.spasm_runs;
 
     realm.setFuel(4);
-    const outcome = try lantern.evaluateScript(testing.allocator, &realm, "meteredInstance.exports.spin()");
+    const outcome = try lantern.evaluateScript(testing.allocator, &realm, "try { meteredInstance.exports.spin() } catch(e) { globalThis.caughtNativeTermination=true; }");
     switch (outcome) {
         .thrown => {},
         else => return error.TestUnexpectedResult,
     }
     try testing.expectEqual(@as(?Realm.TerminationReason, .fuel_exhausted), realm.terminationReason());
-    try testing.expect(rec.instance.spasm_runs > runs_before);
+    try testing.expect((if (shared_backend) rec.instance.shared_backend_stats.entries else rec.instance.spasm_runs) > runs_before);
+    try testing.expect(realm.globals.get("caughtNativeTermination") == null);
 }
 
 test "WebAssembly JS API: Realm.requestInterrupt wakes Spasm after native entry" {
+    try testRealmNativeWake(false);
+}
+
+test "backend tier: Realm.requestInterrupt wakes shared code after native entry" {
+    try testRealmNativeWake(true);
+}
+
+fn testRealmNativeWake(shared_backend: bool) !void {
     const testing = std.testing;
     const lantern = @import("../lantern/interpreter.zig");
     const spasm = @import("../wasm/spasm.zig");
     if (comptime !spasm.supported) return error.SkipZigTest;
 
     // import host.barrier : () -> (); export run : () -> i32. The imported
-    // host function parks after Spasm's entry poll; the two-trip loop then
+    // host function parks after the native entry poll; the two-trip loop then
     // guarantees a taken native backedge.
     const mod_bytes = [_]u8{
         0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
@@ -3353,6 +3418,7 @@ test "WebAssembly JS API: Realm.requestInterrupt wakes Spasm after native entry"
     defer realm.deinit();
     realm.allow_wasm_compile = true;
     realm.jit_enabled = true;
+    realm.wasm_shared_backend_enabled = shared_backend;
     try realm.installBuiltins();
 
     const evaluated = try lantern.evaluateScript(testing.allocator, &realm, src.items);
@@ -3369,7 +3435,7 @@ test "WebAssembly JS API: Realm.requestInterrupt wakes Spasm after native entry"
     // Import resolution and populateInstance ran through the public JS API.
     // Replace its placeholder JS callback with a direct host barrier only for
     // deterministic cross-thread synchronization: no Lantern safe point can
-    // consume the request between barrier release and the Spasm backedge.
+    // consume the request between barrier release and the native backedge.
     var barrier: RealmInterruptBarrier = .{};
     const imported_funcs: []wasm.FuncRef = @constCast(record.instance.imported_funcs);
     imported_funcs[0] = .{ .host = .{
@@ -3380,20 +3446,25 @@ test "WebAssembly JS API: Realm.requestInterrupt wakes Spasm after native entry"
     } };
 
     // Warm the exact JS-created instance while the barrier is disabled, so
-    // the worker enters already-published Spasm code with an unarmed Realm.
+    // the worker enters already-published native code with an unarmed Realm.
     const warm = try call.callJSFunction(realm.allocator, &realm, function, Value.undefined_, &.{});
     switch (warm) {
         .value => {},
         else => return error.TestUnexpectedResult,
     }
-    try testing.expect(record.instance.spasm_runs >= 1);
-    const runs_before_worker = record.instance.spasm_runs;
+    try testing.expect((if (shared_backend) record.instance.shared_backend_stats.entries else record.instance.spasm_runs) >= 1);
+    const runs_before_worker = if (shared_backend) record.instance.shared_backend_stats.entries else record.instance.spasm_runs;
 
     barrier.enabled.store(true, .release);
     var worker: RealmInterruptWorker = .{ .realm = &realm, .function = function };
     const thread = try std.Thread.spawn(.{}, RealmInterruptWorker.run, .{&worker});
-    while (!barrier.entered.load(.acquire) and worker.status.load(.acquire) == 0) std.atomic.spinLoopHint();
+    const start = std.Io.Clock.now(.awake, testing.io);
+    while (!barrier.entered.load(.acquire) and worker.status.load(.acquire) == 0) {
+        if (start.durationTo(std.Io.Clock.now(.awake, testing.io)).toNanoseconds() > 10 * std.time.ns_per_s) break;
+        std.atomic.spinLoopHint();
+    }
     if (!barrier.entered.load(.acquire)) {
+        barrier.released.store(true, .release);
         thread.join();
         return error.TestUnexpectedResult;
     }
@@ -3401,8 +3472,9 @@ test "WebAssembly JS API: Realm.requestInterrupt wakes Spasm after native entry"
     barrier.released.store(true, .release);
     thread.join();
 
+    try testing.expect(!barrier.timed_out.load(.acquire));
     try testing.expectEqual(@as(u8, 1), worker.status.load(.acquire));
-    try testing.expect(record.instance.spasm_runs > runs_before_worker);
+    try testing.expect((if (shared_backend) record.instance.shared_backend_stats.entries else record.instance.spasm_runs) > runs_before_worker);
     try testing.expect(!realm.executionWakeFlag().load(.acquire));
     try testing.expectEqual(@as(?Realm.TerminationReason, null), realm.terminationReason());
 }

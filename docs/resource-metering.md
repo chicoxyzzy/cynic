@@ -63,6 +63,16 @@ is near zero (§6). Straight-line code between crossings is bounded by
 construction, so the budget bounds wall-clock work without a
 per-opcode tax.
 
+The opt-in [shared Wasm tier](shared-backend.md#opt-in-wasm-execution) uses
+the same controller at native entry and taken backward SSA edges. Its synthetic
+control-flow blocks can add crossings, so fuel counts are not identical across
+tiers. An unarmed controller acquire-probes its wake byte without calling the
+host; asynchronous requests are still observed. Poll callbacks must not allocate,
+collect, or re-enter language code. Persistent compiled metadata, invocation
+scratch, and executable mappings all charge the Realm heap ceiling and release
+their charges at their respective lifetimes. The developer-only bounded entry
+API is separate and is not a substitute for Realm policy.
+
 **Reuse after termination** is supported and tested: `clearTermination()`
 (plus a `setFuel` refill — a cleared latch with zero fuel re-latches
 on the next crossing) returns the realm to a runnable state. The

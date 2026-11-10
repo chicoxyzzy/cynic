@@ -334,6 +334,18 @@ jobs:
           zig build wasm-testsuite -Dwasm-corpus=vendor/wasm-testsuite -- \
             --quiet --spasm --require-spasm-entry --min-pass-pct=100
 
+      - name: Score the shared optimizing backend (gating)
+        timeout-minutes: 12
+        run: |
+          zig-out/bin/cynic-wasm-testsuite --gen-dir=.zig-cache/wasm-testsuite \
+            --quiet --shared-backend --require-shared-backend-entry --min-pass-pct=100
+
+      - name: Score shared backend with Spasm fallback (gating)
+        timeout-minutes: 12
+        run: |
+          zig-out/bin/cynic-wasm-testsuite --gen-dir=.zig-cache/wasm-testsuite \
+            --quiet --shared-backend --spasm --require-shared-backend-entry --require-spasm-entry --min-pass-pct=100
+
   wasm-testsuite-spasm:
     name: WASM spec testsuite (Spasm, AArch64)
     runs-on: macos-latest
@@ -371,6 +383,18 @@ jobs:
         run: |
           zig build wasm-testsuite -Dwasm-corpus=vendor/wasm-testsuite -- \
             --quiet --spasm --require-spasm-entry --min-pass-pct=100
+
+      - name: Score the shared optimizing backend (gating)
+        timeout-minutes: 15
+        run: |
+          zig-out/bin/cynic-wasm-testsuite --gen-dir=.zig-cache/wasm-testsuite \
+            --quiet --shared-backend --require-shared-backend-entry --min-pass-pct=100
+
+      - name: Score shared backend with Spasm fallback (gating)
+        timeout-minutes: 15
+        run: |
+          zig-out/bin/cynic-wasm-testsuite --gen-dir=.zig-cache/wasm-testsuite \
+            --quiet --shared-backend --spasm --require-shared-backend-entry --require-spasm-entry --min-pass-pct=100
 
   cross-build:
     name: Cross-build (${{ matrix.target }})

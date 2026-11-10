@@ -1,5 +1,5 @@
-//! Bounded Wasm frontend for the isolated shared-backend experiment.
-//! Production instantiation and tier selection never call this module.
+//! Scalar Wasm frontend for the shared backend. Bounded developer entry points
+//! coexist with host-controlled execution used by the opt-in instance tier.
 const std = @import("std");
 const decoder = @import("decoder.zig");
 const validator = @import("validator.zig");
@@ -62,8 +62,37 @@ pub fn runResultsInInstance(code: *const native.Compiled, instance: *Instance, a
     if (instance.memories.len != code.memory_count or instance.memories.len > ir.max_memories) return error.MemoryCount;
     var views: [ir.max_memories]native.MemoryView = undefined;
     try refreshMemories(instance, views[0..instance.memories.len]);
-    var context: CallContext = .{ .instance = instance, .allocator = code.allocator, .remaining = budget };
+    var remaining = budget;
+    var context: CallContext = .{ .instance = instance, .allocator = code.allocator, .remaining = &remaining };
     return code.runInto(args, views[0..instance.memories.len], budget, if (code.call_sites.len == 0) null else .{ .context = &context, .call = CallContext.invoke }, results);
+}
+
+pub fn runControlledInInstance(code: *const native.Compiled, allocator: std.mem.Allocator, instance: *Instance, args: []const u64, execution_control: ?interpreter.ExecutionControl, entries: ?*u64, results: []u64) !native.Completion {
+    if (instance.memories.len != code.memory_count or instance.memories.len > ir.max_memories) return error.MemoryCount;
+    var views: [ir.max_memories]native.MemoryView = undefined;
+    try refreshMemories(instance, views[0..instance.memories.len]);
+    var context: CallContext = .{ .instance = instance, .allocator = allocator, .execution_control = execution_control };
+    var host_control = execution_control;
+    const native_control: ?native.ExecutionControl = if (host_control) |*host| blk: {
+        const armed = host.isArmed();
+        if (!armed and host.wake_flag == null) break :blk null;
+        break :blk .{ .context = host, .poll_fn = pollExecution, .wake_flag = if (armed) null else host.wake_flag };
+    } else null;
+    return code.runControlledInto(allocator, args, views[0..instance.memories.len], .{
+        .runtime = if (code.call_sites.len == 0) null else .{ .context = &context, .call = CallContext.invoke },
+        .control = native_control,
+        .entry_counter = entries,
+    }, results);
+}
+
+fn pollExecution(raw: ?*anyopaque) !void {
+    const control: *const interpreter.ExecutionControl = @ptrCast(@alignCast(raw.?));
+    return switch (control.poll()) {
+        .proceed => {},
+        .step_budget_exhausted => error.StepBudgetExhausted,
+        .cooperative_interrupted => error.ExecutionInterrupted,
+        .terminated => error.ExecutionTerminated,
+    };
 }
 
 fn refreshMemories(instance: *const Instance, views: []native.MemoryView) !void {
@@ -77,7 +106,8 @@ fn refreshMemories(instance: *const Instance, views: []native.MemoryView) !void 
 const CallContext = struct {
     instance: *Instance,
     allocator: std.mem.Allocator,
-    remaining: u32,
+    remaining: ?*u32 = null,
+    execution_control: ?interpreter.ExecutionControl = null,
 
     fn invoke(raw: ?*anyopaque, request: native.CallRequest) !void {
         const self: *CallContext = @ptrCast(@alignCast(raw.?));
@@ -90,14 +120,14 @@ const CallContext = struct {
             if (try valueType(ty) != expected) return error.CallSignatureMismatch;
         }
         const target = self.instance.funcRefAt(request.target) orelse return error.FunctionIndex;
-        const inherited = self.instance.execution_control orelse switch (target) {
+        const inherited = self.execution_control orelse self.instance.execution_control orelse switch (target) {
             .wasm => |callee| callee.instance.execution_control,
             .host => null,
         };
-        var control: CalleeControl = .{ .remaining = &self.remaining, .inherited = inherited };
+        var control: CalleeControl = .{ .remaining = self.remaining, .inherited = inherited };
         var args: [ir.max_arguments]u128 = undefined;
         for (request.arguments, 0..) |value, i| args[i] = value;
-        const result = try interpreter.invokeWithControl(self.instance, self.allocator, request.target, args[0..request.arguments.len], .{ .ctx = &control, .poll_fn = CalleeControl.poll, .armed_fn = CalleeControl.armed });
+        const result = try interpreter.invokeWithControl(self.instance, self.allocator, request.target, args[0..request.arguments.len], if (self.remaining != null) .{ .ctx = &control, .poll_fn = CalleeControl.poll, .armed_fn = CalleeControl.armed } else inherited);
         defer self.allocator.free(result);
         try refreshMemories(self.instance, request.memories);
         if (result.len != signature.results.len) return error.CallSignatureMismatch;
@@ -106,7 +136,7 @@ const CallContext = struct {
 };
 
 const CalleeControl = struct {
-    remaining: *u32,
+    remaining: ?*u32,
     inherited: ?interpreter.ExecutionControl,
 
     fn armed(_: *anyopaque) bool {
@@ -118,8 +148,9 @@ const CalleeControl = struct {
             const result = control.poll();
             if (result != .proceed) return result;
         }
-        if (self.remaining.* == 0) return .step_budget_exhausted;
-        self.remaining.* -= 1;
+        const remaining = self.remaining orelse return .proceed;
+        if (remaining.* == 0) return .step_budget_exhausted;
+        remaining.* -= 1;
         return .proceed;
     }
 };

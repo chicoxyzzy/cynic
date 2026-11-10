@@ -1,16 +1,18 @@
 # Shared optimizing backend experiment
 
-Status: an **opt-in developer prototype**, not a production execution tier.
-Ohaimark, Bistromath, Spasm, and their selection policies remain unchanged.
-The experiment establishes a typed SSA boundary with JS and Wasm consumers;
-it does not claim B3-level optimization or a throughput improvement.
+Status: **an opt-in Wasm execution tier and a developer-only JS adapter**.
+Production Ohaimark still uses its existing backend. Bistromath and Spasm remain
+baseline tiers; default tier selection is unchanged. The shared layer establishes
+a typed SSA boundary with JS and Wasm consumers, not B3-level optimization or a
+demonstrated throughput improvement. Full production qualification remains open.
 
 ## Why this boundary
 
 Ohaimark already owns JS feedback, guards, SSA, representation selection,
 allocation, and deoptimization. Spasm directly emits from validated Wasm.
-Both reuse instruction encoders and executable-memory management. Their
-production paths do not use the language-independent IR introduced here.
+Both reuse instruction encoders and executable-memory management. Ohaimark's
+production path does not yet use the language-independent IR introduced here;
+Wasm can opt into it at the instance/Realm boundary described below.
 
 The intended eventual pipeline is:
 
@@ -127,9 +129,9 @@ bounded scalar loads/stores, and typed runtime calls. Functions and calls
 support zero to 64 scalar results through one result-list model.
 The Wasm adapter accepts locals, scalar-typed block/loop/if constructs (including
 multiple block parameters/results), `br`/`br_if`/`br_table`, and scalar `select`.
-Unsupported instructions or types are an explicit
-refusal, even in dead bytecode; there is no silent fallback that could make an
-execution test pass without running generated code.
+Unsupported instructions or types are an explicit refusal, even in dead
+bytecode. Standalone frontend tests do not fall back. The opt-in runtime tier
+records pre-entry refusals and falls back, so its tests also assert native entry.
 
 Run the isolated correctness demo with `zig build backend-prototype`. It
 compares the same sum-of-squares loop through both frontends: Wasm against
@@ -170,6 +172,79 @@ It runs before any executable code is installed.
 AArch64 and x86_64 SysV backends use the existing encoders and W^X allocator.
 Code is published only after graph/allocation verification and complete
 emission; an allocation or emission failure releases temporary state.
+
+## Opt-in Wasm execution
+
+Set `Instance.shared_backend_enabled = true`, or set
+`Realm.wasm_shared_backend_enabled = true` before creating JS-facing instances.
+The Realm option is inherited by child realms and remains subordinate to
+`jit_enabled`. There is no CLI default-on change. At external/runtime function
+dispatch the defining instance tries shared code first, then Spasm if enabled,
+then Sarcasm. Sarcasm's internal frame-push path is not rerouted, and there is
+no OSR or hotness-based tier-up yet.
+
+`wasm/backend_tier.zig` owns a pointer-stable, per-instance cache, including
+negative entries for unsupported functions. Compilation refusal can fall back
+only before execution. Errors after native entry propagate without replaying
+stores or callbacks. Scalar direct calls use the runtime dispatcher, so an
+eligible callee may also use shared code; this is not direct native linking.
+Memory descriptors refresh after callees, and foreign exception tags/payloads
+retain their defining-instance identity. Exception-handler bodies still refuse.
+
+Controlled compilation uses `native.Options.execution_policy = .controlled`
+and `Compiled.runControlledInto`. It polls an optional host controller at entry
+and taken backward SSA edges. Every CFG cycle has such an edge; polls run before
+entry parameter loads or after edge values are staged, so no allocated register
+is live across them. A null controller skips the helper; an unarmed controller's
+atomic wake byte is acquire-probed. Errors return normally through the native
+status ABI. Poll callbacks must not allocate, collect, re-enter language code,
+or retain arguments. They see the caller's FP state; generated code restores
+strict controls afterwards and the original host state on every exit.
+
+Realm fuel, sticky termination, and asynchronous wakeups use the existing Wasm
+controller. Fuel counts safe-point crossings, not Wasm instructions: synthetic
+branch-table blocks can introduce additional backward SSA edges. Controlled
+execution has no developer block-budget cap. The bounded standalone API remains
+available and rejects controlled code, and vice versa.
+
+This follows the entry/loop polling boundary in
+[Wasmtime's epoch interruption](https://docs.wasmtime.dev/api/wasmtime/struct.Config.html#method.epoch_interruption),
+while preserving Cynic's existing controller policy. The
+[Wasm invocation rules](https://webassembly.github.io/spec/core/exec/modules.html#invocation)
+govern calls/start behavior; [V8's baseline/optimizing split](https://v8.dev/blog/liftoff)
+supports retaining a fast baseline rather than replacing it with this tier.
+ECMA-262/test262 semantics and the SES surface are unchanged.
+
+Persistent cache metadata uses `Instance.shared_backend_allocator` (or the
+instance GPA); it never borrows the short-lived `invocation_allocator`.
+Realm-backed metadata and transient scratch both use the immediate-free Wasm
+quota allocator; executable mappings use the existing memory ledger. The cache owns
+its mapping allocator and releases compiled handles before it. Teardown is
+idempotent; cache-initialization refusal stays sticky until explicit release.
+Result/scratch allocation and stack checks precede native entry; the entry
+counter increments only immediately before generated code actually executes.
+The stack guard also runs before cache allocation or compilation. Cold compilation
+has a non-inlined boundary so optimizer workspace cannot inflate every cached
+recursive call frame. Tests cover both exhausted-stack rejection before compilation
+and 200 successful recursive calls on a 2 MiB ReleaseSafe worker stack.
+
+The Wasm suite accepts `--shared-backend --require-shared-backend-entry` and
+reports entries, compiled functions, and refusals. It tracks instances before
+start execution, including trapping starts, and releases their native caches.
+Experimental runs cannot overwrite the default results ledger. Per-manifest
+score equality plus a positive entry count proves integration/non-regression,
+not complete shared-backend opcode coverage: refusals remain visible and the
+completion checklist below remains open.
+
+Local verification on 2026-11-10: the 232-manifest Wasm corpus passes
+61,051/61,051 assertions with 1,370 skips in interpreter, shared-only, and
+shared-plus-Spasm modes on AArch64 and x86_64 under Rosetta. Every manifest's
+pass/fail/skip counts match; both native tiers are required to execute in the
+combined run. Shared-only mode compiles 3,254 functions and records 2,381
+refusals. The AArch64 unit/CLI suite passes 4,179 tests (303 skips); the focused
+x86_64 backend suite passes 212 (one hardware-dependent skip). The production
+test262 pass set remains byte-identical at 48,653 passes and 1,324 existing
+failures. These are integration gates, not default-on or performance approval.
 
 ## Liveness-aware allocation
 
@@ -309,7 +384,7 @@ all eight switch combinations, integer boundaries, commutative/ordered keys,
 block isolation, mixed register pressure, seeded native differential cases,
 input ownership, table growth, graph limits, and allocation failures. The JS
 frontend compares exact recovery frames and the Wasm frontend compares with
-Sarcasm. Neither frontend gains a new production execution path.
+Sarcasm. These optimization passes do not by themselves activate a runtime tier.
 
 For the fixed sum-of-squares demo (ReleaseSafe, macOS; x86_64 via Rosetta),
 each cell below is **optimized / rematerialization-off / CSE-off /
@@ -432,9 +507,11 @@ emits no x87 arithmetic. On AArch64, MRS/MSR save FPCR and FPSR; entry clears th
 f32/f64 rounding, flush, alternate/NaN-handling, exception-enable, and status
 bits while preserving unrelated controls. Exit restores FPSR before FPCR.
 State lives in two extra scratch words per invocation, not global storage.
-The graph is checked after optimization: integer-only graphs, raw float-bit
-transfers, and graphs whose only FP arithmetic was removed by DCE receive no
-extra entry/exit instructions or scratch slots.
+For bounded execution, the graph is checked after optimization: integer-only
+graphs, raw float-bit transfers, and graphs whose only FP arithmetic was removed
+by DCE receive no extra entry/exit instructions or scratch slots. Controlled
+execution always saves FP state so host polls cannot change the native environment
+or leak changed controls back to the embedder, including in integer-only code.
 
 The instruction/register model follows [Arm AAPCS64](https://github.com/ARM-software/abi-aa/blob/main/aapcs64/aapcs64.rst#simd-and-floating-point-registers)
 and [LLVM libc's MXCSR handling](https://github.com/llvm/llvm-project/blob/main/libc/src/__support/FPUtil/x86_64/fenv_mxcsr_utils.h).
@@ -595,9 +672,9 @@ register/scratch allocation, guard/budget/trap ordering, and allocation failure.
 Wasm tests compare results and backing bytes with Sarcasm and Spasm, require
 Spasm entry, and cover real instance growth, imported aliasing, replacement
 stores, multi-memory, memory64, loop-carried addresses, partial writes before
-later traps, and source trap locations. This is still a developer-only path:
-direct `memory.grow` lowering, production resource metering,
-and production dispatch are not implemented by this adapter. Growth in a callee
+later traps, and source trap locations. Direct `memory.grow` lowering is not
+implemented by this adapter. Resource
+metering and runtime dispatch are provided by the opt-in tier. Growth in a callee
 now refreshes descriptors through the runtime-call bridge described below.
 
 The memory increment passes the focused backend tests on native AArch64 and
@@ -667,20 +744,21 @@ production qualification.
 ## Safety and non-goals
 
 - No JS heap-object dereferences, shared-memory accesses,
-  atomics, SIMD, exception handlers, table/global/tag imports, inlining, OSR, or production
-  tier-up in this slice.
-- Compile-time limits cap input at 64 KiB, decoder/validator workspace at
-  8 MiB, function bodies at 16 KiB, blocks at 256, SSA values at 2,048,
+  atomics, SIMD, exception handlers, table/global/tag imports, inlining, OSR, or
+  automatic shared-backend tier-up in this slice.
+- Developer module decoding caps input at 64 KiB and decoder/validator workspace
+  at 8 MiB. Runtime lowering starts from an already validated instance.
+  Shared compilation caps function bodies at 16 KiB, blocks at 256, SSA values at 2,048,
   IR nodes (including guards) at 4,096, arguments/results/captures at 64, and
   memory views at 64.
   The JS adapter caps bytecode at 16 KiB and registers at 63. Runtime scratch
-  storage is heap-allocated and bounded by those limits; the execution budget
-  is at most 1,000,000 visits.
-- Generated code checks a mandatory finite budget at every block entry,
+  storage is heap-allocated and bounded by those limits; the developer execution
+  budget is at most 1,000,000 visits.
+- Bounded developer code checks a finite budget at every block entry,
   including loop backedges. Exhaustion returns normally. These block visits
   are a **prototype work limit**, not Realm fuel or Wasm instruction counts.
-  This does not implement asynchronous interruption and cannot be wired into
-  a production Realm until that contract is preserved.
+  Realm execution instead uses the separate controlled policy above, including
+  asynchronous interruption; the two entry APIs reject policy mismatches.
 - The developer driver reports refusal on an unsupported target; no native
   entry means no claimed native result.
 - No JS-visible state or globals are added. The experiment has no SES impact.
@@ -790,9 +868,9 @@ and result publication follows it.
 The Wasm frontend handles void and multi-result entry signatures, explicit
 returns and implicit-function-label branches, defined direct calls, and imported
 host/cross-instance calls. It validates the complete result signature and
-converts the existing runtime's returned Cells to scalar words. Callees still
-run through Sarcasm/Spasm; this is not native shared-backend callee linking or
-production tier activation.
+converts the existing runtime's returned Cells to scalar words. Callees use
+the runtime dispatcher and its selected tier; this is not direct native
+shared-backend callee linking.
 
 Tests cover mixed scalar types, order and duplicates, NaN payloads, 64-result
 calls, simultaneous live caller values, discarded outputs, aliasing, allocation

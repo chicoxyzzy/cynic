@@ -79,6 +79,10 @@ fn dispatch(invocation: *Invocation, slots: [*]u64, index: u32) callconv(.c) u32
 /// Inputs and live registers already reside in invocation scratch. Preserve
 /// the scratch pointer, block budget, and return address over the C ABI call.
 pub fn emit(m: *Machine, base: usize, index: u32) !void {
+    return emitHelper(m, base, index, @intFromPtr(&dispatch));
+}
+
+pub fn emitHelper(m: *Machine, base: usize, index: u32, helper: usize) !void {
     if (comptime is_x86) {
         // SysV entry RSP is 8 mod 16; 24 bytes align the outbound call.
         try m.subRegImm32(.rsp, 24);
@@ -87,7 +91,7 @@ pub fn emit(m: *Machine, base: usize, index: u32) !void {
         try m.movReg64(.rsi, .rdi);
         try m.load64Disp32(.rdi, .rdi, @intCast(base * 8));
         try m.movImm32(.rdx, index);
-        try m.movImm64(.r11, @intFromPtr(&dispatch));
+        try m.movImm64(.r11, helper);
         try m.callReg(.r11);
         try m.load64Disp32(.rdi, .rsp, 0);
         try m.load64Disp32(.rsi, .rsp, 8);
@@ -98,7 +102,7 @@ pub fn emit(m: *Machine, base: usize, index: u32) !void {
         try m.emit(arm.movReg(.x1, .x0));
         try m.emit(arm.ldrImm(.x0, .x0, @intCast(base * 8)));
         try m.movImm64(.x2, index);
-        try m.movImm64(.x16, @intFromPtr(&dispatch));
+        try m.movImm64(.x16, helper);
         try m.emit(arm.blr(.x16));
         try m.emit(arm.movReg(.x2, .x0));
         try m.emit(arm.ldpPostIdxSp(.x1, .fp, 16));

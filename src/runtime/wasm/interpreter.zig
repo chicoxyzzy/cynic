@@ -146,6 +146,7 @@ pub const ExecutionControl = struct {
 };
 
 pub const Error = TrapError || validator.ValidateError || error{
+    SharedBackendFailure,
     NoSuchExport,
     OutOfMemory,
     StepBudgetExhausted,
@@ -726,6 +727,16 @@ pub const Instance = struct {
     /// tries to compile the entry function and run native code,
     /// degrading to the interpreter for anything Spasm can't emit.
     spasm_enabled: bool = false,
+    /// Experimental optimizing tier. Compile refusal falls through to the
+    /// existing tiers; an error after native entry never restarts the body.
+    shared_backend_enabled: bool = false,
+    shared_backend_diagnostics: bool = builtin.is_test,
+    shared_backend_stats: @import("backend_tier.zig").Stats = .{},
+    /// Compilation workspace and retained cache metadata. Must outlive the
+    /// cache; distinct from per-call scratch. Defaults to the instance GPA.
+    shared_backend_allocator: ?std.mem.Allocator = null,
+    shared_backend_cache: ?*@import("backend_tier.zig").Cache = null,
+    shared_backend_cache_failed: bool = false,
     /// Per-instance diagnostics for Spasm's counters. Test builds enable this
     /// by default so counter-based coverage stays load-bearing; production
     /// instances leave it off, keeping telemetry out of hot calls.
@@ -769,8 +780,8 @@ pub const Instance = struct {
     /// Spasm-enabled invoke. Owns the executable memory the compiled
     /// `EntryFn`s point into, so it lives for the instance's lifetime.
     spasm_cache: ?SpasmCache = null,
-    /// Optional Realm live-byte ledger for the cache's OS-backed executable
-    /// reservation. Bare embedders leave it null.
+    /// Optional Realm ledger for both native tiers' executable reservations.
+    /// The historical field name is retained for existing embedders.
     spasm_memory_ledger: ?code_alloc.MemoryLedger = null,
     /// The concrete error a nested `call` from Spasm-compiled code raised
     /// (§5.4.1). The call helper stashes it here and returns
@@ -833,6 +844,9 @@ pub const Instance = struct {
     /// state. Realm teardown calls this before dropping the Wasm arena because
     /// an ArenaAllocator cannot run `CodeAllocator.deinit` on its own.
     pub fn releaseExecutableCode(self: *Instance) void {
+        if (self.shared_backend_cache) |cache| cache.deinit();
+        self.shared_backend_cache = null;
+        self.shared_backend_cache_failed = false;
         if (self.spasm_cache) |*c| c.deinit(self.gpa);
         self.spasm_cache = null;
     }
@@ -1848,11 +1862,14 @@ pub fn invokeWithControl(
         },
     };
 
-    // Spasm baseline-JIT fast path (docs/jit.md §6): if the tier is on,
-    // compile the entry function and run any body in Spasm's supported
-    // scalar/control/call/reference subset; anything it can't emit returns
-    // null and falls through to the interpreter below.
+    // Native tiers refuse only before entry. Try the opt-in shared backend,
+    // then the baseline, retaining Sarcasm for unsupported bodies/targets.
     const execution_control = inherited_execution_control orelse self.execution_control orelse target.instance.execution_control;
+    if (target.instance.shared_backend_enabled) {
+        const optimized = @import("backend_tier.zig").run(allocator, target.instance, target.func, args, execution_control, spasmCodeReserve(target.instance.funcs)) catch |err|
+            return forwardSpasmError(self, target.instance, err);
+        if (optimized) |out| return out;
+    }
     if (target.instance.spasm_enabled) {
         const native_result = spasmRun(allocator, target.instance, target.func, args, execution_control) catch |err|
             return forwardSpasmError(self, target.instance, err);
@@ -2124,6 +2141,8 @@ fn trySpasmDirectCall(
     buf_cells: u32,
     execution_control: ?ExecutionControl,
 ) SpasmDirectCall {
+    // The generic call boundary gives the optimizing tier first refusal.
+    if (instance.shared_backend_enabled) return .unavailable;
     if (!instance.spasm_enabled) return .unavailable;
     if (func.type_index >= instance.module.types.len) return .unavailable;
     const ftype = &instance.module.types[func.type_index];

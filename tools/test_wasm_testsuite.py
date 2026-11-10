@@ -218,6 +218,37 @@ class WasmHarnessContract(unittest.TestCase):
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
         self.assertIn('harness error', result.stderr)
 
+    def test_shared_backend_requires_real_native_entry(self):
+        options = ('--shared-backend', '--require-shared-backend-entry')
+        result = self.run_harness([module_command()], {'case.wasm': EMPTY}, options=options)
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn('no generated shared-backend entry executed', result.stderr)
+        result = self.run_harness([
+            module_command(),
+            {'type': 'assert_return', 'action': {'type': 'invoke', 'field': 'f', 'args': []},
+             'expected': [{'type': 'i32', 'value': '42'}]},
+        ], {'case.wasm': CONSTANT}, options=options)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assert_summary(result, 2, 2)
+        self.assertIn('1 native entries, 1 compiled functions, 0 refusals', result.stdout)
+
+    def test_shared_backend_counts_trapping_start_entries(self):
+        result = self.run_harness([module_command(kind='assert_uninstantiable')],
+                                  {'case.wasm': TRAPPING_START},
+                                  options=('--shared-backend', '--require-shared-backend-entry'))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assert_summary(result, 1, 1)
+        self.assertIn('1 native entries, 1 compiled functions, 0 refusals', result.stdout)
+
+    def test_shared_backend_flags_do_not_overwrite_production_scores(self):
+        for options, message in (
+                (('--require-shared-backend-entry',), 'requires --shared-backend'),
+                (('--shared-backend', '--write-results'), 'do not replace the default results ledger')):
+            with self.subTest(options=options):
+                result = self.run_harness([], options=options)
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertIn(message, result.stderr)
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()

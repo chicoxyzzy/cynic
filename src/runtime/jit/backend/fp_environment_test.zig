@@ -456,3 +456,52 @@ test "backend calls: language runtime helpers execute with strict FP controls" {
     try std.testing.expectEqual(@as(u64, 0x3ff0_0000_0000_0000), outcome.returned);
     try std.testing.expectEqualDeep(before, after);
 }
+
+test "backend control: polls see host FP state and restore it on both exits" {
+    if (!native.supported) return error.SkipZigTest;
+    const Host = struct {
+        probe: *const Probe,
+        seen: State = .{},
+        changed: State,
+        fail: bool,
+        fn poll(raw: ?*anyopaque) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            self.seen = self.probe.read();
+            self.probe.write(&self.changed);
+            if (self.fail) return error.PollFailed;
+        }
+    };
+    var owner = try code_alloc.CodeAllocator.init(a, 256 * 1024);
+    defer owner.deinit();
+    var probe = try Probe.init(&owner);
+    defer probe.deinit();
+    const original = probe.read();
+    defer probe.write(&original);
+    for ([_]bool{ false, true }) |floating| {
+        const ty: ir.Type = if (floating) .f64 else .i64;
+        const graph: ir.Graph = .{ .types = &.{ ty, ty, ty }, .argument_types = &.{ ty, ty }, .result_types = &.{ty}, .blocks = &.{.{ .params = &.{ 0, 1 }, .nodes = &.{.{ .op = if (floating) .fadd else .add, .out = 2, .lhs = 0, .rhs = 1 }}, .terminator = .{ .return_ = &.{2} } }} };
+        var code = try native.compileWithOptions(a, &owner, graph, .{ .execution_policy = .controlled });
+        defer code.deinit();
+        for ([_]bool{ false, true }) |fail| {
+            var host: Host = .{ .probe = &probe, .changed = probe.unusual(2), .fail = fail };
+            const requested = probe.unusual(1);
+            probe.write(&requested);
+            const before = probe.read();
+            var values = [_]u64{99};
+            const result = code.runControlledInto(a, if (floating) &.{ 0x3ff0_0000_0000_0000, 0x3ca0_0000_0000_0000 } else &.{ 20, 22 }, &.{}, .{ .control = .{ .context = &host, .poll_fn = Host.poll } }, &values);
+            const after = probe.read();
+            probe.write(&original);
+            try std.testing.expectEqualDeep(before, host.seen);
+            try std.testing.expectEqualDeep(before, after);
+            if (fail) {
+                try std.testing.expectError(error.PollFailed, result);
+                try std.testing.expectEqual(@as(u64, 99), values[0]);
+            } else {
+                var outcome = try result;
+                defer outcome.deinit();
+                try std.testing.expect(outcome == .returned);
+                try std.testing.expectEqual(@as(u64, if (floating) 0x3ff0_0000_0000_0000 else 42), values[0]);
+            }
+        }
+    }
+}
