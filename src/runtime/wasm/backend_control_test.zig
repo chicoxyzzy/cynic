@@ -252,7 +252,7 @@ test "backend control: oversized tables and unsupported dead signatures refuse" 
     try std.testing.expectError(error.PrototypeLimit, prototype.lowerModule(a, oversized, 0));
     for ([_][]const u8{
         &.{ 0x41, 5, 0x0f, 0x02, 0x7b, 0x00, 0x0b, 0x1a, 0x41, 8, 0x0b },
-        &.{ 0x41, 5, 0x0f, 0x1c, 1, 0x6f, 0x1a, 0x41, 8, 0x0b },
+        &.{ 0x41, 5, 0x0f, 0x1c, 1, 0x7b, 0x1a, 0x41, 8, 0x0b },
     }) |dead_body| {
         const bytes = try helper.moduleBytes(arena.allocator(), &.{}, 0x7f, &.{}, dead_body);
         try std.testing.expectError(error.UnsupportedType, prototype.lowerModule(a, bytes, 0));

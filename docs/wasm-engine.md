@@ -279,12 +279,19 @@ stack, so its representation dominates interpreter speed.
       boundary too. The set is cleared when the outermost wasm call exits,
       normally or exceptionally: by then the stack is empty and any escapee
       is rooted by its JS caller. Nested calls in another realm cannot clear the outer pins.
-    - **Persistent** — every `externref` table / global is registered and
+      JS boundary conversions pin incoming values and host results. Sarcasm
+      and Spasm also pin external-reference table/global loads before a later
+      store or host callback can remove their persistent root. The shared tier
+      instead captures typed reference pairs at language calls and pins returns
+      before JS result marshalling. Pinning never collects or re-enters JS;
+      allocation failure propagates without replaying the Wasm body.
+    - **Persistent** — every external-reference table / global is registered
+      (including constructed non-nullable types) and
       its live cells are walked each GC. Overwriting or dropping a slot
       reclaims the old value precisely.
   So an `externref` survives wherever wasm holds it (identity preserved)
   and is collected once wasm drops it — no retain-until-teardown leak,
-  and no hot-loop instrumentation. The originally-planned lazy 1-byte
+  without conservative pointer scanning. The originally-planned lazy 1-byte
   *value-stack* ref tags would let Metla scan only live ref slots; they
   remain a future micro-optimization, not a correctness requirement.
   See §6 and §11.

@@ -379,6 +379,8 @@ pub const ElemDropHelperFn = *const fn (instance: *anyopaque, elem_index: u32) c
 /// a GP register. Injected at startup (one-directional import).
 pub const TableGetHelperFn = *const fn (instance: *anyopaque, table_index: u32, index: u64, out_cell: [*]u128) callconv(.c) u32;
 
+pub const PinExternRefHelperFn = *const fn (instance: *anyopaque, cell: *const u128) callconv(.c) u32;
+
 /// The native helper a Spasm-compiled `table.set` (§4.4.x, opcode 0x26)
 /// branches to: `(instance, table_index, index, ref_slot) -> status`. It
 /// bounds-checks `index` against the table and, in range, writes the 128-bit
@@ -438,6 +440,7 @@ pub const Helpers = struct {
     table_set: ?TableSetHelperFn = null,
     table_grow: ?TableGrowHelperFn = null,
     table_fill: ?TableFillHelperFn = null,
+    pin_externref: ?PinExternRefHelperFn = null,
 };
 
 // ── wasm opcodes this increment understands ─────────────────────────
@@ -955,6 +958,7 @@ pub fn compileWithDiagnostics(
                 .table_init_helper = if (helpers.table_init) |helper| @intFromPtr(helper) else null,
                 .elem_drop_helper = if (helpers.elem_drop) |helper| @intFromPtr(helper) else null,
                 .table_get_helper = if (helpers.table_get) |helper| @intFromPtr(helper) else null,
+                .pin_externref_helper = if (helpers.pin_externref) |helper| @intFromPtr(helper) else null,
                 .table_set_helper = if (helpers.table_set) |helper| @intFromPtr(helper) else null,
                 .table_grow_helper = if (helpers.table_grow) |helper| @intFromPtr(helper) else null,
                 .table_fill_helper = if (helpers.table_fill) |helper| @intFromPtr(helper) else null,
@@ -1626,6 +1630,8 @@ fn compileAarch64(
                 if (global_type.isRef() or global_type == .v128) {
                     try m.emit(a64.ldrImm(.x17, .x4, @intCast(idx * 8)));
                     try emitCopyCell(&m, .x17, 0, .x0, refSlotOff(num_locals, sp));
+                    if (global_type.heapOf() == @import("types.zig").heap_abs_extern)
+                        try emitPinExternRef(&m, gpa, stack[0..sp], num_locals, sp, helpers.pin_externref orelse return null, &epilogue);
                     stack[sp] = runtimeLoc(global_type, sp);
                     sp += 1;
                     continue;
@@ -4858,6 +4864,37 @@ fn emitBranchValues(m: *masm_mod.Masm, stack: []const Loc, num_locals: usize, sp
         }
     }
     return true;
+}
+
+fn emitPinExternRef(m: *masm_mod.Masm, gpa: std.mem.Allocator, stack: []const Loc, num_locals: usize, depth: usize, helper: PinExternRefHelperFn, epilogue: *masm_mod.Masm.Label) CompileError!void {
+    const framebytes: u12 = @intCast((40 + stack.len * 8 + 15) & ~@as(usize, 15));
+    try m.emit(a64.subSpImm(framebytes));
+    try m.emit(a64.addRegSp(.x6, 0));
+    for ([_]a64.Reg{ .x0, .x1, .x2, .x3, .x4 }, 0..) |reg, i|
+        try m.emit(a64.strImm(reg, .x6, @intCast(i * 8)));
+    for (stack, 0..) |loc, i| if (loc == .reg)
+        try m.emit(a64.strImm(regForDepth(i), .x6, @intCast(40 + i * 8)));
+    const offset = refSlotOff(num_locals, depth);
+    if (offset <= 4095) {
+        try m.emit(a64.addImm(.x1, .x0, @intCast(offset), false));
+    } else {
+        try m.movImm64(.x16, offset);
+        try m.emit(a64.addReg(.x1, .x0, .x16));
+    }
+    try m.emit(a64.movReg(.x0, .x19));
+    try m.callAbs(.x16, @intFromPtr(helper));
+    var ok: masm_mod.Masm.Label = .{};
+    defer ok.deinit(gpa);
+    try m.jumpCbz(.x0, &ok);
+    try m.emit(a64.addSpImm(framebytes));
+    try m.jump(epilogue);
+    try m.bind(&ok);
+    try m.emit(a64.addRegSp(.x6, 0));
+    for ([_]a64.Reg{ .x0, .x1, .x2, .x3, .x4 }, 0..) |reg, i|
+        try m.emit(a64.ldrImm(reg, .x6, @intCast(i * 8)));
+    for (stack, 0..) |loc, i| if (loc == .reg)
+        try m.emit(a64.ldrImm(regForDepth(i), .x6, @intCast(40 + i * 8)));
+    try m.emit(a64.addSpImm(framebytes));
 }
 
 fn emitCallArguments(m: *masm_mod.Masm, stack: []const Loc, num_locals: usize, below: usize, params: []const ValType) CompileError!void {

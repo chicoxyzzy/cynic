@@ -43,8 +43,8 @@ test "backend tier: unsupported functions fall back once without disguising nati
         .types = &.{.{ .params = &.{}, .results = &.{.i32} }},
         .funcs = &.{0},
         .mems = &.{.{ .limits = .{ .min = 1 } }},
-        // ref.null keeps this body unsupported by the scalar frontend.
-        .code = &.{.{ .bytes = &.{ 0, 0xd0, 0x6f, 0x1a, 0x41, 1, 0x0b } }},
+        // SIMD keeps this body unsupported by the scalar frontend.
+        .code = &.{.{ .bytes = &.{ 0, 0xfd, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x1a, 0x41, 1, 0x0b } }},
     };
     var instance: wasm.Instance = undefined;
     try wasm.instantiate(&instance, arena.allocator(), a, &module, .{});
@@ -275,9 +275,9 @@ test "backend tier: a fallback callee can grow memory before the native caller l
     const module: wasm.Module = .{
         .types = &.{ .{ .params = &.{ .i32, .i32 }, .results = &.{.i32} }, .{ .params = &.{.i32}, .results = &.{.i32} } },
         .funcs = &.{ 0, 1 },
-        // The callee grows, then drops a ref.null to keep
+        // The callee grows, then drops a SIMD value to keep
         // this specifically a fallback-callee descriptor-refresh test.
-        .code = &.{ .{ .bytes = &.{ 0, 0x20, 0, 0x10, 1, 0x1a, 0x20, 1, 0x28, 0, 0, 0x0b } }, .{ .bytes = &.{ 0, 0x20, 0, 0x40, 0, 0xd0, 0x6f, 0x1a, 0x0b } } },
+        .code = &.{ .{ .bytes = &.{ 0, 0x20, 0, 0x10, 1, 0x1a, 0x20, 1, 0x28, 0, 0, 0x0b } }, .{ .bytes = &.{ 0, 0x20, 0, 0x40, 0, 0xfd, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x1a, 0x0b } } },
         .mems = &.{.{ .limits = .{ .min = 1, .max = 2 } }},
     };
     var instance: wasm.Instance = undefined;

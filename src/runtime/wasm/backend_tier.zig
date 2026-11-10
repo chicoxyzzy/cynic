@@ -92,11 +92,11 @@ pub fn run(allocator: std.mem.Allocator, instance: *interpreter.Instance, func: 
     const code = instance.shared_backend_cache.?.codeFor(instance, local) orelse return null;
     var arguments: [frontend.ir.max_arguments]u64 = undefined;
     var results: [frontend.ir.max_arguments]u64 = undefined;
-    for (args, 0..) |value, i| arguments[i] = @truncate(value);
+    const words = frontend.abi.pack(signature.params, args, &arguments) catch return error.SharedBackendFailure;
     // Allocate the public result before entry, so OOM cannot replay side effects.
     const out = try allocator.alloc(u128, signature.results.len);
     errdefer allocator.free(out);
-    var result = frontend.runControlledInInstance(code, instance.invocation_allocator orelse allocator, instance, arguments[0..args.len], execution_control, if (instance.shared_backend_diagnostics) &instance.shared_backend_stats.entries else null, results[0..signature.results.len]) catch |err| {
+    var result = frontend.runControlledInInstance(code, instance.invocation_allocator orelse allocator, instance, words, execution_control, if (instance.shared_backend_diagnostics) &instance.shared_backend_stats.entries else null, results[0..code.code.result_types.len]) catch |err| {
         inline for (@typeInfo(interpreter.Error).error_set.error_names.?) |name| {
             if (err == @field(interpreter.Error, name)) return @field(interpreter.Error, name);
         }
@@ -104,9 +104,7 @@ pub fn run(allocator: std.mem.Allocator, instance: *interpreter.Instance, func: 
     };
     defer result.deinit();
     switch (result) {
-        .returned => for (out, results[0..out.len]) |*value, bits| {
-            value.* = bits;
-        },
+        .returned => frontend.abi.unpack(signature.results, results[0..code.code.result_types.len], out) catch return error.SharedBackendFailure,
         .trapped => |trap| return trap.reason.toError(),
         .exited => return error.SharedBackendFailure,
     }

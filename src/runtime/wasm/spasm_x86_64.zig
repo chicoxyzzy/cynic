@@ -89,6 +89,7 @@ pub const Config = struct {
     table_init_helper: ?usize,
     elem_drop_helper: ?usize,
     table_get_helper: ?usize,
+    pin_externref_helper: ?usize,
     table_set_helper: ?usize,
     table_grow_helper: ?usize,
     table_fill_helper: ?usize,
@@ -900,6 +901,19 @@ pub fn compile(
                 if (isWideValue(global_type)) {
                     try m.load64Disp32(.rax, .r10, 8);
                     try m.store64Disp32(.r12, scratchOffset(num_locals, sp) + 8, .rax);
+                }
+                if (global_type.heapOf() == @import("types.zig").heap_abs_extern) {
+                    const helper = config.pin_externref_helper orelse return null;
+                    try m.load64Disp32(.rdi, .rsp, 0);
+                    try m.leaDisp32(.rsi, .r12, scratchOffset(num_locals, sp));
+                    try m.movImm64(.r11, helper);
+                    try m.callReg(.r11);
+                    try m.cmpReg32Imm32(.rax, 0);
+                    var pinned: x64.Masm.Label = .{};
+                    defer pinned.deinit(gpa);
+                    try m.jumpCond(.equal, &pinned);
+                    try m.jump(&epilogue);
+                    try m.bind(&pinned);
                 }
                 stack[sp] = runtimeLoc(global_type);
                 sp += 1;
