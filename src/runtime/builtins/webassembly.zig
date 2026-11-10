@@ -3405,6 +3405,63 @@ test "backend references: removed table values remain rooted across collecting J
     for (0..3) |tier| try testRemovedStoredReference(tier, false);
 }
 
+test "backend tail calls: references survive collecting host reentry and result marshalling" {
+    const testing = std.testing;
+    const lantern = @import("../lantern/interpreter.zig");
+    if (comptime !wasm.backend_prototype.native.supported) return error.SkipZigTest;
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.allow_wasm_compile = true;
+    realm.jit_enabled = true;
+    realm.wasm_shared_backend_enabled = true;
+    try realm.installBuiltins();
+    try realm.installTestGlobals();
+    const setup = try lantern.evaluateScript(testing.allocator, &realm,
+        \\let tailObject = {answer: 42};
+        \\const tailWeak = new WeakRef(tailObject);
+        \\const tailTable = new WebAssembly.Table({element: "externref", initial: 1});
+        \\tailTable.set(0, tailObject); tailObject = null;
+        \\const tailInstance = new WebAssembly.Instance(new WebAssembly.Module(new Uint8Array([
+        \\  0,97,115,109,1,0,0,0,1,13,2,96,2,126,111,2,126,111,96,0,2,126,111,
+        \\  2,20,2,1,104,2,103,99,0,0,1,104,5,116,97,98,108,101,1,111,0,1,
+        \\  3,2,1,1,7,8,1,4,116,97,107,101,0,1,
+        \\  10,18,1,16,0,66,9,65,0,37,0,65,0,208,111,38,0,18,0,11
+        \\])), {h: {table: tailTable, gc(n, value) {
+        \\  __clearKeptObjects(); __collectGarbage();
+        \\  if (tailWeak.deref() !== value || value.answer !== 42) throw new Error("lost tail argument");
+        \\  return [n, value];
+        \\}}});
+        \\tailInstance.exports.take;
+    );
+    const function = switch (setup) {
+        .value => |v| heap_mod.valueAsFunction(v) orelse return error.TestUnexpectedResult,
+        else => return error.TestUnexpectedResult,
+    };
+    const record: *ExportRecord = @ptrCast(@alignCast(function.wasm_export orelse return error.TestUnexpectedResult));
+    realm.heap.setGcThreshold(1);
+    const result = try lantern.evaluateScript(testing.allocator, &realm,
+        \\let tailResult = tailInstance.exports.take();
+        \\if (tailResult[0] !== 9n || tailResult[1].answer !== 42) throw new Error("wrong tail result");
+        \\if (tailTable.get(0) !== null) throw new Error("table not cleared");
+        \\tailResult = null; 42;
+    );
+    switch (result) {
+        .value => |v| try testing.expectEqual(@as(i32, 42), v.asInt32()),
+        else => return error.TestUnexpectedResult,
+    }
+    try testing.expectEqual(@as(u64, 1), record.instance.shared_backend_stats.entries);
+    try testing.expectEqual(@as(u32, 0), record.instance.spasm_runs);
+    try testing.expect(record.instance.native_tail_call == null);
+    try testing.expectEqual(@as(usize, 0), realm.wasm_extern_roots.count());
+    const released = try lantern.evaluateScript(testing.allocator, &realm,
+        \\__clearKeptObjects(); __collectGarbage(); tailWeak.deref() === undefined;
+    );
+    switch (released) {
+        .value => |v| try testing.expect(v.isBool() and v.asBool()),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
 test "backend references: removed global values remain rooted across collecting JS reentry" {
     for (0..3) |tier| try testRemovedStoredReference(tier, true);
 }

@@ -74,7 +74,9 @@ pub fn refuse(instance: *interpreter.Instance, err: anyerror) void {
     instance.shared_backend_stats.last_refusal = err;
 }
 
-pub fn run(allocator: std.mem.Allocator, instance: *interpreter.Instance, func: *const @import("code.zig").CompiledFunc, args: []const u128, execution_control: ?interpreter.ExecutionControl, reserve: usize) interpreter.Error!?[]u128 {
+pub const Outcome = union(enum) { returned: []u128, tail_call };
+
+pub fn run(allocator: std.mem.Allocator, instance: *interpreter.Instance, func: *const @import("code.zig").CompiledFunc, args: []const u128, execution_control: ?interpreter.ExecutionControl, reserve: usize) interpreter.Error!?Outcome {
     if (comptime !native.supported) return null;
     if (stack_guard.nearLimit()) return error.CallStackExhausted;
     if (instance.shared_backend_cache_failed) return null;
@@ -106,7 +108,16 @@ pub fn run(allocator: std.mem.Allocator, instance: *interpreter.Instance, func: 
     switch (result) {
         .returned => frontend.abi.unpack(signature.results, results[0..code.code.result_types.len], out) catch return error.SharedBackendFailure,
         .trapped => |trap| return trap.reason.toError(),
-        .exited => return error.SharedBackendFailure,
+        .exited => |exit| {
+            frontend.stageTailCall(code, instance, exit.id, exit.values) catch |err| {
+                inline for (@typeInfo(interpreter.Error).error_set.error_names.?) |name| {
+                    if (err == @field(interpreter.Error, name)) return @field(interpreter.Error, name);
+                }
+                return error.SharedBackendFailure;
+            };
+            allocator.free(out);
+            return .tail_call;
+        },
     }
-    return out;
+    return .{ .returned = out };
 }
