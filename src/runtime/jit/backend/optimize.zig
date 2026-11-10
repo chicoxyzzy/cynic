@@ -48,7 +48,7 @@ pub fn run(a: std.mem.Allocator, graph: ir.Graph, options: Options) !Result {
             else
                 original;
             if (options.constant_folding) if (node.out) |out| {
-                if (node.op == .constant) {
+                if (node.op == .constant and graph.types[out] != .v128) {
                     constants[out] = node.immediate;
                 } else if (fold(node, graph.types, &constants)) |value| {
                     constants[out] = value;
@@ -149,11 +149,13 @@ const Expression = struct {
     lhs: ir.Value = 0,
     rhs: ir.Value = 0,
     immediate: u64 = 0,
+    immediate_hi: u64 = 0,
+    vector_lane: ?ir.VectorLane = null,
 };
 
 fn expression(node: ir.Node, types: []const ir.Type) ?Expression {
     if (!isPure(node.op)) return null;
-    var key: Expression = .{ .op = node.op, .ty = types[node.out.?] };
+    var key: Expression = .{ .op = node.op, .ty = types[node.out.?], .immediate_hi = node.immediate_hi, .vector_lane = node.vector_lane };
     switch (ir.inputCount(node.op)) {
         0 => key.immediate = node.immediate,
         1 => key.lhs = node.lhs,
@@ -179,7 +181,7 @@ fn isPure(op: ir.Op) bool {
 fn fold(node: ir.Node, types: []const ir.Type, constants: []const ?u64) ?u64 {
     // Leave FP evaluation to the target. No host folding, fast math, or
     // reassociation; literal keys preserve signed zero and NaN payload bits.
-    if (!isPure(node.op) or node.op == .constant or ir.isFloatOp(node.op)) return null;
+    if (!isPure(node.op) or node.op == .constant or ir.isFloatOp(node.op) or types[node.out.?] == .v128) return null;
     const lhs = constants[node.lhs] orelse return null;
     if (node.op == .reinterpret) return lhs;
     if (ir.conversionTypes(node.op) != null) return switch (node.op) {

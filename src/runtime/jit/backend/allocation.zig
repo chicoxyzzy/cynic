@@ -1,4 +1,4 @@
-//! Block-local allocation for the shared integer SSA backend.
+//! Block-local allocation with separate scalar and vector register banks.
 const std = @import("std");
 const ir = @import("ir.zig");
 
@@ -9,7 +9,7 @@ pub const Options = struct {
     register_count: u8 = max_registers,
     rematerialize_constants: bool = true,
 };
-pub const Location = union(enum) { none, register: u8, spill: u32, immediate: u64 };
+pub const Location = union(enum) { none, register: u8, vector_register: u8, spill: u32, immediate: u64 };
 pub const LiveRange = struct { block: u32, start: u32, end: u32, uses: u32 = 0 };
 
 pub const Plan = struct {
@@ -36,28 +36,35 @@ pub const Plan = struct {
             .spill_slot_count = 0,
         };
         if (options.mode == .scratch) {
-            for (locations, 0..) |*location, i| location.* = .{ .spill = @intCast(i) };
-            plan.spill_slot_count = @intCast(locations.len);
-        } else for (graph.blocks) |block| {
-            var owners: [max_registers]?ir.Value = @splat(null);
-            for (block.params) |value| plan.assignRegister(value, &owners);
-            for (block.nodes) |node| {
-                var outputs = node.outputs();
-                while (outputs.next()) |value| {
-                    if (options.rematerialize_constants and node.op == .constant and
-                        plan.ranges[value].uses != 0 and isCheapConstant(node.immediate))
-                    {
-                        plan.locations[value] = .{ .immediate = node.immediate };
-                    } else plan.assignRegister(value, &owners);
-                }
+            for (locations, graph.types) |*location, ty| {
+                location.* = .{ .spill = plan.spill_slot_count };
+                plan.spill_slot_count += @intCast(ty.words());
             }
-            // Assign whole-lifetime spills only after register selection, so
-            // evicted intervals get a definition-time home, not a late copy.
-            var spill_ends: [ir.max_values]?u32 = @splat(null);
-            for (block.params) |value| plan.assignSpill(value, &spill_ends);
-            for (block.nodes) |node| {
-                var outputs = node.outputs();
-                while (outputs.next()) |value| plan.assignSpill(value, &spill_ends);
+        } else {
+            const spill_ends = try a.alloc(?u32, ir.wordCount(graph.types));
+            defer a.free(spill_ends);
+            for (graph.blocks) |block| {
+                var owners: [max_registers]?ir.Value = @splat(null);
+                var vectors: [max_registers]?ir.Value = @splat(null);
+                for (block.params) |value| plan.assignRegister(value, graph.types[value] == .v128, if (graph.types[value] == .v128) &vectors else &owners);
+                for (block.nodes) |node| {
+                    var outputs = node.outputs();
+                    while (outputs.next()) |value| {
+                        if (options.rematerialize_constants and node.op == .constant and graph.types[value] != .v128 and
+                            plan.ranges[value].uses != 0 and isCheapConstant(node.immediate))
+                        {
+                            plan.locations[value] = .{ .immediate = node.immediate };
+                        } else plan.assignRegister(value, graph.types[value] == .v128, if (graph.types[value] == .v128) &vectors else &owners);
+                    }
+                }
+                // Assign whole-lifetime spills only after register selection, so
+                // evicted intervals get a definition-time home, not a late copy.
+                @memset(spill_ends, null);
+                for (block.params) |value| plan.assignSpill(value, graph.types[value].words(), spill_ends);
+                for (block.nodes) |node| {
+                    var outputs = node.outputs();
+                    while (outputs.next()) |value| plan.assignSpill(value, graph.types[value].words(), spill_ends);
+                }
             }
         }
         try plan.verify(graph);
@@ -73,7 +80,7 @@ pub const Plan = struct {
     pub fn verify(self: *const Plan, graph: ir.Graph) !void {
         try graph.verify();
         if (self.locations.len != graph.types.len or self.ranges.len != graph.types.len or
-            self.register_count > max_registers or self.spill_slot_count > graph.types.len)
+            self.register_count > max_registers or self.spill_slot_count > ir.wordCount(graph.types))
             return error.InvalidAllocation;
         const expected = try self.allocator.alloc(LiveRange, graph.types.len);
         defer self.allocator.free(expected);
@@ -84,10 +91,13 @@ pub const Plan = struct {
                 .none => if (range.uses != 0) {
                     return error.InvalidAllocation;
                 },
-                .register => |register| if (register >= self.register_count) {
+                .register => |register| if (register >= self.register_count or graph.types[i] == .v128) {
                     return error.InvalidAllocation;
                 },
-                .spill => |slot| if (slot >= self.spill_slot_count) {
+                .vector_register => |register| if (register >= self.register_count or graph.types[i] != .v128) {
+                    return error.InvalidAllocation;
+                },
+                .spill => |slot| if (slot >= self.spill_slot_count or graph.types[i].words() > self.spill_slot_count - slot) {
                     return error.InvalidAllocation;
                 },
                 .immediate => |bits| {
@@ -95,27 +105,31 @@ pub const Plan = struct {
                     // never trust an allocator-supplied value or a block input.
                     if (actual.start < 2) return error.InvalidAllocation;
                     const node = graph.blocks[actual.block].nodes[(actual.start - 2) / 2];
-                    if (node.op != .constant or node.immediate != bits) return error.InvalidAllocation;
+                    if (node.op != .constant or node.immediate != bits or graph.types[i] == .v128) return error.InvalidAllocation;
                 },
             }
             if (location == .none or location == .immediate) continue;
-            for (self.locations[0..i], self.ranges[0..i]) |other, other_range| {
+            for (self.locations[0..i], self.ranges[0..i], graph.types[0..i]) |other, other_range, other_type| {
                 // Include dead definitions with a home: their writes must not
                 // clobber another value, even though they have no later use.
-                if (std.meta.eql(location, other) and range.block == other_range.block and
+                const overlaps = if (location == .spill and other == .spill)
+                    location.spill < other.spill + other_type.words() and other.spill < location.spill + graph.types[i].words()
+                else
+                    std.meta.eql(location, other);
+                if (overlaps and range.block == other_range.block and
                     range.start <= other_range.end and other_range.start <= range.end)
                     return error.InvalidAllocation;
             }
         }
     }
 
-    fn assignRegister(self: *Plan, value: ir.Value, owners: *[max_registers]?ir.Value) void {
+    fn assignRegister(self: *Plan, value: ir.Value, vector: bool, owners: *[max_registers]?ir.Value) void {
         const range = self.ranges[value];
         if (range.uses == 0 or self.register_count == 0) return;
         for (owners[0..self.register_count], 0..) |*owner, register| {
             if (owner.* == null or self.ranges[owner.*.?].end < range.start) {
                 owner.* = value;
-                self.locations[value] = .{ .register = @intCast(register) };
+                self.locations[value] = if (vector) .{ .vector_register = @intCast(register) } else .{ .register = @intCast(register) };
                 return;
             }
         }
@@ -128,17 +142,21 @@ pub const Plan = struct {
         if (self.ranges[victim].end <= range.end) return;
         self.locations[victim] = .none;
         owners[victim_register] = value;
-        self.locations[value] = .{ .register = @intCast(victim_register) };
+        self.locations[value] = if (vector) .{ .vector_register = @intCast(victim_register) } else .{ .register = @intCast(victim_register) };
     }
 
-    fn assignSpill(self: *Plan, value: ir.Value, ends: *[ir.max_values]?u32) void {
+    fn assignSpill(self: *Plan, value: ir.Value, words: usize, ends: []?u32) void {
         const range = self.ranges[value];
         if (range.uses == 0 or self.locations[value] != .none) return;
-        for (ends, 0..) |*end, slot| {
-            if (end.* == null or end.*.? < range.start) {
-                end.* = range.end;
+        for (0..ends.len - words + 1) |slot| {
+            var free = true;
+            for (ends[slot..][0..words]) |end| if (end != null and end.? >= range.start) {
+                free = false;
+            };
+            if (free) {
+                @memset(ends[slot..][0..words], range.end);
                 self.locations[value] = .{ .spill = @intCast(slot) };
-                self.spill_slot_count = @max(self.spill_slot_count, @as(u32, @intCast(slot + 1)));
+                self.spill_slot_count = @max(self.spill_slot_count, @as(u32, @intCast(slot + words)));
                 return;
             }
         }

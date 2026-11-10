@@ -106,7 +106,13 @@ fn observeWithMemory(probe: *const Probe, code: *const native.Compiled, requeste
     defer a.free(slots);
     @memset(slots, 0);
     if (code.memory_count != 0) slots[code.scratchSlotCount() - 1] = @intFromPtr(views.ptr);
-    for (args, code.argument_types, 0..) |arg, ty, i| slots[code.spill_slot_count + i] = ir.normalize(ty, arg);
+    try std.testing.expectEqual(ir.wordCount(code.argument_types), args.len);
+    var offset: usize = 0;
+    for (code.argument_types) |ty| {
+        slots[code.spill_slot_count + offset] = ir.normalize(ty, args[offset]);
+        if (ty == .v128) slots[code.spill_slot_count + offset + 1] = args[offset + 1];
+        offset += ty.words();
+    }
     const entry: Entry = @ptrCast(@alignCast(code.code.entry().?));
     const original = probe.read();
     defer probe.write(&original);
@@ -117,7 +123,31 @@ fn observeWithMemory(probe: *const Probe, code: *const native.Compiled, requeste
     // Restore before the allocator, assertions, or test diagnostics can run.
     probe.write(&original);
     const base = code.spill_slot_count + @as(usize, if (status == 0) 0 else ir.max_arguments);
-    return .{ .before = before, .after = after, .status = status, .result = if (status == 0) .{ slots[base], 0 } else slots[base..][0..2].*, .captures = slots[code.spill_slot_count..][0..ir.max_arguments].* };
+    return .{ .before = before, .after = after, .status = status, .result = if (status == 0 and code.result_types[0] != .v128) .{ slots[base], 0 } else slots[base..][0..2].*, .captures = slots[code.spill_slot_count..][0..ir.max_arguments].* };
+}
+
+test "backend vectors: direct native entry protects vector rounding subnormals and FP state" {
+    if (!native.supported) return error.SkipZigTest;
+    var owner = try code_alloc.CodeAllocator.init(a, 256 * 1024);
+    defer owner.deinit();
+    var probe = try Probe.init(&owner);
+    defer probe.deinit();
+    for ([_]ir.VectorLane{ .f32x4, .f64x2 }) |lane| {
+        const graph: ir.Graph = .{ .types = &.{ .v128, .v128, .v128 }, .argument_types = &.{ .v128, .v128 }, .result_types = &.{.v128}, .blocks = &.{.{ .params = &.{ 0, 1 }, .nodes = &.{
+            .{ .op = .vector_add, .out = 2, .lhs = 0, .rhs = 1, .vector_lane = lane },
+        }, .terminator = .{ .return_ = &.{2} } }} };
+        var code = try native.compile(a, &owner, graph);
+        defer code.deinit();
+        const one: u64 = if (lane == .f32x4) 0x3f80_0000_3f80_0000 else 0x3ff0_0000_0000_0000;
+        const quarter_ulp: u64 = if (lane == .f32x4) 0x3300_0000_3300_0000 else 0x3c90_0000_0000_0000;
+        const tiny: u64 = if (lane == .f32x4) 0x0000_0001_0000_0001 else 1;
+        for (0..4) |mode| {
+            const observed = try observe(&probe, &code, probe.unusual(@intCast(mode)), &.{ one, tiny, quarter_ulp, tiny }, 1);
+            try std.testing.expectEqual(@as(u32, 0), observed.status);
+            try std.testing.expectEqualSlices(u64, &.{ one, tiny * 2 }, &observed.result);
+            try std.testing.expectEqualDeep(observed.before, observed.after);
+        }
+    }
 }
 
 test "backend FP environment: direct native entry ignores caller rounding and flush modes" {

@@ -5,6 +5,7 @@ const arm = @import("../asm_aarch64.zig");
 const arm_masm = @import("../masm.zig");
 const x86 = @import("../asm_x86_64.zig");
 const call = @import("call.zig");
+const scratch = @import("scratch.zig");
 const fp_environment = @import("fp_environment.zig");
 const is_x86 = builtin.cpu.arch == .x86_64;
 const Machine = if (is_x86) x86.Masm else arm_masm.Masm;
@@ -50,7 +51,7 @@ pub fn emit(m: *Machine, slot: usize, fp_slot: usize, failed: *Machine.Label) !v
         try m.testReg64(.rax, .rax);
         try m.jumpCond(.equal, &done);
     } else {
-        try m.emit(arm.ldrImm(.x16, .x0, @intCast(slot * 8)));
+        try scratch.load(m, .x16, slot);
         try m.jumpCbz(.x16, &done);
         try m.emit(arm.ldrImm(.x16, .x16, @offsetOf(Invocation, "wake_flag")));
         try m.emit(arm.ldarb(.x16, .x16));

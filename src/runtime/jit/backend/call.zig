@@ -2,6 +2,7 @@
 const builtin = @import("builtin");
 const ir = @import("ir.zig");
 const memory = @import("memory.zig");
+const scratch = @import("scratch.zig");
 const arm = @import("../asm_aarch64.zig");
 const arm_masm = @import("../masm.zig");
 const x86 = @import("../asm_x86_64.zig");
@@ -9,7 +10,8 @@ const is_x86 = builtin.cpu.arch == .x86_64;
 const Machine = if (is_x86) x86.Masm else arm_masm.Masm;
 
 pub const saved_registers_offset = 1;
-pub const captures_offset = saved_registers_offset + 4;
+pub const saved_vectors_offset = saved_registers_offset + 4;
+pub const captures_offset = saved_vectors_offset + 8;
 pub const slot_count = captures_offset + ir.max_arguments;
 pub const emit_loads = if (is_x86) 3 else 5;
 pub const emit_stores = if (is_x86) 2 else 4;
@@ -17,9 +19,12 @@ pub const Site = struct {
     target: u64,
     site: u32,
     safepoint: u32,
+    /// Payload lengths count 64-bit words; type lengths count logical values.
     argument_count: usize,
     capture_count: usize,
     result_count: usize,
+    parameter_count: usize,
+    result_type_count: usize,
     parameter_types: [ir.max_arguments]ir.Type = @splat(.i64),
     result_types: [ir.max_arguments]ir.Type = @splat(.i64),
 };
@@ -27,6 +32,7 @@ pub const Request = struct {
     target: u64,
     site: u32,
     safepoint: u32,
+    /// Low word then high word for v128; scalar values occupy one word.
     arguments: []const u64,
     parameter_types: []const ir.Type,
     result_types: []const ir.Type,
@@ -63,8 +69,8 @@ fn dispatch(invocation: *Invocation, slots: [*]u64, index: u32) callconv(.c) u32
         .site = site.site,
         .safepoint = site.safepoint,
         .arguments = slots[invocation.transfer_base..][0..site.argument_count],
-        .parameter_types = site.parameter_types[0..site.argument_count],
-        .result_types = site.result_types[0..site.result_count],
+        .parameter_types = site.parameter_types[0..site.parameter_count],
+        .result_types = site.result_types[0..site.result_type_count],
         .results = results[0..site.result_count],
         .captures = slots[invocation.call_base + captures_offset ..][0..site.capture_count],
         .memories = invocation.memories,
@@ -100,7 +106,7 @@ pub fn emitHelper(m: *Machine, base: usize, index: u32, helper: usize) !void {
         try m.emit(arm.stpPreIdxSp(.x0, .lr, -16));
         try m.emit(arm.stpPreIdxSp(.x1, .fp, -16));
         try m.emit(arm.movReg(.x1, .x0));
-        try m.emit(arm.ldrImm(.x0, .x0, @intCast(base * 8)));
+        try scratch.load(m, .x0, base);
         try m.movImm64(.x2, index);
         try m.movImm64(.x16, helper);
         try m.emit(arm.blr(.x16));

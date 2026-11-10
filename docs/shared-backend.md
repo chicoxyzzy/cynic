@@ -47,6 +47,12 @@ consumers use the same contract, not merely similar-looking instructions.
   from reinterpretation, and do not assume algebraic identities for NaNs/zeros.
   Cynic's existing Spasm emitters provide the local per-ISA reference, including
   x86's unordered comparisons and signed-zero min/max handling.
+  B3's explicit [V128 type](https://github.com/WebKit/WebKit/blob/main/Source/JavaScriptCore/b3/B3Type.h)
+  and separate [SIMD operation metadata](https://github.com/WebKit/WebKit/blob/main/Source/JavaScriptCore/b3/B3SIMDValue.h)
+  motivate keeping a vector's 128-bit storage independent of its lane
+  interpretation. Cynic uses the existing NEON/SSE2 encoders; no Wasm opcode
+  or Cell representation enters the shared IR. Arithmetic follows the
+  [Wasm vector rules](https://webassembly.github.io/spec/core/exec/instructions.html#vector-instructions).
 - [V8 Turboshaft](https://github.com/v8/v8/tree/main/src/compiler/turboshaft)
   is a useful shared-backend reference. Keep lowering distinct from language
   feedback rather than moving JS-shaped nodes into a nominally shared folder.
@@ -133,7 +139,10 @@ strict scalar FP arithmetic, comparisons, bitwise operations, explicit width
 conversions, ordered guards/traps, block parameters, jumps, conditional branches,
 bounded scalar loads/stores, and typed runtime calls. Wasm bulk-memory and table
 instructions lower through those calls. Functions and calls support zero to 64
-physical scalar words through one result-list model; a Wasm reference uses two.
+physical 64-bit words through one result-list model; a Wasm reference uses two.
+The backend also has native v128 values, full-width memory accesses, bitwise
+operations, and lane-wise addition. The Wasm adapter does not yet lower SIMD;
+the vector foundation and its remaining integration work are detailed below.
 Scalar/reference globals use ordered loads/stores over bounded views.
 The Wasm adapter accepts scalar/reference locals and block/loop/if constructs
 (including multiple block parameters/results), branches, and selection.
@@ -1187,6 +1196,47 @@ demos retained their IR/code size, scratch use, emitted load/store counts, and
 recovery counts; their timings are diagnostic, not a performance claim.
 
 ## Delivery and gates
+
+### Vector values and native storage
+
+The language-neutral IR now has a real `v128` type. It occupies two consecutive
+64-bit words in invocation storage but remains one SSA value and one entry in a
+signature. Constants carry separate low/high words; their CSE keys retain both.
+`vector_add` has explicit lane metadata for i8x16, i16x8, i32x4, i64x2, f32x4,
+and f64x2. Bitwise AND/OR/XOR operate on all 128 bits without lane metadata.
+Integer addition wraps independently in each lane; floating addition uses the
+same protected FP environment as scalar arithmetic. No vector constant folding,
+fast math, or reassociation is performed.
+
+Allocation uses independent four-register GP and vector banks. Vector homes use
+v4-v7 on AArch64 and xmm4-xmm7 on x86-64, with full-width preservation across
+runtime calls. Whole-lifetime vector spills reserve two contiguous words;
+the verifier checks partial overlap with scalar spills as well as register
+class and lifetime overlap. The all-scratch reference layout is width-aware.
+
+Function entry/results, block-edge permutations, guards, terminal exits, runtime
+arguments/results, and safepoint snapshots all transport complete vectors.
+Type arrays count logical values; payload arrays count words, low word first.
+The existing limit remains **64 physical words per transfer**, allowing up to
+32 vectors or a mixed signature. It is not silently expanded to 64 vectors.
+Runtime callback results remain unpublished on failure, and the scalar-only
+`run` convenience API refuses a v128 result rather than truncating it.
+
+Full-width vector loads/stores use the existing ordered bounds checks, with
+exactly 16 bytes checked before any access and no alignment promise. Packed
+scratch also requires only eight-byte alignment. A shared scratch-addressing
+helper handles AArch64 offsets beyond its scalar load/store immediate range;
+maximum-sized vector graphs can place invocation metadata past 32 KiB.
+
+Direct tests cover all allocation/optimization switches, every addition lane
+shape and bitwise operation, constant/CSE identity, mixed-width cyclic edges,
+maximum-width callbacks, nested native re-entry clobbering all allocated vector
+registers, guards/exits, unaligned and failing memory accesses, hostile FP
+rounding/flush modes, allocation failures, and maximum-sized scratch with
+control/memory/callback metadata. These are backend tests, **not evidence of
+Wasm SIMD integration or production qualification**. Wasm's Cell/signature
+adapter and complete accepted SIMD instruction lowering remain next, followed
+by forced-native corpus coverage on both architectures.
 
 ### Production completion checklist
 
