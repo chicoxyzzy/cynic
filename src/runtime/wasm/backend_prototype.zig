@@ -322,10 +322,8 @@ const CallContext = struct {
             };
             const compatible = if (target_id.kind == .call_ref)
                 interpreter.funcCallLayoutsMatch(expected, actual)
-            else switch (resolved) {
-                .host => |host| expected.params.len == host.params and expected.results.len == host.results,
-                .wasm => interpreter.funcTypesEqual(expected, actual),
-            };
+            else
+                interpreter.funcTypesEqual(expected, actual);
             if (!compatible) return error.IndirectCallTypeMismatch;
             call.arguments = request.arguments[0..count];
             call.parameter_types = request.parameter_types[0..count];

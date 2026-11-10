@@ -11,6 +11,46 @@ fn expectNative(instance: *wasm.Instance, index: u32, args: []const u128, expect
     try std.testing.expectEqual(before + 1, instance.shared_backend_stats.entries);
 }
 
+test "backend references: indirect host targets require types rather than arity alone" {
+    if (!prototype.native.supported) return error.SkipZigTest;
+    const Host = struct {
+        calls: usize = 0,
+        fn invoke(raw: ?*anyopaque, args: []const u128, results: []u128) wasm.TrapError!void {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            self.calls += 1;
+            results[0] = args[0];
+        }
+    };
+    const ValType = @import("types.zig").ValType;
+    for ([_][2]ValType{ .{ .i32, .i32 }, .{ .i64, .i32 }, .{ .i32, .i64 }, .{ .i64, .i64 } }) |signature| {
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        const module: wasm.Module = .{
+            .types = &.{ .{ .params = &.{signature[0]}, .results = &.{signature[1]} }, .{ .params = &.{.i32}, .results = &.{.i32} } },
+            .imports = &.{.{ .module = "h", .name = "f", .desc = .{ .func = 0 } }},
+            .tables = &.{.{ .elem = .funcref, .limits = .{ .min = 1 } }},
+            .funcs = &.{1},
+            .code = &.{.{ .bytes = &.{ 0, 0x20, 0, 0x41, 0, 0x11, 1, 0, 0x0b } }},
+        };
+        var host: Host = .{};
+        var instance: wasm.Instance = undefined;
+        try wasm.instantiate(&instance, arena.allocator(), a, &module, .{ .funcs = &.{.{ .host = .{ .fn_ptr = Host.invoke, .ctx = &host, .params = 1, .results = 1 } }} });
+        defer instance.deinit();
+        instance.shared_backend_enabled = true;
+        instance.tables[0].elems[0] = wasm.interpreter.makeFuncRef(&instance, 0);
+        const outcome = wasm.invoke(&instance, a, 1, &.{42});
+        defer if (outcome) |result| a.free(result) else |_| {};
+        const compatible = signature[0] == .i32 and signature[1] == .i32;
+        if (compatible) {
+            try std.testing.expectEqualSlices(u128, &.{42}, try outcome);
+        } else {
+            try std.testing.expectError(error.IndirectCallTypeMismatch, outcome);
+        }
+        try std.testing.expectEqual(@as(usize, @intFromBool(compatible)), host.calls);
+        try std.testing.expectEqual(@as(u64, 1), instance.shared_backend_stats.entries);
+    }
+}
+
 test "backend references: parameters and multivalue results preserve both words" {
     if (!wasm.backend_prototype.native.supported) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(a);
