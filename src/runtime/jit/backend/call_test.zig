@@ -168,6 +168,38 @@ test "backend calls: void effects refresh memory and errors prevent subsequent s
     try std.testing.expectEqual(@as(usize, 2), host.calls);
 }
 
+test "backend calls: full memory descriptor set remains invocation-owned" {
+    if (!native.supported) return error.SkipZigTest;
+    const Host = struct {
+        bytes: [8]u8 = @splat(0),
+        fn invoke(raw: ?*anyopaque, request: native.CallRequest) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            try std.testing.expectEqual(ir.max_memories, request.memories.len);
+            for (request.memories) |view| try std.testing.expectEqual(@as(usize, 0), view.length);
+            request.memories[ir.max_memories - 1] = native.MemoryView.fromSlice(&self.bytes);
+        }
+    };
+    const memory_graph: ir.Graph = .{ .types = &.{ .i32, .i64, .i64 }, .argument_types = &.{ .i32, .i64 }, .result_types = &.{.i64}, .memory_count = ir.max_memories, .blocks = &.{.{ .params = &.{ 0, 1 }, .nodes = &.{
+        .{ .op = .call, .trap_site = 1, .call = .{ .target = 0, .arguments = &.{}, .parameter_types = &.{}, .results = &.{}, .result_types = &.{}, .safepoint = .{ .id = 0, .values = &.{} } } },
+        .{ .op = .store, .lhs = 0, .rhs = 1, .memory = .{ .region = ir.max_memories - 1, .width = .double }, .trap_site = 2 },
+        .{ .op = .load, .out = 2, .lhs = 0, .memory = .{ .region = ir.max_memories - 1, .width = .double }, .trap_site = 3 },
+    }, .terminator = .{ .return_ = &.{2} } }} };
+    var owner = try CodeAllocator.init(a, 256 * 1024);
+    defer owner.deinit();
+    var code = try native.compile(a, &owner, memory_graph);
+    defer code.deinit();
+    var empty: [0]u8 = .{};
+    const views: [ir.max_memories]native.MemoryView = @splat(native.MemoryView.fromSlice(&empty));
+    var host: Host = .{};
+    for (0..2) |_| {
+        var result = try code.runOutcomeWithRuntime(&.{ 0, 0x1234 }, &views, 1, .{ .context = &host, .call = Host.invoke });
+        defer result.deinit();
+        try std.testing.expectEqual(@as(u64, 0x1234), result.returned);
+        try std.testing.expectEqual(@as(u64, 0x1234), std.mem.readInt(u64, &host.bytes, .little));
+        for (views) |view| try std.testing.expectEqual(@as(usize, 0), view.length);
+    }
+}
+
 test "backend calls: callback scalar results preserve raw bits and narrow upper lanes" {
     if (!native.supported) return error.SkipZigTest;
     const Host = struct {

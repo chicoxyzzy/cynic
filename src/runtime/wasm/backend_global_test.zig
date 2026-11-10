@@ -298,6 +298,32 @@ test "backend globals: linear memories and used globals share the bounded view b
             var graph = try prototype.lowerInstance(a, &instance, 0);
             defer graph.deinit();
             try std.testing.expectEqual(@as(u32, prototype.ir.max_memories), graph.graph.memory_count);
+            if (!prototype.native.supported) continue;
+            var owner = try prototype.CodeAllocator.init(a, 256 * 1024);
+            defer owner.deinit();
+            var bounded = try prototype.compile(a, &owner, &graph, .{});
+            defer bounded.deinit();
+            var result = try prototype.runResultsInInstance(&bounded, &instance, &.{}, 1, &.{});
+            defer result.deinit();
+            try std.testing.expect(result == .returned);
+            var controlled = try prototype.compile(a, &owner, &graph, .{ .execution_policy = .controlled });
+            defer controlled.deinit();
+            // The adapter's overflow buffer and native scratch both precede entry.
+            for (0..3) |fail_index| {
+                var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = fail_index });
+                var entries: u64 = 0;
+                if (fail_index < 2) {
+                    try std.testing.expectError(error.OutOfMemory, prototype.runControlledInInstance(&controlled, failing.allocator(), &instance, &.{}, null, &entries, &.{}));
+                    try std.testing.expectEqual(@as(u64, 0), entries);
+                    try std.testing.expect(failing.has_induced_failure);
+                } else {
+                    var completion = try prototype.runControlledInInstance(&controlled, failing.allocator(), &instance, &.{}, null, &entries, &.{});
+                    defer completion.deinit();
+                    try std.testing.expect(completion == .returned);
+                    try std.testing.expectEqual(@as(u64, 1), entries);
+                }
+                try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+            }
         }
     }
 }

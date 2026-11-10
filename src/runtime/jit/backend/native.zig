@@ -169,18 +169,21 @@ pub const Compiled = struct {
         if (views.len != self.memory_count) return error.MemoryCount;
         if (self.call_sites.len != 0 and options.runtime == null) return error.MissingRuntime;
         if (stack_guard.nearLimit()) return error.CallStackExhausted;
-        const slots = try allocator.alloc(u64, self.scratchSlotCount());
+        // Descriptors are mutable per invocation, but need not consume the
+        // maximum-sized native stack buffer at every recursive call.
+        const descriptor_slots = views.len * (@sizeOf(MemoryView) / @sizeOf(u64));
+        const slots = try allocator.alloc(u64, self.scratchSlotCount() + descriptor_slots);
         defer allocator.free(slots);
         @memset(slots, 0);
         var poll_invocation: ?control.Invocation = if (options.control) |host| control.Invocation.init(host) else null;
         if (self.execution_policy == .controlled) slots[self.controlSlot()] = if (poll_invocation) |*host| @intFromPtr(host) else 0;
-        var current_views: [ir.max_memories]MemoryView = undefined;
-        @memcpy(current_views[0..views.len], views);
-        if (self.memory_count != 0) slots[self.memoryViewsSlot()] = @intFromPtr(&current_views);
+        const current_views = std.mem.bytesAsSlice(MemoryView, std.mem.sliceAsBytes(slots[self.scratchSlotCount()..]));
+        @memcpy(current_views, views);
+        if (self.memory_count != 0) slots[self.memoryViewsSlot()] = @intFromPtr(current_views.ptr);
         var invocation: ?call.Invocation = if (options.runtime) |host| .{
             .runtime = host,
             .sites = self.call_sites,
-            .memories = current_views[0..views.len],
+            .memories = current_views,
             .transfer_base = self.spill_slot_count,
             .call_base = self.callBase(),
         } else null;

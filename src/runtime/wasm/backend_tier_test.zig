@@ -254,10 +254,13 @@ test "backend tier: cached recursion does not retain compiler workspace on each 
             try wasm.instantiate(&instance, arena.allocator(), a, &module, .{});
             defer instance.deinit();
             instance.shared_backend_enabled = true;
-            const result = try wasm.invoke(&instance, a, 0, &.{200});
+            const result = wasm.invoke(&instance, a, 0, &.{256}) catch |err| {
+                std.debug.print("cached recursion failed with {s} after {d} native entries\n", .{ @errorName(err), instance.shared_backend_stats.entries });
+                return err;
+            };
             defer a.free(result);
             try std.testing.expectEqualSlices(u128, &.{42}, result);
-            try std.testing.expectEqual(@as(u64, 201), instance.shared_backend_stats.entries);
+            try std.testing.expectEqual(@as(u64, 257), instance.shared_backend_stats.entries);
             try std.testing.expectEqual(@as(u64, 1), instance.shared_backend_stats.compiles);
         }
     };

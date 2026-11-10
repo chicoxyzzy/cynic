@@ -233,8 +233,14 @@ Result/scratch allocation and stack checks precede native entry; the entry
 counter increments only immediately before generated code actually executes.
 The stack guard also runs before cache allocation or compilation. Cold compilation
 has a non-inlined boundary so optimizer workspace cannot inflate every cached
-recursive call frame. Tests cover both exhausted-stack rejection before compilation
-and 200 successful recursive calls on a 2 MiB ReleaseSafe worker stack.
+recursive call frame. Mutable memory descriptors live after the code-visible
+slots in the existing invocation scratch allocation, rather than reserving the
+maximum descriptor count on every native frame. The Wasm adapter keeps four
+initial views locally and uses its invocation allocator for larger sets; both
+that allocation and native scratch allocation fail before entry. Tests cover
+descriptor isolation at the 64-view limit, allocation-failure cleanup,
+exhausted-stack rejection before compilation, and 256 successful recursive calls
+on a 2 MiB ReleaseSafe worker stack.
 
 The Wasm suite accepts `--shared-backend --require-shared-backend-entry` and
 reports entries, compiled functions, and refusals. It tracks instances before
