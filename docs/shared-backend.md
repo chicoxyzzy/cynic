@@ -125,7 +125,8 @@ JS values/realms nor Wasm types, bytecode, instances, or Cells.
 The subset has i32/i64 and f32/f64 constants, wrapping integer arithmetic,
 strict scalar FP arithmetic, comparisons, bitwise operations, explicit width
 conversions, ordered guards/traps, block parameters, jumps, conditional branches,
-bounded scalar loads/stores, and typed runtime calls. Functions and calls
+bounded scalar loads/stores, and typed runtime calls. Wasm bulk-memory
+instructions lower through those calls. Functions and calls
 support zero to 64 scalar results through one result-list model.
 The Wasm adapter accepts locals, scalar-typed block/loop/if constructs (including
 multiple block parameters/results), `br`/`br_if`/`br_table`, and scalar `select`.
@@ -711,8 +712,8 @@ The split follows [V8's size-load / growth-builtin lowering](https://raw.githubu
 and [JSC's runtime growth helper](https://raw.githubusercontent.com/WebKit/WebKit/main/Source/JavaScriptCore/wasm/WasmOperations.cpp).
 The [Core memory instructions](https://webassembly.github.io/spec/core/exec/instructions.html#memory-instructions)
 define the old-page-count / failure result; the native helper does not introduce
-a JS exception for an ordinary Wasm growth failure. Shared-memory ordering,
-bulk-memory operations, and broader production qualification remain open.
+a JS exception for an ordinary Wasm growth failure. Shared-memory ordering
+and broader production qualification remain open.
 
 Tests require native entry for direct growth, force backing-store relocation
 through aliased imports, and check memory32/memory64 result widths, ordered
@@ -732,6 +733,58 @@ matches its named baseline (592 passing subtests, 11 known failures, two
 existing parse-error files). WPT runs the interpreter reference path; it is
 not shared-native qualification. Native x86_64 hardware and rollout/performance
 gates remain separate.
+
+### Bulk memory
+
+The frontend lowers non-shared `memory.copy`, `memory.fill`, `memory.init`,
+and `data.drop` to ordered void runtime calls. The shared backend receives no
+Wasm-specific opcode or instance pointer in its IR. A second memory/segment
+index is a typed i32 constant argument; the target namespace retains its full
+u32 primary index. Call effects keep writes and drops live even with no result.
+
+Both copy ranges are checked before any write, including zero-length requests.
+Aliased imports use the same runtime memory identity, so overlapping copies
+choose the correct direction. Mixed memory32/memory64 copies preserve each
+address width and use the narrower width for the count. Fill truncates its
+value to a byte; init retains i32 source/count operands even for memory64.
+Dropped segments become empty and repeated drops remain harmless. Later traps
+do not roll back or replay completed writes, growth, or drops.
+
+The common `copyMemory`, `fillMemory`, `initMemory`, and `dropData` helpers
+serve Sarcasm and the shared tier; Spasm also reuses init/drop, while retaining
+its existing native copy/fill emission. Growth still refreshes descriptors
+before a subsequent bulk call. These helpers do not allocate, re-enter JS, or
+change the JS API/SES policy. Shared memories remain an explicit refusal.
+
+The [Wasm Core memory instructions](https://webassembly.github.io/spec/core/exec/instructions.html#memory-instructions)
+define bounds-before-writes and dropped-segment behavior.
+[JSC uses runtime helpers](https://raw.githubusercontent.com/WebKit/WebKit/main/Source/JavaScriptCore/wasm/WasmOperations.cpp)
+for bulk operations; [V8 combines upfront checks with helper or inline paths](https://raw.githubusercontent.com/v8/v8/main/src/wasm/turboshaft-graph-interface.cc).
+Cynic starts with the existing call boundary; small-copy inlining is separate
+measured optimization work, not required to establish instruction coverage.
+
+Tests compare the interpreter, forced Spasm entry, and forced shared entry for
+mixed-width and aliased copies, nonzero memory/segment indices, zero-length and
+maximum-width operands, bounds failures without partial writes, and segment
+lifetime. Void fill/drop effects survive all optimization/rematerialization
+combinations with scratch and linear-scan allocation at zero/one/four registers.
+The suite also checks data-only modules and growth/write/drop effects before a
+later trap without replay.
+
+Local verification on 2026-11-10: the full AArch64 ReleaseSafe unit/CLI suite
+passes 4,191 tests with 303 skips (55/55 build steps); x86_64 Debug backend tests
+under Rosetta pass 224 with one hardware-dependent skip. Both harness-contract
+runs pass 18 tests. All 232 Wasm manifests have identical pass/fail/skip counts
+in interpreter, shared-only, and combined shared/Spasm modes on both
+architectures: 61,051 passes and 1,370 skips each. Shared-only mode compiles
+3,493 functions with 2,142 refusals, 165 additional functions compared with
+memory size/growth alone. Native hardware, remaining opcode coverage,
+production JS integration, and performance/default-on qualification remain open.
+The bounded RSS precheck passes, and the full production test262 pass set stays
+byte-identical (48,653 passes, 1,324 existing failures). GC-threshold-1 ReleaseSafe
+WPT matches its named baseline (592 passing subtests, 11 known failures, two
+existing parse-error files). That WPT run checks the interpreter helpers, not
+shared-native JavaScript API qualification.
 
 ## Runtime calls and root snapshots
 
@@ -994,7 +1047,7 @@ failures, but is not evidence that an unimplemented backend capability works.
    conversions), the complete scalar integer family, and bounded scalar memory
    now run natively, with explicit ordered arithmetic/conversion/memory traps.
    Direct scalar calls now bridge through existing runtime dispatch, including
-   function imports, direct memory size/growth, and callee memory growth.
+   function imports, direct memory size/growth, bulk memory, and callee growth.
    Scalar structured control now includes multi-value block parameters/results,
    branch tables, and selection.
    Function and call signatures support void and multiple scalar results.

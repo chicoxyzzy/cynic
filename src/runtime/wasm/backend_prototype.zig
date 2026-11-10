@@ -107,8 +107,14 @@ fn refreshMemories(instance: *const Instance, views: []native.MemoryView) !void 
 // teaching the shared call ABI about Wasm operations or embedding pointers.
 const RuntimeTarget = packed struct(u64) {
     index: u32,
-    kind: enum(u32) { function, memory_grow, _ } = .function,
+    kind: enum(u32) { function, memory_grow, memory_copy, memory_fill, memory_init, data_drop, _ } = .function,
 };
+
+fn checkCallSignature(request: native.CallRequest, params: []const ir.Type, results: []const ir.Type) !void {
+    if (request.arguments.len != params.len or request.results.len != results.len or
+        !std.mem.eql(ir.Type, request.parameter_types, params) or
+        !std.mem.eql(ir.Type, request.result_types, results)) return error.CallSignatureMismatch;
+}
 
 const CallContext = struct {
     instance: *Instance,
@@ -125,13 +131,46 @@ const CallContext = struct {
                 if (target_id.index >= self.instance.memories.len) return error.InvalidMemory;
                 const memory = self.instance.memories[target_id.index];
                 const ty: ir.Type = if (memory.is_64) .i64 else .i32;
-                if (request.arguments.len != 1 or request.results.len != 1 or
-                    !std.mem.eql(ir.Type, request.parameter_types, &.{ty}) or
-                    !std.mem.eql(ir.Type, request.result_types, &.{ty})) return error.CallSignatureMismatch;
+                try checkCallSignature(request, &.{ty}, &.{ty});
                 const previous = interpreter.growMemory(self.instance.gpa, memory, ir.normalize(ty, request.arguments[0]));
                 request.results[0] = ir.normalize(ty, previous orelse std.math.maxInt(u64));
                 // Several import indices can name the same backing store.
                 try refreshMemories(self.instance, request.memories);
+                return;
+            },
+            .data_drop => {
+                try checkCallSignature(request, &.{}, &.{});
+                if (target_id.index >= self.instance.data_segments.len) return error.InvalidDataSegment;
+                interpreter.dropData(self.instance, target_id.index);
+                return;
+            },
+            .memory_copy, .memory_fill, .memory_init => {
+                if (target_id.index >= self.instance.memories.len) return error.InvalidMemory;
+                const memory = self.instance.memories[target_id.index];
+                const addr: ir.Type = if (memory.is_64) .i64 else .i32;
+                switch (target_id.kind) {
+                    .memory_copy => {
+                        if (request.arguments.len != 4) return error.CallSignatureMismatch;
+                        const source_index = request.arguments[3];
+                        if (source_index >= self.instance.memories.len) return error.InvalidMemory;
+                        const source = self.instance.memories[@intCast(source_index)];
+                        const src_addr: ir.Type = if (source.is_64) .i64 else .i32;
+                        const count: ir.Type = if (memory.is_64 and source.is_64) .i64 else .i32;
+                        try checkCallSignature(request, &.{ addr, src_addr, count, .i32 }, &.{});
+                        try interpreter.copyMemory(memory, source, request.arguments[0], request.arguments[1], request.arguments[2]);
+                    },
+                    .memory_fill => {
+                        try checkCallSignature(request, &.{ addr, .i32, addr }, &.{});
+                        try interpreter.fillMemory(memory, request.arguments[0], @truncate(request.arguments[1]), request.arguments[2]);
+                    },
+                    .memory_init => {
+                        try checkCallSignature(request, &.{ addr, .i32, .i32, .i32 }, &.{});
+                        const segment = request.arguments[3];
+                        if (segment >= self.instance.data_segments.len) return error.InvalidDataSegment;
+                        try interpreter.initMemory(memory, self.instance.data_segments[@intCast(segment)].bytes, request.arguments[0], @truncate(request.arguments[1]), @truncate(request.arguments[2]));
+                    },
+                    else => return error.CallSignatureMismatch,
+                }
                 return;
             },
             else => return error.CallSignatureMismatch,
@@ -257,6 +296,7 @@ const Instruction = struct {
     val_count: u32 = 0,
     table_default: bool = false,
     memory_index: u32 = 0,
+    secondary_index: u32 = 0,
 };
 const Range = struct { start: usize, end: usize };
 const Control = struct { entered_reachable: bool, reachable: bool };
@@ -382,7 +422,26 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
             .f64_const => inst.immediate = std.mem.readInt(u64, (try reader.bytesN(8))[0..8], .little),
             .prefix_fc => {
                 inst.immediate = try reader.uleb(u32);
-                if (inst.immediate > 7) return error.UnsupportedOpcode;
+                switch (inst.immediate) {
+                    0...7 => {},
+                    8, 9 => {
+                        inst.secondary_index = try reader.uleb(u32);
+                        if (inst.secondary_index >= module.data_count_in_section) return error.InvalidDataSegment;
+                        if (inst.immediate == 8) {
+                            inst.memory_index = try reader.uleb(u32);
+                            if (inst.memory_index >= memories.len) return error.InvalidMemory;
+                        }
+                    },
+                    10, 11 => {
+                        inst.memory_index = try reader.uleb(u32);
+                        if (inst.memory_index >= memories.len) return error.InvalidMemory;
+                        if (inst.immediate == 10) {
+                            inst.secondary_index = try reader.uleb(u32);
+                            if (inst.secondary_index >= memories.len) return error.InvalidMemory;
+                        }
+                    },
+                    else => return error.UnsupportedOpcode,
+                }
             },
             else => if (memoryOperation(inst.op) != null) {
                 const alignment = try reader.uleb(u32);
@@ -451,6 +510,39 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
         }
         var terminator: ?ir.Terminator = null;
         for (instructions.items[range.start..range.end]) |inst| {
+            if (inst.op == .prefix_fc and inst.immediate >= 8) {
+                const count: usize = if (inst.immediate == 9) 0 else 3;
+                if (stack.items.len < count) return error.InvalidControlFlow;
+                const start = stack.items.len - count;
+                var operands: [4]ir.Value = undefined;
+                @memcpy(operands[0..count], stack.items[start..]);
+                stack.shrinkRetainingCapacity(start);
+                const has_secondary = inst.immediate == 8 or inst.immediate == 10;
+                if (has_secondary) operands[3] = try builder.constant(&nodes, .i32, inst.secondary_index);
+                const arguments = try a.dupe(ir.Value, operands[0 .. count + @intFromBool(has_secondary)]);
+                const parameter_types = try a.alloc(ir.Type, arguments.len);
+                for (arguments, parameter_types) |value, *ty| ty.* = builder.types.items[value];
+                const target: RuntimeTarget = .{
+                    .kind = switch (inst.immediate) {
+                        8 => .memory_init,
+                        9 => .data_drop,
+                        10 => .memory_copy,
+                        11 => .memory_fill,
+                        else => return error.UnsupportedOpcode,
+                    },
+                    .index = if (inst.immediate == 9) inst.secondary_index else inst.memory_index,
+                };
+                try nodes.append(a, .{ .op = .call, .trap_site = inst.offset, .call = .{
+                    .target = @bitCast(target),
+                    .arguments = arguments,
+                    .parameter_types = parameter_types,
+                    .results = &.{},
+                    .result_types = &.{},
+                    .fp_mode = .strict,
+                    .safepoint = .{ .id = inst.offset, .values = &.{} },
+                } });
+                continue;
+            }
             switch (inst.op) {
                 .nop, .block, .loop, .end => {},
                 .local_get, .local_set, .local_tee => {
