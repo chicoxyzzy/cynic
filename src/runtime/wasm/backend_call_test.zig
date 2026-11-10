@@ -20,9 +20,9 @@ test "backend calls: Wasm direct callees return into native arithmetic" {
     defer graph.deinit();
     var owner = try prototype.CodeAllocator.init(a, 256 * 1024);
     defer owner.deinit();
-    var code = try native.compile(a, &owner, graph.graph);
+    var code = try prototype.compile(a, &owner, &graph, .{});
     defer code.deinit();
-    try std.testing.expectEqual(@as(usize, 1), code.call_sites.len);
+    try std.testing.expectEqual(@as(usize, 1), code.code.call_sites.len);
     for ([_]bool{ false, true }) |spasm| {
         instance.spasm_enabled = spasm;
         for ([_]u64{ 0, 7, 0x7fff_ffff, 0xffff_ffff }) |arg| {
@@ -61,7 +61,7 @@ test "backend calls: Wasm imports retain function indices and exact callback err
     defer graph.deinit();
     var owner = try prototype.CodeAllocator.init(a, 256 * 1024);
     defer owner.deinit();
-    var code = try native.compile(a, &owner, graph.graph);
+    var code = try prototype.compile(a, &owner, &graph, .{});
     defer code.deinit();
     var result = try prototype.runInInstance(&code, &instance, &.{0xffff_ffff}, 8);
     defer result.deinit();
@@ -88,7 +88,7 @@ test "backend calls: Wasm callee growth refreshes native memory views" {
     defer graph.deinit();
     var owner = try prototype.CodeAllocator.init(a, 256 * 1024);
     defer owner.deinit();
-    var code = try native.compile(a, &owner, graph.graph);
+    var code = try prototype.compile(a, &owner, &graph, .{});
     defer code.deinit();
     var result = try prototype.runInInstance(&code, &instance, &.{ 1, wasm.PAGE_SIZE }, 8);
     defer result.deinit();
@@ -112,7 +112,7 @@ test "backend calls: Wasm callee loops remain bounded in either existing tier" {
     defer graph.deinit();
     var owner = try prototype.CodeAllocator.init(a, 256 * 1024);
     defer owner.deinit();
-    var code = try native.compile(a, &owner, graph.graph);
+    var code = try prototype.compile(a, &owner, &graph, .{});
     defer code.deinit();
     for ([_]bool{ false, true }) |spasm| {
         instance.spasm_enabled = spasm;
@@ -156,7 +156,7 @@ test "backend calls: cross-instance callees retain their execution controller" {
     defer graph.deinit();
     var owner = try prototype.CodeAllocator.init(a, 256 * 1024);
     defer owner.deinit();
-    var code = try native.compile(a, &owner, graph.graph);
+    var code = try prototype.compile(a, &owner, &graph, .{});
     defer code.deinit();
     for ([_]bool{ false, true }) |spasm| {
         provider.spasm_enabled = spasm;

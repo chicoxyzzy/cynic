@@ -144,7 +144,7 @@ test "backend bulk memory: void effects survive every optimization and allocatio
     defer owner.deinit();
     const AllocationMode = @import("../jit/backend/allocation.zig").Mode;
     for ([_]AllocationMode{ .scratch, .linear_scan }) |mode| for (0..16) |flags| for ([_]u8{ 0, 1, 4 }) |registers| {
-        var code = try prototype.native.compileWithOptions(a, &owner, graph.graph, .{
+        var code = try prototype.compile(a, &owner, &graph, .{
             .allocation = mode,
             .register_count = registers,
             .rematerialize_constants = flags & 8 != 0,

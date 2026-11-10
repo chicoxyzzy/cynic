@@ -14,7 +14,7 @@ pub const Stats = struct {
 };
 
 pub const Cache = struct {
-    const Slot = union(enum) { untried, refused, compiled: native.Compiled };
+    const Slot = union(enum) { untried, refused, compiled: frontend.Compiled };
     allocator: std.mem.Allocator,
     owner: code_alloc.CodeAllocator,
     slots: []Slot,
@@ -36,7 +36,7 @@ pub const Cache = struct {
         self.allocator.destroy(self);
     }
 
-    fn codeFor(self: *Cache, instance: *interpreter.Instance, local: usize) ?*const native.Compiled {
+    fn codeFor(self: *Cache, instance: *interpreter.Instance, local: usize) ?*const frontend.Compiled {
         const slot = &self.slots[local];
         if (slot.* == .untried) self.compileSlot(instance, local);
         return if (slot.* == .compiled) &slot.compiled else null;
@@ -59,7 +59,7 @@ pub const Cache = struct {
             return;
         };
         defer graph.deinit();
-        const compiled = native.compileWithOptions(self.allocator, &self.owner, graph.graph, .{ .execution_policy = .controlled }) catch |err| {
+        const compiled = frontend.compile(self.allocator, &self.owner, &graph, .{ .execution_policy = .controlled }) catch |err| {
             refuse(instance, err);
             return;
         };
