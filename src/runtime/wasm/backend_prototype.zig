@@ -10,6 +10,7 @@ const Op = @import("opcodes.zig").Op;
 const Module = @import("module.zig").Module;
 const interpreter = @import("interpreter.zig");
 const Instance = interpreter.Instance;
+const metadata = @import("spasm_metadata.zig");
 pub const ir = @import("../jit/backend/ir.zig");
 pub const native = @import("../jit/backend/native.zig");
 pub const CodeAllocator = @import("../jit/code_alloc.zig").CodeAllocator;
@@ -17,12 +18,31 @@ pub const CodeAllocator = @import("../jit/code_alloc.zig").CodeAllocator;
 pub const OwnedGraph = struct {
     arena: std.heap.ArenaAllocator,
     graph: ir.Graph,
+    global_indices: []const u32,
 
     pub fn deinit(self: *OwnedGraph) void {
         self.arena.deinit();
         self.* = undefined;
     }
 };
+
+/// Wasm owns instance bindings; the shared compiler sees only numbered views.
+pub const Compiled = struct {
+    code: native.Compiled,
+    global_indices: []const u32,
+
+    pub fn deinit(self: *Compiled) void {
+        self.code.allocator.free(self.global_indices);
+        self.code.deinit();
+        self.* = undefined;
+    }
+};
+
+pub fn compile(allocator: std.mem.Allocator, owner: *CodeAllocator, graph: *const OwnedGraph, options: native.Options) !Compiled {
+    const globals = try allocator.dupe(u32, graph.global_indices);
+    errdefer allocator.free(globals);
+    return .{ .code = try native.compileWithOptions(allocator, owner, graph.graph, options), .global_indices = globals };
+}
 
 /// Developer-only module entry point, not a Wasm execution tier. The temporary
 /// decoder/validator workspace is capped independently of the emitted graph.
@@ -51,34 +71,36 @@ pub fn lowerInstance(allocator: std.mem.Allocator, instance: *const Instance, fu
 
 /// Developer-only invocation. Direct calls use the existing Wasm tiers under a
 /// separate bounded callee budget, not production tier selection or Realm fuel.
-pub fn runInInstance(code: *const native.Compiled, instance: *Instance, args: []const u64, budget: u32) !native.Outcome {
-    if (code.result_types.len != 1) return error.ResultCount;
+pub fn runInInstance(compiled: *const Compiled, instance: *Instance, args: []const u64, budget: u32) !native.Outcome {
+    if (compiled.code.result_types.len != 1) return error.ResultCount;
     var result: [1]u64 = .{0};
-    const completion = try runResultsInInstance(code, instance, args, budget, &result);
+    const completion = try runResultsInInstance(compiled, instance, args, budget, &result);
     return native.Outcome.fromCompletion(completion, result[0]);
 }
 
-pub fn runResultsInInstance(code: *const native.Compiled, instance: *Instance, args: []const u64, budget: u32, results: []u64) !native.Completion {
-    if (instance.memories.len != code.memory_count or instance.memories.len > ir.max_memories) return error.MemoryCount;
+pub fn runResultsInInstance(compiled: *const Compiled, instance: *Instance, args: []const u64, budget: u32, results: []u64) !native.Completion {
+    const code = &compiled.code;
+    if (code.memory_count > ir.max_memories) return error.MemoryCount;
     var views: [ir.max_memories]native.MemoryView = undefined;
-    try refreshMemories(instance, views[0..instance.memories.len]);
+    try refreshMemories(instance, views[0..code.memory_count], compiled.global_indices);
     var remaining = budget;
-    var context: CallContext = .{ .instance = instance, .allocator = code.allocator, .remaining = &remaining };
-    return code.runInto(args, views[0..instance.memories.len], budget, if (code.call_sites.len == 0) null else .{ .context = &context, .call = CallContext.invoke }, results);
+    var context: CallContext = .{ .instance = instance, .allocator = code.allocator, .remaining = &remaining, .global_indices = compiled.global_indices };
+    return code.runInto(args, views[0..code.memory_count], budget, if (code.call_sites.len == 0) null else .{ .context = &context, .call = CallContext.invoke }, results);
 }
 
-pub fn runControlledInInstance(code: *const native.Compiled, allocator: std.mem.Allocator, instance: *Instance, args: []const u64, execution_control: ?interpreter.ExecutionControl, entries: ?*u64, results: []u64) !native.Completion {
-    if (instance.memories.len != code.memory_count or instance.memories.len > ir.max_memories) return error.MemoryCount;
+pub fn runControlledInInstance(compiled: *const Compiled, allocator: std.mem.Allocator, instance: *Instance, args: []const u64, execution_control: ?interpreter.ExecutionControl, entries: ?*u64, results: []u64) !native.Completion {
+    const code = &compiled.code;
+    if (code.memory_count > ir.max_memories) return error.MemoryCount;
     var views: [ir.max_memories]native.MemoryView = undefined;
-    try refreshMemories(instance, views[0..instance.memories.len]);
-    var context: CallContext = .{ .instance = instance, .allocator = allocator, .execution_control = execution_control };
+    try refreshMemories(instance, views[0..code.memory_count], compiled.global_indices);
+    var context: CallContext = .{ .instance = instance, .allocator = allocator, .execution_control = execution_control, .global_indices = compiled.global_indices };
     var host_control = execution_control;
     const native_control: ?native.ExecutionControl = if (host_control) |*host| blk: {
         const armed = host.isArmed();
         if (!armed and host.wake_flag == null) break :blk null;
         break :blk .{ .context = host, .poll_fn = pollExecution, .wake_flag = if (armed) null else host.wake_flag };
     } else null;
-    return code.runControlledInto(allocator, args, views[0..instance.memories.len], .{
+    return code.runControlledInto(allocator, args, views[0..code.memory_count], .{
         .runtime = if (code.call_sites.len == 0) null else .{ .context = &context, .call = CallContext.invoke },
         .control = native_control,
         .entry_counter = entries,
@@ -95,11 +117,15 @@ fn pollExecution(raw: ?*anyopaque) !void {
     };
 }
 
-fn refreshMemories(instance: *const Instance, views: []native.MemoryView) !void {
-    if (views.len != instance.memories.len) return error.MemoryCount;
+fn refreshMemories(instance: *const Instance, views: []native.MemoryView, globals: []const u32) !void {
+    if (instance.memories.len > views.len or views.len - instance.memories.len != globals.len) return error.MemoryCount;
     for (instance.memories, 0..) |memory, i| {
         if (memory.is_shared) return error.UnsupportedSharedMemory;
         views[i] = native.MemoryView.fromSlice(memory.data);
+    }
+    for (globals, views[instance.memories.len..]) |index, *view| {
+        if (index >= instance.globals.len) return error.InvalidGlobal;
+        view.* = native.MemoryView.fromSlice(std.mem.asBytes(&instance.globals[index].value));
     }
 }
 
@@ -121,6 +147,7 @@ const CallContext = struct {
     allocator: std.mem.Allocator,
     remaining: ?*u32 = null,
     execution_control: ?interpreter.ExecutionControl = null,
+    global_indices: []const u32,
 
     fn invoke(raw: ?*anyopaque, request: native.CallRequest) !void {
         const self: *CallContext = @ptrCast(@alignCast(raw.?));
@@ -135,7 +162,7 @@ const CallContext = struct {
                 const previous = interpreter.growMemory(self.instance.gpa, memory, ir.normalize(ty, request.arguments[0]));
                 request.results[0] = ir.normalize(ty, previous orelse std.math.maxInt(u64));
                 // Several import indices can name the same backing store.
-                try refreshMemories(self.instance, request.memories);
+                try refreshMemories(self.instance, request.memories, self.global_indices);
                 return;
             },
             .data_drop => {
@@ -193,7 +220,7 @@ const CallContext = struct {
         for (request.arguments, 0..) |value, i| args[i] = value;
         const result = try interpreter.invokeWithControl(self.instance, self.allocator, target_id.index, args[0..request.arguments.len], if (self.remaining != null) .{ .ctx = &control, .poll_fn = CalleeControl.poll, .armed_fn = CalleeControl.armed } else inherited);
         defer self.allocator.free(result);
-        try refreshMemories(self.instance, request.memories);
+        try refreshMemories(self.instance, request.memories, self.global_indices);
         if (result.len != signature.results.len) return error.CallSignatureMismatch;
         for (result, request.results) |value, *out| out.* = @truncate(value);
     }
@@ -251,7 +278,7 @@ fn callSignature(module: *const Module, index: u32) !wasm_types.FuncType {
 fn collectMemories(module: *const Module, out: *[ir.max_memories]wasm_types.MemType) ![]const wasm_types.MemType {
     var count: usize = 0;
     for (module.imports) |entry| {
-        if (entry.desc == .func) continue;
+        if (entry.desc == .func or entry.desc == .global) continue;
         if (entry.desc != .mem) return error.UnsupportedImports;
         if (count == out.len) return error.PrototypeLimit;
         out[count] = entry.desc.mem;
@@ -343,6 +370,7 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
     const a = arena.allocator();
+    var global_indices: std.ArrayList(u32) = .empty;
     const result_types = try a.alloc(ir.Type, signature.results.len);
     for (signature.results, result_types) |ty, *out| out.* = try valueType(ty);
     const argument_types = try a.alloc(ir.Type, signature.params.len);
@@ -408,6 +436,17 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
             },
             .@"return", .@"unreachable" => controls.items[controls.items.len - 1].reachable = false,
             .local_get, .local_set, .local_tee => inst.immediate = try reader.uleb(u32),
+            .global_get, .global_set => {
+                const index = try reader.uleb(u32);
+                _ = try valueType(metadata.globalValType(module, index) orelse return error.InvalidGlobal);
+                const binding = std.mem.indexOfScalar(u32, global_indices.items, index) orelse blk: {
+                    if (global_indices.items.len >= ir.max_memories - memories.len) return error.PrototypeLimit;
+                    try global_indices.append(a, index);
+                    break :blk global_indices.items.len - 1;
+                };
+                inst.immediate = index;
+                inst.secondary_index = @intCast(memories.len + binding);
+            },
             .memory_size, .memory_grow => {
                 inst.memory_index = try reader.uleb(u32);
                 if (inst.memory_index >= memories.len) return error.InvalidMemory;
@@ -557,6 +596,33 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
                 },
                 .drop => {
                     _ = stack.pop() orelse return error.InvalidControlFlow;
+                },
+                .global_get, .global_set => {
+                    const ty = try valueType(metadata.globalValType(module, @intCast(inst.immediate)) orelse return error.InvalidGlobal);
+                    const address = try builder.constant(&nodes, .i64, 0);
+                    if (inst.op == .global_get) {
+                        const out = try builder.value(ty);
+                        try nodes.append(a, .{ .op = .load, .out = out, .lhs = address, .trap_site = inst.offset, .memory = .{
+                            .region = inst.secondary_index,
+                            .width = if (ir.is32(ty)) .word else .double,
+                        } });
+                        try stack.append(a, out);
+                    } else {
+                        var value = stack.pop() orelse return error.InvalidControlFlow;
+                        // Scalar Cells use a canonical low 64-bit word, including
+                        // zeroed upper i32/f32 bits, as in Spasm's global.set.
+                        if (ty == .f32 or ty == .f64) {
+                            const bits = try builder.value(if (ty == .f32) .i32 else .i64);
+                            try nodes.append(a, .{ .op = .reinterpret, .out = bits, .lhs = value });
+                            value = bits;
+                        }
+                        if (ir.is32(ty)) {
+                            const wide = try builder.value(.i64);
+                            try nodes.append(a, .{ .op = .zext_i32, .out = wide, .lhs = value });
+                            value = wide;
+                        }
+                        try nodes.append(a, .{ .op = .store, .lhs = address, .rhs = value, .trap_site = inst.offset, .memory = .{ .region = inst.secondary_index, .width = .double } });
+                    }
                 },
                 .i32_const, .i64_const, .f32_const, .f64_const => {
                     const ty: ir.Type = switch (inst.op) {
@@ -715,10 +781,10 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
         .blocks = builder.blocks.items,
         .argument_types = argument_types,
         .result_types = result_types,
-        .memory_count = @intCast(memories.len),
+        .memory_count = @intCast(memories.len + global_indices.items.len),
     };
     try graph.verify();
-    return .{ .arena = arena, .graph = graph };
+    return .{ .arena = arena, .graph = graph, .global_indices = global_indices.items };
 }
 
 const MemoryOperation = struct { ty: ir.Type, width: ir.MemoryWidth, signed: bool = false, store: bool = false };

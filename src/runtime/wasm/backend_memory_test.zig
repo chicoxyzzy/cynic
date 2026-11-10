@@ -30,7 +30,7 @@ test "backend memory growth: native size and grow preserve widths and ordered ob
         instance.memories[1].data[0] = 37;
         var graph = try prototype.lowerInstance(a, &instance, 0);
         defer graph.deinit();
-        var code = try native.compile(a, &owner, graph.graph);
+        var code = try prototype.compile(a, &owner, &graph, .{});
         defer code.deinit();
         var values: [3]u64 = undefined;
         var result = try prototype.runResultsInInstance(&code, &instance, &.{delta}, 1, &values);
@@ -216,7 +216,7 @@ test "backend memory: Wasm scalar accesses match Sarcasm on real instance memori
         instance.spasm_diagnostics = true;
         var graph = try prototype.lowerInstance(a, &instance, 0);
         defer graph.deinit();
-        var code = try native.compile(a, &owner, graph.graph);
+        var code = try prototype.compile(a, &owner, &graph, .{});
         defer code.deinit();
         for ([_]u64{ 0, 0xffff_ffff_ffff_ffff, 0x7ff0_0000_8000_0001 }) |raw| {
             const bits = if (case.ty == .i32 or case.ty == .f32) raw & 0xffff_ffff else raw;
@@ -268,7 +268,7 @@ test "backend memory: imported views may alias and shared memories refuse explic
     defer graph.deinit();
     var owner = try prototype.CodeAllocator.init(a, 256 * 1024);
     defer owner.deinit();
-    var code = try native.compile(a, &owner, graph.graph);
+    var code = try prototype.compile(a, &owner, &graph, .{});
     defer code.deinit();
     var result = try prototype.runInInstance(&code, &instance, &.{ 3, 0xaabb_ccdd }, 1);
     defer result.deinit();
@@ -312,7 +312,7 @@ test "backend memory: compiled instance calls observe replacement backing stores
     defer graph.deinit();
     var owner = try prototype.CodeAllocator.init(a, 256 * 1024);
     defer owner.deinit();
-    var code = try native.compile(a, &owner, graph.graph);
+    var code = try prototype.compile(a, &owner, &graph, .{});
     defer code.deinit();
     var before = try prototype.runInInstance(&code, &instance, &.{0}, 1);
     defer before.deinit();
@@ -370,7 +370,7 @@ test "backend memory: loop stores and partial progress match both Wasm engines" 
         instance.spasm_diagnostics = true;
         var graph = try prototype.lowerInstance(a, &instance, 0);
         defer graph.deinit();
-        var code = try native.compile(a, &owner, graph.graph);
+        var code = try prototype.compile(a, &owner, &graph, .{});
         defer code.deinit();
         const bytes = instance.memories[0].data;
         @memset(bytes, 0);
@@ -426,7 +426,7 @@ test "backend memory: Wasm memory64 immediate overflow traps at the original ins
     defer graph.deinit();
     var owner = try prototype.CodeAllocator.init(a, 256 * 1024);
     defer owner.deinit();
-    var code = try native.compile(a, &owner, graph.graph);
+    var code = try prototype.compile(a, &owner, &graph, .{});
     defer code.deinit();
     var result = try prototype.runInInstance(&code, &instance, &.{1}, 1);
     defer result.deinit();
@@ -447,7 +447,7 @@ test "backend memory: module lowering retains memory metadata and exact float bi
     try std.testing.expectEqual(@as(u32, 1), graph.graph.memory_count);
     var owner = try prototype.CodeAllocator.init(a, 256 * 1024);
     defer owner.deinit();
-    var code = try native.compile(a, &owner, graph.graph);
+    var code = try prototype.compile(a, &owner, &graph, .{});
     defer code.deinit();
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
@@ -479,7 +479,7 @@ test "backend memory: instance calls refresh memory views after host growth" {
     defer graph.deinit();
     var owner = try prototype.CodeAllocator.init(a, 256 * 1024);
     defer owner.deinit();
-    var code = try native.compile(a, &owner, graph.graph);
+    var code = try prototype.compile(a, &owner, &graph, .{});
     defer code.deinit();
     var before = try prototype.runInInstance(&code, &instance, &.{wasm.PAGE_SIZE}, 1);
     defer before.deinit();

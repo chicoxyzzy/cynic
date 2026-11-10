@@ -25,7 +25,7 @@ fn compare(module: *const wasm.Module, args: []const u64, expected: []const u64)
     var owner = try prototype.CodeAllocator.init(a, 256 * 1024);
     defer owner.deinit();
     for ([_]u8{ 0, 1, 4 }) |registers| for ([_]bool{ false, true }) |optimize| {
-        var code = try prototype.native.compileWithOptions(a, &owner, graph.graph, .{ .register_count = registers, .optimization = .{ .constant_folding = optimize, .common_subexpression_elimination = optimize, .dead_code_elimination = optimize } });
+        var code = try prototype.compile(a, &owner, &graph, .{ .register_count = registers, .optimization = .{ .constant_folding = optimize, .common_subexpression_elimination = optimize, .dead_code_elimination = optimize } });
         defer code.deinit();
         var values: [64]u64 = undefined;
         var completion = try prototype.runResultsInInstance(&code, &instance, args, 100, values[0..expected.len]);
@@ -99,7 +99,7 @@ test "backend results: imported result lists retain types and exact callback err
     defer graph.deinit();
     var owner = try prototype.CodeAllocator.init(a, 64 * 1024);
     defer owner.deinit();
-    var code = try prototype.native.compile(a, &owner, graph.graph);
+    var code = try prototype.compile(a, &owner, &graph, .{});
     defer code.deinit();
     try std.testing.expectError(error.ResultCount, prototype.runInInstance(&code, &instance, &.{42}, 10));
     try std.testing.expectEqual(@as(usize, 0), host.calls);
@@ -139,7 +139,7 @@ test "backend results: cross-instance multi-result calls preserve defining insta
     defer graph.deinit();
     var owner = try prototype.CodeAllocator.init(a, 64 * 1024);
     defer owner.deinit();
-    var code = try prototype.native.compile(a, &owner, graph.graph);
+    var code = try prototype.compile(a, &owner, &graph, .{});
     defer code.deinit();
     for ([_]bool{ false, true }) |spasm| {
         provider.spasm_enabled = spasm;

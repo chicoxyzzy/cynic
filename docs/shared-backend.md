@@ -127,7 +127,8 @@ strict scalar FP arithmetic, comparisons, bitwise operations, explicit width
 conversions, ordered guards/traps, block parameters, jumps, conditional branches,
 bounded scalar loads/stores, and typed runtime calls. Wasm bulk-memory
 instructions lower through those calls. Functions and calls
-support zero to 64 scalar results through one result-list model.
+support zero to 64 scalar results through one result-list model. Scalar Wasm
+globals use the same ordered loads/stores as other bounded views.
 The Wasm adapter accepts locals, scalar-typed block/loop/if constructs (including
 multiple block parameters/results), `br`/`br_if`/`br_table`, and scalar `select`.
 Unsupported instructions or types are an explicit refusal, even in dead
@@ -786,6 +787,53 @@ WPT matches its named baseline (592 passing subtests, 11 known failures, two
 existing parse-error files). That WPT run checks the interpreter helpers, not
 shared-native JavaScript API qualification.
 
+### Scalar globals
+
+`global.get` and `global.set` lower directly to typed loads/stores for i32,
+i64, f32, and f64. Reads retain exact bits, including signed zero and NaN
+payloads. Stores preserve the scalar Cell's canonical low 64-bit word, including
+zero-extension for i32/f32. These are ordered memory effects: a write, an aliased
+import, or a callee update cannot be hidden by CSE or removed as a dead result.
+No per-access host call or Wasm-specific shared IR opcode is needed.
+
+The Wasm frontend owns a compact list of referenced global indices alongside
+the compiled code. It copies that list out of the temporary lowering arena;
+the instance cache owns and releases it with the same quota allocator as other
+compiler metadata. At entry, each index binds a view of the instance's actual
+global cell, after the linear-memory views. Imported aliases therefore share
+storage, while one compiled function can bind different compatible instances
+without embedded instance pointers. Callee/growth refreshes preserve both kinds
+of view. Only referenced globals consume the existing 64-view budget; exceeding
+it is a pre-entry resource refusal, not an unbounded compiler allocation.
+
+The [Wasm variable instructions](https://webassembly.github.io/spec/core/exec/instructions.html#variable-instructions)
+define the reads/writes; mutability remains a validator obligation. The
+instance-storage model follows [V8's global lowering](https://raw.githubusercontent.com/v8/v8/main/src/compiler/turboshaft/wasm-lowering-reducer.h)
+and Cynic's Spasm implementation. Reference/SIMD global accesses still refuse,
+including in dead bytecode, but unused non-scalar imports do not prevent scalar
+functions from compiling. Reference barriers/roots and SIMD representation
+remain separate work. No ECMA-262 or SES surface changes.
+
+Tests cover imported aliases, immutable/defined globals, exact scalar bits,
+callee updates, graph-to-code binding lifetime, all optimization/allocation
+modes, allocation failures, view-budget boundaries, and writes before traps
+without fallback replay. A forced-native JS API test changes an imported global
+inside a collecting callback. Broader production and rollout gates remain open.
+
+Local verification on 2026-11-10: the full AArch64 ReleaseSafe unit/CLI suite
+passes 4,201 tests with 303 skips (55/55 build steps); x86_64 Debug backend tests
+under Rosetta pass 234 with one hardware-dependent skip. Both harness-contract
+runs pass 18 tests. All 232 Wasm manifests match the interpreter in shared-only
+and shared/Spasm modes on both architectures: 61,051 passes, 1,370 skips each.
+Shared-only mode compiles 3,570 functions with 2,067 refusals (77 more compiled
+and 75 fewer refusals than bulk memory alone). The production test262 pass set
+is byte-identical after the RSS precheck: 48,653 passes, 1,324 existing failures.
+GC-threshold-1 ReleaseSafe WPT retains its named baseline: 592 passing subtests,
+11 known failures, two existing parse-error files. WPT remains an interpreter
+reference check; the collecting-callback unit test requires shared-native entry.
+Native x86_64 hardware and wasm32 builds remain CI gates, with no performance
+or default-on claim.
+
 ## Runtime calls and root snapshots
 
 `call` is an ordered read/write/trapping safepoint with an explicit scalar
@@ -845,13 +893,13 @@ production qualification.
 ## Safety and non-goals
 
 - No JS heap-object dereferences, shared-memory accesses,
-  atomics, SIMD, exception handlers, table/global/tag imports, inlining, OSR, or
-  automatic shared-backend tier-up in this slice.
+  atomics, SIMD, exception handlers, table/tag imports, reference-global accesses,
+  inlining, OSR, or automatic shared-backend tier-up in this slice.
 - Developer module decoding caps input at 64 KiB and decoder/validator workspace
   at 8 MiB. Runtime lowering starts from an already validated instance.
   Shared compilation caps function bodies at 16 KiB, blocks at 256, SSA values at 2,048,
   IR nodes (including guards) at 4,096, arguments/results/captures at 64, and
-  memory views at 64.
+  linear-memory/global views at 64.
   The JS adapter caps bytecode at 16 KiB and registers at 63. Runtime scratch
   storage is heap-allocated and bounded by those limits; the developer execution
   budget is at most 1,000,000 visits.
@@ -1047,7 +1095,8 @@ failures, but is not evidence that an unimplemented backend capability works.
    conversions), the complete scalar integer family, and bounded scalar memory
    now run natively, with explicit ordered arithmetic/conversion/memory traps.
    Direct scalar calls now bridge through existing runtime dispatch, including
-   function imports, direct memory size/growth, bulk memory, and callee growth.
+   function imports, direct memory size/growth, bulk memory, scalar globals,
+   and callee growth.
    Scalar structured control now includes multi-value block parameters/results,
    branch tables, and selection.
    Function and call signatures support void and multiple scalar results.

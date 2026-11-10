@@ -3352,6 +3352,49 @@ test "backend memory growth: JS buffers detach or refresh through shared native 
     try testing.expectEqual(@as(u32, 0), instance.spasm_runs);
 }
 
+test "backend globals: JS imports stay aliased across a collecting callback" {
+    const testing = std.testing;
+    const lantern = @import("../lantern/interpreter.zig");
+    if (comptime !wasm.backend_prototype.native.supported) return error.SkipZigTest;
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.allow_wasm_compile = true;
+    realm.jit_enabled = true;
+    realm.wasm_shared_backend_enabled = true;
+    try realm.installBuiltins();
+    try realm.installTestGlobals();
+    const setup = try lantern.evaluateScript(testing.allocator, &realm,
+        \\const backendGlobal = new WebAssembly.Global({value: "i32", mutable: true}, 3);
+        \\const backendGlobalInstance = new WebAssembly.Instance(new WebAssembly.Module(new Uint8Array([
+        \\  0,97,115,109,1,0,0,0,1,9,2,96,0,0,96,1,127,1,127,
+        \\  2,21,3,1,104,1,102,0,0,1,104,1,97,3,127,1,1,104,1,98,3,127,1,
+        \\  3,2,1,1,7,5,1,1,103,0,1,10,12,1,10,0,32,0,36,0,16,0,35,1,11
+        \\])), {h: {a: backendGlobal, b: backendGlobal, f() {
+        \\  __collectGarbage(); backendGlobal.value += 7;
+        \\}}});
+        \\backendGlobalInstance.exports.g;
+    );
+    const function = switch (setup) {
+        .value => |value| heap_mod.valueAsFunction(value) orelse return error.TestUnexpectedResult,
+        else => return error.TestUnexpectedResult,
+    };
+    const record: *ExportRecord = @ptrCast(@alignCast(function.wasm_export orelse return error.TestUnexpectedResult));
+    realm.collectGarbage();
+    const result = try lantern.evaluateScript(testing.allocator, &realm,
+        \\if (backendGlobalInstance.exports.g(35) !== 42 || backendGlobal.value !== 42) throw new Error("first call");
+        \\backendGlobal.value = -1;
+        \\if (backendGlobalInstance.exports.g(-10) !== -3 || backendGlobal.value !== -3) throw new Error("second call");
+        \\42;
+    );
+    switch (result) {
+        .value => |value| try testing.expectEqual(@as(i32, 42), value.asInt32()),
+        else => return error.TestUnexpectedResult,
+    }
+    try testing.expectEqual(@as(u64, 2), record.instance.shared_backend_stats.entries);
+    try testing.expectEqual(@as(u64, 1), record.instance.shared_backend_stats.compiles);
+    try testing.expectEqual(@as(u32, 0), record.instance.spasm_runs);
+}
+
 test "WebAssembly JS API: a fuel-metered loop remains in Spasm" {
     try testFuelMeteredNativeLoop(false);
 }
