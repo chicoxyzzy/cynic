@@ -44,7 +44,7 @@ pub const opcodes = @import("opcodes.zig");
 pub const code = @import("code.zig");
 pub const validator = @import("validator.zig");
 pub const interpreter = @import("interpreter.zig");
-/// Shared scalar lowering, bounded demos, and controlled instance execution.
+/// Shared backend lowering, bounded demos, and controlled instance execution.
 pub const backend_prototype = @import("backend_prototype.zig");
 
 pub const Reader = reader.Reader;
@@ -101,6 +101,7 @@ test {
     _ = @import("backend_bulk_memory_test.zig");
     _ = @import("backend_global_test.zig");
     _ = @import("backend_reference_test.zig");
+    _ = @import("backend_vector_test.zig");
     _ = @import("backend_tail_test.zig");
     _ = @import("backend_call_test.zig");
     _ = @import("backend_control_test.zig");

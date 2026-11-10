@@ -241,7 +241,7 @@ test "backend globals: allocation failures release bindings and compiler workspa
     try std.testing.checkAllAllocationFailures(no_resize.allocator(), globalAllocationFailures, .{ &owner, &instance });
 }
 
-test "backend globals: unsupported cells refuse even in dead code but unused imports do not" {
+test "backend globals: vector cells lower in live and dead code but unused imports stay unbound" {
     for ([_]wasm.ValType{.v128}) |ty| {
         var arena = std.heap.ArenaAllocator.init(a);
         defer arena.deinit();
@@ -262,8 +262,12 @@ test "backend globals: unsupported cells refuse even in dead code but unused imp
         var graph = try prototype.lowerInstance(a, &instance, 0);
         defer graph.deinit();
         try std.testing.expectEqual(@as(usize, 0), graph.global_indices.len);
-        try std.testing.expectError(error.UnsupportedType, prototype.lowerInstance(a, &instance, 1));
-        try std.testing.expectError(error.UnsupportedType, prototype.lowerInstance(a, &instance, 2));
+        for ([_]u32{ 1, 2 }) |index| {
+            var used = try prototype.lowerInstance(a, &instance, index);
+            defer used.deinit();
+            try used.graph.verify();
+            try std.testing.expectEqualSlices(u32, &.{0}, used.global_indices);
+        }
     }
     var invalid = alias_module;
     invalid.imports = &.{

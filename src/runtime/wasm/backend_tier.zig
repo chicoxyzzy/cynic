@@ -95,10 +95,11 @@ pub fn run(allocator: std.mem.Allocator, instance: *interpreter.Instance, func: 
     var arguments: [frontend.ir.max_arguments]u64 = undefined;
     var results: [frontend.ir.max_arguments]u64 = undefined;
     const words = frontend.abi.pack(signature.params, args, &arguments) catch return error.SharedBackendFailure;
+    const result_words = results[0..frontend.ir.wordCount(code.code.result_types)];
     // Allocate the public result before entry, so OOM cannot replay side effects.
     const out = try allocator.alloc(u128, signature.results.len);
     errdefer allocator.free(out);
-    var result = frontend.runControlledInInstance(code, instance.invocation_allocator orelse allocator, instance, words, execution_control, if (instance.shared_backend_diagnostics) &instance.shared_backend_stats.entries else null, results[0..code.code.result_types.len]) catch |err| {
+    var result = frontend.runControlledInInstance(code, instance.invocation_allocator orelse allocator, instance, words, execution_control, if (instance.shared_backend_diagnostics) &instance.shared_backend_stats.entries else null, result_words) catch |err| {
         inline for (@typeInfo(interpreter.Error).error_set.error_names.?) |name| {
             if (err == @field(interpreter.Error, name)) return @field(interpreter.Error, name);
         }
@@ -106,7 +107,7 @@ pub fn run(allocator: std.mem.Allocator, instance: *interpreter.Instance, func: 
     };
     defer result.deinit();
     switch (result) {
-        .returned => frontend.abi.unpack(signature.results, results[0..code.code.result_types.len], out) catch return error.SharedBackendFailure,
+        .returned => frontend.abi.unpack(signature.results, result_words, out) catch return error.SharedBackendFailure,
         .trapped => |trap| return trap.reason.toError(),
         .exited => |exit| {
             frontend.stageTailCall(code, instance, exit.id, exit.values) catch |err| {

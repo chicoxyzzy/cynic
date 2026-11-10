@@ -53,7 +53,7 @@ test "backend tail calls: alternating shared and Spasm entries use one trampolin
         .funcs = &.{ 0, 0 },
         .code = &.{
             .{ .bytes = &.{ 0, 0x20, 0, 0x45, 0x04, 0x7f, 0x41, 42, 0x05, 0x20, 0, 0x41, 1, 0x6b, 0x12, 1, 0x0b, 0x0b } },
-            .{ .bytes = &.{ 0, 0xfd, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x1a, 0x20, 0, 0x12, 0, 0x0b } },
+            .{ .bytes = &.{ 0, 0xfd, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xfd, 77, 0x1a, 0x20, 0, 0x12, 0, 0x0b } },
         },
     };
     var instance: wasm.Instance = undefined;
@@ -422,7 +422,7 @@ test "backend tail calls: full physical arity preserves reordered arguments and 
         if (fallback) {
             try callee.appendSlice(arena.allocator(), &.{ 0xfd, 12 });
             try callee.appendNTimes(arena.allocator(), 0, 16);
-            try callee.append(arena.allocator(), 0x1a);
+            try callee.appendSlice(arena.allocator(), &.{ 0xfd, 77, 0x1a });
         }
         var args: [params.len]u128 = undefined;
         var expected: [params.len]u128 = undefined;
@@ -513,7 +513,7 @@ test "backend tail calls: dormant controllers wake between shared and mixed-tier
             .funcs = if (mixed) &.{ 0, 0 } else &.{0},
             .code = if (mixed) &.{
                 .{ .bytes = &.{ 0, 0x20, 0, 0x12, 1, 0x0b } },
-                .{ .bytes = &.{ 0, 0xfd, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x1a, 0x20, 0, 0x12, 0, 0x0b } },
+                .{ .bytes = &.{ 0, 0xfd, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xfd, 77, 0x1a, 0x20, 0, 0x12, 0, 0x0b } },
             } else &.{.{ .bytes = &.{ 0, 0x20, 0, 0x12, 0, 0x0b } }},
         };
         var instance: wasm.Instance = undefined;

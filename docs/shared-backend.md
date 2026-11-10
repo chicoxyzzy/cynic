@@ -139,12 +139,12 @@ strict scalar FP arithmetic, comparisons, bitwise operations, explicit width
 conversions, ordered guards/traps, block parameters, jumps, conditional branches,
 bounded scalar loads/stores, and typed runtime calls. Wasm bulk-memory and table
 instructions lower through those calls. Functions and calls support zero to 64
-physical 64-bit words through one result-list model; a Wasm reference uses two.
+physical 64-bit words through one result-list model; references and vectors use two.
 The backend also has native v128 values, full-width memory accesses, bitwise
-operations, and lane-wise addition. The Wasm adapter does not yet lower SIMD;
-the vector foundation and its remaining integration work are detailed below.
-Scalar/reference globals use ordered loads/stores over bounded views.
-The Wasm adapter accepts scalar/reference locals and block/loop/if constructs
+operations, and lane-wise addition. The Wasm adapter lowers this initial SIMD
+set; full instruction coverage remains open as detailed below.
+Scalar/reference/vector globals use ordered loads/stores over bounded views.
+The Wasm adapter accepts scalar/reference/vector locals and block/loop/if constructs
 (including multiple block parameters/results), branches, and selection.
 Unsupported instructions or types are an explicit refusal, even in dead
 bytecode. Standalone frontend tests do not fall back. The opt-in runtime tier
@@ -203,7 +203,7 @@ no OSR or hotness-based tier-up yet.
 `wasm/backend_tier.zig` owns a pointer-stable, per-instance cache, including
 negative entries for unsupported functions. Compilation refusal can fall back
 only before execution. Errors after native entry propagate without replaying
-stores or callbacks. Scalar direct calls use the runtime dispatcher, so an
+stores or callbacks. Calls use the runtime dispatcher, so an
 eligible callee may also use shared code; this is not direct native linking.
 Memory descriptors refresh after callees, and foreign exception tags/payloads
 retain their defining-instance identity. Exception-handler bodies still refuse.
@@ -611,8 +611,8 @@ i32/i64: arithmetic, signed/unsigned division and remainder, bitwise operations,
 masked shifts/rotates, zero/leading/trailing/population counts, comparisons,
 integer width conversions, and sign-extension operations. Numeric integer/float
 conversions are described above and memory accesses below. It also accepts
-`unreachable`, including in dead validated code. Unsupported operations such
-as SIMD instructions still refuse even in dead bytecode.
+`unreachable`, including in dead validated code. Unsupported operations still
+refuse even in dead bytecode; the supported SIMD subset is described below.
 
 Division and remainder declare `may_trap` effects and require a frontend-owned
 `trap_site`; pure operations and guards reject that metadata. A terminal `trap`
@@ -831,8 +831,8 @@ The [Wasm variable instructions](https://webassembly.github.io/spec/core/exec/in
 define the reads/writes; mutability remains a validator obligation. The
 instance-storage model follows [V8's global lowering](https://raw.githubusercontent.com/v8/v8/main/src/compiler/turboshaft/wasm-lowering-reducer.h)
 and Cynic's Spasm implementation. Reference globals now use the paired-word
-representation below. SIMD accesses still refuse, including in dead bytecode,
-but unused SIMD imports do not prevent scalar functions from compiling.
+representation below. Vector globals use full-width 16-byte accesses, and
+unused imports of any supported type consume no view slots.
 No ECMA-262 or SES surface changes.
 
 Tests cover imported aliases, immutable/defined globals, exact scalar bits,
@@ -1050,12 +1050,13 @@ production qualification.
 ## Safety and non-goals
 
 - No JS heap-object dereferences, shared-memory accesses,
-  atomics, SIMD, exception handlers, tag imports,
+  atomics, exception handlers, tag imports,
   inlining, OSR, or automatic shared-backend tier-up in this slice.
 - Developer module decoding caps input at 64 KiB and decoder/validator workspace
   at 8 MiB. Runtime lowering starts from an already validated instance.
   Shared compilation caps function bodies at 16 KiB, blocks at 256, SSA values at 2,048,
-  IR nodes (including guards) at 4,096, arguments/results/captures at 64, and
+  IR nodes (including guards) at 4,096, argument/result/capture payloads at 64
+  physical 64-bit words, and
   linear-memory/global views at 64.
   The JS adapter caps bytecode at 16 KiB and registers at 63. Runtime scratch
   storage is heap-allocated and bounded by those limits; the developer execution
@@ -1092,12 +1093,12 @@ contracts when adding production execution paths.
 
 ## Structured Wasm control
 
-The Wasm adapter lowers scalar/reference-typed `block`, `loop`, and `if`/`else`,
+The Wasm adapter lowers scalar/reference/vector-typed `block`, `loop`, and `if`/`else`,
 including type-index signatures with multiple parameters/results; `br`, `br_if`, and
 `br_table`; explicit return and branches to the implicit function label; and
-typed selection (plus untyped scalar `select`). Function and runtime-call
-signatures also support void/multiple logical results through scalar words. SIMD control
-and exception handling remain outside this adapter; tail calls use terminal exits.
+typed selection (plus untyped numeric/vector `select`). Function and runtime-call
+signatures support void/multiple logical results through width-aware payloads.
+Exception handling remains outside this adapter; tail calls use terminal exits.
 
 The [Wasm control instruction rules](https://webassembly.github.io/spec/core/exec/instructions.html#control-instructions)
 distinguish loop parameters from block results. Wasmtime's
@@ -1233,10 +1234,53 @@ shape and bitwise operation, constant/CSE identity, mixed-width cyclic edges,
 maximum-width callbacks, nested native re-entry clobbering all allocated vector
 registers, guards/exits, unaligned and failing memory accesses, hostile FP
 rounding/flush modes, allocation failures, and maximum-sized scratch with
-control/memory/callback metadata. These are backend tests, **not evidence of
-Wasm SIMD integration or production qualification**. Wasm's Cell/signature
-adapter and complete accepted SIMD instruction lowering remain next, followed
-by forced-native corpus coverage on both architectures.
+control/memory/callback metadata. These establish the backend storage contract;
+frontend integration has its own tests below. Neither closes the production
+qualification checklist.
+
+### Wasm vector integration
+
+The opt-in Wasm tier now carries `v128` through parameters, results, zeroed
+locals, selections, block transfers, globals, direct/indirect/typed calls,
+imports, and proper tail calls. The Cell adapter distinguishes three counts:
+logical Wasm values, lowered SSA values, and physical 64-bit words. A vector
+is one Wasm value and one SSA value, but two payload words. A reference remains
+one Wasm value lowered to two i64 SSA values. Type arrays are allocated to
+their exact lowered length; payload limits remain 64 words, including dynamic
+call selectors. Vector bits are never included in external-reference snapshots.
+
+`v128.const`, `v128.load/store`, `v128.and/or/xor`, and the six integer/float
+lane-wise additions lower directly to the native vector operations above.
+Scalar and vector memory decoding share the same memory32/memory64 and
+multi-memory immediate handling. Full-width globals use one 16-byte access;
+loads/stores keep the existing aliasing and ordered bounds/trap contracts.
+Other SIMD operations still refuse before native entry, even in dead code.
+Fallback tests use an unsupported operation rather than a now-supported
+constant, so their tier-transition assertions remain meaningful.
+
+This follows the Wasm Core [vector type](https://webassembly.github.io/spec/core/syntax/types.html#vector-types)
+and [vector instruction](https://webassembly.github.io/spec/core/exec/instructions.html#vector-instructions)
+rules: all 128 bits are observable, while lane interpretation belongs to each
+operation. [B3's V128 type](https://github.com/WebKit/WebKit/blob/main/Source/JavaScriptCore/b3/B3Type.h)
+and [V8's typed Wasm values](https://github.com/v8/v8/blob/main/src/wasm/wasm-value.h)
+likewise keep vector data distinct from references. Cynic retains its existing
+Cell ABI at tier boundaries rather than importing either engine's frame layout.
+No ECMA-262/SES surface or default tier policy changes.
+
+Integration tests require actual shared-backend entry and cover mixed
+scalar/reference/vector signatures, 32-vector Wasm calls, selector-inclusive
+limits, all allocation/optimization modes, cyclic local transfers, high-word
+constants, aliased globals, foreign and host calls (including all three tail
+forms), Sarcasm/Spasm/shared callees, reference-root failures without replay,
+OOM cleanup, and unaligned/out-of-bounds multi-memory accesses. Arithmetic
+differentials preserve exact non-NaN bits and compare arithmetic NaNs by class.
+
+The 232-manifest Wasm corpus retains 61,051 passes and 1,370 skips on AArch64
+and x86-64 under Rosetta, with identical per-manifest results in shared-only and
+shared-plus-Spasm modes. Shared-only compiled-function coverage increases from
+4,602 to 4,867; refusals fall from 1,518 to 1,257. The mixed-tier run compiles
+4,868 functions through the shared backend. These are coverage counts, not performance claims. Complete
+SIMD lowering and both-architecture production qualification remain open.
 
 ### Production completion checklist
 
@@ -1294,12 +1338,14 @@ failures, but is not evidence that an unimplemented backend capability works.
    now run natively, with explicit ordered arithmetic/conversion/memory traps.
    Direct, indirect, and typed-reference calls now bridge through existing runtime
    dispatch, including function imports, direct memory size/growth, bulk memory,
-   scalar/reference globals, table operations, and callee growth.
-   Scalar/reference structured control includes multi-value block parameters/results,
+   scalar/reference/vector globals, table operations, and callee growth.
+   Scalar/reference/vector structured control includes multi-value block parameters/results,
    branch tables, nullable branches, and selection.
    Function and call signatures support void and multiple logical results.
    Proper tail calls use the tier-neutral terminal-exit handoff described above.
-   Continue with SIMD, exception handling, native linking,
+   Initial SIMD constants, full-width memory, bitwise operations, and lane-wise
+   additions now lower natively. Continue with the remaining SIMD operations,
+   exception handling, native linking,
    and production integration. Preserve bounds checks,
    memory-growth invalidation, resource metering, and executable ownership.
 6. **Rollout decision:** paired warm/cold execution measurements, compilation

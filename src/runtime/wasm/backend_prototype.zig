@@ -1,4 +1,4 @@
-//! Scalar Wasm frontend for the shared backend. Bounded developer entry points
+//! Wasm frontend for the shared backend. Bounded developer entry points
 //! coexist with host-controlled execution used by the opt-in instance tier.
 const std = @import("std");
 const decoder = @import("decoder.zig");
@@ -11,6 +11,7 @@ const Module = @import("module.zig").Module;
 const interpreter = @import("interpreter.zig");
 const Instance = interpreter.Instance;
 const metadata = @import("spasm_metadata.zig");
+const simd = @import("spasm_simd.zig");
 pub const abi = @import("backend_abi.zig");
 pub const ir = @import("../jit/backend/ir.zig");
 pub const native = @import("../jit/backend/native.zig");
@@ -78,7 +79,7 @@ pub fn lowerInstance(allocator: std.mem.Allocator, instance: *const Instance, fu
 /// Developer-only invocation. Direct calls use the existing Wasm tiers under a
 /// separate bounded callee budget, not production tier selection or Realm fuel.
 pub fn runInInstance(compiled: *const Compiled, instance: *Instance, args: []const u64, budget: u32) !native.Outcome {
-    if (compiled.code.result_types.len != 1) return error.ResultCount;
+    if (ir.wordCount(compiled.code.result_types) != 1) return error.ResultCount;
     var result: [1]u64 = .{0};
     const completion = try runResultsInInstance(compiled, instance, args, budget, &result);
     return native.Outcome.fromCompletion(completion, result[0]);
@@ -166,7 +167,7 @@ const RuntimeTarget = packed struct(u64) {
 };
 
 fn checkCallSignature(request: native.CallRequest, params: []const ir.Type, results: []const ir.Type) !void {
-    if (request.arguments.len != params.len or request.results.len != results.len or
+    if (request.arguments.len != ir.wordCount(params) or request.results.len != ir.wordCount(results) or
         !std.mem.eql(ir.Type, request.parameter_types, params) or
         !std.mem.eql(ir.Type, request.result_types, results)) return error.CallSignatureMismatch;
 }
@@ -320,7 +321,7 @@ const CallContext = struct {
         const signature = resolved.signature;
         var result_types: [ir.max_arguments]ir.Type = undefined;
         const expected_results = try abi.writeTypes(signature.results, &result_types);
-        if (request.results.len != expected_results.len or !std.mem.eql(ir.Type, request.result_types, expected_results)) return error.CallSignatureMismatch;
+        if (request.results.len != ir.wordCount(expected_results) or !std.mem.eql(ir.Type, request.result_types, expected_results)) return error.CallSignatureMismatch;
         const target = call_instance.funcRefAt(call_index) orelse return error.FunctionIndex;
         const inherited = self.execution_control orelse self.instance.execution_control orelse switch (target) {
             .wasm => |callee| callee.instance.execution_control,
@@ -355,7 +356,7 @@ fn resolveCall(instance: *Instance, target: RuntimeTarget, arguments: []const u6
     const total = count + @as(usize, if (dynamic) 2 else 0);
     if (total > ir.max_arguments or arguments.len != total) return error.CallSignatureMismatch;
     var types: [ir.max_arguments]ir.Type = undefined;
-    _ = try abi.writeTypes(expected.params, &types);
+    const type_count = (try abi.writeTypes(expected.params, &types)).len;
     var callee = instance;
     var index = target.index;
     if (dynamic) {
@@ -363,15 +364,15 @@ fn resolveCall(instance: *Instance, target: RuntimeTarget, arguments: []const u6
         const reference = if (target.kind == .call_indirect) ref: {
             if (extra[0] >= instance.tables.len) return error.UnsupportedImportCall;
             const table = instance.tables[@intCast(extra[0])];
-            types[count] = .i32;
-            types[count + 1] = if (table.is_64) .i64 else .i32;
+            types[type_count] = .i32;
+            types[type_count + 1] = if (table.is_64) .i64 else .i32;
             if (extra[1] >= table.elems.len) return error.UndefinedElement;
             const value = table.elems[@intCast(extra[1])];
             if (value == interpreter.REF_NULL) return error.UninitializedElement;
             break :ref value;
         } else ref: {
-            types[count] = .i64;
-            types[count + 1] = .i64;
+            types[type_count] = .i64;
+            types[type_count + 1] = .i64;
             const value = @as(u128, extra[0]) | (@as(u128, extra[1]) << 64);
             if (value == interpreter.REF_NULL) return error.NullReference;
             break :ref value;
@@ -389,7 +390,7 @@ fn resolveCall(instance: *Instance, target: RuntimeTarget, arguments: []const u6
             interpreter.funcTypesEqual(expected, actual);
         if (!compatible) return error.IndirectCallTypeMismatch;
     }
-    if (parameter_types) |actual| if (!std.mem.eql(ir.Type, actual, types[0..total])) return error.CallSignatureMismatch;
+    if (parameter_types) |actual| if (!std.mem.eql(ir.Type, actual, types[0 .. type_count + @as(usize, if (dynamic) 2 else 0)])) return error.CallSignatureMismatch;
     return .{ .instance = callee, .index = index, .signature = expected, .arguments = arguments[0..count] };
 }
 
@@ -484,7 +485,7 @@ fn collectMemories(module: *const Module, out: *[ir.max_memories]wasm_types.MemT
 pub fn evaluate(allocator: std.mem.Allocator, bytes: []const u8, function_index: u32, args: []const u64, budget: u32) !u64 {
     var graph = try lowerModule(allocator, bytes, function_index);
     defer graph.deinit();
-    if (args.len != graph.graph.argument_types.len) return error.ArgumentCount;
+    if (args.len != ir.wordCount(graph.graph.argument_types)) return error.ArgumentCount;
     if (comptime !native.supported) return error.UnsupportedTarget;
     var owner = try CodeAllocator.init(allocator, 256 * 1024);
     defer owner.deinit();
@@ -500,6 +501,8 @@ const Instruction = struct {
     op: Op,
     offset: u32,
     immediate: u64 = 0,
+    immediate_hi: u64 = 0,
+    simd_opcode: u32 = 0,
     target: u32 = missing,
     pop_count: u32 = 0,
     val_count: u32 = 0,
@@ -538,6 +541,13 @@ fn readBranch(inst: *Instruction, function: *const CompiledFunc, side_index: *us
     inst.val_count = branch.val_count;
 }
 
+fn readMemoryArgument(inst: *Instruction, reader: *Reader, memories: []const wasm_types.MemType) !void {
+    const alignment = try reader.uleb(u32);
+    if (alignment & 0x40 != 0) inst.memory_index = try reader.uleb(u32);
+    if (inst.memory_index >= memories.len) return error.InvalidMemory;
+    inst.immediate = if (memories[inst.memory_index].limits.is_64) try reader.uleb(u64) else try reader.uleb(u32);
+}
+
 fn endsBlock(op: Op) bool {
     return switch (op) {
         .return_call, .return_call_indirect, .return_call_ref => true,
@@ -555,8 +565,8 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
     const a = arena.allocator();
     var global_indices: std.ArrayList(u32) = .empty;
     var tail_calls: std.ArrayList(RuntimeTarget) = .empty;
-    const result_types = try abi.physicalTypes(a, signature.results);
-    const argument_types = try abi.physicalTypes(a, signature.params);
+    const result_types = try abi.loweredTypes(a, signature.results);
+    const argument_types = try abi.loweredTypes(a, signature.params);
     const local_types = function.local_types;
     _ = try abi.wordCount(local_types);
 
@@ -657,6 +667,15 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
             .i64_const => inst.immediate = @bitCast(try reader.sleb(i64)),
             .f32_const => inst.immediate = try reader.u32le(),
             .f64_const => inst.immediate = std.mem.readInt(u64, (try reader.bytesN(8))[0..8], .little),
+            .prefix_fd => {
+                inst.simd_opcode = try reader.uleb(u32);
+                if (inst.simd_opcode == 12) {
+                    inst.immediate = std.mem.readInt(u64, (try reader.bytesN(8))[0..8], .little);
+                    inst.immediate_hi = std.mem.readInt(u64, (try reader.bytesN(8))[0..8], .little);
+                } else if (memoryOperation(inst) != null) {
+                    try readMemoryArgument(&inst, &reader, memories);
+                } else if (vectorOperation(inst.simd_opcode) == null) return error.UnsupportedOpcode;
+            },
             .prefix_fc => {
                 inst.immediate = try reader.uleb(u32);
                 switch (inst.immediate) {
@@ -698,11 +717,8 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
                     else => return error.UnsupportedOpcode,
                 }
             },
-            else => if (memoryOperation(inst.op) != null) {
-                const alignment = try reader.uleb(u32);
-                if (alignment & 0x40 != 0) inst.memory_index = try reader.uleb(u32);
-                if (inst.memory_index >= memories.len) return error.InvalidMemory;
-                inst.immediate = if (memories[inst.memory_index].limits.is_64) try reader.uleb(u64) else try reader.uleb(u32);
+            else => if (memoryOperation(inst) != null) {
+                try readMemoryArgument(&inst, &reader, memories);
             } else if (scalarOperation(inst) == null) return error.UnsupportedOpcode,
         }
         try instructions.append(a, inst);
@@ -863,7 +879,7 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
                         const out = try builder.wasmValue(wasm_ty);
                         try nodes.append(a, .{ .op = .load, .out = out, .lhs = address, .trap_site = inst.offset, .memory = .{
                             .region = inst.secondary_index,
-                            .width = if (ir.is32(ty)) .word else .double,
+                            .width = if (ty == .v128) .quad else if (ir.is32(ty)) .word else .double,
                         } });
                         if (builder.references.items[out]) |reference| try nodes.append(a, .{ .op = .load, .out = reference.high, .lhs = address, .trap_site = inst.offset, .memory = .{
                             .region = inst.secondary_index,
@@ -873,6 +889,10 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
                         try stack.append(a, out);
                     } else {
                         var value = stack.pop() orelse return error.InvalidControlFlow;
+                        if (ty == .v128) {
+                            try nodes.append(a, .{ .op = .store, .lhs = address, .rhs = value, .trap_site = inst.offset, .memory = .{ .region = inst.secondary_index, .width = .quad } });
+                            continue;
+                        }
                         if (builder.references.items[value]) |reference| {
                             try nodes.append(a, .{ .op = .store, .lhs = address, .rhs = value, .trap_site = inst.offset, .memory = .{ .region = inst.secondary_index, .width = .double } });
                             try nodes.append(a, .{ .op = .store, .lhs = address, .rhs = reference.high, .trap_site = inst.offset, .memory = .{ .region = inst.secondary_index, .offset = 8, .width = .double } });
@@ -1042,12 +1062,25 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
                     } } else .{ .jump = edge };
                 },
                 else => {
-                    if (memoryOperation(inst.op)) |operation| {
+                    if (memoryOperation(inst)) |operation| {
                         const value = if (operation.store) stack.pop() orelse return error.InvalidControlFlow else 0;
                         const address = stack.pop() orelse return error.InvalidControlFlow;
                         const out = if (operation.store) null else try builder.value(operation.ty);
                         try nodes.append(a, .{ .op = if (operation.store) .store else .load, .out = out, .lhs = address, .rhs = value, .memory = .{ .region = inst.memory_index, .offset = inst.immediate, .width = operation.width, .signed = operation.signed }, .trap_site = inst.offset });
                         if (out) |result| try stack.append(a, result);
+                        continue;
+                    }
+                    if (inst.op == .prefix_fd) {
+                        const out = try builder.value(.v128);
+                        if (inst.simd_opcode == 12) {
+                            try nodes.append(a, .{ .op = .constant, .out = out, .immediate = inst.immediate, .immediate_hi = inst.immediate_hi });
+                        } else {
+                            const operation = vectorOperation(inst.simd_opcode) orelse return error.UnsupportedOpcode;
+                            const rhs = stack.pop() orelse return error.InvalidControlFlow;
+                            const lhs = stack.pop() orelse return error.InvalidControlFlow;
+                            try nodes.append(a, .{ .op = operation.op, .vector_lane = operation.lane, .out = out, .lhs = lhs, .rhs = rhs });
+                        }
+                        try stack.append(a, out);
                         continue;
                     }
                     const op = scalarOperation(inst) orelse return error.UnsupportedOpcode;
@@ -1091,8 +1124,13 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
 
 const MemoryOperation = struct { ty: ir.Type, width: ir.MemoryWidth, signed: bool = false, store: bool = false };
 
-fn memoryOperation(op: Op) ?MemoryOperation {
-    return switch (op) {
+fn memoryOperation(inst: Instruction) ?MemoryOperation {
+    return switch (inst.op) {
+        .prefix_fd => switch (inst.simd_opcode) {
+            0 => .{ .ty = .v128, .width = .quad },
+            11 => .{ .ty = .v128, .width = .quad, .store = true },
+            else => null,
+        },
         .i32_load => .{ .ty = .i32, .width = .word },
         .i64_load => .{ .ty = .i64, .width = .double },
         .f32_load => .{ .ty = .f32, .width = .word },
@@ -1116,6 +1154,31 @@ fn memoryOperation(op: Op) ?MemoryOperation {
         .i64_store8 => .{ .ty = .i64, .width = .byte, .store = true },
         .i64_store16 => .{ .ty = .i64, .width = .half, .store = true },
         .i64_store32 => .{ .ty = .i64, .width = .word, .store = true },
+        else => null,
+    };
+}
+
+const VectorOperation = struct { op: ir.Op, lane: ?ir.VectorLane = null };
+
+fn vectorOperation(sub: u32) ?VectorOperation {
+    if (simd.integerBinaryOp(sub)) |operation| {
+        if (operation.kind != .add or operation.saturating) return null;
+        return .{ .op = .vector_add, .lane = switch (operation.width) {
+            1 => .i8x16,
+            2 => .i16x8,
+            4 => .i32x4,
+            8 => .i64x2,
+            else => return null,
+        } };
+    }
+    if (simd.floatArithmeticOp(sub)) |operation| {
+        if (operation.kind != .add) return null;
+        return .{ .op = .vector_add, .lane = if (operation.double_precision) .f64x2 else .f32x4 };
+    }
+    return switch (sub) {
+        78 => .{ .op = .bit_and },
+        80 => .{ .op = .bit_or },
+        81 => .{ .op = .bit_xor },
         else => null,
     };
 }
@@ -1238,13 +1301,16 @@ const Builder = struct {
     }
 
     fn flatten(self: *Builder, values: []const ir.Value) ![]const ir.Value {
-        var words: std.ArrayList(ir.Value) = .empty;
+        var lowered: std.ArrayList(ir.Value) = .empty;
+        var words: usize = 0;
         for (values) |low| {
-            try words.append(self.a, low);
-            if (self.references.items[low]) |reference| try words.append(self.a, reference.high);
-            if (words.items.len > ir.max_arguments) return error.PrototypeLimit;
+            const width = self.types.items[low].words() + @intFromBool(self.references.items[low] != null);
+            if (width > ir.max_arguments - words) return error.PrototypeLimit;
+            words += width;
+            try lowered.append(self.a, low);
+            if (self.references.items[low]) |reference| try lowered.append(self.a, reference.high);
         }
-        return words.items;
+        return lowered.items;
     }
 
     fn runtimeCall(self: *Builder, nodes: *std.ArrayList(ir.Node), inst: Instruction, target: RuntimeTarget, arguments: []const ir.Value, results: []const ir.Value, captures: []const ir.Value) !void {
