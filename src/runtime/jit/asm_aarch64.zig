@@ -465,6 +465,14 @@ pub fn andV16b(vd: Reg, vn: Reg, vm: Reg) u32 {
     return 0x4E201C00 | (r(vm) << 16) | (r(vn) << 5) | r(vd);
 }
 
+pub fn orV16b(vd: Reg, vn: Reg, vm: Reg) u32 {
+    return 0x4EA01C00 | (r(vm) << 16) | (r(vn) << 5) | r(vd);
+}
+
+pub fn xorV16b(vd: Reg, vn: Reg, vm: Reg) u32 {
+    return 0x6E201C00 | (r(vm) << 16) | (r(vn) << 5) | r(vd);
+}
+
 /// EXT Vd.16B, Vn.16B, Vm.16B, #byte_offset.
 pub fn extV16b(vd: Reg, vn: Reg, vm: Reg, byte_offset: u4) u32 {
     return 0x6E000000 | (r(vm) << 16) | (@as(u32, byte_offset) << 11) | (r(vn) << 5) | r(vd);

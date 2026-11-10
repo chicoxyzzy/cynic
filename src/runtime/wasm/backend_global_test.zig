@@ -235,7 +235,10 @@ test "backend globals: allocation failures release bindings and compiler workspa
     defer instance.deinit();
     var owner = try prototype.CodeAllocator.init(a, 256 * 1024);
     defer owner.deinit();
-    try std.testing.checkAllAllocationFailures(a, globalAllocationFailures, .{ &owner, &instance });
+    // Arena growth must allocate so failure indices do not depend on whether
+    // the backing allocator can extend a particular mapping in place.
+    var no_resize = std.testing.FailingAllocator.init(a, .{ .resize_fail_index = 0 });
+    try std.testing.checkAllAllocationFailures(no_resize.allocator(), globalAllocationFailures, .{ &owner, &instance });
 }
 
 test "backend globals: unsupported cells refuse even in dead code but unused imports do not" {

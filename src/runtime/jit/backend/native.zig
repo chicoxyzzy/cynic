@@ -13,6 +13,8 @@ const fp_environment = @import("fp_environment.zig");
 const memory = @import("memory.zig");
 const call = @import("call.zig");
 const control = @import("control.zig");
+const scratch = @import("scratch.zig");
+const vector = @import("vector.zig");
 const stack_guard = @import("../../../stack_guard.zig");
 const code_alloc = @import("../code_alloc.zig");
 const a64 = @import("../asm_aarch64.zig");
@@ -142,7 +144,7 @@ pub const Compiled = struct {
     }
 
     pub fn runOutcomeWithRuntime(self: *const Compiled, args: []const u64, views: []const MemoryView, budget: u32, runtime: ?Runtime) !Outcome {
-        if (self.result_types.len != 1) return error.ResultCount;
+        if (ir.wordCount(self.result_types) != 1) return error.ResultCount;
         var result: [1]u64 = .{0};
         const completion = try self.runInto(args, views, budget, runtime, &result);
         return Outcome.fromCompletion(completion, result[0]);
@@ -164,8 +166,8 @@ pub const Compiled = struct {
     }
 
     fn runImpl(self: *const Compiled, allocator: std.mem.Allocator, args: []const u64, views: []const MemoryView, budget: u32, options: ControlledOptions, results: []u64) !Completion {
-        if (args.len != self.params.len) return error.ArgumentCount;
-        if (results.len != self.result_types.len) return error.ResultCount;
+        if (args.len != ir.wordCount(self.argument_types)) return error.ArgumentCount;
+        if (results.len != ir.wordCount(self.result_types)) return error.ResultCount;
         if (views.len != self.memory_count) return error.MemoryCount;
         if (self.call_sites.len != 0 and options.runtime == null) return error.MissingRuntime;
         if (stack_guard.nearLimit()) return error.CallStackExhausted;
@@ -188,13 +190,13 @@ pub const Compiled = struct {
             .call_base = self.callBase(),
         } else null;
         if (self.call_sites.len != 0) slots[self.callBase()] = @intFromPtr(&invocation.?);
-        for (args, self.argument_types, 0..) |arg, ty, i| slots[self.spill_slot_count + i] = ir.normalize(ty, arg);
+        copyWords(slots[self.spill_slot_count..][0..args.len], args, self.argument_types);
         const entry: Entry = @ptrCast(@alignCast(self.code.entry() orelse return error.MissingCode));
         const result_slot = self.spill_slot_count + ir.max_arguments;
         if (options.entry_counter) |counter| counter.* +%= 1;
         return switch (entry(slots.ptr, budget)) {
             0 => blk: {
-                for (results, self.result_types, 0..) |*out, ty, i| out.* = ir.normalize(ty, slots[self.spill_slot_count + i]);
+                copyWords(results, slots[self.spill_slot_count..][0..results.len], self.result_types);
                 break :blk .returned;
             },
             1 => error.BudgetExhausted,
@@ -227,6 +229,15 @@ pub const Compiled = struct {
     }
 };
 
+fn copyWords(destination: []u64, source: []const u64, types: []const ir.Type) void {
+    var offset: usize = 0;
+    for (types) |ty| {
+        destination[offset] = ir.normalize(ty, source[offset]);
+        if (ty == .v128) destination[offset + 1] = source[offset + 1];
+        offset += ty.words();
+    }
+}
+
 pub fn compile(a: std.mem.Allocator, owner: *code_alloc.CodeAllocator, graph: ir.Graph) !Compiled {
     return compileWithOptions(a, owner, graph, .{});
 }
@@ -258,7 +269,7 @@ fn emitGraph(a: std.mem.Allocator, owner: *code_alloc.CodeAllocator, graph: ir.G
     defer plan.deinit();
     var m = Machine.init(a);
     defer m.deinit();
-    var emission: Emission = .{ .m = &m, .plan = &plan, .transfer_base = plan.spill_slot_count };
+    var emission: Emission = .{ .m = &m, .plan = &plan, .types = graph.types, .transfer_base = plan.spill_slot_count };
     var call_count: usize = 0;
     for (graph.blocks) |block| for (block.nodes) |node| {
         if (node.op == .call) call_count += 1;
@@ -285,11 +296,7 @@ fn emitGraph(a: std.mem.Allocator, owner: *code_alloc.CodeAllocator, graph: ir.G
     var exhausted: Machine.Label = .{};
     defer exhausted.deinit(a);
     try emission.pollControl();
-    for (graph.blocks[0].params, 0..) |param, i| {
-        if (plan.locations[param] == .none) continue;
-        try emission.loadSlot(false, emission.transfer_base + i);
-        try emission.write(param);
-    }
+    try emission.restore(graph.blocks[0].params, emission.transfer_base, false);
     for (graph.blocks, 0..) |block, index| {
         try m.bind(&labels[index]);
         if (options.execution_policy == .bounded) try poll(&m, &exhausted);
@@ -306,7 +313,7 @@ fn emitGraph(a: std.mem.Allocator, owner: *code_alloc.CodeAllocator, graph: ir.G
                 try m.bind(&success);
                 continue;
             } else if (node.call) |runtime_call| {
-                call_sites[call_index] = .{ .target = runtime_call.target, .site = node.trap_site.?, .safepoint = runtime_call.safepoint.id, .argument_count = runtime_call.arguments.len, .capture_count = runtime_call.safepoint.values.len, .result_count = runtime_call.results.len };
+                call_sites[call_index] = .{ .target = runtime_call.target, .site = node.trap_site.?, .safepoint = runtime_call.safepoint.id, .argument_count = ir.wordCount(runtime_call.parameter_types), .capture_count = graph.valueWords(runtime_call.safepoint.values), .result_count = ir.wordCount(runtime_call.result_types), .parameter_count = runtime_call.parameter_types.len, .result_type_count = runtime_call.result_types.len };
                 @memcpy(call_sites[call_index].parameter_types[0..runtime_call.parameter_types.len], runtime_call.parameter_types);
                 @memcpy(call_sites[call_index].result_types[0..runtime_call.result_types.len], runtime_call.result_types);
                 try emission.invoke(node, @intCast(index), @intCast(2 * node_index + 1), call_index);
@@ -323,11 +330,13 @@ fn emitGraph(a: std.mem.Allocator, owner: *code_alloc.CodeAllocator, graph: ir.G
                 continue;
             } else if (node.op == .constant) {
                 if (plan.locations[node.out.?] == .immediate) continue;
-                try constant(&m, node.immediate);
+                if (graph.types[node.out.?] == .v128) try vector.constant(&m, node.immediate, node.immediate_hi) else try constant(&m, node.immediate);
             } else {
                 try emission.read(false, node.lhs);
                 if (ir.inputCount(node.op) == 2) try emission.read(true, node.rhs);
-                if (ir.isNumericConversion(node.op)) {
+                if (graph.types[node.lhs] == .v128) {
+                    try vector.emit(&m, node);
+                } else if (ir.isNumericConversion(node.op)) {
                     try emission.convert(node, graph.types[node.lhs], graph.types[node.out.?]);
                 } else if (ir.isFloatOp(node.op)) {
                     try float.emit(&m, node.op, graph.types[node.lhs]);
@@ -347,10 +356,7 @@ fn emitGraph(a: std.mem.Allocator, owner: *code_alloc.CodeAllocator, graph: ir.G
             .trap => |trap| try emission.emitTrap(trap),
             .exit => |side_exit| try emission.emitExit(side_exit),
             .return_ => |values| {
-                for (values, 0..) |value, i| {
-                    try emission.read(false, value);
-                    try emission.storeSlot(emission.transfer_base + i);
-                }
+                _ = try emission.capture(values, emission.transfer_base);
                 try emission.finish(0);
             },
             .jump => |edge| try emission.transfer(graph, edge, @intCast(index), labels),
@@ -396,6 +402,7 @@ fn emitGraph(a: std.mem.Allocator, owner: *code_alloc.CodeAllocator, graph: ir.G
 const Emission = struct {
     m: *Machine,
     plan: *const allocation.Plan,
+    types: []const ir.Type,
     transfer_base: usize,
     fp_state_slot: ?usize = null,
     memory_views_slot: ?usize = null,
@@ -406,8 +413,12 @@ const Emission = struct {
     fn read(self: *Emission, rhs: bool, value: ir.Value) !void {
         switch (self.plan.locations[value]) {
             .none => return error.InvalidAllocation,
-            .spill => |slot| try self.loadSlot(rhs, slot),
+            .spill => |slot| try self.loadValueSlot(rhs, slot, self.types[value]),
             .register => |register| try self.move(scratchRegister(rhs), allocatedRegister(register)),
+            .vector_register => |register| {
+                try vector.move(self.m, vector.temporary(rhs), vector.allocated(register));
+                self.stats.register_moves += 1;
+            },
             .immediate => |bits| {
                 try self.m.movImm64(scratchRegister(rhs), bits);
                 self.stats.rematerializations += 1;
@@ -418,20 +429,61 @@ const Emission = struct {
     fn write(self: *Emission, value: ir.Value) !void {
         switch (self.plan.locations[value]) {
             .none => {},
-            .spill => |slot| try self.storeSlot(slot),
+            .spill => |slot| try self.storeValueSlot(slot, self.types[value]),
             .register => |register| try self.move(allocatedRegister(register), scratchRegister(false)),
+            .vector_register => |register| {
+                try vector.move(self.m, vector.allocated(register), vector.temporary(false));
+                self.stats.register_moves += 1;
+            },
             .immediate => return error.InvalidAllocation,
         }
     }
 
     fn loadSlot(self: *Emission, rhs: bool, slot: usize) !void {
-        try load(self.m, rhs, slot);
+        try scratch.load(self.m, scratchRegister(rhs), slot);
         self.stats.loads += 1;
     }
 
     fn storeSlot(self: *Emission, slot: usize) !void {
-        try store(self.m, slot);
+        try scratch.store(self.m, scratchRegister(false), slot);
         self.stats.stores += 1;
+    }
+
+    fn loadValueSlot(self: *Emission, rhs: bool, slot: usize, ty: ir.Type) !void {
+        if (ty != .v128) return self.loadSlot(rhs, slot);
+        try scratch.loadVector(self.m, vector.temporary(rhs), slot);
+        self.stats.loads += 1;
+    }
+
+    fn storeValueSlot(self: *Emission, slot: usize, ty: ir.Type) !void {
+        if (ty != .v128) return self.storeSlot(slot);
+        try scratch.storeVector(self.m, vector.temporary(false), slot);
+        self.stats.stores += 1;
+    }
+
+    fn capture(self: *Emission, values: []const ir.Value, base: usize) !usize {
+        var offset: usize = 0;
+        for (values) |value| {
+            try self.read(false, value);
+            try self.storeValueSlot(base + offset, self.types[value]);
+            offset += self.types[value].words();
+        }
+        return offset;
+    }
+
+    fn restore(self: *Emission, values: []const ir.Value, base: usize, normalize_results: bool) !void {
+        var offset: usize = 0;
+        for (values) |value| {
+            const ty = self.types[value];
+            if (self.plan.locations[value] != .none) {
+                try self.loadValueSlot(false, base + offset, ty);
+                if (normalize_results and ir.is32(ty)) {
+                    if (comptime is_x86) try self.m.movReg32(.rax, .rax) else try self.m.emit(a64.movRegW(.x2, .x2));
+                }
+                try self.write(value);
+            }
+            offset += ty.words();
+        }
     }
 
     fn move(self: *Emission, destination: Reg, source: Reg) !void {
@@ -440,13 +492,10 @@ const Emission = struct {
     }
 
     fn emitExit(self: *Emission, side_exit: ir.SideExit) !void {
-        for (side_exit.values, 0..) |value, i| {
-            try self.read(false, value);
-            try self.storeSlot(self.transfer_base + i);
-        }
+        const count = try self.capture(side_exit.values, self.transfer_base);
         try constant(self.m, side_exit.id);
         try self.storeSlot(self.transfer_base + ir.max_arguments);
-        try constant(self.m, side_exit.values.len);
+        try constant(self.m, count);
         try self.storeSlot(self.transfer_base + ir.max_arguments + 1);
         try self.finish(2);
     }
@@ -469,16 +518,9 @@ const Emission = struct {
     fn transfer(self: *Emission, graph: ir.Graph, edge: ir.Edge, from: u32, labels: []Machine.Label) !void {
         // Capture all sources before changing any destination home, including
         // registers. Both register and spill permutations may contain cycles.
-        for (edge.args, 0..) |arg, i| {
-            try self.read(false, arg);
-            try self.storeSlot(self.transfer_base + i);
-        }
+        _ = try self.capture(edge.args, self.transfer_base);
         if (edge.target <= from) try self.pollControl();
-        for (graph.blocks[edge.target].params, 0..) |param, i| {
-            if (self.plan.locations[param] == .none) continue;
-            try self.loadSlot(false, self.transfer_base + i);
-            try self.write(param);
-        }
+        try self.restore(graph.blocks[edge.target].params, self.transfer_base, false);
         try self.m.jump(&labels[edge.target]);
     }
 
@@ -542,21 +584,23 @@ const Emission = struct {
         const runtime_call = node.call.?;
         const base = self.call_base.?;
         var live: [allocation.max_registers]bool = @splat(false);
+        var live_vectors: [allocation.max_registers]bool = @splat(false);
         for (self.plan.locations, self.plan.ranges) |location, range| {
-            if (range.block == block and range.start < position and range.end > position and location == .register)
-                live[location.register] = true;
+            if (range.block == block and range.start < position and range.end > position) switch (location) {
+                .register => |register| live[register] = true,
+                .vector_register => |register| live_vectors[register] = true,
+                else => {},
+            };
         }
-        for (runtime_call.arguments, 0..) |value, i| {
-            try self.read(false, value);
-            try self.storeSlot(self.transfer_base + i);
-        }
-        for (runtime_call.safepoint.values, 0..) |value, i| {
-            try self.read(false, value);
-            try self.storeSlot(base + call.captures_offset + i);
-        }
+        _ = try self.capture(runtime_call.arguments, self.transfer_base);
+        _ = try self.capture(runtime_call.safepoint.values, base + call.captures_offset);
         for (live, 0..) |used, register| if (used) {
             try self.move(scratchRegister(false), allocatedRegister(@intCast(register)));
             try self.storeSlot(base + call.saved_registers_offset + register);
+        };
+        for (live_vectors, 0..) |used, register| if (used) {
+            try scratch.storeVector(self.m, vector.allocated(@intCast(register)), base + call.saved_vectors_offset + 2 * register);
+            self.stats.stores += 1;
         };
         if (runtime_call.fp_mode == .host) {
             try fp_environment.leave(self.m, self.fp_state_slot.?);
@@ -580,13 +624,11 @@ const Emission = struct {
             try self.loadSlot(false, base + call.saved_registers_offset + register);
             try self.move(allocatedRegister(@intCast(register)), scratchRegister(false));
         };
-        for (runtime_call.results, runtime_call.result_types, 0..) |out, ty, i| {
-            try self.loadSlot(false, self.transfer_base + i);
-            if (ir.is32(ty)) {
-                if (comptime is_x86) try self.m.movReg32(.rax, .rax) else try self.m.emit(a64.movRegW(.x2, .x2));
-            }
-            try self.write(out);
-        }
+        for (live_vectors, 0..) |used, register| if (used) {
+            try scratch.loadVector(self.m, vector.allocated(@intCast(register)), base + call.saved_vectors_offset + 2 * register);
+            self.stats.loads += 1;
+        };
+        try self.restore(runtime_call.results, self.transfer_base, true);
     }
 
     fn finish(self: *Emission, status: u32) !void {
@@ -615,18 +657,6 @@ fn allocatedRegister(register: u8) Reg {
         ([_]Reg{ .rcx, .rdx, .r8, .r9 })[register]
     else
         ([_]Reg{ .x4, .x5, .x6, .x7 })[register];
-}
-
-fn load(m: *Machine, rhs: bool, slot: usize) !void {
-    if (comptime is_x86) {
-        try m.load64Disp32(if (rhs) .r10 else .rax, .rdi, @intCast(slot * 8));
-    } else try m.emit(a64.ldrImm(if (rhs) .x3 else .x2, .x0, @intCast(slot * 8)));
-}
-
-fn store(m: *Machine, slot: usize) !void {
-    if (comptime is_x86) {
-        try m.store64Disp32(.rdi, @intCast(slot * 8), .rax);
-    } else try m.emit(a64.strImm(.x2, .x0, @intCast(slot * 8)));
 }
 
 fn constant(m: *Machine, value: u64) !void {

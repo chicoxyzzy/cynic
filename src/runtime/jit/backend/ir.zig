@@ -1,11 +1,29 @@
-//! Language-neutral scalar SSA experiment. Cross-block values use block
+//! Language-neutral SSA experiment. Cross-block values use block
 //! arguments; there are no implicit heap effects or language-specific nodes.
 pub const max_values = 2048;
 pub const max_nodes = 4096;
 pub const max_blocks = 256;
+/// Physical 64-bit words per argument/result/edge/capture payload.
 pub const max_arguments = 64;
 pub const max_memories = 64;
-pub const Type = enum { i32, i64, f32, f64 };
+pub const Type = enum {
+    i32,
+    i64,
+    f32,
+    f64,
+    v128,
+
+    pub fn words(self: Type) usize {
+        return if (self == .v128) 2 else 1;
+    }
+};
+pub const VectorLane = enum { i8x16, i16x8, i32x4, i64x2, f32x4, f64x2 };
+
+pub fn wordCount(types: []const Type) usize {
+    var count: usize = 0;
+    for (types) |ty| count += ty.words();
+    return count;
+}
 pub const Value = u32;
 pub const Op = enum {
     constant,
@@ -19,6 +37,7 @@ pub const Op = enum {
     bit_and,
     bit_or,
     bit_xor,
+    vector_add,
     shl,
     shr_s,
     shr_u,
@@ -84,6 +103,7 @@ pub const MemoryWidth = enum(u8) {
     half = 2,
     word = 4,
     double = 8,
+    quad = 16,
 
     pub fn bytes(self: MemoryWidth) usize {
         return @backingInt(self);
@@ -132,6 +152,8 @@ pub const Node = struct {
     lhs: Value = 0,
     rhs: Value = 0,
     immediate: u64 = 0,
+    immediate_hi: u64 = 0,
+    vector_lane: ?VectorLane = null,
     exit: ?SideExit = null,
     trap_site: ?u32 = null,
     memory: ?MemoryAccess = null,
@@ -181,6 +203,7 @@ pub const Graph = struct {
     pub fn verify(self: Graph) !void {
         if (self.types.len > max_values or self.blocks.len > max_blocks or
             self.argument_types.len > max_arguments or self.result_types.len > max_arguments or self.memory_count > max_memories) return error.PrototypeLimit;
+        if (wordCount(self.argument_types) > max_arguments or wordCount(self.result_types) > max_arguments) return error.PrototypeLimit;
         if (self.blocks.len == 0 or self.blocks[0].params.len != self.argument_types.len)
             return error.InvalidGraph;
         var defined: [max_values]bool = @splat(false);
@@ -194,7 +217,10 @@ pub const Graph = struct {
                 try self.define(param, &defined, &available);
                 if (block_index == 0 and self.types[param] != self.argument_types[i]) return error.InvalidGraph;
             }
+            if (self.valueWords(block.params) > max_arguments) return error.PrototypeLimit;
             for (block.nodes) |node| {
+                if ((node.op == .vector_add) != (node.vector_lane != null)) return error.InvalidGraph;
+                if (node.immediate_hi != 0 and (node.op != .constant or node.out == null or node.out.? >= self.types.len or self.types[node.out.?] != .v128)) return error.InvalidGraph;
                 if (mayTrap(node.op) != (node.trap_site != null)) return error.InvalidGraph;
                 if (isMemoryOp(node.op) != (node.memory != null)) return error.InvalidGraph;
                 if ((node.op == .call) != (node.call != null)) return error.InvalidGraph;
@@ -205,6 +231,7 @@ pub const Graph = struct {
                     const side_exit = node.exit orelse return error.InvalidGraph;
                     if (side_exit.values.len > max_arguments) return error.PrototypeLimit;
                     for (side_exit.values) |value| try self.use(value, &available);
+                    if (self.valueWords(side_exit.values) > max_arguments) return error.PrototypeLimit;
                     continue;
                 }
                 if (node.exit != null) return error.InvalidGraph;
@@ -220,19 +247,20 @@ pub const Graph = struct {
                         try self.define(out, &defined, &available);
                         if (self.types[out] != ty) return error.InvalidGraph;
                     }
+                    if (wordCount(call.parameter_types) > max_arguments or wordCount(call.result_types) > max_arguments or self.valueWords(call.safepoint.values) > max_arguments) return error.PrototypeLimit;
                     continue;
                 }
                 if (node.memory) |access| {
                     if (access.region >= self.memory_count) return error.InvalidGraph;
                     try self.use(node.lhs, &available);
-                    if (isFloat(self.types[node.lhs])) return error.InvalidGraph;
+                    if (!isInteger(self.types[node.lhs])) return error.InvalidGraph;
                     const value = if (node.op == .load) node.out orelse return error.InvalidGraph else node.rhs;
                     if (value >= self.types.len) return error.InvalidGraph;
                     const ty = self.types[value];
-                    const width: usize = if (is32(ty)) 4 else 8;
+                    const width: usize = if (ty == .v128) 16 else if (is32(ty)) 4 else 8;
                     if (access.width.bytes() > width or
-                        (isFloat(ty) and access.width.bytes() != width) or
-                        (access.signed and (node.op == .store or isFloat(ty) or access.width.bytes() == width))) return error.InvalidGraph;
+                        (!isInteger(ty) and access.width.bytes() != width) or
+                        (access.signed and (node.op == .store or !isInteger(ty) or access.width.bytes() == width))) return error.InvalidGraph;
                     if (node.op == .load) {
                         try self.define(value, &defined, &available);
                     } else {
@@ -254,14 +282,16 @@ pub const Graph = struct {
                 } else if (isNumericConversion(node.op)) {
                     try self.use(node.lhs, &available);
                     const to_float = node.op == .convert_s or node.op == .convert_u;
-                    if (isFloat(self.types[node.lhs]) == to_float or isFloat(out_type) != to_float) return error.InvalidGraph;
+                    if (self.types[node.lhs] == .v128 or out_type == .v128 or isFloat(self.types[node.lhs]) == to_float or isFloat(out_type) != to_float) return error.InvalidGraph;
                 } else if (node.op == .reinterpret) {
                     try self.use(node.lhs, &available);
                     const source = self.types[node.lhs];
-                    if (isFloat(source) == isFloat(out_type) or is32(source) != is32(out_type)) return error.InvalidGraph;
+                    if (source == .v128 or out_type == .v128 or isFloat(source) == isFloat(out_type) or is32(source) != is32(out_type)) return error.InvalidGraph;
                 } else {
                     try self.use(node.lhs, &available);
                     const input_type = self.types[node.lhs];
+                    if (node.op == .vector_add and input_type != .v128) return error.InvalidGraph;
+                    if (input_type == .v128 and node.op != .vector_add and node.op != .bit_and and node.op != .bit_or and node.op != .bit_xor) return error.InvalidGraph;
                     if (node.op == .sext32 and input_type != .i64) return error.InvalidGraph;
                     if (isFloatOp(node.op) != isFloat(input_type)) return error.InvalidGraph;
                     if (inputCount(node.op) == 2) {
@@ -278,6 +308,7 @@ pub const Graph = struct {
                 .exit => |side_exit| {
                     if (side_exit.values.len > max_arguments) return error.PrototypeLimit;
                     for (side_exit.values) |value| try self.use(value, &available);
+                    if (self.valueWords(side_exit.values) > max_arguments) return error.PrototypeLimit;
                 },
                 .return_ => |values| {
                     if (values.len != self.result_types.len) return error.InvalidGraph;
@@ -302,6 +333,13 @@ pub const Graph = struct {
         if (value >= self.types.len or defined[value]) return error.InvalidGraph;
         defined[value] = true;
         available[value] = true;
+    }
+
+    /// Only call after validating every value ID.
+    pub fn valueWords(self: Graph, values: []const Value) usize {
+        var count: usize = 0;
+        for (values) |value| count += self.types[value].words();
+        return count;
     }
 
     fn use(self: Graph, value: Value, available: *const [max_values]bool) !void {
@@ -329,6 +367,10 @@ pub fn is32(ty: Type) bool {
 
 pub fn isFloat(ty: Type) bool {
     return ty == .f32 or ty == .f64;
+}
+
+pub fn isInteger(ty: Type) bool {
+    return ty == .i32 or ty == .i64;
 }
 
 pub fn conversionTypes(op: Op) ?struct { input: Type, output: Type } {
@@ -368,6 +410,7 @@ pub fn isComparison(op: Op) bool {
 
 pub fn inputCount(op: Op) u2 {
     return switch (op) {
+        .vector_add => 2,
         .constant, .call, .memory_length => 0,
         .load => 1,
         .store => 2,
@@ -392,6 +435,7 @@ pub const Effects = struct {
 pub fn effects(op: Op) Effects {
     // Exhaustive: new operations must declare their observable effects.
     return switch (op) {
+        .vector_add => .{},
         .guard => .{ .exits = true },
         .div_s, .div_u, .rem_s, .rem_u, .trunc_s, .trunc_u => .{ .may_trap = true },
         .load => .{ .reads_memory = true, .may_trap = true },
@@ -417,4 +461,5 @@ test {
     _ = @import("call_test.zig");
     _ = @import("results_test.zig");
     _ = @import("control_test.zig");
+    _ = @import("vector_test.zig");
 }
