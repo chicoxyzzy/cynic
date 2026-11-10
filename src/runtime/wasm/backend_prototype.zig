@@ -11,6 +11,7 @@ const Module = @import("module.zig").Module;
 const interpreter = @import("interpreter.zig");
 const Instance = interpreter.Instance;
 const metadata = @import("spasm_metadata.zig");
+pub const abi = @import("backend_abi.zig");
 pub const ir = @import("../jit/backend/ir.zig");
 pub const native = @import("../jit/backend/native.zig");
 pub const CodeAllocator = @import("../jit/code_alloc.zig").CodeAllocator;
@@ -133,7 +134,7 @@ fn refreshMemories(instance: *const Instance, views: []native.MemoryView, global
 // teaching the shared call ABI about Wasm operations or embedding pointers.
 const RuntimeTarget = packed struct(u64) {
     index: u32,
-    kind: enum(u32) { function, memory_grow, memory_copy, memory_fill, memory_init, data_drop, _ } = .function,
+    kind: enum(u32) { function, memory_grow, memory_copy, memory_fill, memory_init, data_drop, table_get, table_set, table_grow, table_size, table_fill, pin_references, ref_func, ref_as_non_null, call_indirect, call_ref, table_copy, table_init, elem_drop, _ } = .function,
 };
 
 fn checkCallSignature(request: native.CallRequest, params: []const ir.Type, results: []const ir.Type) !void {
@@ -151,9 +152,92 @@ const CallContext = struct {
 
     fn invoke(raw: ?*anyopaque, request: native.CallRequest) !void {
         const self: *CallContext = @ptrCast(@alignCast(raw.?));
+        if (request.captures.len % 2 != 0) return error.CallSignatureMismatch;
+        if (self.instance.externref_rooter) |rooter| {
+            var i: usize = 0;
+            while (i < request.captures.len) : (i += 2)
+                try rooter.pin(@as(u128, request.captures[i]) | (@as(u128, request.captures[i + 1]) << 64));
+        }
         const target_id: RuntimeTarget = @bitCast(request.target);
         switch (target_id.kind) {
-            .function => {},
+            .function, .call_indirect, .call_ref => {},
+            .ref_func => {
+                try checkCallSignature(request, &.{}, &.{ .i64, .i64 });
+                if (self.instance.funcRefAt(target_id.index) == null) return error.FunctionIndex;
+                const reference = interpreter.makeFuncRef(self.instance, target_id.index);
+                request.results[0] = @truncate(reference);
+                request.results[1] = @truncate(reference >> 64);
+                return;
+            },
+            .ref_as_non_null => {
+                try checkCallSignature(request, &.{ .i64, .i64 }, &.{});
+                if (request.arguments[0] == std.math.maxInt(u64) and request.arguments[1] == std.math.maxInt(u64)) return error.NullReference;
+                return;
+            },
+            .elem_drop => {
+                try checkCallSignature(request, &.{}, &.{});
+                if (target_id.index >= self.instance.elem_segments.len) return error.InvalidElementSegment;
+                interpreter.dropElement(self.instance, target_id.index);
+                return;
+            },
+            .pin_references => {
+                try checkCallSignature(request, &.{}, &.{});
+                return;
+            },
+            .table_get, .table_set, .table_grow, .table_size, .table_fill, .table_copy, .table_init => {
+                if (target_id.index >= self.instance.tables.len) return error.OutOfBoundsTableAccess;
+                const table = self.instance.tables[target_id.index];
+                const addr: ir.Type = if (table.is_64) .i64 else .i32;
+                switch (target_id.kind) {
+                    .table_get => {
+                        try checkCallSignature(request, &.{addr}, &.{ .i64, .i64 });
+                        const index = request.arguments[0];
+                        if (index >= table.elems.len) return error.OutOfBoundsTableAccess;
+                        const value = table.elems[@intCast(index)];
+                        request.results[0] = @truncate(value);
+                        request.results[1] = @truncate(value >> 64);
+                    },
+                    .table_set => {
+                        try checkCallSignature(request, &.{ addr, .i64, .i64 }, &.{});
+                        const index = request.arguments[0];
+                        if (index >= table.elems.len) return error.OutOfBoundsTableAccess;
+                        table.elems[@intCast(index)] = @as(u128, request.arguments[1]) | (@as(u128, request.arguments[2]) << 64);
+                    },
+                    .table_size => {
+                        try checkCallSignature(request, &.{}, &.{addr});
+                        request.results[0] = table.elems.len;
+                    },
+                    .table_grow => {
+                        try checkCallSignature(request, &.{ .i64, .i64, addr }, &.{addr});
+                        const value = @as(u128, request.arguments[0]) | (@as(u128, request.arguments[1]) << 64);
+                        const previous = interpreter.growTable(self.instance.gpa, table, request.arguments[2], value);
+                        request.results[0] = ir.normalize(addr, previous orelse std.math.maxInt(u64));
+                    },
+                    .table_fill => {
+                        try checkCallSignature(request, &.{ addr, .i64, .i64, addr }, &.{});
+                        const value = @as(u128, request.arguments[1]) | (@as(u128, request.arguments[2]) << 64);
+                        try interpreter.fillTable(table, request.arguments[0], value, request.arguments[3]);
+                    },
+                    .table_copy => {
+                        if (request.arguments.len != 4) return error.CallSignatureMismatch;
+                        const source_index = request.arguments[3];
+                        if (source_index >= self.instance.tables.len) return error.OutOfBoundsTableAccess;
+                        const source = self.instance.tables[@intCast(source_index)];
+                        const src_addr: ir.Type = if (source.is_64) .i64 else .i32;
+                        const count: ir.Type = if (table.is_64 and source.is_64) .i64 else .i32;
+                        try checkCallSignature(request, &.{ addr, src_addr, count, .i32 }, &.{});
+                        try interpreter.copyTable(table, source, request.arguments[0], request.arguments[1], request.arguments[2]);
+                    },
+                    .table_init => {
+                        try checkCallSignature(request, &.{ addr, .i32, .i32, .i32 }, &.{});
+                        const segment = request.arguments[3];
+                        if (segment >= self.instance.elem_segments.len) return error.InvalidElementSegment;
+                        try interpreter.initTable(table, self.instance.elem_segments[@intCast(segment)].values, request.arguments[0], @truncate(request.arguments[1]), @truncate(request.arguments[2]));
+                    },
+                    else => return error.CallSignatureMismatch,
+                }
+                return;
+            },
             .memory_grow => {
                 if (target_id.index >= self.instance.memories.len) return error.InvalidMemory;
                 const memory = self.instance.memories[target_id.index];
@@ -202,27 +286,66 @@ const CallContext = struct {
             },
             else => return error.CallSignatureMismatch,
         }
-        const signature = try callSignature(self.instance.module, target_id.index);
-        if (signature.params.len != request.arguments.len or signature.results.len != request.results.len) return error.CallSignatureMismatch;
-        for (signature.params, request.parameter_types) |ty, expected| {
-            if (try valueType(ty) != expected) return error.CallSignatureMismatch;
-        }
-        for (signature.results, request.result_types) |ty, expected| {
-            if (try valueType(ty) != expected) return error.CallSignatureMismatch;
-        }
-        const target = self.instance.funcRefAt(target_id.index) orelse return error.FunctionIndex;
+        var call_instance = self.instance;
+        var call_index = target_id.index;
+        var call = request;
+        const signature = if (target_id.kind == .function) try callSignature(self.instance.module, target_id.index) else blk: {
+            const expected = try typeSignature(self.instance.module, target_id.index);
+            const count = try abi.wordCount(expected.params);
+            if (request.arguments.len != count + 2) return error.CallSignatureMismatch;
+            const extra = request.arguments[count..];
+            const reference = if (target_id.kind == .call_indirect) reference: {
+                if (extra[0] >= self.instance.tables.len) return error.UnsupportedImportCall;
+                const table = self.instance.tables[@intCast(extra[0])];
+                const addr: ir.Type = if (table.is_64) .i64 else .i32;
+                if (!std.mem.eql(ir.Type, request.parameter_types[count..], &.{ .i32, addr })) return error.CallSignatureMismatch;
+                if (extra[1] >= table.elems.len) return error.UndefinedElement;
+                const ref = table.elems[@intCast(extra[1])];
+                if (ref == interpreter.REF_NULL) return error.UninitializedElement;
+                break :reference ref;
+            } else reference: {
+                if (!std.mem.eql(ir.Type, request.parameter_types[count..], &.{ .i64, .i64 })) return error.CallSignatureMismatch;
+                const ref = @as(u128, extra[0]) | (@as(u128, extra[1]) << 64);
+                if (ref == interpreter.REF_NULL) return error.NullReference;
+                break :reference ref;
+            };
+            call_instance = if (reference >> 64 == 0) self.instance else interpreter.funcRefInstance(reference);
+            call_index = interpreter.funcRefIndex(reference);
+            const resolved = call_instance.funcRefAt(call_index) orelse return error.UnsupportedImportCall;
+            const actual = switch (resolved) {
+                .wasm => |callee| callee.instance.module.types[callee.func.type_index],
+                .host => call_instance.funcType(call_index) orelse return error.UnsupportedImportCall,
+            };
+            const compatible = if (target_id.kind == .call_ref)
+                interpreter.funcCallLayoutsMatch(expected, actual)
+            else switch (resolved) {
+                .host => |host| expected.params.len == host.params and expected.results.len == host.results,
+                .wasm => interpreter.funcTypesEqual(expected, actual),
+            };
+            if (!compatible) return error.IndirectCallTypeMismatch;
+            call.arguments = request.arguments[0..count];
+            call.parameter_types = request.parameter_types[0..count];
+            break :blk expected;
+        };
+        var parameter_types: [ir.max_arguments]ir.Type = undefined;
+        var result_types: [ir.max_arguments]ir.Type = undefined;
+        try checkCallSignature(call, try abi.writeTypes(signature.params, &parameter_types), try abi.writeTypes(signature.results, &result_types));
+        const target = call_instance.funcRefAt(call_index) orelse return error.FunctionIndex;
         const inherited = self.execution_control orelse self.instance.execution_control orelse switch (target) {
             .wasm => |callee| callee.instance.execution_control,
             .host => null,
         };
         var control: CalleeControl = .{ .remaining = self.remaining, .inherited = inherited };
         var args: [ir.max_arguments]u128 = undefined;
-        for (request.arguments, 0..) |value, i| args[i] = value;
-        const result = try interpreter.invokeWithControl(self.instance, self.allocator, target_id.index, args[0..request.arguments.len], if (self.remaining != null) .{ .ctx = &control, .poll_fn = CalleeControl.poll, .armed_fn = CalleeControl.armed } else inherited);
+        try abi.unpack(signature.params, call.arguments, args[0..signature.params.len]);
+        const result = interpreter.invokeWithControl(call_instance, self.allocator, call_index, args[0..signature.params.len], if (self.remaining != null) .{ .ctx = &control, .poll_fn = CalleeControl.poll, .armed_fn = CalleeControl.armed } else inherited) catch |err| {
+            if (err == error.UncaughtException) self.instance.pending_exn = call_instance.pending_exn;
+            return err;
+        };
         defer self.allocator.free(result);
         try refreshMemories(self.instance, request.memories, self.global_indices);
         if (result.len != signature.results.len) return error.CallSignatureMismatch;
-        for (result, request.results) |value, *out| out.* = @truncate(value);
+        _ = try abi.pack(signature.results, result, request.results);
     }
 };
 
@@ -267,18 +390,21 @@ fn callSignature(module: *const Module, index: u32) !wasm_types.FuncType {
         const local = try localFunctionIndex(module, index);
         break :imported module.funcs[local];
     };
+    return typeSignature(module, type_index);
+}
+
+fn typeSignature(module: *const Module, type_index: u32) !wasm_types.FuncType {
     if (type_index >= module.types.len) return error.FunctionIndex;
     const signature = module.types[type_index];
-    if (signature.params.len > ir.max_arguments or signature.results.len > ir.max_arguments) return error.UnsupportedSignature;
-    for (signature.params) |ty| _ = try valueType(ty);
-    for (signature.results) |ty| _ = try valueType(ty);
+    _ = try abi.wordCount(signature.params);
+    _ = try abi.wordCount(signature.results);
     return signature;
 }
 
 fn collectMemories(module: *const Module, out: *[ir.max_memories]wasm_types.MemType) ![]const wasm_types.MemType {
     var count: usize = 0;
     for (module.imports) |entry| {
-        if (entry.desc == .func or entry.desc == .global) continue;
+        if (entry.desc == .func or entry.desc == .global or entry.desc == .table) continue;
         if (entry.desc != .mem) return error.UnsupportedImports;
         if (count == out.len) return error.PrototypeLimit;
         out[count] = entry.desc.mem;
@@ -303,15 +429,7 @@ pub fn evaluate(allocator: std.mem.Allocator, bytes: []const u8, function_index:
     return compiled.run(args, budget);
 }
 
-fn valueType(ty: wasm_types.ValType) !ir.Type {
-    return switch (ty) {
-        .i32 => .i32,
-        .i64 => .i64,
-        .f32 => .f32,
-        .f64 => .f64,
-        else => error.UnsupportedType,
-    };
-}
+const valueType = abi.valueType;
 
 const missing = std.math.maxInt(u32);
 const Instruction = struct {
@@ -358,7 +476,7 @@ fn readBranch(inst: *Instruction, function: *const CompiledFunc, side_index: *us
 
 fn endsBlock(op: Op) bool {
     return switch (op) {
-        .br, .br_if, .br_table, .@"if", .@"else", .select, .select_t, .@"return", .@"unreachable" => true,
+        .br, .br_if, .br_table, .br_on_null, .br_on_non_null, .@"if", .@"else", .select, .select_t, .@"return", .@"unreachable" => true,
         else => false,
     };
 }
@@ -371,12 +489,10 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
     errdefer arena.deinit();
     const a = arena.allocator();
     var global_indices: std.ArrayList(u32) = .empty;
-    const result_types = try a.alloc(ir.Type, signature.results.len);
-    for (signature.results, result_types) |ty, *out| out.* = try valueType(ty);
-    const argument_types = try a.alloc(ir.Type, signature.params.len);
-    for (signature.params, argument_types) |ty, *out| out.* = try valueType(ty);
-    const local_types = try a.alloc(ir.Type, function.local_types.len);
-    for (function.local_types, local_types) |ty, *out| out.* = try valueType(ty);
+    const result_types = try abi.physicalTypes(a, signature.results);
+    const argument_types = try abi.physicalTypes(a, signature.params);
+    const local_types = function.local_types;
+    _ = try abi.wordCount(local_types);
 
     var instructions: std.ArrayList(Instruction) = .empty;
     const offsets = try a.alloc(u32, function.body.len + 1);
@@ -392,7 +508,9 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
         offsets[offset] = @intCast(instructions.items.len);
         var inst: Instruction = .{ .op = @fromBackingInt(@intCast(try reader.byte())), .offset = @intCast(offset) };
         switch (inst.op) {
-            .nop, .drop, .select => {},
+            .nop, .drop, .select, .ref_is_null, .ref_as_non_null => {},
+            .ref_func => inst.immediate = try reader.uleb(u32),
+            .ref_null => inst.immediate = @backingInt(wasm_types.ValType.refType(true, try wasm_types.readHeapType(&reader))),
             .select_t => {
                 if (try reader.uleb(u32) != 1) return error.UnsupportedType;
                 _ = try valueType(try wasm_types.readValType(&reader));
@@ -413,7 +531,7 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
                 _ = controls.pop() orelse return error.InvalidControlFlow;
                 if (controls.items.len == 0 and !reader.atEnd()) return error.InvalidControlFlow;
             },
-            .br, .br_if => {
+            .br, .br_if, .br_on_null, .br_on_non_null => {
                 _ = try reader.uleb(u32);
                 const control = &controls.items[controls.items.len - 1];
                 if (control.reachable) try readBranch(&inst, function, &side_index);
@@ -451,9 +569,21 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
                 inst.memory_index = try reader.uleb(u32);
                 if (inst.memory_index >= memories.len) return error.InvalidMemory;
             },
+            .table_get, .table_set => {
+                inst.memory_index = try reader.uleb(u32);
+                _ = metadata.tableType(module, inst.memory_index) orelse return error.InvalidTable;
+            },
             .call => {
                 inst.immediate = try reader.uleb(u32);
                 _ = try callSignature(module, @intCast(inst.immediate));
+            },
+            .call_ref, .call_indirect => {
+                inst.immediate = try reader.uleb(u32);
+                _ = try typeSignature(module, @intCast(inst.immediate));
+                if (inst.op == .call_indirect) {
+                    inst.memory_index = try reader.uleb(u32);
+                    _ = metadata.tableType(module, inst.memory_index) orelse return error.InvalidTable;
+                }
             },
             .i32_const => inst.immediate = @as(u32, @bitCast(try reader.sleb(i32))),
             .i64_const => inst.immediate = @bitCast(try reader.sleb(i64)),
@@ -478,6 +608,24 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
                             inst.secondary_index = try reader.uleb(u32);
                             if (inst.secondary_index >= memories.len) return error.InvalidMemory;
                         }
+                    },
+                    15...17 => {
+                        inst.memory_index = try reader.uleb(u32);
+                        _ = metadata.tableType(module, inst.memory_index) orelse return error.InvalidTable;
+                    },
+                    12, 13 => {
+                        inst.secondary_index = try reader.uleb(u32);
+                        if (inst.secondary_index >= module.elements_count) return error.InvalidElementSegment;
+                        if (inst.immediate == 12) {
+                            inst.memory_index = try reader.uleb(u32);
+                            _ = metadata.tableType(module, inst.memory_index) orelse return error.InvalidTable;
+                        }
+                    },
+                    14 => {
+                        inst.memory_index = try reader.uleb(u32);
+                        inst.secondary_index = try reader.uleb(u32);
+                        _ = metadata.tableType(module, inst.memory_index) orelse return error.InvalidTable;
+                        _ = metadata.tableType(module, inst.secondary_index) orelse return error.InvalidTable;
                     },
                     else => return error.UnsupportedOpcode,
                 }
@@ -528,9 +676,10 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
     @memset(builder.mapping, missing);
     builder.mapping[0] = 0;
     try builder.queue.append(a, 0);
-    const params = try a.alloc(ir.Value, argument_types.len);
-    for (params, argument_types) |*param, ty| param.* = try builder.value(ty);
-    try builder.blocks.append(a, .{ .params = params });
+    const params = try a.alloc(ir.Value, signature.params.len);
+    for (params, signature.params) |*param, ty| param.* = try builder.wasmValue(ty);
+    try builder.blocks.append(a, .{ .params = try builder.flatten(params) });
+    try builder.block_values.append(a, params);
     var index: usize = 0;
     while (index < builder.queue.items.len) : (index += 1) {
         const byte_block = builder.queue.items[index];
@@ -538,17 +687,58 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
         var nodes: std.ArrayList(ir.Node) = .empty;
         var locals: [ir.max_arguments]ir.Value = undefined;
         var stack: std.ArrayList(ir.Value) = .empty;
-        const block_params = builder.blocks.items[index].params;
+        const block_params = builder.block_values.items[index];
         if (index == 0) {
             @memcpy(locals[0..params.len], params);
             for (local_types[params.len..], params.len..) |ty, i|
-                locals[i] = try builder.constant(&nodes, ty, 0);
+                locals[i] = try builder.defaultValue(&nodes, ty);
         } else {
             @memcpy(locals[0..local_types.len], block_params[0..local_types.len]);
             try stack.appendSlice(a, block_params[local_types.len..]);
         }
         var terminator: ?ir.Terminator = null;
         for (instructions.items[range.start..range.end]) |inst| {
+            if (inst.op == .prefix_fc and inst.immediate == 13) {
+                try builder.runtimeCall(&nodes, inst, .{ .kind = .elem_drop, .index = inst.secondary_index }, &.{}, &.{}, &.{});
+                continue;
+            }
+            if (inst.op == .table_get or inst.op == .table_set or (inst.op == .prefix_fc and inst.immediate >= 12 and inst.immediate <= 17)) {
+                const table = metadata.tableType(module, inst.memory_index) orelse return error.InvalidTable;
+                const target: RuntimeTarget = .{ .index = inst.memory_index, .kind = switch (inst.op) {
+                    .table_get => .table_get,
+                    .table_set => .table_set,
+                    else => switch (inst.immediate) {
+                        12 => .table_init,
+                        14 => .table_copy,
+                        15 => .table_grow,
+                        16 => .table_size,
+                        else => .table_fill,
+                    },
+                } };
+                const count: usize = switch (target.kind) {
+                    .table_get => 1,
+                    .table_set, .table_grow => 2,
+                    .table_fill, .table_copy, .table_init => 3,
+                    else => 0,
+                };
+                if (count > stack.items.len) return error.InvalidControlFlow;
+                const start = stack.items.len - count;
+                var operands: [4]ir.Value = undefined;
+                @memcpy(operands[0..count], stack.items[start..]);
+                const has_secondary = target.kind == .table_copy or target.kind == .table_init;
+                if (has_secondary) operands[count] = try builder.constant(&nodes, .i32, inst.secondary_index);
+                const arguments = try builder.flatten(operands[0 .. count + @intFromBool(has_secondary)]);
+                stack.shrinkRetainingCapacity(start);
+                const result: ?ir.Value = switch (target.kind) {
+                    .table_get => try builder.wasmValue(table.elem),
+                    .table_size, .table_grow => try builder.value(if (table.limits.is_64) .i64 else .i32),
+                    else => null,
+                };
+                const results = if (result) |out| try builder.flatten(&.{out}) else &.{};
+                try builder.runtimeCall(&nodes, inst, target, arguments, results, &.{});
+                if (result) |out| try stack.append(a, out);
+                continue;
+            }
             if (inst.op == .prefix_fc and inst.immediate >= 8) {
                 const count: usize = if (inst.immediate == 9) 0 else 3;
                 if (stack.items.len < count) return error.InvalidControlFlow;
@@ -598,17 +788,28 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
                     _ = stack.pop() orelse return error.InvalidControlFlow;
                 },
                 .global_get, .global_set => {
-                    const ty = try valueType(metadata.globalValType(module, @intCast(inst.immediate)) orelse return error.InvalidGlobal);
+                    const wasm_ty = metadata.globalValType(module, @intCast(inst.immediate)) orelse return error.InvalidGlobal;
+                    const ty = try valueType(wasm_ty);
                     const address = try builder.constant(&nodes, .i64, 0);
                     if (inst.op == .global_get) {
-                        const out = try builder.value(ty);
+                        const out = try builder.wasmValue(wasm_ty);
                         try nodes.append(a, .{ .op = .load, .out = out, .lhs = address, .trap_site = inst.offset, .memory = .{
                             .region = inst.secondary_index,
                             .width = if (ir.is32(ty)) .word else .double,
                         } });
+                        if (builder.references.items[out]) |reference| try nodes.append(a, .{ .op = .load, .out = reference.high, .lhs = address, .trap_site = inst.offset, .memory = .{
+                            .region = inst.secondary_index,
+                            .offset = 8,
+                            .width = .double,
+                        } });
                         try stack.append(a, out);
                     } else {
                         var value = stack.pop() orelse return error.InvalidControlFlow;
+                        if (builder.references.items[value]) |reference| {
+                            try nodes.append(a, .{ .op = .store, .lhs = address, .rhs = value, .trap_site = inst.offset, .memory = .{ .region = inst.secondary_index, .width = .double } });
+                            try nodes.append(a, .{ .op = .store, .lhs = address, .rhs = reference.high, .trap_site = inst.offset, .memory = .{ .region = inst.secondary_index, .offset = 8, .width = .double } });
+                            continue;
+                        }
                         // Scalar Cells use a canonical low 64-bit word, including
                         // zeroed upper i32/f32 bits, as in Spasm's global.set.
                         if (ty == .f32 or ty == .f64) {
@@ -634,34 +835,48 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
                     try stack.append(a, try builder.constant(&nodes, ty, inst.immediate));
                 },
                 .@"return" => {
-                    if (stack.items.len < result_types.len) return error.InvalidControlFlow;
-                    terminator = .{ .return_ = try a.dupe(ir.Value, stack.items[stack.items.len - result_types.len ..]) };
+                    if (stack.items.len < signature.results.len) return error.InvalidControlFlow;
+                    const values = stack.items[stack.items.len - signature.results.len ..];
+                    const roots = try builder.roots(&.{}, values);
+                    if (roots.len != 0) try builder.runtimeCall(&nodes, inst, .{ .kind = .pin_references, .index = 0 }, &.{}, &.{}, roots);
+                    terminator = .{ .return_ = try builder.flatten(values) };
                 },
-                .call => {
+                .call, .call_indirect, .call_ref => {
                     const target: u32 = @intCast(inst.immediate);
-                    const callee = try callSignature(module, target);
+                    const callee = if (inst.op == .call) try callSignature(module, target) else try typeSignature(module, target);
+                    const dynamic = inst.op != .call;
+                    const selector = if (dynamic) stack.pop() orelse return error.InvalidControlFlow else 0;
                     if (callee.params.len > stack.items.len) return error.InvalidControlFlow;
+                    const roots = try builder.roots(locals[0..local_types.len], stack.items);
                     const start = stack.items.len - callee.params.len;
-                    const arguments = try a.dupe(ir.Value, stack.items[start..]);
+                    var operands: std.ArrayList(ir.Value) = .empty;
+                    try operands.appendSlice(a, stack.items[start..]);
+                    if (inst.op == .call_indirect) try operands.append(a, try builder.constant(&nodes, .i32, inst.memory_index));
+                    if (dynamic) try operands.append(a, selector);
+                    const arguments = try builder.flatten(operands.items);
                     stack.shrinkRetainingCapacity(start);
-                    const parameter_types = try a.alloc(ir.Type, callee.params.len);
-                    for (callee.params, parameter_types) |ty, *parameter| parameter.* = try valueType(ty);
-                    const call_result_types = try a.alloc(ir.Type, callee.results.len);
                     const results = try a.alloc(ir.Value, callee.results.len);
-                    for (callee.results, call_result_types, results) |ty, *result_ty, *out| {
-                        result_ty.* = try valueType(ty);
-                        out.* = try builder.value(result_ty.*);
-                    }
-                    try nodes.append(a, .{ .op = .call, .trap_site = inst.offset, .call = .{
-                        .target = target,
-                        .arguments = arguments,
-                        .parameter_types = parameter_types,
-                        .results = results,
-                        .result_types = call_result_types,
-                        .fp_mode = .strict,
-                        .safepoint = .{ .id = inst.offset, .values = &.{} },
-                    } });
+                    for (callee.results, results) |ty, *out| out.* = try builder.wasmValue(ty);
+                    try builder.runtimeCall(&nodes, inst, .{ .index = target, .kind = switch (inst.op) {
+                        .call => .function,
+                        .call_indirect => .call_indirect,
+                        else => .call_ref,
+                    } }, arguments, try builder.flatten(results), roots);
                     try stack.appendSlice(a, results);
+                },
+                .ref_null => try stack.append(a, try builder.defaultValue(&nodes, @fromBackingInt(@intCast(@as(u32, @intCast(inst.immediate)))))),
+                .ref_func => {
+                    const out = try builder.wasmValue(.funcref);
+                    try builder.runtimeCall(&nodes, inst, .{ .kind = .ref_func, .index = @intCast(inst.immediate) }, &.{}, try builder.flatten(&.{out}), &.{});
+                    try stack.append(a, out);
+                },
+                .ref_as_non_null => {
+                    const value = stack.getLastOrNull() orelse return error.InvalidControlFlow;
+                    try builder.runtimeCall(&nodes, inst, .{ .kind = .ref_as_non_null, .index = 0 }, try builder.flatten(&.{value}), &.{}, &.{});
+                },
+                .ref_is_null => {
+                    const value = stack.pop() orelse return error.InvalidControlFlow;
+                    try stack.append(a, try builder.isNull(&nodes, value));
                 },
                 .memory_size => {
                     const bytes = try builder.value(.i64);
@@ -699,6 +914,19 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
                         .condition = condition,
                         .taken = try builder.edge(byte_block + 1, locals[0..local_types.len], stack.items),
                         .fallthrough = try builder.branchEdge(inst, locals[0..local_types.len], stack.items),
+                    } };
+                },
+                .br_on_null, .br_on_non_null => {
+                    const reference = stack.pop() orelse return error.InvalidControlFlow;
+                    const condition = try builder.isNull(&nodes, reference);
+                    if (inst.op == .br_on_non_null) try stack.append(a, reference);
+                    const taken = try builder.branchEdge(inst, locals[0..local_types.len], stack.items);
+                    if (inst.op == .br_on_null) try stack.append(a, reference) else _ = stack.pop();
+                    const fallthrough = try builder.edge(byte_block + 1, locals[0..local_types.len], stack.items);
+                    terminator = .{ .branch = .{
+                        .condition = condition,
+                        .taken = if (inst.op == .br_on_null) taken else fallthrough,
+                        .fallthrough = if (inst.op == .br_on_null) fallthrough else taken,
                     } };
                 },
                 .select, .select_t => {
@@ -887,9 +1115,12 @@ fn scalarOperation(inst: Instruction) ?ir.Op {
 }
 
 const Builder = struct {
+    const Reference = struct { high: ir.Value, external: bool };
     a: std.mem.Allocator,
     types: std.ArrayList(ir.Type) = .empty,
+    references: std.ArrayList(?Reference) = .empty,
     blocks: std.ArrayList(ir.Block) = .empty,
+    block_values: std.ArrayList([]const ir.Value) = .empty,
     mapping: []u32 = &.{},
     queue: std.ArrayList(u32) = .empty,
 
@@ -897,7 +1128,76 @@ const Builder = struct {
         if (self.types.items.len == ir.max_values) return error.PrototypeLimit;
         const id: ir.Value = @intCast(self.types.items.len);
         try self.types.append(self.a, ty);
+        try self.references.append(self.a, null);
         return id;
+    }
+
+    fn wasmValue(self: *Builder, ty: wasm_types.ValType) !ir.Value {
+        const low = try self.value(try valueType(ty));
+        if (ty.isRef()) {
+            const high = try self.value(.i64);
+            self.references.items[low] = .{ .high = high, .external = ty.heapOf() == wasm_types.heap_abs_extern };
+        }
+        return low;
+    }
+
+    fn defaultValue(self: *Builder, nodes: *std.ArrayList(ir.Node), ty: wasm_types.ValType) !ir.Value {
+        if (!ty.isRef()) return self.constant(nodes, try valueType(ty), 0);
+        const out = try self.wasmValue(ty);
+        for ([_]ir.Value{ out, self.references.items[out].?.high }) |word|
+            try nodes.append(self.a, .{ .op = .constant, .out = word, .immediate = std.math.maxInt(u64) });
+        return out;
+    }
+
+    fn isNull(self: *Builder, nodes: *std.ArrayList(ir.Node), low: ir.Value) !ir.Value {
+        const reference = self.references.items[low] orelse return error.InvalidControlFlow;
+        const sentinel = try self.constant(nodes, .i64, std.math.maxInt(u64));
+        const lo = try self.value(.i32);
+        const hi = try self.value(.i32);
+        const out = try self.value(.i32);
+        try nodes.appendSlice(self.a, &.{
+            .{ .op = .eq, .out = lo, .lhs = low, .rhs = sentinel },
+            .{ .op = .eq, .out = hi, .lhs = reference.high, .rhs = sentinel },
+            .{ .op = .bit_and, .out = out, .lhs = lo, .rhs = hi },
+        });
+        return out;
+    }
+
+    fn flatten(self: *Builder, values: []const ir.Value) ![]const ir.Value {
+        var words: std.ArrayList(ir.Value) = .empty;
+        for (values) |low| {
+            try words.append(self.a, low);
+            if (self.references.items[low]) |reference| try words.append(self.a, reference.high);
+            if (words.items.len > ir.max_arguments) return error.PrototypeLimit;
+        }
+        return words.items;
+    }
+
+    fn runtimeCall(self: *Builder, nodes: *std.ArrayList(ir.Node), inst: Instruction, target: RuntimeTarget, arguments: []const ir.Value, results: []const ir.Value, captures: []const ir.Value) !void {
+        const params = try self.a.alloc(ir.Type, arguments.len);
+        for (arguments, params) |operand, *ty| ty.* = self.types.items[operand];
+        const types = try self.a.alloc(ir.Type, results.len);
+        for (results, types) |operand, *ty| ty.* = self.types.items[operand];
+        try nodes.append(self.a, .{ .op = .call, .trap_site = inst.offset, .call = .{
+            .target = @bitCast(target),
+            .arguments = arguments,
+            .parameter_types = params,
+            .results = results,
+            .result_types = types,
+            .fp_mode = .strict,
+            .safepoint = .{ .id = inst.offset, .values = captures },
+        } });
+    }
+
+    fn roots(self: *Builder, locals: []const ir.Value, stack: []const ir.Value) ![]const ir.Value {
+        var captures: std.ArrayList(ir.Value) = .empty;
+        for ([_][]const ir.Value{ locals, stack }) |values| for (values) |low| {
+            const reference = self.references.items[low] orelse continue;
+            if (!reference.external or std.mem.indexOfScalar(ir.Value, captures.items, low) != null) continue;
+            if (captures.items.len > ir.max_arguments - 2) return error.PrototypeLimit;
+            try captures.appendSlice(self.a, &.{ low, reference.high });
+        };
+        return captures.items;
     }
 
     fn constant(self: *Builder, nodes: *std.ArrayList(ir.Node), ty: ir.Type, immediate: u64) !ir.Value {
@@ -909,14 +1209,22 @@ const Builder = struct {
     fn edge(self: *Builder, target: u32, locals: []const ir.Value, stack: []const ir.Value) !ir.Edge {
         if (target == 0 or target >= self.mapping.len) return error.InvalidControlFlow;
         if (locals.len + stack.len > ir.max_arguments) return error.PrototypeLimit;
-        const args = try self.a.alloc(ir.Value, locals.len + stack.len);
-        @memcpy(args[0..locals.len], locals);
-        @memcpy(args[locals.len..], stack);
+        const values = try self.a.alloc(ir.Value, locals.len + stack.len);
+        @memcpy(values[0..locals.len], locals);
+        @memcpy(values[locals.len..], stack);
+        const args = try self.flatten(values);
         if (self.mapping[target] == missing) {
-            const params = try self.a.alloc(ir.Value, args.len);
-            for (params, args) |*param, arg| param.* = try self.value(self.types.items[arg]);
+            const params = try self.a.alloc(ir.Value, values.len);
+            for (params, values) |*param, arg| {
+                param.* = try self.value(self.types.items[arg]);
+                if (self.references.items[arg]) |reference| {
+                    const high = try self.value(.i64);
+                    self.references.items[param.*] = .{ .high = high, .external = reference.external };
+                }
+            }
             self.mapping[target] = @intCast(self.blocks.items.len);
-            try self.blocks.append(self.a, .{ .params = params });
+            try self.blocks.append(self.a, .{ .params = try self.flatten(params) });
+            try self.block_values.append(self.a, params);
             try self.queue.append(self.a, target);
         }
         return .{ .target = self.mapping[target], .args = args };

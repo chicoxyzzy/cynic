@@ -65,6 +65,18 @@ pub const TrapError = error{
 /// so all-ones never collides with a real reference.
 pub const REF_NULL: u128 = std.math.maxInt(u128);
 
+/// Embedders pin opaque externrefs before a native frame can re-enter the host.
+/// Pinning may allocate bookkeeping but must not collect or re-enter Wasm/JS.
+/// The embedding owns release at its outermost call boundary.
+pub const ExternRefRooter = struct {
+    context: *anyopaque,
+    pin_fn: *const fn (*anyopaque, u128) error{OutOfMemory}!void,
+
+    pub fn pin(self: ExternRefRooter, reference: u128) error{OutOfMemory}!void {
+        if (reference != REF_NULL) try self.pin_fn(self.context, reference);
+    }
+};
+
 /// A `funcref` cell encodes the function's *defining* instance in the
 /// high 64 bits and its function-space index in the low 32. This makes
 /// a funcref callable across module boundaries: a table shared between
@@ -231,6 +243,7 @@ const spasm_helpers: spasm.Helpers = .{
     .table_set = spasmTableSet,
     .table_grow = spasmTableGrow,
     .table_fill = spasmTableFill,
+    .pin_externref = spasmPinExternRef,
 };
 
 /// A runtime global cell. 128-bit to hold a `v128` (scalars use the
@@ -722,6 +735,8 @@ pub const Instance = struct {
     /// byte without spilling registers or calling the host.
     execution_control: ?ExecutionControl = null,
 
+    externref_rooter: ?ExternRefRooter = null,
+
     /// Spasm baseline-JIT opt-in (docs/jit.md §6). Off by default; the
     /// wasm-testsuite differential forces it on. When set, `invoke`
     /// tries to compile the entry function and run native code,
@@ -1018,6 +1033,11 @@ pub const Instance = struct {
         const local = func_index - @as(u32, @intCast(self.imported_funcs.len));
         if (local >= self.funcs.len) return null;
         return .{ .wasm = .{ .instance = self, .func = &self.funcs[local] } };
+    }
+
+    fn pinReference(self: *Instance, ty: types.ValType, reference: u128) error{OutOfMemory}!void {
+        if (ty.heapOf() != types.heap_abs_extern) return;
+        if (self.externref_rooter) |rooter| try rooter.pin(reference);
     }
 
     /// Resolve a function-index-space entry to a callable `FuncRef`, for
@@ -2406,7 +2426,7 @@ fn callValueLayout(t: types.ValType) types.ValType {
     return types.ValType.refType(true, if (heap < types.heap_concrete_max) types.heap_abs_func else heap);
 }
 
-fn funcCallLayoutsMatch(expected: types.FuncType, actual: types.FuncType) bool {
+pub fn funcCallLayoutsMatch(expected: types.FuncType, actual: types.FuncType) bool {
     if (expected.params.len != actual.params.len or expected.results.len != actual.results.len) return false;
     for (expected.params, actual.params) |e, a| if (callValueLayout(e) != callValueLayout(a)) return false;
     for (expected.results, actual.results) |e, a| if (callValueLayout(e) != callValueLayout(a)) return false;
@@ -2523,26 +2543,10 @@ fn spasmTableCopy(
         inst.spasm_call_trap = error.OutOfBoundsTableAccess;
         return spasm.trap_pending;
     }
-    const dtable = inst.tables[dst_t];
-    const stable = inst.tables[src_t];
-    if (!rangeInBounds(stable.elems.len, src, len) or !rangeInBounds(dtable.elems.len, dst, len)) {
-        inst.spasm_call_trap = error.OutOfBoundsTableAccess;
+    copyTable(inst.tables[dst_t], inst.tables[src_t], dst, src, len) catch |err| {
+        inst.spasm_call_trap = err;
         return spasm.trap_pending;
-    }
-    if (len == 0) return spasm.trap_ok;
-    const d: usize = @intCast(dst);
-    const s: usize = @intCast(src);
-    const cnt: usize = @intCast(len);
-    if (dst <= src) {
-        var k: usize = 0;
-        while (k < cnt) : (k += 1) dtable.elems[d + k] = stable.elems[s + k];
-    } else {
-        var k: usize = cnt;
-        while (k > 0) {
-            k -= 1;
-            dtable.elems[d + k] = stable.elems[s + k];
-        }
-    }
+    };
     return spasm.trap_ok;
 }
 
@@ -2568,15 +2572,10 @@ fn spasmTableInit(
         inst.spasm_call_trap = error.OutOfBoundsTableAccess;
         return spasm.trap_pending;
     }
-    const table = inst.tables[table_idx];
-    const vals = inst.elem_segments[elem_idx].values;
-    if (!rangeInBounds(vals.len, src, len) or !rangeInBounds(table.elems.len, dst, len)) {
-        inst.spasm_call_trap = error.OutOfBoundsTableAccess;
+    initTable(inst.tables[table_idx], inst.elem_segments[elem_idx].values, dst, src, len) catch |err| {
+        inst.spasm_call_trap = err;
         return spasm.trap_pending;
-    }
-    const base: usize = @intCast(dst);
-    var k: u32 = 0;
-    while (k < len) : (k += 1) table.elems[base + k] = vals[src + k];
+    };
     return spasm.trap_ok;
 }
 
@@ -2585,10 +2584,7 @@ fn spasmTableInit(
 /// dropped and clear its values (guarded by the segment count). Cannot trap.
 fn spasmElemDrop(instance_opaque: *anyopaque, elem_idx: u32) callconv(.c) void {
     const inst: *Instance = @ptrCast(@alignCast(instance_opaque));
-    if (elem_idx < inst.elem_segments.len) {
-        inst.elem_segments[elem_idx].dropped = true;
-        inst.elem_segments[elem_idx].values = &.{};
-    }
+    dropElement(inst, elem_idx);
 }
 
 /// The native helper a Spasm-compiled `table.get` (§4.4.x, opcode 0x25)
@@ -2617,7 +2613,23 @@ fn spasmTableGet(
         inst.spasm_call_trap = error.OutOfBoundsTableAccess;
         return spasm.trap_pending;
     }
-    out_cell[0] = table.elems[@intCast(index)];
+    const reference = table.elems[@intCast(index)];
+    if (inst.externref_rooter != null) {
+        if (inst.tableElemType(table_idx)) |ty| inst.pinReference(ty, reference) catch |err| {
+            inst.spasm_call_trap = err;
+            return spasm.trap_pending;
+        };
+    }
+    out_cell[0] = reference;
+    return spasm.trap_ok;
+}
+
+fn spasmPinExternRef(instance_opaque: *anyopaque, cell: *const u128) callconv(.c) u32 {
+    const instance: *Instance = @ptrCast(@alignCast(instance_opaque));
+    instance.pinReference(.externref, cell.*) catch |err| {
+        instance.spasm_call_trap = err;
+        return spasm.trap_pending;
+    };
     return spasm.trap_ok;
 }
 
@@ -2669,22 +2681,7 @@ fn spasmTableGrow(
 ) callconv(.c) i64 {
     const inst: *Instance = @ptrCast(@alignCast(instance_opaque));
     if (table_idx >= inst.tables.len) return -1;
-    const table = inst.tables[table_idx];
-    const old: u64 = table.elems.len;
-    const new_len = std.math.add(u64, old, delta) catch return -1;
-    // §4.5.4 permits growth to fail for any implementation limit; cap well
-    // below the point where a huge request would lazily "succeed" and fault
-    // on first touch (mirrors `growTable`).
-    if (new_len > MAX_TABLE_ELEMS) return -1;
-    if (table.max) |mx| {
-        if (new_len > mx) return -1;
-    }
-    const new_count = std.math.cast(usize, new_len) orelse return -1;
-    const old_count = std.math.cast(usize, old) orelse return -1;
-    const grown = table.storeAllocator(inst.gpa).realloc(table.elems, new_count) catch return -1;
-    for (grown[old_count..]) |*e| e.* = init_slot[0];
-    table.elems = grown;
-    return @intCast(old);
+    return @intCast(growTable(inst.gpa, inst.tables[table_idx], delta, init_slot[0]) orelse return -1);
 }
 
 /// The native helper a Spasm-compiled `table.fill` (§4.4.x, 0xFC sub 17)
@@ -2708,15 +2705,10 @@ fn spasmTableFill(
         inst.spasm_call_trap = error.OutOfBoundsTableAccess;
         return spasm.trap_pending;
     }
-    const table = inst.tables[table_idx];
-    if (!rangeInBounds(table.elems.len, index, count)) {
-        inst.spasm_call_trap = error.OutOfBoundsTableAccess;
+    fillTable(inst.tables[table_idx], index, val_slot[0], count) catch |err| {
+        inst.spasm_call_trap = err;
         return spasm.trap_pending;
-    }
-    const base: usize = @intCast(index);
-    const len: usize = @intCast(count);
-    const val = val_slot[0];
-    for (table.elems[base..][0..len]) |*elem| elem.* = val;
+    };
     return spasm.trap_ok;
 }
 
@@ -3407,7 +3399,11 @@ fn run(ip: *Interp) Error!void {
             if (tidx >= ip.instance.tables.len) return error.UnsupportedImportCall;
             const table = ip.instance.tables[tidx];
             if (index >= table.elems.len) return error.OutOfBoundsTableAccess;
-            try ip.pushV128(table.elems[@intCast(index)]);
+            const reference = table.elems[@intCast(index)];
+            if (ip.instance.externref_rooter != null) {
+                if (ip.instance.tableElemType(tidx)) |ty| try ip.instance.pinReference(ty, reference);
+            }
+            try ip.pushV128(reference);
             continue :dispatch nextOp(body, &pc);
         },
         .table_set => {
@@ -3450,7 +3446,11 @@ fn run(ip: *Interp) Error!void {
         },
         .global_get => {
             const x = readU32(body, &pc);
-            try ip.pushCell(ip.instance.globals[x].value);
+            const reference = ip.instance.globals[x].value;
+            if (ip.instance.externref_rooter != null) {
+                if (@import("spasm_metadata.zig").globalValType(ip.instance.module, x)) |ty| try ip.instance.pinReference(ty, reference);
+            }
+            try ip.pushCell(reference);
             continue :dispatch nextOp(body, &pc);
         },
         .global_set => {
@@ -3728,10 +3728,7 @@ fn run(ip: *Interp) Error!void {
                 },
                 13 => { // elem.drop
                     const elem_idx = readU32(body, &pc);
-                    if (elem_idx < ip.instance.elem_segments.len) {
-                        ip.instance.elem_segments[elem_idx].dropped = true;
-                        ip.instance.elem_segments[elem_idx].values = &.{};
-                    }
+                    dropElement(ip.instance, elem_idx);
                 },
                 14 => { // table.copy
                     const dst_t = readU32(body, &pc);
@@ -4047,7 +4044,7 @@ pub fn dropData(instance: *Instance, index: u32) void {
 
 // ── tables ──────────────────────────────────────────────────────────
 
-fn funcTypesEqual(a: types.FuncType, b: types.FuncType) bool {
+pub fn funcTypesEqual(a: types.FuncType, b: types.FuncType) bool {
     if (a.params.len != b.params.len or a.results.len != b.results.len) return false;
     for (a.params, b.params) |x, y| if (x != y) return false;
     for (a.results, b.results) |x, y| if (x != y) return false;
@@ -4059,12 +4056,20 @@ fn tableInit(ip: *Interp, elem_idx: u32, tidx: u32) TrapError!void {
     const src: u32 = @bitCast(ip.popI32());
     const dst: u64 = @truncate(ip.popCell());
     if (tidx >= ip.instance.tables.len or elem_idx >= ip.instance.elem_segments.len) return error.UnsupportedImportCall;
-    const table = ip.instance.tables[tidx];
-    const vals = ip.instance.elem_segments[elem_idx].values;
-    if (!rangeInBounds(vals.len, src, n) or !rangeInBounds(table.elems.len, dst, n)) return error.OutOfBoundsTableAccess;
+    try initTable(ip.instance.tables[tidx], ip.instance.elem_segments[elem_idx].values, dst, src, n);
+}
+
+pub fn initTable(table: *Table, values: []const u128, dst: u64, src: u32, n: u32) TrapError!void {
+    if (!rangeInBounds(values.len, src, n) or !rangeInBounds(table.elems.len, dst, n)) return error.OutOfBoundsTableAccess;
     const base: usize = @intCast(dst);
     var k: u32 = 0;
-    while (k < n) : (k += 1) table.elems[base + k] = vals[src + k];
+    while (k < n) : (k += 1) table.elems[base + k] = values[src + k];
+}
+
+pub fn dropElement(instance: *Instance, index: u32) void {
+    if (index >= instance.elem_segments.len) return;
+    instance.elem_segments[index].dropped = true;
+    instance.elem_segments[index].values = &.{};
 }
 
 fn tableCopy(ip: *Interp, dst_t: u32, src_t: u32) TrapError!void {
@@ -4072,8 +4077,10 @@ fn tableCopy(ip: *Interp, dst_t: u32, src_t: u32) TrapError!void {
     const src: u64 = @truncate(ip.popCell());
     const dst: u64 = @truncate(ip.popCell());
     if (dst_t >= ip.instance.tables.len or src_t >= ip.instance.tables.len) return error.UnsupportedImportCall;
-    const dtable = ip.instance.tables[dst_t];
-    const stable = ip.instance.tables[src_t];
+    try copyTable(ip.instance.tables[dst_t], ip.instance.tables[src_t], dst, src, n);
+}
+
+pub fn copyTable(dtable: *Table, stable: *const Table, dst: u64, src: u64, n: u64) TrapError!void {
     if (!rangeInBounds(stable.elems.len, src, n) or !rangeInBounds(dtable.elems.len, dst, n)) return error.OutOfBoundsTableAccess;
     if (n == 0) return;
     const d: usize = @intCast(dst);
@@ -4096,7 +4103,7 @@ fn tableGrow(ip: *Interp, tidx: u32) TrapError!void {
     const init_val = ip.popV128();
     if (tidx >= ip.instance.tables.len) return error.UnsupportedImportCall;
     const table = ip.instance.tables[tidx];
-    const result = growTable(ip, table, n, init_val);
+    const result = growTable(ip.instance.gpa, table, n, init_val);
     if (table.is_64) {
         try ip.pushI64(if (result) |r| @intCast(r) else -1);
     } else {
@@ -4104,7 +4111,7 @@ fn tableGrow(ip: *Interp, tidx: u32) TrapError!void {
     }
 }
 
-fn growTable(ip: *Interp, table: *Table, n: u64, init_val: u128) ?u64 {
+pub fn growTable(allocator: std.mem.Allocator, table: *Table, n: u64, init_val: u128) ?u64 {
     const old: u64 = table.elems.len;
     const new_len = std.math.add(u64, old, n) catch return null;
     // §4.5.4 permits growth to fail for any implementation limit; cap
@@ -4116,7 +4123,7 @@ fn growTable(ip: *Interp, table: *Table, n: u64, init_val: u128) ?u64 {
     }
     const new_count = std.math.cast(usize, new_len) orelse return null;
     const old_count = std.math.cast(usize, old) orelse return null;
-    const grown = table.storeAllocator(ip.instance.gpa).realloc(table.elems, new_count) catch return null;
+    const grown = table.storeAllocator(allocator).realloc(table.elems, new_count) catch return null;
     for (grown[old_count..]) |*e| e.* = init_val;
     table.elems = grown;
     return old;
@@ -4127,7 +4134,10 @@ fn tableFill(ip: *Interp, tidx: u32) TrapError!void {
     const val = ip.popV128();
     const dst: u64 = @truncate(ip.popCell());
     if (tidx >= ip.instance.tables.len) return error.UnsupportedImportCall;
-    const table = ip.instance.tables[tidx];
+    try fillTable(ip.instance.tables[tidx], dst, val, n);
+}
+
+pub fn fillTable(table: *Table, dst: u64, val: u128, n: u64) TrapError!void {
     if (!rangeInBounds(table.elems.len, dst, n)) return error.OutOfBoundsTableAccess;
     const base: usize = @intCast(dst);
     var k: usize = 0;

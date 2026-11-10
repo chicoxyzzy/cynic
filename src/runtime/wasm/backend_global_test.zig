@@ -239,7 +239,7 @@ test "backend globals: allocation failures release bindings and compiler workspa
 }
 
 test "backend globals: unsupported cells refuse even in dead code but unused imports do not" {
-    for ([_]wasm.ValType{ .externref, .v128 }) |ty| {
+    for ([_]wasm.ValType{.v128}) |ty| {
         var arena = std.heap.ArenaAllocator.init(a);
         defer arena.deinit();
         const module: wasm.Module = .{

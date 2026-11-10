@@ -114,6 +114,12 @@ consumers use the same contract, not merely similar-looking instructions.
   and the [Wasm call rules](https://webassembly.github.io/spec/core/exec/instructions.html#exec-call)
   motivate explicit typed result vectors. Calls define all their SSA results
   together; void calls are the empty case, not a fabricated scalar value.
+- [Wasmtime's reference-type roots](https://bytecodealliance.org/articles/reference-types-in-wasmtime)
+  motivate typed safepoint captures, not scanning arbitrary integers for pointers.
+  [JSC's Wasm lowering](https://raw.githubusercontent.com/WebKit/WebKit/main/Source/JavaScriptCore/wasm/WasmOMGIRGenerator.cpp)
+  and [V8's table lowering](https://raw.githubusercontent.com/v8/v8/main/src/wasm/turboshaft-graph-interface.cc)
+  keep reference representation and instance-relative table access in the Wasm
+  frontend. Cynic preserves its existing two-word reference Cells at this boundary.
 
 ## First executable slice
 
@@ -125,12 +131,12 @@ JS values/realms nor Wasm types, bytecode, instances, or Cells.
 The subset has i32/i64 and f32/f64 constants, wrapping integer arithmetic,
 strict scalar FP arithmetic, comparisons, bitwise operations, explicit width
 conversions, ordered guards/traps, block parameters, jumps, conditional branches,
-bounded scalar loads/stores, and typed runtime calls. Wasm bulk-memory
-instructions lower through those calls. Functions and calls
-support zero to 64 scalar results through one result-list model. Scalar Wasm
-globals use the same ordered loads/stores as other bounded views.
-The Wasm adapter accepts locals, scalar-typed block/loop/if constructs (including
-multiple block parameters/results), `br`/`br_if`/`br_table`, and scalar `select`.
+bounded scalar loads/stores, and typed runtime calls. Wasm bulk-memory and table
+instructions lower through those calls. Functions and calls support zero to 64
+physical scalar words through one result-list model; a Wasm reference uses two.
+Scalar/reference globals use ordered loads/stores over bounded views.
+The Wasm adapter accepts scalar/reference locals and block/loop/if constructs
+(including multiple block parameters/results), branches, and selection.
 Unsupported instructions or types are an explicit refusal, even in dead
 bytecode. Standalone frontend tests do not fall back. The opt-in runtime tier
 records pre-entry refusals and falls back, so its tests also assert native entry.
@@ -591,7 +597,7 @@ masked shifts/rotates, zero/leading/trailing/population counts, comparisons,
 integer width conversions, and sign-extension operations. Numeric integer/float
 conversions are described above and memory accesses below. It also accepts
 `unreachable`, including in dead validated code. Unsupported operations such
-as reference instructions still refuse even in dead bytecode.
+as SIMD instructions still refuse even in dead bytecode.
 
 Division and remainder declare `may_trap` effects and require a frontend-owned
 `trap_site`; pure operations and guards reject that metadata. A terminal `trap`
@@ -809,10 +815,10 @@ it is a pre-entry resource refusal, not an unbounded compiler allocation.
 The [Wasm variable instructions](https://webassembly.github.io/spec/core/exec/instructions.html#variable-instructions)
 define the reads/writes; mutability remains a validator obligation. The
 instance-storage model follows [V8's global lowering](https://raw.githubusercontent.com/v8/v8/main/src/compiler/turboshaft/wasm-lowering-reducer.h)
-and Cynic's Spasm implementation. Reference/SIMD global accesses still refuse,
-including in dead bytecode, but unused non-scalar imports do not prevent scalar
-functions from compiling. Reference barriers/roots and SIMD representation
-remain separate work. No ECMA-262 or SES surface changes.
+and Cynic's Spasm implementation. Reference globals now use the paired-word
+representation below. SIMD accesses still refuse, including in dead bytecode,
+but unused SIMD imports do not prevent scalar functions from compiling.
+No ECMA-262 or SES surface changes.
 
 Tests cover imported aliases, immutable/defined globals, exact scalar bits,
 callee updates, graph-to-code binding lifetime, all optimization/allocation
@@ -833,6 +839,77 @@ GC-threshold-1 ReleaseSafe WPT retains its named baseline: 592 passing subtests,
 reference check; the collecting-callback unit test requires shared-native entry.
 Native x86_64 hardware and wasm32 builds remain CI gates, with no performance
 or default-on claim.
+
+### References and tables
+
+The Wasm frontend retains logical 128-bit Cells while `backend_abi.zig` maps
+each reference to two i64 SSA values: low word followed by high word. Function
+references retain their defining-instance pointer; external references retain
+JS value bits; null retains all 128 one bits. `exnref` moves opaquely, but
+exception instructions still refuse. Scalar values remain single words.
+The shared IR, allocator, and emitter do not import Wasm types or GC policy.
+The existing 64-word ABI limit therefore admits at most 32 reference arguments
+or results. Oversized signatures/edges refuse before entry.
+
+Reference locals, typed selection, block/loop/if edges, parameters/results,
+global reads/writes, `ref.null`, `ref.func`, `ref.is_null`, `ref.as_non_null`,
+`br_on_null`, and `br_on_non_null` now lower. Branch metadata continues to count
+logical values; flattening happens only at SSA edges and call/return boundaries.
+Reference globals use two ordered eight-byte accesses to the same Cell view.
+
+`table.get/set/size/grow/fill/copy/init` and `elem.drop` use runtime helpers.
+They preserve table32/table64 address widths, imported aliases, overlapping
+copies, dropped segments, and bounds-before-mutation. Sarcasm, Spasm, and the
+shared tier reuse the same table growth/bulk helpers. Each operation reads the
+current backing store, so growth cannot leave a cached table address stale.
+`call_indirect` and `call_ref` resolve the full reference, check the existing
+runtime signature contract, and dispatch into the defining instance's selected
+tier. Null, bounds, and type-mismatch errors return normally. This is runtime
+dispatch, not direct shared-native linking or proper tail-call support.
+
+These operations follow the [Core instruction rules](https://webassembly.github.io/spec/core/exec/instructions.html).
+Table/ref helpers do not collect or re-enter JS. Before language calls, the
+frontend captures external-reference pairs from locals and the operand stack;
+the callback pins them using `Instance.externref_rooter`. Return values are
+pinned before JS result marshalling can allocate. Pinning may fail with OOM,
+but must not collect or re-enter; errors after native entry never replay effects
+through fallback. Bare embeddings leave this hook unset or supply their own
+root lifetime. The Realm hook uses the existing heap-wide outermost-call owner
+and releases transient pins on normal and exceptional return.
+
+The same tests exposed a fallback-tier gap: values loaded from a table/global
+could lose their persistent root before a collecting callback. Sarcasm and
+Spasm now pin external-reference loads, including constructed non-nullable
+reference types. Durable registration also recognizes these types, not just
+the `externref` shorthand. No ordinary object properties or public globals
+are added; ECMA-262/SES policy is unchanged.
+
+Tests require shared entry for paired parameters/results, reference globals,
+nullable control, table operations, cross-instance indirect/typed calls, and
+all optimization/allocation modes. They cover 64-word limits, allocation
+failures, null/bounds/type traps, and no replay after pin failure in all three
+tiers. Collecting JS callbacks verify that removed table/global values survive
+while on the Wasm stack and become collectible after the outermost return.
+This establishes correctness coverage, not a throughput or default-on claim.
+
+Local verification on 2026-11-10: Debug backend tests pass on AArch64 and
+x86_64 under Rosetta (250 passed, one hardware-dependent skip each). Both
+separate harness-contract runs pass 18 checks. All 55 full AArch64 ReleaseSafe unit/CLI
+build steps pass; the final reference-focused ReleaseSafe run passes 22 tests.
+The OOM matrix disables in-place arena growth, as the existing Ohaimark test
+does, so failure indices remain deterministic across retry layouts.
+All 232 Wasm manifests retain identical per-file pass/fail/skip counts across
+interpreter, shared-only, and combined shared/Spasm modes on both architectures:
+61,051 passes, 1,370 skips. Shared-only mode compiles 4,499 functions with 1,577
+refusals, compared with 3,570/2,067 before references; native entries are
+182,940 on AArch64 and 177,540 under Rosetta. Native hardware and production
+qualification remain CI/rollout gates, not conclusions from translated runs.
+After the bounded RSS precheck, the full production test262 pass set remains
+byte-identical: 48,653 passes, 1,324 existing failures. ReleaseSafe WPT at GC
+threshold 1 retains its named baseline: 592 passing subtests, 11 known failures,
+two existing parse-error files. WPT checks the interpreter reference path;
+the new collecting-callback tests separately verify interpreter, Spasm, and
+shared-native execution, with entry counters for both native tiers.
 
 ## Runtime calls and root snapshots
 
@@ -861,7 +938,8 @@ occupy separate scratch areas from arguments, captures, and saved registers.
 
 Snapshots are borrowed, read-only values for Cynic's non-moving collector.
 The frontend must register all live references, including arguments, in a
-`HandleScope` before allocation or JS re-entry; the backend cannot infer roots
+`HandleScope` or an embedding-owned pin set before GC-capable allocation or JS
+re-entry; the backend cannot infer roots
 from raw integer bits. A regression adapter calls the existing
 ECMA-262 [Call](https://tc39.es/ecma262/multipage/abstract-operations.html#sec-call)
 machinery, forces GC inside the callee, and checks a capture-only object after
@@ -869,15 +947,15 @@ native resumption. This establishes the boundary, not complete Ohaimark call
 lowering. Moving-GC relocation is not supported; JS frame maps, exception
 handlers, and OSR remain production-integration requirements.
 
-The Wasm frontend lowers scalar direct `call`, including function imports and
-cross-instance targets, following the [Core call rules](https://webassembly.github.io/spec/core/exec/instructions.html#exec-call).
+The Wasm frontend lowers direct `call`, `call_indirect`, and `call_ref`, including
+function imports and cross-instance targets, following the [Core call rules](https://webassembly.github.io/spec/core/exec/instructions.html#exec-call).
 Its callback uses existing Sarcasm/Spasm dispatch, then refreshes all caller
 memory views before resumption. Callees share a bounded poll allowance across
 the invocation, in addition to the caller's native block budget. The bridge
 forwards the existing caller or defining-instance execution controller without
 mutating either instance. These prototype bounds are not a production fuel
-cost model; host callbacks remain trusted and cooperative. Indirect/reference
-calls, native shared-backend callee linking, and
+cost model; host callbacks remain trusted and cooperative. Native
+shared-backend callee linking, proper tail calls, and
 complete JS/Wasm exception integration remain open.
 
 The initial runtime-call checks covered caller-saved values, duplicate captures,
@@ -893,7 +971,7 @@ production qualification.
 ## Safety and non-goals
 
 - No JS heap-object dereferences, shared-memory accesses,
-  atomics, SIMD, exception handlers, table/tag imports, reference-global accesses,
+  atomics, SIMD, exception handlers, tag imports, proper tail calls,
   inlining, OSR, or automatic shared-backend tier-up in this slice.
 - Developer module decoding caps input at 64 KiB and decoder/validator workspace
   at 8 MiB. Runtime lowering starts from an already validated instance.
@@ -935,11 +1013,11 @@ contracts when adding production execution paths.
 
 ## Structured Wasm control
 
-The Wasm adapter lowers scalar-typed `block`, `loop`, and `if`/`else`, including
-type-index signatures with multiple parameters/results; `br`, `br_if`, and
+The Wasm adapter lowers scalar/reference-typed `block`, `loop`, and `if`/`else`,
+including type-index signatures with multiple parameters/results; `br`, `br_if`, and
 `br_table`; explicit return and branches to the implicit function label; and
-typed/untyped scalar `select`. Function and runtime-call signatures now also
-support void/multiple scalar results as described below. Reference/SIMD control,
+typed selection (plus untyped scalar `select`). Function and runtime-call
+signatures also support void/multiple logical results through scalar words. SIMD control,
 tail calls, and exception handling remain outside this adapter.
 
 The [Wasm control instruction rules](https://webassembly.github.io/spec/core/exec/instructions.html#control-instructions)
@@ -1094,21 +1172,21 @@ failures, but is not evidence that an unimplemented backend capability works.
 5. **Wider Wasm coverage:** scalar floating point (including rounding and
    conversions), the complete scalar integer family, and bounded scalar memory
    now run natively, with explicit ordered arithmetic/conversion/memory traps.
-   Direct scalar calls now bridge through existing runtime dispatch, including
-   function imports, direct memory size/growth, bulk memory, scalar globals,
-   and callee growth.
-   Scalar structured control now includes multi-value block parameters/results,
-   branch tables, and selection.
-   Function and call signatures support void and multiple scalar results.
-   Continue with references/exceptions, indirect/native
-   calls, and production integration. Preserve bounds checks,
+   Direct, indirect, and typed-reference calls now bridge through existing runtime
+   dispatch, including function imports, direct memory size/growth, bulk memory,
+   scalar/reference globals, table operations, and callee growth.
+   Scalar/reference structured control includes multi-value block parameters/results,
+   branch tables, nullable branches, and selection.
+   Function and call signatures support void and multiple logical results.
+   Continue with SIMD, proper tail calls, exception handling, native linking,
+   and production integration. Preserve bounds checks,
    memory-growth invalidation, resource metering, and executable ownership.
 6. **Rollout decision:** paired warm/cold execution measurements, compilation
    latency, peak compiler allocation, installed code size, refusal/entry
    telemetry, differential fuzzing, and spec-suite gates. No automatic
    default-on graduation or new JS tier follows from finishing the prototype.
 
-The next capability work is the remaining Wasm reference/control/call surface,
+The next capability work is Wasm SIMD, proper tail calls and exception handling,
 production Ohaimark root/frame lowering, and resource-policy integration.
 Operand-move
 reduction and immediate/compare-branch selection remain measured optimization

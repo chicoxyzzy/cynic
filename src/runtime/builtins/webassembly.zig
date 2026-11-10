@@ -412,7 +412,7 @@ fn populateInstanceFromImports(realm: *Realm, self: *JSObject, mstate: *ModuleSt
             var tables_remaining = registered_extern_tables;
             for (0..ip.tables.len) |i| {
                 if (tables_remaining == 0) break;
-                if ((ip.tableElemType(@intCast(i)) orelse continue) != .externref) continue;
+                if ((ip.tableElemType(@intCast(i)) orelse continue).heapOf() != wasm_types.heap_abs_extern) continue;
                 const table = ip.tableRef(@intCast(i)) orelse continue;
                 realm.unregisterExternTable(table);
                 tables_remaining -= 1;
@@ -422,7 +422,7 @@ fn populateInstanceFromImports(realm: *Realm, self: *JSObject, mstate: *ModuleSt
             for (0..ip.globals.len) |i| {
                 if (globals_remaining == 0) break;
                 const gt = ip.globalTypeAt(@intCast(i)) orelse continue;
-                if (gt.val != .externref) continue;
+                if (gt.val.heapOf() != wasm_types.heap_abs_extern) continue;
                 const cell = ip.globalCellPtr(@intCast(i)) orelse continue;
                 realm.unregisterExternGlobalCell(cell);
                 globals_remaining -= 1;
@@ -437,6 +437,7 @@ fn populateInstanceFromImports(realm: *Realm, self: *JSObject, mstate: *ModuleSt
     // realm's pending exception through this bridge.
     ip.host_exn_ctx = realm;
     ip.host_exn_hook = convertHostException;
+    ip.externref_rooter = .{ .context = realm, .pin_fn = pinNativeExternRef };
     ip.execution_control = .{
         .ctx = realm,
         .poll_fn = pollWasmExecution,
@@ -461,14 +462,14 @@ fn populateInstanceFromImports(realm: *Realm, self: *JSObject, mstate: *ModuleSt
     // JS value a wasm body stores into one survives past the call that put
     // it there (its transient pin is dropped at the outermost return).
     for (0..ip.tables.len) |i| {
-        if ((ip.tableElemType(@intCast(i)) orelse continue) == .externref) {
+        if ((ip.tableElemType(@intCast(i)) orelse continue).heapOf() == wasm_types.heap_abs_extern) {
             realm.registerExternTable(ip.tableRef(@intCast(i)).?) catch return error.OutOfMemory;
             registered_extern_tables += 1;
         }
     }
     for (0..ip.globals.len) |i| {
         const gt = ip.globalTypeAt(@intCast(i)) orelse continue;
-        if (gt.val == .externref) {
+        if (gt.val.heapOf() == wasm_types.heap_abs_extern) {
             realm.registerExternGlobalCell(ip.globalCellPtr(@intCast(i)).?) catch return error.OutOfMemory;
             registered_extern_globals += 1;
         }
@@ -1947,6 +1948,11 @@ fn exportTrampoline(realm: *Realm, this_value: Value, args: []const Value) Nativ
     return heap_mod.taggedObject(arr);
 }
 
+fn pinNativeExternRef(raw: *anyopaque, cell: u128) error{OutOfMemory}!void {
+    const realm: *Realm = @ptrCast(@alignCast(raw));
+    try realm.pinExternRefTransient(.{ .bits = @truncate(cell) });
+}
+
 /// JS value -> a wasm operand cell, per the parameter's value type.
 /// (§ToWebAssemblyValue.)
 fn marshalArg(realm: *Realm, type_context: []const wasm_types.FuncType, vt: wasm.ValType, v: Value) NativeError!u128 {
@@ -3393,6 +3399,116 @@ test "backend globals: JS imports stay aliased across a collecting callback" {
     try testing.expectEqual(@as(u64, 2), record.instance.shared_backend_stats.entries);
     try testing.expectEqual(@as(u64, 1), record.instance.shared_backend_stats.compiles);
     try testing.expectEqual(@as(u32, 0), record.instance.spasm_runs);
+}
+
+test "backend references: removed table values remain rooted across collecting JS reentry" {
+    for (0..3) |tier| try testRemovedStoredReference(tier, false);
+}
+
+test "backend references: removed global values remain rooted across collecting JS reentry" {
+    for (0..3) |tier| try testRemovedStoredReference(tier, true);
+}
+
+fn testRemovedStoredReference(tier: usize, comptime global: bool) !void {
+    const testing = std.testing;
+    const lantern = @import("../lantern/interpreter.zig");
+    if (comptime !wasm.backend_prototype.native.supported) return error.SkipZigTest;
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.allow_wasm_compile = true;
+    realm.jit_enabled = tier != 0;
+    realm.wasm_shared_backend_enabled = tier == 2;
+    try realm.installBuiltins();
+    try realm.installTestGlobals();
+    const source =
+        \\let refObject = {answer: 42};
+        \\const refWeak = new WeakRef(refObject);
+    ++ (if (global)
+        \\const refGlobal = new WebAssembly.Global({value: "externref", mutable: true}, refObject);
+        \\refObject = null;
+        \\const refBytes = [0,97,115,109,1,0,0,0,1,9,2,96,0,0,96,0,2,127,111,
+        \\  2,20,2,1,104,2,103,99,0,0,1,104,6,103,108,111,98,97,108,3,111,1,
+        \\  3,2,1,1,7,8,1,4,116,97,107,101,0,1,10,14,1,12,0,65,9,35,0,208,111,36,0,16,0,11];
+        \\const refHost = {global: refGlobal};
+    else
+        \\const refTable = new WebAssembly.Table({element: "externref", initial: 1});
+        \\refTable.set(0, refObject); refObject = null;
+        \\const refBytes = [
+        \\  0,97,115,109,1,0,0,0,1,8,2,96,0,0,96,0,1,111,
+        \\  2,20,2,1,104,2,103,99,0,0,1,104,5,116,97,98,108,101,1,111,0,1,
+        \\  3,2,1,1,7,8,1,4,116,97,107,101,0,1,
+        \\  10,16,1,14,0,65,0,37,0,65,0,208,111,38,0,16,0,11
+        \\];
+        \\const refHost = {table: refTable};
+    ) ++
+        \\refHost.gc = function() {
+        \\  __clearKeptObjects(); __collectGarbage();
+        \\  if (refWeak.deref() === undefined) throw new Error("lost native reference");
+        \\};
+        \\const refInstance = new WebAssembly.Instance(new WebAssembly.Module(new Uint8Array(refBytes)), {h: refHost});
+        \\refInstance.exports.take;
+    ;
+    const setup = try lantern.evaluateScript(testing.allocator, &realm, source);
+    const function = switch (setup) {
+        .value => |v| heap_mod.valueAsFunction(v) orelse return error.TestUnexpectedResult,
+        else => return error.TestUnexpectedResult,
+    };
+    const record: *ExportRecord = @ptrCast(@alignCast(function.wasm_export orelse return error.TestUnexpectedResult));
+    const result = try lantern.evaluateScript(testing.allocator, &realm, if (global)
+        \\let refResult = refInstance.exports.take();
+        \\if (refResult[0] !== 9 || refResult[1].answer !== 42) throw new Error("wrong result");
+        \\if (refGlobal.value !== null) throw new Error("global not cleared");
+        \\refResult = null; 42;
+    else
+        \\if (refInstance.exports.take().answer !== 42) throw new Error("wrong result");
+        \\if (refTable.get(0) !== null) throw new Error("table not cleared");
+        \\42;
+    );
+    switch (result) {
+        .value => |v| try testing.expectEqual(@as(i32, 42), v.asInt32()),
+        else => return error.TestUnexpectedResult,
+    }
+    try testing.expectEqual(@as(u64, @intFromBool(tier == 2)), record.instance.shared_backend_stats.entries);
+    try testing.expectEqual(@as(u32, @intFromBool(tier == 1)), record.instance.spasm_runs);
+    try testing.expectEqual(@as(usize, 0), realm.wasm_extern_roots.count());
+    const released = try lantern.evaluateScript(testing.allocator, &realm,
+        \\__clearKeptObjects(); __collectGarbage(); refWeak.deref() === undefined;
+    );
+    switch (released) {
+        .value => |v| try testing.expect(v.isBool() and v.asBool()),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "backend references: constructed externref globals retain durable roots" {
+    const testing = std.testing;
+    const lantern = @import("../lantern/interpreter.zig");
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.allow_wasm_compile = true;
+    realm.jit_enabled = true;
+    realm.wasm_shared_backend_enabled = true;
+    try realm.installBuiltins();
+    try realm.installTestGlobals();
+    const setup = try lantern.evaluateScript(testing.allocator, &realm,
+        \\let durableObject = {answer: 42};
+        \\const durableWeak = new WeakRef(durableObject);
+        \\const durableInstance = new WebAssembly.Instance(new WebAssembly.Module(new Uint8Array([
+        \\  0,97,115,109,1,0,0,0,1,5,1,96,0,1,111,2,9,1,1,104,1,103,3,100,111,0,
+        \\  3,2,1,0,7,7,1,3,103,101,116,0,0,10,6,1,4,0,35,0,11
+        \\])), {h: {g: durableObject}});
+        \\durableObject = null;
+    );
+    try testing.expect(setup == .value);
+    const result = try lantern.evaluateScript(testing.allocator, &realm,
+        \\__clearKeptObjects(); __collectGarbage();
+        \\if (durableWeak.deref() === undefined) throw new Error("lost durable root");
+        \\durableInstance.exports.get().answer;
+    );
+    switch (result) {
+        .value => |v| try testing.expectEqual(@as(i32, 42), v.asInt32()),
+        else => return error.TestUnexpectedResult,
+    }
 }
 
 test "WebAssembly JS API: a fuel-metered loop remains in Spasm" {
