@@ -82,18 +82,22 @@ pub fn runInInstance(compiled: *const Compiled, instance: *Instance, args: []con
 pub fn runResultsInInstance(compiled: *const Compiled, instance: *Instance, args: []const u64, budget: u32, results: []u64) !native.Completion {
     const code = &compiled.code;
     if (code.memory_count > ir.max_memories) return error.MemoryCount;
-    var views: [ir.max_memories]native.MemoryView = undefined;
-    try refreshMemories(instance, views[0..code.memory_count], compiled.global_indices);
+    var local_views: [4]native.MemoryView = undefined;
+    const views = if (code.memory_count <= local_views.len) local_views[0..code.memory_count] else try code.allocator.alloc(native.MemoryView, code.memory_count);
+    defer if (code.memory_count > local_views.len) code.allocator.free(views);
+    try refreshMemories(instance, views, compiled.global_indices);
     var remaining = budget;
     var context: CallContext = .{ .instance = instance, .allocator = code.allocator, .remaining = &remaining, .global_indices = compiled.global_indices };
-    return code.runInto(args, views[0..code.memory_count], budget, if (code.call_sites.len == 0) null else .{ .context = &context, .call = CallContext.invoke }, results);
+    return code.runInto(args, views, budget, if (code.call_sites.len == 0) null else .{ .context = &context, .call = CallContext.invoke }, results);
 }
 
 pub fn runControlledInInstance(compiled: *const Compiled, allocator: std.mem.Allocator, instance: *Instance, args: []const u64, execution_control: ?interpreter.ExecutionControl, entries: ?*u64, results: []u64) !native.Completion {
     const code = &compiled.code;
     if (code.memory_count > ir.max_memories) return error.MemoryCount;
-    var views: [ir.max_memories]native.MemoryView = undefined;
-    try refreshMemories(instance, views[0..code.memory_count], compiled.global_indices);
+    var local_views: [4]native.MemoryView = undefined;
+    const views = if (code.memory_count <= local_views.len) local_views[0..code.memory_count] else try allocator.alloc(native.MemoryView, code.memory_count);
+    defer if (code.memory_count > local_views.len) allocator.free(views);
+    try refreshMemories(instance, views, compiled.global_indices);
     var context: CallContext = .{ .instance = instance, .allocator = allocator, .execution_control = execution_control, .global_indices = compiled.global_indices };
     var host_control = execution_control;
     const native_control: ?native.ExecutionControl = if (host_control) |*host| blk: {
@@ -101,7 +105,7 @@ pub fn runControlledInInstance(compiled: *const Compiled, allocator: std.mem.All
         if (!armed and host.wake_flag == null) break :blk null;
         break :blk .{ .context = host, .poll_fn = pollExecution, .wake_flag = if (armed) null else host.wake_flag };
     } else null;
-    return code.runControlledInto(allocator, args, views[0..code.memory_count], .{
+    return code.runControlledInto(allocator, args, views, .{
         .runtime = if (code.call_sites.len == 0) null else .{ .context = &context, .call = CallContext.invoke },
         .control = native_control,
         .entry_counter = entries,
