@@ -240,7 +240,7 @@ test "backend control: typed edges and table lowering clean up every allocation 
     try std.testing.checkAllAllocationFailures(a, lowerWithFailures, .{&instance});
 }
 
-test "backend control: oversized tables and unsupported dead signatures refuse" {
+test "backend control: oversized tables refuse and dead vector signatures lower" {
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const helper = @import("backend_prototype_test.zig");
@@ -255,7 +255,9 @@ test "backend control: oversized tables and unsupported dead signatures refuse" 
         &.{ 0x41, 5, 0x0f, 0x1c, 1, 0x7b, 0x1a, 0x41, 8, 0x0b },
     }) |dead_body| {
         const bytes = try helper.moduleBytes(arena.allocator(), &.{}, 0x7f, &.{}, dead_body);
-        try std.testing.expectError(error.UnsupportedType, prototype.lowerModule(a, bytes, 0));
+        var graph = try prototype.lowerModule(a, bytes, 0);
+        defer graph.deinit();
+        try graph.graph.verify();
     }
 }
 

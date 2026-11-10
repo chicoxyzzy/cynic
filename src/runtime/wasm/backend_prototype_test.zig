@@ -163,10 +163,10 @@ test "backend prototype: infinite loop and zero budget return normally" {
 test "backend prototype: unsupported operations refuse rather than falling back silently" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const bytes = try moduleBytes(arena.allocator(), &.{ 0x7f, 0x7f }, 0x7f, &.{}, &.{ 0xfd, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x1a, 0x41, 1, 0x0b });
+    const bytes = try moduleBytes(arena.allocator(), &.{ 0x7f, 0x7f }, 0x7f, &.{}, &.{ 0xfd, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xfd, 77, 0x1a, 0x41, 1, 0x0b });
     try std.testing.expectError(error.UnsupportedOpcode, prototype.evaluate(std.testing.allocator, bytes, 0, &.{ 1, 0 }, 100));
     const vectors = try moduleBytes(arena.allocator(), &.{0x7b}, 0x7b, &.{}, &.{ 0x20, 0, 0x0b });
-    try std.testing.expectError(error.UnsupportedType, prototype.evaluate(std.testing.allocator, vectors, 0, &.{0}, 100));
+    try std.testing.expectError(error.ArgumentCount, prototype.evaluate(std.testing.allocator, vectors, 0, &.{0}, 100));
 }
 
 test "backend prototype: argument count is checked before native entry" {
@@ -194,7 +194,7 @@ test "backend prototype: branch discard and dead branch metadata" {
 test "backend prototype: unsupported dead operations and resource limits refuse" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const bytes = try moduleBytes(arena.allocator(), &.{}, 0x7f, &.{}, &.{ 0x41, 1, 0x0f, 0xfd, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x1a, 0x0b });
+    const bytes = try moduleBytes(arena.allocator(), &.{}, 0x7f, &.{}, &.{ 0x41, 1, 0x0f, 0xfd, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xfd, 77, 0x1a, 0x0b });
     try std.testing.expectError(error.UnsupportedOpcode, prototype.lowerModule(std.testing.allocator, bytes, 0));
     const oversized = try arena.allocator().alloc(u8, 64 * 1024 + 1);
     try std.testing.expectError(error.PrototypeLimit, prototype.lowerModule(std.testing.allocator, oversized, 0));
