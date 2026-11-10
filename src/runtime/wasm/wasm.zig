@@ -98,6 +98,7 @@ test {
     _ = @import("backend_integer_test.zig");
     _ = @import("backend_conversion_test.zig");
     _ = @import("backend_memory_test.zig");
+    _ = @import("backend_bulk_memory_test.zig");
     _ = @import("backend_call_test.zig");
     _ = @import("backend_control_test.zig");
     _ = @import("backend_results_test.zig");

@@ -2477,15 +2477,10 @@ fn spasmMemoryInit(
         inst.spasm_call_trap = error.OutOfBoundsMemoryAccess;
         return spasm.trap_pending;
     }
-    const seg = inst.data_segments[data_idx].bytes;
-    const mem = inst.memories[mem_idx];
-    if (!rangeInBounds(seg.len, src, len) or !rangeInBounds(mem.data.len, dst, len)) {
+    initMemory(inst.memories[mem_idx], inst.data_segments[data_idx].bytes, dst, src, len) catch {
         inst.spasm_call_trap = error.OutOfBoundsMemoryAccess;
         return spasm.trap_pending;
-    }
-    const base: usize = @intCast(dst);
-    var k: u32 = 0;
-    while (k < len) : (k += 1) mem.data[base + k] = seg[src + k];
+    };
     return spasm.trap_ok;
 }
 
@@ -2494,10 +2489,7 @@ fn spasmMemoryInit(
 /// dropped and clear its bytes (guarded by the segment count). Cannot trap.
 fn spasmDataDrop(instance_opaque: *anyopaque, data_idx: u32) callconv(.c) void {
     const inst: *Instance = @ptrCast(@alignCast(instance_opaque));
-    if (data_idx < inst.data_segments.len) {
-        inst.data_segments[data_idx].dropped = true;
-        inst.data_segments[data_idx].bytes = &.{};
-    }
+    dropData(inst, data_idx);
 }
 
 /// The native helper a Spasm-compiled `table.size` (§4.4.x) branches to.
@@ -3727,10 +3719,7 @@ fn run(ip: *Interp) Error!void {
                 },
                 9 => { // data.drop
                     const data_idx = readU32(body, &pc);
-                    if (data_idx < ip.instance.data_segments.len) {
-                        ip.instance.data_segments[data_idx].dropped = true;
-                        ip.instance.data_segments[data_idx].bytes = &.{};
-                    }
+                    dropData(ip.instance, data_idx);
                 },
                 12 => { // table.init
                     const elem_idx = readU32(body, &pc);
@@ -4001,26 +3990,23 @@ fn memCopy(ip: *Interp, dst_mi: u32, src_mi: u32) TrapError!void {
     const n: u64 = @truncate(ip.popCell());
     const src: u64 = @truncate(ip.popCell());
     const dst: u64 = @truncate(ip.popCell());
-    const dst_data = ip.instance.memories[dst_mi].data;
-    const src_data = ip.instance.memories[src_mi].data;
+    try copyMemory(ip.instance.memories[dst_mi], ip.instance.memories[src_mi], dst, src, n);
+}
+
+/// Wasm memory.copy: validate both complete ranges before the first write.
+pub fn copyMemory(destination: *Memory, source: *Memory, dst: u64, src: u64, n: u64) TrapError!void {
+    const dst_data = destination.data;
+    const src_data = source.data;
     try checkBounds(src_data.len, src, n);
     try checkBounds(dst_data.len, dst, n);
     if (n == 0) return;
     const d: usize = @intCast(dst);
     const s: usize = @intCast(src);
     const cnt: usize = @intCast(n);
-    // Same memory may overlap; copy in the direction that never reads
-    // an already-written byte. Distinct memories never overlap, so
-    // either direction is fine.
-    if (dst <= src or ip.instance.memories[dst_mi] != ip.instance.memories[src_mi]) {
-        var i: usize = 0;
-        while (i < cnt) : (i += 1) dst_data[d + i] = src_data[s + i];
+    if (dst <= src or destination != source) {
+        std.mem.copyForwards(u8, dst_data[d..][0..cnt], src_data[s..][0..cnt]);
     } else {
-        var i: usize = cnt;
-        while (i > 0) {
-            i -= 1;
-            dst_data[d + i] = src_data[s + i];
-        }
+        std.mem.copyBackwards(u8, dst_data[d..][0..cnt], src_data[s..][0..cnt]);
     }
 }
 
@@ -4028,7 +4014,11 @@ fn memFill(ip: *Interp, mi: u32) TrapError!void {
     const n: u64 = @truncate(ip.popCell());
     const val: u32 = @bitCast(ip.popI32());
     const dst: u64 = @truncate(ip.popCell());
-    const data = ip.instance.memories[mi].data;
+    try fillMemory(ip.instance.memories[mi], dst, val, n);
+}
+
+pub fn fillMemory(memory: *Memory, dst: u64, val: u32, n: u64) TrapError!void {
+    const data = memory.data;
     try checkBounds(data.len, dst, n);
     if (n == 0) return;
     @memset(data[@intCast(dst)..][0..@intCast(n)], @truncate(val));
@@ -4039,12 +4029,20 @@ fn memInit(ip: *Interp, data_idx: u32, mi: u32) TrapError!void {
     const src: u32 = @bitCast(ip.popI32());
     const dst: u64 = @truncate(ip.popCell());
     if (data_idx >= ip.instance.data_segments.len) return error.OutOfBoundsMemoryAccess;
-    const seg = ip.instance.data_segments[data_idx].bytes;
-    const mem = ip.instance.memories[mi];
+    try initMemory(ip.instance.memories[mi], ip.instance.data_segments[data_idx].bytes, dst, src, n);
+}
+
+pub fn initMemory(mem: *Memory, seg: []const u8, dst: u64, src: u32, n: u32) TrapError!void {
     if (!rangeInBounds(seg.len, src, n) or !rangeInBounds(mem.data.len, dst, n)) return error.OutOfBoundsMemoryAccess;
     const base: usize = @intCast(dst);
     var k: u32 = 0;
     while (k < n) : (k += 1) mem.data[base + k] = seg[src + k];
+}
+
+pub fn dropData(instance: *Instance, index: u32) void {
+    if (index >= instance.data_segments.len) return;
+    instance.data_segments[index].dropped = true;
+    instance.data_segments[index].bytes = &.{};
 }
 
 // ── tables ──────────────────────────────────────────────────────────
