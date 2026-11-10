@@ -6,6 +6,81 @@ const AllocationMode = @import("allocation.zig").Mode;
 const CodeAllocator = @import("../code_alloc.zig").CodeAllocator;
 const a = std.testing.allocator;
 
+test "backend memory length: verifier requires an existing view and an i64 result" {
+    const effect = ir.effects(.memory_length);
+    try std.testing.expect(effect.reads_memory and !effect.may_trap and !effect.isPure());
+    var types = [_]ir.Type{.i64};
+    var nodes = [_]ir.Node{.{ .op = .memory_length, .out = 0 }};
+    const blocks = [_]ir.Block{.{ .params = &.{}, .nodes = &nodes, .terminator = .{ .return_ = &.{0} } }};
+    var graph: ir.Graph = .{ .types = &types, .argument_types = &.{}, .result_types = &types, .memory_count = 1, .blocks = &blocks };
+    try graph.verify();
+    if (native.supported) {
+        var owner = try CodeAllocator.init(a, 64 * 1024);
+        defer owner.deinit();
+        var code = try native.compile(a, &owner, graph);
+        defer code.deinit();
+        var bytes: [37]u8 = @splat(0);
+        var views = [_]native.MemoryView{native.MemoryView.fromSlice(&bytes)};
+        try std.testing.expectEqual(@as(u64, 37), try code.runWithMemory(&.{}, &views, 1));
+        views[0] = native.MemoryView.fromSlice(bytes[0..0]);
+        try std.testing.expectEqual(@as(u64, 0), try code.runWithMemory(&.{}, &views, 1));
+        try std.testing.expectEqual(@as(usize, 0), code.call_sites.len);
+        try std.testing.expect(!code.uses_fp_environment);
+    }
+    for ([_]ir.Type{ .i32, .f32, .f64 }) |ty| {
+        types[0] = ty;
+        try std.testing.expectError(error.InvalidGraph, graph.verify());
+    }
+    types[0] = .i64;
+    for ([_]u64{ 1, std.math.maxInt(u64) }) |region| {
+        nodes[0].immediate = region;
+        try std.testing.expectError(error.InvalidGraph, graph.verify());
+    }
+    nodes[0].immediate = 0;
+    nodes[0].trap_site = 0;
+    try std.testing.expectError(error.InvalidGraph, graph.verify());
+    nodes[0].trap_site = null;
+    graph.memory_count = 0;
+    try std.testing.expectError(error.InvalidGraph, graph.verify());
+}
+
+test "backend memory length: native reads observe descriptor updates across callbacks" {
+    if (!native.supported) return error.SkipZigTest;
+    const Host = struct {
+        fn invoke(_: ?*anyopaque, request: native.CallRequest) !void {
+            request.memories[0].length = 32;
+            request.memories[1].length = 48;
+        }
+    };
+    const graph: ir.Graph = .{
+        .types = &.{ .i64, .i64, .i64, .i64 },
+        .argument_types = &.{},
+        .result_types = &.{ .i64, .i64, .i64, .i64 },
+        .memory_count = 2,
+        .blocks = &.{.{ .params = &.{}, .nodes = &.{
+            .{ .op = .memory_length, .out = 0 },
+            .{ .op = .memory_length, .out = 1, .immediate = 1 },
+            .{ .op = .call, .trap_site = 0, .call = .{ .target = 0, .arguments = &.{}, .parameter_types = &.{}, .results = &.{}, .result_types = &.{}, .safepoint = .{ .id = 0, .values = &.{} } } },
+            .{ .op = .memory_length, .out = 2 },
+            .{ .op = .memory_length, .out = 3, .immediate = 1 },
+        }, .terminator = .{ .return_ = &.{ 0, 1, 2, 3 } } }},
+    };
+    var owner = try CodeAllocator.init(a, 256 * 1024);
+    defer owner.deinit();
+    var bytes: [48]u8 = @splat(0);
+    const views = [_]native.MemoryView{ native.MemoryView.fromSlice(bytes[0..8]), native.MemoryView.fromSlice(bytes[0..16]) };
+    for ([_]AllocationMode{ .linear_scan, .scratch }) |mode| for (0..8) |flags| for ([_]u8{ 0, 1, 4 }) |registers| {
+        var code = try native.compileWithOptions(a, &owner, graph, .{ .allocation = mode, .register_count = registers, .optimization = .{ .constant_folding = flags & 1 != 0, .common_subexpression_elimination = flags & 2 != 0, .dead_code_elimination = flags & 4 != 0 } });
+        defer code.deinit();
+        var values: [4]u64 = undefined;
+        var result = try code.runInto(&.{}, &views, 1, .{ .call = Host.invoke }, &values);
+        defer result.deinit();
+        try std.testing.expect(result == .returned);
+        try std.testing.expectEqualSlices(u64, &.{ 8, 16, 32, 48 }, &values);
+        try std.testing.expectEqual(@as(usize, 8), views[0].length);
+    };
+}
+
 const LoadFixture = struct {
     types: [2]ir.Type,
     nodes: [1]ir.Node,

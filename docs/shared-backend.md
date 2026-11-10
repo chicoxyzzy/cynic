@@ -672,10 +672,9 @@ register/scratch allocation, guard/budget/trap ordering, and allocation failure.
 Wasm tests compare results and backing bytes with Sarcasm and Spasm, require
 Spasm entry, and cover real instance growth, imported aliasing, replacement
 stores, multi-memory, memory64, loop-carried addresses, partial writes before
-later traps, and source trap locations. Direct `memory.grow` lowering is not
-implemented by this adapter. Resource
-metering and runtime dispatch are provided by the opt-in tier. Growth in a callee
-now refreshes descriptors through the runtime-call bridge described below.
+later traps, and source trap locations. Resource metering and runtime dispatch
+are provided by the opt-in tier. Both direct growth and growth in a callee
+refresh descriptors through the runtime-call bridge described below.
 
 The memory increment passes the focused backend tests on native AArch64 and
 x86_64 under Rosetta (146 passed, one skipped on each), the full ReleaseSafe
@@ -684,6 +683,55 @@ scratch sizes, and emitted load/store counts are unchanged. The production
 test262 pass set is also unchanged at 48,653 passing and 1,324 failing fixtures;
 that is a non-regression check, not qualification of this experimental path.
 Native x86_64 hardware coverage remains a CI gate.
+
+### Memory size and growth
+
+The Wasm frontend now lowers `memory.size` and `memory.grow` for non-shared
+memory32/memory64, including nonzero and aliased imported memory indices.
+`memory.size` reads the current descriptor through the language-neutral
+`memory_length` operation, then converts bytes to pages. This is an ordered
+read, not a constant or pure expression: CSE must not reuse a pre-growth size.
+The verifier requires an existing view and an i64 byte-length result; native
+emission loads the descriptor directly without a host call.
+
+`memory.grow` uses the existing typed runtime-call boundary. Its helper reuses
+`interpreter.growMemory`, also used by Sarcasm and Spasm: overflow, maximum,
+host-cap, or allocation refusal returns the address-width `-1` value without
+changing the store. Successful growth zeroes the new range and runs the existing
+host-view commit before returning, including zero-page growth. Every descriptor
+is then refreshed, since multiple imports can alias the grown memory. A later
+trap preserves the growth and never retries the body through another tier.
+Realm-backed stores retain their quota allocator and host-view callbacks.
+
+Runtime call targets are opaque 64-bit identifiers. The Wasm frontend partitions
+them into a kind and a full u32 index, so helper IDs cannot collide with the
+function-index space. This interpretation stays outside the shared backend.
+
+The split follows [V8's size-load / growth-builtin lowering](https://raw.githubusercontent.com/v8/v8/main/src/wasm/turboshaft-graph-interface.cc)
+and [JSC's runtime growth helper](https://raw.githubusercontent.com/WebKit/WebKit/main/Source/JavaScriptCore/wasm/WasmOperations.cpp).
+The [Core memory instructions](https://webassembly.github.io/spec/core/exec/instructions.html#memory-instructions)
+define the old-page-count / failure result; the native helper does not introduce
+a JS exception for an ordinary Wasm growth failure. Shared-memory ordering,
+bulk-memory operations, and broader production qualification remain open.
+
+Tests require native entry for direct growth, force backing-store relocation
+through aliased imports, and check memory32/memory64 result widths, ordered
+size observations, zero initialization, allocation refusal, Realm quotas, and
+no replay after a later trap. The JS integration test checks fixed-buffer
+detachment and resizable-buffer identity/extent after a GC checkpoint.
+
+Local verification on 2026-11-10: all 232 Wasm manifests retain identical
+pass/fail/skip counts in interpreter, shared-only, and shared-plus-Spasm modes
+on AArch64 and x86_64 under Rosetta (61,051 passes, 1,370 skips each).
+Shared-only mode compiles 3,328 functions with 2,307 refusals on each
+architecture: 74 additional compiled functions and 74 fewer refusals than
+the initial tier. The final Debug memory tests pass on both architectures
+(55 each). The full production test262 pass set remains byte-identical
+(48,653 passes, 1,324 existing failures). ReleaseSafe WPT with GC threshold 1
+matches its named baseline (592 passing subtests, 11 known failures, two
+existing parse-error files). WPT runs the interpreter reference path; it is
+not shared-native qualification. Native x86_64 hardware and rollout/performance
+gates remain separate.
 
 ## Runtime calls and root snapshots
 
@@ -946,8 +994,9 @@ failures, but is not evidence that an unimplemented backend capability works.
    conversions), the complete scalar integer family, and bounded scalar memory
    now run natively, with explicit ordered arithmetic/conversion/memory traps.
    Direct scalar calls now bridge through existing runtime dispatch, including
-   function imports and callee memory growth. Scalar structured control now
-   includes multi-value block parameters/results, branch tables, and selection.
+   function imports, direct memory size/growth, and callee memory growth.
+   Scalar structured control now includes multi-value block parameters/results,
+   branch tables, and selection.
    Function and call signatures support void and multiple scalar results.
    Continue with references/exceptions, indirect/native
    calls, and production integration. Preserve bounds checks,

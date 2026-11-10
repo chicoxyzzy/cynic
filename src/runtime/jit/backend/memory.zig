@@ -19,6 +19,17 @@ pub const View = extern struct {
     }
 };
 
+pub fn emitLength(m: *Machine, region: u32, views_slot: usize) !void {
+    const offset = @as(usize, region) * @sizeOf(View) + @offsetOf(View, "length");
+    if (comptime is_x86) {
+        try m.load64Disp32(.r11, .rdi, @intCast(views_slot * 8));
+        try m.load64Disp32(.rax, .r11, @intCast(offset));
+    } else {
+        try m.emit(arm.ldrImm(.x16, .x0, @intCast(views_slot * 8)));
+        try m.emit(arm.ldrImm(.x2, .x16, @intCast(offset)));
+    }
+}
+
 pub fn emit(m: *Machine, op: ir.Op, ty: ir.Type, access: ir.MemoryAccess, views_slot: usize, oob: *Machine.Label) !void {
     const descriptor = access.region * @sizeOf(View);
     const length_offset = descriptor + @offsetOf(View, "length");

@@ -43,7 +43,8 @@ test "backend tier: unsupported functions fall back once without disguising nati
         .types = &.{.{ .params = &.{}, .results = &.{.i32} }},
         .funcs = &.{0},
         .mems = &.{.{ .limits = .{ .min = 1 } }},
-        .code = &.{.{ .bytes = &.{ 0, 0x3f, 0, 0x0b } }},
+        // A zero-length memory.fill keeps this body unsupported.
+        .code = &.{.{ .bytes = &.{ 0, 0x41, 0, 0x41, 0, 0x41, 0, 0xfc, 0x0b, 0, 0x41, 1, 0x0b } }},
     };
     var instance: wasm.Instance = undefined;
     try wasm.instantiate(&instance, arena.allocator(), a, &module, .{});
@@ -274,7 +275,9 @@ test "backend tier: a fallback callee can grow memory before the native caller l
     const module: wasm.Module = .{
         .types = &.{ .{ .params = &.{ .i32, .i32 }, .results = &.{.i32} }, .{ .params = &.{.i32}, .results = &.{.i32} } },
         .funcs = &.{ 0, 1 },
-        .code = &.{ .{ .bytes = &.{ 0, 0x20, 0, 0x10, 1, 0x1a, 0x20, 1, 0x28, 0, 0, 0x0b } }, .{ .bytes = &.{ 0, 0x20, 0, 0x40, 0, 0x0b } } },
+        // The callee grows, then performs a zero-length memory.fill to keep
+        // this specifically a fallback-callee descriptor-refresh test.
+        .code = &.{ .{ .bytes = &.{ 0, 0x20, 0, 0x10, 1, 0x1a, 0x20, 1, 0x28, 0, 0, 0x0b } }, .{ .bytes = &.{ 0, 0x20, 0, 0x40, 0, 0x41, 0, 0x41, 0, 0x41, 0, 0xfc, 0x0b, 0, 0x0b } } },
         .mems = &.{.{ .limits = .{ .min = 1, .max = 2 } }},
     };
     var instance: wasm.Instance = undefined;

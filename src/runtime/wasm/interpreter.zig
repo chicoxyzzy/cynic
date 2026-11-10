@@ -2427,7 +2427,7 @@ fn spasmCallResolvedRef(inst: *Instance, def_inst: *Instance, fidx: u32, buf: [*
 }
 
 /// The native helper a Spasm-compiled `memory.grow` (§4.4.7) branches to.
-/// Grows memory `mem_idx` by `delta` pages, reusing `growMem`'s logic, and
+/// Grows memory `mem_idx` by `delta` pages, reusing `growMemory`, and
 /// returns the previous page count (>= 0) or -1 if growth fails (it never
 /// traps). The grow reallocates the backing buffer, so the compiled body's
 /// cached memory-zero view may be stale, including when a nonzero import
@@ -2437,22 +2437,7 @@ fn spasmCallResolvedRef(inst: *Instance, def_inst: *Instance, fidx: u32, buf: [*
 fn spasmMemoryGrow(instance_opaque: *anyopaque, mem_idx: u32, delta: u64, out_baselen: [*]u64) callconv(.c) i64 {
     const inst: *Instance = @ptrCast(@alignCast(instance_opaque));
     const mem = inst.memories[mem_idx];
-    const old = mem.pages();
-    var result: i64 = -1;
-    grow: {
-        const new_pages = std.math.add(u64, old, delta) catch break :grow;
-        if (new_pages > 65536) break :grow; // hard cap (4 GiB) bounds allocation
-        if (mem.max_pages) |mx| {
-            if (new_pages > mx) break :grow;
-        }
-        const page_count = std.math.cast(usize, new_pages) orelse break :grow;
-        const byte_len = std.math.mul(usize, page_count, PAGE_SIZE) catch break :grow;
-        const old_len = mem.data.len;
-        const grown = mem.storeAllocator(inst.gpa).realloc(mem.data, byte_len) catch break :grow;
-        @memset(grown[old_len..], 0);
-        mem.commitGrowth(grown);
-        result = @bitCast(old);
-    }
+    const result: i64 = if (growMemory(inst.gpa, mem, delta)) |old| @bitCast(old) else -1;
     spasmMemoryView(instance_opaque, 0, out_baselen);
     return result;
 }
@@ -3986,7 +3971,7 @@ fn execStore(ip: *Interp, op: Op, body: []const u8, pc: *usize) TrapError!void {
 fn memGrow(ip: *Interp, mi: u32) TrapError!void {
     const delta: u64 = @truncate(ip.popCell());
     const mem = ip.instance.memories[mi];
-    const result = growMem(ip, mem, delta);
+    const result = growMemory(ip.instance.gpa, mem, delta);
     if (mem.is_64) {
         try ip.pushI64(if (result) |r| @bitCast(r) else -1);
     } else {
@@ -3994,7 +3979,9 @@ fn memGrow(ip: *Interp, mi: u32) TrapError!void {
     }
 }
 
-fn growMem(ip: *Interp, mem: *Memory, delta: u64) ?u64 {
+/// Wasm growmem (§4.4.7): allocation failure is a normal -1 result at the
+/// instruction boundary. Publish host-view changes only after success.
+pub fn growMemory(allocator: std.mem.Allocator, mem: *Memory, delta: u64) ?u64 {
     const old = mem.pages();
     const new_pages = std.math.add(u64, old, delta) catch return null;
     if (new_pages > 65536) return null; // hard cap (4 GiB) bounds allocation
@@ -4004,7 +3991,7 @@ fn growMem(ip: *Interp, mem: *Memory, delta: u64) ?u64 {
     const page_count = std.math.cast(usize, new_pages) orelse return null;
     const byte_len = std.math.mul(usize, page_count, PAGE_SIZE) catch return null;
     const old_len = mem.data.len;
-    const grown = mem.storeAllocator(ip.instance.gpa).realloc(mem.data, byte_len) catch return null;
+    const grown = mem.storeAllocator(allocator).realloc(mem.data, byte_len) catch return null;
     @memset(grown[old_len..], 0);
     mem.commitGrowth(grown);
     return old;
