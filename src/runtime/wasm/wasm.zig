@@ -101,6 +101,7 @@ test {
     _ = @import("backend_bulk_memory_test.zig");
     _ = @import("backend_global_test.zig");
     _ = @import("backend_reference_test.zig");
+    _ = @import("backend_tail_test.zig");
     _ = @import("backend_call_test.zig");
     _ = @import("backend_control_test.zig");
     _ = @import("backend_results_test.zig");

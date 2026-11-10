@@ -83,6 +83,7 @@ pub fn run(a: std.mem.Allocator, graph: ir.Graph, options: Options) !Result {
         for (block.params) |value| live[value] = true;
         switch (block.terminator) {
             .trap => {},
+            .exit => |side_exit| markValues(&live, side_exit.values),
             .return_ => |values| markValues(&live, values),
             .jump => |edge| markValues(&live, edge.args),
             .branch => |branch| {
@@ -261,6 +262,7 @@ fn remapInputs(a: std.mem.Allocator, original: ir.Node, map: []const ir.Value) !
 fn remapTerminator(a: std.mem.Allocator, terminator: ir.Terminator, map: []const ir.Value) !ir.Terminator {
     return switch (terminator) {
         .trap => terminator,
+        .exit => |side_exit| .{ .exit = .{ .id = side_exit.id, .values = try remapValues(a, side_exit.values, map) } },
         .return_ => |values| .{ .return_ = try remapValues(a, values, map) },
         .jump => |edge| .{ .jump = try remapEdge(a, edge, map) },
         .branch => |branch| .{ .branch = .{

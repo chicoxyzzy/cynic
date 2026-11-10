@@ -20,6 +20,7 @@ pub const OwnedGraph = struct {
     arena: std.heap.ArenaAllocator,
     graph: ir.Graph,
     global_indices: []const u32,
+    tail_calls: []const RuntimeTarget,
 
     pub fn deinit(self: *OwnedGraph) void {
         self.arena.deinit();
@@ -31,9 +32,11 @@ pub const OwnedGraph = struct {
 pub const Compiled = struct {
     code: native.Compiled,
     global_indices: []const u32,
+    tail_calls: []const RuntimeTarget,
 
     pub fn deinit(self: *Compiled) void {
         self.code.allocator.free(self.global_indices);
+        self.code.allocator.free(self.tail_calls);
         self.code.deinit();
         self.* = undefined;
     }
@@ -42,7 +45,9 @@ pub const Compiled = struct {
 pub fn compile(allocator: std.mem.Allocator, owner: *CodeAllocator, graph: *const OwnedGraph, options: native.Options) !Compiled {
     const globals = try allocator.dupe(u32, graph.global_indices);
     errdefer allocator.free(globals);
-    return .{ .code = try native.compileWithOptions(allocator, owner, graph.graph, options), .global_indices = globals };
+    const tails = try allocator.dupe(RuntimeTarget, graph.tail_calls);
+    errdefer allocator.free(tails);
+    return .{ .code = try native.compileWithOptions(allocator, owner, graph.graph, options), .global_indices = globals, .tail_calls = tails };
 }
 
 /// Developer-only module entry point, not a Wasm execution tier. The temporary
@@ -88,7 +93,26 @@ pub fn runResultsInInstance(compiled: *const Compiled, instance: *Instance, args
     try refreshMemories(instance, views, compiled.global_indices);
     var remaining = budget;
     var context: CallContext = .{ .instance = instance, .allocator = code.allocator, .remaining = &remaining, .global_indices = compiled.global_indices };
-    return code.runInto(args, views, budget, if (code.call_sites.len == 0) null else .{ .context = &context, .call = CallContext.invoke }, results);
+    var completion = try code.runInto(args, views, budget, if (code.call_sites.len == 0) null else .{ .context = &context, .call = CallContext.invoke }, results);
+    if (completion != .exited) return completion;
+    stageTailCall(compiled, instance, completion.exited.id, completion.exited.values) catch |err| {
+        completion.deinit();
+        return err;
+    };
+    completion.deinit();
+    defer instance.native_tail_call = null;
+    const request = &instance.native_tail_call.?;
+    const signature = try callSignature(request.instance.module, request.func_index);
+    const target = request.instance.funcRefAt(request.func_index) orelse return error.FunctionIndex;
+    const inherited = instance.execution_control orelse request.instance.execution_control orelse switch (target) {
+        .wasm => |callee| callee.instance.execution_control,
+        .host => null,
+    };
+    var control: CalleeControl = .{ .remaining = &remaining, .inherited = inherited };
+    const out = try interpreter.finishNativeTailCall(code.allocator, instance, .{ .ctx = &control, .poll_fn = CalleeControl.poll, .armed_fn = CalleeControl.armed });
+    defer code.allocator.free(out);
+    _ = try abi.pack(signature.results, out, results);
+    return .returned;
 }
 
 pub fn runControlledInInstance(compiled: *const Compiled, allocator: std.mem.Allocator, instance: *Instance, args: []const u64, execution_control: ?interpreter.ExecutionControl, entries: ?*u64, results: []u64) !native.Completion {
@@ -290,48 +314,13 @@ const CallContext = struct {
             },
             else => return error.CallSignatureMismatch,
         }
-        var call_instance = self.instance;
-        var call_index = target_id.index;
-        var call = request;
-        const signature = if (target_id.kind == .function) try callSignature(self.instance.module, target_id.index) else blk: {
-            const expected = try typeSignature(self.instance.module, target_id.index);
-            const count = try abi.wordCount(expected.params);
-            if (request.arguments.len != count + 2) return error.CallSignatureMismatch;
-            const extra = request.arguments[count..];
-            const reference = if (target_id.kind == .call_indirect) reference: {
-                if (extra[0] >= self.instance.tables.len) return error.UnsupportedImportCall;
-                const table = self.instance.tables[@intCast(extra[0])];
-                const addr: ir.Type = if (table.is_64) .i64 else .i32;
-                if (!std.mem.eql(ir.Type, request.parameter_types[count..], &.{ .i32, addr })) return error.CallSignatureMismatch;
-                if (extra[1] >= table.elems.len) return error.UndefinedElement;
-                const ref = table.elems[@intCast(extra[1])];
-                if (ref == interpreter.REF_NULL) return error.UninitializedElement;
-                break :reference ref;
-            } else reference: {
-                if (!std.mem.eql(ir.Type, request.parameter_types[count..], &.{ .i64, .i64 })) return error.CallSignatureMismatch;
-                const ref = @as(u128, extra[0]) | (@as(u128, extra[1]) << 64);
-                if (ref == interpreter.REF_NULL) return error.NullReference;
-                break :reference ref;
-            };
-            call_instance = if (reference >> 64 == 0) self.instance else interpreter.funcRefInstance(reference);
-            call_index = interpreter.funcRefIndex(reference);
-            const resolved = call_instance.funcRefAt(call_index) orelse return error.UnsupportedImportCall;
-            const actual = switch (resolved) {
-                .wasm => |callee| callee.instance.module.types[callee.func.type_index],
-                .host => call_instance.funcType(call_index) orelse return error.UnsupportedImportCall,
-            };
-            const compatible = if (target_id.kind == .call_ref)
-                interpreter.funcCallLayoutsMatch(expected, actual)
-            else
-                interpreter.funcTypesEqual(expected, actual);
-            if (!compatible) return error.IndirectCallTypeMismatch;
-            call.arguments = request.arguments[0..count];
-            call.parameter_types = request.parameter_types[0..count];
-            break :blk expected;
-        };
-        var parameter_types: [ir.max_arguments]ir.Type = undefined;
+        const resolved = try resolveCall(self.instance, target_id, request.arguments, request.parameter_types);
+        const call_instance = resolved.instance;
+        const call_index = resolved.index;
+        const signature = resolved.signature;
         var result_types: [ir.max_arguments]ir.Type = undefined;
-        try checkCallSignature(call, try abi.writeTypes(signature.params, &parameter_types), try abi.writeTypes(signature.results, &result_types));
+        const expected_results = try abi.writeTypes(signature.results, &result_types);
+        if (request.results.len != expected_results.len or !std.mem.eql(ir.Type, request.result_types, expected_results)) return error.CallSignatureMismatch;
         const target = call_instance.funcRefAt(call_index) orelse return error.FunctionIndex;
         const inherited = self.execution_control orelse self.instance.execution_control orelse switch (target) {
             .wasm => |callee| callee.instance.execution_control,
@@ -339,7 +328,7 @@ const CallContext = struct {
         };
         var control: CalleeControl = .{ .remaining = self.remaining, .inherited = inherited };
         var args: [ir.max_arguments]u128 = undefined;
-        try abi.unpack(signature.params, call.arguments, args[0..signature.params.len]);
+        try abi.unpack(signature.params, resolved.arguments, args[0..signature.params.len]);
         const result = interpreter.invokeWithControl(call_instance, self.allocator, call_index, args[0..signature.params.len], if (self.remaining != null) .{ .ctx = &control, .poll_fn = CalleeControl.poll, .armed_fn = CalleeControl.armed } else inherited) catch |err| {
             if (err == error.UncaughtException) self.instance.pending_exn = call_instance.pending_exn;
             return err;
@@ -350,6 +339,79 @@ const CallContext = struct {
         _ = try abi.pack(signature.results, result, request.results);
     }
 };
+
+const ResolvedCall = struct {
+    instance: *Instance,
+    index: u32,
+    signature: wasm_types.FuncType,
+    arguments: []const u64,
+};
+
+fn resolveCall(instance: *Instance, target: RuntimeTarget, arguments: []const u64, parameter_types: ?[]const ir.Type) !ResolvedCall {
+    const dynamic = target.kind == .call_indirect or target.kind == .call_ref;
+    if (!dynamic and target.kind != .function) return error.CallSignatureMismatch;
+    const expected = if (dynamic) try typeSignature(instance.module, target.index) else try callSignature(instance.module, target.index);
+    const count = try abi.wordCount(expected.params);
+    const total = count + @as(usize, if (dynamic) 2 else 0);
+    if (total > ir.max_arguments or arguments.len != total) return error.CallSignatureMismatch;
+    var types: [ir.max_arguments]ir.Type = undefined;
+    _ = try abi.writeTypes(expected.params, &types);
+    var callee = instance;
+    var index = target.index;
+    if (dynamic) {
+        const extra = arguments[count..];
+        const reference = if (target.kind == .call_indirect) ref: {
+            if (extra[0] >= instance.tables.len) return error.UnsupportedImportCall;
+            const table = instance.tables[@intCast(extra[0])];
+            types[count] = .i32;
+            types[count + 1] = if (table.is_64) .i64 else .i32;
+            if (extra[1] >= table.elems.len) return error.UndefinedElement;
+            const value = table.elems[@intCast(extra[1])];
+            if (value == interpreter.REF_NULL) return error.UninitializedElement;
+            break :ref value;
+        } else ref: {
+            types[count] = .i64;
+            types[count + 1] = .i64;
+            const value = @as(u128, extra[0]) | (@as(u128, extra[1]) << 64);
+            if (value == interpreter.REF_NULL) return error.NullReference;
+            break :ref value;
+        };
+        callee = if (reference >> 64 == 0) instance else interpreter.funcRefInstance(reference);
+        index = interpreter.funcRefIndex(reference);
+        const resolved = callee.funcRefAt(index) orelse return error.UnsupportedImportCall;
+        const actual = switch (resolved) {
+            .wasm => |w| w.instance.module.types[w.func.type_index],
+            .host => callee.funcType(index) orelse return error.UnsupportedImportCall,
+        };
+        const compatible = if (target.kind == .call_ref)
+            interpreter.funcCallLayoutsMatch(expected, actual)
+        else
+            interpreter.funcTypesEqual(expected, actual);
+        if (!compatible) return error.IndirectCallTypeMismatch;
+    }
+    if (parameter_types) |actual| if (!std.mem.eql(ir.Type, actual, types[0..total])) return error.CallSignatureMismatch;
+    return .{ .instance = callee, .index = index, .signature = expected, .arguments = arguments[0..count] };
+}
+
+/// The generated frame is gone. Copy outgoing values before another tier can
+/// allocate or re-enter JS. Pin only outgoing external references here.
+// Keep the outgoing payload off ordinary recursive invocation frames.
+pub noinline fn stageTailCall(compiled: *const Compiled, instance: *Instance, id: u32, values: []const u64) !void {
+    if (id >= compiled.tail_calls.len) return error.InvalidNativeResult;
+    const call = try resolveCall(instance, compiled.tail_calls[id], values, null);
+    var request: interpreter.NativeTailCall = .{
+        .instance = call.instance,
+        .func_index = call.index,
+        .args = @splat(0),
+        .num_args = call.signature.params.len,
+        .num_results = call.signature.results.len,
+    };
+    try abi.unpack(call.signature.params, call.arguments, request.args[0..request.num_args]);
+    if (instance.externref_rooter) |rooter| for (call.signature.params, request.args[0..request.num_args]) |ty, value| {
+        if (ty.heapOf() == wasm_types.heap_abs_extern) try rooter.pin(value);
+    };
+    instance.native_tail_call = request;
+}
 
 const CalleeControl = struct {
     remaining: ?*u32,
@@ -478,6 +540,7 @@ fn readBranch(inst: *Instruction, function: *const CompiledFunc, side_index: *us
 
 fn endsBlock(op: Op) bool {
     return switch (op) {
+        .return_call, .return_call_indirect, .return_call_ref => true,
         .br, .br_if, .br_table, .br_on_null, .br_on_non_null, .@"if", .@"else", .select, .select_t, .@"return", .@"unreachable" => true,
         else => false,
     };
@@ -486,11 +549,12 @@ fn endsBlock(op: Op) bool {
 fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature: wasm_types.FuncType, memories: []const wasm_types.MemType, module: *const Module) !OwnedGraph {
     if (signature.results.len > ir.max_arguments) return error.UnsupportedSignature;
     if (function.body.len > 16 * 1024 or function.local_types.len > ir.max_arguments or
-        function.max_stack > ir.max_arguments - function.local_types.len) return error.PrototypeLimit;
+        function.max_stack > ir.max_arguments) return error.PrototypeLimit;
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
     const a = arena.allocator();
     var global_indices: std.ArrayList(u32) = .empty;
+    var tail_calls: std.ArrayList(RuntimeTarget) = .empty;
     const result_types = try abi.physicalTypes(a, signature.results);
     const argument_types = try abi.physicalTypes(a, signature.params);
     const local_types = function.local_types;
@@ -575,17 +639,19 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
                 inst.memory_index = try reader.uleb(u32);
                 _ = metadata.tableType(module, inst.memory_index) orelse return error.InvalidTable;
             },
-            .call => {
+            .call, .return_call => {
                 inst.immediate = try reader.uleb(u32);
                 _ = try callSignature(module, @intCast(inst.immediate));
+                if (inst.op == .return_call) controls.items[controls.items.len - 1].reachable = false;
             },
-            .call_ref, .call_indirect => {
+            .call_ref, .call_indirect, .return_call_ref, .return_call_indirect => {
                 inst.immediate = try reader.uleb(u32);
                 _ = try typeSignature(module, @intCast(inst.immediate));
-                if (inst.op == .call_indirect) {
+                if (inst.op == .call_indirect or inst.op == .return_call_indirect) {
                     inst.memory_index = try reader.uleb(u32);
                     _ = metadata.tableType(module, inst.memory_index) orelse return error.InvalidTable;
                 }
+                if (inst.op == .return_call_ref or inst.op == .return_call_indirect) controls.items[controls.items.len - 1].reachable = false;
             },
             .i32_const => inst.immediate = @as(u32, @bitCast(try reader.sleb(i32))),
             .i64_const => inst.immediate = @bitCast(try reader.sleb(i64)),
@@ -843,27 +909,33 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
                     if (roots.len != 0) try builder.runtimeCall(&nodes, inst, .{ .kind = .pin_references, .index = 0 }, &.{}, &.{}, roots);
                     terminator = .{ .return_ = try builder.flatten(values) };
                 },
-                .call, .call_indirect, .call_ref => {
+                .call, .call_indirect, .call_ref, .return_call, .return_call_indirect, .return_call_ref => {
                     const target: u32 = @intCast(inst.immediate);
-                    const callee = if (inst.op == .call) try callSignature(module, target) else try typeSignature(module, target);
-                    const dynamic = inst.op != .call;
+                    const direct = inst.op == .call or inst.op == .return_call;
+                    const indirect = inst.op == .call_indirect or inst.op == .return_call_indirect;
+                    const tail = inst.op == .return_call or inst.op == .return_call_indirect or inst.op == .return_call_ref;
+                    const callee = if (direct) try callSignature(module, target) else try typeSignature(module, target);
+                    const dynamic = !direct;
                     const selector = if (dynamic) stack.pop() orelse return error.InvalidControlFlow else 0;
                     if (callee.params.len > stack.items.len) return error.InvalidControlFlow;
-                    const roots = try builder.roots(locals[0..local_types.len], stack.items);
+                    const roots = if (tail) &.{} else try builder.roots(locals[0..local_types.len], stack.items);
                     const start = stack.items.len - callee.params.len;
                     var operands: std.ArrayList(ir.Value) = .empty;
                     try operands.appendSlice(a, stack.items[start..]);
-                    if (inst.op == .call_indirect) try operands.append(a, try builder.constant(&nodes, .i32, inst.memory_index));
+                    if (indirect) try operands.append(a, try builder.constant(&nodes, .i32, inst.memory_index));
                     if (dynamic) try operands.append(a, selector);
                     const arguments = try builder.flatten(operands.items);
                     stack.shrinkRetainingCapacity(start);
+                    const runtime_target: RuntimeTarget = .{ .index = target, .kind = if (direct) .function else if (indirect) .call_indirect else .call_ref };
+                    if (tail) {
+                        const id: u32 = @intCast(tail_calls.items.len);
+                        try tail_calls.append(a, runtime_target);
+                        terminator = .{ .exit = .{ .id = id, .values = arguments } };
+                        continue;
+                    }
                     const results = try a.alloc(ir.Value, callee.results.len);
                     for (callee.results, results) |ty, *out| out.* = try builder.wasmValue(ty);
-                    try builder.runtimeCall(&nodes, inst, .{ .index = target, .kind = switch (inst.op) {
-                        .call => .function,
-                        .call_indirect => .call_indirect,
-                        else => .call_ref,
-                    } }, arguments, try builder.flatten(results), roots);
+                    try builder.runtimeCall(&nodes, inst, runtime_target, arguments, try builder.flatten(results), roots);
                     try stack.appendSlice(a, results);
                 },
                 .ref_null => try stack.append(a, try builder.defaultValue(&nodes, @fromBackingInt(@intCast(@as(u32, @intCast(inst.immediate)))))),
@@ -1014,7 +1086,7 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
         .memory_count = @intCast(memories.len + global_indices.items.len),
     };
     try graph.verify();
-    return .{ .arena = arena, .graph = graph, .global_indices = global_indices.items };
+    return .{ .arena = arena, .graph = graph, .global_indices = global_indices.items, .tail_calls = tail_calls.items };
 }
 
 const MemoryOperation = struct { ty: ir.Type, width: ir.MemoryWidth, signed: bool = false, store: bool = false };

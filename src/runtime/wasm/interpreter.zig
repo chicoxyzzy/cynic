@@ -805,10 +805,10 @@ pub const Instance = struct {
     /// trap channel without the channel enumerating each one. Only valid
     /// immediately after a `trap_pending` status; never read otherwise.
     spasm_call_trap: ?Error = null,
-    /// A no-reentry helper copies arguments here before its native caller
-    /// returns. The dispatcher consumes and clears it before any allocation
-    /// or host call. Nested JS/Wasm calls therefore cannot overwrite it.
-    spasm_tail_call: ?SpasmTailCall = null,
+    /// A native tier stages outgoing arguments before another tier can run.
+    /// The dispatcher copies and clears them before resizing its frame or
+    /// calling the host, so nested JS/Wasm calls cannot overwrite them.
+    native_tail_call: ?NativeTailCall = null,
 
     /// Allocate an `ExnRecord` in this instance's pool — used by the JS
     /// boundary to reify a thrown JS value for a `try_table` to catch.
@@ -1888,7 +1888,11 @@ pub fn invokeWithControl(
     if (target.instance.shared_backend_enabled) {
         const optimized = @import("backend_tier.zig").run(allocator, target.instance, target.func, args, execution_control, spasmCodeReserve(target.instance.funcs)) catch |err|
             return forwardSpasmError(self, target.instance, err);
-        if (optimized) |out| return out;
+        if (optimized) |out| return switch (out) {
+            .returned => |values| values,
+            .tail_call => finishNativeTailCall(allocator, target.instance, execution_control) catch |err|
+                return forwardSpasmError(self, target.instance, err),
+        };
     }
     if (target.instance.spasm_enabled) {
         const native_result = spasmRun(allocator, target.instance, target.func, args, execution_control) catch |err|
@@ -1951,13 +1955,23 @@ threadlocal var spasm_call_depth: u32 = 0;
 const spasm_call_depth_cap: u32 = 512;
 const spasm_always_poll = std.atomic.Value(bool).init(true);
 
-const SpasmTailCall = struct {
+pub const NativeTailCall = struct {
     instance: *Instance,
     func_index: u32,
-    args: [spasm.operand_reg_count]Cell,
+    args: [64]Cell,
     num_args: usize,
     num_results: usize,
 };
+
+pub noinline fn finishNativeTailCall(allocator: std.mem.Allocator, instance: *Instance, execution_control: ?ExecutionControl) Error![]u128 {
+    const request = instance.native_tail_call orelse return error.SharedBackendFailure;
+    defer instance.native_tail_call = null;
+    if (request.num_args > request.args.len or request.num_results > request.args.len) return error.UnsupportedImportCall;
+    const results = try allocator.alloc(u128, request.num_results);
+    errdefer allocator.free(results);
+    try runSpasmEntry(instance, null, results.ptr, results.ptr, false, execution_control);
+    return results;
+}
 
 /// Bridge Spasm's compact native status channel to the embedding-neutral
 /// execution controller shared with Sarcasm. Generated code calls this only
@@ -2031,20 +2045,39 @@ fn runSpasmEntry(
                 // Core return_call: discard the caller before invoking the target.
                 // The Cell ABI uses this iterative handoff instead of retaining a
                 // helper frame for each hop. Copy before resizing or re-entering JS.
-                const request = current_instance.spasm_tail_call orelse return error.UnsupportedImportCall;
-                current_instance.spasm_tail_call = null;
+                const request = current_instance.native_tail_call orelse return error.UnsupportedImportCall;
+                current_instance.native_tail_call = null;
                 const target = request.instance.resolveFunc(request.func_index) orelse return error.UnsupportedImportCall;
                 current_instance = request.instance;
+                active_control = active_control orelse request.instance.execution_control;
                 switch (target) {
                     .host => |h| {
                         if (h.params != request.num_args or h.results != request.num_results)
                             return error.IndirectCallTypeMismatch;
+                        try pollExecutionControl(active_control);
                         h.fn_ptr(h.ctx, request.args[0..request.num_args], results[0..request.num_results]) catch |err|
                             return forwardSpasmError(instance, current_instance, err);
                         return;
                     },
                     .wasm => |w| {
-                        active_control = active_control orelse request.instance.execution_control orelse w.instance.execution_control;
+                        active_control = active_control orelse w.instance.execution_control;
+                        if (w.instance.shared_backend_enabled) {
+                            const shared = @import("backend_tier.zig").run(allocator, w.instance, w.func, request.args[0..request.num_args], active_control, spasmCodeReserve(w.instance.funcs)) catch |err|
+                                return forwardSpasmError(instance, w.instance, err);
+                            if (shared) |out| switch (out) {
+                                .returned => |values| {
+                                    defer allocator.free(values);
+                                    if (values.len != request.num_results) return error.IndirectCallTypeMismatch;
+                                    @memcpy(results[0..values.len], values);
+                                    return;
+                                },
+                                .tail_call => {
+                                    current_instance = w.instance;
+                                    current_entry = null;
+                                    continue;
+                                },
+                            };
+                        }
                         const next_entry = if (w.instance.spasm_enabled) w.instance.spasmEntryFor(w.func) else null;
                         if (next_entry) |native_entry| {
                             const ft = &w.instance.module.types[w.func.type_index];
@@ -2099,11 +2132,40 @@ fn forwardSpasmError(caller: *Instance, callee: *Instance, err: Error) Error {
 
 fn spasmFinishTailCall(instance_opaque: *anyopaque, results: [*]Cell, control: ?*anyopaque) callconv(.c) u32 {
     const instance: *Instance = @ptrCast(@alignCast(instance_opaque));
+    defer instance.native_tail_call = null;
     runSpasmEntry(instance, null, results, results, true, executionControlFromOpaque(control)) catch |err| {
         instance.spasm_call_trap = err;
         return spasm.trap_pending;
     };
     return spasm.trap_ok;
+}
+
+test "backend tail calls: exhausted tail completion clears the staged request" {
+    if (!spasm.supported) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const Stack = struct {
+        noinline fn invoke(instance: *Instance, depth: usize) !u32 {
+            var padding: [16 * 1024]u8 = undefined;
+            std.mem.doNotOptimizeAway(&padding);
+            defer std.mem.doNotOptimizeAway(&padding);
+            if (stack_guard.nearLimit()) {
+                var result: [1]Cell = undefined;
+                return spasmFinishTailCall(instance, &result, null);
+            }
+            if (depth == 4096) return error.StackLimitNotReached;
+            return @This().invoke(instance, depth + 1);
+        }
+    };
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const module: Module = .{};
+    var instance: Instance = undefined;
+    try instantiate(&instance, arena.allocator(), a, &module, .{});
+    defer instance.deinit();
+    instance.native_tail_call = .{ .instance = &instance, .func_index = 0, .args = @splat(0), .num_args = 0, .num_results = 0 };
+    try std.testing.expectEqual(spasm.trap_pending, try Stack.invoke(&instance, 0));
+    try std.testing.expectEqual(error.CallStackExhausted, instance.spasm_call_trap.?);
+    try std.testing.expect(instance.native_tail_call == null);
 }
 
 fn stageSpasmTailCall(instance: *Instance, target_instance: *Instance, func_index: u32, expected: types.FuncType, buf: [*]const Cell) u32 {
@@ -2119,7 +2181,7 @@ fn stageSpasmTailCall(instance: *Instance, target_instance: *Instance, func_inde
         instance.spasm_call_trap = error.IndirectCallTypeMismatch;
         return spasm.trap_pending;
     }
-    var request: SpasmTailCall = .{
+    var request: NativeTailCall = .{
         .instance = target_instance,
         .func_index = func_index,
         .args = @splat(0),
@@ -2127,7 +2189,7 @@ fn stageSpasmTailCall(instance: *Instance, target_instance: *Instance, func_inde
         .num_results = expected.results.len,
     };
     @memcpy(request.args[0..request.num_args], buf[0..request.num_args]);
-    instance.spasm_tail_call = request;
+    instance.native_tail_call = request;
     return spasm.status_tail_call;
 }
 

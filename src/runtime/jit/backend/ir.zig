@@ -159,6 +159,8 @@ pub const OutputIterator = struct {
 pub const Edge = struct { target: u32, args: []const Value };
 pub const Terminator = union(enum) {
     trap: Trap,
+    /// Unconditional transfer to an opaque frontend-owned continuation.
+    exit: SideExit,
     return_: []const Value,
     jump: Edge,
     branch: struct { condition: Value, taken: Edge, fallthrough: Edge },
@@ -273,6 +275,10 @@ pub const Graph = struct {
             }
             switch (block.terminator) {
                 .trap => {},
+                .exit => |side_exit| {
+                    if (side_exit.values.len > max_arguments) return error.PrototypeLimit;
+                    for (side_exit.values) |value| try self.use(value, &available);
+                },
                 .return_ => |values| {
                     if (values.len != self.result_types.len) return error.InvalidGraph;
                     for (values, self.result_types) |value, ty| {

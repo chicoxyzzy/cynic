@@ -871,7 +871,7 @@ current backing store, so growth cannot leave a cached table address stale.
 `call_indirect` and `call_ref` resolve the full reference, check the existing
 runtime signature contract, and dispatch into the defining instance's selected
 tier. Null, bounds, and type-mismatch errors return normally. This is runtime
-dispatch, not direct shared-native linking or proper tail-call support.
+dispatch, not direct shared-native linking. Tail-call dispatch is described below.
 
 These operations follow the [Core instruction rules](https://webassembly.github.io/spec/core/exec/instructions.html).
 Table/ref helpers do not collect or re-enter JS. Before language calls, the
@@ -917,6 +917,70 @@ two existing parse-error files. WPT checks the interpreter reference path;
 the new collecting-callback tests separately verify interpreter, Spasm, and
 shared-native execution, with entry counters for both native tiers.
 
+### Proper tail calls
+
+`return_call`, `return_call_indirect`, and `return_call_ref` lower to a terminal
+IR `exit` carrying outgoing physical arguments and an opaque continuation ID.
+The shared verifier checks capture availability and the 64-word bound;
+optimization and allocation preserve ordered captures, including duplicate
+values. Native emission uses the existing side-exit completion and restores FP
+state before returning. It does not encode Wasm targets or GC policy in the IR.
+
+The Wasm compiled artifact owns the target descriptors independently of the
+temporary graph. After the generated frame returns, the adapter resolves the
+target, checks null/table bounds/signature compatibility, and pins outgoing
+external references. Indirect host targets must match parameter/result types,
+not just arity. Direct calls retain the existing imported-function contract.
+Dead caller locals are not added to the tail-call root snapshot; Realm transient
+pins still have their existing conservative outermost-call lifetime.
+
+The adapter stages an instance-owned `NativeTailCall`; an iterative dispatcher
+shared with Spasm consumes it before invoking the next target. Alternating
+shared/Spasm chains therefore do not accumulate native frames. Sarcasm fallback
+uses its existing frame-replacement path. Host calls receive separate outgoing
+arguments and results. This is a constant-stack tier handoff, not native `jmp`
+linking. The large staged payload stays behind non-inlined helpers rather than
+inflating ordinary recursive dispatch frames.
+
+The [Core tail-call rules](https://webassembly.github.io/spec/core/exec/instructions.html#exec-return-call)
+require discarding the caller before invoking its target.
+[V8's implementation notes](https://v8.dev/blog/wasm-tail-call) describe the same
+constant-stack requirement and argument-move hazards; B3's
+[frontend-owned exits](https://webkit.org/docs/b3/intermediate-representation.html)
+motivate keeping the continuation opaque to the shared backend. Cynic reuses
+its existing cross-tier trampoline rather than introducing a second unwinder.
+ECMA-262/test262 semantics and the SES surface are unchanged.
+
+Native-entry polls retain caller/defining-instance controller precedence,
+including through the bounded developer wrapper. Host tail targets poll before
+observable effects. Errors never retry the executed caller through fallback;
+staged requests and owned captures are released on allocation failure, traps,
+cancellation, and normal return. Foreign fallback exceptions retain their tag
+and payload. Exception instructions/handlers themselves remain unsupported by
+the shared frontend.
+
+Tests cover 10,000-hop direct, indirect, typed, and mixed-tier chains with a
+measured native-stack span below 32 KiB; foreign state and table32/table64 traps;
+mixed scalar/reference results; 64-word reordered argument/result transfers;
+all optimization/allocation modes; metadata and invocation allocation failures;
+bounded and production termination; and collecting JS re-entry at GC threshold
+1. They require native entry so interpreter fallback cannot hide a refusal.
+An initially dormant controller is also woken between tail hops, including a
+shared-to-Spasm transition, with a finite backstop if the wake probe is broken.
+Locals and operand-stack depth are bounded independently at 64 logical values;
+combined physical edge width is checked where a block edge is emitted.
+
+Qualification preserves the per-manifest interpreter baseline on all 232 Wasm
+manifests in interpreter, shared-only, and shared/Spasm modes on ARM64 and
+x86-64/Rosetta: 61,051 passes and 1,370 skips in each run. Shared-only execution
+compiles 4,602 functions (up from 4,499), with 1,518 refusals (down from 1,577)
+and 10,901,536 native entries. These are coverage counters, not throughput
+measurements. The full production test262 pass set remains byte-identical
+(48,653 passes, 1,324 existing failures), and GC-threshold-1 ReleaseSafe WPT
+has no named-baseline regressions (592 passes, 11 existing failures, two existing
+parse-error files). Native x86-64 hardware and wasm32 remain CI gates; this
+does not close the production completion checklist or change the opt-in policy.
+
 ## Runtime calls and root snapshots
 
 `call` is an ordered read/write/trapping safepoint with an explicit scalar
@@ -961,7 +1025,7 @@ the invocation, in addition to the caller's native block budget. The bridge
 forwards the existing caller or defining-instance execution controller without
 mutating either instance. These prototype bounds are not a production fuel
 cost model; host callbacks remain trusted and cooperative. Native
-shared-backend callee linking, proper tail calls, and
+shared-backend callee linking and
 complete JS/Wasm exception integration remain open.
 
 The initial runtime-call checks covered caller-saved values, duplicate captures,
@@ -977,7 +1041,7 @@ production qualification.
 ## Safety and non-goals
 
 - No JS heap-object dereferences, shared-memory accesses,
-  atomics, SIMD, exception handlers, tag imports, proper tail calls,
+  atomics, SIMD, exception handlers, tag imports,
   inlining, OSR, or automatic shared-backend tier-up in this slice.
 - Developer module decoding caps input at 64 KiB and decoder/validator workspace
   at 8 MiB. Runtime lowering starts from an already validated instance.
@@ -1023,8 +1087,8 @@ The Wasm adapter lowers scalar/reference-typed `block`, `loop`, and `if`/`else`,
 including type-index signatures with multiple parameters/results; `br`, `br_if`, and
 `br_table`; explicit return and branches to the implicit function label; and
 typed selection (plus untyped scalar `select`). Function and runtime-call
-signatures also support void/multiple logical results through scalar words. SIMD control,
-tail calls, and exception handling remain outside this adapter.
+signatures also support void/multiple logical results through scalar words. SIMD control
+and exception handling remain outside this adapter; tail calls use terminal exits.
 
 The [Wasm control instruction rules](https://webassembly.github.io/spec/core/exec/instructions.html#control-instructions)
 distinguish loop parameters from block results. Wasmtime's
@@ -1184,7 +1248,8 @@ failures, but is not evidence that an unimplemented backend capability works.
    Scalar/reference structured control includes multi-value block parameters/results,
    branch tables, nullable branches, and selection.
    Function and call signatures support void and multiple logical results.
-   Continue with SIMD, proper tail calls, exception handling, native linking,
+   Proper tail calls use the tier-neutral terminal-exit handoff described above.
+   Continue with SIMD, exception handling, native linking,
    and production integration. Preserve bounds checks,
    memory-growth invalidation, resource metering, and executable ownership.
 6. **Rollout decision:** paired warm/cold execution measurements, compilation
@@ -1192,7 +1257,7 @@ failures, but is not evidence that an unimplemented backend capability works.
    telemetry, differential fuzzing, and spec-suite gates. No automatic
    default-on graduation or new JS tier follows from finishing the prototype.
 
-The next capability work is Wasm SIMD, proper tail calls and exception handling,
+The next capability work is Wasm SIMD and exception handling,
 production Ohaimark root/frame lowering, and resource-policy integration.
 Operand-move
 reduction and immediate/compare-branch selection remain measured optimization

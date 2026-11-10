@@ -3,6 +3,46 @@ const ir = @import("ir.zig");
 const native = @import("native.zig");
 const CodeAllocator = @import("../code_alloc.zig").CodeAllocator;
 
+test "backend terminal exits: captures survive optimization and register allocation" {
+    if (!native.supported) return error.SkipZigTest;
+    const graph: ir.Graph = .{
+        .types = &.{ .i64, .i64, .f64, .i64, .i64 },
+        .argument_types = &.{ .i64, .i64, .f64 },
+        .result_types = &.{.i64},
+        .blocks = &.{.{ .params = &.{ 0, 1, 2 }, .nodes = &.{
+            .{ .op = .add, .out = 3, .lhs = 0, .rhs = 1 },
+            .{ .op = .add, .out = 4, .lhs = 0, .rhs = 1 },
+        }, .terminator = .{ .exit = .{ .id = 42, .values = &.{ 3, 2, 0, 4, 3 } } } }},
+    };
+    var owner = try CodeAllocator.init(std.testing.allocator, 64 * 1024);
+    defer owner.deinit();
+    const Mode = @import("allocation.zig").Mode;
+    for ([_]Mode{ .scratch, .linear_scan }) |mode| for (0..16) |flags| for ([_]u8{ 0, 1, 4 }) |registers| {
+        var code = try native.compileWithOptions(std.testing.allocator, &owner, graph, .{
+            .allocation = mode,
+            .register_count = registers,
+            .rematerialize_constants = flags & 8 != 0,
+            .optimization = .{ .constant_folding = flags & 1 != 0, .common_subexpression_elimination = flags & 2 != 0, .dead_code_elimination = flags & 4 != 0 },
+        });
+        defer code.deinit();
+        var result = try code.runOutcome(&.{ 17, 25, 0x7ff0_0000_0000_0001 }, 1);
+        defer result.deinit();
+        try std.testing.expect(result == .exited);
+        try std.testing.expectEqual(@as(u32, 42), result.exited.id);
+        try std.testing.expectEqualSlices(u64, &.{ 42, 0x7ff0_0000_0000_0001, 17, 42, 42 }, result.exited.values);
+        try std.testing.expectError(error.BudgetExhausted, code.runOutcome(&.{ 17, 25, 0 }, 0));
+    };
+}
+
+test "backend terminal exits: verifier rejects unavailable and excessive captures" {
+    var block: ir.Block = .{ .params = &.{0}, .terminator = .{ .exit = .{ .id = 0, .values = &.{1} } } };
+    const graph: ir.Graph = .{ .types = &.{.i64}, .blocks = @as(*[1]ir.Block, &block), .argument_types = &.{.i64}, .result_types = &.{} };
+    try std.testing.expectError(error.InvalidGraph, graph.verify());
+    const many: [ir.max_arguments + 1]ir.Value = @splat(0);
+    block.terminator.exit.values = &many;
+    try std.testing.expectError(error.PrototypeLimit, graph.verify());
+}
+
 test "backend rematerialization: constant return needs no spill or register moves" {
     if (!native.supported) return error.SkipZigTest;
     const graph: ir.Graph = .{

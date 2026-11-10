@@ -345,6 +345,7 @@ fn emitGraph(a: std.mem.Allocator, owner: *code_alloc.CodeAllocator, graph: ir.G
         }
         switch (block.terminator) {
             .trap => |trap| try emission.emitTrap(trap),
+            .exit => |side_exit| try emission.emitExit(side_exit),
             .return_ => |values| {
                 for (values, 0..) |value, i| {
                     try emission.read(false, value);
