@@ -14,7 +14,7 @@ pub const slot_count = captures_offset + ir.max_arguments;
 pub const emit_loads = if (is_x86) 3 else 5;
 pub const emit_stores = if (is_x86) 2 else 4;
 pub const Site = struct {
-    target: u32,
+    target: u64,
     site: u32,
     safepoint: u32,
     argument_count: usize,
@@ -24,7 +24,7 @@ pub const Site = struct {
     result_types: [ir.max_arguments]ir.Type = @splat(.i64),
 };
 pub const Request = struct {
-    target: u32,
+    target: u64,
     site: u32,
     safepoint: u32,
     arguments: []const u64,

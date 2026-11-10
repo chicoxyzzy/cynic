@@ -103,6 +103,13 @@ fn refreshMemories(instance: *const Instance, views: []native.MemoryView) !void 
     }
 }
 
+// Frontend-owned namespaces preserve all u32 function/memory indices without
+// teaching the shared call ABI about Wasm operations or embedding pointers.
+const RuntimeTarget = packed struct(u64) {
+    index: u32,
+    kind: enum(u32) { function, memory_grow, _ } = .function,
+};
+
 const CallContext = struct {
     instance: *Instance,
     allocator: std.mem.Allocator,
@@ -111,7 +118,25 @@ const CallContext = struct {
 
     fn invoke(raw: ?*anyopaque, request: native.CallRequest) !void {
         const self: *CallContext = @ptrCast(@alignCast(raw.?));
-        const signature = try callSignature(self.instance.module, request.target);
+        const target_id: RuntimeTarget = @bitCast(request.target);
+        switch (target_id.kind) {
+            .function => {},
+            .memory_grow => {
+                if (target_id.index >= self.instance.memories.len) return error.InvalidMemory;
+                const memory = self.instance.memories[target_id.index];
+                const ty: ir.Type = if (memory.is_64) .i64 else .i32;
+                if (request.arguments.len != 1 or request.results.len != 1 or
+                    !std.mem.eql(ir.Type, request.parameter_types, &.{ty}) or
+                    !std.mem.eql(ir.Type, request.result_types, &.{ty})) return error.CallSignatureMismatch;
+                const previous = interpreter.growMemory(self.instance.gpa, memory, ir.normalize(ty, request.arguments[0]));
+                request.results[0] = ir.normalize(ty, previous orelse std.math.maxInt(u64));
+                // Several import indices can name the same backing store.
+                try refreshMemories(self.instance, request.memories);
+                return;
+            },
+            else => return error.CallSignatureMismatch,
+        }
+        const signature = try callSignature(self.instance.module, target_id.index);
         if (signature.params.len != request.arguments.len or signature.results.len != request.results.len) return error.CallSignatureMismatch;
         for (signature.params, request.parameter_types) |ty, expected| {
             if (try valueType(ty) != expected) return error.CallSignatureMismatch;
@@ -119,7 +144,7 @@ const CallContext = struct {
         for (signature.results, request.result_types) |ty, expected| {
             if (try valueType(ty) != expected) return error.CallSignatureMismatch;
         }
-        const target = self.instance.funcRefAt(request.target) orelse return error.FunctionIndex;
+        const target = self.instance.funcRefAt(target_id.index) orelse return error.FunctionIndex;
         const inherited = self.execution_control orelse self.instance.execution_control orelse switch (target) {
             .wasm => |callee| callee.instance.execution_control,
             .host => null,
@@ -127,7 +152,7 @@ const CallContext = struct {
         var control: CalleeControl = .{ .remaining = self.remaining, .inherited = inherited };
         var args: [ir.max_arguments]u128 = undefined;
         for (request.arguments, 0..) |value, i| args[i] = value;
-        const result = try interpreter.invokeWithControl(self.instance, self.allocator, request.target, args[0..request.arguments.len], if (self.remaining != null) .{ .ctx = &control, .poll_fn = CalleeControl.poll, .armed_fn = CalleeControl.armed } else inherited);
+        const result = try interpreter.invokeWithControl(self.instance, self.allocator, target_id.index, args[0..request.arguments.len], if (self.remaining != null) .{ .ctx = &control, .poll_fn = CalleeControl.poll, .armed_fn = CalleeControl.armed } else inherited);
         defer self.allocator.free(result);
         try refreshMemories(self.instance, request.memories);
         if (result.len != signature.results.len) return error.CallSignatureMismatch;
@@ -343,6 +368,10 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
             },
             .@"return", .@"unreachable" => controls.items[controls.items.len - 1].reachable = false,
             .local_get, .local_set, .local_tee => inst.immediate = try reader.uleb(u32),
+            .memory_size, .memory_grow => {
+                inst.memory_index = try reader.uleb(u32);
+                if (inst.memory_index >= memories.len) return error.InvalidMemory;
+            },
             .call => {
                 inst.immediate = try reader.uleb(u32);
                 _ = try callSignature(module, @intCast(inst.immediate));
@@ -475,6 +504,35 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
                         .safepoint = .{ .id = inst.offset, .values = &.{} },
                     } });
                     try stack.appendSlice(a, results);
+                },
+                .memory_size => {
+                    const bytes = try builder.value(.i64);
+                    try nodes.append(a, .{ .op = .memory_length, .out = bytes, .immediate = inst.memory_index });
+                    const shift = try builder.constant(&nodes, .i64, 16);
+                    const pages = try builder.value(.i64);
+                    try nodes.append(a, .{ .op = .shr_u, .out = pages, .lhs = bytes, .rhs = shift });
+                    const result = if (memories[inst.memory_index].limits.is_64) pages else blk: {
+                        const out = try builder.value(.i32);
+                        try nodes.append(a, .{ .op = .trunc_i64, .out = out, .lhs = pages });
+                        break :blk out;
+                    };
+                    try stack.append(a, result);
+                },
+                .memory_grow => {
+                    const delta = stack.pop() orelse return error.InvalidControlFlow;
+                    const ty: ir.Type = if (memories[inst.memory_index].limits.is_64) .i64 else .i32;
+                    const out = try builder.value(ty);
+                    const types = try a.dupe(ir.Type, &.{ty});
+                    try nodes.append(a, .{ .op = .call, .trap_site = inst.offset, .call = .{
+                        .target = @bitCast(RuntimeTarget{ .kind = .memory_grow, .index = inst.memory_index }),
+                        .arguments = try a.dupe(ir.Value, &.{delta}),
+                        .parameter_types = types,
+                        .results = try a.dupe(ir.Value, &.{out}),
+                        .result_types = types,
+                        .fp_mode = .strict,
+                        .safepoint = .{ .id = inst.offset, .values = &.{} },
+                    } });
+                    try stack.append(a, out);
                 },
                 .@"unreachable" => terminator = .{ .trap = .{ .reason = .unreachable_code, .site = inst.offset } },
                 .@"if" => {

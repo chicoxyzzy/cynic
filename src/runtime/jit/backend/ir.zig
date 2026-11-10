@@ -74,6 +74,8 @@ pub const Op = enum {
     demote_f64,
     load,
     store,
+    /// Current byte length of the view selected by Node.immediate, as i64.
+    memory_length,
     call,
     guard,
 };
@@ -96,7 +98,7 @@ pub const SideExit = struct { id: u32, values: []const Value };
 /// Symbolic runtime call. The frontend owns the target and root interpretation;
 /// snapshots are read-only because the current collector does not move objects.
 pub const Call = struct {
-    target: u32,
+    target: u64,
     arguments: []const Value,
     parameter_types: []const Type,
     results: []const Value,
@@ -242,6 +244,8 @@ pub const Graph = struct {
                 const out_type = self.types[out];
                 if (node.op == .constant) {
                     if (normalize(out_type, node.immediate) != node.immediate) return error.InvalidGraph;
+                } else if (node.op == .memory_length) {
+                    if (out_type != .i64 or node.immediate >= self.memory_count) return error.InvalidGraph;
                 } else if (conversionTypes(node.op)) |conversion| {
                     try self.use(node.lhs, &available);
                     if (self.types[node.lhs] != conversion.input or out_type != conversion.output) return error.InvalidGraph;
@@ -358,7 +362,7 @@ pub fn isComparison(op: Op) bool {
 
 pub fn inputCount(op: Op) u2 {
     return switch (op) {
-        .constant, .call => 0,
+        .constant, .call, .memory_length => 0,
         .load => 1,
         .store => 2,
         .fceil, .ffloor, .ftrunc, .fnearest, .convert_s, .convert_u, .trunc_s, .trunc_u, .trunc_sat_s, .trunc_sat_u => 1,
@@ -385,6 +389,7 @@ pub fn effects(op: Op) Effects {
         .guard => .{ .exits = true },
         .div_s, .div_u, .rem_s, .rem_u, .trunc_s, .trunc_u => .{ .may_trap = true },
         .load => .{ .reads_memory = true, .may_trap = true },
+        .memory_length => .{ .reads_memory = true },
         .store => .{ .writes_memory = true, .may_trap = true },
         .call => .{ .reads_memory = true, .writes_memory = true, .may_trap = true, .safepoint = true },
         .fceil, .ffloor, .ftrunc, .fnearest, .convert_s, .convert_u, .trunc_sat_s, .trunc_sat_u => .{},

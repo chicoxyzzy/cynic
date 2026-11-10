@@ -309,6 +309,9 @@ fn emitGraph(a: std.mem.Allocator, owner: *code_alloc.CodeAllocator, graph: ir.G
                 try emission.invoke(node, @intCast(index), @intCast(2 * node_index + 1), call_index);
                 call_index += 1;
                 continue;
+            } else if (node.op == .memory_length) {
+                try memory.emitLength(&m, @intCast(node.immediate), emission.memory_views_slot.?);
+                emission.stats.loads += 2;
             } else if (ir.isMemoryOp(node.op)) {
                 try emission.read(false, node.lhs);
                 if (node.op == .store) try emission.read(true, node.rhs);

@@ -4,6 +4,185 @@ const prototype = @import("backend_prototype.zig");
 const native = prototype.native;
 const a = std.testing.allocator;
 
+test "backend memory growth: native size and grow preserve widths and ordered observations" {
+    if (!native.supported) return error.SkipZigTest;
+    var owner = try prototype.CodeAllocator.init(a, 256 * 1024);
+    defer owner.deinit();
+    for ([_]bool{ false, true }) |memory64| for ([_]u64{ 0, 1, 2, 0xffff_ffff, 0xffff_ffff_ffff_ffff }) |raw_delta| {
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        const ty: wasm.ValType = if (memory64) .i64 else .i32;
+        const delta = if (memory64) raw_delta else raw_delta & 0xffff_ffff;
+        const module: wasm.Module = .{
+            .types = &.{.{ .params = &.{ty}, .results = &.{ ty, ty, ty } }},
+            .funcs = &.{0},
+            .code = &.{.{ .bytes = &.{ 0, 0x3f, 1, 0x20, 0, 0x40, 1, 0x3f, 1, 0x0b } }},
+            .mems = &.{ .{ .limits = .{ .min = 0 } }, .{ .limits = .{ .min = 1, .max = 2, .is_64 = memory64 } } },
+        };
+        var reference: wasm.Instance = undefined;
+        try wasm.instantiate(&reference, arena.allocator(), a, &module, .{});
+        defer reference.deinit();
+        const expected = try wasm.invoke(&reference, a, 0, &.{delta});
+        defer a.free(expected);
+        var instance: wasm.Instance = undefined;
+        try wasm.instantiate(&instance, arena.allocator(), a, &module, .{});
+        defer instance.deinit();
+        instance.memories[1].data[0] = 37;
+        var graph = try prototype.lowerInstance(a, &instance, 0);
+        defer graph.deinit();
+        var code = try native.compile(a, &owner, graph.graph);
+        defer code.deinit();
+        var values: [3]u64 = undefined;
+        var result = try prototype.runResultsInInstance(&code, &instance, &.{delta}, 1, &values);
+        defer result.deinit();
+        try std.testing.expect(result == .returned);
+        for (expected, values) |want, actual| try std.testing.expectEqual(@as(u64, @truncate(want)), actual);
+        try std.testing.expectEqual(@as(u64, 1), values[0]);
+        const previous: u64 = if (delta <= 1) 1 else if (memory64) std.math.maxInt(u64) else std.math.maxInt(u32);
+        try std.testing.expectEqual(previous, values[1]);
+        try std.testing.expectEqual(@as(u64, if (delta == 1) 2 else 1), values[2]);
+        try std.testing.expectEqual(@as(usize, 0), instance.memories[0].data.len);
+        try std.testing.expectEqual(@as(u8, 37), instance.memories[1].data[0]);
+        if (delta == 1) try std.testing.expect(std.mem.allEqual(u8, instance.memories[1].data[wasm.PAGE_SIZE..], 0));
+    };
+}
+
+test "backend memory growth: real tier refreshes aliased imports after direct growth" {
+    if (!native.supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const mem_type: wasm.types.MemType = .{ .limits = .{ .min = 1, .max = 2 } };
+    const module: wasm.Module = .{
+        .types = &.{.{ .params = &.{.i32}, .results = &.{ .i32, .i32, .i32 } }},
+        .funcs = &.{0},
+        .code = &.{.{ .bytes = &.{ 0, 0x41, 1, 0x40, 1, 0x3f, 0, 0x20, 0, 0x41, 42, 0x36, 0, 0, 0x20, 0, 0x28, 0x40, 1, 0, 0x0b } }},
+        .imports = &.{ .{ .module = "host", .name = "a", .desc = .{ .mem = mem_type } }, .{ .module = "host", .name = "b", .desc = .{ .mem = mem_type } } },
+    };
+    const storage = try a.alloc(u8, 4 * wasm.PAGE_SIZE);
+    defer a.free(storage);
+    var fixed = std.heap.FixedBufferAllocator.init(storage);
+    const backing = fixed.allocator();
+    var memory: wasm.Memory = .{ .data = try backing.alloc(u8, wasm.PAGE_SIZE), .max_pages = 2, .backing_allocator = backing };
+    // A trailing allocation prevents in-place resize of the original store.
+    _ = try backing.alloc(u8, 1);
+    const original = memory.data.ptr;
+    @memset(memory.data, 0);
+    var instance: wasm.Instance = undefined;
+    try wasm.instantiate(&instance, arena.allocator(), a, &module, .{ .memories = &.{ &memory, &memory }, .share_memory = true });
+    defer instance.deinit();
+    instance.shared_backend_enabled = true;
+    const result = try wasm.invoke(&instance, a, 0, &.{wasm.PAGE_SIZE});
+    defer a.free(result);
+    try std.testing.expectEqualSlices(u128, &.{ 1, 2, 42 }, result);
+    try std.testing.expect(memory.data.ptr != original);
+    try std.testing.expectEqual(@as(u64, 1), instance.shared_backend_stats.entries);
+    try std.testing.expectEqual(@as(u64, 0), instance.shared_backend_stats.refusals);
+}
+
+test "backend memory growth: OOM preserves backing and views while zero growth invalidates views" {
+    if (!native.supported) return error.SkipZigTest;
+    const View = struct {
+        detached: usize = 0,
+        fn detach(raw: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.detached += 1;
+        }
+    };
+    for (0..3) |tier| {
+        var backing = std.testing.FailingAllocator.init(a, .{});
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        const module: wasm.Module = .{
+            .types = &.{.{ .params = &.{.i32}, .results = &.{ .i32, .i32 } }},
+            .funcs = &.{0},
+            .code = &.{.{ .bytes = &.{ 0, 0x20, 0, 0x40, 0, 0x3f, 0, 0x0b } }},
+            .mems = &.{.{ .limits = .{ .min = 1, .max = 2 } }},
+        };
+        var instance: wasm.Instance = undefined;
+        var view: View = .{};
+        try wasm.instantiate(&instance, arena.allocator(), a, &module, .{ .store_allocator = backing.allocator() });
+        defer instance.deinit();
+        instance.spasm_enabled = tier == 1;
+        instance.shared_backend_enabled = tier == 2;
+        const memory = instance.memories[0];
+        memory.data[0] = 37;
+        try memory.registerHostView(a, .{ .object = &view, .detach_fn = View.detach });
+        const original = memory.data.ptr;
+        backing.fail_index = backing.alloc_index;
+        backing.resize_fail_index = backing.resize_index;
+        const failed = try wasm.invoke(&instance, a, 0, &.{1});
+        defer a.free(failed);
+        try std.testing.expectEqualSlices(u128, &.{ 0xffff_ffff, 1 }, failed);
+        try std.testing.expect(backing.has_induced_failure);
+        try std.testing.expectEqual(@as(usize, 0), view.detached);
+        try std.testing.expectEqual(@as(usize, wasm.PAGE_SIZE), memory.data.len);
+        try std.testing.expectEqual(original, memory.data.ptr);
+        try std.testing.expectEqual(@as(u8, 37), memory.data[0]);
+        backing.fail_index = std.math.maxInt(usize);
+        backing.resize_fail_index = std.math.maxInt(usize);
+        const unchanged = try wasm.invoke(&instance, a, 0, &.{0});
+        defer a.free(unchanged);
+        try std.testing.expectEqualSlices(u128, &.{ 1, 1 }, unchanged);
+        try std.testing.expectEqual(@as(usize, 1), view.detached);
+        if (tier == 1) try std.testing.expectEqual(@as(u32, 2), instance.spasm_runs);
+        if (tier == 2) try std.testing.expectEqual(@as(u64, 2), instance.shared_backend_stats.entries);
+    }
+}
+
+test "backend memory growth: Realm quota failure returns minus one without native fallback" {
+    if (!native.supported) return error.SkipZigTest;
+    const Realm = @import("../realm.zig").Realm;
+    var realm = Realm.init(a);
+    defer realm.deinit();
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const module: wasm.Module = .{
+        .types = &.{.{ .params = &.{.i32}, .results = &.{.i32} }},
+        .funcs = &.{0},
+        .code = &.{.{ .bytes = &.{ 0, 0x20, 0, 0x40, 0, 0x0b } }},
+        .mems = &.{.{ .limits = .{ .min = 1, .max = 2 } }},
+    };
+    var instance: wasm.Instance = undefined;
+    try wasm.instantiate(&instance, arena.allocator(), a, &module, .{ .store_allocator = realm.wasmStoreAllocator() });
+    defer instance.deinit();
+    instance.shared_backend_enabled = true;
+    instance.shared_backend_allocator = realm.wasmStoreAllocator();
+    instance.invocation_allocator = realm.wasmInvocationAllocator();
+    instance.spasm_memory_ledger = realm.wasmCodeMemoryLedger();
+    const warm = try wasm.invoke(&instance, a, 0, &.{0});
+    defer a.free(warm);
+    const retained = realm.heap.bytes_live;
+    realm.setMemoryLimit(retained + 16 * 1024);
+    const failed = try wasm.invoke(&instance, a, 0, &.{1});
+    defer a.free(failed);
+    try std.testing.expectEqualSlices(u128, &.{0xffff_ffff}, failed);
+    try std.testing.expectEqual(retained, realm.heap.bytes_live);
+    try std.testing.expectEqual(@as(usize, wasm.PAGE_SIZE), instance.memories[0].data.len);
+    try std.testing.expectEqual(@as(u64, 2), instance.shared_backend_stats.entries);
+    try std.testing.expectEqual(@as(u64, 0), instance.shared_backend_stats.refusals);
+}
+
+test "backend memory growth: a later trap does not replay a successful growth" {
+    if (!native.supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const module: wasm.Module = .{
+        .types = &.{.{ .params = &.{}, .results = &.{} }},
+        .funcs = &.{0},
+        .code = &.{.{ .bytes = &.{ 0, 0x41, 1, 0x40, 0, 0x1a, 0x00, 0x0b } }},
+        .mems = &.{.{ .limits = .{ .min = 1, .max = 3 } }},
+    };
+    var instance: wasm.Instance = undefined;
+    try wasm.instantiate(&instance, arena.allocator(), a, &module, .{});
+    defer instance.deinit();
+    instance.shared_backend_enabled = true;
+    instance.spasm_enabled = true;
+    try std.testing.expectError(error.Unreachable, wasm.invoke(&instance, a, 0, &.{}));
+    try std.testing.expectEqual(@as(usize, 2 * wasm.PAGE_SIZE), instance.memories[0].data.len);
+    try std.testing.expectEqual(@as(u64, 1), instance.shared_backend_stats.entries);
+    try std.testing.expectEqual(@as(u32, 0), instance.spasm_runs);
+}
+
 test "backend memory: Wasm scalar accesses match Sarcasm on real instance memories" {
     if (!native.supported) return error.SkipZigTest;
     const Case = struct { ty: wasm.ValType, load: u8, store: u8 };

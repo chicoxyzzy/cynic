@@ -11,7 +11,7 @@ const graph: ir.Graph = .{
     .result_types = &.{.i64},
     .blocks = &.{.{ .params = &.{ 0, 1, 2, 3 }, .nodes = &.{
         .{ .op = .call, .trap_site = 17, .call = .{
-            .target = 42,
+            .target = 0x1234_5678_ffff_ffff,
             .arguments = &.{ 3, 1, 3 },
             .parameter_types = &.{ .i64, .i64, .i64 },
             .result_types = &.{.i64},
@@ -33,7 +33,7 @@ const Context = struct {
     fn invoke(raw: ?*anyopaque, request: native.CallRequest) !void {
         const self: *Context = @ptrCast(@alignCast(raw.?));
         self.calls += 1;
-        try std.testing.expectEqual(@as(u32, 42), request.target);
+        try std.testing.expectEqual(@as(u64, 0x1234_5678_ffff_ffff), request.target);
         try std.testing.expectEqual(@as(u32, 17), request.site);
         try std.testing.expectEqual(@as(u32, 99), request.safepoint);
         try std.testing.expectEqualSlices(u64, &.{ 40, 20, 40 }, request.arguments);

@@ -3308,6 +3308,50 @@ test "backend tier: child Realm inherits opt-in but honors the master JIT switch
     }
 }
 
+test "backend memory growth: JS buffers detach or refresh through shared native execution" {
+    const testing = std.testing;
+    const lantern = @import("../lantern/interpreter.zig");
+    if (comptime !wasm.backend_prototype.native.supported) return error.SkipZigTest;
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.allow_wasm_compile = true;
+    realm.jit_enabled = true;
+    realm.wasm_shared_backend_enabled = true;
+    try realm.installBuiltins();
+    const setup = try lantern.evaluateScript(testing.allocator, &realm,
+        \\const growthInstance = new WebAssembly.Instance(new WebAssembly.Module(new Uint8Array([
+        \\  0,97,115,109,1,0,0,0,1,6,1,96,1,127,1,127,3,2,1,0,5,4,1,1,1,2,
+        \\  7,9,2,1,103,0,0,1,109,2,0,10,8,1,6,0,32,0,64,0,11
+        \\])));
+        \\const originalGrowthBuffer = growthInstance.exports.m.buffer;
+        \\growthInstance.exports.g;
+    );
+    const function = switch (setup) {
+        .value => |value| heap_mod.valueAsFunction(value) orelse return error.TestUnexpectedResult,
+        else => return error.TestUnexpectedResult,
+    };
+    const record: *ExportRecord = @ptrCast(@alignCast(function.wasm_export orelse return error.TestUnexpectedResult));
+    const instance = record.instance;
+    realm.collectGarbage();
+    const result = try lantern.evaluateScript(testing.allocator, &realm,
+        \\if (growthInstance.exports.g(0) !== 1 || originalGrowthBuffer.byteLength !== 0) throw new Error("zero growth");
+        \\const unchangedGrowthBuffer = growthInstance.exports.m.buffer;
+        \\if (growthInstance.exports.g(2) !== -1 || unchangedGrowthBuffer.byteLength !== 65536 ||
+        \\    growthInstance.exports.m.buffer !== unchangedGrowthBuffer) throw new Error("failed growth");
+        \\const resizableGrowthBuffer = growthInstance.exports.m.toResizableBuffer();
+        \\if (growthInstance.exports.g(1) !== 1 || resizableGrowthBuffer.byteLength !== 131072 ||
+        \\    growthInstance.exports.m.buffer !== resizableGrowthBuffer) throw new Error("resizable growth");
+        \\new Uint8Array(resizableGrowthBuffer)[65536] === 0 ? 42 : 0;
+    );
+    switch (result) {
+        .value => |value| try testing.expectEqual(@as(i32, 42), value.asInt32()),
+        else => return error.TestUnexpectedResult,
+    }
+    try testing.expectEqual(@as(u64, 3), instance.shared_backend_stats.entries);
+    try testing.expectEqual(@as(u64, 1), instance.shared_backend_stats.compiles);
+    try testing.expectEqual(@as(u32, 0), instance.spasm_runs);
+}
+
 test "WebAssembly JS API: a fuel-metered loop remains in Spasm" {
     try testFuelMeteredNativeLoop(false);
 }
