@@ -1257,6 +1257,9 @@ pub const Realm = struct {
     /// The production CLI enables this by default, while direct embedders must
     /// opt in explicitly. Targets without codegen support (§8) ignore it.
     jit_enabled: bool = false,
+    /// Opt-in Wasm optimizing tier using the shared backend. Subordinate to
+    /// the master JIT policy; not enabled by the production CLI by default.
+    wasm_shared_backend_enabled: bool = false,
     /// Tier-up threshold override for the differential gate
     /// (docs/jit.md §10 step 2): `1` force-compiles every eligible
     /// chunk on its first call so a test262 sweep exercises
@@ -1282,7 +1285,7 @@ pub const Realm = struct {
     /// immediate-free quota allocator and are tracked separately below.
     wasm_quota_allocator: ?WasmQuotaAllocator = null,
     wasm_arena: ?std.heap.ArenaAllocator = null,
-    /// Instances whose Spasm caches may own executable mappings. Persistent
+    /// Instances whose native caches may own executable mappings. Persistent
     /// metadata still dies with `wasm_arena`; mappings require an explicit
     /// `munmap` before that arena invalidates the instance pointers.
     wasm_instances: std.ArrayListUnmanaged(*@import("wasm/interpreter.zig").Instance) = .empty,
@@ -1481,6 +1484,7 @@ pub const Realm = struct {
             // ShadowRealm children with the same thresholds as their parent;
             // the master `jit_enabled` switch remains authoritative.
             .jit_enabled = parent.jit_enabled,
+            .wasm_shared_backend_enabled = parent.wasm_shared_backend_enabled,
             .jit_threshold_override = parent.jit_threshold_override,
             .ohaimark_enabled = parent.ohaimark_enabled,
             .ohaimark_threshold_override = parent.ohaimark_threshold_override,
@@ -2048,7 +2052,7 @@ pub const Realm = struct {
     }
 
     /// Immediate-free Wasm storage under the shared Heap quota. Used by
-    /// invocation stacks and movable Memory/Table backings.
+    /// invocation stacks, shared-backend caches, and movable store backings.
     pub fn wasmStoreAllocator(self: *Realm) std.mem.Allocator {
         if (self.wasm_quota_allocator == null) {
             self.wasm_quota_allocator = .{ .backing = self.allocator, .heap = self.heap };
@@ -2060,7 +2064,7 @@ pub const Realm = struct {
         return self.wasmStoreAllocator();
     }
 
-    /// Account OS-backed Spasm mappings against the Realm live-byte ceiling.
+    /// Account OS-backed Wasm native mappings against the Realm live-byte ceiling.
     /// The ledger borrows the heap, which outlives every registered instance.
     pub fn wasmCodeMemoryLedger(self: *Realm) code_alloc.MemoryLedger {
         return .{

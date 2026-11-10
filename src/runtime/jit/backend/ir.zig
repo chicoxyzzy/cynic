@@ -405,4 +405,5 @@ test {
     _ = @import("memory_test.zig");
     _ = @import("call_test.zig");
     _ = @import("results_test.zig");
+    _ = @import("control_test.zig");
 }

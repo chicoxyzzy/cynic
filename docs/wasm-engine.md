@@ -733,6 +733,16 @@ realm/agent budget. Obsolete growth buffers discharge immediately and native
 code discharges after `munmap`. See
 [resource-metering.md](resource-metering.md).
 
+The [shared optimizing backend](shared-backend.md#opt-in-wasm-execution) is an
+additional opt-in instance tier: `Instance.shared_backend_enabled`, or
+`Realm.wasm_shared_backend_enabled` before instantiation (still gated by
+`jit_enabled`). It caches scalar shared-native code, tries it before Spasm at
+runtime dispatch, and preserves the same controller, memory quota, and teardown
+contracts. Unsupported bodies refuse before entry; runtime errors do not replay
+through a fallback. Interpreter-internal calls and default tier policy remain
+unchanged. Run the spec harness with `--shared-backend
+--require-shared-backend-entry` to distinguish actual engagement from fallback.
+
 ## 10. Performance posture
 
 This is the **T0** tier — correctness-first, but at the right point in

@@ -17,6 +17,7 @@
 //!   zig build wasm-testsuite -- [--gen-dir=<dir>] [--filter=<s>]
 //!                               [--quiet] [--write-results] [--spasm]
 //!                               [--require-spasm-entry]
+//!                               [--shared-backend] [--require-shared-backend-entry]
 
 const std = @import("std");
 const cynic = @import("cynic");
@@ -29,6 +30,9 @@ const Counts = struct {
     pass: u32 = 0,
     fail: u32 = 0,
     skip: u32 = 0,
+    shared_backend_runs: u64 = 0,
+    shared_backend_compiles: u64 = 0,
+    shared_backend_refusals: u64 = 0,
     spasm_runs: u64 = 0,
     spasm_compiles: u64 = 0,
     spasm_refusals: u64 = 0,
@@ -46,6 +50,9 @@ const Counts = struct {
         self.pass += other.pass;
         self.fail += other.fail;
         self.skip += other.skip;
+        self.shared_backend_runs += other.shared_backend_runs;
+        self.shared_backend_compiles += other.shared_backend_compiles;
+        self.shared_backend_refusals += other.shared_backend_refusals;
         self.spasm_runs += other.spasm_runs;
         self.spasm_compiles += other.spasm_compiles;
         self.spasm_refusals += other.spasm_refusals;
@@ -61,6 +68,13 @@ const Counts = struct {
     }
 };
 
+const Tiers = struct {
+    spasm: bool = false,
+    shared_backend: bool = false,
+    allocator: ?std.mem.Allocator = null,
+    instances: ?*std.ArrayListUnmanaged(*wasm.Instance) = null,
+};
+
 const Options = struct {
     gen_dir: []const u8 = ".zig-cache/wasm-testsuite",
     filter: ?[]const u8 = null,
@@ -72,6 +86,8 @@ const Options = struct {
     /// default interpreter run: that diff is the goes-live correctness
     /// gate (compilable functions run native, everything else degrades).
     spasm: bool = false,
+    shared_backend: bool = false,
+    require_shared_backend_entry: bool = false,
     /// Fail unless a forced-Spasm run actually enters generated code. Semantic
     /// parity alone is insufficient because an all-interpreter fallback can
     /// produce the same pass set while leaving the native tier broken.
@@ -102,6 +118,10 @@ pub fn main(init: std.process.Init) !void {
                 opts.write_results = true;
             } else if (std.mem.eql(u8, a, "--spasm")) {
                 opts.spasm = true;
+            } else if (std.mem.eql(u8, a, "--shared-backend")) {
+                opts.shared_backend = true;
+            } else if (std.mem.eql(u8, a, "--require-shared-backend-entry")) {
+                opts.require_shared_backend_entry = true;
             } else if (std.mem.eql(u8, a, "--require-spasm-entry")) {
                 opts.require_spasm_entry = true;
             } else if (std.mem.startsWith(u8, a, "--min-pass-pct=")) {
@@ -114,6 +134,14 @@ pub fn main(init: std.process.Init) !void {
 
     if (opts.require_spasm_entry and !opts.spasm) {
         try std.Io.File.stderr().writeStreamingAll(io, "wasm-testsuite: --require-spasm-entry requires --spasm\n");
+        std.process.exit(2);
+    }
+    if (opts.require_shared_backend_entry and !opts.shared_backend) {
+        try std.Io.File.stderr().writeStreamingAll(io, "wasm-testsuite: --require-shared-backend-entry requires --shared-backend\n");
+        std.process.exit(2);
+    }
+    if (opts.shared_backend and opts.write_results) {
+        try std.Io.File.stderr().writeStreamingAll(io, "wasm-testsuite: experimental shared-backend runs do not replace the default results ledger\n");
         std.process.exit(2);
     }
 
@@ -141,7 +169,7 @@ pub fn main(init: std.process.Init) !void {
 
         var arena = std.heap.ArenaAllocator.init(gpa);
         defer arena.deinit();
-        const c = runManifest(gpa, arena.allocator(), io, dir, entry.path, opts.spasm) catch |err| {
+        const c = runManifest(gpa, arena.allocator(), io, dir, entry.path, .{ .spasm = opts.spasm, .shared_backend = opts.shared_backend }) catch |err| {
             // A broken fixture is not an engine rejection or an excluded
             // command. Keep it visible under --quiet and fail the whole run.
             harness_errors += 1;
@@ -164,6 +192,10 @@ pub fn main(init: std.process.Init) !void {
     var line: [512]u8 = undefined;
     const summary = try std.fmt.bufPrint(&line, "\nwasm spec testsuite: {d}/{d} pass ({d:.2}%), {d} skip across {d} files\n", .{ total.pass, scored, pct, total.skip, files });
     try std.Io.File.stdout().writeStreamingAll(io, summary);
+    if (opts.shared_backend) {
+        const engagement = try std.fmt.bufPrint(&line, "Shared backend engagement: {d} native entries, {d} compiled functions, {d} refusals\n", .{ total.shared_backend_runs, total.shared_backend_compiles, total.shared_backend_refusals });
+        try std.Io.File.stdout().writeStreamingAll(io, engagement);
+    }
     if (opts.spasm) {
         var spasm_line: [256]u8 = undefined;
         const spasm_summary = try std.fmt.bufPrint(
@@ -197,11 +229,15 @@ pub fn main(init: std.process.Init) !void {
         try std.Io.File.stderr().writeStreamingAll(io, "wasm-testsuite: --require-spasm-entry failed -- no generated Spasm entry executed\n");
         std.process.exit(2);
     }
+    if (opts.require_shared_backend_entry and total.shared_backend_runs == 0) {
+        try std.Io.File.stderr().writeStreamingAll(io, "wasm-testsuite: no generated shared-backend entry executed\n");
+        std.process.exit(2);
+    }
 }
 
 // ── per-manifest execution ──────────────────────────────────────────
 
-fn runManifest(gpa: std.mem.Allocator, arena: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, json_path: []const u8, spasm_enabled: bool) !Counts {
+fn runManifest(gpa: std.mem.Allocator, arena: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, json_path: []const u8, selected_tiers: Tiers) !Counts {
     const bytes = try dir.readFileAlloc(io, json_path, arena, .limited(64 * 1024 * 1024));
     const root = try std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{});
     if (root != .object) return error.BadManifest;
@@ -213,7 +249,11 @@ fn runManifest(gpa: std.mem.Allocator, arena: std.mem.Allocator, io: std.Io, dir
     var current: ?*wasm.Instance = null;
     var current_definition: ?ModuleDefinition = null;
     var definitions: std.StringHashMapUnmanaged(ModuleDefinition) = .empty;
-    var spasm_instances: std.ArrayListUnmanaged(*wasm.Instance) = .empty;
+    var native_instances: std.ArrayListUnmanaged(*wasm.Instance) = .empty;
+    defer for (native_instances.items) |instance| instance.releaseExecutableCode();
+    var tiers = selected_tiers;
+    tiers.allocator = gpa;
+    tiers.instances = &native_instances;
 
     // Cross-module linking registry: registered name → instance. Names
     // a `register` command exposes for a later module's imports.
@@ -276,11 +316,10 @@ fn runManifest(gpa: std.mem.Allocator, arena: std.mem.Allocator, io: std.Io, dir
             // WABT's TallyCommand(OnModuleCommand) also counts plain module
             // commands: decoding, linking, initialization and start must work
             // even when the script has no later assertion against the module.
-            switch (try instantiateDefinition(arena, io, definition, &registry, spasm_enabled)) {
+            switch (try instantiateDefinition(arena, io, definition, &registry, tiers)) {
                 .loaded => |loaded| {
                     current = loaded.instance;
                     counts.pass += 1;
-                    if (spasm_enabled) try spasm_instances.append(arena, loaded.instance);
                     if (try optionalString(cmd, if (is_module) "name" else "instance")) |name|
                         try registry.put(arena, name, loaded.instance);
                 },
@@ -328,7 +367,7 @@ fn runManifest(gpa: std.mem.Allocator, arena: std.mem.Allocator, io: std.Io, dir
             // Instantiate the module and expect a trap. Side effects that
             // ran before the trap (e.g. an active element segment writing
             // into a shared imported table) persist by design.
-            switch (try loadModule(arena, io, dir, cmd, &registry, spasm_enabled)) {
+            switch (try loadModule(arena, io, dir, cmd, &registry, tiers)) {
                 .loaded => counts.fail += 1,
                 .unsupported => counts.skip += 1,
                 .rejected => |rejection| {
@@ -343,7 +382,10 @@ fn runManifest(gpa: std.mem.Allocator, arena: std.mem.Allocator, io: std.Io, dir
             counts.skip += 1;
         }
     }
-    for (spasm_instances.items) |instance| {
+    for (native_instances.items) |instance| {
+        counts.shared_backend_runs += instance.shared_backend_stats.entries;
+        counts.shared_backend_compiles += instance.shared_backend_stats.compiles;
+        counts.shared_backend_refusals += instance.shared_backend_stats.refusals;
         counts.spasm_runs += instance.spasm_runs;
         counts.spasm_compiles += instance.spasm_compiles;
         counts.spasm_refusals += instance.spasm_refusals;
@@ -668,10 +710,10 @@ fn loadModule(
     dir: std.Io.Dir,
     cmd: std.json.ObjectMap,
     registry: *const Registry,
-    spasm_enabled: bool,
+    tiers: Tiers,
 ) !LoadResult {
     return switch (try readModule(arena, io, dir, cmd)) {
-        .defined => |definition| instantiateDefinition(arena, io, definition, registry, spasm_enabled),
+        .defined => |definition| instantiateDefinition(arena, io, definition, registry, tiers),
         .rejected => |rejection| .{ .rejected = rejection },
         .unsupported => .unsupported,
     };
@@ -695,16 +737,23 @@ fn readModule(arena: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, cmd: std.js
     return .{ .defined = .{ .module = modp, .filename = filename } };
 }
 
-fn instantiateDefinition(arena: std.mem.Allocator, io: std.Io, definition: ModuleDefinition, registry: *const Registry, spasm_enabled: bool) !LoadResult {
+fn instantiateDefinition(arena: std.mem.Allocator, io: std.Io, definition: ModuleDefinition, registry: *const Registry, tiers: Tiers) !LoadResult {
     const modp = definition.module;
     const filename = definition.filename;
     const imports = resolveImports(arena, modp, registry) catch |err| return .{ .rejected = try rejectModule(io, filename, .link, err) };
     const ip = try arena.create(wasm.Instance);
     wasm.instantiate(ip, arena, arena, modp, imports) catch |err| return .{ .rejected = try rejectModule(io, filename, .initialize, err) };
-    if (spasm_enabled) {
+    if (tiers.spasm or tiers.shared_backend) {
+        if (tiers.instances) |instances| try instances.append(arena, ip);
+        ip.invocation_allocator = tiers.allocator;
+    }
+    if (tiers.spasm) {
         ip.spasm_enabled = true;
         ip.spasm_diagnostics = true;
     }
+    ip.shared_backend_enabled = tiers.shared_backend;
+    ip.shared_backend_diagnostics = tiers.shared_backend;
+    ip.shared_backend_allocator = tiers.allocator;
     wasm.runStart(ip, arena) catch |err| return .{ .rejected = try rejectModule(io, filename, .start, err) };
     return .{ .loaded = .{ .instance = ip, .module = modp } };
 }
@@ -1052,10 +1101,10 @@ fn expectManifestCounts(source: []const u8, module: ?[]const u8, expected: Count
     const io = std.testing.io;
     try tmp.dir.writeFile(io, .{ .sub_path = "case.json", .data = source });
     if (module) |bytes| try tmp.dir.writeFile(io, .{ .sub_path = "case.wasm", .data = bytes });
-    for ([_]bool{ false, true }) |spasm| {
+    for ([_]Tiers{ .{}, .{ .spasm = true }, .{ .shared_backend = true } }) |tiers| {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
-        const actual = try runManifest(std.testing.allocator, arena.allocator(), io, tmp.dir, "case.json", spasm);
+        const actual = try runManifest(std.testing.allocator, arena.allocator(), io, tmp.dir, "case.json", tiers);
         try std.testing.expectEqual(expected.pass, actual.pass);
         try std.testing.expectEqual(expected.fail, actual.fail);
         try std.testing.expectEqual(expected.skip, actual.skip);
@@ -1124,7 +1173,7 @@ test "wasm harness: register after a failed or skipped module preserves its outc
 fn checkManifestAllocationFailures(allocator: std.mem.Allocator, dir: std.Io.Dir) !void {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    const counts = try runManifest(allocator, arena.allocator(), std.testing.io, dir, "case.json", false);
+    const counts = try runManifest(allocator, arena.allocator(), std.testing.io, dir, "case.json", .{});
     try std.testing.expectEqual(@as(u32, 1), counts.pass);
     try std.testing.expectEqual(@as(u32, 0), counts.fail);
 }
@@ -1142,7 +1191,7 @@ test "wasm harness: allocation failure cannot satisfy an expected instantiation 
 fn checkActionAllocationFailures(allocator: std.mem.Allocator, dir: std.Io.Dir, expected: Counts) !void {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    const actual = try runManifest(allocator, arena.allocator(), std.testing.io, dir, "case.json", false);
+    const actual = try runManifest(allocator, arena.allocator(), std.testing.io, dir, "case.json", .{});
     try std.testing.expectEqual(expected.pass, actual.pass);
     try std.testing.expectEqual(expected.fail, actual.fail);
     try std.testing.expectEqual(@as(u32, 0), actual.skip);
@@ -1233,7 +1282,7 @@ test "wasm harness: action scratch does not accumulate in the manifest arena" {
     try tmp.dir.writeFile(io, .{ .sub_path = "constant.json", .data = manifest.items });
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const counts = try runManifest(std.testing.allocator, arena.allocator(), io, tmp.dir, "constant.json", false);
+    const counts = try runManifest(std.testing.allocator, arena.allocator(), io, tmp.dir, "constant.json", .{});
     try std.testing.expectEqual(@as(u32, 33), counts.pass);
     try std.testing.expectEqual(@as(u32, 0), counts.fail);
     try std.testing.expect(arena.queryCapacity() < 2 * 1024 * 1024);
