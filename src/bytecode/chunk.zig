@@ -792,6 +792,9 @@ pub const Chunk = struct {
         /// before the heap unmaps the shared code allocator.
         bistromath: BistromathState = .{},
         ohaimark: TierCode = .{},
+        shared_backend: ?*@import("../runtime/ohaimark/shared_runtime.zig").Cache = null,
+        shared_backend_refused: bool = false,
+        shared_backend_guard_exits: u8 = 0,
         /// Whether the published T2 entry may cross a generated-code helper
         /// boundary. Set before the executable becomes visible so the runtime
         /// can register the active Lantern frame only for code that needs it.
@@ -989,6 +992,10 @@ pub const Chunk = struct {
         }
 
         pub fn deinit(self: *JitState) void {
+            if (self.shared_backend) |cache| cache.deinit();
+            self.shared_backend = null;
+            self.shared_backend_refused = false;
+            self.shared_backend_guard_exits = 0;
             self.bistromath.deinit();
             self.ohaimark.deinit();
             self.ohaimark_requires_frame_scope = false;

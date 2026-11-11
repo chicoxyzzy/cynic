@@ -648,7 +648,7 @@ jobs:
           diff -u /tmp/pass-interp.txt /tmp/pass-jit.txt
           echo "pass-sets identical: $(wc -l < /tmp/pass-interp.txt) fixtures (Atomics wait/notify + copyWithin coerced-detached excluded from the differential)"
 
-      - name: Ohaimark + OSR differential + telemetry (gating)
+      - name: Ohaimark + OSR and shared JS differential (gating)
         timeout-minutes: 20
         run: |
           set -euo pipefail
@@ -662,6 +662,10 @@ jobs:
           test -s /tmp/pass-ohaimark.txt
           diff -u /tmp/pass-interp.txt /tmp/pass-ohaimark.txt
           echo "Ohaimark+OSR pass-set identical: $(wc -l < /tmp/pass-ohaimark.txt) fixtures"
+          zig build test262 -- --quiet --threads=0 --shared-js-backend --require-shared-js-entry "${EXCLUDES[@]}" --pass-list-out=/tmp/pass-shared-js.txt
+          test -s /tmp/pass-shared-js.txt
+          diff -u /tmp/pass-interp.txt /tmp/pass-shared-js.txt
+          echo "Shared JS AArch64 pass-set identical: $(wc -l < /tmp/pass-shared-js.txt) fixtures"
 
   test262-ohaimark-x86-differential:
     name: test262 Ohaimark x86_64 differential
@@ -687,7 +691,7 @@ jobs:
         with:
           cache-key: ohaimark-x86-differential
 
-      - name: Differential sweep (Lantern vs Ohaimark + OSR)
+      - name: Differential sweep (Lantern vs Ohaimark + OSR and shared JS)
         timeout-minutes: 45
         run: |
           set -euo pipefail
@@ -698,6 +702,10 @@ jobs:
           test -s /tmp/pass-ohaimark-x86.txt
           diff -u /tmp/pass-interp.txt /tmp/pass-ohaimark-x86.txt
           echo "Ohaimark x86_64 pass-set identical: $(wc -l < /tmp/pass-ohaimark-x86.txt) fixtures"
+          zig build test262 -- --quiet --threads=0 --shared-js-backend --require-shared-js-entry "${EXCLUDES[@]}" --pass-list-out=/tmp/pass-shared-js.txt
+          test -s /tmp/pass-shared-js.txt
+          diff -u /tmp/pass-interp.txt /tmp/pass-shared-js.txt
+          echo "Shared JS x86_64 pass-set identical: $(wc -l < /tmp/pass-shared-js.txt) fixtures"
 
   test262-jit-differential-x86-64:
     name: test262 JIT differential (x86_64)

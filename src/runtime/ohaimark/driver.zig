@@ -99,6 +99,11 @@ pub fn tryEnterTop(
     if (!realm.jit_enabled or !realm.ohaimark_enabled) return .not_entered;
     const state = frame.chunk.jit_state orelse return .not_entered;
 
+    if (realm.ohaimark_shared_backend_enabled and frameKindCompilable(frame)) {
+        const outcome = try @import("shared_runtime.zig").tryEnter(allocator, realm, frames);
+        if (outcome != .not_entered) return outcome;
+    }
+
     // Permanent refusal is the common lower-tier path while a backend grows
     // opcode coverage. Check its one-byte status before frame-kind, exit-budget,
     // executable-handle, or retry machinery. Feedback-deferred refusals must
