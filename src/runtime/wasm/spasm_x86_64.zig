@@ -14,6 +14,7 @@ const tableIs64 = metadata.tableIs64;
 const memoryIs64 = metadata.memoryIs64;
 
 const x64 = @import("../jit/asm_x86_64.zig");
+const x64_simd = @import("../jit/simd_x86_64.zig");
 const code_alloc = @import("../jit/code_alloc.zig");
 const float_ops = @import("float_ops.zig");
 const dead_code = @import("spasm_dead_code.zig");
@@ -3041,71 +3042,15 @@ fn emitSimdSplat(m: *x64.Masm, width: u4, target: i32) Error!void {
 }
 
 fn emitSimdExtend(m: *x64.Masm, op: simd.ExtendOp) Error!void {
-    const size: x64.Masm.PackedIntSize = switch (op.width) {
-        1 => .byte,
-        2 => .half,
-        4 => .word,
-        else => return error.UnsupportedOp,
-    };
-    // Zero > signed lane supplies the sign-extension bits for PUNPCK.
-    try m.xorPacked128(.xmm1, .xmm1);
-    if (op.signed) try m.compareGreaterSignedPacked(.xmm1, .xmm0, size);
-    if (op.high)
-        try m.unpackHighPackedInteger(.xmm0, .xmm1, size)
-    else
-        try m.unpackLowPackedInteger(.xmm0, .xmm1, size);
+    try x64_simd.extend(m, op.width, op.signed, op.high);
 }
 
 fn emitSimdNarrow(m: *x64.Masm, op: simd.NarrowOp) Error!void {
-    if (op.width == 1) {
-        if (op.signed) try m.packSigned16To8(.xmm0, .xmm1) else try m.packUnsigned16To8(.xmm0, .xmm1);
-    } else if (op.signed) {
-        try m.packSigned32To16(.xmm0, .xmm1);
-    } else {
-        // PACKUSDW needs SSE4.1. Clamp negatives first, bias by -32768,
-        // PACKSSDW, then flip each output sign bit to recover unsigned lanes.
-        try m.movImm64(.rax, 0x0000800000008000);
-        try m.movQXmmFromReg(.xmm3, .rax);
-        try m.shufflePackedI32(.xmm3, .xmm3, 0x44);
-        for ([_]x64.Xmm{ .xmm0, .xmm1 }) |input| {
-            try m.xorPacked128(.xmm2, .xmm2);
-            try m.compareGreaterSignedPacked(.xmm2, input, .word);
-            try m.andNotPacked128(.xmm2, input);
-            try m.movVector128(input, .xmm2);
-            try m.subtractPackedInteger(input, .xmm3, .word);
-        }
-        try m.packSigned32To16(.xmm0, .xmm1);
-        try m.movImm64(.rax, 0x8000800080008000);
-        try m.movQXmmFromReg(.xmm1, .rax);
-        try m.shufflePackedI32(.xmm1, .xmm1, 0x44);
-        try m.xorPacked128(.xmm0, .xmm1);
-    }
+    try x64_simd.narrow(m, op.width, op.signed);
 }
 
 fn emitSimdPairwiseAdd(m: *x64.Masm, op: simd.PairwiseAddOp) Error!void {
-    if (op.signed and op.width == 2) {
-        try m.movImm64(.rax, 0x0001000100010001);
-        try m.movQXmmFromReg(.xmm1, .rax);
-        try m.shufflePackedI32(.xmm1, .xmm1, 0x44);
-        try m.multiplyAddPackedI16(.xmm0, .xmm1);
-        return;
-    }
-    try m.movVector128(.xmm1, .xmm0);
-    if (op.signed) {
-        try m.movImm64(.rax, 8);
-        try m.movDXmmFromReg(.xmm2, .rax);
-        try m.shiftPackedInteger(.xmm0, .xmm2, .shl16);
-        try m.shiftPackedInteger(.xmm0, .xmm2, .sar16);
-        try m.shiftPackedInteger(.xmm1, .xmm2, .sar16);
-    } else {
-        try m.shiftRightLogicalPacked128(.xmm1, @as(u8, op.width) * 8, false);
-        try m.movImm64(.rax, if (op.width == 1) 0x00ff00ff00ff00ff else 0x0000ffff0000ffff);
-        try m.movQXmmFromReg(.xmm2, .rax);
-        try m.shufflePackedI32(.xmm2, .xmm2, 0x44);
-        try m.andPacked128(.xmm0, .xmm2);
-        if (op.width == 1) try m.andPacked128(.xmm1, .xmm2);
-    }
-    try m.addPackedInteger(.xmm0, .xmm1, if (op.width == 1) .half else .word);
+    try x64_simd.pairwiseAdd(m, op.width, op.signed);
 }
 
 /// ivdotsat: signed bytes -> saturated i16 pair sums, with SSE2 only.

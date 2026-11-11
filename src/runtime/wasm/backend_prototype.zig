@@ -1153,7 +1153,7 @@ fn memoryOperation(inst: Instruction) ?MemoryOperation {
     };
 }
 
-const VectorOperation = struct { op: ir.Op, lane: ?ir.VectorLane = null, signed_extract: bool = false };
+const VectorOperation = struct { op: ir.Op, lane: ?ir.VectorLane = null, signed_extract: bool = false, immediate: ?u64 = null };
 
 fn integerVectorLane(width: u4) ?ir.VectorLane {
     return switch (width) {
@@ -1166,6 +1166,19 @@ fn integerVectorLane(width: u4) ?ir.VectorLane {
 }
 
 fn vectorOperation(sub: u32) ?VectorOperation {
+    if (simd.extendOp(sub)) |operation| return .{
+        .op = if (operation.signed) .vector_extend_s else .vector_extend_u,
+        .lane = integerVectorLane(operation.width),
+        .immediate = @intFromBool(operation.high),
+    };
+    if (simd.narrowOp(sub)) |operation| return .{
+        .op = if (operation.signed) .vector_narrow_s else .vector_narrow_u,
+        .lane = integerVectorLane(operation.width),
+    };
+    if (simd.pairwiseAddOp(sub)) |operation| return .{
+        .op = if (operation.signed) .vector_pairwise_add_s else .vector_pairwise_add_u,
+        .lane = integerVectorLane(operation.width),
+    };
     if (simd.splatWidth(sub)) |width| return .{
         .op = .vector_splat,
         .lane = if (sub == 19) .f32x4 else if (sub == 20) .f64x2 else integerVectorLane(width),
@@ -1200,12 +1213,17 @@ fn vectorOperation(sub: u32) ?VectorOperation {
 }
 
 const VectorMemoryOperation = struct {
-    kind: enum { splat, zero, load_lane, store_lane },
+    kind: enum { splat, zero, load_lane, store_lane, extend_s, extend_u },
     lane: ir.VectorLane,
     width: ir.MemoryWidth,
 };
 
 fn vectorMemoryOperation(sub: u32) ?VectorMemoryOperation {
+    if (simd.wideningLoadOp(sub)) |load| return .{
+        .kind = if (load.signed) .extend_s else .extend_u,
+        .lane = integerVectorLane(load.width) orelse return null,
+        .width = .double,
+    };
     if (simd.scalarLoadOp(sub)) |load| return .{
         .kind = if (load.splat) .splat else .zero,
         .lane = integerVectorLane(load.width) orelse return null,
@@ -1220,10 +1238,11 @@ fn lowerVector(builder: *Builder, nodes: *std.ArrayList(ir.Node), stack: *std.Ar
     const a = builder.a;
     if (vectorMemoryOperation(inst.simd_opcode)) |operation| {
         const lane_memory = operation.kind == .load_lane or operation.kind == .store_lane;
+        const widening = operation.kind == .extend_s or operation.kind == .extend_u;
         if (inst.lane_index >= operation.lane.count()) return error.InvalidControlFlow;
         var vector_value = if (lane_memory) stack.pop() orelse return error.InvalidControlFlow else @as(ir.Value, 0);
         const address = stack.pop() orelse return error.InvalidControlFlow;
-        const scalar = try builder.value(operation.lane.scalarType());
+        const scalar = try builder.value(if (widening) .i64 else operation.lane.scalarType());
         const access: ir.MemoryAccess = .{ .region = inst.memory_index, .offset = inst.immediate, .width = operation.width };
         if (operation.kind == .store_lane) {
             try nodes.append(a, .{ .op = .vector_extract, .out = scalar, .lhs = vector_value, .vector_lane = operation.lane, .immediate = inst.lane_index });
@@ -1236,8 +1255,10 @@ fn lowerVector(builder: *Builder, nodes: *std.ArrayList(ir.Node), stack: *std.Ar
         if (operation.kind == .splat) {
             try nodes.append(a, .{ .op = .vector_splat, .out = out, .lhs = scalar, .vector_lane = operation.lane });
         } else {
-            if (operation.kind == .zero) vector_value = try builder.constant(nodes, .v128, 0);
-            try nodes.append(a, .{ .op = .vector_replace, .out = out, .lhs = vector_value, .rhs = scalar, .vector_lane = operation.lane, .immediate = inst.lane_index });
+            if (operation.kind == .zero or widening) vector_value = try builder.constant(nodes, .v128, 0);
+            const loaded = if (widening) try builder.value(.v128) else out;
+            try nodes.append(a, .{ .op = .vector_replace, .out = loaded, .lhs = vector_value, .rhs = scalar, .vector_lane = if (widening) .i64x2 else operation.lane, .immediate = inst.lane_index });
+            if (widening) try nodes.append(a, .{ .op = if (operation.kind == .extend_s) .vector_extend_s else .vector_extend_u, .out = out, .lhs = loaded, .vector_lane = operation.lane });
         }
         try stack.append(a, out);
         return;
@@ -1252,7 +1273,7 @@ fn lowerVector(builder: *Builder, nodes: *std.ArrayList(ir.Node), stack: *std.Ar
     const rhs = if (ir.inputCount(operation.op) == 2) stack.pop() orelse return error.InvalidControlFlow else 0;
     const lhs = stack.pop() orelse return error.InvalidControlFlow;
     var out = try builder.value(if (operation.op == .vector_extract) operation.lane.?.scalarType() else .v128);
-    try nodes.append(a, .{ .op = operation.op, .vector_lane = operation.lane, .out = out, .lhs = lhs, .rhs = rhs, .immediate = if (operation.op == .vector_shuffle) inst.immediate else inst.lane_index, .immediate_hi = if (operation.op == .vector_shuffle) inst.immediate_hi else 0 });
+    try nodes.append(a, .{ .op = operation.op, .vector_lane = operation.lane, .out = out, .lhs = lhs, .rhs = rhs, .immediate = if (operation.op == .vector_shuffle) inst.immediate else operation.immediate orelse inst.lane_index, .immediate_hi = if (operation.op == .vector_shuffle) inst.immediate_hi else 0 });
     if (operation.signed_extract) {
         const raw = out;
         out = try builder.value(.i32);

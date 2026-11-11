@@ -95,6 +95,31 @@ const Probe = struct {
 
 const Observation = struct { before: State, after: State, status: u32, result: [2]u64, captures: [ir.max_arguments]u64 };
 
+test "backend SIMD widths: integer saturation restores host status on native return and exit" {
+    if (!native.supported) return error.SkipZigTest;
+    var owner = try code_alloc.CodeAllocator.init(a, 256 * 1024);
+    defer owner.deinit();
+    var probe = try Probe.init(&owner);
+    defer probe.deinit();
+    for ([_]ir.Op{ .vector_narrow_s, .vector_narrow_u }) |op| for ([_]ir.VectorLane{ .i8x16, .i16x8 }) |lane| for ([_]bool{ false, true }) |side_exit| for ([_]u8{ 0, 4 }) |registers| {
+        const graph: ir.Graph = .{
+            .types = &.{ .v128, .v128, .v128 },
+            .argument_types = &.{ .v128, .v128 },
+            .result_types = &.{.v128},
+            .blocks = &.{.{ .params = &.{ 0, 1 }, .nodes = &.{.{ .op = op, .out = 2, .lhs = 0, .rhs = 1, .vector_lane = lane }}, .terminator = if (side_exit) .{ .exit = .{ .id = 9, .values = &.{2} } } else .{ .return_ = &.{2} } }},
+        };
+        var code = try native.compileWithOptions(a, &owner, graph, .{ .register_count = registers });
+        defer code.deinit();
+        for ([_]bool{ false, true }) |sticky| {
+            var requested = probe.unusual(1);
+            if (!is_x86 and sticky) requested.status |= 1 << 27;
+            const observed = try observe(&probe, &code, requested, &.{ 0x7fff7fff7fff7fff, 0x7fff7fff7fff7fff, 0x8000800080008000, 0x8000800080008000 }, 1);
+            try std.testing.expectEqual(@as(u32, if (side_exit) 2 else 0), observed.status);
+            try std.testing.expectEqualDeep(observed.before, observed.after);
+        }
+    };
+}
+
 fn observe(probe: *const Probe, code: *const native.Compiled, requested: State, args: []const u64, budget: u32) !Observation {
     return observeWithMemory(probe, code, requested, args, &.{}, budget);
 }
