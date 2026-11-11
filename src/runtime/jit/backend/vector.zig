@@ -5,6 +5,7 @@ const scratch = @import("scratch.zig");
 const arm = @import("../asm_aarch64.zig");
 const x86_simd = @import("../simd_x86_64.zig");
 const predicates = @import("vector_predicates.zig");
+const integers = @import("vector_integer.zig");
 const is_x86 = builtin.cpu.arch == .x86_64;
 const Machine = scratch.Machine;
 const Reg = scratch.VectorReg;
@@ -39,6 +40,7 @@ pub fn constant(m: *Machine, low: u64, high: u64) !void {
 
 pub fn emit(m: *Machine, node: ir.Node) !void {
     if (ir.isVectorComparison(node.op) or ir.isVectorReduction(node.op)) return predicates.emit(m, node);
+    if (ir.isVectorInteger(node.op)) return integers.emit(m, node);
     if (comptime is_x86) switch (node.op) {
         .vector_extend_s, .vector_extend_u => try x86_simd.extend(m, @intCast(node.vector_lane.?.bytes()), node.op == .vector_extend_s, node.immediate == 1),
         .vector_narrow_s, .vector_narrow_u => try x86_simd.narrow(m, @intCast(node.vector_lane.?.bytes()), node.op == .vector_narrow_s),

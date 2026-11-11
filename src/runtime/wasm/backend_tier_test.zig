@@ -43,8 +43,8 @@ test "backend tier: unsupported functions fall back once without disguising nati
         .types = &.{.{ .params = &.{}, .results = &.{.i32} }},
         .funcs = &.{0},
         .mems = &.{.{ .limits = .{ .min = 1 } }},
-        // v128.not is not lowered yet; the constant itself is supported.
-        .code = &.{.{ .bytes = &.{ 0, 0xfd, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xfd, 77, 0x1a, 0x41, 1, 0x0b } }},
+        // f32x4.ceil is not lowered yet; the constant itself is supported.
+        .code = &.{.{ .bytes = &.{ 0, 0xfd, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xfd, 103, 0x1a, 0x41, 1, 0x0b } }},
     };
     var instance: wasm.Instance = undefined;
     try wasm.instantiate(&instance, arena.allocator(), a, &module, .{});
@@ -280,7 +280,7 @@ test "backend tier: a fallback callee can grow memory before the native caller l
         .funcs = &.{ 0, 1 },
         // The callee grows, then drops a SIMD value to keep
         // this specifically a fallback-callee descriptor-refresh test.
-        .code = &.{ .{ .bytes = &.{ 0, 0x20, 0, 0x10, 1, 0x1a, 0x20, 1, 0x28, 0, 0, 0x0b } }, .{ .bytes = &.{ 0, 0x20, 0, 0x40, 0, 0xfd, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xfd, 77, 0x1a, 0x0b } } },
+        .code = &.{ .{ .bytes = &.{ 0, 0x20, 0, 0x10, 1, 0x1a, 0x20, 1, 0x28, 0, 0, 0x0b } }, .{ .bytes = &.{ 0, 0x20, 0, 0x40, 0, 0xfd, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xfd, 103, 0x1a, 0x0b } } },
         .mems = &.{.{ .limits = .{ .min = 1, .max = 2 } }},
     };
     var instance: wasm.Instance = undefined;

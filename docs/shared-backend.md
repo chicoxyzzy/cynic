@@ -1434,6 +1434,44 @@ Spasm-only compilation and entry/refusal counts remain unchanged after the
 SSE2 extraction. This measures native coverage, not a throughput improvement
 or completion of SIMD.
 
+### SIMD integer arithmetic and masks
+
+The shared frontend now accepts wrapping subtraction/multiplication, signed and
+unsigned saturating add/subtract, abs/neg, byte popcount, all integer shifts,
+integer min/max, rounded unsigned averages, and the remaining bitwise operations.
+Shifts take a scalar `i32` count modulo lane width; abs/neg preserve the signed
+minimum through wrapping. Saturation and averages are restricted to 8/16-bit
+lanes, min/max to 8/16/32-bit lanes, and multiplication to 16/32/64-bit lanes.
+The verifier rejects incompatible lane, count, result, and immediate metadata.
+
+These contracts follow the
+[Wasm SIMD integer definitions](https://github.com/WebAssembly/spec/blob/main/proposals/simd/SIMD.md)
+and [numeric rules](https://webassembly.github.io/spec/core/exec/numerics.html).
+The operation/lane boundary follows
+[B3 SIMD values](https://github.com/WebKit/WebKit/blob/main/Source/JavaScriptCore/b3/B3SIMDValue.h).
+Bit-select is `b ^ ((a ^ b) & mask)` in existing bitwise IR;
+[relaxed lane-select](https://webassembly.github.io/spec/core/exec/numerics.html#op-irelaxed-laneselect)
+uses its allowed per-bit profile. No ECMAScript or SES surface changes.
+
+`jit/simd_integer_x86_64.zig` shares SSE2 sequences with Spasm. Qword products use
+32-bit partial products, arithmetic qword shifts use sign masks, and byte shifts
+mask cross-lane bits without borrowing allocated GP homes. ARM uses NEON, with
+scalar lane products for `i64x2.mul`. Saturating NEON operations participate in
+native-entry FPSR preservation, including sticky QC and side exits.
+
+Direct tests cover every optimization/allocation mode, live GP/vector homes,
+composed selects, and invalid metadata. Independent scalar oracles compare all
+new Wasm operations against Sarcasm, forced Spasm, and forced shared-native
+entry. Extended products, dot products, Q15 multiplication, and remaining FP
+arithmetic/conversions are still pending; this is not complete SIMD coverage.
+
+All 232 Wasm manifests retain their exact per-manifest results on both native
+architectures in shared-only, mixed-tier, and Spasm-only modes: 61,051 passes,
+1,370 skips, no failures. The 57 newly supported opcodes add 345 compiled
+functions, reaching 5,913 (5,914 in mixed-tier runs), with refusals down from
+556 to 211. Spasm-only compilation, entry, and refusal counts are unchanged.
+These are coverage measurements, not throughput claims.
+
 ### Production completion checklist
 
 The active objective is a fully functional shared backend for Cynic's JS and
@@ -1499,6 +1537,8 @@ failures, but is not evidence that an unimplemented backend capability works.
    lane-wise additions, splats, lane access, shuffles, swizzles, integer width
    changes, pairwise widening sums, and widening loads now lower natively.
    Integer/FP comparisons and Boolean/bitmask reductions also lower natively.
+   Wrapping/saturating integer arithmetic, shifts, min/max, averages, abs/neg,
+   byte popcount, bitwise complements, and strict/relaxed bit selection are supported.
    Continue with the remaining SIMD operations,
    exception handling, native linking,
    and production integration. Preserve bounds checks,
