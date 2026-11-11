@@ -119,13 +119,14 @@ test "backend SIMD predicates: native comparisons ignore flushing and restore ho
     };
 }
 
-test "backend SIMD integers and widths: saturation restores host status on native return and exit" {
+test "backend SIMD products integers and widths: saturation restores host status on native return and exit" {
     if (!native.supported) return error.SkipZigTest;
     var owner = try code_alloc.CodeAllocator.init(a, 256 * 1024);
     defer owner.deinit();
     var probe = try Probe.init(&owner);
     defer probe.deinit();
-    for ([_]ir.Op{ .vector_narrow_s, .vector_narrow_u, .vector_add_sat_s, .vector_add_sat_u, .vector_sub_sat_s, .vector_sub_sat_u }) |op| for ([_]ir.VectorLane{ .i8x16, .i16x8 }) |lane| for ([_]bool{ false, true }) |side_exit| for ([_]u8{ 0, 4 }) |registers| {
+    for ([_]ir.Op{ .vector_narrow_s, .vector_narrow_u, .vector_add_sat_s, .vector_add_sat_u, .vector_sub_sat_s, .vector_sub_sat_u, .vector_dot_sat_s, .vector_q15mulr_sat_s }) |op| for ([_]ir.VectorLane{ .i8x16, .i16x8 }) |lane| for ([_]bool{ false, true }) |side_exit| for ([_]u8{ 0, 4 }) |registers| {
+        if ((op == .vector_dot_sat_s and lane != .i8x16) or (op == .vector_q15mulr_sat_s and lane != .i16x8)) continue;
         const graph: ir.Graph = .{
             .types = &.{ .v128, .v128, .v128 },
             .argument_types = &.{ .v128, .v128 },
@@ -137,8 +138,13 @@ test "backend SIMD integers and widths: saturation restores host status on nativ
         for ([_]bool{ false, true }) |sticky| {
             var requested = probe.unusual(1);
             if (!is_x86 and sticky) requested.status |= 1 << 27;
-            const lhs: u64 = if (op == .vector_add_sat_u) std.math.maxInt(u64) else 0x7fff7fff7fff7fff;
-            const rhs: u64 = if (op == .vector_add_sat_s or op == .vector_add_sat_u) lhs else 0x8000800080008000;
+            const lhs: u64 = switch (op) {
+                .vector_add_sat_u => std.math.maxInt(u64),
+                .vector_dot_sat_s => 0x8080808080808080,
+                .vector_q15mulr_sat_s => 0x8000800080008000,
+                else => 0x7fff7fff7fff7fff,
+            };
+            const rhs: u64 = if (op == .vector_add_sat_s or op == .vector_add_sat_u or op == .vector_dot_sat_s or op == .vector_q15mulr_sat_s) lhs else 0x8000800080008000;
             const observed = try observe(&probe, &code, requested, &.{ lhs, lhs, rhs, rhs }, 1);
             try std.testing.expectEqual(@as(u32, if (side_exit) 2 else 0), observed.status);
             try std.testing.expectEqualDeep(observed.before, observed.after);

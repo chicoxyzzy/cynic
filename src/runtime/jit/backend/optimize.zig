@@ -157,7 +157,7 @@ fn expression(node: ir.Node, types: []const ir.Type) ?Expression {
     if (!isPure(node.op)) return null;
     var key: Expression = .{ .op = node.op, .ty = types[node.out.?], .immediate_hi = node.immediate_hi, .vector_lane = node.vector_lane };
     switch (node.op) {
-        .vector_extract, .vector_replace, .vector_shuffle, .vector_extend_s, .vector_extend_u => key.immediate = node.immediate,
+        .vector_extract, .vector_replace, .vector_shuffle, .vector_extend_s, .vector_extend_u, .vector_extmul_s, .vector_extmul_u => key.immediate = node.immediate,
         else => {},
     }
     switch (ir.inputCount(node.op)) {

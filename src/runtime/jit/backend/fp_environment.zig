@@ -20,7 +20,7 @@ pub fn required(graph: ir.Graph) bool {
         // NEON saturating integer instructions update FPSR.QC without any FP
         // values. The caller's sticky saturation flag must not leak or change.
         if (!is_x86) switch (node.op) {
-            .vector_narrow_s, .vector_narrow_u, .vector_add_sat_s, .vector_add_sat_u, .vector_sub_sat_s, .vector_sub_sat_u => return true,
+            .vector_narrow_s, .vector_narrow_u, .vector_add_sat_s, .vector_add_sat_u, .vector_sub_sat_s, .vector_sub_sat_u, .vector_dot_sat_s, .vector_q15mulr_sat_s => return true,
             else => {},
         };
     };

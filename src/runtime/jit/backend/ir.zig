@@ -69,6 +69,14 @@ pub const Op = enum {
     vector_add,
     vector_sub,
     vector_mul,
+    /// Source lane width; immediate selects low (0) or high (1) half.
+    vector_extmul_s,
+    vector_extmul_u,
+    /// Adjacent signed i16 products, summed with i32 wrapping.
+    vector_dot_s,
+    /// Adjacent signed i8 products, summed with i16 saturation.
+    vector_dot_sat_s,
+    vector_q15mulr_sat_s,
     vector_add_sat_s,
     vector_add_sat_u,
     vector_sub_sat_s,
@@ -374,9 +382,13 @@ pub const Graph = struct {
                         if (self.types[node.rhs] != (if (isVectorShift(node.op)) Type.i32 else if (node.op == .vector_replace) scalar else .v128)) return error.InvalidGraph;
                     }
                     if (isVectorInteger(node.op)) {
-                        if (node.immediate != 0 or isFloat(scalar)) return error.InvalidGraph;
+                        const extended = node.op == .vector_extmul_s or node.op == .vector_extmul_u;
+                        if (node.immediate > @as(u64, if (extended) 1 else 0) or isFloat(scalar)) return error.InvalidGraph;
                         const width = node.vector_lane.?.bytes();
                         switch (node.op) {
+                            .vector_extmul_s, .vector_extmul_u => if (width > 4) return error.InvalidGraph,
+                            .vector_dot_s, .vector_q15mulr_sat_s => if (width != 2) return error.InvalidGraph,
+                            .vector_dot_sat_s => if (width != 1) return error.InvalidGraph,
                             .vector_mul => if (width == 1) return error.InvalidGraph,
                             .vector_add_sat_s, .vector_add_sat_u, .vector_sub_sat_s, .vector_sub_sat_u, .vector_avgr_u => if (width > 2) return error.InvalidGraph,
                             .vector_min_s, .vector_min_u, .vector_max_s, .vector_max_u => if (width > 4) return error.InvalidGraph,
@@ -522,6 +534,7 @@ pub fn isComparison(op: Op) bool {
 
 pub fn inputCount(op: Op) u2 {
     return switch (op) {
+        .vector_extmul_s, .vector_extmul_u, .vector_dot_s, .vector_dot_sat_s, .vector_q15mulr_sat_s => 2,
         .vector_abs, .vector_neg, .vector_popcnt => 1,
         .vector_sub, .vector_mul, .vector_add_sat_s, .vector_add_sat_u, .vector_sub_sat_s, .vector_sub_sat_u, .vector_min_s, .vector_min_u, .vector_max_s, .vector_max_u, .vector_avgr_u, .vector_shl, .vector_shr_s, .vector_shr_u => 2,
         .vector_eq, .vector_ne, .vector_lt_s, .vector_lt_u, .vector_le_s, .vector_le_u, .vector_flt, .vector_fle => 2,
@@ -552,6 +565,7 @@ pub const Effects = struct {
 pub fn effects(op: Op) Effects {
     // Exhaustive: new operations must declare their observable effects.
     return switch (op) {
+        .vector_extmul_s, .vector_extmul_u, .vector_dot_s, .vector_dot_sat_s, .vector_q15mulr_sat_s => .{},
         .vector_sub, .vector_mul, .vector_add_sat_s, .vector_add_sat_u, .vector_sub_sat_s, .vector_sub_sat_u, .vector_abs, .vector_neg, .vector_popcnt, .vector_min_s, .vector_min_u, .vector_max_s, .vector_max_u, .vector_avgr_u, .vector_shl, .vector_shr_s, .vector_shr_u => .{},
         .vector_eq, .vector_ne, .vector_lt_s, .vector_lt_u, .vector_le_s, .vector_le_u, .vector_flt, .vector_fle, .vector_any_true, .vector_all_true, .vector_bitmask => .{},
         .vector_add, .vector_splat, .vector_extract, .vector_replace, .vector_shuffle, .vector_swizzle, .vector_extend_s, .vector_extend_u, .vector_narrow_s, .vector_narrow_u, .vector_pairwise_add_s, .vector_pairwise_add_u => .{},
@@ -577,6 +591,7 @@ pub fn hasVectorLane(op: Op) bool {
 
 pub fn isVectorInteger(op: Op) bool {
     return switch (op) {
+        .vector_extmul_s, .vector_extmul_u, .vector_dot_s, .vector_dot_sat_s, .vector_q15mulr_sat_s => true,
         .vector_sub, .vector_mul, .vector_add_sat_s, .vector_add_sat_u, .vector_sub_sat_s, .vector_sub_sat_u, .vector_abs, .vector_neg, .vector_popcnt, .vector_min_s, .vector_min_u, .vector_max_s, .vector_max_u, .vector_avgr_u, .vector_shl, .vector_shr_s, .vector_shr_u => true,
         else => false,
     };
@@ -619,4 +634,5 @@ test {
     _ = @import("vector_width_test.zig");
     _ = @import("vector_predicate_test.zig");
     _ = @import("vector_integer_test.zig");
+    _ = @import("vector_product_test.zig");
 }
