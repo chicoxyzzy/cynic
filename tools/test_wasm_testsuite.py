@@ -21,9 +21,10 @@ CONSTANT = (EMPTY + b'\x01\x05\x01\x60\x00\x01\x7f\x03\x02\x01\x00'
 COUNTER = (EMPTY + b'\x01\x05\x01\x60\x00\x01\x7f\x03\x02\x01\x00'
            + b'\x06\x06\x01\x7f\x01\x41\x00\x0b\x07\x05\x01\x01f\x00\x00'
            + b'\x0a\x0d\x01\x0b\x00\x23\x00\x41\x01\x6a\x24\x00\x23\x00\x0b')
-EXCEPTION_REGION = (EMPTY + b'\x01\x04\x01\x60\x00\x00\x03\x02\x01\x00'
-                    + b'\x07\x05\x01\x01f\x00\x00\x08\x01\x00'
-                    + b'\x0a\x08\x01\x06\x00\x1f\x40\x00\x0b\x0b')
+OVERSIZED_BRANCH_TABLE = (EMPTY + b'\x01\x04\x01\x60\x00\x00\x03\x02\x01\x00'
+                          + b'\x07\x05\x01\x01f\x00\x00\x08\x01\x00'
+                          + b'\x0a\x8b\x02\x01\x88\x02\x00\x41\x00\x0e\x80\x02'
+                          + bytes(257) + b'\x0b')
 GENERATOR = Path(__file__).with_name('wasm-testsuite-gen.sh')
 FEATURES = ('tail-call', 'relaxed-simd', 'memory64', 'extended-const',
             'multi-memory', 'function-references')
@@ -155,11 +156,11 @@ class WasmHarnessContract(unittest.TestCase):
     def test_shared_backend_refusal_details_remain_visible_in_quiet_mode(self):
         action = {'type': 'action', 'action': {'type': 'invoke', 'field': 'f', 'args': []}}
         result = self.run_harness([module_command(), action, module_command(), action],
-                                  {'case.wasm': EXCEPTION_REGION}, options=('--shared-backend',))
+                                  {'case.wasm': OVERSIZED_BRANCH_TABLE}, options=('--shared-backend',))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assert_summary(result, 4, 4)
         self.assertIn('0 native entries, 0 compiled functions, 2 refusals', result.stdout)
-        self.assertIn('lowering / UnsupportedOpcode / opcode 0x1f: 2', result.stdout)
+        self.assertIn('lowering / PrototypeLimit / opcode 0x0e: 2', result.stdout)
 
     def test_standalone_start_trap_fails_the_gate_even_after_a_successful_module(self):
         result = self.run_harness([module_command('good.wasm'), module_command()],

@@ -160,11 +160,13 @@ test "backend prototype: infinite loop and zero budget return normally" {
     try std.testing.expectError(error.BudgetExhausted, prototype.evaluate(std.testing.allocator, bytes, 0, &.{}, 100));
 }
 
-test "backend prototype: unsupported operations refuse rather than falling back silently" {
+test "backend prototype: empty exception regions lower and physical arguments are checked" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const bytes = try moduleBytes(arena.allocator(), &.{ 0x7f, 0x7f }, 0x7f, &.{}, &.{ 0x1f, 0x40, 0, 0x0b, 0x41, 1, 0x0b });
-    try std.testing.expectError(error.UnsupportedOpcode, prototype.evaluate(std.testing.allocator, bytes, 0, &.{ 1, 0 }, 100));
+    var graph = try prototype.lowerModule(std.testing.allocator, bytes, 0);
+    defer graph.deinit();
+    try graph.graph.verify();
     const vectors = try moduleBytes(arena.allocator(), &.{0x7b}, 0x7b, &.{}, &.{ 0x20, 0, 0x0b });
     try std.testing.expectError(error.ArgumentCount, prototype.evaluate(std.testing.allocator, vectors, 0, &.{0}, 100));
 }
@@ -191,11 +193,13 @@ test "backend prototype: branch discard and dead branch metadata" {
         try std.testing.expectEqual(@as(u64, 7), try prototype.evaluate(std.testing.allocator, bytes, 0, &.{condition}, 10));
 }
 
-test "backend prototype: unsupported dead operations and resource limits refuse" {
+test "backend prototype: dead exception regions lower while resource limits refuse" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const bytes = try moduleBytes(arena.allocator(), &.{}, 0x7f, &.{}, &.{ 0x41, 1, 0x0f, 0x1f, 0x40, 0, 0x0b, 0x0b });
-    try std.testing.expectError(error.UnsupportedOpcode, prototype.lowerModule(std.testing.allocator, bytes, 0));
+    var graph = try prototype.lowerModule(std.testing.allocator, bytes, 0);
+    defer graph.deinit();
+    try graph.graph.verify();
     const oversized = try arena.allocator().alloc(u8, 64 * 1024 + 1);
     try std.testing.expectError(error.PrototypeLimit, prototype.lowerModule(std.testing.allocator, oversized, 0));
 }

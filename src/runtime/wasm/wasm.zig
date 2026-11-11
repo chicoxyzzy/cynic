@@ -111,6 +111,7 @@ test {
     _ = @import("backend_simd_float_test.zig");
     _ = @import("backend_tail_test.zig");
     _ = @import("backend_call_test.zig");
+    _ = @import("backend_exception_test.zig");
     _ = @import("backend_control_test.zig");
     _ = @import("backend_results_test.zig");
     _ = @import("backend_tier_test.zig");

@@ -3,20 +3,8 @@ const wasm = @import("wasm.zig");
 const a = std.testing.allocator;
 const prototype = wasm.backend_prototype;
 
-fn appendRefusalPrefix(allocator: std.mem.Allocator, body: *std.ArrayList(u8)) !void {
-    // Exceed the shared SSA value budget while Spasm folds each discarded
-    // constant. Tier-transition tests must not depend on a missing opcode.
-    for (0..prototype.ir.max_values) |_| try body.appendSlice(allocator, &.{ 0x41, 0, 0x1a });
-}
-
-fn spasmOnlyBody(allocator: std.mem.Allocator, suffix: []const u8) ![]const u8 {
-    var body: std.ArrayList(u8) = .empty;
-    errdefer body.deinit(allocator);
-    try body.append(allocator, 0);
-    try appendRefusalPrefix(allocator, &body);
-    try body.appendSlice(allocator, suffix);
-    return body.toOwnedSlice(allocator);
-}
+const appendRefusalPrefix = @import("backend_test_helpers.zig").appendRefusalPrefix;
+const spasmOnlyBody = @import("backend_test_helpers.zig").refusedBody;
 
 fn expectResult(instance: *wasm.Instance, index: u32, args: []const u128, expected: []const u128) !void {
     const result = try wasm.invoke(instance, a, index, args);
@@ -398,7 +386,7 @@ test "backend tail calls: foreign fallback exceptions preserve payloads without 
         .globals = &.{.{ .type = .{ .val = .i32, .mut = .mutable }, .init_expr = &.{ 0x41, 0, 0x0b } }},
         .tags = &.{.{ .attribute = 0, .type_index = 1 }},
         .funcs = &.{0},
-        .code = &.{.{ .bytes = &.{ 0, 0x23, 0, 0x41, 1, 0x6a, 0x24, 0, 0x41, 37, 0x08, 0, 0x0b } }},
+        .code = &.{.{ .bytes = try spasmOnlyBody(arena.allocator(), &.{ 0x23, 0, 0x41, 1, 0x6a, 0x24, 0, 0x41, 37, 0x08, 0, 0x0b }) }},
     };
     var provider: wasm.Instance = undefined;
     try wasm.instantiate(&provider, arena.allocator(), a, &provider_module, .{});

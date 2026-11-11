@@ -1084,8 +1084,8 @@ status-return runtime boundary instead of adding an unwind ABI. This is the
 shared substrate for [Core exception handling](https://webassembly.github.io/spec/core/exec/instructions.html#exception-handling)
 and ECMA-262
 [14.15.3 TryStatement evaluation](https://tc39.es/ecma262/multipage/ecmascript-language-statements-and-declarations.html#sec-try-statement-runtime-semantics-evaluation),
-not their complete frontend implementation. Wasm handler/tag/payload lowering,
-Ohaimark exception/frame integration, and production qualification remain open.
+not their complete frontend implementation. Wasm lowering is described below;
+Ohaimark exception/frame integration and production qualification remain open.
 No test262 scoring or SES policy changes follow from this IR operation.
 
 The initial runtime-call checks covered caller-saved values, duplicate captures,
@@ -1098,10 +1098,57 @@ focused x86_64 suite under Rosetta (162 passed, one hardware-specific skip).
 The production test262 pass set remained byte-identical; this was not
 production qualification.
 
+### Wasm exception lowering
+
+The instance-aware frontend now lowers `try_table`, `throw`, and `throw_ref`
+through explicit invoke edges. Protected direct, indirect, and typed-reference
+calls split at their normal continuation; exceptional continuations carry the
+current locals and pre-call stack values into a lexical catch chain. Catch
+branches use the validator's branch metadata after restoring the try-entry
+stack prefix, excluding block parameters. All four catch forms are supported.
+Canonical instance tag identities, not equal signatures or tag indices, select
+the first matching clause. A nonmatch continues outward. Proper tail calls
+still leave the current frame and its handlers before the callee executes.
+
+The runtime adapter reuses `ExnRecord`, imported tag identities, and the host
+exception bridge. Wasm traps, null `throw_ref`, allocation failure, and resource
+termination do not enter catch blocks. Caught host calls refresh memory views
+before resuming generated code. Scalar, vector, and reference payloads retain
+their bits; `_ref` catches and rethrows retain record identity. A direct local
+throw uses a temporary record that is freed after a plain catch; an exnref or
+an escaping exception materializes it into the instance pool. Both paths clean
+up on allocation failure. Materialized records retain the existing
+instance-lifetime ownership model; general exception-record reclamation is
+still lifecycle work, not claimed complete here.
+
+The Realm root walker now traces pooled records' typed externref payloads and
+original JS throw values. This covers records retained in Wasm globals/tables
+after an invocation ends, not just transient native snapshots. Tests check
+normal/exceptional paths, nested handlers, block parameters and live locals,
+cross-instance tags, mixed payloads, host-call growth, proper tail calls,
+allocation failures, repeated local catches, full/minor GC, and actual
+collecting JS re-entry with an exnref retained between calls. Native entry and
+zero refusal assertions prevent interpreter fallback from satisfying them.
+
+Prior art: V8's
+[Turboshaft catch chain](https://raw.githubusercontent.com/v8/v8/main/src/wasm/turboshaft-graph-interface.cc)
+also makes catch dispatch and tag comparison explicit in the graph. Cynic keeps
+that structure but uses status-return helpers and its existing exception
+records instead of adding a platform unwind mechanism. The semantic anchor is
+[Core control instructions](https://webassembly.github.io/spec/core/exec/instructions.html#control-instructions);
+the JS bridge preserves the existing ECMA-262 throw completion and SES policy.
+
+The AArch64 forced-native corpus comparison passes the same 61,051 assertions
+with 1,370 skips across 232 manifests. Compiled functions increase from 6,113
+to 6,123; all nine exception-related refusals disappear, leaving two
+pre-instruction resource limits and one `br_table` resource limit. These remain
+executed-corpus counts, not proof of complete accepted-input coverage or a
+production rollout decision.
+
 ## Safety and non-goals
 
 - No JS heap-object dereferences, shared-memory accesses,
-  atomics, exception handlers, tag imports,
+  atomics,
   inlining, OSR, or automatic shared-backend tier-up in this slice.
 - Developer module decoding caps input at 64 KiB and decoder/validator workspace
   at 8 MiB. Runtime lowering starts from an already validated instance.

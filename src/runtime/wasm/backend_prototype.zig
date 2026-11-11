@@ -13,6 +13,7 @@ const Instance = interpreter.Instance;
 const metadata = @import("spasm_metadata.zig");
 const simd = @import("spasm_simd.zig");
 const diagnostics = @import("backend_diagnostics.zig");
+const exceptions = @import("backend_exceptions.zig");
 pub const abi = @import("backend_abi.zig");
 pub const ir = @import("../jit/backend/ir.zig");
 pub const native = @import("../jit/backend/native.zig");
@@ -104,7 +105,8 @@ pub fn runResultsInInstance(compiled: *const Compiled, instance: *Instance, args
     try refreshMemories(instance, views, compiled.global_indices);
     var remaining = budget;
     var context: CallContext = .{ .instance = instance, .allocator = code.allocator, .remaining = &remaining, .global_indices = compiled.global_indices };
-    var completion = try code.runInto(args, views, budget, if (code.call_sites.len == 0) null else .{ .context = &context, .call = CallContext.invoke }, results);
+    defer context.exception.deinit(instance.gpa);
+    var completion = try code.runInto(args, views, budget, if (code.call_sites.len == 0) null else .{ .context = &context, .call = CallContext.invoke, .catch_exception = CallContext.catchException }, results);
     if (completion != .exited) return completion;
     stageTailCall(compiled, instance, completion.exited.id, completion.exited.values) catch |err| {
         completion.deinit();
@@ -134,6 +136,7 @@ pub fn runControlledInInstance(compiled: *const Compiled, allocator: std.mem.All
     defer if (code.memory_count > local_views.len) allocator.free(views);
     try refreshMemories(instance, views, compiled.global_indices);
     var context: CallContext = .{ .instance = instance, .allocator = allocator, .execution_control = execution_control, .global_indices = compiled.global_indices };
+    defer context.exception.deinit(instance.gpa);
     var host_control = execution_control;
     const native_control: ?native.ExecutionControl = if (host_control) |*host| blk: {
         const armed = host.isArmed();
@@ -141,7 +144,7 @@ pub fn runControlledInInstance(compiled: *const Compiled, allocator: std.mem.All
         break :blk .{ .context = host, .poll_fn = pollExecution, .wake_flag = if (armed) null else host.wake_flag };
     } else null;
     return code.runControlledInto(allocator, args, views, .{
-        .runtime = if (code.call_sites.len == 0) null else .{ .context = &context, .call = CallContext.invoke },
+        .runtime = if (code.call_sites.len == 0) null else .{ .context = &context, .call = CallContext.invoke, .catch_exception = CallContext.catchException },
         .control = native_control,
         .entry_counter = entries,
     }, results);
@@ -173,7 +176,7 @@ fn refreshMemories(instance: *const Instance, views: []native.MemoryView, global
 // teaching the shared call ABI about Wasm operations or embedding pointers.
 const RuntimeTarget = packed struct(u64) {
     index: u32,
-    kind: enum(u32) { function, memory_grow, memory_copy, memory_fill, memory_init, data_drop, table_get, table_set, table_grow, table_size, table_fill, pin_references, ref_func, ref_as_non_null, call_indirect, call_ref, table_copy, table_init, elem_drop, _ } = .function,
+    kind: enum(u32) { function, memory_grow, memory_copy, memory_fill, memory_init, data_drop, table_get, table_set, table_grow, table_size, table_fill, pin_references, ref_func, ref_as_non_null, call_indirect, call_ref, table_copy, table_init, elem_drop, throw_, throw_caught, throw_ref, exception_matches, exception_payload, exception_propagate, _ } = .function,
 };
 
 fn checkCallSignature(request: native.CallRequest, params: []const ir.Type, results: []const ir.Type) !void {
@@ -188,18 +191,43 @@ const CallContext = struct {
     remaining: ?*u32 = null,
     execution_control: ?interpreter.ExecutionControl = null,
     global_indices: []const u32,
+    exception: exceptions.State = .{},
+
+    fn catchException(raw: ?*anyopaque, request: native.CallRequest, err: anyerror) !bool {
+        const self: *CallContext = @ptrCast(@alignCast(raw.?));
+        try self.pinCaptures(request.captures);
+        if (!self.exception.classify(self.instance, err)) return false;
+        try refreshMemories(self.instance, request.memories, self.global_indices);
+        return true;
+    }
+
+    fn pinCaptures(self: *CallContext, captures: []const u64) !void {
+        if (captures.len % 2 != 0) return error.CallSignatureMismatch;
+        if (self.instance.externref_rooter) |rooter| {
+            var i: usize = 0;
+            while (i < captures.len) : (i += 2)
+                try rooter.pin(@as(u128, captures[i]) | (@as(u128, captures[i + 1]) << 64));
+        }
+    }
 
     fn invoke(raw: ?*anyopaque, request: native.CallRequest) !void {
         const self: *CallContext = @ptrCast(@alignCast(raw.?));
-        if (request.captures.len % 2 != 0) return error.CallSignatureMismatch;
-        if (self.instance.externref_rooter) |rooter| {
-            var i: usize = 0;
-            while (i < request.captures.len) : (i += 2)
-                try rooter.pin(@as(u128, request.captures[i]) | (@as(u128, request.captures[i + 1]) << 64));
-        }
+        try self.pinCaptures(request.captures);
         const target_id: RuntimeTarget = @bitCast(request.target);
         switch (target_id.kind) {
             .function, .call_indirect, .call_ref => {},
+            .throw_, .throw_caught => return exceptions.raise(&self.exception, self.instance, target_id.index, request, target_id.kind == .throw_caught),
+            .throw_ref => return exceptions.raiseRef(self.instance, request),
+            .exception_matches => {
+                try checkCallSignature(request, &.{}, &.{.i32});
+                request.results[0] = @intFromBool(try self.exception.matches(self.instance, target_id.index));
+                return;
+            },
+            .exception_payload => return self.exception.payload(self.instance, target_id.index, request),
+            .exception_propagate => {
+                try checkCallSignature(request, &.{}, &.{});
+                return self.exception.propagate(self.instance);
+            },
             .ref_func => {
                 try checkCallSignature(request, &.{}, &.{ .i64, .i64 });
                 if (self.instance.funcRefAt(target_id.index) == null) return error.FunctionIndex;
@@ -521,11 +549,14 @@ const Instruction = struct {
     table_default: bool = false,
     memory_index: u32 = 0,
     secondary_index: u32 = 0,
+    handler: u32 = missing,
 };
 const Range = struct { start: usize, end: usize };
-const Control = struct { entered_reachable: bool, reachable: bool };
+const Control = struct { entered_reachable: bool, reachable: bool, handler: u32 = missing };
+const Catch = struct { kind: u8, tag: u32, branch: Instruction };
+const Handler = struct { parent: u32, parameter_count: u32, height: ?usize = null, catches: []Catch };
 
-fn readBlockType(reader: *Reader, module: *const Module) !void {
+fn readBlockType(reader: *Reader, module: *const Module) !u32 {
     const first = try reader.peek();
     if (first == 0x40) {
         _ = try reader.byte();
@@ -538,7 +569,9 @@ fn readBlockType(reader: *Reader, module: *const Module) !void {
         if (signature.params.len > ir.max_arguments or signature.results.len > ir.max_arguments) return error.PrototypeLimit;
         for (signature.params) |ty| _ = try valueType(ty);
         for (signature.results) |ty| _ = try valueType(ty);
+        return @intCast(signature.params.len);
     }
+    return 0;
 }
 
 fn readBranch(inst: *Instruction, function: *const CompiledFunc, side_index: *usize) !void {
@@ -562,7 +595,7 @@ fn readMemoryArgument(inst: *Instruction, reader: *Reader, memories: []const was
 
 fn endsBlock(op: Op) bool {
     return switch (op) {
-        .return_call, .return_call_indirect, .return_call_ref => true,
+        .return_call, .return_call_indirect, .return_call_ref, .throw, .throw_ref => true,
         .br, .br_if, .br_table, .br_on_null, .br_on_non_null, .@"if", .@"else", .select, .select_t, .@"return", .@"unreachable" => true,
         else => false,
     };
@@ -589,6 +622,7 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
     const a = arena.allocator();
     var global_indices: std.ArrayList(u32) = .empty;
     var tail_calls: std.ArrayList(RuntimeTarget) = .empty;
+    var handlers: std.ArrayList(Handler) = .empty;
     const result_types = try abi.loweredTypes(a, signature.results);
     const argument_types = try abi.loweredTypes(a, signature.params);
     const local_types = function.local_types;
@@ -607,6 +641,7 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
         const offset = reader.pos;
         offsets[offset] = @intCast(instructions.items.len);
         var inst: Instruction = .{ .op = @fromBackingInt(@intCast(try reader.byte())), .offset = @intCast(offset) };
+        inst.handler = controls.items[controls.items.len - 1].handler;
         errdefer recordRefusalSite(diagnostic, inst);
         switch (inst.op) {
             .nop, .drop, .select, .ref_is_null, .ref_as_non_null => {},
@@ -617,10 +652,37 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
                 _ = try valueType(try wasm_types.readValType(&reader));
             },
             .block, .loop, .@"if" => {
-                try readBlockType(&reader, module);
+                _ = try readBlockType(&reader, module);
                 const parent = controls.items[controls.items.len - 1].reachable;
                 if (inst.op == .@"if" and parent) try readBranch(&inst, function, &side_index);
-                try controls.append(a, .{ .entered_reachable = parent, .reachable = parent });
+                try controls.append(a, .{ .entered_reachable = parent, .reachable = parent, .handler = inst.handler });
+            },
+            .try_table => {
+                const parameter_count = try readBlockType(&reader, module);
+                const count = try reader.uleb(u32);
+                if (count > ir.max_blocks or handlers.items.len == ir.max_blocks) return error.PrototypeLimit;
+                const catches = try a.alloc(Catch, count);
+                const parent = controls.items[controls.items.len - 1].reachable;
+                for (catches) |*clause| {
+                    const kind = try reader.byte();
+                    if (kind > 3) return error.InvalidControlFlow;
+                    const tag = if (kind < 2) try reader.uleb(u32) else 0;
+                    if (kind < 2) _ = try exceptions.tagSignature(module, tag);
+                    _ = try reader.uleb(u32);
+                    var branch = inst;
+                    if (parent) try readBranch(&branch, function, &side_index);
+                    clause.* = .{ .kind = kind, .tag = tag, .branch = branch };
+                }
+                inst.immediate = handlers.items.len;
+                try handlers.append(a, .{ .parent = inst.handler, .parameter_count = parameter_count, .catches = catches });
+                try controls.append(a, .{ .entered_reachable = parent, .reachable = parent, .handler = @intCast(inst.immediate) });
+            },
+            .throw, .throw_ref => {
+                if (inst.op == .throw) {
+                    inst.immediate = try reader.uleb(u32);
+                    _ = try exceptions.tagSignature(module, @intCast(inst.immediate));
+                }
+                controls.items[controls.items.len - 1].reachable = false;
             },
             .@"else" => {
                 const control = &controls.items[controls.items.len - 1];
@@ -767,9 +829,16 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
             if (inst.target == missing) return error.InvalidControlFlow;
             leaders[inst.target] = true;
         }
-        if (endsBlock(inst.op) and i + 1 < leaders.len)
+        const protected_call = inst.handler != missing and (inst.op == .call or inst.op == .call_indirect or inst.op == .call_ref);
+        if ((endsBlock(inst.op) or protected_call) and i + 1 < leaders.len)
             leaders[i + 1] = true;
     }
+    for (handlers.items) |handler| for (handler.catches) |*clause| {
+        if (clause.branch.target == missing) continue;
+        clause.branch.target = offsets[clause.branch.target];
+        if (clause.branch.target == missing) return error.InvalidControlFlow;
+        leaders[clause.branch.target] = true;
+    };
     var ranges: std.ArrayList(Range) = .empty;
     const instruction_blocks = try a.alloc(u32, instructions.items.len);
     for (leaders, 0..) |leader, i| {
@@ -783,6 +852,9 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
     for (instructions.items) |*inst| if (inst.target != missing) {
         inst.target = instruction_blocks[inst.target];
     };
+    for (handlers.items) |handler| for (handler.catches) |*clause| {
+        if (clause.branch.target != missing) clause.branch.target = instruction_blocks[clause.branch.target];
+    };
     var builder: Builder = .{ .a = a };
     builder.mapping = try a.alloc(u32, ranges.items.len);
     @memset(builder.mapping, missing);
@@ -795,6 +867,7 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
     var index: usize = 0;
     while (index < builder.queue.items.len) : (index += 1) {
         const byte_block = builder.queue.items[index];
+        if (byte_block == missing) continue; // Synthetic exception dispatch block.
         const range = ranges.items[byte_block];
         var nodes: std.ArrayList(ir.Node) = .empty;
         var locals: [ir.max_arguments]ir.Value = undefined;
@@ -887,6 +960,25 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
             }
             switch (inst.op) {
                 .nop, .block, .loop, .end => {},
+                .try_table => {
+                    const handler = &handlers.items[@intCast(inst.immediate)];
+                    if (stack.items.len < handler.parameter_count) return error.InvalidControlFlow;
+                    handler.height = stack.items.len - handler.parameter_count;
+                },
+                .throw, .throw_ref => {
+                    const count = if (inst.op == .throw) (try exceptions.tagSignature(module, @intCast(inst.immediate))).params.len else 1;
+                    if (stack.items.len < count) return error.InvalidControlFlow;
+                    const roots = try builder.roots(locals[0..local_types.len], stack.items);
+                    const start = stack.items.len - count;
+                    const arguments = try builder.flatten(stack.items[start..]);
+                    stack.shrinkRetainingCapacity(start);
+                    try builder.runtimeCall(&nodes, inst, .{ .kind = if (inst.op == .throw_ref) .throw_ref else if (inst.handler == missing) .throw_ else .throw_caught, .index = @intCast(inst.immediate) }, arguments, &.{}, roots);
+                    if (inst.handler != missing) {
+                        const runtime_call = nodes.pop().?.call.?;
+                        const normal = try builder.synthetic(&.{}, &.{});
+                        terminator = .{ .invoke = .{ .site = inst.offset, .call = runtime_call, .normal = normal, .exceptional = try builder.exceptionEdge(inst, handlers.items, module, locals[0..local_types.len], stack.items) } };
+                    } else terminator = .{ .trap = .{ .reason = .unreachable_code, .site = inst.offset } };
+                },
                 .local_get, .local_set, .local_tee => {
                     if (inst.immediate >= local_types.len) return error.InvalidControlFlow;
                     const local: usize = @intCast(inst.immediate);
@@ -985,7 +1077,12 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
                     const results = try a.alloc(ir.Value, callee.results.len);
                     for (callee.results, results) |ty, *out| out.* = try builder.wasmValue(ty);
                     try builder.runtimeCall(&nodes, inst, runtime_target, arguments, try builder.flatten(results), roots);
+                    const exceptional = if (inst.handler != missing) try builder.exceptionEdge(inst, handlers.items, module, locals[0..local_types.len], stack.items) else null;
                     try stack.appendSlice(a, results);
+                    if (exceptional) |edge| {
+                        const runtime_call = nodes.pop().?.call.?;
+                        terminator = .{ .invoke = .{ .site = inst.offset, .call = runtime_call, .normal = try builder.edge(byte_block + 1, locals[0..local_types.len], stack.items), .exceptional = edge } };
+                    }
                 },
                 .ref_null => try stack.append(a, try builder.defaultValue(&nodes, @fromBackingInt(@intCast(@as(u32, @intCast(inst.immediate)))))),
                 .ref_func => {
@@ -1590,20 +1687,83 @@ const Builder = struct {
         @memcpy(values[locals.len..], stack);
         const args = try self.flatten(values);
         if (self.mapping[target] == missing) {
-            const params = try self.a.alloc(ir.Value, values.len);
-            for (params, values) |*param, arg| {
-                param.* = try self.value(self.types.items[arg]);
-                if (self.references.items[arg]) |reference| {
-                    const high = try self.value(.i64);
-                    self.references.items[param.*] = .{ .high = high, .external = reference.external };
-                }
-            }
-            self.mapping[target] = @intCast(self.blocks.items.len);
-            try self.blocks.append(self.a, .{ .params = try self.flatten(params) });
-            try self.block_values.append(self.a, params);
-            try self.queue.append(self.a, target);
+            self.mapping[target] = try self.newBlock(values, target);
         }
         return .{ .target = self.mapping[target], .args = args };
+    }
+
+    fn newBlock(self: *Builder, values: []const ir.Value, byte_block: u32) !u32 {
+        if (self.blocks.items.len == ir.max_blocks) return error.PrototypeLimit;
+        const params = try self.a.alloc(ir.Value, values.len);
+        for (params, values) |*param, arg| {
+            param.* = try self.value(self.types.items[arg]);
+            if (self.references.items[arg]) |reference| {
+                const high = try self.value(.i64);
+                self.references.items[param.*] = .{ .high = high, .external = reference.external };
+            }
+        }
+        const id: u32 = @intCast(self.blocks.items.len);
+        try self.blocks.append(self.a, .{ .params = try self.flatten(params) });
+        try self.block_values.append(self.a, params);
+        try self.queue.append(self.a, byte_block);
+        return id;
+    }
+
+    fn synthetic(self: *Builder, locals: []const ir.Value, stack: []const ir.Value) !ir.Edge {
+        const values = try std.mem.concat(self.a, ir.Value, &.{ locals, stack });
+        const args = try self.flatten(values);
+        const target = try self.newBlock(values, missing);
+        self.blocks.items[target].terminator = .{ .trap = .{ .reason = .unreachable_code, .site = 0 } };
+        return .{ .target = target, .args = args };
+    }
+
+    fn exceptionEdge(self: *Builder, inst: Instruction, handlers: []const Handler, module: *const Module, locals: []const ir.Value, stack: []const ir.Value) !ir.Edge {
+        const entry = try self.synthetic(locals, stack);
+        var current = entry.target;
+        var handler_index = inst.handler;
+        // The lexical chain encodes scope; no runtime handler stack can retain
+        // a stale handler after a branch or a proper tail call.
+        while (handler_index != missing) {
+            const handler = handlers[handler_index];
+            const height = handler.height orelse return error.InvalidControlFlow;
+            if (height > stack.len) return error.InvalidControlFlow;
+            for (handler.catches) |clause| {
+                const values = self.block_values.items[current];
+                const live_locals = values[0..locals.len];
+                const live_stack = values[locals.len..];
+                var nodes: std.ArrayList(ir.Node) = .empty;
+                const matched = try self.synthetic(live_locals, live_stack);
+                const bound = self.block_values.items[matched.target];
+                var catch_nodes: std.ArrayList(ir.Node) = .empty;
+                var payload: std.ArrayList(ir.Value) = .empty;
+                if (clause.kind < 2) {
+                    const tag = try exceptions.tagSignature(module, clause.tag);
+                    for (tag.params) |ty| try payload.append(self.a, try self.wasmValue(ty));
+                }
+                if (clause.kind & 1 != 0) try payload.append(self.a, try self.wasmValue(.exnref));
+                const flags: u32 = @as(u32, @intFromBool(clause.kind < 2)) | (@as(u32, clause.kind & 1) << 1);
+                try self.runtimeCall(&catch_nodes, inst, .{ .kind = .exception_payload, .index = flags }, &.{}, try self.flatten(payload.items), try self.roots(bound[0..locals.len], bound[locals.len..]));
+                const caught_stack = try std.mem.concat(self.a, ir.Value, &.{ bound[locals.len..][0..height], payload.items });
+                const destination = try self.branchEdge(clause.branch, bound[0..locals.len], caught_stack);
+                self.blocks.items[matched.target].nodes = catch_nodes.items;
+                self.blocks.items[matched.target].terminator = .{ .jump = destination };
+                if (clause.kind >= 2) {
+                    self.blocks.items[current].terminator = .{ .jump = matched };
+                    return entry;
+                }
+                const condition = try self.value(.i32);
+                try self.runtimeCall(&nodes, inst, .{ .kind = .exception_matches, .index = clause.tag }, &.{}, try self.a.dupe(ir.Value, &.{condition}), try self.roots(live_locals, live_stack));
+                const next = try self.synthetic(live_locals, live_stack);
+                self.blocks.items[current].nodes = nodes.items;
+                self.blocks.items[current].terminator = .{ .branch = .{ .condition = condition, .taken = matched, .fallthrough = next } };
+                current = next.target;
+            }
+            handler_index = handler.parent;
+        }
+        var nodes: std.ArrayList(ir.Node) = .empty;
+        try self.runtimeCall(&nodes, inst, .{ .kind = .exception_propagate, .index = 0 }, &.{}, &.{}, &.{});
+        self.blocks.items[current].nodes = nodes.items;
+        return entry;
     }
 
     fn branchEdge(self: *Builder, inst: Instruction, locals: []const ir.Value, stack: []const ir.Value) !ir.Edge {

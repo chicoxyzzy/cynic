@@ -1,6 +1,7 @@
 const std = @import("std");
 const wasm = @import("wasm.zig");
 const a = std.testing.allocator;
+const refusedBody = @import("backend_test_helpers.zig").refusedBody;
 
 const identity_module: wasm.Module = .{
     .types = &.{.{ .params = &.{.i32}, .results = &.{.i32} }},
@@ -43,8 +44,7 @@ test "backend tier: unsupported functions fall back once without disguising nati
         .types = &.{.{ .params = &.{}, .results = &.{.i32} }},
         .funcs = &.{0},
         .mems = &.{.{ .limits = .{ .min = 1 } }},
-        // Exception regions remain unsupported, even with an empty catch table.
-        .code = &.{.{ .bytes = &.{ 0, 0x1f, 0x40, 0, 0x0b, 0x41, 1, 0x0b } }},
+        .code = &.{.{ .bytes = try refusedBody(arena.allocator(), &.{ 0x41, 1, 0x0b }) }},
     };
     var instance: wasm.Instance = undefined;
     try wasm.instantiate(&instance, arena.allocator(), a, &module, .{});
@@ -60,8 +60,8 @@ test "backend tier: unsupported functions fall back once without disguising nati
     const refusal = instance.shared_backend_stats.refusal_details.entries[0];
     try std.testing.expectEqual(@as(u64, 1), refusal.count);
     try std.testing.expectEqual(.lowering, refusal.key.stage);
-    try std.testing.expectEqual(@as(anyerror, error.UnsupportedOpcode), refusal.key.reason);
-    try std.testing.expectEqual(@as(?u8, 0x1f), refusal.key.opcode);
+    try std.testing.expectEqual(@as(anyerror, error.PrototypeLimit), refusal.key.reason);
+    try std.testing.expectEqual(@as(?u8, 0x41), refusal.key.opcode);
 }
 
 test "backend tier: fuel termination is propagated and the cached function remains reusable" {
@@ -284,9 +284,7 @@ test "backend tier: a fallback callee can grow memory before the native caller l
     const module: wasm.Module = .{
         .types = &.{ .{ .params = &.{ .i32, .i32 }, .results = &.{.i32} }, .{ .params = &.{.i32}, .results = &.{.i32} } },
         .funcs = &.{ 0, 1 },
-        // The callee grows, then enters an exception region to keep
-        // this specifically a fallback-callee descriptor-refresh test.
-        .code = &.{ .{ .bytes = &.{ 0, 0x20, 0, 0x10, 1, 0x1a, 0x20, 1, 0x28, 0, 0, 0x0b } }, .{ .bytes = &.{ 0, 0x20, 0, 0x40, 0, 0x1f, 0x40, 0, 0x0b, 0x0b } } },
+        .code = &.{ .{ .bytes = &.{ 0, 0x20, 0, 0x10, 1, 0x1a, 0x20, 1, 0x28, 0, 0, 0x0b } }, .{ .bytes = try refusedBody(arena.allocator(), &.{ 0x20, 0, 0x40, 0, 0x0b }) } },
         .mems = &.{.{ .limits = .{ .min = 1, .max = 2 } }},
     };
     var instance: wasm.Instance = undefined;
@@ -309,7 +307,7 @@ test "backend tier: foreign fallback exceptions preserve their tag and payload" 
         .types = &.{ .{ .params = &.{}, .results = &.{} }, .{ .params = &.{.i32}, .results = &.{} } },
         .funcs = &.{0},
         .tags = &.{.{ .attribute = 0, .type_index = 1 }},
-        .code = &.{.{ .bytes = &.{ 0, 0x41, 37, 0x08, 0, 0x0b } }},
+        .code = &.{.{ .bytes = try refusedBody(arena.allocator(), &.{ 0x41, 37, 0x08, 0, 0x0b }) }},
     };
     var provider: wasm.Instance = undefined;
     try wasm.instantiate(&provider, arena.allocator(), a, &provider_module, .{});
@@ -385,11 +383,8 @@ test "backend tier: imported tags do not reject unrelated functions or shift mem
     const exception = instance.pending_exn orelse return error.MissingException;
     try std.testing.expectEqual(provider.tag_identities[1], exception.tag);
     try std.testing.expectEqualSlices(u128, &.{37}, exception.payload);
-    const refusal = instance.shared_backend_stats.refusal_details.entries[0];
-    try std.testing.expectEqual(@as(u64, 1), instance.shared_backend_stats.refusals);
-    try std.testing.expectEqual(@as(u64, 1), refusal.count);
-    try std.testing.expectEqual(@as(anyerror, error.UnsupportedOpcode), refusal.key.reason);
-    try std.testing.expectEqual(@as(?u8, 0x08), refusal.key.opcode);
+    try std.testing.expectEqual(@as(u64, 2), instance.shared_backend_stats.entries);
+    try std.testing.expectEqual(@as(u64, 0), instance.shared_backend_stats.refusals);
 }
 
 test "backend tier: allocation failures release cache metadata and invocation scratch" {
