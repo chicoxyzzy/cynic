@@ -108,7 +108,7 @@ pub const Program = struct {
     /// The existing frame stays authoritative. Neither compilation, native
     /// arithmetic, nor the poll callback can collect or re-enter JavaScript.
     pub fn runFrame(self: *const Program, allocator: std.mem.Allocator, realm: *Realm, frame: *lantern.CallFrame, entries: *u64) !FrameOutcome {
-        if (frame.registers.len != self.register_count) return error.ArgumentCount;
+        if (frame.registers.len < self.register_count) return error.ArgumentCount;
         var args: [low.max_arguments]u64 = undefined;
         for (self.entry_roles, 0..) |role, i| args[i] = switch (role) {
             .accumulator => frame.accumulator.bits,
@@ -135,11 +135,13 @@ pub const Program = struct {
     }
 
     fn restoreFrame(self: *const Program, frame: *lantern.CallFrame, id: u32, values: []const u64) !void {
-        if (id >= self.recoveries.len or frame.registers.len != self.register_count) return error.InvalidMetadata;
+        if (id >= self.recoveries.len or frame.registers.len < self.register_count) return error.InvalidMetadata;
         const recovery = self.recoveries[id];
         if (values.len != recovery.registers.len + 1) return error.InvalidMetadata;
-        for (recovery.registers) |register| if (register >= frame.registers.len) return error.InvalidMetadata;
-        @memset(frame.registers, Value.undefined_);
+        for (recovery.registers) |register| if (register >= self.register_count) return error.InvalidMetadata;
+        // The call ABI may reserve extra slots for surplus actual arguments.
+        // They are not bytecode temporaries and must survive frame recovery.
+        @memset(frame.registers[0..self.register_count], Value.undefined_);
         for (recovery.registers, values[1..]) |register, bits| frame.registers[register] = .{ .bits = bits };
         frame.accumulator = .{ .bits = values[0] };
         frame.ip = recovery.bytecode_offset;

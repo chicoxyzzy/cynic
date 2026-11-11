@@ -145,6 +145,36 @@ test "shared JS backend runtime: ordinary dispatch enters shared code and caches
     try testing.expectEqual(@as(u64, 2), realm.heap.ohaimark_stats.shared_backend.entries);
 }
 
+test "shared JS backend runtime: callbacks accept extra arguments and guards retain trailing slots" {
+    if (!driver.supported) return error.SkipZigTest;
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+    realm.ohaimark_enabled = true;
+    realm.ohaimark_shared_backend_enabled = true;
+    realm.ohaimark_threshold_override = 1;
+    var outer = try compileScript(&realm, "function answer() { return 42; }");
+    defer outer.deinit(testing.allocator);
+    _ = try runValue(&realm, &outer);
+    try testing.expectEqual(Value.fromInt32(42).bits, (try callGlobalFunction(&realm, "answer", &.{ Value.null_, Value.true_, Value.fromInt32(99) })).bits);
+    try testing.expectEqual(@as(u64, 1), realm.heap.ohaimark_stats.shared_backend.entries);
+    var chunk = try overflowChunk();
+    defer chunk.deinit(testing.allocator);
+    var frames: std.ArrayListUnmanaged(lantern.CallFrame) = .empty;
+    defer {
+        for (frames.items) |*frame| frame.releaseRegisters(&realm, testing.allocator);
+        frames.deinit(testing.allocator);
+    }
+    const registers = try realm.frame_pool.acquire(testing.allocator, chunk.register_count + 2);
+    @memset(registers, Value.undefined_);
+    registers[chunk.register_count] = Value.true_;
+    registers[chunk.register_count + 1] = Value.fromInt32(99);
+    try frames.append(testing.allocator, .{ .chunk = &chunk, .ip = 0, .accumulator = Value.undefined_, .registers = registers, .env = null, .this_value = Value.undefined_ });
+    try testing.expectEqual(driver.EnterOutcome.resumed, try driver.tryEnterTop(testing.allocator, &realm, &frames));
+    try testing.expectEqual(Value.true_.bits, registers[chunk.register_count].bits);
+    try testing.expectEqual(Value.fromInt32(99).bits, registers[chunk.register_count + 1].bits);
+}
+
 test "shared JS backend runtime: guard recovery preserves the active frame and register storage" {
     if (!driver.supported) return error.SkipZigTest;
     var realm = Realm.init(testing.allocator);
