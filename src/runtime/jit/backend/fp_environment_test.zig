@@ -599,6 +599,62 @@ test "backend calls: language runtime helpers execute with strict FP controls" {
     try std.testing.expectEqualDeep(before, after);
 }
 
+test "backend invoke: both successors restore strict FP after callbacks and classifiers" {
+    if (!native.supported) return error.SkipZigTest;
+    const Host = struct {
+        probe: *const Probe,
+        changed: State,
+        fail: bool,
+        classify_failure: bool,
+        fn invoke(raw: ?*anyopaque, _: native.CallRequest) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            self.probe.write(&self.changed);
+            if (self.fail) return error.LanguageException;
+        }
+        fn classify(raw: ?*anyopaque, _: native.CallRequest, _: anyerror) !bool {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            const changed = self.probe.unusual(3);
+            self.probe.write(&changed);
+            if (self.classify_failure) return error.ClassifierFailed;
+            return true;
+        }
+    };
+    var owner = try code_alloc.CodeAllocator.init(a, 256 * 1024);
+    defer owner.deinit();
+    var probe = try Probe.init(&owner);
+    defer probe.deinit();
+    const original = probe.read();
+    defer probe.write(&original);
+    for ([_]bool{ false, true }) |strict| for ([_]bool{ false, true }) |fail| for ([_]bool{ false, true }) |classify_failure| {
+        const graph: ir.Graph = .{ .types = &.{ .f64, .f64, .f64, .f64, .f64 }, .argument_types = &.{ .f64, .f64 }, .result_types = &.{.f64}, .blocks = &.{
+            .{ .params = &.{ 0, 1 }, .terminator = .{ .invoke = .{
+                .site = 7,
+                .call = .{ .target = 0, .arguments = &.{}, .parameter_types = &.{}, .results = &.{}, .result_types = &.{}, .fp_mode = if (strict) .strict else .host, .safepoint = .{ .id = 0, .values = &.{} } },
+                .normal = .{ .target = 1, .args = &.{ 0, 1 } },
+                .exceptional = .{ .target = 1, .args = &.{ 0, 1 } },
+            } } },
+            .{ .params = &.{ 2, 3 }, .nodes = &.{.{ .op = .fadd, .out = 4, .lhs = 2, .rhs = 3 }}, .terminator = .{ .return_ = &.{4} } },
+        } };
+        var code = try native.compile(a, &owner, graph);
+        defer code.deinit();
+        var host: Host = .{ .probe = &probe, .changed = probe.unusual(2), .fail = fail, .classify_failure = classify_failure };
+        const requested = probe.unusual(1);
+        probe.write(&requested);
+        const before = probe.read();
+        const result = code.runOutcomeWithRuntime(&.{ 0x3ff0_0000_0000_0000, 0x3ca0_0000_0000_0000 }, &.{}, 2, .{ .context = &host, .call = Host.invoke, .catch_exception = Host.classify });
+        const after = probe.read();
+        probe.write(&original);
+        try std.testing.expectEqualDeep(before, after);
+        if (fail and classify_failure) {
+            try std.testing.expectError(error.ClassifierFailed, result);
+        } else {
+            var outcome = try result;
+            defer outcome.deinit();
+            try std.testing.expectEqual(@as(u64, 0x3ff0_0000_0000_0000), outcome.returned);
+        }
+    };
+}
+
 test "backend control: polls see host FP state and restore it on both exits" {
     if (!native.supported) return error.SkipZigTest;
     const Host = struct {

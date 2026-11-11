@@ -55,6 +55,85 @@ test "shared Ohaimark backend calls: root snapshots survive a collecting JS call
     }
 }
 
+test "shared Ohaimark backend invoke: classifier re-entry roots captures and thrown values" {
+    const native = @import("../jit/backend/native.zig");
+    const ir = @import("../jit/backend/ir.zig");
+    const heap = @import("../heap.zig");
+    const call = @import("../lantern/call.zig");
+    if (!native.supported) return error.SkipZigTest;
+    const Host = struct {
+        realm: *Realm,
+        pending: ?Value = null,
+        fn collect(realm: *Realm, _: Value, _: []const Value) @import("../function.zig").NativeError!Value {
+            realm.collectGarbage();
+            return Value.undefined_;
+        }
+        fn raise(realm: *Realm, _: Value, _: []const Value) @import("../function.zig").NativeError!Value {
+            realm.collectGarbage();
+            const exception = try realm.heap.allocateObject();
+            try exception.set(a, "marker", Value.fromInt32(99));
+            realm.pending_exception = heap.taggedObject(exception);
+            return error.NativeThrew;
+        }
+        fn invoke(raw: ?*anyopaque, request: native.CallRequest) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            const roots = try self.realm.heap.openScope();
+            defer roots.close();
+            for (request.captures) |bits| try roots.push(.{ .bits = bits });
+            const result = try call.callValue(a, self.realm, self.realm, .{ .bits = request.arguments[0] }, Value.undefined_, &.{});
+            switch (result) {
+                .thrown => |value| {
+                    self.pending = value;
+                    return error.HostThrew;
+                },
+                else => return error.ExpectedThrow,
+            }
+        }
+        fn classify(raw: ?*anyopaque, request: native.CallRequest, err: anyerror) !bool {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            if (err != error.HostThrew) return false;
+            const roots = try self.realm.heap.openScope();
+            defer roots.close();
+            for (request.captures) |bits| try roots.push(.{ .bits = bits });
+            try roots.push(self.pending.?);
+            const result = try call.callValue(a, self.realm, self.realm, .{ .bits = request.captures[1] }, Value.undefined_, &.{});
+            try std.testing.expect(result == .value);
+            const exception = heap.valueAsPlainObject(self.pending.?) orelse return error.ExpectedExceptionObject;
+            try std.testing.expectEqual(Value.fromInt32(99).bits, exception.get("marker").bits);
+            return true;
+        }
+    };
+    const graph: ir.Graph = .{ .types = &.{ .i64, .i64, .i64, .i64, .i64 }, .argument_types = &.{ .i64, .i64, .i64 }, .result_types = &.{.i64}, .blocks = &.{
+        .{ .params = &.{ 0, 1, 2 }, .terminator = .{ .invoke = .{
+            .site = 0,
+            .call = .{ .target = 0, .arguments = &.{0}, .parameter_types = &.{.i64}, .results = &.{}, .result_types = &.{}, .safepoint = .{ .id = 1, .values = &.{ 0, 1, 2 } } },
+            .normal = .{ .target = 1, .args = &.{0} },
+            .exceptional = .{ .target = 2, .args = &.{2} },
+        } } },
+        .{ .params = &.{3}, .terminator = .{ .return_ = &.{3} } },
+        .{ .params = &.{4}, .terminator = .{ .return_ = &.{4} } },
+    } };
+    var owner = try shared.CodeAllocator.init(a, 256 * 1024);
+    defer owner.deinit();
+    for ([_]u8{ 0, 4 }) |registers| {
+        var code = try native.compileWithOptions(a, &owner, graph, .{ .register_count = registers });
+        defer code.deinit();
+        var realm = Realm.init(a);
+        defer realm.deinit();
+        try realm.installBuiltins();
+        const object = try realm.heap.allocateObject();
+        try object.set(a, "marker", Value.fromInt32(42));
+        const thrower = try realm.heap.allocateFunctionNative(&realm, Host.raise, 0, "raise");
+        const collector = try realm.heap.allocateFunctionNative(&realm, Host.collect, 0, "collect");
+        var host: Host = .{ .realm = &realm };
+        var result = try code.runOutcomeWithRuntime(&.{ heap.taggedFunction(thrower).bits, heap.taggedFunction(collector).bits, heap.taggedObject(object).bits }, &.{}, 2, .{ .context = &host, .call = Host.invoke, .catch_exception = Host.classify });
+        defer result.deinit();
+        try std.testing.expectEqual(heap.taggedObject(object).bits, result.returned);
+        try std.testing.expectEqual(Value.fromInt32(42).bits, object.get("marker").bits);
+        try std.testing.expectEqual(@as(usize, 0), realm.heap.handle_scopes.items.len);
+    }
+}
+
 fn binaryChunk(op: Op) !chunk_mod.Chunk {
     var builder = chunk_mod.Builder.init(a);
     defer builder.deinit();

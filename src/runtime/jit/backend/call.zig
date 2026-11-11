@@ -19,6 +19,7 @@ pub const Site = struct {
     target: u64,
     site: u32,
     safepoint: u32,
+    can_catch: bool = false,
     /// Payload lengths count 64-bit words; type lengths count logical values.
     argument_count: usize,
     capture_count: usize,
@@ -27,6 +28,13 @@ pub const Site = struct {
     result_type_count: usize,
     parameter_types: [ir.max_arguments]ir.Type = @splat(.i64),
     result_types: [ir.max_arguments]ir.Type = @splat(.i64),
+
+    pub fn init(graph: ir.Graph, runtime_call: ir.Call, site: u32, can_catch: bool) Site {
+        var result: Site = .{ .target = runtime_call.target, .site = site, .safepoint = runtime_call.safepoint.id, .can_catch = can_catch, .argument_count = ir.wordCount(runtime_call.parameter_types), .capture_count = graph.valueWords(runtime_call.safepoint.values), .result_count = ir.wordCount(runtime_call.result_types), .parameter_count = runtime_call.parameter_types.len, .result_type_count = runtime_call.result_types.len };
+        @memcpy(result.parameter_types[0..runtime_call.parameter_types.len], runtime_call.parameter_types);
+        @memcpy(result.result_types[0..runtime_call.result_types.len], runtime_call.result_types);
+        return result;
+    }
 };
 pub const Request = struct {
     target: u64,
@@ -47,6 +55,11 @@ pub const Runtime = struct {
     /// Root frontend-owned references before allocation or language re-entry.
     /// Snapshots are borrowed for this call only and must not be retained.
     call: *const fn (?*anyopaque, Request) anyerror!void,
+    /// Only invoke sites classify failed calls. True means frontend-owned
+    /// exception state is ready for the handler; false propagates the error.
+    /// Re-root the borrowed captures before allocating/re-entering here too.
+    /// Failed call results are not valid and are never published.
+    catch_exception: ?*const fn (?*anyopaque, Request, anyerror) anyerror!bool = null,
 };
 pub const Invocation = struct {
     runtime: Runtime,
@@ -64,7 +77,7 @@ fn dispatch(invocation: *Invocation, slots: [*]u64, index: u32) callconv(.c) u32
     }
     const site = invocation.sites[index];
     var results: [ir.max_arguments]u64 = @splat(0);
-    invocation.runtime.call(invocation.runtime.context, .{
+    const request: Request = .{
         .target = site.target,
         .site = site.site,
         .safepoint = site.safepoint,
@@ -74,7 +87,15 @@ fn dispatch(invocation: *Invocation, slots: [*]u64, index: u32) callconv(.c) u32
         .results = results[0..site.result_count],
         .captures = slots[invocation.call_base + captures_offset ..][0..site.capture_count],
         .memories = invocation.memories,
-    }) catch |err| {
+    };
+    invocation.runtime.call(invocation.runtime.context, request) catch |err| {
+        if (site.can_catch) if (invocation.runtime.catch_exception) |classify| {
+            const handled = classify(invocation.runtime.context, request, err) catch |failure| {
+                invocation.failure = failure;
+                return 1;
+            };
+            if (handled) return 2;
+        };
         invocation.failure = err;
         return 1;
     };

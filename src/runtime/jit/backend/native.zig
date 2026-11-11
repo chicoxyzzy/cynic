@@ -271,9 +271,12 @@ fn emitGraph(a: std.mem.Allocator, owner: *code_alloc.CodeAllocator, graph: ir.G
     defer m.deinit();
     var emission: Emission = .{ .m = &m, .plan = &plan, .types = graph.types, .transfer_base = plan.spill_slot_count };
     var call_count: usize = 0;
-    for (graph.blocks) |block| for (block.nodes) |node| {
-        if (node.op == .call) call_count += 1;
-    };
+    for (graph.blocks) |block| {
+        for (block.nodes) |node| if (node.op == .call) {
+            call_count += 1;
+        };
+        if (block.terminator == .invoke) call_count += 1;
+    }
     const call_sites = try a.alloc(call.Site, call_count);
     errdefer a.free(call_sites);
     if (fp_environment.required(graph) or options.execution_policy == .controlled) {
@@ -313,10 +316,8 @@ fn emitGraph(a: std.mem.Allocator, owner: *code_alloc.CodeAllocator, graph: ir.G
                 try m.bind(&success);
                 continue;
             } else if (node.call) |runtime_call| {
-                call_sites[call_index] = .{ .target = runtime_call.target, .site = node.trap_site.?, .safepoint = runtime_call.safepoint.id, .argument_count = ir.wordCount(runtime_call.parameter_types), .capture_count = graph.valueWords(runtime_call.safepoint.values), .result_count = ir.wordCount(runtime_call.result_types), .parameter_count = runtime_call.parameter_types.len, .result_type_count = runtime_call.result_types.len };
-                @memcpy(call_sites[call_index].parameter_types[0..runtime_call.parameter_types.len], runtime_call.parameter_types);
-                @memcpy(call_sites[call_index].result_types[0..runtime_call.result_types.len], runtime_call.result_types);
-                try emission.invoke(node, @intCast(index), @intCast(2 * node_index + 1), call_index);
+                call_sites[call_index] = call.Site.init(graph, runtime_call, node.trap_site.?, false);
+                try emission.invoke(runtime_call, @intCast(index), @intCast(2 * node_index + 1), call_index, null);
                 call_index += 1;
                 continue;
             } else if (node.op == .memory_length) {
@@ -371,6 +372,16 @@ fn emitGraph(a: std.mem.Allocator, owner: *code_alloc.CodeAllocator, graph: ir.G
                 try emission.transfer(graph, branch.taken, @intCast(index), labels);
                 try m.bind(&otherwise);
                 try emission.transfer(graph, branch.fallthrough, @intCast(index), labels);
+            },
+            .invoke => |invocation| {
+                var exceptional: Machine.Label = .{};
+                defer exceptional.deinit(a);
+                call_sites[call_index] = call.Site.init(graph, invocation.call, invocation.site, true);
+                try emission.invoke(invocation.call, @intCast(index), @intCast(2 * block.nodes.len + 1), call_index, &exceptional);
+                call_index += 1;
+                try emission.transfer(graph, invocation.normal, @intCast(index), labels);
+                try m.bind(&exceptional);
+                try emission.transfer(graph, invocation.exceptional, @intCast(index), labels);
             },
         }
     }
@@ -580,8 +591,7 @@ const Emission = struct {
         try self.m.bind(&done);
     }
 
-    fn invoke(self: *Emission, node: ir.Node, block: u32, position: u32, index: u32) !void {
-        const runtime_call = node.call.?;
+    fn invoke(self: *Emission, runtime_call: ir.Call, block: u32, position: u32, index: u32, exceptional: ?*Machine.Label) !void {
         const base = self.call_base.?;
         var live: [allocation.max_registers]bool = @splat(false);
         var live_vectors: [allocation.max_registers]bool = @splat(false);
@@ -607,19 +617,39 @@ const Emission = struct {
             self.stats.loads += fp_environment.leave_loads;
         }
         try call.emit(self.m, base, index);
+        // call.emit also saves and restores the context and budget on the stack.
+        self.stats.loads += call.emit_loads;
+        self.stats.stores += call.emit_stores;
         var success: Machine.Label = .{};
         defer success.deinit(self.m.gpa);
         if (comptime is_x86) {
             try self.m.testReg64(.rax, .rax);
             try self.m.jumpCond(.equal, &success);
         } else try self.m.jumpCbz(.x2, &success);
-        try self.finish(4);
+        if (exceptional) |target| {
+            var handled: Machine.Label = .{};
+            defer handled.deinit(self.m.gpa);
+            if (comptime is_x86) {
+                try self.m.cmpRegImm32(.rax, 2);
+                try self.m.jumpCond(.equal, &handled);
+            } else {
+                try self.m.emit(a64.cmpImm(.x2, 2, false));
+                try self.m.jumpCond(.eq, &handled);
+            }
+            try self.finish(4);
+            try self.m.bind(&handled);
+            try self.restoreCallHomes(live, live_vectors);
+            try self.m.jump(target);
+        } else try self.finish(4);
         try self.m.bind(&success);
+        try self.restoreCallHomes(live, live_vectors);
+        try self.restore(runtime_call.results, self.transfer_base, true);
+    }
+
+    fn restoreCallHomes(self: *Emission, live: [allocation.max_registers]bool, live_vectors: [allocation.max_registers]bool) !void {
+        const base = self.call_base.?;
         try fp_environment.reenter(self.m, self.fp_state_slot.?);
         self.stats.loads += fp_environment.leave_loads;
-        // call.emit also saves and restores the context and budget on the stack.
-        self.stats.loads += call.emit_loads;
-        self.stats.stores += call.emit_stores;
         for (live, 0..) |used, register| if (used) {
             try self.loadSlot(false, base + call.saved_registers_offset + register);
             try self.move(allocatedRegister(@intCast(register)), scratchRegister(false));
@@ -628,7 +658,6 @@ const Emission = struct {
             try scratch.loadVector(self.m, vector.allocated(@intCast(register)), base + call.saved_vectors_offset + 2 * register);
             self.stats.loads += 1;
         };
-        try self.restore(runtime_call.results, self.transfer_base, true);
     }
 
     fn finish(self: *Emission, status: u32) !void {

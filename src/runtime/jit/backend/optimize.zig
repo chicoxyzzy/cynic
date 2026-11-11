@@ -91,6 +91,13 @@ pub fn run(a: std.mem.Allocator, graph: ir.Graph, options: Options) !Result {
                 markValues(&live, branch.taken.args);
                 markValues(&live, branch.fallthrough.args);
             },
+            .invoke => |invocation| {
+                markValues(&live, invocation.call.arguments);
+                markValues(&live, invocation.call.safepoint.values);
+                markValues(&live, invocation.call.results);
+                markValues(&live, invocation.normal.args);
+                markValues(&live, invocation.exceptional.args);
+            },
         }
         var i = block.nodes.len;
         while (i != 0) {
@@ -253,16 +260,20 @@ fn remapInputs(a: std.mem.Allocator, original: ir.Node, map: []const ir.Value) !
     if (ir.inputCount(node.op) >= 1) node.lhs = map[node.lhs];
     if (ir.inputCount(node.op) == 2) node.rhs = map[node.rhs];
     if (node.exit) |side_exit| node.exit = .{ .id = side_exit.id, .values = try remapValues(a, side_exit.values, map) };
-    if (node.call) |call| node.call = .{
+    if (node.call) |call| node.call = try remapCall(a, call, map, false);
+    return node;
+}
+
+fn remapCall(a: std.mem.Allocator, call: ir.Call, map: []const ir.Value, results: bool) !ir.Call {
+    return .{
         .target = call.target,
         .arguments = try remapValues(a, call.arguments, map),
         .parameter_types = try a.dupe(ir.Type, call.parameter_types),
-        .results = try a.dupe(ir.Value, call.results),
+        .results = if (results) try remapValues(a, call.results, map) else try a.dupe(ir.Value, call.results),
         .result_types = try a.dupe(ir.Type, call.result_types),
         .fp_mode = call.fp_mode,
         .safepoint = .{ .id = call.safepoint.id, .values = try remapValues(a, call.safepoint.values, map) },
     };
-    return node;
 }
 
 fn remapTerminator(a: std.mem.Allocator, terminator: ir.Terminator, map: []const ir.Value) !ir.Terminator {
@@ -275,6 +286,12 @@ fn remapTerminator(a: std.mem.Allocator, terminator: ir.Terminator, map: []const
             .condition = map[branch.condition],
             .taken = try remapEdge(a, branch.taken, map),
             .fallthrough = try remapEdge(a, branch.fallthrough, map),
+        } },
+        .invoke => |invocation| .{ .invoke = .{
+            .site = invocation.site,
+            .call = try remapCall(a, invocation.call, map, true),
+            .normal = try remapEdge(a, invocation.normal, map),
+            .exceptional = try remapEdge(a, invocation.exceptional, map),
         } },
     };
 }
