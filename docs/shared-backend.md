@@ -257,6 +257,13 @@ on a 2 MiB ReleaseSafe worker stack.
 The Wasm suite accepts `--shared-backend --require-shared-backend-entry` and
 reports entries, compiled functions, and refusals. It tracks instances before
 start execution, including trapping starts, and releases their native caches.
+Refusal details distinguish cache creation, frontend lowering, and native
+compilation, retaining the error and opcode/subopcode when available. Like
+Spasm's existing diagnostics, collection is bounded and allocation-free: 32
+distinct keys plus an explicit overflow count, with saturating counters.
+Cached refusals count once, not on every fallback invocation. The harness
+aggregates across instances and manifests; `--quiet` retains the final
+breakdown, while ordinary output also identifies the affected manifests.
 Experimental runs cannot overwrite the default results ledger. Per-manifest
 score equality plus a positive entry count proves integration/non-regression,
 not complete shared-backend opcode coverage: refusals remain visible and the
@@ -1544,6 +1551,34 @@ compilation, entry, and refusal counts remain unchanged. Those remaining
 refusals, production integration, and rollout qualification stay open; these
 are coverage results, not performance measurements.
 
+### Refusal audit and imported tags
+
+The post-SIMD audit exposed a blanket `UnsupportedImports` check: importing a
+tag rejected every function in that module, even ordinary arithmetic or memory
+accesses. Memory collection now ignores tag imports, as it already ignores
+function/global/table imports. The [Core module index spaces](https://webassembly.github.io/spec/core/syntax/modules.html#indices)
+are separate; tags remain owned by the existing instance machinery. Regression
+tests interleave tag and memory imports, compare all three tiers, and verify
+that a fallback throw retains the imported tag's identity and payload.
+
+On the 232-manifest corpus, shared compilation increases from 6,101 to 6,113
+functions and refusals fall from 23 to 12. All 61,051 assertions still pass,
+with 1,370 unchanged skips. The remaining lowering refusals are:
+
+| Cause | Count | Manifests |
+|---|---:|---|
+| `try_table` (`0x1f`) | 8 | `throw_ref`, `instance`, `throw` |
+| `throw` (`0x08`) | 1 | `throw` |
+| Pre-instruction resource limits | 2 | `skip-stack-guard-page`, `call` |
+| `br_table` resource limit | 1 | `br_table` |
+
+These are executed-corpus counts, not a claim that every accepted function or
+instruction has been exercised. No refusal keys overflowed the diagnostic
+table. Exception lowering remains next: explicit exceptional call edges,
+handler transfers, payload/reference roots, and uncaught propagation must all
+work before exception bodies can stop falling back. This does not change
+ECMA-262/SES policy, the default tier, or the production gates below.
+
 ### Production completion checklist
 
 The active objective is a fully functional shared backend for Cynic's JS and
@@ -1622,7 +1657,7 @@ failures, but is not evidence that an unimplemented backend capability works.
    telemetry, differential fuzzing, and spec-suite gates. No automatic
    default-on graduation or new JS tier follows from finishing the prototype.
 
-The next capability work is Wasm SIMD and exception handling,
+The next capability work is Wasm exception handling and ordered atomic memory,
 production Ohaimark root/frame lowering, and resource-policy integration.
 Operand-move
 reduction and immediate/compare-branch selection remain measured optimization

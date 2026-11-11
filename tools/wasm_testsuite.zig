@@ -33,6 +33,7 @@ const Counts = struct {
     shared_backend_runs: u64 = 0,
     shared_backend_compiles: u64 = 0,
     shared_backend_refusals: u64 = 0,
+    shared_backend_refusal_details: wasm.backend_diagnostics.Refusals = .{},
     spasm_runs: u64 = 0,
     spasm_compiles: u64 = 0,
     spasm_refusals: u64 = 0,
@@ -53,6 +54,7 @@ const Counts = struct {
         self.shared_backend_runs += other.shared_backend_runs;
         self.shared_backend_compiles += other.shared_backend_compiles;
         self.shared_backend_refusals += other.shared_backend_refusals;
+        self.shared_backend_refusal_details.add(&other.shared_backend_refusal_details);
         self.spasm_runs += other.spasm_runs;
         self.spasm_compiles += other.spasm_compiles;
         self.spasm_refusals += other.spasm_refusals;
@@ -184,6 +186,10 @@ pub fn main(init: std.process.Init) !void {
             var line: [512]u8 = undefined;
             const msg = try std.fmt.bufPrint(&line, "  {s}: {d} pass, {d} fail, {d} skip\n", .{ entry.path, c.pass, c.fail, c.skip });
             try std.Io.File.stderr().writeStreamingAll(io, msg);
+            if (opts.shared_backend and c.shared_backend_refusals != 0) {
+                try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "Shared backend refusals in {s}:\n", .{entry.path}));
+                try writeSharedBackendRefusalSummary(io, &c.shared_backend_refusal_details);
+            }
         }
     }
 
@@ -195,6 +201,10 @@ pub fn main(init: std.process.Init) !void {
     if (opts.shared_backend) {
         const engagement = try std.fmt.bufPrint(&line, "Shared backend engagement: {d} native entries, {d} compiled functions, {d} refusals\n", .{ total.shared_backend_runs, total.shared_backend_compiles, total.shared_backend_refusals });
         try std.Io.File.stdout().writeStreamingAll(io, engagement);
+        if (total.shared_backend_refusals != 0) {
+            try std.Io.File.stdout().writeStreamingAll(io, "Shared backend refusals:\n");
+            try writeSharedBackendRefusalSummary(io, &total.shared_backend_refusal_details);
+        }
     }
     if (opts.spasm) {
         var spasm_line: [256]u8 = undefined;
@@ -386,6 +396,7 @@ fn runManifest(gpa: std.mem.Allocator, arena: std.mem.Allocator, io: std.Io, dir
         counts.shared_backend_runs += instance.shared_backend_stats.entries;
         counts.shared_backend_compiles += instance.shared_backend_stats.compiles;
         counts.shared_backend_refusals += instance.shared_backend_stats.refusals;
+        counts.shared_backend_refusal_details.add(&instance.shared_backend_stats.refusal_details);
         counts.spasm_runs += instance.spasm_runs;
         counts.spasm_compiles += instance.spasm_compiles;
         counts.spasm_refusals += instance.spasm_refusals;
@@ -402,6 +413,25 @@ fn runManifest(gpa: std.mem.Allocator, arena: std.mem.Allocator, io: std.Io, dir
         counts.spasm_refused_simd_subopcode_other += instance.spasm_refused_simd_subopcode_other;
     }
     return counts;
+}
+
+fn formatSharedBackendRefusal(buffer: []u8, entry: wasm.backend_diagnostics.Refusals.Entry) ![]const u8 {
+    const key = entry.key;
+    if (key.opcode) |opcode| {
+        if (key.subopcode) |subopcode| return std.fmt.bufPrint(buffer, "  {t} / {s} / opcode 0x{x:0>2} / subopcode {d}: {d}\n", .{ key.stage, @errorName(key.reason), opcode, subopcode, entry.count });
+        return std.fmt.bufPrint(buffer, "  {t} / {s} / opcode 0x{x:0>2}: {d}\n", .{ key.stage, @errorName(key.reason), opcode, entry.count });
+    }
+    return std.fmt.bufPrint(buffer, "  {t} / {s}: {d}\n", .{ key.stage, @errorName(key.reason), entry.count });
+}
+
+fn writeSharedBackendRefusalSummary(io: std.Io, counts: *const wasm.backend_diagnostics.Refusals) !void {
+    var line: [512]u8 = undefined;
+    for (counts.entries) |entry| if (entry.count != 0) {
+        try std.Io.File.stdout().writeStreamingAll(io, try formatSharedBackendRefusal(&line, entry));
+    };
+    if (counts.other != 0) {
+        try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "  untracked refusal keys (bounded diagnostics): {d}\n", .{counts.other}));
+    }
 }
 
 fn writeSpasmRefusalSummary(io: std.Io, counts: Counts) !void {
@@ -1119,6 +1149,53 @@ test "wasm harness: standalone module commands are scored without later assertio
         try expectManifestCounts(source, bytes, .{ .pass = 1 });
     for ([_][]const u8{ "\x00asm", scoring_invalid_module, scoring_unlinked_module, scoring_trapping_start, scoring_oob_data }) |bytes|
         try expectManifestCounts(source, bytes, .{ .fail = 1 });
+}
+
+test "wasm harness: shared backend refusals aggregate across instances without recounting cache hits" {
+    if (!wasm.backend_prototype.native.supported) return error.SkipZigTest;
+    const module = scoring_empty_module ++
+        "\x01\x04\x01\x60\x00\x00\x03\x02\x01\x00" ++
+        "\x07\x05\x01\x01f\x00\x00\x08\x01\x00" ++
+        "\x0a\x08\x01\x06\x00\x1f\x40\x00\x0b\x0b";
+    const source =
+        \\{"commands":[{"type":"module","filename":"case.wasm"},
+        \\{"type":"action","action":{"type":"invoke","field":"f","args":[]}},
+        \\{"type":"module","filename":"case.wasm"},
+        \\{"type":"action","action":{"type":"invoke","field":"f","args":[]}}]}
+    ;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    try tmp.dir.writeFile(io, .{ .sub_path = "case.json", .data = source });
+    try tmp.dir.writeFile(io, .{ .sub_path = "case.wasm", .data = module });
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const actual = try runManifest(std.testing.allocator, arena.allocator(), io, tmp.dir, "case.json", .{ .shared_backend = true });
+    try std.testing.expectEqual(@as(u32, 4), actual.pass);
+    try std.testing.expectEqual(@as(u32, 0), actual.fail);
+    try std.testing.expectEqual(@as(u64, 0), actual.shared_backend_runs);
+    try std.testing.expectEqual(@as(u64, 2), actual.shared_backend_refusals);
+    const entry = actual.shared_backend_refusal_details.entries[0];
+    try std.testing.expectEqual(@as(u64, 2), entry.count);
+    var line: [512]u8 = undefined;
+    try std.testing.expectEqualStrings("  lowering / UnsupportedOpcode / opcode 0x1f: 2\n", try formatSharedBackendRefusal(&line, entry));
+    var total: Counts = .{};
+    total.add(actual);
+    total.add(actual);
+    try std.testing.expectEqual(@as(u64, 4), total.shared_backend_refusals);
+    try std.testing.expectEqual(@as(u64, 4), total.shared_backend_refusal_details.entries[0].count);
+}
+
+test "wasm harness: shared backend refusal formatting preserves prefix and noninstruction errors" {
+    var line: [512]u8 = undefined;
+    try std.testing.expectEqualStrings("  lowering / UnsupportedOpcode / opcode 0xfd / subopcode 256: 3\n", try formatSharedBackendRefusal(&line, .{
+        .key = .{ .stage = .lowering, .reason = error.UnsupportedOpcode, .opcode = 0xfd, .subopcode = 256 },
+        .count = 3,
+    }));
+    try std.testing.expectEqualStrings("  cache / OutOfMemory: 1\n", try formatSharedBackendRefusal(&line, .{
+        .key = .{ .stage = .cache, .reason = error.OutOfMemory },
+        .count = 1,
+    }));
 }
 
 test "wasm harness: uninstantiable requires an initialization or start trap" {
