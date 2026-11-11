@@ -334,7 +334,7 @@ fn emitGraph(a: std.mem.Allocator, owner: *code_alloc.CodeAllocator, graph: ir.G
             } else {
                 try emission.read(false, node.lhs);
                 if (ir.inputCount(node.op) == 2) try emission.read(true, node.rhs);
-                if (graph.types[node.lhs] == .v128) {
+                if (ir.isVectorOp(node.op) or graph.types[node.lhs] == .v128) {
                     try vector.emit(&m, node);
                 } else if (ir.isNumericConversion(node.op)) {
                     try emission.convert(node, graph.types[node.lhs], graph.types[node.out.?]);

@@ -503,6 +503,7 @@ const Instruction = struct {
     immediate: u64 = 0,
     immediate_hi: u64 = 0,
     simd_opcode: u32 = 0,
+    lane_index: u8 = 0,
     target: u32 = missing,
     pop_count: u32 = 0,
     val_count: u32 = 0,
@@ -669,11 +670,14 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
             .f64_const => inst.immediate = std.mem.readInt(u64, (try reader.bytesN(8))[0..8], .little),
             .prefix_fd => {
                 inst.simd_opcode = try reader.uleb(u32);
-                if (inst.simd_opcode == 12) {
+                if (inst.simd_opcode == 12 or inst.simd_opcode == 13) {
                     inst.immediate = std.mem.readInt(u64, (try reader.bytesN(8))[0..8], .little);
                     inst.immediate_hi = std.mem.readInt(u64, (try reader.bytesN(8))[0..8], .little);
-                } else if (memoryOperation(inst) != null) {
+                } else if (memoryOperation(inst) != null or vectorMemoryOperation(inst.simd_opcode) != null) {
                     try readMemoryArgument(&inst, &reader, memories);
+                    if (inst.simd_opcode >= 84 and inst.simd_opcode <= 91) inst.lane_index = (try reader.bytesN(1))[0];
+                } else if (simd.laneOp(inst.simd_opcode) != null) {
+                    inst.lane_index = (try reader.bytesN(1))[0];
                 } else if (vectorOperation(inst.simd_opcode) == null) return error.UnsupportedOpcode;
             },
             .prefix_fc => {
@@ -1071,16 +1075,7 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
                         continue;
                     }
                     if (inst.op == .prefix_fd) {
-                        const out = try builder.value(.v128);
-                        if (inst.simd_opcode == 12) {
-                            try nodes.append(a, .{ .op = .constant, .out = out, .immediate = inst.immediate, .immediate_hi = inst.immediate_hi });
-                        } else {
-                            const operation = vectorOperation(inst.simd_opcode) orelse return error.UnsupportedOpcode;
-                            const rhs = stack.pop() orelse return error.InvalidControlFlow;
-                            const lhs = stack.pop() orelse return error.InvalidControlFlow;
-                            try nodes.append(a, .{ .op = operation.op, .vector_lane = operation.lane, .out = out, .lhs = lhs, .rhs = rhs });
-                        }
-                        try stack.append(a, out);
+                        try lowerVector(&builder, &nodes, &stack, inst);
                         continue;
                     }
                     const op = scalarOperation(inst) orelse return error.UnsupportedOpcode;
@@ -1158,9 +1153,28 @@ fn memoryOperation(inst: Instruction) ?MemoryOperation {
     };
 }
 
-const VectorOperation = struct { op: ir.Op, lane: ?ir.VectorLane = null };
+const VectorOperation = struct { op: ir.Op, lane: ?ir.VectorLane = null, signed_extract: bool = false };
+
+fn integerVectorLane(width: u4) ?ir.VectorLane {
+    return switch (width) {
+        1 => .i8x16,
+        2 => .i16x8,
+        4 => .i32x4,
+        8 => .i64x2,
+        else => null,
+    };
+}
 
 fn vectorOperation(sub: u32) ?VectorOperation {
+    if (simd.splatWidth(sub)) |width| return .{
+        .op = .vector_splat,
+        .lane = if (sub == 19) .f32x4 else if (sub == 20) .f64x2 else integerVectorLane(width),
+    };
+    if (simd.laneOp(sub)) |operation| return .{
+        .op = if (operation.replace) .vector_replace else .vector_extract,
+        .lane = if (sub == 31 or sub == 32) .f32x4 else if (sub == 33 or sub == 34) .f64x2 else integerVectorLane(operation.width),
+        .signed_extract = operation.signed,
+    };
     if (simd.integerBinaryOp(sub)) |operation| {
         if (operation.kind != .add or operation.saturating) return null;
         return .{ .op = .vector_add, .lane = switch (operation.width) {
@@ -1176,11 +1190,75 @@ fn vectorOperation(sub: u32) ?VectorOperation {
         return .{ .op = .vector_add, .lane = if (operation.double_precision) .f64x2 else .f32x4 };
     }
     return switch (sub) {
+        13 => .{ .op = .vector_shuffle },
+        14, 256 => .{ .op = .vector_swizzle },
         78 => .{ .op = .bit_and },
         80 => .{ .op = .bit_or },
         81 => .{ .op = .bit_xor },
         else => null,
     };
+}
+
+const VectorMemoryOperation = struct {
+    kind: enum { splat, zero, load_lane, store_lane },
+    lane: ir.VectorLane,
+    width: ir.MemoryWidth,
+};
+
+fn vectorMemoryOperation(sub: u32) ?VectorMemoryOperation {
+    if (simd.scalarLoadOp(sub)) |load| return .{
+        .kind = if (load.splat) .splat else .zero,
+        .lane = integerVectorLane(load.width) orelse return null,
+        .width = @fromBackingInt(load.width),
+    };
+    if (sub < 84 or sub > 91) return null;
+    const width = @as(u4, 1) << @as(u2, @intCast((sub - 84) % 4));
+    return .{ .kind = if (sub < 88) .load_lane else .store_lane, .lane = integerVectorLane(width).?, .width = @fromBackingInt(width) };
+}
+
+fn lowerVector(builder: *Builder, nodes: *std.ArrayList(ir.Node), stack: *std.ArrayList(ir.Value), inst: Instruction) !void {
+    const a = builder.a;
+    if (vectorMemoryOperation(inst.simd_opcode)) |operation| {
+        const lane_memory = operation.kind == .load_lane or operation.kind == .store_lane;
+        if (inst.lane_index >= operation.lane.count()) return error.InvalidControlFlow;
+        var vector_value = if (lane_memory) stack.pop() orelse return error.InvalidControlFlow else @as(ir.Value, 0);
+        const address = stack.pop() orelse return error.InvalidControlFlow;
+        const scalar = try builder.value(operation.lane.scalarType());
+        const access: ir.MemoryAccess = .{ .region = inst.memory_index, .offset = inst.immediate, .width = operation.width };
+        if (operation.kind == .store_lane) {
+            try nodes.append(a, .{ .op = .vector_extract, .out = scalar, .lhs = vector_value, .vector_lane = operation.lane, .immediate = inst.lane_index });
+            try nodes.append(a, .{ .op = .store, .lhs = address, .rhs = scalar, .memory = access, .trap_site = inst.offset });
+            return;
+        }
+        // The scalar load carries the original trap site and exact byte width.
+        try nodes.append(a, .{ .op = .load, .out = scalar, .lhs = address, .memory = access, .trap_site = inst.offset });
+        const out = try builder.value(.v128);
+        if (operation.kind == .splat) {
+            try nodes.append(a, .{ .op = .vector_splat, .out = out, .lhs = scalar, .vector_lane = operation.lane });
+        } else {
+            if (operation.kind == .zero) vector_value = try builder.constant(nodes, .v128, 0);
+            try nodes.append(a, .{ .op = .vector_replace, .out = out, .lhs = vector_value, .rhs = scalar, .vector_lane = operation.lane, .immediate = inst.lane_index });
+        }
+        try stack.append(a, out);
+        return;
+    }
+    if (inst.simd_opcode == 12) {
+        const out = try builder.value(.v128);
+        try nodes.append(a, .{ .op = .constant, .out = out, .immediate = inst.immediate, .immediate_hi = inst.immediate_hi });
+        try stack.append(a, out);
+        return;
+    }
+    const operation = vectorOperation(inst.simd_opcode) orelse return error.UnsupportedOpcode;
+    const rhs = if (ir.inputCount(operation.op) == 2) stack.pop() orelse return error.InvalidControlFlow else 0;
+    const lhs = stack.pop() orelse return error.InvalidControlFlow;
+    var out = try builder.value(if (operation.op == .vector_extract) operation.lane.?.scalarType() else .v128);
+    try nodes.append(a, .{ .op = operation.op, .vector_lane = operation.lane, .out = out, .lhs = lhs, .rhs = rhs, .immediate = if (operation.op == .vector_shuffle) inst.immediate else inst.lane_index, .immediate_hi = if (operation.op == .vector_shuffle) inst.immediate_hi else 0 });
+    if (operation.signed_extract) {
+        const raw = out;
+        out = try builder.value(.i32);
+        try nodes.append(a, .{ .op = if (operation.lane == .i8x16) .sext8 else .sext16, .out = out, .lhs = raw });
+    }
+    try stack.append(a, out);
 }
 
 fn scalarOperation(inst: Instruction) ?ir.Op {

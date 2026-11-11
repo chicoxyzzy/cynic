@@ -141,8 +141,9 @@ bounded scalar loads/stores, and typed runtime calls. Wasm bulk-memory and table
 instructions lower through those calls. Functions and calls support zero to 64
 physical 64-bit words through one result-list model; references and vectors use two.
 The backend also has native v128 values, full-width memory accesses, bitwise
-operations, and lane-wise addition. The Wasm adapter lowers this initial SIMD
-set; full instruction coverage remains open as detailed below.
+operations, lane-wise addition, splats, lane access, shuffles, and swizzles.
+The Wasm adapter lowers these and scalar-width vector memory forms;
+full instruction coverage remains open as detailed below.
 Scalar/reference/vector globals use ordered loads/stores over bounded views.
 The Wasm adapter accepts scalar/reference/vector locals and block/loop/if constructs
 (including multiple block parameters/results), branches, and selection.
@@ -1254,7 +1255,8 @@ lane-wise additions lower directly to the native vector operations above.
 Scalar and vector memory decoding share the same memory32/memory64 and
 multi-memory immediate handling. Full-width globals use one 16-byte access;
 loads/stores keep the existing aliasing and ordered bounds/trap contracts.
-Other SIMD operations still refuse before native entry, even in dead code.
+SIMD lane access and permutation extend this set as described below.
+Unimplemented SIMD operations still refuse before native entry, even in dead code.
 Fallback tests use an unsupported operation rather than a now-supported
 constant, so their tier-transition assertions remain meaningful.
 
@@ -1275,12 +1277,63 @@ forms), Sarcasm/Spasm/shared callees, reference-root failures without replay,
 OOM cleanup, and unaligned/out-of-bounds multi-memory accesses. Arithmetic
 differentials preserve exact non-NaN bits and compare arithmetic NaNs by class.
 
-The 232-manifest Wasm corpus retains 61,051 passes and 1,370 skips on AArch64
-and x86-64 under Rosetta, with identical per-manifest results in shared-only and
-shared-plus-Spasm modes. Shared-only compiled-function coverage increases from
-4,602 to 4,867; refusals fall from 1,518 to 1,257. The mixed-tier run compiles
-4,868 functions through the shared backend. These are coverage counts, not performance claims. Complete
-SIMD lowering and both-architecture production qualification remain open.
+At the initial vector integration, the 232-manifest Wasm corpus retained
+61,051 passes and 1,370 skips on AArch64 and x86-64 under Rosetta, with identical
+per-manifest results in shared-only and shared-plus-Spasm modes. Shared-only
+compiled-function coverage increased from 4,602 to 4,867; refusals fell from
+1,518 to 1,257. The mixed-tier run compiled 4,868 functions through the shared
+backend. These are coverage counts, not performance claims. Complete SIMD
+lowering and both-architecture production qualification remain open.
+
+### SIMD lane access and permutation
+
+`vector_splat`, `vector_extract`, and `vector_replace` carry a lane shape;
+extraction/replacement also carry a checked immediate lane index. Floating
+lanes transfer raw bits, including signaling NaNs and signed zero. Narrow
+integer extraction is unsigned in the IR; the Wasm frontend adds the existing
+`sext8`/`sext16` operation for signed extraction. `vector_shuffle` contains
+sixteen constant byte selectors in its two immediate words; `vector_swizzle`
+uses dynamic byte indices and returns zero for every index above 15. The Wasm
+relaxed swizzle selects this same permitted deterministic behavior.
+
+This follows [B3's explicit lane/immediate metadata](https://github.com/WebKit/WebKit/blob/main/Source/JavaScriptCore/b3/B3SIMDValue.h)
+and [Cranelift's separate lane, shuffle, and swizzle operations](https://github.com/bytecodealliance/wasmtime/blob/main/cranelift/codegen/meta/src/shared/instructions.rs).
+In particular, strict swizzle is not x86 PSHUFB semantics for indices 16-127.
+The verifier checks scalar/vector types, lane bounds, selector bounds, and
+metadata applicability. CSE keys include the semantic immediates independently
+of arity, so two extractions or shuffles differing only in an immediate remain
+distinct while unused fields on scalar operations remain irrelevant.
+
+AArch64 emits native DUP, INS, UMOV, and TBL instructions. x86-64 retains the
+SSE2 baseline: splats use unpack/shuffle instructions, lane transfers preserve
+the untouched bits, constant shuffles use fixed native extracts, and dynamic
+swizzles combine packed equality masks. These paths make no interpreter or
+runtime helper calls. The SSE2 permutation sequences are larger than native
+SSSE3/AVX alternatives; a feature-gated fast path and its measurements remain
+optimization work, not a claimed throughput gain.
+
+The Wasm adapter also lowers `v128.load{8,16,32,64}_splat`,
+`v128.load{32,64}_zero`, and all lane loads/stores. They compose existing
+bounded scalar accesses with the lane operations. Each checks exactly 1, 2,
+4, or 8 bytes, retaining the original trap site, offset overflow checks,
+memory32/memory64 selection, and multi-memory identity. Zero loads explicitly
+zero the remaining bits. Lane stores leave every other memory byte untouched.
+Widening loads and the remaining arithmetic/conversion SIMD families are
+still pending; this is not completion of SIMD or the production checklist.
+
+Direct tests cover every allocation/optimization switch, live GP/vector homes,
+both shuffle-mask words in CSE, and malformed IR. Wasm integration tests require
+native entry and cover every lane, all 256 swizzle indices, both input vectors
+in constant shuffles, exact float bits, and unaligned memory-end accesses with
+overflow/OOB traps and no partial stores. No ECMA-262/SES surface or default
+tier policy changes.
+
+With lane/permutation lowering, all 232 manifests retain the same per-manifest
+results on AArch64 and x86-64/Rosetta, in both shared-only and shared-plus-Spasm
+modes: 61,051 passes and 1,370 skips. Shared-only compilation rises from 4,867
+to 5,269 functions; refusals fall from 1,257 to 855. Mixed-tier runs compile
+5,270 functions through the shared backend. These measure expanded native
+coverage, not a performance win or complete SIMD coverage.
 
 ### Production completion checklist
 
@@ -1343,8 +1396,9 @@ failures, but is not evidence that an unimplemented backend capability works.
    branch tables, nullable branches, and selection.
    Function and call signatures support void and multiple logical results.
    Proper tail calls use the tier-neutral terminal-exit handoff described above.
-   Initial SIMD constants, full-width memory, bitwise operations, and lane-wise
-   additions now lower natively. Continue with the remaining SIMD operations,
+   SIMD constants, full-width and scalar-width vector memory, bitwise operations,
+   lane-wise additions, splats, lane access, shuffles, and swizzles now lower
+   natively. Continue with the remaining SIMD operations,
    exception handling, native linking,
    and production integration. Preserve bounds checks,
    memory-growth invalidation, resource metering, and executable ownership.
