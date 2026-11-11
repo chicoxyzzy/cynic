@@ -1153,7 +1153,7 @@ fn memoryOperation(inst: Instruction) ?MemoryOperation {
     };
 }
 
-const VectorOperation = struct { op: ir.Op, lane: ?ir.VectorLane = null, signed_extract: bool = false, immediate: ?u64 = null };
+const VectorOperation = struct { op: ir.Op, lane: ?ir.VectorLane = null, signed_extract: bool = false, immediate: ?u64 = null, reverse: bool = false };
 
 fn integerVectorLane(width: u4) ?ir.VectorLane {
     return switch (width) {
@@ -1166,6 +1166,17 @@ fn integerVectorLane(width: u4) ?ir.VectorLane {
 }
 
 fn vectorOperation(sub: u32) ?VectorOperation {
+    if (simd.comparisonOp(sub)) |operation| return .{
+        .op = switch (operation.relation) {
+            .eq => .vector_eq,
+            .ne => .vector_ne,
+            .lt, .gt => if (operation.floating) .vector_flt else if (operation.signed) .vector_lt_s else .vector_lt_u,
+            .le, .ge => if (operation.floating) .vector_fle else if (operation.signed) .vector_le_s else .vector_le_u,
+        },
+        .lane = if (operation.floating) (if (operation.width == 4) ir.VectorLane.f32x4 else .f64x2) else integerVectorLane(operation.width),
+        .reverse = operation.relation == .gt or operation.relation == .ge,
+    };
+    if (simd.reductionOp(sub)) |operation| return .{ .op = if (operation.bitmask) .vector_bitmask else .vector_all_true, .lane = integerVectorLane(operation.width) };
     if (simd.extendOp(sub)) |operation| return .{
         .op = if (operation.signed) .vector_extend_s else .vector_extend_u,
         .lane = integerVectorLane(operation.width),
@@ -1203,6 +1214,7 @@ fn vectorOperation(sub: u32) ?VectorOperation {
         return .{ .op = .vector_add, .lane = if (operation.double_precision) .f64x2 else .f32x4 };
     }
     return switch (sub) {
+        83 => .{ .op = .vector_any_true },
         13 => .{ .op = .vector_shuffle },
         14, 256 => .{ .op = .vector_swizzle },
         78 => .{ .op = .bit_and },
@@ -1272,8 +1284,8 @@ fn lowerVector(builder: *Builder, nodes: *std.ArrayList(ir.Node), stack: *std.Ar
     const operation = vectorOperation(inst.simd_opcode) orelse return error.UnsupportedOpcode;
     const rhs = if (ir.inputCount(operation.op) == 2) stack.pop() orelse return error.InvalidControlFlow else 0;
     const lhs = stack.pop() orelse return error.InvalidControlFlow;
-    var out = try builder.value(if (operation.op == .vector_extract) operation.lane.?.scalarType() else .v128);
-    try nodes.append(a, .{ .op = operation.op, .vector_lane = operation.lane, .out = out, .lhs = lhs, .rhs = rhs, .immediate = if (operation.op == .vector_shuffle) inst.immediate else operation.immediate orelse inst.lane_index, .immediate_hi = if (operation.op == .vector_shuffle) inst.immediate_hi else 0 });
+    var out = try builder.value(if (ir.isVectorReduction(operation.op)) .i32 else if (operation.op == .vector_extract) operation.lane.?.scalarType() else .v128);
+    try nodes.append(a, .{ .op = operation.op, .vector_lane = operation.lane, .out = out, .lhs = if (operation.reverse) rhs else lhs, .rhs = if (operation.reverse) lhs else rhs, .immediate = if (operation.op == .vector_shuffle) inst.immediate else operation.immediate orelse inst.lane_index, .immediate_hi = if (operation.op == .vector_shuffle) inst.immediate_hi else 0 });
     if (operation.signed_extract) {
         const raw = out;
         out = try builder.value(.i32);

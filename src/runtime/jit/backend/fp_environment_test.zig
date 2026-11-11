@@ -95,6 +95,30 @@ const Probe = struct {
 
 const Observation = struct { before: State, after: State, status: u32, result: [2]u64, captures: [ir.max_arguments]u64 };
 
+test "backend SIMD predicates: native comparisons ignore flushing and restore host status" {
+    if (!native.supported) return error.SkipZigTest;
+    var owner = try code_alloc.CodeAllocator.init(a, 256 * 1024);
+    defer owner.deinit();
+    var probe = try Probe.init(&owner);
+    defer probe.deinit();
+    for ([_]ir.VectorLane{ .f32x4, .f64x2 }) |lane| for ([_]u8{ 0, 4 }) |registers| {
+        const graph: ir.Graph = .{
+            .types = &.{ .v128, .v128, .v128 },
+            .argument_types = &.{ .v128, .v128 },
+            .result_types = &.{.v128},
+            .blocks = &.{.{ .params = &.{ 0, 1 }, .nodes = &.{.{ .op = .vector_flt, .out = 2, .lhs = 0, .rhs = 1, .vector_lane = lane }}, .terminator = .{ .return_ = &.{2} } }},
+        };
+        var code = try native.compileWithOptions(a, &owner, graph, .{ .register_count = registers });
+        defer code.deinit();
+        const rhs = if (lane == .f32x4) [2]u64{ 0x7f80004200000001, 1 } else [2]u64{ 1, 0x7ff0000000000042 };
+        const expected = if (lane == .f32x4) [2]u64{ 0xffffffff, 0xffffffff } else [2]u64{ std.math.maxInt(u64), 0 };
+        const observed = try observe(&probe, &code, probe.unusual(2), &(.{ @as(u64, 0), @as(u64, 0) } ++ rhs), 1);
+        try std.testing.expectEqual(@as(u32, 0), observed.status);
+        try std.testing.expectEqualSlices(u64, &expected, &observed.result);
+        try std.testing.expectEqualDeep(observed.before, observed.after);
+    };
+}
+
 test "backend SIMD widths: integer saturation restores host status on native return and exit" {
     if (!native.supported) return error.SkipZigTest;
     var owner = try code_alloc.CodeAllocator.init(a, 256 * 1024);
