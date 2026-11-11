@@ -1462,8 +1462,7 @@ native-entry FPSR preservation, including sticky QC and side exits.
 Direct tests cover every optimization/allocation mode, live GP/vector homes,
 composed selects, and invalid metadata. Independent scalar oracles compare all
 new Wasm operations against Sarcasm, forced Spasm, and forced shared-native
-entry. Integer product support is described below. Remaining FP
-arithmetic/conversions are still pending; this is not complete SIMD coverage.
+entry. Integer products and floating arithmetic/conversions are described below.
 
 All 232 Wasm manifests retain their exact per-manifest results on both native
 architectures in shared-only, mixed-tier, and Spasm-only modes: 61,051 passes,
@@ -1503,6 +1502,47 @@ x86_64 in shared-only, mixed-tier, and Spasm-only runs: 61,051 passes,
 5,933 (5,934 in mixed-tier runs), with refusals down from 211 to 191.
 Spasm-only compilation, entry, and refusal counts remain unchanged. These
 counts measure native coverage, not execution speed or production readiness.
+
+### SIMD floating-point operations
+
+The remaining 50 floating-point SIMD opcodes lower natively: f32/f64 arithmetic,
+sign operations, square roots, strict/pseudo/relaxed min/max, four rounding modes,
+precision changes, signed/unsigned integer conversions, strict/relaxed saturating
+truncation, and relaxed multiply-add. The verifier records the float lane shape
+and rejects invalid widths or metadata. CSE keeps the lane interpretation;
+scalar constant folding never processes vector payloads.
+
+The contracts follow [Core numeric operations](https://webassembly.github.io/spec/core/exec/numerics.html)
+and [Relaxed SIMD](https://github.com/WebAssembly/relaxed-simd/blob/main/proposals/relaxed-simd/Overview.md).
+Sign and pseudo-min/max operations preserve selected bits, including signaling
+NaNs and signed zero. Arithmetic observes Core's canonical/arithmetic NaN rules.
+Relaxed operations retain Cynic's existing deterministic choices: strict min/max
+and saturating truncation, plus separate multiply/add rounding (negate the first
+operand for nmadd). No optimization fuses those two operations.
+
+As in [B3's SIMD values](https://github.com/WebKit/WebKit/blob/main/Source/JavaScriptCore/b3/B3SIMDValue.h),
+operation semantics and lane interpretation are explicit rather than encoded as
+frontend-specific helpers. AArch64 uses NEON operations. SSE2 arithmetic and
+min/max sequences are shared with Spasm. The shared backend's rounding/conversions
+reuse its native scalar emitters, with XMM8/XMM9 preserving the vector input and partial
+result. They require no host callbacks, temporary stack storage, SSE4, or AVX.
+
+Direct tests keep all GP/vector homes live across every optimization/allocation
+setting. Independent Wasm oracles require actual Spasm/shared entry, preserve
+exact bits for sign/pseudo operations, and enforce quiet/canonical NaN rules for
+arithmetic. Raw-entry probes cover all host rounding modes, flushing controls,
+sticky status, subnormals, conversion boundaries, normal returns, and side exits.
+Numerical cancellation cases distinguish the two-rounding multiply-add profile
+from fused results. Fallback tests now use exception regions for opcode refusal
+and an SSA-size limit for mixed shared/Spasm execution, not a SIMD coverage hole.
+
+All 232 corpus manifests retain identical per-file results on both native
+architectures in shared-only, mixed-tier, and Spasm-only runs: 61,051 passes,
+1,370 skips, no failures. Floating SIMD adds 168 compiled functions, reaching
+6,101 (6,102 in mixed-tier runs), with refusals down from 191 to 23. Spasm-only
+compilation, entry, and refusal counts remain unchanged. Those remaining
+refusals, production integration, and rollout qualification stay open; these
+are coverage results, not performance measurements.
 
 ### Production completion checklist
 
@@ -1573,8 +1613,8 @@ failures, but is not evidence that an unimplemented backend capability works.
    byte popcount, bitwise complements, and strict/relaxed bit selection are supported.
    Extended products, dot products, and strict/relaxed Q15 multiplication also
    lower natively, including relaxed dot accumulation.
-   Continue with the remaining SIMD operations,
-   exception handling, native linking,
+   Floating arithmetic, rounding, min/max, conversions, and relaxed multiply-add
+   also lower natively. Continue with exception handling, native linking,
    and production integration. Preserve bounds checks,
    memory-growth invalidation, resource metering, and executable ownership.
 6. **Rollout decision:** paired warm/cold execution measurements, compilation

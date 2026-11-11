@@ -69,6 +69,29 @@ pub const Op = enum {
     vector_add,
     vector_sub,
     vector_mul,
+    vector_fsub,
+    vector_fmul,
+    vector_fdiv,
+    vector_fmin,
+    vector_fmax,
+    /// Pseudo min/max retain the first input bits on ties and unordered inputs.
+    vector_fpmin,
+    vector_fpmax,
+    vector_fabs,
+    vector_fneg,
+    vector_fsqrt,
+    vector_fceil,
+    vector_ffloor,
+    vector_ftrunc,
+    vector_fnearest,
+    /// Float lane shape is the destination; source lanes are i32 (low two for f64).
+    vector_convert_s,
+    vector_convert_u,
+    /// Float lane shape is the source; destination is i32 with unused lanes zeroed.
+    vector_trunc_sat_s,
+    vector_trunc_sat_u,
+    vector_promote_f32,
+    vector_demote_f64,
     /// Source lane width; immediate selects low (0) or high (1) half.
     vector_extmul_s,
     vector_extmul_u,
@@ -381,7 +404,11 @@ pub const Graph = struct {
                         try self.use(node.rhs, &available);
                         if (self.types[node.rhs] != (if (isVectorShift(node.op)) Type.i32 else if (node.op == .vector_replace) scalar else .v128)) return error.InvalidGraph;
                     }
-                    if (isVectorInteger(node.op)) {
+                    if (isVectorFloat(node.op)) {
+                        if (!isFloat(scalar) or node.immediate != 0) return error.InvalidGraph;
+                        if (node.op == .vector_promote_f32 and node.vector_lane != .f32x4) return error.InvalidGraph;
+                        if (node.op == .vector_demote_f64 and node.vector_lane != .f64x2) return error.InvalidGraph;
+                    } else if (isVectorInteger(node.op)) {
                         const extended = node.op == .vector_extmul_s or node.op == .vector_extmul_u;
                         if (node.immediate > @as(u64, if (extended) 1 else 0) or isFloat(scalar)) return error.InvalidGraph;
                         const width = node.vector_lane.?.bytes();
@@ -534,6 +561,8 @@ pub fn isComparison(op: Op) bool {
 
 pub fn inputCount(op: Op) u2 {
     return switch (op) {
+        .vector_fsub, .vector_fmul, .vector_fdiv, .vector_fmin, .vector_fmax, .vector_fpmin, .vector_fpmax => 2,
+        .vector_fabs, .vector_fneg, .vector_fsqrt, .vector_fceil, .vector_ffloor, .vector_ftrunc, .vector_fnearest, .vector_convert_s, .vector_convert_u, .vector_trunc_sat_s, .vector_trunc_sat_u, .vector_promote_f32, .vector_demote_f64 => 1,
         .vector_extmul_s, .vector_extmul_u, .vector_dot_s, .vector_dot_sat_s, .vector_q15mulr_sat_s => 2,
         .vector_abs, .vector_neg, .vector_popcnt => 1,
         .vector_sub, .vector_mul, .vector_add_sat_s, .vector_add_sat_u, .vector_sub_sat_s, .vector_sub_sat_u, .vector_min_s, .vector_min_u, .vector_max_s, .vector_max_u, .vector_avgr_u, .vector_shl, .vector_shr_s, .vector_shr_u => 2,
@@ -565,6 +594,7 @@ pub const Effects = struct {
 pub fn effects(op: Op) Effects {
     // Exhaustive: new operations must declare their observable effects.
     return switch (op) {
+        .vector_fsub, .vector_fmul, .vector_fdiv, .vector_fmin, .vector_fmax, .vector_fpmin, .vector_fpmax, .vector_fabs, .vector_fneg, .vector_fsqrt, .vector_fceil, .vector_ffloor, .vector_ftrunc, .vector_fnearest, .vector_convert_s, .vector_convert_u, .vector_trunc_sat_s, .vector_trunc_sat_u, .vector_promote_f32, .vector_demote_f64 => .{},
         .vector_extmul_s, .vector_extmul_u, .vector_dot_s, .vector_dot_sat_s, .vector_q15mulr_sat_s => .{},
         .vector_sub, .vector_mul, .vector_add_sat_s, .vector_add_sat_u, .vector_sub_sat_s, .vector_sub_sat_u, .vector_abs, .vector_neg, .vector_popcnt, .vector_min_s, .vector_min_u, .vector_max_s, .vector_max_u, .vector_avgr_u, .vector_shl, .vector_shr_s, .vector_shr_u => .{},
         .vector_eq, .vector_ne, .vector_lt_s, .vector_lt_u, .vector_le_s, .vector_le_u, .vector_flt, .vector_fle, .vector_any_true, .vector_all_true, .vector_bitmask => .{},
@@ -581,10 +611,17 @@ pub fn effects(op: Op) Effects {
 }
 
 pub fn hasVectorLane(op: Op) bool {
-    if (isVectorInteger(op)) return true;
+    if (isVectorInteger(op) or isVectorFloat(op)) return true;
     return switch (op) {
         .vector_eq, .vector_ne, .vector_lt_s, .vector_lt_u, .vector_le_s, .vector_le_u, .vector_flt, .vector_fle, .vector_all_true, .vector_bitmask => true,
         .vector_add, .vector_splat, .vector_extract, .vector_replace, .vector_extend_s, .vector_extend_u, .vector_narrow_s, .vector_narrow_u, .vector_pairwise_add_s, .vector_pairwise_add_u => true,
+        else => false,
+    };
+}
+
+pub fn isVectorFloat(op: Op) bool {
+    return switch (op) {
+        .vector_fsub, .vector_fmul, .vector_fdiv, .vector_fmin, .vector_fmax, .vector_fpmin, .vector_fpmax, .vector_fabs, .vector_fneg, .vector_fsqrt, .vector_fceil, .vector_ffloor, .vector_ftrunc, .vector_fnearest, .vector_convert_s, .vector_convert_u, .vector_trunc_sat_s, .vector_trunc_sat_u, .vector_promote_f32, .vector_demote_f64 => true,
         else => false,
     };
 }
@@ -635,4 +672,5 @@ test {
     _ = @import("vector_predicate_test.zig");
     _ = @import("vector_integer_test.zig");
     _ = @import("vector_product_test.zig");
+    _ = @import("vector_float_test.zig");
 }

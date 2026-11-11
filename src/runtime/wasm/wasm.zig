@@ -107,6 +107,7 @@ test {
     _ = @import("backend_simd_predicate_test.zig");
     _ = @import("backend_simd_integer_test.zig");
     _ = @import("backend_simd_product_test.zig");
+    _ = @import("backend_simd_float_test.zig");
     _ = @import("backend_tail_test.zig");
     _ = @import("backend_call_test.zig");
     _ = @import("backend_control_test.zig");

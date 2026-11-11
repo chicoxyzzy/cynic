@@ -15,6 +15,15 @@ fn signed(value: u128, bits: usize) i128 {
 }
 
 pub fn check(sub: u32, args: []const u128, shift: bool, expected: u128) !void {
+    return checkResult(sub, args, shift, expected, null);
+}
+
+pub fn checkFloat(sub: u32, args: []const u128, expected: u128, width: u4) !void {
+    try std.testing.expect(width == 4 or width == 8);
+    return checkResult(sub, args, false, expected, width);
+}
+
+fn checkResult(sub: u32, args: []const u128, shift: bool, expected: u128, float_width: ?u4) !void {
     if (!backend.native.supported) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
@@ -41,7 +50,33 @@ pub fn check(sub: u32, args: []const u128, shift: bool, expected: u128) !void {
         const entries = if (tier == 1) instance.spasm_runs else instance.shared_backend_stats.entries;
         const result = try wasm.invoke(&instance, a, 0, args);
         defer a.free(result);
-        try std.testing.expectEqualSlices(u128, &.{expected}, result);
+        try std.testing.expectEqual(@as(usize, 1), result.len);
+        if (float_width) |width| {
+            inline for (.{ .{ u32, f32, 4 }, .{ u64, f64, 2 } }) |case| {
+                if (width == @sizeOf(case[0])) {
+                    const wanted: [case[2]]case[0] = @bitCast(expected);
+                    const actual: [case[2]]case[0] = @bitCast(result[0]);
+                    for (wanted, actual, 0..) |want, got, lane| {
+                        if (std.math.isNan(@as(case[1], @bitCast(want)))) {
+                            const quiet = @as(case[0], 1) << (std.math.floatMantissaBits(case[1]) - 1);
+                            try std.testing.expect(std.math.isNan(@as(case[1], @bitCast(got))) and got & quiet != 0);
+                            // With only canonical-NaN or numeric inputs, Core
+                            // requires a canonical result, not an arbitrary payload.
+                            const source_width: u4 = if (sub == 94) 8 else if (sub == 95) 4 else width;
+                            const exponent: u64 = if (source_width == 8) 0x7ff0000000000000 else 0x7f800000;
+                            const payload: u64 = if (source_width == 8) 0x000fffffffffffff else 0x007fffff;
+                            const source_quiet: u64 = (payload + 1) >> 1;
+                            var canonical = true;
+                            for (args) |arg| {
+                                const source: u64 = @truncate(arg >> @as(u7, @intCast(lane * @as(usize, source_width) * 8)));
+                                if (source & exponent == exponent and source & payload != 0 and source & payload != source_quiet) canonical = false;
+                            }
+                            if (canonical) try std.testing.expectEqual(quiet, got & (quiet * 2 - 1));
+                        } else try std.testing.expectEqual(want, got);
+                    }
+                }
+            }
+        } else try std.testing.expectEqualSlices(u128, &.{expected}, result);
         if (tier == 1) try std.testing.expectEqual(entries + 1, instance.spasm_runs);
         if (tier == 2) {
             try std.testing.expectEqual(entries + 1, instance.shared_backend_stats.entries);
