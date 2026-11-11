@@ -678,7 +678,7 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
                     if (inst.simd_opcode >= 84 and inst.simd_opcode <= 91) inst.lane_index = (try reader.bytesN(1))[0];
                 } else if (simd.laneOp(inst.simd_opcode) != null) {
                     inst.lane_index = (try reader.bytesN(1))[0];
-                } else if (vectorOperation(inst.simd_opcode) == null) return error.UnsupportedOpcode;
+                } else if (vectorOperation(inst.simd_opcode) == null and !isVectorMask(inst.simd_opcode)) return error.UnsupportedOpcode;
             },
             .prefix_fc => {
                 inst.immediate = try reader.uleb(u32);
@@ -1200,20 +1200,32 @@ fn vectorOperation(sub: u32) ?VectorOperation {
         .signed_extract = operation.signed,
     };
     if (simd.integerBinaryOp(sub)) |operation| {
-        if (operation.kind != .add or operation.saturating) return null;
-        return .{ .op = .vector_add, .lane = switch (operation.width) {
-            1 => .i8x16,
-            2 => .i16x8,
-            4 => .i32x4,
-            8 => .i64x2,
-            else => return null,
-        } };
+        const op: ir.Op = if (operation.saturating)
+            (if (operation.kind == .add)
+                (if (operation.signed) .vector_add_sat_s else .vector_add_sat_u)
+            else
+                (if (operation.signed) .vector_sub_sat_s else .vector_sub_sat_u))
+        else switch (operation.kind) {
+            .add => .vector_add,
+            .sub => .vector_sub,
+            .mul => .vector_mul,
+        };
+        return .{ .op = op, .lane = integerVectorLane(operation.width) };
     }
+    if (simd.shiftOp(sub)) |operation| return .{ .op = switch (operation.kind) {
+        .shl => .vector_shl,
+        .shr_s => .vector_shr_s,
+        .shr_u => .vector_shr_u,
+    }, .lane = integerVectorLane(operation.width) };
+    if (simd.integerUnaryOp(sub)) |operation| return .{ .op = if (operation.negate) .vector_neg else .vector_abs, .lane = integerVectorLane(operation.width) };
+    if (simd.roundingAverageWidth(sub)) |width| return .{ .op = .vector_avgr_u, .lane = integerVectorLane(width) };
+    if (simd.integerMinMaxOp(sub)) |operation| return .{ .op = if (operation.maximum) (if (operation.signed) .vector_max_s else .vector_max_u) else (if (operation.signed) .vector_min_s else .vector_min_u), .lane = integerVectorLane(operation.width) };
     if (simd.floatArithmeticOp(sub)) |operation| {
         if (operation.kind != .add) return null;
         return .{ .op = .vector_add, .lane = if (operation.double_precision) .f64x2 else .f32x4 };
     }
     return switch (sub) {
+        98 => .{ .op = .vector_popcnt, .lane = .i8x16 },
         83 => .{ .op = .vector_any_true },
         13 => .{ .op = .vector_shuffle },
         14, 256 => .{ .op = .vector_swizzle },
@@ -1222,6 +1234,10 @@ fn vectorOperation(sub: u32) ?VectorOperation {
         81 => .{ .op = .bit_xor },
         else => null,
     };
+}
+
+fn isVectorMask(sub: u32) bool {
+    return sub == 77 or sub == 79 or sub == 82 or (sub >= 265 and sub <= 268);
 }
 
 const VectorMemoryOperation = struct {
@@ -1278,6 +1294,35 @@ fn lowerVector(builder: *Builder, nodes: *std.ArrayList(ir.Node), stack: *std.Ar
     if (inst.simd_opcode == 12) {
         const out = try builder.value(.v128);
         try nodes.append(a, .{ .op = .constant, .out = out, .immediate = inst.immediate, .immediate_hi = inst.immediate_hi });
+        try stack.append(a, out);
+        return;
+    }
+    if (isVectorMask(inst.simd_opcode)) {
+        // Relaxed lane select chooses the strict per-bit profile. Express
+        // complements and selects with the language-neutral bitwise IR.
+        const select = inst.simd_opcode == 82 or inst.simd_opcode >= 265;
+        const mask = if (select) stack.pop() orelse return error.InvalidControlFlow else 0;
+        const rhs = if (inst.simd_opcode != 77) stack.pop() orelse return error.InvalidControlFlow else 0;
+        const lhs = stack.pop() orelse return error.InvalidControlFlow;
+        const temp = try builder.value(.v128);
+        var out = temp;
+        if (select) {
+            const masked = try builder.value(.v128);
+            out = try builder.value(.v128);
+            try nodes.appendSlice(a, &.{
+                .{ .op = .bit_xor, .out = temp, .lhs = lhs, .rhs = rhs },
+                .{ .op = .bit_and, .out = masked, .lhs = temp, .rhs = mask },
+                .{ .op = .bit_xor, .out = out, .lhs = masked, .rhs = rhs },
+            });
+        } else {
+            const ones = try builder.value(.v128);
+            try nodes.append(a, .{ .op = .constant, .out = ones, .immediate = std.math.maxInt(u64), .immediate_hi = std.math.maxInt(u64) });
+            try nodes.append(a, .{ .op = .bit_xor, .out = temp, .lhs = if (inst.simd_opcode == 77) lhs else rhs, .rhs = ones });
+            if (inst.simd_opcode == 79) {
+                out = try builder.value(.v128);
+                try nodes.append(a, .{ .op = .bit_and, .out = out, .lhs = lhs, .rhs = temp });
+            }
+        }
         try stack.append(a, out);
         return;
     }
