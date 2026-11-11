@@ -159,6 +159,95 @@ fn expectSameOutcome(expected: @import("evaluator.zig").Outcome, actual: @import
     }
 }
 
+test "shared Ohaimark Number backend: mixed arithmetic preserves IEEE values and canonical NaNs" {
+    if (!shared.supported) return error.SkipZigTest;
+    var owner = try shared.CodeAllocator.init(a, 256 * 1024);
+    defer owner.deinit();
+    const pairs = [_][2]Value{
+        .{ Value.fromDouble(1.5), Value.fromInt32(2) },
+        .{ Value.fromInt32(-7), Value.fromDouble(2.5) },
+        .{ Value.fromDouble(-0.0), Value.fromDouble(0.0) },
+        .{ Value.fromDouble(0.0), Value.fromInt32(-1) },
+        .{ Value.fromDouble(0.0), Value.fromDouble(0.0) },
+        .{ Value.fromDouble(std.math.inf(f64)), Value.fromDouble(std.math.inf(f64)) },
+        .{ Value.fromDouble(-std.math.inf(f64)), Value.fromDouble(0.0) },
+        .{ Value.fromDouble(std.math.nan(f64)), Value.fromInt32(1) },
+        .{ Value.fromDouble(0x1.fffffffffffffp1023), Value.fromDouble(2.0) },
+        .{ Value.fromDouble(0x1p-1022), Value.fromInt32(2) },
+    };
+    for ([_]Op{ .add, .sub, .mul, .div }) |op| {
+        var chunk = try binaryChunk(op);
+        defer chunk.deinit(a);
+        for ([_]u8{ 0, 1, 4 }) |registers| {
+            var program = try shared.Program.buildWithOptions(a, &owner, &chunk, .{ .register_count = registers });
+            defer program.deinit();
+            for (pairs) |pair| {
+                const lhs = pair[0].numberToDouble();
+                const rhs = pair[1].numberToDouble();
+                const expected = Value.fromDouble(switch (op) {
+                    .add => lhs + rhs,
+                    .sub => lhs - rhs,
+                    .mul => lhs * rhs,
+                    .div => lhs / rhs,
+                    else => unreachable,
+                });
+                var result = try program.run(.{ .accumulator = Value.undefined_, .registers = &pair, .block_budget = 100 });
+                defer result.deinit();
+                try std.testing.expect(result == .returned);
+                try std.testing.expectEqual(expected.bits, result.returned.bits);
+                try std.testing.expect(result.returned.isNumber());
+            }
+        }
+    }
+}
+
+test "shared Ohaimark Number backend: integer division uses Number semantics without trapping" {
+    if (!shared.supported) return error.SkipZigTest;
+    var owner = try shared.CodeAllocator.init(a, 256 * 1024);
+    defer owner.deinit();
+    var chunk = try binaryChunk(.div);
+    defer chunk.deinit(a);
+    var program = try shared.Program.build(a, &owner, &chunk);
+    defer program.deinit();
+    for ([_][2]i32{ .{ 7, 2 }, .{ 6, 2 }, .{ 0, -1 }, .{ 1, 0 }, .{ -1, 0 }, .{ 0, 0 }, .{ std.math.minInt(i32), -1 } }) |pair| {
+        const lhs: f64 = @floatFromInt(pair[0]);
+        const rhs: f64 = @floatFromInt(pair[1]);
+        var result = try program.run(.{ .accumulator = Value.undefined_, .registers = &.{ Value.fromInt32(pair[0]), Value.fromInt32(pair[1]) }, .block_budget = 100 });
+        defer result.deinit();
+        try std.testing.expect(result == .returned);
+        try std.testing.expectEqual(Value.fromDouble(lhs / rhs).bits, result.returned.bits);
+    }
+}
+
+test "shared Ohaimark Number backend: ordered comparisons do not invert unordered NaNs" {
+    if (!shared.supported) return error.SkipZigTest;
+    var owner = try shared.CodeAllocator.init(a, 256 * 1024);
+    defer owner.deinit();
+    const values = [_]Value{ Value.fromDouble(std.math.nan(f64)), Value.fromDouble(-0.0), Value.fromInt32(0), Value.fromDouble(2.5), Value.fromDouble(std.math.inf(f64)) };
+    for ([_]Op{ .lt, .gt, .ge, .strict_eq, .strict_neq }) |op| {
+        var chunk = try binaryChunk(op);
+        defer chunk.deinit(a);
+        var program = try shared.Program.build(a, &owner, &chunk);
+        defer program.deinit();
+        for (values) |lhs| for (values) |rhs| {
+            const x = lhs.numberToDouble();
+            const y = rhs.numberToDouble();
+            const expected = switch (op) {
+                .lt => x < y,
+                .gt => x > y,
+                .ge => x >= y,
+                .strict_eq => x == y,
+                .strict_neq => x != y,
+                else => unreachable,
+            };
+            var result = try program.run(.{ .accumulator = Value.undefined_, .registers = &.{ lhs, rhs }, .block_budget = 100 });
+            defer result.deinit();
+            try std.testing.expect(result == .returned);
+            try std.testing.expectEqual(Value.fromBool(expected).bits, result.returned.bits);
+        };
+    }
+}
+
 test "shared Ohaimark backend: checked integer arithmetic executes natively" {
     if (!shared.supported) return error.SkipZigTest;
     var owner = try shared.CodeAllocator.init(a, 256 * 1024);
@@ -219,7 +308,7 @@ test "shared Ohaimark backend: overflow reconstructs the exact intermediate fram
     try std.testing.expectEqual(@as(f64, 2), if (result.value.isInt32()) @as(f64, @floatFromInt(result.value.asInt32())) else result.value.asDouble());
 }
 
-test "shared Ohaimark backend: negative zero and unexpected operands deopt before arithmetic" {
+test "shared Ohaimark backend: checked integer negative zero exits while doubles execute" {
     if (!shared.supported) return error.SkipZigTest;
     var chunk = try binaryChunk(.mul);
     defer chunk.deinit(a);
@@ -238,12 +327,17 @@ test "shared Ohaimark backend: negative zero and unexpected operands deopt befor
     }) |case| {
         var outcome = try program.run(.{ .accumulator = Value.undefined_, .registers = &.{ case.lhs, case.rhs }, .block_budget = 100 });
         defer outcome.deinit();
-        try std.testing.expect(outcome == .deopt);
-        try std.testing.expectEqual(case.rhs.bits, outcome.deopt.accumulator.bits);
-        try std.testing.expectEqual(case.lhs.bits, outcome.deopt.registers[0].bits);
-        const result = try outcome.deopt.resumeLantern(a, &realm, &chunk);
-        try std.testing.expect(result == .value);
-        try std.testing.expectEqual(case.expected.bits, result.value.bits);
+        if (case.lhs.isInt32() and case.rhs.isInt32()) {
+            try std.testing.expect(outcome == .deopt);
+            try std.testing.expectEqual(case.rhs.bits, outcome.deopt.accumulator.bits);
+            try std.testing.expectEqual(case.lhs.bits, outcome.deopt.registers[0].bits);
+            const result = try outcome.deopt.resumeLantern(a, &realm, &chunk);
+            try std.testing.expect(result == .value);
+            try std.testing.expectEqual(case.expected.bits, result.value.bits);
+        } else {
+            try std.testing.expect(outcome == .returned);
+            try std.testing.expectEqual(case.expected.bits, outcome.returned.bits);
+        }
     }
 }
 
@@ -322,7 +416,11 @@ test "shared Ohaimark backend: branch selection and truthiness fallback" {
 }
 
 test "shared Ohaimark backend: unsupported operations refuse explicitly" {
-    var chunk = try binaryChunk(.div);
+    var builder = chunk_mod.Builder.init(a);
+    defer builder.deinit();
+    try builder.emitOp(.lda_this, span);
+    try builder.emitOp(.return_, span);
+    var chunk = try builder.finish();
     defer chunk.deinit(a);
     if (!shared.supported) return error.SkipZigTest;
     var owner = try shared.CodeAllocator.init(a, 64 * 1024);
@@ -355,7 +453,7 @@ test "shared Ohaimark backend: comparison inversion and non-number recovery" {
             const expected = try reference.resumeLantern(a, &realm, &chunk);
             var outcome = try program.run(.{ .accumulator = Value.undefined_, .registers = &registers, .block_budget = 100 });
             defer outcome.deinit();
-            try std.testing.expectEqual(lhs.isInt32(), outcome == .returned);
+            try std.testing.expectEqual(lhs.isNumber(), outcome == .returned);
             const actual = switch (outcome) {
                 .returned => |value| value,
                 .deopt => |*state| (try state.resumeLantern(a, &realm, &chunk)).value,
@@ -471,6 +569,11 @@ test "shared Ohaimark backend: optimization switches preserve signed zero and ty
                     .{ Value.fromInt32(0), Value.fromInt32(-1) },
                     .{ Value.fromDouble(-0.0), Value.fromInt32(3) },
                     .{ Value.fromDouble(1.5), Value.fromInt32(3) },
+                    .{ Value.fromDouble(std.math.nan(f64)), Value.fromInt32(3) },
+                    .{ Value.fromDouble(std.math.inf(f64)), Value.fromDouble(0.0) },
+                    .{ Value.null_, Value.fromDouble(2.5) },
+                    .{ Value.fromDouble(2.5), Value.true_ },
+                    .{ Value.undefined_, Value.fromInt32(3) },
                     .{ Value.fromInt32(46341), Value.fromInt32(46341) },
                     .{ Value.fromInt32(-3), Value.fromInt32(-7) },
                 }) |registers| {

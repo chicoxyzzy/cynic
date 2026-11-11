@@ -2,6 +2,7 @@
 //! Lantern recovery remain frontend-owned. Runtime polls never collect in native code.
 const std = @import("std");
 const Chunk = @import("../../bytecode/chunk.zig").Chunk;
+const Op = @import("../../bytecode/op.zig").Op;
 const evaluator = @import("evaluator.zig");
 const Value = @import("../value.zig").Value;
 const ir = @import("ir.zig");
@@ -239,17 +240,18 @@ const Builder = struct {
     }
 
     fn binary(self: *Builder, op: low.Op, lhs: low.Value, rhs: low.Value) !low.Value {
-        const ty: low.Type = switch (op) {
-            .add, .sub, .mul, .bit_and, .bit_or => self.types.items[lhs],
-            else => .i32,
-        };
+        const ty: low.Type = if (low.isComparison(op)) .i32 else self.types.items[lhs];
         const out = try self.value(ty);
         try self.nodes.append(self.a, .{ .op = op, .out = out, .lhs = lhs, .rhs = rhs });
         return out;
     }
 
     fn convert(self: *Builder, op: low.Op, input: low.Value) !low.Value {
-        const out = try self.value(if (op == .trunc_i64) .i32 else .i64);
+        return self.convertTo(op, input, if (op == .trunc_i64) .i32 else .i64);
+    }
+
+    fn convertTo(self: *Builder, op: low.Op, input: low.Value, ty: low.Type) !low.Value {
+        const out = try self.value(ty);
         try self.nodes.append(self.a, .{ .op = op, .out = out, .lhs = input });
         return out;
     }
@@ -264,13 +266,83 @@ const Builder = struct {
         return self.binary(.eq, actual, try self.constant(.i64, @as(u64, tag) << 48));
     }
 
-    fn unbox(self: *Builder, input: low.Value, exit: low.SideExit) !low.Value {
-        try self.guard(try self.hasTag(input, Value.tag_int32), exit);
-        return self.convert(.trunc_i64, input);
-    }
-
     fn box(self: *Builder, input: low.Value, tag: u16) !low.Value {
         return self.binary(.bit_or, try self.convert(.zext_i32, input), try self.constant(.i64, @as(u64, tag) << 48));
+    }
+
+    fn selectBits(self: *Builder, condition_value: low.Value, yes: low.Value, no: low.Value) !low.Value {
+        const mask = try self.binary(.sub, try self.constant(.i64, 0), try self.convert(.zext_i32, condition_value));
+        return self.binary(.bit_xor, no, try self.binary(.bit_and, mask, try self.binary(.bit_xor, yes, no)));
+    }
+
+    fn number(self: *Builder, input: low.Value, exit: low.SideExit, comptime allow_boolean: bool) !low.Value {
+        var integral = try self.hasTag(input, Value.tag_int32);
+        if (allow_boolean) integral = try self.binary(.bit_or, integral, try self.hasTag(input, Value.tag_bool));
+        const double = try self.binary(.lt_u, input, try self.constant(.i64, @as(u64, Value.tag_object) << 48));
+        try self.guard(try self.binary(.bit_or, integral, double), exit);
+        const converted = try self.convertTo(.convert_s, try self.convert(.trunc_i64, input), .f64);
+        const raw = try self.binary(.sub, input, try self.constant(.i64, Value.double_encode_offset));
+        // Select integer bit patterns before reinterpretation: a tag payload
+        // must never be consumed as a floating-point value.
+        return self.convertTo(.reinterpret, try self.selectBits(integral, try self.convertTo(.reinterpret, converted, .i64), raw), .f64);
+    }
+
+    fn boxDouble(self: *Builder, input: low.Value) !low.Value {
+        const raw = try self.convertTo(.reinterpret, input, .i64);
+        const encoded = try self.binary(.add, raw, try self.constant(.i64, Value.double_encode_offset));
+        // Match Value.fromDouble: hardware NaN signs/payloads can otherwise
+        // encode as heap tags. Number:: arithmetic exposes only one NaN value.
+        return self.selectBits(try self.binary(.fne, input, input), try self.constant(.i64, Value.fromDouble(std.math.nan(f64)).bits), encoded);
+    }
+
+    fn arithmetic(self: *Builder, kind: ir.NodeKind, lhs: low.Value, rhs: low.Value, exit: low.SideExit) !low.Value {
+        const x = try self.number(lhs, exit, false);
+        const y = try self.number(rhs, exit, false);
+        if (kind == .div) return self.boxDouble(try self.binary(.fdiv, x, y));
+
+        const int_pair = try self.binary(.bit_and, try self.hasTag(lhs, Value.tag_int32), try self.hasTag(rhs, Value.tag_int32));
+        const not_int_pair = try self.binary(.eq, int_pair, try self.constant(.i32, 0));
+        const lhs_int = try self.convert(.trunc_i64, lhs);
+        const rhs_int = try self.convert(.trunc_i64, rhs);
+        const int_op: low.Op = switch (kind) {
+            .add => .add,
+            .sub => .sub,
+            .mul => .mul,
+            else => return error.UnsupportedNode,
+        };
+        const float_op: low.Op = switch (kind) {
+            .add => .fadd,
+            .sub => .fsub,
+            .mul => .fmul,
+            else => return error.UnsupportedNode,
+        };
+        const wide = try self.binary(int_op, try self.convert(.sext_i32, lhs_int), try self.convert(.sext_i32, rhs_int));
+        const narrow = try self.convert(.trunc_i64, wide);
+        const fits = try self.binary(.eq, wide, try self.convert(.sext_i32, narrow));
+        try self.guard(try self.binary(.bit_or, not_int_pair, fits), exit);
+        if (kind == .mul) {
+            const zero = try self.constant(.i32, 0);
+            const negative = try self.binary(.bit_or, try self.binary(.lt_s, lhs_int, zero), try self.binary(.lt_s, rhs_int, zero));
+            const negative_zero = try self.binary(.bit_and, negative, try self.binary(.eq, narrow, zero));
+            try self.guard(try self.binary(.bit_or, not_int_pair, try self.binary(.eq, negative_zero, zero)), exit);
+        }
+        // Retain the existing checked-Int32 recovery contract. Mixed/double
+        // inputs use strict FP, including overflow to infinity and signed zero.
+        const floating = try self.boxDouble(try self.binary(float_op, x, y));
+        return self.selectBits(int_pair, try self.box(narrow, Value.tag_int32), floating);
+    }
+
+    fn lessThan(self: *Builder, node: ir.Node, lhs: low.Value, rhs: low.Value) !low.Value {
+        if (node.bytecode_offset >= self.chunk.code.len) return error.InvalidMetadata;
+        const op: Op = @fromBackingInt(@intCast(self.chunk.code[node.bytecode_offset]));
+        const canonical = if (op.branchInfo()) |branch| branch.canonical else op;
+        // The source IR represents >= and fused !<= / !>= via an inverted
+        // integer < predicate. Invert ordered >= instead so NaN stays false
+        // for the original relation; operand reversal is already in the IR.
+        return switch (canonical) {
+            .ge, .jmp_if_not_le, .jmp_if_not_ge => self.binary(.eq, try self.binary(.fge, lhs, rhs), try self.constant(.i32, 0)),
+            else => self.binary(.flt, lhs, rhs),
+        };
     }
 
     fn sideExit(self: *Builder, node_id: ir.ValueId) !low.SideExit {
@@ -347,11 +419,12 @@ const Builder = struct {
     fn condition(self: *Builder, node_id: ir.ValueId, input_id: ir.ValueId) !low.Value {
         const input = try self.get(input_id);
         const type_info = self.plan.node_info[input_id].result_type;
-        if (!type_info.isSubsetOf(specialize.Type.int32.merge(specialize.Type.boolean))) {
-            const valid = try self.binary(.bit_or, try self.hasTag(input, Value.tag_int32), try self.hasTag(input, Value.tag_bool));
-            try self.guard(valid, try self.sideExit(node_id));
-        }
-        return self.convert(.trunc_i64, input);
+        if (type_info.isSubsetOf(specialize.Type.boolean)) return self.convert(.trunc_i64, input);
+        // Int32 facts in the production specialization plan may describe a
+        // broader Number here. Only Boolean result facts remain unconditional.
+        const numeric = try self.number(input, try self.sideExit(node_id), true);
+        const nonzero = try self.binary(.fne, numeric, try self.constant(.f64, 0));
+        return self.binary(.bit_and, nonzero, try self.binary(.feq, numeric, numeric));
     }
 
     fn lowerBlock(self: *Builder, block_index: usize) !void {
@@ -369,39 +442,22 @@ const Builder = struct {
             }
             switch (node.kind) {
                 .constant => self.values[id] = try self.immediate(node.payload.immediate),
-                .add, .sub, .mul, .less_than, .strict_eq => {
-                    // The explicit developer path forces Int32 speculation,
-                    // including cold inputs. Production feedback policy is
-                    // unchanged; each operand is guarded before computation.
+                .add, .sub, .mul, .div => {
                     if (inputs.len != 2) return error.UnsupportedNode;
                     const exit = try self.sideExit(id);
-                    const lhs = try self.unbox(try self.get(inputs[0]), exit);
-                    const rhs = try self.unbox(try self.get(inputs[1]), exit);
-                    if (node.kind == .less_than or node.kind == .strict_eq) {
-                        self.values[id] = try self.box(try self.binary(if (node.kind == .less_than) .lt_s else .eq, lhs, rhs), Value.tag_bool);
-                    } else {
-                        // Widen first: every Int32 add/sub/mul fits exactly in
-                        // Int64. Round-trip through Int32 detects overflow.
-                        const op: low.Op = switch (node.kind) {
-                            .add => .add,
-                            .sub => .sub,
-                            else => .mul,
-                        };
-                        const wide = try self.binary(op, try self.convert(.sext_i32, lhs), try self.convert(.sext_i32, rhs));
-                        const result = try self.convert(.trunc_i64, wide);
-                        try self.guard(try self.binary(.eq, wide, try self.convert(.sext_i32, result)), exit);
-                        if (node.kind == .mul) {
-                            const zero = try self.constant(.i32, 0);
-                            const negative = try self.binary(.bit_or, try self.binary(.lt_s, lhs, zero), try self.binary(.lt_s, rhs, zero));
-                            const negative_zero = try self.binary(.bit_and, negative, try self.binary(.eq, result, zero));
-                            try self.guard(try self.binary(.eq, negative_zero, zero), exit);
-                        }
-                        self.values[id] = try self.box(result, Value.tag_int32);
-                    }
+                    self.values[id] = try self.arithmetic(node.kind, try self.get(inputs[0]), try self.get(inputs[1]), exit);
+                },
+                .less_than, .strict_eq => {
+                    if (inputs.len != 2) return error.UnsupportedNode;
+                    const exit = try self.sideExit(id);
+                    const lhs = try self.number(try self.get(inputs[0]), exit, false);
+                    const rhs = try self.number(try self.get(inputs[1]), exit, false);
+                    const result = if (node.kind == .less_than) try self.lessThan(node, lhs, rhs) else try self.binary(.feq, lhs, rhs);
+                    self.values[id] = try self.box(result, Value.tag_bool);
                 },
                 .to_numeric => {
                     if (inputs.len != 1) return error.UnsupportedNode;
-                    _ = try self.unbox(try self.get(inputs[0]), try self.sideExit(id));
+                    _ = try self.number(try self.get(inputs[0]), try self.sideExit(id), false);
                     self.values[id] = try self.get(inputs[0]);
                 },
                 .logical_not => {
