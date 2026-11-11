@@ -1,8 +1,133 @@
-//! Shared SSE2 width-changing sequences, independent of Wasm and SSA IR.
-//! Inputs/results use XMM0/XMM1; RAX and XMM0-XMM3 are scratch. No allocated
+//! Shared SSE2 sequences, independent of Wasm and SSA IR.
+//! Inputs/results use XMM0/XMM1; RAX/R10 and XMM0-XMM3 are scratch. No allocated
 //! shared-backend GP homes or XMM4-XMM7 homes are modified.
 const x64 = @import("asm_x86_64.zig");
 const Error = error{ OutOfMemory, UnsupportedOp };
+
+pub const Comparison = enum { eq, ne, lt, gt, le, ge };
+
+/// Complete lane masks. Integer qwords use scalar comparisons because the
+/// SSE2 baseline has neither PCMPEQQ nor PCMPGTQ. GP homes remain untouched.
+pub fn compare(m: *x64.Masm, width: u4, relation: Comparison, signed: bool, floating: bool) Error!void {
+    if (!floating and width == 8) {
+        for (0..2) |half| {
+            if (half == 0) {
+                try m.movQRegFromXmm(.rax, .xmm0);
+                try m.movQRegFromXmm(.r10, .xmm1);
+            } else {
+                try m.shufflePackedI32(.xmm2, .xmm0, 0xee);
+                try m.movQRegFromXmm(.rax, .xmm2);
+                try m.shufflePackedI32(.xmm2, .xmm1, 0xee);
+                try m.movQRegFromXmm(.r10, .xmm2);
+            }
+            try m.cmpReg64(.rax, .r10);
+            try m.setCond32(.rax, switch (relation) {
+                .eq => .equal,
+                .ne => .not_equal,
+                .lt => if (signed) .less else .below,
+                .gt => if (signed) .greater else .above,
+                .le => if (signed) .less_or_equal else .below_or_equal,
+                .ge => if (signed) .greater_or_equal else .above_or_equal,
+            });
+            try m.movImm64(.r10, 0);
+            try m.subReg64(.r10, .rax);
+            try m.movQXmmFromReg(if (half == 0) .xmm3 else .xmm2, .r10);
+        }
+        try m.unpackLowPackedInteger(.xmm3, .xmm2, .word);
+        try m.shufflePackedI32(.xmm0, .xmm3, 0xd8);
+        return;
+    }
+    var result: x64.Xmm = .xmm0;
+    if (floating) {
+        if (width != 4 and width != 8) return error.UnsupportedOp;
+        // Reversal, not Boolean inversion, preserves unordered false for gt/ge.
+        const reverse = relation == .gt or relation == .ge;
+        result = if (reverse) .xmm1 else .xmm0;
+        try m.comparePackedFloat128(result, if (reverse) .xmm0 else .xmm1, width == 8, switch (relation) {
+            .eq => .eq,
+            .ne => .ne,
+            .lt, .gt => .lt,
+            .le, .ge => .le,
+        });
+    } else {
+        const size: x64.Masm.PackedIntSize = switch (width) {
+            1 => .byte,
+            2 => .half,
+            4 => .word,
+            else => return error.UnsupportedOp,
+        };
+        if (relation == .eq or relation == .ne) {
+            try m.compareEqualPacked(.xmm0, .xmm1, size);
+        } else {
+            if (!signed) {
+                const sign_bits: u64 = switch (width) {
+                    1 => 0x8080808080808080,
+                    2 => 0x8000800080008000,
+                    4 => 0x8000000080000000,
+                    else => return error.UnsupportedOp,
+                };
+                try m.movImm64(.rax, sign_bits);
+                try m.movQXmmFromReg(.xmm2, .rax);
+                try m.shufflePackedI32(.xmm2, .xmm2, 0x44);
+                try m.xorPacked128(.xmm0, .xmm2);
+                try m.xorPacked128(.xmm1, .xmm2);
+            }
+            const reverse = relation == .lt or relation == .ge;
+            result = if (reverse) .xmm1 else .xmm0;
+            try m.compareGreaterSignedPacked(result, if (reverse) .xmm0 else .xmm1, size);
+        }
+        if (relation == .ne or relation == .le or relation == .ge) {
+            try m.compareEqualPacked(.xmm2, .xmm2, .word);
+            try m.xorPacked128(result, .xmm2);
+        }
+    }
+    if (result != .xmm0) try m.movVector128(.xmm0, result);
+}
+
+pub fn anyTrue(m: *x64.Masm) Error!void {
+    try m.movQRegFromXmm(.rax, .xmm0);
+    try m.shufflePackedI32(.xmm1, .xmm0, 0xee);
+    try m.movQRegFromXmm(.r10, .xmm1);
+    try m.orReg64(.rax, .r10);
+    try m.testReg64(.rax, .rax);
+    try m.setCond32(.rax, .not_equal);
+}
+
+/// XMM0 input to a zero-extended i32 in RAX.
+pub fn reduce(m: *x64.Masm, width: u4, bitmask: bool) Error!void {
+    if (bitmask) switch (width) {
+        1 => try m.movByteMask(.rax, .xmm0),
+        2 => {
+            try m.packSigned16To8(.xmm0, .xmm0);
+            try m.movByteMask(.rax, .xmm0);
+            try m.shrImm8(.rax, 8);
+        },
+        4 => try m.movFloatMask(.rax, .xmm0),
+        8 => try m.movDoubleMask(.rax, .xmm0),
+        else => return error.UnsupportedOp,
+    } else if (width == 8) {
+        try m.movQRegFromXmm(.rax, .xmm0);
+        try m.testReg64(.rax, .rax);
+        try m.setCond32(.rax, .not_equal);
+        try m.shufflePackedI32(.xmm1, .xmm0, 0xee);
+        try m.movQRegFromXmm(.r10, .xmm1);
+        try m.testReg64(.r10, .r10);
+        try m.setCond32(.r10, .not_equal);
+        try m.andReg32(.rax, .r10);
+    } else {
+        const size: x64.Masm.PackedIntSize = switch (width) {
+            1 => .byte,
+            2 => .half,
+            4 => .word,
+            else => return error.UnsupportedOp,
+        };
+        try m.xorPacked128(.xmm1, .xmm1);
+        try m.compareEqualPacked(.xmm0, .xmm1, size);
+        try m.movByteMask(.rax, .xmm0);
+        try m.testReg64(.rax, .rax);
+        try m.setCond32(.rax, .equal);
+    }
+}
 
 /// Width is the source lane size in bytes; the result doubles it.
 pub fn extend(m: *x64.Masm, width: u4, signed: bool, high: bool) Error!void {

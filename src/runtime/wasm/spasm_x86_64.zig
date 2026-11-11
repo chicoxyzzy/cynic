@@ -2005,40 +2005,8 @@ pub fn compile(
                         if (sp == 0 or stack[sp - 1] != .v128) return null;
                         const reduction = simd.reductionOp(sub) orelse return null;
                         const target = scratchOffset(num_locals, sp - 1);
-                        if (!reduction.bitmask and reduction.width == 8) {
-                            // PCMPEQQ would require SSE4.1. Two whole-lane tests
-                            // retain SSE2 and accept nonzero values in either word.
-                            try m.load64Disp32(.rax, .r12, target);
-                            try m.testReg64(.rax, .rax);
-                            try m.setCond32(.rax, .not_equal);
-                            try m.load64Disp32(.rcx, .r12, target + 8);
-                            try m.testReg64(.rcx, .rcx);
-                            try m.setCond32(.rcx, .not_equal);
-                            try m.andReg32(.rax, .rcx);
-                        } else {
-                            try m.loadVector128(.xmm0, .r12, target);
-                            if (reduction.bitmask) {
-                                switch (reduction.width) {
-                                    1 => try m.movByteMask(.rax, .xmm0),
-                                    2 => {
-                                        // Signed saturation preserves the sign
-                                        // and duplicates all eight packed lanes.
-                                        try m.packSigned16To8(.xmm0, .xmm0);
-                                        try m.movByteMask(.rax, .xmm0);
-                                        try m.shrImm8(.rax, 8);
-                                    },
-                                    4 => try m.movFloatMask(.rax, .xmm0),
-                                    8 => try m.movDoubleMask(.rax, .xmm0),
-                                    else => return null,
-                                }
-                            } else {
-                                try m.xorPacked128(.xmm1, .xmm1);
-                                try m.compareEqualPacked(.xmm0, .xmm1, if (reduction.width == 1) .byte else if (reduction.width == 2) .half else .word);
-                                try m.movByteMask(.rax, .xmm0);
-                                try m.testReg64(.rax, .rax);
-                                try m.setCond32(.rax, .equal);
-                            }
-                        }
+                        try m.loadVector128(.xmm0, .r12, target);
+                        try x64_simd.reduce(&m, reduction.width, reduction.bitmask);
                         try m.store64Disp32(.r12, target, .rax);
                         stack[sp - 1] = .runtime;
                     },
@@ -2960,73 +2928,17 @@ fn emitExecutionPoll(
 }
 
 fn emitSimdComparison(m: *x64.Masm, op: simd.ComparisonOp, target: i32, right_offset: i32) Error!void {
-    if (!op.floating and op.width == 8) {
-        // SSE2 lacks PCMPGTQ/PCMPEQQ. Scalar comparisons still produce full
-        // qword masks and never confuse the signs of the two 32-bit halves.
-        for ([_]i32{ 0, 8 }) |half| {
-            try m.load64Disp32(.rax, .r12, target + half);
-            try m.load64Disp32(.rcx, .r12, right_offset + half);
-            try m.cmpReg64(.rax, .rcx);
-            try m.setCond32(.rax, switch (op.relation) {
-                .eq => .equal,
-                .ne => .not_equal,
-                .lt => .less,
-                .gt => .greater,
-                .le => .less_or_equal,
-                .ge => .greater_or_equal,
-            });
-            try m.movImm64(.rcx, 0);
-            try m.subReg64(.rcx, .rax);
-            try m.store64Disp32(.r12, target + half, .rcx);
-        }
-        return;
-    }
     try m.loadVector128(.xmm0, .r12, target);
     try m.loadVector128(.xmm1, .r12, right_offset);
-    var result: x64.Xmm = .xmm0;
-    if (op.floating) {
-        // Swap operands for gt/ge: negating lt/le would accept unordered
-        // lanes. CMPNEQ alone is true for a NaN in either operand.
-        const reverse = op.relation == .gt or op.relation == .ge;
-        result = if (reverse) .xmm1 else .xmm0;
-        try m.comparePackedFloat128(result, if (reverse) .xmm0 else .xmm1, op.width == 8, switch (op.relation) {
-            .eq => .eq,
-            .ne => .ne,
-            .lt, .gt => .lt,
-            .le, .ge => .le,
-        });
-    } else {
-        const size: x64.Masm.PackedIntSize = switch (op.width) {
-            1 => .byte,
-            2 => .half,
-            4 => .word,
-            else => return error.UnsupportedOp,
-        };
-        if (op.relation == .eq or op.relation == .ne) {
-            try m.compareEqualPacked(.xmm0, .xmm1, size);
-        } else {
-            if (!op.signed) {
-                // Flipping every lane's sign bit maps unsigned ordering to
-                // signed ordering for all three SSE2 comparison widths.
-                var sign_bits: u64 = 0;
-                var bit: u8 = @as(u8, op.width) * 8 - 1;
-                while (bit < 64) : (bit += @as(u8, op.width) * 8) sign_bits |= @as(u64, 1) << @as(u6, @intCast(bit));
-                try m.movImm64(.rax, sign_bits);
-                try m.movQXmmFromReg(.xmm2, .rax);
-                try m.shufflePackedI32(.xmm2, .xmm2, 0x44);
-                try m.xorPacked128(.xmm0, .xmm2);
-                try m.xorPacked128(.xmm1, .xmm2);
-            }
-            const reverse = op.relation == .lt or op.relation == .ge;
-            result = if (reverse) .xmm1 else .xmm0;
-            try m.compareGreaterSignedPacked(result, if (reverse) .xmm0 else .xmm1, size);
-        }
-        if (op.relation == .ne or op.relation == .le or op.relation == .ge) {
-            try m.compareEqualPacked(.xmm2, .xmm2, .word);
-            try m.xorPacked128(result, .xmm2);
-        }
-    }
-    try m.storeVector128(.r12, target, result);
+    try x64_simd.compare(m, op.width, switch (op.relation) {
+        .eq => .eq,
+        .ne => .ne,
+        .lt => .lt,
+        .gt => .gt,
+        .le => .le,
+        .ge => .ge,
+    }, op.signed, op.floating);
+    try m.storeVector128(.r12, target, .xmm0);
 }
 
 /// Repeat the zero-extended lane in rax without interpreting float bits.

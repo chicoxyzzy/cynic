@@ -84,6 +84,19 @@ pub const Op = enum {
     /// Extend source lanes, then add adjacent pairs into double-width lanes.
     vector_pairwise_add_s,
     vector_pairwise_add_u,
+    /// True lanes contain all ones, not the scalar Boolean value one.
+    vector_eq,
+    vector_ne,
+    vector_lt_s,
+    vector_lt_u,
+    vector_le_s,
+    vector_le_u,
+    vector_flt,
+    vector_fle,
+    /// Reductions return i32; any_true is independent of lane shape.
+    vector_any_true,
+    vector_all_true,
+    vector_bitmask,
     shl,
     shr_s,
     shr_u,
@@ -337,12 +350,18 @@ pub const Graph = struct {
                     try self.use(node.lhs, &available);
                     const scalar = if (node.vector_lane) |lane| lane.scalarType() else Type.v128;
                     if (self.types[node.lhs] != (if (node.op == .vector_splat) scalar else .v128)) return error.InvalidGraph;
-                    if (out_type != (if (node.op == .vector_extract) scalar else .v128)) return error.InvalidGraph;
+                    if (out_type != (if (isVectorReduction(node.op)) Type.i32 else if (node.op == .vector_extract) scalar else .v128)) return error.InvalidGraph;
                     if (inputCount(node.op) == 2) {
                         try self.use(node.rhs, &available);
                         if (self.types[node.rhs] != (if (node.op == .vector_replace) scalar else .v128)) return error.InvalidGraph;
                     }
-                    if (node.op == .vector_extend_s or node.op == .vector_extend_u) {
+                    if (isVectorComparison(node.op)) {
+                        const floating = isFloat(scalar);
+                        if (node.immediate != 0) return error.InvalidGraph;
+                        if (node.op != .vector_eq and node.op != .vector_ne and floating != (node.op == .vector_flt or node.op == .vector_fle)) return error.InvalidGraph;
+                    } else if (isVectorReduction(node.op)) {
+                        if (node.immediate != 0 or isFloat(scalar)) return error.InvalidGraph;
+                    } else if (node.op == .vector_extend_s or node.op == .vector_extend_u) {
                         if (node.immediate > 1 or (node.vector_lane != .i8x16 and node.vector_lane != .i16x8 and node.vector_lane != .i32x4)) return error.InvalidGraph;
                     } else if (node.op == .vector_narrow_s or node.op == .vector_narrow_u or node.op == .vector_pairwise_add_s or node.op == .vector_pairwise_add_u) {
                         if (node.immediate != 0 or (node.vector_lane != .i8x16 and node.vector_lane != .i16x8)) return error.InvalidGraph;
@@ -475,6 +494,8 @@ pub fn isComparison(op: Op) bool {
 
 pub fn inputCount(op: Op) u2 {
     return switch (op) {
+        .vector_eq, .vector_ne, .vector_lt_s, .vector_lt_u, .vector_le_s, .vector_le_u, .vector_flt, .vector_fle => 2,
+        .vector_any_true, .vector_all_true, .vector_bitmask => 1,
         .vector_add, .vector_replace, .vector_shuffle, .vector_swizzle, .vector_narrow_s, .vector_narrow_u => 2,
         .vector_splat, .vector_extract, .vector_extend_s, .vector_extend_u, .vector_pairwise_add_s, .vector_pairwise_add_u => 1,
         .constant, .call, .memory_length => 0,
@@ -501,6 +522,7 @@ pub const Effects = struct {
 pub fn effects(op: Op) Effects {
     // Exhaustive: new operations must declare their observable effects.
     return switch (op) {
+        .vector_eq, .vector_ne, .vector_lt_s, .vector_lt_u, .vector_le_s, .vector_le_u, .vector_flt, .vector_fle, .vector_any_true, .vector_all_true, .vector_bitmask => .{},
         .vector_add, .vector_splat, .vector_extract, .vector_replace, .vector_shuffle, .vector_swizzle, .vector_extend_s, .vector_extend_u, .vector_narrow_s, .vector_narrow_u, .vector_pairwise_add_s, .vector_pairwise_add_u => .{},
         .guard => .{ .exits = true },
         .div_s, .div_u, .rem_s, .rem_u, .trunc_s, .trunc_u => .{ .may_trap = true },
@@ -515,13 +537,25 @@ pub fn effects(op: Op) Effects {
 
 pub fn hasVectorLane(op: Op) bool {
     return switch (op) {
+        .vector_eq, .vector_ne, .vector_lt_s, .vector_lt_u, .vector_le_s, .vector_le_u, .vector_flt, .vector_fle, .vector_all_true, .vector_bitmask => true,
         .vector_add, .vector_splat, .vector_extract, .vector_replace, .vector_extend_s, .vector_extend_u, .vector_narrow_s, .vector_narrow_u, .vector_pairwise_add_s, .vector_pairwise_add_u => true,
         else => false,
     };
 }
 
 pub fn isVectorOp(op: Op) bool {
-    return hasVectorLane(op) or op == .vector_shuffle or op == .vector_swizzle;
+    return hasVectorLane(op) or op == .vector_shuffle or op == .vector_swizzle or op == .vector_any_true;
+}
+
+pub fn isVectorComparison(op: Op) bool {
+    return switch (op) {
+        .vector_eq, .vector_ne, .vector_lt_s, .vector_lt_u, .vector_le_s, .vector_le_u, .vector_flt, .vector_fle => true,
+        else => false,
+    };
+}
+
+pub fn isVectorReduction(op: Op) bool {
+    return op == .vector_any_true or op == .vector_all_true or op == .vector_bitmask;
 }
 
 pub fn mayTrap(op: Op) bool {
@@ -540,4 +574,5 @@ test {
     _ = @import("control_test.zig");
     _ = @import("vector_test.zig");
     _ = @import("vector_width_test.zig");
+    _ = @import("vector_predicate_test.zig");
 }

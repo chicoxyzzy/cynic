@@ -737,7 +737,7 @@ src/runtime/jit/            shared substrate (new)
                             per-code free; one region per Engine
   asm_aarch64.zig           encoder
   asm_x86_64.zig            encoder
-  simd_x86_64.zig           SSE2 width-changing sequences shared by Spasm
+  simd_x86_64.zig           SSE2 width changes, comparisons, and reductions shared by Spasm
                             and the optimizing backend
   masm.zig                  AArch64 facade used by mature Spasm lowering
 src/runtime/bistromath/     T1 JS baseline (per AGENTS.md repo map)

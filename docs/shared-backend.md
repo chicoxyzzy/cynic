@@ -143,7 +143,8 @@ physical 64-bit words through one result-list model; references and vectors use 
 The backend also has native v128 values, full-width memory accesses, bitwise
 operations, lane-wise addition, splats, lane access, shuffles, and swizzles.
 Integer extension, saturating narrowing, and pairwise widening sums are also
-native. The Wasm adapter lowers these and scalar-width/widening vector loads;
+native, as are integer/FP comparisons and Boolean/bitmask reductions.
+The Wasm adapter lowers these and scalar-width/widening vector loads;
 full instruction coverage remains open as detailed below.
 Scalar/reference/vector globals use ordered loads/stores over bounded views.
 The Wasm adapter accepts scalar/reference/vector locals and block/loop/if constructs
@@ -1385,6 +1386,54 @@ runs also match their pre-extraction baselines, including all 6,080 compiled
 functions, so shared-tier coverage cannot hide a regression in the extracted
 SSE2 sequences. These are native-coverage counts, not throughput measurements.
 
+### SIMD comparisons and reductions
+
+All 48 accepted Wasm vector comparisons and all nine Boolean/bitmask reductions
+now lower through the shared backend. Comparisons produce full-width lane masks;
+`vector_any_true`, `vector_all_true`, and `vector_bitmask` produce zero-extended
+`i32` values. `any_true` has no lane interpretation, while `all_true` tests each
+complete integer lane and `bitmask` gathers lane sign bits in lane order.
+In particular, `i64x2.all_true` does not require all four 32-bit words to be
+nonzero. Scalar reduction results also feed ordinary structured branches.
+
+The IR uses equality/inequality, signed/unsigned integer less-than/less-or-equal,
+and ordered FP less-than/less-or-equal operations with existing lane metadata.
+The Wasm adapter swaps operands for greater-than/greater-or-equal forms.
+It never implements an FP ordered comparison by negating another ordered
+comparison, which would turn unordered NaN lanes into true. Equality treats
+positive and negative zero as equal, and inequality is true for unordered lanes.
+These contracts follow the Wasm
+[vector instruction semantics](https://webassembly.github.io/spec/core/exec/instructions.html#vector-instructions)
+and [SIMD comparison/reduction definitions](https://github.com/WebAssembly/spec/blob/main/proposals/simd/SIMD.md).
+[B3's SIMD values](https://github.com/WebKit/WebKit/blob/main/Source/JavaScriptCore/b3/B3SIMDValue.h)
+likewise keep comparisons and reductions as language-neutral operations with
+lane metadata. No ECMAScript or SES surface changes are involved.
+
+AArch64 emits native lane comparisons, whole-lane tests, and weighted sign-bit
+reductions. The SSE2 comparison/reduction sequences are shared with Spasm in
+`jit/simd_x86_64.zig`. Integer 64-bit comparisons use native scalar comparisons
+and reconstruct full qword masks without SSE4.1/SSE4.2 instructions; temporary
+GP/vector registers stay outside allocated homes. FP comparisons use the
+existing native-entry FP-state protection, including subnormal handling and
+restoration of exception flags after signaling-NaN comparisons.
+
+Direct tests exercise every allocation/optimization combination, retained
+scalar/vector inputs, mixed-lane CSE identities, result types, and invalid lane
+metadata. Integration tests compare independent scalar oracles with Sarcasm,
+forced Spasm, and forced shared-native entry for every accepted comparison and
+reduction, including every sign-bit position, all 128 any-true input bits,
+signedness boundaries, whole-qword cases, NaNs, infinities, signed zeros, and
+subnormals. Raw installed-entry tests additionally use unusual host FP controls;
+the public invocation wrapper cannot conceal a native-entry failure.
+
+The same 232 manifests retain 61,051 passes, 1,370 skips, and no failures on
+AArch64 and x86-64, with exact per-manifest agreement in shared-only,
+shared-plus-Spasm, and Spasm-only modes. Shared compilation increases by 197
+functions to 5,568 (5,569 in mixed-tier runs); refusals fall from 753 to 556.
+Spasm-only compilation and entry/refusal counts remain unchanged after the
+SSE2 extraction. This measures native coverage, not a throughput improvement
+or completion of SIMD.
+
 ### Production completion checklist
 
 The active objective is a fully functional shared backend for Cynic's JS and
@@ -1449,6 +1498,7 @@ failures, but is not evidence that an unimplemented backend capability works.
    SIMD constants, full-width and scalar-width vector memory, bitwise operations,
    lane-wise additions, splats, lane access, shuffles, swizzles, integer width
    changes, pairwise widening sums, and widening loads now lower natively.
+   Integer/FP comparisons and Boolean/bitmask reductions also lower natively.
    Continue with the remaining SIMD operations,
    exception handling, native linking,
    and production integration. Preserve bounds checks,
