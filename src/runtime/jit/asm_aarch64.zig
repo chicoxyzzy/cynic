@@ -716,7 +716,30 @@ pub fn strbImm(rt: Reg, rn: Reg, imm12: u12) u32 {
 /// pairs with a host thread's release-store before generated code calls the
 /// embedding's full execution poll.
 pub fn ldarb(rt: Reg, rn: Reg) u32 {
-    return 0x08DFFC00 | (r(rn) << 5) | r(rt);
+    return atomicLoad(rt, rn, .byte, false);
+}
+
+pub const AtomicWidth = enum(u2) { byte, half, word, double };
+
+pub fn atomicLoad(rt: Reg, rn: Reg, width: AtomicWidth, exclusive: bool) u32 {
+    return (if (exclusive) @as(u32, 0x085FFC00) else @as(u32, 0x08DFFC00)) |
+        (@as(u32, @backingInt(width)) << 30) | (r(rn) << 5) | r(rt);
+}
+
+pub fn atomicStore(rt: Reg, rn: Reg, width: AtomicWidth) u32 {
+    return 0x089FFC00 | (@as(u32, @backingInt(width)) << 30) | (r(rn) << 5) | r(rt);
+}
+
+pub fn storeReleaseExclusive(status: Reg, rt: Reg, rn: Reg, width: AtomicWidth) u32 {
+    return 0x0800FC00 | (@as(u32, @backingInt(width)) << 30) | (r(status) << 16) | (r(rn) << 5) | r(rt);
+}
+
+pub fn dmbIsh() u32 {
+    return 0xD5033BBF;
+}
+
+pub fn clrex() u32 {
+    return 0xD5033F5F;
 }
 
 /// LDR Wt, [Xn, Xm] — 32-bit load from base Xn + register offset Xm

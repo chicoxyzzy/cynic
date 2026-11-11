@@ -238,6 +238,7 @@ fn markValues(live: []bool, values: []const ir.Value) void {
 fn markInputs(live: []bool, node: ir.Node) void {
     if (ir.inputCount(node.op) >= 1) live[node.lhs] = true;
     if (ir.inputCount(node.op) == 2) live[node.rhs] = true;
+    if (node.expected) |expected| live[expected] = true;
     if (node.exit) |side_exit| markValues(live, side_exit.values);
     if (node.call) |call| {
         markValues(live, call.arguments);
@@ -259,6 +260,7 @@ fn remapInputs(a: std.mem.Allocator, original: ir.Node, map: []const ir.Value) !
     var node = original;
     if (ir.inputCount(node.op) >= 1) node.lhs = map[node.lhs];
     if (ir.inputCount(node.op) == 2) node.rhs = map[node.rhs];
+    if (node.expected) |expected| node.expected = map[expected];
     if (node.exit) |side_exit| node.exit = .{ .id = side_exit.id, .values = try remapValues(a, side_exit.values, map) };
     if (node.call) |call| node.call = try remapCall(a, call, map, false);
     return node;

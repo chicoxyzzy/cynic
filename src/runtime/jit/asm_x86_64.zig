@@ -87,6 +87,40 @@ pub const Masm = struct {
         self.* = undefined;
     }
 
+    pub const AtomicWidth = enum { byte, half, word, double };
+
+    pub fn atomicCompareExchange(self: *Masm, base: Reg, replacement: Reg, width: AtomicWidth) !void {
+        try self.atomicMemory(base, replacement, width, true);
+    }
+
+    pub fn atomicExchange(self: *Masm, base: Reg, value: Reg, width: AtomicWidth) !void {
+        try self.atomicMemory(base, value, width, false);
+    }
+
+    fn atomicMemory(self: *Masm, base: Reg, value: Reg, width: AtomicWidth, compare: bool) !void {
+        if (compare) try self.emitByte(0xf0);
+        if (width == .half) try self.emitByte(0x66);
+        // Always emit REX: byte operands 4..7 must mean SPL..DIL, not AH..BH.
+        try self.emitByte(rex(width == .double, isExtended(value), false, isExtended(base)));
+        if (compare) try self.emitByte(0x0f);
+        try self.emitByte(if (compare) (if (width == .byte) @as(u8, 0xb0) else 0xb1) else (if (width == .byte) @as(u8, 0x86) else 0x87));
+        try self.emitDisp32ModRm(lowBits(value), base, 0);
+    }
+
+    pub fn memoryFence(self: *Masm) !void {
+        try self.code.appendSlice(self.gpa, &.{ 0x0f, 0xae, 0xf0 });
+    }
+
+    pub fn pushReg(self: *Masm, reg: Reg) !void {
+        if (isExtended(reg)) try self.emitByte(0x41);
+        try self.emitByte(0x50 + lowBits(reg));
+    }
+
+    pub fn popReg(self: *Masm, reg: Reg) !void {
+        if (isExtended(reg)) try self.emitByte(0x41);
+        try self.emitByte(0x58 + lowBits(reg));
+    }
+
     /// STMXCSR m32 / LDMXCSR m32 (SSE control and sticky status bits).
     pub fn storeMxcsr(self: *Masm, base: Reg, displacement: i32) error{OutOfMemory}!void {
         try self.mxcsrMemory(3, base, displacement);
