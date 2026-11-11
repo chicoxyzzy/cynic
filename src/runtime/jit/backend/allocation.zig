@@ -57,6 +57,9 @@ pub const Plan = struct {
                         } else plan.assignRegister(value, graph.types[value] == .v128, if (graph.types[value] == .v128) &vectors else &owners);
                     }
                 }
+                if (block.terminator == .invoke) for (block.terminator.invoke.call.results) |value| {
+                    plan.assignRegister(value, graph.types[value] == .v128, if (graph.types[value] == .v128) &vectors else &owners);
+                };
                 // Assign whole-lifetime spills only after register selection, so
                 // evicted intervals get a definition-time home, not a late copy.
                 @memset(spill_ends, null);
@@ -65,6 +68,9 @@ pub const Plan = struct {
                     var outputs = node.outputs();
                     while (outputs.next()) |value| plan.assignSpill(value, graph.types[value].words(), spill_ends);
                 }
+                if (block.terminator == .invoke) for (block.terminator.invoke.call.results) |value| {
+                    plan.assignSpill(value, graph.types[value].words(), spill_ends);
+                };
             }
         }
         try plan.verify(graph);
@@ -104,7 +110,10 @@ pub const Plan = struct {
                     // Recompute the defining node from the verified lifetime;
                     // never trust an allocator-supplied value or a block input.
                     if (actual.start < 2) return error.InvalidAllocation;
-                    const node = graph.blocks[actual.block].nodes[(actual.start - 2) / 2];
+                    const nodes = graph.blocks[actual.block].nodes;
+                    const index = (actual.start - 2) / 2;
+                    if (index >= nodes.len) return error.InvalidAllocation;
+                    const node = nodes[index];
                     if (node.op != .constant or node.immediate != bits or graph.types[i] == .v128) return error.InvalidAllocation;
                 },
             }
@@ -210,6 +219,15 @@ fn computeRanges(graph: ir.Graph, ranges: []LiveRange) void {
                 use(ranges, branch.condition, terminal_position);
                 for (branch.taken.args) |value| use(ranges, value, terminal_position);
                 for (branch.fallthrough.args) |value| use(ranges, value, terminal_position);
+            },
+            .invoke => |invocation| {
+                for (invocation.call.arguments) |value| use(ranges, value, terminal_position);
+                for (invocation.call.safepoint.values) |value| use(ranges, value, terminal_position);
+                for (invocation.call.results) |value| ranges[value] = .{ .block = @intCast(block_index), .start = terminal_position + 1, .end = terminal_position + 1 };
+                // Both edges read after the call, keeping their pre-call homes
+                // live across the callback even when only the handler uses them.
+                for (invocation.normal.args) |value| use(ranges, value, terminal_position + 2);
+                for (invocation.exceptional.args) |value| use(ranges, value, terminal_position + 2);
             },
         }
     }

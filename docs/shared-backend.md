@@ -1002,9 +1002,9 @@ does not close the production completion checklist or change the opt-in policy.
 
 ## Runtime calls and root snapshots
 
-`call` is an ordered read/write/trapping safepoint with an explicit scalar
+`call` is an ordered read/write/trapping safepoint with an explicit scalar/vector
 signature, symbolic frontend target, source site, and root-snapshot ID/values.
-It supports up to 64 scalar arguments, results, and captures. The
+Arguments, results, and captures each fit 64 physical words (two for `v128`). The
 verifier checks all argument/result types and capture availability; optimization
 retains even unused or void calls and remaps their inputs, outputs, and captures.
 
@@ -1046,6 +1046,47 @@ mutating either instance. These prototype bounds are not a production fuel
 cost model; host callbacks remain trusted and cooperative. Native
 shared-backend callee linking and
 complete JS/Wasm exception integration remain open.
+
+### Exceptional call edges
+
+`Terminator.invoke` makes both normal and exceptional successors explicit.
+It uses the same typed call signature, source site, and safepoint snapshot as
+`call`. The verifier checks the exceptional edge before defining call results,
+so a handler cannot observe partial or failed results. Both successors may
+forward pre-call values; allocation keeps those homes live across the call,
+including scalar/vector register banks and spills. CSE/DCE remap and retain
+the call, captures, results, and both edge argument lists.
+
+An optional frontend `Runtime.catch_exception(context, request, error)` hook
+classifies a failed invoke. Returning true means the frontend has prepared
+its exception state and generated code may enter the handler; false propagates
+the original error. A classifier error propagates instead. Ordinary calls do
+not invoke this hook. The hook receives the same borrowed request and root
+snapshot as the call, with no valid result values. It must root captures and
+any pending exception before allocation or language re-entry, just as the
+call callback must. JS values, Wasm tags/payloads, catch ordering, and
+catchability policy remain frontend-owned; the backend does not equate Zig
+errors, resource termination, or Wasm traps with language exceptions.
+
+Native code uses status returns, not stack unwinding through generated frames.
+Both resumable paths restore strict FP controls and live register homes, but
+only the normal path publishes results. Final failures restore the original
+host FP state. Handler backedges use the existing execution-controller polls
+and block-budget rules. Memory descriptors refreshed by either callback remain
+invocation-owned and visible to the successor.
+
+Prior art: Cranelift's
+[`try_call`](https://docs.rs/cranelift-codegen/latest/cranelift_codegen/ir/trait.InstBuilder.html#method.try_call)
+separates return/exception edges and leaves tag meaning to the embedder;
+[B3 terminal patchpoints](https://webkit.org/docs/b3/intermediate-representation.html)
+also make custom successor control flow explicit. Cynic uses its existing
+status-return runtime boundary instead of adding an unwind ABI. This is the
+shared substrate for [Core exception handling](https://webassembly.github.io/spec/core/exec/instructions.html#exception-handling)
+and ECMA-262
+[14.15.3 TryStatement evaluation](https://tc39.es/ecma262/multipage/ecmascript-language-statements-and-declarations.html#sec-try-statement-runtime-semantics-evaluation),
+not their complete frontend implementation. Wasm handler/tag/payload lowering,
+Ohaimark exception/frame integration, and production qualification remain open.
+No test262 scoring or SES policy changes follow from this IR operation.
 
 The initial runtime-call checks covered caller-saved values, duplicate captures,
 every scalar result type, void effects, nested entry, stack exhaustion,
@@ -1591,7 +1632,7 @@ open; a passing demo or unchanged production test262 run does not close them.
   implemented; production integration and qualification remain below.
 - [ ] Model memory, calls, traps, safepoints, and ordered effects in the IR and
   verifier before optimizing them; preserve aliasing, atomics, and trap order.
-  Bounded scalar memory, runtime calls, root snapshots, and conservative effects
+  Bounded scalar memory, runtime calls with explicit exceptional edges, root snapshots, and conservative effects
   are implemented; atomic/fence semantics and complete frontend integration remain.
 - [ ] Support the accepted Wasm control/signature surface, memory and growth,
   tables/references, calls/imports, globals, SIMD, and exception behavior through

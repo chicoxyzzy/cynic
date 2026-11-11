@@ -14,16 +14,19 @@ pub const enter_stores = 2;
 pub const leave_loads = if (is_x86) 1 else 2;
 
 pub fn required(graph: ir.Graph) bool {
-    for (graph.blocks) |block| for (block.nodes) |node| {
-        if (ir.isFloatOp(node.op) or ir.isNumericConversion(node.op) or node.op == .call) return true;
-        if (node.vector_lane == .f32x4 or node.vector_lane == .f64x2) return true;
-        // NEON saturating integer instructions update FPSR.QC without any FP
-        // values. The caller's sticky saturation flag must not leak or change.
-        if (!is_x86) switch (node.op) {
-            .vector_narrow_s, .vector_narrow_u, .vector_add_sat_s, .vector_add_sat_u, .vector_sub_sat_s, .vector_sub_sat_u, .vector_dot_sat_s, .vector_q15mulr_sat_s => return true,
-            else => {},
-        };
-    };
+    for (graph.blocks) |block| {
+        if (block.terminator == .invoke) return true;
+        for (block.nodes) |node| {
+            if (ir.isFloatOp(node.op) or ir.isNumericConversion(node.op) or node.op == .call) return true;
+            if (node.vector_lane == .f32x4 or node.vector_lane == .f64x2) return true;
+            // NEON saturating integer instructions update FPSR.QC without any FP
+            // values. The caller's sticky saturation flag must not leak or change.
+            if (!is_x86) switch (node.op) {
+                .vector_narrow_s, .vector_narrow_u, .vector_add_sat_s, .vector_add_sat_u, .vector_sub_sat_s, .vector_sub_sat_u, .vector_dot_sat_s, .vector_q15mulr_sat_s => return true,
+                else => {},
+            };
+        }
+    }
     return false;
 }
 

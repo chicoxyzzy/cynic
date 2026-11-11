@@ -287,6 +287,9 @@ pub const OutputIterator = struct {
     }
 };
 pub const Edge = struct { target: u32, args: []const Value };
+/// The frontend owns exception state and catchability. Call results are only
+/// available to the normal successor; the exceptional edge uses pre-call values.
+pub const Invoke = struct { site: u32, call: Call, normal: Edge, exceptional: Edge };
 pub const Terminator = union(enum) {
     trap: Trap,
     /// Unconditional transfer to an opaque frontend-owned continuation.
@@ -294,6 +297,7 @@ pub const Terminator = union(enum) {
     return_: []const Value,
     jump: Edge,
     branch: struct { condition: Value, taken: Edge, fallthrough: Edge },
+    invoke: Invoke,
 };
 pub const Block = struct {
     params: []const Value,
@@ -344,18 +348,9 @@ pub const Graph = struct {
                 }
                 if (node.exit != null) return error.InvalidGraph;
                 if (node.call) |call| {
-                    if (call.arguments.len > max_arguments or call.results.len > max_arguments or call.result_types.len > max_arguments or call.safepoint.values.len > max_arguments) return error.PrototypeLimit;
-                    if (node.out != null or call.arguments.len != call.parameter_types.len or call.results.len != call.result_types.len) return error.InvalidGraph;
-                    for (call.arguments, call.parameter_types) |value, ty| {
-                        try self.use(value, &available);
-                        if (self.types[value] != ty) return error.InvalidGraph;
-                    }
-                    for (call.safepoint.values) |value| try self.use(value, &available);
-                    for (call.results, call.result_types) |out, ty| {
-                        try self.define(out, &defined, &available);
-                        if (self.types[out] != ty) return error.InvalidGraph;
-                    }
-                    if (wordCount(call.parameter_types) > max_arguments or wordCount(call.result_types) > max_arguments or self.valueWords(call.safepoint.values) > max_arguments) return error.PrototypeLimit;
+                    if (node.out != null) return error.InvalidGraph;
+                    try self.verifyCallInputs(call, &available);
+                    try self.defineCallResults(call, &defined, &available);
                     continue;
                 }
                 if (node.memory) |access| {
@@ -475,6 +470,12 @@ pub const Graph = struct {
                     try self.verifyEdge(branch.taken, &available);
                     try self.verifyEdge(branch.fallthrough, &available);
                 },
+                .invoke => |invocation| {
+                    try self.verifyCallInputs(invocation.call, &available);
+                    try self.verifyEdge(invocation.exceptional, &available);
+                    try self.defineCallResults(invocation.call, &defined, &available);
+                    try self.verifyEdge(invocation.normal, &available);
+                },
             }
         }
         for (defined[0..self.types.len]) |present| if (!present) return error.InvalidGraph;
@@ -484,6 +485,24 @@ pub const Graph = struct {
         if (value >= self.types.len or defined[value]) return error.InvalidGraph;
         defined[value] = true;
         available[value] = true;
+    }
+
+    fn verifyCallInputs(self: Graph, call: Call, available: *const [max_values]bool) !void {
+        if (call.arguments.len > max_arguments or call.results.len > max_arguments or call.result_types.len > max_arguments or call.safepoint.values.len > max_arguments) return error.PrototypeLimit;
+        if (call.arguments.len != call.parameter_types.len or call.results.len != call.result_types.len) return error.InvalidGraph;
+        for (call.arguments, call.parameter_types) |value, ty| {
+            try self.use(value, available);
+            if (self.types[value] != ty) return error.InvalidGraph;
+        }
+        for (call.safepoint.values) |value| try self.use(value, available);
+        if (wordCount(call.parameter_types) > max_arguments or wordCount(call.result_types) > max_arguments or self.valueWords(call.safepoint.values) > max_arguments) return error.PrototypeLimit;
+    }
+
+    fn defineCallResults(self: Graph, call: Call, defined: *[max_values]bool, available: *[max_values]bool) !void {
+        for (call.results, call.result_types) |out, ty| {
+            try self.define(out, defined, available);
+            if (self.types[out] != ty) return error.InvalidGraph;
+        }
     }
 
     /// Only call after validating every value ID.
@@ -665,6 +684,7 @@ test {
     _ = @import("fp_environment_test.zig");
     _ = @import("memory_test.zig");
     _ = @import("call_test.zig");
+    _ = @import("invoke_test.zig");
     _ = @import("results_test.zig");
     _ = @import("control_test.zig");
     _ = @import("vector_test.zig");
