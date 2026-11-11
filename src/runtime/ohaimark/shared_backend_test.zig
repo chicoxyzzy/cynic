@@ -167,9 +167,11 @@ test "shared Ohaimark Number backend: mixed arithmetic preserves IEEE values and
         .{ Value.fromDouble(1.5), Value.fromInt32(2) },
         .{ Value.fromInt32(-7), Value.fromDouble(2.5) },
         .{ Value.fromDouble(-0.0), Value.fromDouble(0.0) },
+        .{ Value.fromDouble(-0.0), Value.fromDouble(-0.0) },
         .{ Value.fromDouble(0.0), Value.fromInt32(-1) },
         .{ Value.fromDouble(0.0), Value.fromDouble(0.0) },
         .{ Value.fromDouble(std.math.inf(f64)), Value.fromDouble(std.math.inf(f64)) },
+        .{ Value.fromDouble(std.math.inf(f64)), Value.fromDouble(-std.math.inf(f64)) },
         .{ Value.fromDouble(-std.math.inf(f64)), Value.fromDouble(0.0) },
         .{ Value.fromDouble(std.math.nan(f64)), Value.fromInt32(1) },
         .{ Value.fromDouble(0x1.fffffffffffffp1023), Value.fromDouble(2.0) },
@@ -197,6 +199,37 @@ test "shared Ohaimark Number backend: mixed arithmetic preserves IEEE values and
                 try std.testing.expectEqual(expected.bits, result.returned.bits);
                 try std.testing.expect(result.returned.isNumber());
             }
+        }
+    }
+}
+
+test "shared Ohaimark Number backend: seeded mixed values match the arithmetic oracle" {
+    if (!shared.supported) return error.SkipZigTest;
+    var owner = try shared.CodeAllocator.init(a, 256 * 1024);
+    defer owner.deinit();
+    for ([_]Op{ .add, .sub, .mul, .div }) |op| {
+        var chunk = try binaryChunk(op);
+        defer chunk.deinit(a);
+        var program = try shared.Program.buildWithOptions(a, &owner, &chunk, .{ .register_count = 1 });
+        defer program.deinit();
+        var prng = std.Random.DefaultPrng.init(0x4e756d626572);
+        const random = prng.random();
+        for (0..128) |i| {
+            const lhs = Value.fromDouble(@bitCast(random.int(u64)));
+            const rhs = if (i % 2 == 0) Value.fromInt32(random.int(i32)) else Value.fromDouble(@bitCast(random.int(u64)));
+            const x = lhs.numberToDouble();
+            const y = rhs.numberToDouble();
+            const expected = Value.fromDouble(switch (op) {
+                .add => x + y,
+                .sub => x - y,
+                .mul => x * y,
+                .div => x / y,
+                else => unreachable,
+            });
+            var result = try program.run(.{ .accumulator = Value.undefined_, .registers = &.{ lhs, rhs }, .block_budget = 100 });
+            defer result.deinit();
+            try std.testing.expect(result == .returned);
+            try std.testing.expectEqual(expected.bits, result.returned.bits);
         }
     }
 }

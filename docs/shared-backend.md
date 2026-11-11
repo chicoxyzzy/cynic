@@ -565,9 +565,22 @@ code and scratch costs require measurement, not an assumed speedup.
 On the same AArch64 sum-of-squares diagnostic, Number lowering grows optimized
 code from 1,788 to 3,920 bytes and per-call scratch from 568 to 640 bytes;
 the graph grows from 98 to 307 nodes before optimization (190 afterwards).
+The x86_64/macOS diagnostic grows from 2,465 to 4,664 code bytes, with the
+same scratch increase. These x86_64 results are translated execution via Rosetta.
 All five optimization/allocation variants retain exact Lantern results and the
 Int32 loop-overflow recovery. These static costs make conditional fast paths
 and better representation selection important follow-up work before rollout.
+
+Number-lowering qualification on 2026-11-11: AArch64 interpreter and forced
+shared test262 runs have byte-identical full-corpus pass lists (48,653 passes,
+1,324 existing failures), without exclusions or watchdog aborts. Shared mode
+executes 655,160 entries, compiles 43,740 functions, completes 593,743 entries,
+and recovers 61,417 guards; 174,599 pre-entry refusals remain. The expression
+memory preflight's highest reported per-fixture RSS delta is 8 MiB. The final
+39-test shared frontend/runtime suite passes on AArch64 and x86_64/macOS,
+including 512 seeded mixed-number oracle cases with one allocated register.
+The wider native CI, GC/fuzz, and representative performance gates remain
+required; this is not a completed-backend or default-on decision.
 
 A `guard` has no SSA result. A zero predicate captures an ordered list of
 available values and returns an opaque frontend-owned exit ID. The shared
