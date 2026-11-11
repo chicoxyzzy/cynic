@@ -142,7 +142,8 @@ instructions lower through those calls. Functions and calls support zero to 64
 physical 64-bit words through one result-list model; references and vectors use two.
 The backend also has native v128 values, full-width memory accesses, bitwise
 operations, lane-wise addition, splats, lane access, shuffles, and swizzles.
-The Wasm adapter lowers these and scalar-width vector memory forms;
+Integer extension, saturating narrowing, and pairwise widening sums are also
+native. The Wasm adapter lowers these and scalar-width/widening vector loads;
 full instruction coverage remains open as detailed below.
 Scalar/reference/vector globals use ordered loads/stores over bounded views.
 The Wasm adapter accepts scalar/reference/vector locals and block/loop/if constructs
@@ -1318,8 +1319,9 @@ bounded scalar accesses with the lane operations. Each checks exactly 1, 2,
 4, or 8 bytes, retaining the original trap site, offset overflow checks,
 memory32/memory64 selection, and multi-memory identity. Zero loads explicitly
 zero the remaining bits. Lane stores leave every other memory byte untouched.
-Widening loads and the remaining arithmetic/conversion SIMD families are
-still pending; this is not completion of SIMD or the production checklist.
+Widening loads are covered by the next section. The remaining
+arithmetic/conversion SIMD families are still pending; this is not completion
+of SIMD or the production checklist.
 
 Direct tests cover every allocation/optimization switch, live GP/vector homes,
 both shuffle-mask words in CSE, and malformed IR. Wasm integration tests require
@@ -1334,6 +1336,54 @@ modes: 61,051 passes and 1,370 skips. Shared-only compilation rises from 4,867
 to 5,269 functions; refusals fall from 1,257 to 855. Mixed-tier runs compile
 5,270 functions through the shared backend. These measure expanded native
 coverage, not a performance win or complete SIMD coverage.
+
+### SIMD integer width changes
+
+The IR now has signed/unsigned `vector_extend`, `vector_narrow`, and
+`vector_pairwise_add` operations. Extension's lane metadata describes the source
+width (8, 16, or 32 bits), and immediate 0/1 selects the low/high input half.
+Narrowing's lane metadata describes the destination width (8 or 16 bits);
+the two inputs are narrowed and concatenated in operand order. Pairwise sums
+extend adjacent 8/16-bit lanes before adding into 16/32-bit results. The verifier
+rejects unsupported widths, floating lane metadata, and invalid half selectors;
+CSE retains the selected half and signedness.
+
+The signed-source rule for both narrowing variants follows the Wasm
+[numeric narrowing definitions](https://webassembly.github.io/spec/core/exec/numerics.html#op-narrow):
+unsigned narrowing clamps negative input lanes to zero, rather than treating
+their bit patterns as large unsigned inputs. This fits the existing
+[B3 SIMD metadata boundary](https://github.com/WebKit/WebKit/blob/main/Source/JavaScriptCore/b3/B3SIMDValue.h)
+without importing Wasm opcodes into the shared IR.
+
+AArch64 uses native widening, saturating narrowing, and pairwise-add
+instructions. Integer-only narrowing now enables the native FP-state save and
+restore path: NEON saturation changes FPSR.QC even without floating-point
+operands. Direct native-entry tests caught and now guard preservation of both
+clear and already-set caller flags on returns and side exits. SSE2 narrowing
+does not change MXCSR and does not pay for that extra state handling.
+
+The x86-64 sequences live in `src/runtime/jit/simd_x86_64.zig`, shared with
+Spasm rather than duplicated in two tiers. They retain the SSE2 baseline and
+use only documented temporary registers outside the backend's allocated
+homes. Unsigned 32-to-16 narrowing clamps negatives, applies a bias, uses
+signed packing, then removes the bias; no SSE4.1-only PACKUSDW is assumed.
+
+All six Wasm widening loads compose an exactly eight-byte scalar load with
+native extension. They do not read sixteen bytes just because the result is a
+vector. Integration tests compare Sarcasm, forced Spasm, and forced shared
+native execution across signedness and half-selection boundaries, saturation
+limits, pairwise overflow cases, memory32/memory64 and multi-memory selection,
+memory-end accesses, offset overflow, original trap sites, and suppressed
+post-trap effects. Direct IR tests run every allocation/optimization mode with
+live scalar/vector homes. No default policy or JS/SES surface changes.
+
+The 232-manifest corpus remains identical per manifest to the lane-operation
+baseline on AArch64 and x86-64: 61,051 passing commands, 1,370 skips, no failures.
+Shared-only and mixed-tier runs compile 102 more functions (5,371 and 5,372
+respectively), reducing shared-backend refusals from 855 to 753. Spasm-only
+runs also match their pre-extraction baselines, including all 6,080 compiled
+functions, so shared-tier coverage cannot hide a regression in the extracted
+SSE2 sequences. These are native-coverage counts, not throughput measurements.
 
 ### Production completion checklist
 
@@ -1397,8 +1447,9 @@ failures, but is not evidence that an unimplemented backend capability works.
    Function and call signatures support void and multiple logical results.
    Proper tail calls use the tier-neutral terminal-exit handoff described above.
    SIMD constants, full-width and scalar-width vector memory, bitwise operations,
-   lane-wise additions, splats, lane access, shuffles, and swizzles now lower
-   natively. Continue with the remaining SIMD operations,
+   lane-wise additions, splats, lane access, shuffles, swizzles, integer width
+   changes, pairwise widening sums, and widening loads now lower natively.
+   Continue with the remaining SIMD operations,
    exception handling, native linking,
    and production integration. Preserve bounds checks,
    memory-growth invalidation, resource metering, and executable ownership.

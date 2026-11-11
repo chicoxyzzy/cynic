@@ -701,7 +701,7 @@ same line.
 | Safepoint/interrupt convention (`host_interrupt`, budgets) | **yes** | same atomic, same back-edge discipline |
 | Tiering counter/threshold machinery | **yes** (shape) | constants differ per tier |
 | Disassembler + golden-test harness for emitters | **yes** | substrate ships with its own tests before any tier uses it |
-| T2 SSA backend | **opt-in Wasm tier; developer JS adapter** | [Typed scalar SSA backend](shared-backend.md) with scalar integer and strict floating-point operations, bounded scalar memory, typed runtime calls with root snapshots, instance-aware Wasm and guarded Int32 Ohaimark frontends, exact Lantern recovery, liveness-aware allocation, cheap-constant rematerialization, and independently switchable folding/CSE/DCE. Wasm supports scalar structured control and void/multi-result signatures; the opt-in instance cache runs through real dispatch with Realm fuel, interruption, and memory accounting. Direct calls still bridge through runtime dispatch. Production Ohaimark and default tier policies remain unchanged. |
+| T2 SSA backend | **opt-in Wasm tier; developer JS adapter** | [Typed SSA backend](shared-backend.md) with scalar integer and strict floating-point operations, native vectors and a growing SIMD subset, bounded memory, typed runtime calls with root snapshots, instance-aware Wasm and guarded Int32 Ohaimark frontends, exact Lantern recovery, liveness-aware allocation, cheap-constant rematerialization, and independently switchable folding/CSE/DCE. Wasm supports scalar/reference/vector structured control and void/multi-result signatures; the opt-in instance cache runs through real dispatch with Realm fuel, interruption, and memory accounting. Direct calls still bridge through runtime dispatch. Production Ohaimark and default tier policies remain unchanged. |
 | Baseline abstract state / "register allocation" | **no** | JS T1 has none (frame-mirrored); wasm T1's operand-stack state machine is its whole compiler. V8 keeps Sparkplug and Liftoff separate above the assembler for exactly this reason. |
 | Frame layout & calling convention | **no** | JS frames are `CallFrame`s with heap register files; wasm frames are native. |
 | Value representation handling | **no** | NaN-boxed `Value` vs raw wasm scalars/cells. |
@@ -737,6 +737,8 @@ src/runtime/jit/            shared substrate (new)
                             per-code free; one region per Engine
   asm_aarch64.zig           encoder
   asm_x86_64.zig            encoder
+  simd_x86_64.zig           SSE2 width-changing sequences shared by Spasm
+                            and the optimizing backend
   masm.zig                  AArch64 facade used by mature Spasm lowering
 src/runtime/bistromath/     T1 JS baseline (per AGENTS.md repo map)
   bistromath.zig            target-neutral one-pass compiler

@@ -17,6 +17,9 @@ pub fn required(graph: ir.Graph) bool {
     for (graph.blocks) |block| for (block.nodes) |node| {
         if (ir.isFloatOp(node.op) or ir.isNumericConversion(node.op) or node.op == .call) return true;
         if (node.vector_lane == .f32x4 or node.vector_lane == .f64x2) return true;
+        // NEON saturating integer instructions update FPSR.QC without any FP
+        // values. The caller's sticky saturation flag must not leak or change.
+        if (!is_x86 and (node.op == .vector_narrow_s or node.op == .vector_narrow_u)) return true;
     };
     return false;
 }

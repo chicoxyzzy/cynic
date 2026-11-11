@@ -74,7 +74,7 @@ test "backend SIMD lanes: verifier rejects invalid lane types indices and shuffl
     try std.testing.expectError(error.InvalidGraph, graph.verify());
 }
 
-fn check(graph: ir.Graph, args: []const u64, expected: []const u64, runtime: ?native.Runtime) !void {
+pub fn check(graph: ir.Graph, args: []const u64, expected: []const u64, runtime: ?native.Runtime) !void {
     if (!native.supported) return error.SkipZigTest;
     var owner = try CodeAllocator.init(a, 256 * 1024);
     defer owner.deinit();
