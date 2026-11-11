@@ -3,6 +3,21 @@ const wasm = @import("wasm.zig");
 const a = std.testing.allocator;
 const prototype = wasm.backend_prototype;
 
+fn appendRefusalPrefix(allocator: std.mem.Allocator, body: *std.ArrayList(u8)) !void {
+    // Exceed the shared SSA value budget while Spasm folds each discarded
+    // constant. Tier-transition tests must not depend on a missing opcode.
+    for (0..prototype.ir.max_values) |_| try body.appendSlice(allocator, &.{ 0x41, 0, 0x1a });
+}
+
+fn spasmOnlyBody(allocator: std.mem.Allocator, suffix: []const u8) ![]const u8 {
+    var body: std.ArrayList(u8) = .empty;
+    errdefer body.deinit(allocator);
+    try body.append(allocator, 0);
+    try appendRefusalPrefix(allocator, &body);
+    try body.appendSlice(allocator, suffix);
+    return body.toOwnedSlice(allocator);
+}
+
 fn expectResult(instance: *wasm.Instance, index: u32, args: []const u128, expected: []const u128) !void {
     const result = try wasm.invoke(instance, a, index, args);
     defer a.free(result);
@@ -53,7 +68,7 @@ test "backend tail calls: alternating shared and Spasm entries use one trampolin
         .funcs = &.{ 0, 0 },
         .code = &.{
             .{ .bytes = &.{ 0, 0x20, 0, 0x45, 0x04, 0x7f, 0x41, 42, 0x05, 0x20, 0, 0x41, 1, 0x6b, 0x12, 1, 0x0b, 0x0b } },
-            .{ .bytes = &.{ 0, 0xfd, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xfd, 103, 0x1a, 0x20, 0, 0x12, 0, 0x0b } },
+            .{ .bytes = try spasmOnlyBody(arena.allocator(), &.{ 0x20, 0, 0x12, 0, 0x0b }) },
         },
     };
     var instance: wasm.Instance = undefined;
@@ -69,6 +84,7 @@ test "backend tail calls: alternating shared and Spasm entries use one trampolin
     try std.testing.expectEqual(@as(u64, 10001), instance.shared_backend_stats.entries);
     try std.testing.expectEqual(@as(u32, 10000), instance.spasm_runs);
     try std.testing.expectEqual(@as(u64, 1), instance.shared_backend_stats.refusals);
+    try std.testing.expectEqual(@as(anyerror, error.PrototypeLimit), instance.shared_backend_stats.last_refusal.?);
     try std.testing.expect(control.max_sp - control.min_sp < 32 * 1024);
 }
 
@@ -420,9 +436,7 @@ test "backend tail calls: full physical arity preserves reordered arguments and 
         try caller.append(arena.allocator(), 0);
         try callee.append(arena.allocator(), 0);
         if (fallback) {
-            try callee.appendSlice(arena.allocator(), &.{ 0xfd, 12 });
-            try callee.appendNTimes(arena.allocator(), 0, 16);
-            try callee.appendSlice(arena.allocator(), &.{ 0xfd, 103, 0x1a });
+            try appendRefusalPrefix(arena.allocator(), &callee);
         }
         var args: [params.len]u128 = undefined;
         var expected: [params.len]u128 = undefined;
@@ -513,7 +527,7 @@ test "backend tail calls: dormant controllers wake between shared and mixed-tier
             .funcs = if (mixed) &.{ 0, 0 } else &.{0},
             .code = if (mixed) &.{
                 .{ .bytes = &.{ 0, 0x20, 0, 0x12, 1, 0x0b } },
-                .{ .bytes = &.{ 0, 0xfd, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xfd, 103, 0x1a, 0x20, 0, 0x12, 0, 0x0b } },
+                .{ .bytes = try spasmOnlyBody(arena.allocator(), &.{ 0x20, 0, 0x12, 0, 0x0b }) },
             } else &.{.{ .bytes = &.{ 0, 0x20, 0, 0x12, 0, 0x0b } }},
         };
         var instance: wasm.Instance = undefined;

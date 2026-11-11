@@ -740,6 +740,7 @@ src/runtime/jit/            shared substrate (new)
   simd_x86_64.zig           SSE2 width changes, comparisons, and reductions shared by Spasm
   simd_integer_x86_64.zig   SSE2 integer arithmetic, shifts, min/max, and popcount shared by Spasm
   simd_products_x86_64.zig  SSE2 extended products, dot products, and Q15 rounding shared by Spasm
+  simd_float_x86_64.zig     SSE2 floating arithmetic and min/max shared by Spasm
                             and the optimizing backend
   masm.zig                  AArch64 facade used by mature Spasm lowering
 src/runtime/bistromath/     T1 JS baseline (per AGENTS.md repo map)

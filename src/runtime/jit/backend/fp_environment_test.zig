@@ -95,6 +95,61 @@ const Probe = struct {
 
 const Observation = struct { before: State, after: State, status: u32, result: [2]u64, captures: [ir.max_arguments]u64 };
 
+test "backend SIMD float: raw native returns and exits preserve host state and strict results" {
+    if (!native.supported) return error.SkipZigTest;
+    const cases = @import("vector_float_test.zig");
+    var owner = try code_alloc.CodeAllocator.init(a, 256 * 1024);
+    defer owner.deinit();
+    var probe = try Probe.init(&owner);
+    defer probe.deinit();
+    for (cases.ops) |op| for ([_]ir.VectorLane{ .f32x4, .f64x2 }) |lane| for ([_]bool{ false, true }) |side_exit| for ([_]u8{ 0, 4 }) |registers| {
+        if (!cases.valid(op, lane)) continue;
+        const values = cases.sample(op, lane);
+        const graph: ir.Graph = .{ .types = &.{ .v128, .v128, .v128 }, .argument_types = &.{ .v128, .v128 }, .result_types = &.{.v128}, .blocks = &.{.{ .params = &.{ 0, 1 }, .nodes = &.{.{ .op = op, .out = 2, .lhs = 0, .rhs = if (ir.inputCount(op) == 2) 1 else 0, .vector_lane = lane }}, .terminator = if (side_exit) .{ .exit = .{ .id = 9, .values = &.{2} } } else .{ .return_ = &.{2} } }} };
+        var code = try native.compileWithOptions(a, &owner, graph, .{ .register_count = registers });
+        defer code.deinit();
+        for (0..4) |rounding| {
+            const observed = try observe(&probe, &code, probe.unusual(@intCast(rounding)), &.{ @truncate(values.lhs), @truncate(values.lhs >> 64), @truncate(values.rhs), @truncate(values.rhs >> 64) }, 1);
+            try std.testing.expectEqual(@as(u32, if (side_exit) 2 else 0), observed.status);
+            try std.testing.expectEqualDeep(observed.before, observed.after);
+            const expected = [_]u64{ @truncate(values.result), @truncate(values.result >> 64) };
+            try std.testing.expectEqualSlices(u64, &expected, if (side_exit) observed.captures[0..2] else &observed.result);
+        }
+    };
+}
+
+test "backend SIMD float: subnormals and conversion boundaries ignore host modes" {
+    if (!native.supported) return error.SkipZigTest;
+    const Case = struct { op: ir.Op, lane: ir.VectorLane, lhs: u128, rhs: u128 = 0, result: u128 };
+    const cases = [_]Case{
+        .{ .op = .vector_fmul, .lane = .f32x4, .lhs = 1, .rhs = 0x40000000, .result = 2 },
+        .{ .op = .vector_fmul, .lane = .f64x2, .lhs = 1, .rhs = 0x4000000000000000, .result = 2 },
+        .{ .op = .vector_fdiv, .lane = .f32x4, .lhs = 3, .rhs = 0x4000000040000000_4000000040000000, .result = 2 },
+        .{ .op = .vector_fdiv, .lane = .f64x2, .lhs = 3, .rhs = 0x4000000000000000_4000000000000000, .result = 2 },
+        .{ .op = .vector_promote_f32, .lane = .f32x4, .lhs = 1, .result = 0x36a0000000000000 },
+        .{ .op = .vector_demote_f64, .lane = .f64x2, .lhs = 0x36a0000000000000, .result = 1 },
+        .{ .op = .vector_convert_u, .lane = .f32x4, .lhs = 0x01000001, .result = 0x4b800000 },
+        .{ .op = .vector_trunc_sat_s, .lane = .f64x2, .lhs = 0x7ff0000000000000, .result = 0x7fffffff },
+        .{ .op = .vector_trunc_sat_u, .lane = .f32x4, .lhs = 0x7f800042, .result = 0 },
+    };
+    var owner = try code_alloc.CodeAllocator.init(a, 256 * 1024);
+    defer owner.deinit();
+    var probe = try Probe.init(&owner);
+    defer probe.deinit();
+    for (cases) |case| for ([_]bool{ false, true }) |side_exit| {
+        const graph: ir.Graph = .{ .types = &.{ .v128, .v128, .v128 }, .argument_types = &.{ .v128, .v128 }, .result_types = &.{.v128}, .blocks = &.{.{ .params = &.{ 0, 1 }, .nodes = &.{.{ .op = case.op, .out = 2, .lhs = 0, .rhs = if (ir.inputCount(case.op) == 2) 1 else 0, .vector_lane = case.lane }}, .terminator = if (side_exit) .{ .exit = .{ .id = 9, .values = &.{2} } } else .{ .return_ = &.{2} } }} };
+        var code = try native.compileWithOptions(a, &owner, graph, .{});
+        defer code.deinit();
+        for (0..4) |rounding| {
+            const observed = try observe(&probe, &code, probe.unusual(@intCast(rounding)), &.{ @truncate(case.lhs), @truncate(case.lhs >> 64), @truncate(case.rhs), @truncate(case.rhs >> 64) }, 1);
+            try std.testing.expectEqualDeep(observed.before, observed.after);
+            try std.testing.expectEqual(@as(u32, if (side_exit) 2 else 0), observed.status);
+            const expected = [_]u64{ @truncate(case.result), @truncate(case.result >> 64) };
+            try std.testing.expectEqualSlices(u64, &expected, if (side_exit) observed.captures[0..2] else &observed.result);
+        }
+    };
+}
+
 test "backend SIMD predicates: native comparisons ignore flushing and restore host status" {
     if (!native.supported) return error.SkipZigTest;
     var owner = try code_alloc.CodeAllocator.init(a, 256 * 1024);

@@ -1230,10 +1230,32 @@ fn vectorOperation(sub: u32) ?VectorOperation {
     if (simd.roundingAverageWidth(sub)) |width| return .{ .op = .vector_avgr_u, .lane = integerVectorLane(width) };
     if (simd.integerMinMaxOp(sub)) |operation| return .{ .op = if (operation.maximum) (if (operation.signed) .vector_max_s else .vector_max_u) else (if (operation.signed) .vector_min_s else .vector_min_u), .lane = integerVectorLane(operation.width) };
     if (simd.floatArithmeticOp(sub)) |operation| {
-        if (operation.kind != .add) return null;
-        return .{ .op = .vector_add, .lane = if (operation.double_precision) .f64x2 else .f32x4 };
+        return .{ .op = switch (operation.kind) {
+            .add => .vector_add,
+            .sub => .vector_fsub,
+            .mul => .vector_fmul,
+            .div => .vector_fdiv,
+            .abs => .vector_fabs,
+            .neg => .vector_fneg,
+            .sqrt => .vector_fsqrt,
+        }, .lane = if (operation.double_precision) .f64x2 else .f32x4 };
     }
+    if (simd.floatRoundOp(sub)) |operation| return .{ .op = switch (operation.mode) {
+        .ceil => .vector_fceil,
+        .floor => .vector_ffloor,
+        .trunc => .vector_ftrunc,
+        .nearest => .vector_fnearest,
+    }, .lane = if (operation.double_precision) .f64x2 else .f32x4 };
+    if (simd.floatMinMaxOp(sub)) |operation| return .{ .op = if (operation.maximum) .vector_fmax else .vector_fmin, .lane = if (operation.double_precision) .f64x2 else .f32x4 };
+    if (simd.floatPseudoMinMaxOp(sub)) |operation| return .{ .op = if (operation.maximum) .vector_fpmax else .vector_fpmin, .lane = if (operation.double_precision) .f64x2 else .f32x4 };
+    if (simd.conversionOp(sub)) |operation| return .{ .op = switch (operation.kind) {
+        .convert => if (operation.signed) .vector_convert_s else .vector_convert_u,
+        .trunc_sat => if (operation.signed) .vector_trunc_sat_s else .vector_trunc_sat_u,
+        .promote => .vector_promote_f32,
+        .demote => .vector_demote_f64,
+    }, .lane = if ((if (operation.kind == .convert) operation.output_width else operation.input_width) == 8) .f64x2 else .f32x4 };
     return switch (sub) {
+        261...264 => .{ .op = .vector_fmul, .lane = if (sub >= 263) .f64x2 else .f32x4 },
         274, 275 => .{ .op = .vector_dot_sat_s, .lane = .i8x16 },
         98 => .{ .op = .vector_popcnt, .lane = .i8x16 },
         83 => .{ .op = .vector_any_true },
@@ -1337,11 +1359,22 @@ fn lowerVector(builder: *Builder, nodes: *std.ArrayList(ir.Node), stack: *std.Ar
         return;
     }
     const operation = vectorOperation(inst.simd_opcode) orelse return error.UnsupportedOpcode;
-    const accumulator = if (inst.simd_opcode == 275) stack.pop() orelse return error.InvalidControlFlow else 0;
+    const multiply_add = inst.simd_opcode >= 261 and inst.simd_opcode <= 264;
+    const accumulator = if (inst.simd_opcode == 275 or multiply_add) stack.pop() orelse return error.InvalidControlFlow else 0;
     const rhs = if (ir.inputCount(operation.op) == 2) stack.pop() orelse return error.InvalidControlFlow else 0;
-    const lhs = stack.pop() orelse return error.InvalidControlFlow;
+    var lhs = stack.pop() orelse return error.InvalidControlFlow;
+    if (multiply_add and inst.simd_opcode % 2 == 0) {
+        const negated = try builder.value(.v128);
+        try nodes.append(a, .{ .op = .vector_fneg, .vector_lane = operation.lane, .out = negated, .lhs = lhs });
+        lhs = negated;
+    }
     var out = try builder.value(if (ir.isVectorReduction(operation.op)) .i32 else if (operation.op == .vector_extract) operation.lane.?.scalarType() else .v128);
     try nodes.append(a, .{ .op = operation.op, .vector_lane = operation.lane, .out = out, .lhs = if (operation.reverse) rhs else lhs, .rhs = if (operation.reverse) lhs else rhs, .immediate = if (operation.op == .vector_shuffle) inst.immediate else operation.immediate orelse inst.lane_index, .immediate_hi = if (operation.op == .vector_shuffle) inst.immediate_hi else 0 });
+    if (multiply_add) {
+        const product = out;
+        out = try builder.value(.v128);
+        try nodes.append(a, .{ .op = .vector_add, .vector_lane = operation.lane, .out = out, .lhs = product, .rhs = accumulator });
+    }
     if (inst.simd_opcode == 275) {
         // Keep the existing relaxed profile: signed byte products, saturated
         // i16 pair sums, then signed widening and wrapping i32 accumulation.

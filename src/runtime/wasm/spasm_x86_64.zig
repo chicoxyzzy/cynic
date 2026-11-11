@@ -17,6 +17,7 @@ const x64 = @import("../jit/asm_x86_64.zig");
 const x64_simd = @import("../jit/simd_x86_64.zig");
 const x64_integer = @import("../jit/simd_integer_x86_64.zig");
 const x64_products = @import("../jit/simd_products_x86_64.zig");
+const x64_float = @import("../jit/simd_float_x86_64.zig");
 const code_alloc = @import("../jit/code_alloc.zig");
 const float_ops = @import("float_ops.zig");
 const dead_code = @import("spasm_dead_code.zig");
@@ -2153,9 +2154,8 @@ pub fn compile(
                         const target = scratchOffset(num_locals, sp - 2);
                         try m.loadVector128(.xmm0, .r12, target);
                         try m.loadVector128(.xmm1, .r12, scratchOffset(num_locals, sp - 1));
-                        // SSE selects its second operand on ties/NaNs; reverse.
-                        try m.minMaxPackedFloat128(.xmm1, .xmm0, minmax.double_precision, minmax.maximum);
-                        try m.storeVector128(.r12, target, .xmm1);
+                        try x64_float.minMax(&m, minmax.double_precision, minmax.maximum, true);
+                        try m.storeVector128(.r12, target, .xmm0);
                         sp -= 1;
                         stack[sp - 1] = .v128;
                     },
@@ -2166,7 +2166,7 @@ pub fn compile(
                         try m.loadVector128(.xmm0, .r12, target);
                         try m.loadVector128(.xmm1, .r12, scratchOffset(num_locals, sp - 1));
                         try emitSimdFloatMinMax(&m, minmax);
-                        try m.storeVector128(.r12, target, .xmm2);
+                        try m.storeVector128(.r12, target, .xmm0);
                         sp -= 1;
                         stack[sp - 1] = .v128;
                     },
@@ -3071,23 +3071,14 @@ fn emitSimdConversion(m: *x64.Masm, target: i32, op: simd.ConversionOp) Error!vo
 }
 
 fn emitSimdFloatArithmetic(m: *x64.Masm, op: simd.FloatArithmeticOp) Error!void {
-    if (op.kind == .abs or op.kind == .neg) {
-        // Unlike arithmetic, these sign-bit operations preserve signaling
-        // NaNs and every payload bit. Apply one mask per f32/f64 lane.
-        const sign: u64 = if (op.double_precision) 0x8000000000000000 else 0x8000000080000000;
-        try m.movImm64(.rax, if (op.kind == .abs) ~sign else sign);
-        try m.movQXmmFromReg(.xmm1, .rax);
-        try m.shufflePackedI32(.xmm1, .xmm1, 0x44);
-        if (op.kind == .abs) try m.andPacked128(.xmm0, .xmm1) else try m.xorPacked128(.xmm0, .xmm1);
-        return;
-    }
-    try m.arithmeticPackedFloat128(.xmm0, if (op.kind == .sqrt) .xmm0 else .xmm1, op.double_precision, switch (op.kind) {
+    try x64_float.arithmetic(m, op.double_precision, switch (op.kind) {
+        .abs => .abs,
+        .neg => .neg,
         .sqrt => .sqrt,
         .add => .add,
         .sub => .sub,
         .mul => .mul,
         .div => .div,
-        else => return error.UnsupportedOp,
     });
 }
 
@@ -3126,25 +3117,8 @@ fn emitSimdIntegerUnary(m: *x64.Masm, op: simd.IntegerUnaryOp) Error!x64.Xmm {
     return .xmm0;
 }
 
-/// Inputs are xmm0/xmm1; xmm2/xmm3 are scratch; the result is xmm2.
 fn emitSimdFloatMinMax(m: *x64.Masm, op: simd.FloatMinMaxOp) Error!void {
-    // Core fmin/fmax: SSE picks its second operand on NaN or equal zeros.
-    // Save the NaN mask before combining both orders for signed-zero ties.
-    try m.movVector128(.xmm2, .xmm0);
-    try m.compareUnorderedPackedFloat128(.xmm2, .xmm1, op.double_precision);
-    try m.movVector128(.xmm3, .xmm0);
-    try m.minMaxPackedFloat128(.xmm3, .xmm1, op.double_precision, op.maximum);
-    try m.minMaxPackedFloat128(.xmm1, .xmm0, op.double_precision, op.maximum);
-    if (op.maximum)
-        try m.andPacked128(.xmm3, .xmm1)
-    else
-        try m.orPacked128(.xmm3, .xmm1);
-    // NaN lanes become all ones, then clear their payload below the quiet
-    // bit. Ordered lanes have a zero mask and remain bit-exact, including
-    // subnormals. The resulting negative canonical NaN is allowed by Core.
-    try m.orPacked128(.xmm3, .xmm2);
-    try m.shiftRightLogicalPacked128(.xmm2, if (op.double_precision) 13 else 10, op.double_precision);
-    try m.andNotPacked128(.xmm2, .xmm3);
+    try x64_float.minMax(m, op.double_precision, op.maximum, false);
 }
 
 fn materialize(m: *x64.Masm, loc: Loc, num_locals: usize, depth: usize) Error!void {
