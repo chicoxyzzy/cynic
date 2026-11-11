@@ -145,6 +145,56 @@ test "shared JS backend runtime: ordinary dispatch enters shared code and caches
     try testing.expectEqual(@as(u64, 2), realm.heap.ohaimark_stats.shared_backend.entries);
 }
 
+test "shared JS Number backend runtime: doubles and unordered fused branches complete natively" {
+    if (!driver.supported) return error.SkipZigTest;
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+    realm.ohaimark_enabled = true;
+    realm.ohaimark_shared_backend_enabled = true;
+    realm.ohaimark_threshold_override = 1;
+    var outer = try compileScript(&realm,
+        \\function plus(x) { return x + 1; }
+        \\function bump(x) { x++; return x; }
+        \\function truth(x) { return x ? 11 : 22; }
+        \\function lt(a,b) { if (a < b) return 11; return 22; }
+        \\function le(a,b) { if (a <= b) return 11; return 22; }
+        \\function gt(a,b) { if (a > b) return 11; return 22; }
+        \\function ge(a,b) { if (a >= b) return 11; return 22; }
+    );
+    defer outer.deinit(testing.allocator);
+    _ = try runValue(&realm, &outer);
+    for ([_][]const u8{ "plus", "bump" }) |name| {
+        try testing.expectEqual(Value.fromDouble(2.5).bits, (try callGlobalFunction(&realm, name, &.{Value.fromDouble(1.5)})).bits);
+    }
+    for ([_]f64{ -0.0, 0.0, std.math.nan(f64), 0.25, -std.math.inf(f64) }) |value| {
+        const expected: i32 = if (value != 0 and !std.math.isNan(value)) 11 else 22;
+        try testing.expectEqual(Value.fromInt32(expected).bits, (try callGlobalFunction(&realm, "truth", &.{Value.fromDouble(value)})).bits);
+    }
+    for ([_][]const u8{ "lt", "le", "gt", "ge" }) |name| {
+        var fused = false;
+        const chunk = templateNamed(&outer, name);
+        var pc: usize = 0;
+        while (pc < chunk.code.len) {
+            const op: Op = @fromBackingInt(@intCast(chunk.code[pc]));
+            if (op.branchInfo()) |branch| switch (branch.canonical) {
+                .jmp_if_not_lt, .jmp_if_not_le, .jmp_if_not_gt, .jmp_if_not_ge => fused = true,
+                else => {},
+            };
+            pc += 1 + op.operandSize();
+        }
+        try testing.expect(fused);
+        for ([_][2]Value{
+            .{ Value.fromDouble(std.math.nan(f64)), Value.fromInt32(1) },
+            .{ Value.fromInt32(1), Value.fromDouble(std.math.nan(f64)) },
+        }) |args| try testing.expectEqual(Value.fromInt32(22).bits, (try callGlobalFunction(&realm, name, &args)).bits);
+    }
+    const stats = realm.heap.ohaimark_stats.shared_backend;
+    try testing.expectEqual(@as(u64, 15), stats.entries);
+    try testing.expectEqual(stats.entries, stats.completions);
+    try testing.expectEqual(@as(u64, 0), stats.guard_exits);
+}
+
 test "shared JS backend runtime: callbacks accept extra arguments and guards retain trailing slots" {
     if (!driver.supported) return error.SkipZigTest;
     var realm = Realm.init(testing.allocator);

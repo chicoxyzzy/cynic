@@ -419,7 +419,8 @@ input ownership, table growth, graph limits, and allocation failures. The JS
 frontend compares exact recovery frames and the Wasm frontend compares with
 Sarcasm. These optimization passes do not by themselves activate a runtime tier.
 
-For the fixed sum-of-squares demo (ReleaseSafe, macOS; x86_64 via Rosetta),
+For the pre-Number-lowering sum-of-squares baseline (ReleaseSafe, macOS;
+x86_64 via Rosetta),
 each cell below is **optimized / rematerialization-off / CSE-off /
 allocation-only / unoptimized scratch**.
 These are static sizes/counts, not cross-engine performance scores:
@@ -521,20 +522,52 @@ production tiers continue to handle their supported cases.
 
 The Ohaimark adapter reuses its existing bytecode-to-SSA graph, specialization
 plan, and pre-operation frame-state records. It handles primitive constants
-(including existing pure folds), checked Int32 add/subtract/multiply, numeric
-less-than/strict-equality, Int32 `ToNumeric`, boolean/Int32 truthiness, branches,
-and loops. Other non-folded nodes, environments, and exception handlers refuse.
-The shared frontend deliberately tries guarded Int32 operations even with
-cold inputs; default Ohaimark's feedback policy is unchanged.
+(including existing pure folds), Number add/subtract/multiply/divide, the
+existing relational/strict-equality nodes, Number `ToNumeric`, boolean/Number
+truthiness, branches, and loops. Other non-folded nodes, environments, and
+exception handlers refuse. The shared frontend deliberately tries guarded
+Number operations even with cold inputs; default Ohaimark's feedback policy
+is unchanged.
 
 JS tagged values cross the shared boundary as opaque i64 words. Operand-tag
-checks precede arithmetic. Signed widening to i64 followed by a round-trip
-through i32 detects overflow; multiplication also checks for negative zero.
-This preserves ECMA-262 §6.1.6.1.3
+checks precede arithmetic. Int32 pairs retain the checked add/subtract/multiply
+path: signed widening to i64 followed by a round-trip through i32 detects
+overflow; multiplication also checks for negative zero. Those guards still
+recover before the operation. Mixed/double operands instead use strict f64
+operations, and division uses f64 even for Int32 operands. This preserves
+ECMA-262 §6.1.6.1.4
 [Number::multiply](https://tc39.es/ecma262/#sec-numeric-types-number-multiply)
-and §6.1.6.1.7-8 [Number::add/subtract](https://tc39.es/ecma262/#sec-numeric-types-number-add).
-Other operand types exit before any coercion. Lantern then performs the
+and §6.1.6.1.5 [Number::divide](https://tc39.es/ecma262/#sec-numeric-types-number-divide),
+plus §6.1.6.1.7-8 [Number::add/subtract](https://tc39.es/ecma262/#sec-numeric-types-number-add).
+Non-Number arithmetic operands exit before any coercion. Lantern performs the
 original operation, including user callbacks and abrupt completions.
+
+Number decoding and boxing remain frontend-owned, following B3's typed
+[Double/bitcast boundary](https://webkit.org/docs/b3/intermediate-representation.html)
+and [Maglev's guarded representations](https://v8.dev/blog/maglev). No JS tag or
+coercion rule enters the shared IR. Integer bit selection chooses between an
+exact Int32-to-f64 conversion and decoded double bits before reinterpretation.
+Every computed NaN is canonicalized exactly like `Value.fromDouble`, preventing
+negative/payload NaNs from colliding with heap tags. Signed zero, subnormals,
+infinities, and floating overflow retain their Number behavior.
+
+The existing source IR expresses some `>=` and fused `!<=`/`!>=` relations by
+inverting integer `<`. The shared frontend instead inverts ordered f64 `>=`
+for those nodes, preserving the original relation's false result for NaN.
+Truthiness explicitly rejects both zeros and NaN. It does not trust source
+Int32 facts after widening `ToNumeric` and arithmetic; Boolean result facts
+remain valid. Guards still restore exact pre-operation state and do not call JS.
+Remainder, exponentiation, bitwise/unary operations, and other source-IR
+coverage gaps remain separate frontend work. The wider path computes both
+integer and floating alternatives before selecting a result; its additional
+code and scratch costs require measurement, not an assumed speedup.
+
+On the same AArch64 sum-of-squares diagnostic, Number lowering grows optimized
+code from 1,788 to 3,920 bytes and per-call scratch from 568 to 640 bytes;
+the graph grows from 98 to 307 nodes before optimization (190 afterwards).
+All five optimization/allocation variants retain exact Lantern results and the
+Int32 loop-overflow recovery. These static costs make conditional fast paths
+and better representation selection important follow-up work before rollout.
 
 A `guard` has no SSA result. A zero predicate captures an ordered list of
 available values and returns an opaque frontend-owned exit ID. The shared
@@ -562,8 +595,9 @@ The shared IR and Wasm adapter accept f32/f64 constants, add/subtract/multiply/
 divide, min/max, copy-sign, absolute value, negation, square root, all six
 comparisons, ceil/floor/trunc/nearest, promotion/demotion, numeric integer/float
 conversions, and same-width integer/float reinterpretation.
-The Ohaimark adapter still lowers checked Int32 operations; adding shared FP
-does not silently change JS specialization or coercion behavior.
+The opt-in Ohaimark adapter uses this FP substrate for the guarded Number
+operations above. Default Ohaimark specialization and JS coercion behavior
+are unchanged.
 
 Homes and block arguments carry raw IEEE-754 bits. f32 values have zero upper
 32 bits, like i32. The verifier rejects mixed-width arithmetic, integer ops on
