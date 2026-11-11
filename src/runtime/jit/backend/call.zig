@@ -75,7 +75,9 @@ fn dispatch(invocation: *Invocation, slots: [*]u64, index: u32) callconv(.c) u32
         invocation.failure = error.InvalidNativeResult;
         return 1;
     }
-    const site = invocation.sites[index];
+    // Borrow signature arrays instead of retaining a full metadata copy on
+    // every recursive native call's host stack.
+    const site = &invocation.sites[index];
     var results: [ir.max_arguments]u64 = @splat(0);
     const request: Request = .{
         .target = site.target,
