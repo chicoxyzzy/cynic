@@ -466,6 +466,24 @@ Ohaimark, and fails if no shared native entry executes or a worker fails. Compar
 the explicit pass list with an interpreter run of the same corpus. Experimental
 runs cannot write the normal score report or pass cache. Positive entry counts
 plus pass-set equality prove integration, not complete opcode coverage.
+Both native CI lanes compare the same explicit pass lists with their existing
+Atomics `wait`/`notify` and TypedArray `copyWithin/coerced` exclusions. Those
+blocking-fixture exclusions do not constitute full-corpus qualification;
+`waitAsync` remains in the differential.
+
+Local qualification on 2026-11-11 (`1a5b953e`, merged in #184): full AArch64
+interpreter and forced-shared test262 runs have byte-identical pass lists,
+48,653 passes and 1,324 existing failures, with no exclusions or watchdog
+aborts. Shared code executes 42,259 entries, compiles 6,887 functions, completes
+42,143 entries, and recovers 116 guards. It also records 211,456 pre-entry
+refusals, so this proves runtime integration, not complete operation coverage.
+The single-threaded `language/expressions` memory preflight executes 2,302 shared
+entries with no fixture reaching the 8 MiB RSS-delta reporting threshold.
+All 38 CI checks pass on that revision, including the native AArch64 and x86_64
+shared differential jobs. The 13 focused runtime safety tests pass on AArch64
+and x86_64/macOS via Rosetta (19 tests including module roots); those tests,
+not the full sweep's zero safepoint handoffs, cover collecting recovery and
+fuel/interrupt/hook handoff. Performance and broader production gates stay open.
 
 Each chunk owns a pointer-stable cache containing its native code, typed graph,
 and recovery metadata. Compiler temporaries, retained metadata, invocation
@@ -479,6 +497,9 @@ the existing tiers. Guard exits have their own bounded retry budget.
 The runtime adapter writes recovery directly into the active Lantern frame and
 its existing register storage. It does not create a detached synthetic frame or
 replace `this`, lexical environments, caller continuations, or argument snapshots.
+The call ABI can reserve more slots than the bytecode register count for surplus
+actual arguments. Entry accepts those frames; recovery clears only bytecode
+temporaries and preserves the trailing argument slots.
 Taken backward edges carry exact loop-header captures through a non-collecting
 runtime poll. Only the no-work path decrements fuel. Pending GC, exhausted fuel,
 cooperative interrupts, sticky termination, and host hooks restore that frame
