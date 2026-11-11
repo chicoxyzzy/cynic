@@ -114,6 +114,287 @@ test "Ohaimark runtime tier stays disabled by default" {
     try testing.expect(state.ohaimark.entry() == null);
 }
 
+test "shared JS backend runtime: opt-in policy and child realms" {
+    var parent = Realm.init(testing.allocator);
+    defer parent.deinit();
+    try testing.expect(!parent.ohaimark_shared_backend_enabled);
+    parent.ohaimark_shared_backend_enabled = true;
+    var child = Realm.initChild(&parent);
+    defer child.deinit();
+    try testing.expect(child.ohaimark_shared_backend_enabled);
+}
+
+test "shared JS backend runtime: ordinary dispatch enters shared code and caches it" {
+    if (!driver.supported) return error.SkipZigTest;
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+    realm.ohaimark_enabled = true;
+    realm.ohaimark_shared_backend_enabled = true;
+    realm.ohaimark_threshold_override = 1;
+    var chunk = try compileScript(&realm, "function answer() { return 1 + 2; } answer(); answer();");
+    defer chunk.deinit(testing.allocator);
+    try testing.expectEqual(Value.fromInt32(3).bits, (try runValue(&realm, &chunk)).bits);
+    try testing.expectEqual(@as(u64, 2), realm.heap.ohaimark_stats.shared_backend.entries);
+    try testing.expectEqual(@as(u64, 1), realm.heap.ohaimark_stats.shared_backend.compiles);
+    const state = templateNamed(&chunk, "answer").jit_state.?;
+    try testing.expect(state.shared_backend != null);
+    try testing.expectEqual(chunk_mod.Chunk.JitState.Tier.cold, state.ohaimark.tier);
+    realm.ohaimark_shared_backend_enabled = false;
+    try testing.expectEqual(Value.fromInt32(3).bits, (try callGlobalFunction(&realm, "answer", &.{})).bits);
+    try testing.expectEqual(@as(u64, 2), realm.heap.ohaimark_stats.shared_backend.entries);
+}
+
+test "shared JS backend runtime: guard recovery preserves the active frame and register storage" {
+    if (!driver.supported) return error.SkipZigTest;
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+    realm.ohaimark_enabled = true;
+    realm.ohaimark_shared_backend_enabled = true;
+    realm.ohaimark_threshold_override = 1;
+    var chunk = try overflowChunk();
+    defer chunk.deinit(testing.allocator);
+    var frames: std.ArrayListUnmanaged(lantern.CallFrame) = .empty;
+    defer {
+        for (frames.items) |*frame| frame.releaseRegisters(&realm, testing.allocator);
+        frames.deinit(testing.allocator);
+    }
+    const registers = try realm.frame_pool.acquire(testing.allocator, chunk.register_count);
+    @memset(registers, Value.undefined_);
+    try frames.append(testing.allocator, .{ .chunk = &chunk, .ip = 0, .accumulator = Value.undefined_, .registers = registers, .env = null, .this_value = Value.fromInt32(77) });
+    const frame_address = &frames.items[0];
+    try testing.expectEqual(driver.EnterOutcome.resumed, try driver.tryEnterTop(testing.allocator, &realm, &frames));
+    try testing.expectEqual(frame_address, &frames.items[0]);
+    try testing.expectEqual(registers.ptr, frames.items[0].registers.ptr);
+    try testing.expect(frames.items[0].ip > 0);
+    try testing.expectEqual(Value.fromInt32(1).bits, frames.items[0].accumulator.bits);
+    try testing.expectEqual(Value.fromInt32(std.math.maxInt(i32)).bits, registers[0].bits);
+    try testing.expectEqual(Value.fromInt32(77).bits, frames.items[0].this_value.bits);
+    try testing.expectEqual(@as(u64, 1), realm.heap.ohaimark_stats.shared_backend.entries);
+    try testing.expectEqual(@as(u64, 1), realm.heap.ohaimark_stats.shared_backend.guard_exits);
+}
+
+test "shared JS backend runtime: loop fuel handoff polls before immediate return" {
+    if (!driver.supported) return error.SkipZigTest;
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+    realm.ohaimark_enabled = true;
+    realm.ohaimark_shared_backend_enabled = true;
+    realm.ohaimark_threshold_override = 1;
+    realm.ohaimark_osr_enabled = false;
+    var definition = try compileScript(&realm, "function once(n) { while (n) { n = n - 1; } return 42; }");
+    defer definition.deinit(testing.allocator);
+    _ = try runValue(&realm, &definition);
+    try testing.expectEqual(Value.fromInt32(42).bits, (try callGlobalFunction(&realm, "once", &.{Value.fromInt32(2)})).bits);
+    try testing.expect(templateNamed(&definition, "once").jit_state.?.shared_backend != null);
+    var call_chunk = try compileScript(&realm, "once(1);");
+    defer call_chunk.deinit(testing.allocator);
+    for ([_]bool{ false, true }) |terminating| {
+        realm.clearTermination();
+        realm.step_budget = 1;
+        realm.fuel_exhaustion = if (terminating) .terminate else .throw_range_error;
+        const entries = realm.heap.ohaimark_stats.shared_backend.entries;
+        const points = realm.heap.ohaimark_stats.shared_backend.safe_points;
+        try testing.expect((try lantern.run(testing.allocator, &realm, &call_chunk)) == .thrown);
+        try testing.expectEqual(@as(u64, 0), realm.step_budget);
+        try testing.expectEqual(entries + 1, realm.heap.ohaimark_stats.shared_backend.entries);
+        try testing.expectEqual(points + 1, realm.heap.ohaimark_stats.shared_backend.safe_points);
+        try testing.expectEqual(terminating, realm.terminationReason() != null);
+    }
+}
+
+test "shared JS backend runtime: collecting handoff preserves live heap arguments" {
+    if (!driver.supported) return error.SkipZigTest;
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+    realm.ohaimark_enabled = true;
+    realm.ohaimark_shared_backend_enabled = true;
+    realm.ohaimark_threshold_override = 1;
+    realm.ohaimark_osr_enabled = false;
+    var definition = try compileScript(&realm, "function keep(value, n) { while (n) { n = n - 1; } return value; }");
+    defer definition.deinit(testing.allocator);
+    _ = try runValue(&realm, &definition);
+    _ = try callGlobalFunction(&realm, "keep", &.{ Value.null_, Value.fromInt32(2) });
+    realm.collectGarbage();
+    const objects = realm.heap.objectCount();
+    const object = try realm.heap.allocateObject();
+    const value = heap_mod.taggedObject(object);
+    realm.heap.setGcThreshold(1);
+    const entries = realm.heap.ohaimark_stats.shared_backend.entries;
+    const points = realm.heap.ohaimark_stats.shared_backend.safe_points;
+    try testing.expectEqual(value.bits, (try callGlobalFunction(&realm, "keep", &.{ value, Value.fromInt32(1) })).bits);
+    try testing.expectEqual(entries + 1, realm.heap.ohaimark_stats.shared_backend.entries);
+    try testing.expectEqual(points + 1, realm.heap.ohaimark_stats.shared_backend.safe_points);
+    try testing.expectEqual(objects + 1, realm.heap.objectCount());
+}
+
+test "shared JS backend runtime: loop overflow resumes once through collecting coercion" {
+    if (!driver.supported) return error.SkipZigTest;
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    try realm.installBuiltins();
+    try realm.installTestGlobals();
+    realm.jit_enabled = true;
+    realm.ohaimark_enabled = true;
+    realm.ohaimark_shared_backend_enabled = true;
+    realm.ohaimark_threshold_override = 1;
+    realm.ohaimark_osr_enabled = false;
+    const source =
+        \\var calls = 0;
+        \\function sum(n) { var i = 0, s = 0; while (i < n) { s = s + i * i; i = i + 1; } return s; }
+        \\function add(a, b) { var c = a + 1; return c + b; }
+        \\var input = { valueOf() { calls = calls + 1; __collectGarbage(); return 2; } };
+        \\if (sum(2000) !== 2664667000) throw 1;
+        \\if (add(40, input) !== 43) throw 2;
+        \\calls;
+    ;
+    var chunk = try compileScript(&realm, source);
+    defer chunk.deinit(testing.allocator);
+    try testing.expectEqual(Value.fromInt32(1).bits, (try runValue(&realm, &chunk)).bits);
+    try testing.expect(templateNamed(&chunk, "sum").jit_state.?.shared_backend != null);
+    try testing.expect(templateNamed(&chunk, "add").jit_state.?.shared_backend != null);
+    try testing.expect(realm.heap.ohaimark_stats.shared_backend.guard_exits >= 2);
+}
+
+test "shared JS backend runtime: cache teardown returns metadata and mapping charges" {
+    if (!driver.supported) return error.SkipZigTest;
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+    realm.ohaimark_enabled = true;
+    realm.ohaimark_shared_backend_enabled = true;
+    realm.ohaimark_threshold_override = 1;
+    var chunk = try compileScript(&realm, "function answer() { return 42; }");
+    defer chunk.deinit(testing.allocator);
+    _ = try runValue(&realm, &chunk);
+    const before = realm.heap.bytes_live;
+    _ = try callGlobalFunction(&realm, "answer", &.{});
+    try testing.expect(realm.heap.bytes_live >= before + 64 * 1024);
+    const state = templateNamed(&chunk, "answer").jit_state.?;
+    state.deinit();
+    try testing.expectEqual(before, realm.heap.bytes_live);
+    state.deinit();
+    try testing.expectEqual(before, realm.heap.bytes_live);
+}
+
+test "shared JS backend runtime: exhausted quota refuses before allocation or native entry" {
+    if (!driver.supported) return error.SkipZigTest;
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+    realm.ohaimark_enabled = true;
+    realm.ohaimark_shared_backend_enabled = true;
+    realm.ohaimark_threshold_override = 1;
+    var chunk = try compileScript(&realm, "function answer() { return 42; }");
+    defer chunk.deinit(testing.allocator);
+    _ = try runValue(&realm, &chunk);
+    const before = realm.heap.bytes_live;
+    realm.setMemoryLimit(before);
+    _ = try callGlobalFunction(&realm, "answer", &.{});
+    const state = templateNamed(&chunk, "answer").jit_state.?;
+    try testing.expect(state.shared_backend == null and state.shared_backend_refused);
+    try testing.expectEqual(@as(u64, 0), realm.heap.ohaimark_stats.shared_backend.entries);
+    try testing.expectEqual(@as(u64, 1), realm.heap.ohaimark_stats.shared_backend.refusals);
+    try testing.expectEqual(before, realm.heap.bytes_live);
+    _ = try callGlobalFunction(&realm, "answer", &.{});
+    try testing.expectEqual(@as(u64, 1), realm.heap.ohaimark_stats.shared_backend.refusals);
+}
+
+test "shared JS backend runtime: scratch exhaustion does not count an entry or poison cached code" {
+    if (!driver.supported) return error.SkipZigTest;
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+    realm.ohaimark_enabled = true;
+    realm.ohaimark_shared_backend_enabled = true;
+    realm.ohaimark_threshold_override = 1;
+    var chunk = try compileScript(&realm, "function answer() { return 42; } answer();");
+    defer chunk.deinit(testing.allocator);
+    _ = try runValue(&realm, &chunk);
+    const live = realm.heap.bytes_live;
+    const entries = realm.heap.ohaimark_stats.shared_backend.entries;
+    realm.setMemoryLimit(live);
+    try testing.expectError(error.OutOfMemory, callGlobalFunction(&realm, "answer", &.{}));
+    try testing.expectEqual(live, realm.heap.bytes_live);
+    try testing.expectEqual(entries, realm.heap.ohaimark_stats.shared_backend.entries);
+    realm.setMemoryLimit(std.math.maxInt(usize));
+    try testing.expectEqual(Value.fromInt32(42).bits, (try callGlobalFunction(&realm, "answer", &.{})).bits);
+    try testing.expectEqual(entries + 1, realm.heap.ohaimark_stats.shared_backend.entries);
+}
+
+test "shared JS backend runtime: policy gates cached entries and aggregates children" {
+    if (!driver.supported) return error.SkipZigTest;
+    var parent = Realm.init(testing.allocator);
+    defer parent.deinit();
+    parent.jit_enabled = true;
+    parent.ohaimark_enabled = true;
+    parent.ohaimark_shared_backend_enabled = true;
+    parent.ohaimark_threshold_override = 1;
+    var child = Realm.initChild(&parent);
+    defer child.deinit();
+    var chunk = try compileScript(&child, "function answer() { return 42; } answer();");
+    defer chunk.deinit(testing.allocator);
+    _ = try runValue(&child, &chunk);
+    try testing.expectEqual(@as(u64, 1), parent.heap.ohaimark_stats.shared_backend.entries);
+    child.jit_enabled = false;
+    _ = try callGlobalFunction(&child, "answer", &.{});
+    child.jit_enabled = true;
+    child.ohaimark_enabled = false;
+    _ = try callGlobalFunction(&child, "answer", &.{});
+    try testing.expectEqual(@as(u64, 1), parent.heap.ohaimark_stats.shared_backend.entries);
+}
+
+test "shared JS backend runtime: interrupt and hook handoffs restore the loop header before polling" {
+    if (!driver.supported) return error.SkipZigTest;
+    const Host = struct {
+        calls: usize = 0,
+        fn hook(raw: ?*anyopaque) Realm.InterruptAction {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            self.calls += 1;
+            return .proceed;
+        }
+    };
+    var realm = Realm.init(testing.allocator);
+    defer realm.deinit();
+    realm.jit_enabled = true;
+    realm.ohaimark_enabled = true;
+    realm.ohaimark_shared_backend_enabled = true;
+    realm.ohaimark_threshold_override = 1;
+    realm.ohaimark_osr_enabled = false;
+    var outer = try compileScript(&realm, "function once(n) { while (n) { n = n - 1; } return n; }");
+    defer outer.deinit(testing.allocator);
+    const chunk = templateNamed(&outer, "once");
+    var frames: std.ArrayListUnmanaged(lantern.CallFrame) = .empty;
+    defer frames.deinit(testing.allocator);
+    for ([_]bool{ false, true }) |use_hook| {
+        const registers = try realm.frame_pool.acquire(testing.allocator, chunk.register_count);
+        @memset(registers, Value.undefined_);
+        registers[0] = Value.fromInt32(1);
+        try frames.append(testing.allocator, .{ .chunk = chunk, .ip = 0, .accumulator = Value.undefined_, .registers = registers, .env = null, .this_value = Value.null_ });
+        defer {
+            for (frames.items) |*frame| frame.releaseRegisters(&realm, testing.allocator);
+            frames.clearRetainingCapacity();
+        }
+        var host: Host = .{};
+        if (use_hook) realm.setInterruptHook(Host.hook, &host) else realm.requestInterrupt();
+        realm.jit_enabled = true;
+        try testing.expectEqual(driver.EnterOutcome.safe_point, try driver.tryEnterTop(testing.allocator, &realm, &frames));
+        try testing.expectEqual(@as(usize, 0), host.calls);
+        try testing.expectEqual(Value.fromInt32(0).bits, registers[0].bits);
+        const outcome = try lantern.runFrames(testing.allocator, &realm, &frames);
+        if (use_hook) {
+            try testing.expectEqual(Value.fromInt32(0).bits, outcome.value.bits);
+            try testing.expect(host.calls > 0);
+            realm.clearInterruptHook();
+        } else try testing.expect(outcome == .thrown);
+    }
+    try testing.expectEqual(@as(u64, 2), realm.heap.ohaimark_stats.shared_backend.entries);
+    try testing.expectEqual(@as(u64, 2), realm.heap.ohaimark_stats.shared_backend.safe_points);
+}
+
 test "Ohaimark runtime policy follows child realms" {
     var parent = Realm.init(testing.allocator);
     defer parent.deinit();

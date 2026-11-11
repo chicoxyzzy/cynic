@@ -54,6 +54,8 @@ pub const Stats = struct {
     executed_entries: u64 = 0,
     completed_entries: u64 = 0,
     guard_exits: u64 = 0,
+    /// Separate witness for the opt-in shared-codegen path, including children.
+    shared_backend: @import("shared_runtime.zig").Stats = .{},
     refusal_stages: [refusal_stage_count]u64 = std.mem.zeroes([refusal_stage_count]u64),
     unsupported_opcodes: [opcode_bucket_count]u64 = std.mem.zeroes([opcode_bucket_count]u64),
 
@@ -229,6 +231,7 @@ pub const Stats = struct {
 
     /// Saturating aggregation for harness workers and per-fixture heaps.
     pub fn merge(self: *Stats, other: Stats) void {
+        self.shared_backend.merge(other.shared_backend);
         self.enabled = self.enabled or other.enabled;
         self.compile_attempts +|= other.compile_attempts;
         self.compile_successes +|= other.compile_successes;

@@ -1,5 +1,5 @@
-//! Developer-only Ohaimark consumer of the language-neutral backend. JS tags
-//! and Lantern recovery stay here; generated entries cannot allocate or call.
+//! Ohaimark consumer of the language-neutral backend. JS tags and exact
+//! Lantern recovery remain frontend-owned. Runtime polls never collect in native code.
 const std = @import("std");
 const Chunk = @import("../../bytecode/chunk.zig").Chunk;
 const evaluator = @import("evaluator.zig");
@@ -8,6 +8,8 @@ const ir = @import("ir.zig");
 const specialize = @import("specialize.zig");
 const low = @import("../jit/backend/ir.zig");
 const native = @import("../jit/backend/native.zig");
+const lantern = @import("../lantern/interpreter.zig");
+const Realm = @import("../realm.zig").Realm;
 pub const CodeAllocator = @import("../jit/code_alloc.zig").CodeAllocator;
 pub const supported = @import("../jit/code_alloc.zig").supported;
 
@@ -47,11 +49,13 @@ pub const Program = struct {
         var arena = std.heap.ArenaAllocator.init(a);
         errdefer arena.deinit();
         const allocator = arena.allocator();
-        var builder: Builder = .{ .a = allocator, .source = &source, .plan = &plan, .chunk = chunk };
+        var builder: Builder = .{ .a = allocator, .source = &source, .plan = &plan, .chunk = chunk, .runtime = options.execution_policy == .controlled };
         builder.values = try allocator.alloc(low.Value, source.nodes.len);
         @memset(builder.values, missing);
         builder.block_map = try allocator.alloc(u32, source.blocks.len);
         @memset(builder.block_map, missing);
+        const entry_loop = source.blocks.len != 0 and source.blocks[0].predecessor_count != 0;
+        if (entry_loop) try builder.blocks.append(allocator, .{ .params = &.{} });
         for (source.blocks, 0..) |block, i| {
             if (!block.reachable) continue;
             builder.block_map[i] = @intCast(builder.blocks.items.len);
@@ -63,6 +67,11 @@ pub const Program = struct {
             try builder.blocks.append(allocator, .{ .params = params });
         }
         if (builder.blocks.items.len == 0) return error.UnsupportedNode;
+        if (entry_loop) {
+            const params = try allocator.alloc(low.Value, source.blockParams(0).len);
+            for (params) |*param| param.* = try builder.value(.i64);
+            builder.blocks.items[0] = .{ .params = params, .terminator = .{ .jump = .{ .target = builder.block_map[0], .args = params } } };
+        }
         for (source.blocks, 0..) |block, i| {
             if (block.reachable) try builder.lowerBlock(i);
         }
@@ -93,6 +102,72 @@ pub const Program = struct {
         self.arena.deinit();
         self.* = undefined;
     }
+
+    pub const FrameOutcome = union(enum) { returned: Value, resumed, safe_point };
+
+    /// The existing frame stays authoritative. Neither compilation, native
+    /// arithmetic, nor the poll callback can collect or re-enter JavaScript.
+    pub fn runFrame(self: *const Program, allocator: std.mem.Allocator, realm: *Realm, frame: *lantern.CallFrame, entries: *u64) !FrameOutcome {
+        if (frame.registers.len != self.register_count) return error.ArgumentCount;
+        var args: [low.max_arguments]u64 = undefined;
+        for (self.entry_roles, 0..) |role, i| args[i] = switch (role) {
+            .accumulator => frame.accumulator.bits,
+            .register => |register| frame.registers[register].bits,
+        };
+        var host: FrameHost = .{ .program = self, .realm = realm, .frame = frame };
+        var result: [1]u64 = undefined;
+        var completion = self.compiled.runControlledInto(allocator, args[0..self.entry_roles.len], &.{}, .{
+            .runtime = .{ .context = &host, .call = FrameHost.poll },
+            .entry_counter = entries,
+        }, &result) catch |err| {
+            if (err == error.SharedJSSafePoint) return .safe_point;
+            return err;
+        };
+        defer completion.deinit();
+        return switch (completion) {
+            .returned => .{ .returned = .{ .bits = result[0] } },
+            .trapped => error.UnexpectedNativeTrap,
+            .exited => |exit| blk: {
+                try self.restoreFrame(frame, exit.id, exit.values);
+                break :blk .resumed;
+            },
+        };
+    }
+
+    fn restoreFrame(self: *const Program, frame: *lantern.CallFrame, id: u32, values: []const u64) !void {
+        if (id >= self.recoveries.len or frame.registers.len != self.register_count) return error.InvalidMetadata;
+        const recovery = self.recoveries[id];
+        if (values.len != recovery.registers.len + 1) return error.InvalidMetadata;
+        for (recovery.registers) |register| if (register >= frame.registers.len) return error.InvalidMetadata;
+        @memset(frame.registers, Value.undefined_);
+        for (recovery.registers, values[1..]) |register, bits| frame.registers[register] = .{ .bits = bits };
+        frame.accumulator = .{ .bits = values[0] };
+        frame.ip = recovery.bytecode_offset;
+    }
+
+    const FrameHost = struct {
+        program: *const Program,
+        realm: *Realm,
+        frame: *lantern.CallFrame,
+
+        fn poll(raw: ?*anyopaque, request: native.CallRequest) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            if (request.target != 0 or request.arguments.len != 0 or request.results.len != 0) return error.InvalidMetadata;
+            const realm = self.realm;
+            const heap = realm.heap;
+            // Same fast/slow split as the production Ohaimark backedge poll.
+            // Host hooks and GC run only after exact frame restoration.
+            if (realm.terminationReason() != null or
+                heap.sweep_phase == .sweeping or heap.marking_phase == .marking or
+                heap.allocs_since_gc >= heap.gc_young_threshold or heap.bytes_since_gc >= heap.gc_byte_threshold or
+                realm.step_budget == 0 or realm.interrupt.load(.acquire) or realm.interrupt_hook != null)
+            {
+                try self.program.restoreFrame(self.frame, request.safepoint, request.captures);
+                return error.SharedJSSafePoint;
+            }
+            if (realm.step_budget != std.math.maxInt(u64) or realm.fuel_exhaustion == .terminate) realm.step_budget -|= 1;
+        }
+    };
 
     /// No GC or JS re-entry occurs here. Returned values and recovery records
     /// are detached, not GC roots: resume immediately, or root their heap
@@ -135,6 +210,7 @@ const Builder = struct {
     source: *const ir.Graph,
     plan: *const specialize.Plan,
     chunk: *const Chunk,
+    runtime: bool = false,
     values: []low.Value = &.{},
     block_map: []u32 = &.{},
     types: std.ArrayList(low.Type) = .empty,
@@ -236,7 +312,34 @@ const Builder = struct {
         const source_args = self.source.edgeArguments(edge_value);
         const args = try self.a.alloc(low.Value, source_args.len);
         for (args, source_args) |*arg, source| arg.* = try self.get(source);
-        return .{ .target = self.block_map[edge_value.to], .args = args };
+        const target = self.block_map[edge_value.to];
+        if (!self.runtime or edge_value.to > edge_value.from) return .{ .target = target, .args = args };
+        // Split only taken backward edges. Forward entries into the same loop
+        // header must not consume fuel or invoke an extra interpreter safepoint.
+        if (self.blocks.items.len >= low.max_blocks) return error.PrototypeLimit;
+        const params = try self.a.alloc(low.Value, args.len);
+        for (params) |*param| param.* = try self.value(.i64);
+        const source_params = self.source.blockParams(edge_value.to);
+        if (source_params.len == 0 or source_params[0].role != .accumulator) return error.InvalidMetadata;
+        const registers = try self.a.alloc(u8, source_params.len - 1);
+        for (registers, source_params[1..]) |*register, param| register.* = switch (param.role) {
+            .register => |index| index,
+            else => return error.InvalidMetadata,
+        };
+        const id: u32 = @intCast(self.recoveries.items.len);
+        const pc = self.source.blocks[edge_value.to].start;
+        try self.recoveries.append(self.a, .{ .node = source_params[0].value, .bytecode_offset = pc, .registers = registers });
+        const nodes = try self.a.dupe(low.Node, &.{.{ .op = .call, .trap_site = pc, .call = .{
+            .target = 0,
+            .arguments = &.{},
+            .parameter_types = &.{},
+            .results = &.{},
+            .result_types = &.{},
+            .safepoint = .{ .id = id, .values = params },
+        } }});
+        const poll_block: u32 = @intCast(self.blocks.items.len);
+        try self.blocks.append(self.a, .{ .params = params, .nodes = nodes, .terminator = .{ .jump = .{ .target = target, .args = params } } });
+        return .{ .target = poll_block, .args = args };
     }
 
     fn condition(self: *Builder, node_id: ir.ValueId, input_id: ir.ValueId) !low.Value {

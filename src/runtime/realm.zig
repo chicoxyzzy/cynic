@@ -32,69 +32,7 @@ pub const FeatureSet = features.FeatureSet;
 /// a realm arena, while invocation stacks are short-lived; both use this
 /// adapter so `setMemoryLimit` governs the whole engine rather than only
 /// GC-managed JavaScript values.
-const WasmQuotaAllocator = struct {
-    backing: std.mem.Allocator,
-    heap: *Heap,
-
-    fn allocator(self: *WasmQuotaAllocator) std.mem.Allocator {
-        return .{ .ptr = self, .vtable = &vtable };
-    }
-
-    const vtable: std.mem.Allocator.VTable = .{
-        .alloc = alloc,
-        .resize = resize,
-        .remap = remap,
-        .free = free,
-    };
-
-    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
-        const self: *WasmQuotaAllocator = @ptrCast(@alignCast(ctx));
-        self.heap.charge(len) catch return null;
-        const ptr = self.backing.rawAlloc(len, alignment, ret_addr) orelse {
-            self.heap.discharge(len);
-            return null;
-        };
-        return ptr;
-    }
-
-    fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
-        const self: *WasmQuotaAllocator = @ptrCast(@alignCast(ctx));
-        if (new_len > memory.len) {
-            const delta = new_len - memory.len;
-            self.heap.charge(delta) catch return false;
-            if (!self.backing.rawResize(memory, alignment, new_len, ret_addr)) {
-                self.heap.discharge(delta);
-                return false;
-            }
-        } else {
-            if (!self.backing.rawResize(memory, alignment, new_len, ret_addr)) return false;
-            self.heap.discharge(memory.len - new_len);
-        }
-        return true;
-    }
-
-    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
-        const self: *WasmQuotaAllocator = @ptrCast(@alignCast(ctx));
-        if (new_len > memory.len) {
-            const delta = new_len - memory.len;
-            self.heap.charge(delta) catch return null;
-            const ptr = self.backing.rawRemap(memory, alignment, new_len, ret_addr) orelse {
-                self.heap.discharge(delta);
-                return null;
-            };
-            return ptr;
-        }
-        const ptr = self.backing.rawRemap(memory, alignment, new_len, ret_addr) orelse return null;
-        self.heap.discharge(memory.len - new_len);
-        return ptr;
-    }
-
-    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
-        const self: *WasmQuotaAllocator = @ptrCast(@alignCast(ctx));
-        self.backing.rawFree(memory, alignment, ret_addr);
-        self.heap.discharge(memory.len);
-    }
-};
+const WasmQuotaAllocator = @import("quota_allocator.zig").QuotaAllocator;
 
 fn chargeWasmCodeLedger(ctx: *anyopaque, bytes: usize) bool {
     const realm: *Realm = @ptrCast(@alignCast(ctx));
@@ -1271,6 +1209,8 @@ pub const Realm = struct {
     /// differential, GC-pressure, fuzz, and performance gates passed; direct
     /// embedders retain an explicit opt-in and can select T1 independently.
     ohaimark_enabled: bool = false,
+    /// Experimental shared-codegen function entry; independent of production T2.
+    ohaimark_shared_backend_enabled: bool = false,
     /// T2-only threshold override. Tests and the test262 differential harness
     /// use `1` to attempt every eligible warm function; `null` uses the
     /// size-scaled policy in runtime/ohaimark/driver.zig.
@@ -1487,6 +1427,7 @@ pub const Realm = struct {
             .wasm_shared_backend_enabled = parent.wasm_shared_backend_enabled,
             .jit_threshold_override = parent.jit_threshold_override,
             .ohaimark_enabled = parent.ohaimark_enabled,
+            .ohaimark_shared_backend_enabled = parent.ohaimark_shared_backend_enabled,
             .ohaimark_threshold_override = parent.ohaimark_threshold_override,
             .ohaimark_osr_enabled = parent.ohaimark_osr_enabled,
         };

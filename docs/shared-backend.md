@@ -1,7 +1,7 @@
 # Shared optimizing backend experiment
 
-Status: **an opt-in Wasm execution tier and a developer-only JS adapter**.
-Production Ohaimark still uses its existing backend. Bistromath and Spasm remain
+Status: **opt-in Wasm and narrow JS runtime integration**.
+Default Ohaimark still uses its existing backend. Bistromath and Spasm remain
 baseline tiers; default tier selection is unchanged. The shared layer establishes
 a typed SSA boundary with JS and Wasm consumers, not B3-level optimization or a
 demonstrated throughput improvement. Full production qualification remains open.
@@ -11,8 +11,8 @@ demonstrated throughput improvement. Full production qualification remains open.
 Ohaimark already owns JS feedback, guards, SSA, representation selection,
 allocation, and deoptimization. Spasm directly emits from validated Wasm.
 Both reuse instruction encoders and executable-memory management. Ohaimark's
-production path does not yet use the language-independent IR introduced here;
-Wasm can opt into it at the instance/Realm boundary described below.
+default path does not yet use the language-independent IR introduced here;
+both frontends can opt in at the Realm boundary described below.
 
 The intended eventual pipeline is:
 
@@ -448,13 +448,63 @@ that account for warmup, ordering, and the extra compiler work.
 
 ## JS guards and recovery
 
+### Opt-in ordinary function entry
+
+Set `Realm.ohaimark_shared_backend_enabled = true` together with `jit_enabled`
+and `ohaimark_enabled`. The shared frontend gets first refusal at the existing
+Ohaimark hotness threshold; `ohaimark_threshold_override = 1` forces it for
+verification. The option follows child realms. There is no CLI default change.
+Refused compilation leaves the existing Ohaimark/Bistromath/Lantern paths
+available. A guard exit or runtime error after entry never restarts the call.
+Shared compilation, entries, completions, guard exits, safepoint handoffs, and
+refusals have separate heap-scoped counters, including child realms.
+
+Run `zig build test262 -- --shared-js-backend --require-shared-js-entry
+--pass-list-out=/tmp/shared-js-pass.txt` for forced runtime qualification.
+It disables production OSR, prints the shared counters separately from legacy
+Ohaimark, and fails if no shared native entry executes or a worker fails. Compare
+the explicit pass list with an interpreter run of the same corpus. Experimental
+runs cannot write the normal score report or pass cache. Positive entry counts
+plus pass-set equality prove integration, not complete opcode coverage.
+
+Each chunk owns a pointer-stable cache containing its native code, typed graph,
+and recovery metadata. Compiler temporaries, retained metadata, invocation
+scratch, and executable mappings are charged to the heap ceiling. The quota
+allocator is shared with Wasm. Mappings reserve a bounded, bytecode-scaled
+region per compiled chunk; this is an initial ownership policy, not a tuned
+memory/performance result. Chunk teardown frees the native handle before the
+mapping and releases all charges. Compile refusal is cached independently of
+the existing tiers. Guard exits have their own bounded retry budget.
+
+The runtime adapter writes recovery directly into the active Lantern frame and
+its existing register storage. It does not create a detached synthetic frame or
+replace `this`, lexical environments, caller continuations, or argument snapshots.
+Taken backward edges carry exact loop-header captures through a non-collecting
+runtime poll. Only the no-work path decrements fuel. Pending GC, exhausted fuel,
+cooperative interrupts, sticky termination, and host hooks restore that frame
+and return the existing `.safe_point` handoff; Lantern then performs its canonical
+poll before executing even an immediate header return. Forward header entries
+do not consume a loop poll. A separate native entry block permits bytecode loops
+whose header is also the first instruction without weakening the shared verifier.
+
+This follows the client-owned exit boundary in
+[B3](https://webkit.org/docs/b3/intermediate-representation.html) and the exact
+interpreter-state recovery used by [Maglev](https://v8.dev/blog/maglev), preserving
+[ECMA-262 execution contexts](https://tc39.es/ecma262/multipage/executable-code-and-execution-contexts.html#sec-execution-contexts).
+No test262 or SES policy is relaxed. Native JS heap operations, JS calls, heap
+constant roots, exception regions, and shared-backend OSR are not implemented
+by this entry path; they remain required production work below. The existing
+production tiers continue to handle their supported cases.
+
+### Detached developer API
+
 The Ohaimark adapter reuses its existing bytecode-to-SSA graph, specialization
 plan, and pre-operation frame-state records. It handles primitive constants
 (including existing pure folds), checked Int32 add/subtract/multiply, numeric
 less-than/strict-equality, Int32 `ToNumeric`, boolean/Int32 truthiness, branches,
 and loops. Other non-folded nodes, environments, and exception handlers refuse.
-This developer path deliberately tries guarded Int32 operations even with
-cold inputs; production Ohaimark's feedback policy is unchanged.
+The shared frontend deliberately tries guarded Int32 operations even with
+cold inputs; default Ohaimark's feedback policy is unchanged.
 
 JS tagged values cross the shared boundary as opaque i64 words. Operand-tag
 checks precede arithmetic. Signed widening to i64 followed by a round-trip
@@ -470,12 +520,13 @@ available values and returns an opaque frontend-owned exit ID. The shared
 backend knows nothing about bytecode offsets or JS registers. Ohaimark owns
 the ID-to-frame mapping and reconstructs the exact pre-operation accumulator,
 live registers, `this`, and bytecode offset. Dead registers become undefined.
-This uses the evaluator's detached `DeoptState` and synthetic Lantern frame;
-production adoption must instead preserve the driver's active-frame identity.
+The standalone `Program.run` API uses the evaluator's detached `DeoptState` and
+synthetic Lantern frame; the opt-in runtime path instead restores the driver's
+active frame in place.
 The verifier checks capture availability and bounds, including use-before-def;
 guards remain ordered effects even when none of their captures are used later.
 
-The current Ohaimark adapter's generated entries neither allocate nor call JS,
+The current Ohaimark adapter's generated entries neither allocate JS objects nor call JS,
 and cannot trigger GC. Heap
 constants are refused because the experiment has no compiled-code root table.
 Incoming tagged references may be copied but are never dereferenced. The
@@ -1748,11 +1799,13 @@ failures, but is not evidence that an unimplemented backend capability works.
    native execution on both architectures, and a separate developer driver.
    Unit tests compare results, edge transfers, overflow, refusal, and budget
    exhaustion. The driver compares against Sarcasm and requires native entry.
-2. **Second consumer, developer-only:** narrow Ohaimark integer lowering,
-   explicit guards, and exact recovery now run through the same native backend.
+2. **Second consumer:** narrow Ohaimark integer lowering,
+   explicit guards, and exact recovery now run through the same native backend,
+   including opt-in ordinary function entry on the real Lantern frame.
    Unit gates cover intermediate-state and loop recovery, signed zero, integer
    boundaries, unexpected operands, GC during resumed coercion, and allocation
-   failures. Full test262 pass-set equality remains a production-integration gate.
+   failures. Shared-codegen heap operations, JS calls, and OSR remain open;
+   full forced-entry test262 equality is a qualification gate, not their substitute.
 3. **Liveness-aware allocation, developer-only:** verified register/spill homes,
    reused spill slots, cheap-constant rematerialization, exact guard captures,
    and an all-scratch oracle now serve both frontends. Static code/memory

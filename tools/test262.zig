@@ -94,6 +94,8 @@
 //!                           crosses at least one generated T1 entry. Requires
 //!                           `--jit`; works with the worker pool.
 //!   --ohaimark              Force Ohaimark T2 before T1, both at threshold 1.
+//!   --shared-js-backend     Prefer experimental shared JS codegen, with counters.
+//!   --require-shared-js-entry Fail unless generated shared JS code executes.
 //!                           Production CLI T2 remains at its natural threshold.
 //!   --ohaimark-osr          Explicitly retain default-on loop-header OSR.
 //!   --no-ohaimark-osr       Disable loop-header OSR while forcing Ohaimark;
@@ -1226,6 +1228,7 @@ var g_jit_force: bool = false;
 /// thresholds at 1. Kept separate from `--jit` so the established
 /// Bistromath differential pass set remains a stable gate of its own.
 var g_ohaimark_force: bool = false;
+var g_shared_js_force: bool = false;
 
 /// `--no-ohaimark-osr` — isolate function-entry Ohaimark by disabling the
 /// default-on loop-header OSR policy on every forced-T2 realm.
@@ -1238,7 +1241,8 @@ fn configureForcedJit(realm: *cynic.runtime.Realm) void {
     if (g_ohaimark_force) {
         realm.ohaimark_enabled = true;
         realm.ohaimark_threshold_override = 1;
-        realm.ohaimark_osr_enabled = !g_ohaimark_osr_disabled;
+        realm.ohaimark_shared_backend_enabled = g_shared_js_force;
+        realm.ohaimark_osr_enabled = !g_ohaimark_osr_disabled and !g_shared_js_force;
     }
 }
 
@@ -1282,6 +1286,23 @@ test "test262 tier force keeps Bistromath and Ohaimark postures distinct" {
     configureForcedJit(&without_osr);
     try std.testing.expect(without_osr.ohaimark_enabled);
     try std.testing.expect(!without_osr.ohaimark_osr_enabled);
+}
+
+test "test262 shared JS backend force selects actual runtime integration" {
+    const saved_shared = g_shared_js_force;
+    const saved_ohaimark = g_ohaimark_force;
+    defer {
+        g_shared_js_force = saved_shared;
+        g_ohaimark_force = saved_ohaimark;
+    }
+    g_shared_js_force = true;
+    g_ohaimark_force = true;
+    var realm = cynic.runtime.Realm.init(std.testing.allocator);
+    defer realm.deinit();
+    configureForcedJit(&realm);
+    try std.testing.expect(realm.ohaimark_shared_backend_enabled);
+    try std.testing.expect(!realm.ohaimark_osr_enabled);
+    try std.testing.expectEqual(@as(?u32, 1), realm.ohaimark_threshold_override);
 }
 
 const Options = struct {
@@ -1360,6 +1381,7 @@ const Options = struct {
     /// published Bistromath entry. `--jit` alone only forces the tier-up
     /// threshold and cannot prove dispatch reached generated code.
     require_bistromath_entry: bool = false,
+    require_shared_js_entry: bool = false,
     /// Aggregate opt-in Ohaimark counters and refusal histograms across
     /// fixture heaps and worker threads, then print one rollout summary after
     /// the main phase. Requires `--ohaimark`; unlike memory diagnostics this
@@ -2060,7 +2082,7 @@ pub fn main(init: std.process.Init) !void {
     // dependent, so caching across flag configurations would lie).
     if (main_result) |*mr| {
         const is_full = opts.filter == null and opts.exclude.len == 0 and !opts.only_failing;
-        if (is_full) try writePassCache(gpa, io, cwd, mr.pass_paths.items);
+        if (is_full and !g_shared_js_force) try writePassCache(gpa, io, cwd, mr.pass_paths.items);
     }
 
     // `--pass-list-out` — capture the main-phase pass set at an explicit
@@ -2436,7 +2458,7 @@ fn runSweep(
         // failure as best-effort, but silently omitting a fixture can make two
         // pass lists compare equal. Fail closed for explicit pass-list or
         // generated-entry evidence.
-        if ((opts.pass_list_out != null or opts.require_bistromath_entry) and
+        if ((opts.pass_list_out != null or opts.require_bistromath_entry or opts.require_shared_js_entry) and
             worker_failed.load(.acquire))
         {
             std.debug.print(
@@ -2493,6 +2515,14 @@ fn runSweep(
         }
         if (opts.ohaimark_stats) {
             try printOhaimarkSummary(io, &ohaimark_agg);
+        }
+        if (g_shared_js_force) {
+            const shared = ohaimark_agg.shared_backend;
+            std.debug.print("Shared JS backend: {d} entries, {d} compiled, {d} refused, {d} completed, {d} guards, {d} safepoints\n", .{ shared.entries, shared.compiles, shared.refusals, shared.completions, shared.guard_exits, shared.safe_points });
+            if (opts.require_shared_js_entry and shared.entries == 0) {
+                std.debug.print("test262: no generated shared JS entry executed\n", .{});
+                std.process.exit(2);
+            }
         }
         if (opts.require_bistromath_entry) {
             const executed_entries = bistromath_entries.load(.acquire);
@@ -5013,6 +5043,12 @@ fn parseArgs(gpa: std.mem.Allocator, args: std.process.Args) !Options {
             opts.require_bistromath_entry = true;
         } else if (std.mem.eql(u8, arg, "--ohaimark")) {
             g_ohaimark_force = true;
+        } else if (std.mem.eql(u8, arg, "--shared-js-backend")) {
+            g_shared_js_force = true;
+            g_ohaimark_force = true;
+            opts.ohaimark_stats = true;
+        } else if (std.mem.eql(u8, arg, "--require-shared-js-entry")) {
+            opts.require_shared_js_entry = true;
         } else if (std.mem.eql(u8, arg, "--ohaimark-osr")) {
             g_ohaimark_osr_disabled = false;
         } else if (std.mem.eql(u8, arg, "--no-ohaimark-osr")) {
@@ -5062,6 +5098,19 @@ fn parseArgs(gpa: std.mem.Allocator, args: std.process.Args) !Options {
     }
 
     opts.exclude = try exclude_list.toOwnedSlice(gpa);
+
+    if ((opts.require_shared_js_entry and (!g_shared_js_force or opts.only_failing)) or
+        (g_shared_js_force and opts.write_results))
+    {
+        std.debug.print("error: shared JS entry verification requires --shared-js-backend without --only-failing; experimental runs cannot --write-results\n", .{});
+        std.process.exit(1);
+    }
+    if (opts.require_shared_js_entry) if (opts.phase) |phase| {
+        if (phase != .main) {
+            std.debug.print("error: --require-shared-js-entry requires a main-phase sweep\n", .{});
+            std.process.exit(1);
+        }
+    };
 
     if (opts.require_bistromath_entry and !g_jit_force) {
         std.debug.print("error: --require-bistromath-entry requires --jit\n", .{});
