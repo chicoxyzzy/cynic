@@ -11,6 +11,8 @@ const Machine = if (is_x86) x86.Masm else arm_masm.Masm;
 
 /// The host keeps both descriptors and backing bytes live throughout the leaf
 /// call. Rebuild views after growth/detachment; no concurrent resize is allowed.
+/// Backing bytes may be shared when accessed through the atomic operations;
+/// this does not make ordinary loads/stores or descriptor mutation atomic.
 pub const View = extern struct {
     base: [*]u8,
     length: usize,
@@ -31,9 +33,10 @@ pub fn emitLength(m: *Machine, region: u32, views_slot: usize) !void {
     }
 }
 
-pub fn emit(m: *Machine, op: ir.Op, ty: ir.Type, access: ir.MemoryAccess, views_slot: usize, oob: *Machine.Label) !void {
-    const descriptor = access.region * @sizeOf(View);
-    const length_offset = descriptor + @offsetOf(View, "length");
+/// Leaves the checked effective byte offset in RAX/X2. Backing pointers are
+/// still frontend-owned; region identities make no non-aliasing promise.
+pub fn emitBounds(m: *Machine, access: ir.MemoryAccess, views_slot: usize, oob: *Machine.Label) !void {
+    const length_offset = access.region * @sizeOf(View) + @offsetOf(View, "length");
     const slot_offset = views_slot * 8;
     if (comptime is_x86) {
         if (access.offset != 0) {
@@ -48,6 +51,27 @@ pub fn emit(m: *Machine, op: ir.Op, ty: ir.Type, access: ir.MemoryAccess, views_
         try m.jumpCond(.below, oob);
         try m.cmpReg64(.rax, .r11);
         try m.jumpCond(.above, oob);
+    } else {
+        if (access.offset != 0) {
+            try m.movImm64(.x16, access.offset);
+            try m.emit(arm.addsReg(.x2, .x2, .x16));
+            try m.jumpCond(.cs, oob);
+        }
+        try scratch.load(m, .x16, views_slot);
+        try m.emit(arm.ldrImm(.x16, .x16, @intCast(length_offset)));
+        try m.movImm64(.x17, access.width.bytes());
+        try m.emit(arm.subsReg(.x16, .x16, .x17));
+        try m.jumpCond(.cc, oob);
+        try m.emit(arm.cmpReg(.x2, .x16));
+        try m.jumpCond(.hi, oob);
+    }
+}
+
+pub fn emit(m: *Machine, op: ir.Op, ty: ir.Type, access: ir.MemoryAccess, views_slot: usize, oob: *Machine.Label) !void {
+    const descriptor = access.region * @sizeOf(View);
+    const slot_offset = views_slot * 8;
+    try emitBounds(m, access, views_slot, oob);
+    if (comptime is_x86) {
         try m.load64Disp32(.r11, .rdi, @intCast(slot_offset));
         try m.load64Disp32(.r11, .r11, @intCast(descriptor));
         try m.addReg64(.r11, .rax);
@@ -74,18 +98,6 @@ pub fn emit(m: *Machine, op: ir.Op, ty: ir.Type, access: ir.MemoryAccess, views_
             .quad => try m.loadVector128(.xmm0, .r11, 0),
         }
     } else {
-        if (access.offset != 0) {
-            try m.movImm64(.x16, access.offset);
-            try m.emit(arm.addsReg(.x2, .x2, .x16));
-            try m.jumpCond(.cs, oob);
-        }
-        try scratch.load(m, .x16, views_slot);
-        try m.emit(arm.ldrImm(.x16, .x16, @intCast(length_offset)));
-        try m.movImm64(.x17, access.width.bytes());
-        try m.emit(arm.subsReg(.x16, .x16, .x17));
-        try m.jumpCond(.cc, oob);
-        try m.emit(arm.cmpReg(.x2, .x16));
-        try m.jumpCond(.hi, oob);
         try scratch.load(m, .x16, views_slot);
         try m.emit(arm.ldrImm(.x16, .x16, @intCast(descriptor)));
         if (ty == .v128) {

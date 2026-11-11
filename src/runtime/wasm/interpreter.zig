@@ -43,6 +43,7 @@ pub const TrapError = error{
     IntegerOverflow,
     InvalidConversionToInteger,
     OutOfBoundsMemoryAccess,
+    UnalignedAtomicAccess,
     OutOfBoundsTableAccess,
     UndefinedElement,
     UninitializedElement,

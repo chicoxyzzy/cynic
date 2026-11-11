@@ -193,6 +193,7 @@ fn computeRanges(graph: ir.Graph, ranges: []LiveRange) void {
             const read_position: u32 = @intCast(2 * i + 1);
             if (ir.inputCount(node.op) >= 1) use(ranges, node.lhs, read_position);
             if (ir.inputCount(node.op) == 2) use(ranges, node.rhs, read_position);
+            if (node.expected) |expected| use(ranges, expected, read_position);
             if (node.exit) |side_exit| for (side_exit.values) |value| {
                 use(ranges, value, read_position);
             };

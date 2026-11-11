@@ -11,6 +11,7 @@ const integer = @import("integer.zig");
 const conversion = @import("conversion.zig");
 const fp_environment = @import("fp_environment.zig");
 const memory = @import("memory.zig");
+const atomic = @import("atomic.zig");
 const call = @import("call.zig");
 const control = @import("control.zig");
 const scratch = @import("scratch.zig");
@@ -217,6 +218,7 @@ pub const Compiled = struct {
                     3 => .unreachable_code,
                     4 => .invalid_conversion,
                     5 => .memory_out_of_bounds,
+                    6 => .unaligned_atomic,
                     else => return error.InvalidNativeResult,
                 };
                 if (slots[result_slot + 1] > std.math.maxInt(u32)) return error.InvalidNativeResult;
@@ -323,10 +325,17 @@ fn emitGraph(a: std.mem.Allocator, owner: *code_alloc.CodeAllocator, graph: ir.G
             } else if (node.op == .memory_length) {
                 try memory.emitLength(&m, @intCast(node.immediate), emission.memory_views_slot.?);
                 emission.stats.loads += 2;
+            } else if (node.op == .atomic_fence) {
+                try atomic.fence(&m);
+                continue;
             } else if (ir.isMemoryOp(node.op)) {
+                if (node.expected) |expected| {
+                    try emission.read(false, expected);
+                    try emission.storeSlot(emission.transfer_base);
+                }
                 try emission.read(false, node.lhs);
-                if (node.op == .store) try emission.read(true, node.rhs);
-                try emission.accessMemory(node, graph.types[if (node.op == .store) node.rhs else node.out.?]);
+                if (ir.inputCount(node.op) == 2) try emission.read(true, node.rhs);
+                try emission.accessMemory(node, graph.types[if (node.out) |out| out else node.rhs]);
                 if (node.out) |out| try emission.write(out);
                 continue;
             } else if (node.op == .constant) {
@@ -582,12 +591,20 @@ const Emission = struct {
         defer oob.deinit(self.m.gpa);
         var done: Machine.Label = .{};
         defer done.deinit(self.m.gpa);
-        try memory.emit(self.m, node.op, ty, node.memory.?, self.memory_views_slot.?, &oob);
-        self.stats.loads += 4 + @as(u32, @intFromBool(node.op == .load));
-        self.stats.stores += @intFromBool(node.op == .store);
+        var unaligned: Machine.Label = .{};
+        defer unaligned.deinit(self.m.gpa);
+        if (ir.isAtomicAccess(node.op)) {
+            try atomic.emit(self.m, node, self.memory_views_slot.?, self.transfer_base, &oob, &unaligned);
+        } else try memory.emit(self.m, node.op, ty, node.memory.?, self.memory_views_slot.?, &oob);
+        self.stats.loads += 4 + @as(u32, @intFromBool(ir.effects(node.op).reads_memory));
+        self.stats.stores += @intFromBool(ir.effects(node.op).writes_memory);
         try self.m.jump(&done);
         try self.m.bind(&oob);
         try self.emitTrap(.{ .reason = .memory_out_of_bounds, .site = node.trap_site.? });
+        if (ir.isAtomicAccess(node.op)) {
+            try self.m.bind(&unaligned);
+            try self.emitTrap(.{ .reason = .unaligned_atomic, .site = node.trap_site.? });
+        }
         try self.m.bind(&done);
     }
 

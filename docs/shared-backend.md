@@ -717,6 +717,50 @@ test262 pass set is also unchanged at 48,653 passing and 1,324 failing fixtures;
 that is a non-regression check, not qualification of this experimental path.
 Native x86_64 hardware coverage remains a CI gate.
 
+### Ordered atomic memory
+
+The shared IR has sequentially consistent integer loads, stores, add/subtract,
+and/or/xor, exchange, strong compare-exchange, and a memory-independent fence.
+Accesses use the same bounded, potentially aliased views as ordinary memory.
+Widths are 1, 2, 4, or 8 bytes, with i32/i64 operands and zero-extended narrow
+results. Stores truncate; compare-exchange compares the low access-width bits
+of its expected operand and returns the old value on both success and failure.
+There is no implicit success flag or weak/spurious-failure mode.
+
+The verifier checks operand availability/types, region/width, and exact trap
+metadata. Compare-exchange's expected value participates in liveness, DCE, and
+CSE remapping. Atomic accesses and fences have an explicit ordered effect;
+unused loads/results remain observable and no atomic is folded or commoned.
+Bounds/overflow checks precede alignment checks. Both the effective byte offset
+and host address must be naturally aligned, otherwise execution returns an
+`unaligned_atomic` trap with the frontend's site, never an alignment signal.
+
+AArch64 uses acquire/release loads/stores and exclusive retry loops, with full
+inner-shareable barriers. Failed comparisons clear the exclusive reservation.
+x86_64 uses aligned loads, implicitly locked exchanges for stores, and locked
+compare-exchange for RMW/retry loops; a standalone fence emits MFENCE. No host
+callback or optional CPU extension implements these operations. Retry scratch
+registers cannot clobber allocated values, and all per-invocation storage stays
+private when multiple host threads execute the same compiled code.
+
+Prior art: [B3's memory/fence effects](https://webkit.org/docs/b3/intermediate-representation.html#memory-model)
+make ordering separate from ordinary aliasing;
+[V8's AArch64 atomic lowering](https://github.com/v8/v8/blob/main/src/compiler/backend/arm64/code-generator-arm64.cc)
+provides the exclusive-loop precedent. The semantic anchors are
+[ECMA-262 section 29](https://tc39.es/ecma262/multipage/memory-model.html) and
+[Wasm's atomic instruction rules](https://github.com/WebAssembly/threads/blob/main/proposals/threads/Overview.md#atomic-memory-accesses).
+This is backend machinery, not a change to JS Atomics/SES policy or a claim
+that Wasm shared-memory validation, wait/notify, concurrent growth, or production
+Ohaimark atomic lowering is complete. Views and their descriptors still require
+stable lifetimes; racing ordinary accesses is not made safe by this API.
+
+Tests cover every width/operation, narrow comparison and result bits, register
+pressure, scratch/allocated and optimized/unoptimized variants, malformed IR,
+unaligned host views, address overflow, exact trap/guard order, allocation
+failure, assembler-checked encodings, concurrent native/host increments, and
+the sequential-consistency store-buffering litmus. Concurrency tests are
+regression evidence, not an exhaustive memory-model proof.
+
 ### Memory size and growth
 
 The Wasm frontend now lowers `memory.size` and `memory.grow` for non-shared
@@ -1147,9 +1191,9 @@ production rollout decision.
 
 ## Safety and non-goals
 
-- No JS heap-object dereferences, shared-memory accesses,
-  atomics,
-  inlining, OSR, or automatic shared-backend tier-up in this slice.
+- No production JS heap-object lowering, frontend shared-memory integration,
+  inlining, OSR, or automatic shared-backend tier-up in this slice. The shared
+  IR's atomic accesses do not themselves enable a language's shared-memory API.
 - Developer module decoding caps input at 64 KiB and decoder/validator workspace
   at 8 MiB. Runtime lowering starts from an already validated instance.
   Shared compilation caps function bodies at 16 KiB, blocks at 256, SSA values at 2,048,
@@ -1662,9 +1706,9 @@ with 1,370 unchanged skips. The remaining lowering refusals are:
 
 These are executed-corpus counts, not a claim that every accepted function or
 instruction has been exercised. No refusal keys overflowed the diagnostic
-table. Exception lowering remains next: explicit exceptional call edges,
-handler transfers, payload/reference roots, and uncaught propagation must all
-work before exception bodies can stop falling back. This does not change
+table. This historical audit preceded the exception lowering described above;
+that implementation removes the nine exception refusals and leaves the three
+resource-limit refusals. This does not change
 ECMA-262/SES policy, the default tier, or the production gates below.
 
 ### Production completion checklist
@@ -1680,7 +1724,8 @@ open; a passing demo or unchanged production test262 run does not close them.
 - [ ] Model memory, calls, traps, safepoints, and ordered effects in the IR and
   verifier before optimizing them; preserve aliasing, atomics, and trap order.
   Bounded scalar memory, runtime calls with explicit exceptional edges, root snapshots, and conservative effects
-  are implemented; atomic/fence semantics and complete frontend integration remain.
+  and native sequentially consistent atomic/fence semantics are implemented;
+  complete frontend integration and shared-memory lifecycle qualification remain.
 - [ ] Support the accepted Wasm control/signature surface, memory and growth,
   tables/references, calls/imports, globals, SIMD, and exception behavior through
   a real instance-aware optimizing path, not just the standalone demo.
@@ -1737,7 +1782,8 @@ failures, but is not evidence that an unimplemented backend capability works.
    Extended products, dot products, and strict/relaxed Q15 multiplication also
    lower natively, including relaxed dot accumulation.
    Floating arithmetic, rounding, min/max, conversions, and relaxed multiply-add
-   also lower natively. Continue with exception handling, native linking,
+   also lower natively. Exception handlers, payloads, and propagation now lower
+   through explicit exceptional edges. Continue with shared memory, native linking,
    and production integration. Preserve bounds checks,
    memory-growth invalidation, resource metering, and executable ownership.
 6. **Rollout decision:** paired warm/cold execution measurements, compilation
@@ -1745,8 +1791,8 @@ failures, but is not evidence that an unimplemented backend capability works.
    telemetry, differential fuzzing, and spec-suite gates. No automatic
    default-on graduation or new JS tier follows from finishing the prototype.
 
-The next capability work is Wasm exception handling and ordered atomic memory,
-production Ohaimark root/frame lowering, and resource-policy integration.
+The next capability work is frontend shared-memory integration, production
+Ohaimark root/frame lowering, and resource-policy integration.
 Operand-move
 reduction and immediate/compare-branch selection remain measured optimization
 work, not substitutes for coverage.

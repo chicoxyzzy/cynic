@@ -201,6 +201,17 @@ pub const Op = enum {
     demote_f64,
     load,
     store,
+    /// Sequentially consistent integer accesses. Narrow results zero-extend.
+    atomic_load,
+    atomic_store,
+    atomic_add,
+    atomic_sub,
+    atomic_and,
+    atomic_or,
+    atomic_xor,
+    atomic_exchange,
+    atomic_compare_exchange,
+    atomic_fence,
     /// Current byte length of the view selected by Node.immediate, as i64.
     memory_length,
     call,
@@ -241,14 +252,16 @@ pub const TrapReason = enum(u32) {
     unreachable_code = 3,
     invalid_conversion = 4,
     memory_out_of_bounds = 5,
+    unaligned_atomic = 6,
 
-    pub fn toError(self: TrapReason) error{ IntegerDivideByZero, IntegerOverflow, Unreachable, InvalidConversionToInteger, OutOfBoundsMemoryAccess } {
+    pub fn toError(self: TrapReason) error{ IntegerDivideByZero, IntegerOverflow, Unreachable, InvalidConversionToInteger, OutOfBoundsMemoryAccess, UnalignedAtomicAccess } {
         return switch (self) {
             .division_by_zero => error.IntegerDivideByZero,
             .integer_overflow => error.IntegerOverflow,
             .unreachable_code => error.Unreachable,
             .invalid_conversion => error.InvalidConversionToInteger,
             .memory_out_of_bounds => error.OutOfBoundsMemoryAccess,
+            .unaligned_atomic => error.UnalignedAtomicAccess,
         };
     }
 };
@@ -259,6 +272,8 @@ pub const Node = struct {
     out: ?Value = null,
     lhs: Value = 0,
     rhs: Value = 0,
+    /// Compare-exchange alone: lhs is address, rhs is replacement.
+    expected: ?Value = null,
     immediate: u64 = 0,
     immediate_hi: u64 = 0,
     vector_lane: ?VectorLane = null,
@@ -336,6 +351,7 @@ pub const Graph = struct {
                 if (mayTrap(node.op) != (node.trap_site != null)) return error.InvalidGraph;
                 if (isMemoryOp(node.op) != (node.memory != null)) return error.InvalidGraph;
                 if ((node.op == .call) != (node.call != null)) return error.InvalidGraph;
+                if ((node.op == .atomic_compare_exchange) != (node.expected != null)) return error.InvalidGraph;
                 if (node.op == .guard) {
                     if (node.out != null) return error.InvalidGraph;
                     try self.use(node.lhs, &available);
@@ -347,6 +363,10 @@ pub const Graph = struct {
                     continue;
                 }
                 if (node.exit != null) return error.InvalidGraph;
+                if (node.op == .atomic_fence) {
+                    if (node.out != null) return error.InvalidGraph;
+                    continue;
+                }
                 if (node.call) |call| {
                     if (node.out != null) return error.InvalidGraph;
                     try self.verifyCallInputs(call, &available);
@@ -357,6 +377,25 @@ pub const Graph = struct {
                     if (access.region >= self.memory_count) return error.InvalidGraph;
                     try self.use(node.lhs, &available);
                     if (!isInteger(self.types[node.lhs])) return error.InvalidGraph;
+                    if (isAtomicAccess(node.op)) {
+                        const value = if (node.op == .atomic_load) node.out orelse return error.InvalidGraph else node.rhs;
+                        if (value >= self.types.len) return error.InvalidGraph;
+                        const ty = self.types[value];
+                        if (!isInteger(ty) or access.signed or access.width.bytes() > (if (ty == .i32) @as(usize, 4) else 8)) return error.InvalidGraph;
+                        if (node.op != .atomic_load) try self.use(value, &available);
+                        if (node.expected) |expected| {
+                            try self.use(expected, &available);
+                            if (self.types[expected] != ty) return error.InvalidGraph;
+                        }
+                        if (node.op == .atomic_store) {
+                            if (node.out != null) return error.InvalidGraph;
+                        } else {
+                            const out = node.out orelse return error.InvalidGraph;
+                            try self.define(out, &defined, &available);
+                            if (self.types[out] != ty) return error.InvalidGraph;
+                        }
+                        continue;
+                    }
                     const value = if (node.op == .load) node.out orelse return error.InvalidGraph else node.rhs;
                     if (value >= self.types.len) return error.InvalidGraph;
                     const ty = self.types[value];
@@ -568,7 +607,14 @@ pub fn isNumericConversion(op: Op) bool {
 }
 
 pub fn isMemoryOp(op: Op) bool {
-    return op == .load or op == .store;
+    return op == .load or op == .store or isAtomicAccess(op);
+}
+
+pub fn isAtomicAccess(op: Op) bool {
+    return switch (op) {
+        .atomic_load, .atomic_store, .atomic_add, .atomic_sub, .atomic_and, .atomic_or, .atomic_xor, .atomic_exchange, .atomic_compare_exchange => true,
+        else => false,
+    };
 }
 
 pub fn isComparison(op: Op) bool {
@@ -589,9 +635,9 @@ pub fn inputCount(op: Op) u2 {
         .vector_any_true, .vector_all_true, .vector_bitmask => 1,
         .vector_add, .vector_replace, .vector_shuffle, .vector_swizzle, .vector_narrow_s, .vector_narrow_u => 2,
         .vector_splat, .vector_extract, .vector_extend_s, .vector_extend_u, .vector_pairwise_add_s, .vector_pairwise_add_u => 1,
-        .constant, .call, .memory_length => 0,
-        .load => 1,
-        .store => 2,
+        .constant, .call, .memory_length, .atomic_fence => 0,
+        .load, .atomic_load => 1,
+        .store, .atomic_store, .atomic_add, .atomic_sub, .atomic_and, .atomic_or, .atomic_xor, .atomic_exchange, .atomic_compare_exchange => 2,
         .fceil, .ffloor, .ftrunc, .fnearest, .convert_s, .convert_u, .trunc_s, .trunc_u, .trunc_sat_s, .trunc_sat_u => 1,
         .guard, .sext_i32, .zext_i32, .trunc_i64, .reinterpret, .promote_f32, .demote_f64, .fabs, .fneg, .fsqrt, .clz, .ctz, .popcnt, .sext8, .sext16, .sext32 => 1,
         .add, .sub, .mul, .div_s, .div_u, .rem_s, .rem_u, .bit_and, .bit_or, .bit_xor, .shl, .shr_s, .shr_u, .rotl, .rotr, .eq, .ne, .lt_s, .lt_u, .gt_s, .gt_u, .le_s, .le_u, .ge_s, .ge_u, .fadd, .fsub, .fmul, .fdiv, .fmin, .fmax, .fcopysign, .feq, .fne, .flt, .fgt, .fle, .fge => 2,
@@ -604,9 +650,10 @@ pub const Effects = struct {
     may_trap: bool = false,
     exits: bool = false,
     safepoint: bool = false,
+    ordered: bool = false,
 
     pub fn isPure(self: Effects) bool {
-        return !self.reads_memory and !self.writes_memory and !self.may_trap and !self.exits and !self.safepoint;
+        return !self.reads_memory and !self.writes_memory and !self.may_trap and !self.exits and !self.safepoint and !self.ordered;
     }
 };
 
@@ -623,6 +670,10 @@ pub fn effects(op: Op) Effects {
         .load => .{ .reads_memory = true, .may_trap = true },
         .memory_length => .{ .reads_memory = true },
         .store => .{ .writes_memory = true, .may_trap = true },
+        .atomic_load => .{ .reads_memory = true, .may_trap = true, .ordered = true },
+        .atomic_store => .{ .writes_memory = true, .may_trap = true, .ordered = true },
+        .atomic_add, .atomic_sub, .atomic_and, .atomic_or, .atomic_xor, .atomic_exchange, .atomic_compare_exchange => .{ .reads_memory = true, .writes_memory = true, .may_trap = true, .ordered = true },
+        .atomic_fence => .{ .reads_memory = true, .writes_memory = true, .ordered = true },
         .call => .{ .reads_memory = true, .writes_memory = true, .may_trap = true, .safepoint = true },
         .fceil, .ffloor, .ftrunc, .fnearest, .convert_s, .convert_u, .trunc_sat_s, .trunc_sat_u => .{},
         .constant, .add, .sub, .mul, .bit_and, .bit_or, .bit_xor, .shl, .shr_s, .shr_u, .rotl, .rotr, .clz, .ctz, .popcnt, .sext8, .sext16, .sext32, .eq, .ne, .lt_s, .lt_u, .gt_s, .gt_u, .le_s, .le_u, .ge_s, .ge_u, .sext_i32, .zext_i32, .trunc_i64, .fadd, .fsub, .fmul, .fdiv, .fmin, .fmax, .fcopysign, .fabs, .fneg, .fsqrt, .feq, .fne, .flt, .fgt, .fle, .fge, .reinterpret, .promote_f32, .demote_f64 => .{},
@@ -683,6 +734,7 @@ test {
     _ = @import("conversion_test.zig");
     _ = @import("fp_environment_test.zig");
     _ = @import("memory_test.zig");
+    _ = @import("atomic_test.zig");
     _ = @import("call_test.zig");
     _ = @import("invoke_test.zig");
     _ = @import("results_test.zig");
