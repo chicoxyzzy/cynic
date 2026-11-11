@@ -1166,6 +1166,15 @@ fn integerVectorLane(width: u4) ?ir.VectorLane {
 }
 
 fn vectorOperation(sub: u32) ?VectorOperation {
+    if (simd.productOp(sub)) |operation| return .{
+        .op = switch (operation.kind) {
+            .extmul => if (operation.signed) .vector_extmul_s else .vector_extmul_u,
+            .dot => .vector_dot_s,
+            .q15 => .vector_q15mulr_sat_s,
+        },
+        .lane = integerVectorLane(operation.width),
+        .immediate = @intFromBool(operation.high),
+    };
     if (simd.comparisonOp(sub)) |operation| return .{
         .op = switch (operation.relation) {
             .eq => .vector_eq,
@@ -1225,6 +1234,7 @@ fn vectorOperation(sub: u32) ?VectorOperation {
         return .{ .op = .vector_add, .lane = if (operation.double_precision) .f64x2 else .f32x4 };
     }
     return switch (sub) {
+        274, 275 => .{ .op = .vector_dot_sat_s, .lane = .i8x16 },
         98 => .{ .op = .vector_popcnt, .lane = .i8x16 },
         83 => .{ .op = .vector_any_true },
         13 => .{ .op = .vector_shuffle },
@@ -1327,10 +1337,22 @@ fn lowerVector(builder: *Builder, nodes: *std.ArrayList(ir.Node), stack: *std.Ar
         return;
     }
     const operation = vectorOperation(inst.simd_opcode) orelse return error.UnsupportedOpcode;
+    const accumulator = if (inst.simd_opcode == 275) stack.pop() orelse return error.InvalidControlFlow else 0;
     const rhs = if (ir.inputCount(operation.op) == 2) stack.pop() orelse return error.InvalidControlFlow else 0;
     const lhs = stack.pop() orelse return error.InvalidControlFlow;
     var out = try builder.value(if (ir.isVectorReduction(operation.op)) .i32 else if (operation.op == .vector_extract) operation.lane.?.scalarType() else .v128);
     try nodes.append(a, .{ .op = operation.op, .vector_lane = operation.lane, .out = out, .lhs = if (operation.reverse) rhs else lhs, .rhs = if (operation.reverse) lhs else rhs, .immediate = if (operation.op == .vector_shuffle) inst.immediate else operation.immediate orelse inst.lane_index, .immediate_hi = if (operation.op == .vector_shuffle) inst.immediate_hi else 0 });
+    if (inst.simd_opcode == 275) {
+        // Keep the existing relaxed profile: signed byte products, saturated
+        // i16 pair sums, then signed widening and wrapping i32 accumulation.
+        const pairs = out;
+        const sums = try builder.value(.v128);
+        out = try builder.value(.v128);
+        try nodes.appendSlice(a, &.{
+            .{ .op = .vector_pairwise_add_s, .vector_lane = .i16x8, .out = sums, .lhs = pairs },
+            .{ .op = .vector_add, .vector_lane = .i32x4, .out = out, .lhs = sums, .rhs = accumulator },
+        });
+    }
     if (operation.signed_extract) {
         const raw = out;
         out = try builder.value(.i32);

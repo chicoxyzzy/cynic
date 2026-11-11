@@ -14,7 +14,7 @@ fn signed(value: u128, bits: usize) i128 {
     return @as(i128, @intCast(value)) - (if (value & sign != 0) @as(i128, 1) << @as(u7, @intCast(bits)) else 0);
 }
 
-fn check(sub: u32, args: []const u128, shift: bool, expected: u128) !void {
+pub fn check(sub: u32, args: []const u128, shift: bool, expected: u128) !void {
     if (!backend.native.supported) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();

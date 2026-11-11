@@ -4,6 +4,7 @@ const ir = @import("ir.zig");
 const scratch = @import("scratch.zig");
 const arm = @import("../asm_aarch64.zig");
 const x86 = @import("../simd_integer_x86_64.zig");
+const products = @import("../simd_products_x86_64.zig");
 
 pub fn emit(m: *scratch.Machine, node: ir.Node) !void {
     const width: u4 = @intCast(node.vector_lane.?.bytes());
@@ -12,6 +13,9 @@ pub fn emit(m: *scratch.Machine, node: ir.Node) !void {
     const signed = node.op == .vector_add_sat_s or node.op == .vector_sub_sat_s or node.op == .vector_min_s or node.op == .vector_max_s;
     const maximum = node.op == .vector_max_s or node.op == .vector_max_u;
     if (comptime builtin.cpu.arch == .x86_64) switch (node.op) {
+        .vector_extmul_s, .vector_extmul_u => try products.extended(m, width, node.op == .vector_extmul_s, node.immediate == 1),
+        .vector_dot_s, .vector_dot_sat_s => try products.dot(m, node.op == .vector_dot_sat_s),
+        .vector_q15mulr_sat_s => try products.q15(m),
         .vector_sub, .vector_mul, .vector_add_sat_s, .vector_add_sat_u, .vector_sub_sat_s, .vector_sub_sat_u => try x86.binary(m, width, if (node.op == .vector_mul) .mul else if (subtract) .sub else .add, saturating, signed),
         .vector_abs, .vector_neg => try x86.unary(m, width, node.op == .vector_neg),
         .vector_popcnt => try x86.popcount(m),
@@ -28,6 +32,22 @@ pub fn emit(m: *scratch.Machine, node: ir.Node) !void {
             else => return error.InvalidGraph,
         };
         switch (node.op) {
+            .vector_extmul_s, .vector_extmul_u => try m.emit(arm.multiplyLongV128(.x0, .x0, .x1, if (width == 1) .byte else if (width == 2) .half else .word, node.op == .vector_extmul_s, node.immediate == 1)),
+            .vector_dot_s => {
+                try m.emit(arm.multiplyLongV128(.x2, .x0, .x1, .half, true, false));
+                try m.emit(arm.multiplyLongV128(.x0, .x0, .x1, .half, true, true));
+                try m.emit(arm.addPairwiseV4s(.x0, .x2, .x0));
+            },
+            .vector_dot_sat_s => {
+                try m.emit(arm.multiplyLongV128(.x2, .x0, .x1, .byte, true, false));
+                try m.emit(arm.multiplyLongV128(.x0, .x0, .x1, .byte, true, true));
+                try m.emit(arm.pairwiseAddLongV128(.x2, .x2, .half, true));
+                try m.emit(arm.pairwiseAddLongV128(.x0, .x0, .half, true));
+                try m.emit(arm.narrowIntegerV128(.x2, .x2, .half, true, false));
+                try m.emit(arm.narrowIntegerV128(.x2, .x0, .half, true, true));
+                try m.emit(arm.orV16b(.x0, .x2, .x2));
+            },
+            .vector_q15mulr_sat_s => try m.emit(arm.multiplyQ15V8h(.x0, .x0, .x1)),
             .vector_sub => try m.emit(arm.addSubtractV128(.x0, .x0, .x1, size, true)),
             .vector_add_sat_s, .vector_add_sat_u, .vector_sub_sat_s, .vector_sub_sat_u => try m.emit(arm.saturatingAddSubtractV128(.x0, .x0, .x1, size, signed, subtract)),
             .vector_mul => {

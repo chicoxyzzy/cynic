@@ -1462,7 +1462,7 @@ native-entry FPSR preservation, including sticky QC and side exits.
 Direct tests cover every optimization/allocation mode, live GP/vector homes,
 composed selects, and invalid metadata. Independent scalar oracles compare all
 new Wasm operations against Sarcasm, forced Spasm, and forced shared-native
-entry. Extended products, dot products, Q15 multiplication, and remaining FP
+entry. Integer product support is described below. Remaining FP
 arithmetic/conversions are still pending; this is not complete SIMD coverage.
 
 All 232 Wasm manifests retain their exact per-manifest results on both native
@@ -1471,6 +1471,38 @@ architectures in shared-only, mixed-tier, and Spasm-only modes: 61,051 passes,
 functions, reaching 5,913 (5,914 in mixed-tier runs), with refusals down from
 556 to 211. Spasm-only compilation, entry, and refusal counts are unchanged.
 These are coverage measurements, not throughput claims.
+
+### SIMD extended and fixed-point products
+
+All 17 accepted product opcodes now lower natively: signed/unsigned low/high
+extended multiplication at 8/16/32-bit source widths, signed i16 pair-dot,
+strict/relaxed Q15 multiplication, and relaxed byte-dot with/without an i32
+accumulator. Extended products double the source width; their half selector is
+part of the CSE key. The i16 dot wraps its i32 sum. Q15 adds the rounding bias,
+shifts arithmetically, and saturates, including `INT16_MIN * INT16_MIN`.
+
+The contracts follow the [Wasm SIMD product definitions](https://github.com/WebAssembly/spec/blob/main/proposals/simd/SIMD.md)
+and [relaxed dot rules](https://webassembly.github.io/spec/core/exec/numerics.html#op-ivrelaxed-dot).
+Cynic keeps its existing relaxed profile: signed byte operands, saturating i16
+pair sums, then signed pairwise widening and wrapping i32 accumulation. The
+shared IR expresses those exact operations, not an unconstrained relaxed result.
+
+`jit/simd_products_x86_64.zig` is shared with Spasm and needs only SSE2. The byte
+dot uses XMM8/XMM9 as extra scratch, preserving the allocated XMM4-XMM7 bank.
+ARM emits widening multiplies, pairwise sums, and Q15 instructions. Its Q15 and
+saturating dot operations preserve FPSR.QC on native return and side exit.
+
+Direct tests check half-selector CSE, signedness, live GP/vector homes, every
+allocation/optimization setting, and invalid metadata. Independent scalar
+oracles require entry in both native tiers, including saturation-before-widening
+and accumulator overflow. No default-tier or JS/SES surface changes follow.
+
+All 232 corpus manifests retain identical per-file results on AArch64 and
+x86_64 in shared-only, mixed-tier, and Spasm-only runs: 61,051 passes,
+1,370 skips, no failures. Product lowering adds 20 compiled functions, reaching
+5,933 (5,934 in mixed-tier runs), with refusals down from 211 to 191.
+Spasm-only compilation, entry, and refusal counts remain unchanged. These
+counts measure native coverage, not execution speed or production readiness.
 
 ### Production completion checklist
 
@@ -1539,6 +1571,8 @@ failures, but is not evidence that an unimplemented backend capability works.
    Integer/FP comparisons and Boolean/bitmask reductions also lower natively.
    Wrapping/saturating integer arithmetic, shifts, min/max, averages, abs/neg,
    byte popcount, bitwise complements, and strict/relaxed bit selection are supported.
+   Extended products, dot products, and strict/relaxed Q15 multiplication also
+   lower natively, including relaxed dot accumulation.
    Continue with the remaining SIMD operations,
    exception handling, native linking,
    and production integration. Preserve bounds checks,
