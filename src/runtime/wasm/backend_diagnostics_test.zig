@@ -55,7 +55,7 @@ test "backend diagnostics: lowering reports instruction and clears reused diagno
         .types = &.{.{ .params = &.{}, .results = &.{} }},
         .funcs = &.{ 0, 0 },
         .code = &.{
-            .{ .bytes = &.{ 0, 0x01, 0x1f, 0x40, 0, 0x0b, 0x0b } },
+            .{ .bytes = &([_]u8{ 0, 0x01, 0x41, 0, 0x0e, 0x80, 0x02 } ++ @as([257]u8, @splat(0)) ++ [_]u8{0x0b}) },
             .{ .bytes = &.{ 0, 0x0b } },
         },
     };
@@ -63,8 +63,8 @@ test "backend diagnostics: lowering reports instruction and clears reused diagno
     try wasm.instantiate(&instance, arena.allocator(), a, &module, .{});
     defer instance.deinit();
     var diagnostic: diagnostics.Lowering = .{};
-    try std.testing.expectError(error.UnsupportedOpcode, wasm.backend_prototype.lowerInstanceDiagnosed(a, &instance, 0, &diagnostic));
-    try std.testing.expectEqualDeep(diagnostics.Site{ .offset = 1, .opcode = 0x1f }, diagnostic.site.?);
+    try std.testing.expectError(error.PrototypeLimit, wasm.backend_prototype.lowerInstanceDiagnosed(a, &instance, 0, &diagnostic));
+    try std.testing.expectEqualDeep(diagnostics.Site{ .offset = 3, .opcode = 0x0e }, diagnostic.site.?);
     var graph = try wasm.backend_prototype.lowerInstanceDiagnosed(a, &instance, 1, &diagnostic);
     defer graph.deinit();
     try std.testing.expect(diagnostic.site == null);

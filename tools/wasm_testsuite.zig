@@ -1156,7 +1156,7 @@ test "wasm harness: shared backend refusals aggregate across instances without r
     const module = scoring_empty_module ++
         "\x01\x04\x01\x60\x00\x00\x03\x02\x01\x00" ++
         "\x07\x05\x01\x01f\x00\x00\x08\x01\x00" ++
-        "\x0a\x08\x01\x06\x00\x1f\x40\x00\x0b\x0b";
+        "\x0a\x8b\x02\x01\x88\x02\x00\x41\x00\x0e\x80\x02" ++ @as([257]u8, @splat(0)) ++ "\x0b";
     const source =
         \\{"commands":[{"type":"module","filename":"case.wasm"},
         \\{"type":"action","action":{"type":"invoke","field":"f","args":[]}},
@@ -1178,7 +1178,7 @@ test "wasm harness: shared backend refusals aggregate across instances without r
     const entry = actual.shared_backend_refusal_details.entries[0];
     try std.testing.expectEqual(@as(u64, 2), entry.count);
     var line: [512]u8 = undefined;
-    try std.testing.expectEqualStrings("  lowering / UnsupportedOpcode / opcode 0x1f: 2\n", try formatSharedBackendRefusal(&line, entry));
+    try std.testing.expectEqualStrings("  lowering / PrototypeLimit / opcode 0x0e: 2\n", try formatSharedBackendRefusal(&line, entry));
     var total: Counts = .{};
     total.add(actual);
     total.add(actual);

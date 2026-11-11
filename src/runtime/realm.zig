@@ -2498,6 +2498,15 @@ pub const Realm = struct {
         // JS graph keeps live old views reachable, and their object finalizer
         // unregisters unreachable ones before their addresses can be reused.
         for (self.wasm_instances.items) |instance| {
+            // Exnrefs can outlive an invocation in Wasm globals/tables. Their
+            // pooled records retain both typed payloads and original JS throws.
+            for (instance.exn_pool.items) |record| {
+                if (record.js_value != ref_null) self.heap.markValue(Value{ .bits = @truncate(record.js_value) });
+                for (record.tag.params, record.payload) |ty, cell| {
+                    if (ty.heapOf() == @import("wasm/types.zig").heap_abs_extern and cell != ref_null)
+                        self.heap.markValue(Value{ .bits = @truncate(cell) });
+                }
+            }
             for (instance.owned_memories) |*memory| {
                 for (memory.host_views.items) |view| {
                     if (!view.strong_root) continue;
