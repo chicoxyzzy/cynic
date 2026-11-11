@@ -46,6 +46,7 @@ pub const validator = @import("validator.zig");
 pub const interpreter = @import("interpreter.zig");
 /// Shared backend lowering, bounded demos, and controlled instance execution.
 pub const backend_prototype = @import("backend_prototype.zig");
+pub const backend_diagnostics = @import("backend_diagnostics.zig");
 
 pub const Reader = reader.Reader;
 pub const Module = module.Module;
@@ -113,4 +114,5 @@ test {
     _ = @import("backend_control_test.zig");
     _ = @import("backend_results_test.zig");
     _ = @import("backend_tier_test.zig");
+    _ = @import("backend_diagnostics_test.zig");
 }

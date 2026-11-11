@@ -57,6 +57,11 @@ test "backend tier: unsupported functions fall back once without disguising nati
     }
     try std.testing.expectEqual(@as(u64, 0), instance.shared_backend_stats.entries);
     try std.testing.expectEqual(@as(u64, 1), instance.shared_backend_stats.refusals);
+    const refusal = instance.shared_backend_stats.refusal_details.entries[0];
+    try std.testing.expectEqual(@as(u64, 1), refusal.count);
+    try std.testing.expectEqual(.lowering, refusal.key.stage);
+    try std.testing.expectEqual(@as(anyerror, error.UnsupportedOpcode), refusal.key.reason);
+    try std.testing.expectEqual(@as(?u8, 0x1f), refusal.key.opcode);
 }
 
 test "backend tier: fuel termination is propagated and the cached function remains reusable" {
@@ -130,6 +135,7 @@ test "backend tier: callback errors and arithmetic traps never replay side effec
     try std.testing.expectEqual(@as(u64, 3), instance.shared_backend_stats.entries);
     try std.testing.expectEqual(@as(u64, 1), instance.shared_backend_stats.compiles);
     try std.testing.expectEqual(@as(u32, 0), instance.spasm_runs);
+    try std.testing.expectEqual(@as(u64, 0), instance.shared_backend_stats.refusals);
 }
 
 test "backend tier: foreign calls preserve instance state and controller precedence" {
@@ -325,6 +331,65 @@ test "backend tier: foreign fallback exceptions preserve their tag and payload" 
     try std.testing.expectEqualSlices(u128, &.{37}, exception.payload);
     try std.testing.expectEqual(@as(u64, 1), consumer.shared_backend_stats.entries);
     try std.testing.expectEqual(@as(u64, 1), provider.shared_backend_stats.refusals);
+}
+
+test "backend tier: imported tags do not reject unrelated functions or shift memory indices" {
+    if (!wasm.backend_prototype.native.supported) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const memory_type: wasm.types.MemType = .{ .limits = .{ .min = 1 } };
+    const provider_module: wasm.Module = .{
+        .types = &.{ .{ .params = &.{}, .results = &.{} }, .{ .params = &.{.i32}, .results = &.{} } },
+        .tags = &.{ .{ .attribute = 0, .type_index = 0 }, .{ .attribute = 0, .type_index = 1 } },
+        .mems = &.{memory_type},
+    };
+    var provider: wasm.Instance = undefined;
+    try wasm.instantiate(&provider, arena.allocator(), a, &provider_module, .{});
+    defer provider.deinit();
+    provider.memories[0].data[0] = 11;
+    const module: wasm.Module = .{
+        .types = &.{ .{ .params = &.{}, .results = &.{} }, .{ .params = &.{}, .results = &.{.i32} }, .{ .params = &.{.i32}, .results = &.{} } },
+        .imports = &.{
+            .{ .module = "p", .name = "payload", .desc = .{ .tag = 2 } },
+            .{ .module = "p", .name = "memory", .desc = .{ .mem = memory_type } },
+            .{ .module = "p", .name = "empty", .desc = .{ .tag = 0 } },
+        },
+        .mems = &.{memory_type},
+        .funcs = &.{ 1, 0 },
+        .code = &.{
+            .{ .bytes = &.{ 0, 0x41, 0, 0x28, 2, 0, 0x41, 0, 0x28, 0x42, 1, 0, 0x6a, 0x0b } },
+            .{ .bytes = &.{ 0, 0x41, 37, 0x08, 0, 0x0b } },
+        },
+    };
+    var instance: wasm.Instance = undefined;
+    try wasm.instantiate(&instance, arena.allocator(), a, &module, .{
+        .tags = &.{ provider.tag_identities[1], provider.tag_identities[0] },
+        .memories = &.{provider.memories[0]},
+        .share_memory = true,
+    });
+    defer instance.deinit();
+    instance.memories[1].data[0] = 31;
+    var graph = try wasm.backend_prototype.lowerInstance(a, &instance, 0);
+    defer graph.deinit();
+    try std.testing.expectEqual(@as(u32, 2), graph.graph.memory_count);
+    for (0..3) |mode| {
+        instance.spasm_enabled = mode == 1;
+        instance.shared_backend_enabled = mode == 2;
+        const result = try wasm.invoke(&instance, a, 0, &.{});
+        defer a.free(result);
+        try std.testing.expectEqualSlices(u128, &.{42}, result);
+    }
+    try std.testing.expectEqual(@as(u64, 1), instance.shared_backend_stats.entries);
+    try std.testing.expectEqual(@as(u64, 0), instance.shared_backend_stats.refusals);
+    try std.testing.expectError(error.UncaughtException, wasm.invoke(&instance, a, 1, &.{}));
+    const exception = instance.pending_exn orelse return error.MissingException;
+    try std.testing.expectEqual(provider.tag_identities[1], exception.tag);
+    try std.testing.expectEqualSlices(u128, &.{37}, exception.payload);
+    const refusal = instance.shared_backend_stats.refusal_details.entries[0];
+    try std.testing.expectEqual(@as(u64, 1), instance.shared_backend_stats.refusals);
+    try std.testing.expectEqual(@as(u64, 1), refusal.count);
+    try std.testing.expectEqual(@as(anyerror, error.UnsupportedOpcode), refusal.key.reason);
+    try std.testing.expectEqual(@as(?u8, 0x08), refusal.key.opcode);
 }
 
 test "backend tier: allocation failures release cache metadata and invocation scratch" {

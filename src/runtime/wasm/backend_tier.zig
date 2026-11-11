@@ -5,12 +5,14 @@ const interpreter = @import("interpreter.zig");
 const code_alloc = @import("../jit/code_alloc.zig");
 const stack_guard = @import("../../stack_guard.zig");
 const native = frontend.native;
+const diagnostics = @import("backend_diagnostics.zig");
 
 pub const Stats = struct {
     entries: u64 = 0,
     compiles: u64 = 0,
     refusals: u64 = 0,
     last_refusal: ?anyerror = null,
+    refusal_details: diagnostics.Refusals = .{},
 };
 
 pub const Cache = struct {
@@ -48,19 +50,20 @@ pub const Cache = struct {
         const slot = &self.slots[local];
         slot.* = .refused;
         const index = std.math.add(u32, instance.func_import_count, std.math.cast(u32, local) orelse {
-            refuse(instance, error.FunctionIndex);
+            refuse(instance, error.FunctionIndex, .lowering, null);
             return;
         }) catch {
-            refuse(instance, error.FunctionIndex);
+            refuse(instance, error.FunctionIndex, .lowering, null);
             return;
         };
-        var graph = frontend.lowerInstance(self.allocator, instance, index) catch |err| {
-            refuse(instance, err);
+        var diagnostic: diagnostics.Lowering = .{};
+        var graph = frontend.lowerInstanceDiagnosed(self.allocator, instance, index, &diagnostic) catch |err| {
+            refuse(instance, err, .lowering, diagnostic.site);
             return;
         };
         defer graph.deinit();
         const compiled = frontend.compile(self.allocator, &self.owner, &graph, .{ .execution_policy = .controlled }) catch |err| {
-            refuse(instance, err);
+            refuse(instance, err, .compilation, null);
             return;
         };
         slot.* = .{ .compiled = compiled };
@@ -68,10 +71,16 @@ pub const Cache = struct {
     }
 };
 
-pub fn refuse(instance: *interpreter.Instance, err: anyerror) void {
+pub fn refuse(instance: *interpreter.Instance, err: anyerror, stage: diagnostics.Stage, site: ?diagnostics.Site) void {
     if (!instance.shared_backend_diagnostics) return;
-    instance.shared_backend_stats.refusals +%= 1;
+    instance.shared_backend_stats.refusals +|= 1;
     instance.shared_backend_stats.last_refusal = err;
+    instance.shared_backend_stats.refusal_details.record(.{
+        .stage = stage,
+        .reason = err,
+        .opcode = if (site) |instruction| instruction.opcode else null,
+        .subopcode = if (site) |instruction| instruction.subopcode else null,
+    }, 1);
 }
 
 pub const Outcome = union(enum) { returned: []u128, tail_call };
@@ -87,7 +96,7 @@ pub fn run(allocator: std.mem.Allocator, instance: *interpreter.Instance, func: 
     if (instance.shared_backend_cache == null) {
         instance.shared_backend_cache = Cache.init(instance.shared_backend_allocator orelse instance.gpa, instance.funcs.len, reserve, instance.spasm_memory_ledger) catch |err| {
             instance.shared_backend_cache_failed = true;
-            refuse(instance, err);
+            refuse(instance, err, .cache, null);
             return null;
         };
     }

@@ -12,6 +12,7 @@ const interpreter = @import("interpreter.zig");
 const Instance = interpreter.Instance;
 const metadata = @import("spasm_metadata.zig");
 const simd = @import("spasm_simd.zig");
+const diagnostics = @import("backend_diagnostics.zig");
 pub const abi = @import("backend_abi.zig");
 pub const ir = @import("../jit/backend/ir.zig");
 pub const native = @import("../jit/backend/native.zig");
@@ -64,16 +65,25 @@ pub fn lowerModule(allocator: std.mem.Allocator, bytes: []const u8, function_ind
     const local = try localFunctionIndex(&module, function_index);
     const functions = try validator.validateModule(fixed.allocator(), &module);
     const function = &functions[local];
-    return lower(allocator, function, module.types[function.type_index], memories, &module);
+    return lower(allocator, function, module.types[function.type_index], memories, &module, null);
 }
 
 /// Compile an already validated function without capturing instance pointers.
 pub fn lowerInstance(allocator: std.mem.Allocator, instance: *const Instance, function_index: u32) !OwnedGraph {
+    return lowerInstanceInternal(allocator, instance, function_index, null);
+}
+
+pub fn lowerInstanceDiagnosed(allocator: std.mem.Allocator, instance: *const Instance, function_index: u32, diagnostic: *diagnostics.Lowering) !OwnedGraph {
+    diagnostic.* = .{};
+    return lowerInstanceInternal(allocator, instance, function_index, diagnostic);
+}
+
+fn lowerInstanceInternal(allocator: std.mem.Allocator, instance: *const Instance, function_index: u32, diagnostic: ?*diagnostics.Lowering) !OwnedGraph {
     var memory_types: [ir.max_memories]wasm_types.MemType = undefined;
     const memories = try collectMemories(instance.module, &memory_types);
     const local = try localFunctionIndex(instance.module, function_index);
     const function = &instance.funcs[local];
-    return lower(allocator, function, instance.module.types[function.type_index], memories, instance.module);
+    return lower(allocator, function, instance.module.types[function.type_index], memories, instance.module, diagnostic);
 }
 
 /// Developer-only invocation. Direct calls use the existing Wasm tiers under a
@@ -468,13 +478,14 @@ fn typeSignature(module: *const Module, type_index: u32) !wasm_types.FuncType {
 
 fn collectMemories(module: *const Module, out: *[ir.max_memories]wasm_types.MemType) ![]const wasm_types.MemType {
     var count: usize = 0;
-    for (module.imports) |entry| {
-        if (entry.desc == .func or entry.desc == .global or entry.desc == .table) continue;
-        if (entry.desc != .mem) return error.UnsupportedImports;
-        if (count == out.len) return error.PrototypeLimit;
-        out[count] = entry.desc.mem;
-        count += 1;
-    }
+    for (module.imports) |entry| switch (entry.desc) {
+        .mem => |memory| {
+            if (count == out.len) return error.PrototypeLimit;
+            out[count] = memory;
+            count += 1;
+        },
+        .func, .global, .table, .tag => {},
+    };
     if (module.mems.len > out.len - count) return error.PrototypeLimit;
     @memcpy(out[count..][0..module.mems.len], module.mems);
     count += module.mems.len;
@@ -557,7 +568,19 @@ fn endsBlock(op: Op) bool {
     };
 }
 
-fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature: wasm_types.FuncType, memories: []const wasm_types.MemType, module: *const Module) !OwnedGraph {
+fn recordRefusalSite(diagnostic: ?*diagnostics.Lowering, inst: Instruction) void {
+    if (diagnostic) |out| out.site = .{
+        .offset = inst.offset,
+        .opcode = @backingInt(inst.op),
+        .subopcode = switch (inst.op) {
+            .prefix_fd => inst.simd_opcode,
+            .prefix_fc => @intCast(inst.immediate),
+            else => null,
+        },
+    };
+}
+
+fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature: wasm_types.FuncType, memories: []const wasm_types.MemType, module: *const Module, diagnostic: ?*diagnostics.Lowering) !OwnedGraph {
     if (signature.results.len > ir.max_arguments) return error.UnsupportedSignature;
     if (function.body.len > 16 * 1024 or function.local_types.len > ir.max_arguments or
         function.max_stack > ir.max_arguments) return error.PrototypeLimit;
@@ -584,6 +607,7 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
         const offset = reader.pos;
         offsets[offset] = @intCast(instructions.items.len);
         var inst: Instruction = .{ .op = @fromBackingInt(@intCast(try reader.byte())), .offset = @intCast(offset) };
+        errdefer recordRefusalSite(diagnostic, inst);
         switch (inst.op) {
             .nop, .drop, .select, .ref_is_null, .ref_as_non_null => {},
             .ref_func => inst.immediate = try reader.uleb(u32),
@@ -786,6 +810,7 @@ fn lower(allocator: std.mem.Allocator, function: *const CompiledFunc, signature:
         }
         var terminator: ?ir.Terminator = null;
         for (instructions.items[range.start..range.end]) |inst| {
+            errdefer recordRefusalSite(diagnostic, inst);
             if (inst.op == .prefix_fc and inst.immediate == 13) {
                 try builder.runtimeCall(&nodes, inst, .{ .kind = .elem_drop, .index = inst.secondary_index }, &.{}, &.{}, &.{});
                 continue;
