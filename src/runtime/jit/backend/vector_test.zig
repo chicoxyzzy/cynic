@@ -5,6 +5,75 @@ const allocation = @import("allocation.zig");
 const CodeAllocator = @import("../code_alloc.zig").CodeAllocator;
 const a = std.testing.allocator;
 
+test "backend SIMD lanes: scalar transfers and lane immediates survive every optimization" {
+    const input: u128 = 0xffeeddccbbaa9988_7766554433221180;
+    for ([_]ir.VectorLane{ .i8x16, .i16x8, .i32x4, .i64x2, .f32x4, .f64x2 }) |lane| {
+        const scalar: u64 = if (lane.bytes() == 8) 0xfff0000000000042 else 0xff800042;
+        const mask = (@as(u128, 1) << @as(u7, @intCast(lane.bytes() * 8))) - 1;
+        const shift: u7 = @intCast(128 - lane.bytes() * 8);
+        var splat: u128 = 0;
+        for (0..lane.count()) |i| splat |= (@as(u128, scalar) & mask) << @as(u7, @intCast(i * lane.bytes() * 8));
+        const replaced = (input & ~(mask << shift)) | ((@as(u128, scalar) & mask) << shift);
+        const graph: ir.Graph = .{
+            .types = &.{ .v128, lane.scalarType(), .v128, .v128, lane.scalarType(), lane.scalarType() },
+            .argument_types = &.{ .v128, lane.scalarType() },
+            .result_types = &.{ .v128, .v128, lane.scalarType(), lane.scalarType(), .v128, lane.scalarType() },
+            .blocks = &.{.{ .params = &.{ 0, 1 }, .nodes = &.{
+                .{ .op = .vector_splat, .out = 2, .lhs = 1, .vector_lane = lane },
+                .{ .op = .vector_replace, .out = 3, .lhs = 0, .rhs = 1, .vector_lane = lane, .immediate = lane.count() - 1 },
+                .{ .op = .vector_extract, .out = 4, .lhs = 0, .vector_lane = lane, .immediate = 0 },
+                .{ .op = .vector_extract, .out = 5, .lhs = 0, .vector_lane = lane, .immediate = lane.count() - 1 },
+            }, .terminator = .{ .return_ = &.{ 2, 3, 4, 5, 0, 1 } } }},
+        };
+        try check(graph, &.{ @truncate(input), @truncate(input >> 64), scalar }, &.{ @truncate(splat), @truncate(splat >> 64), @truncate(replaced), @truncate(replaced >> 64), @truncate(input & mask), @truncate(input >> shift), @truncate(input), @truncate(input >> 64), scalar }, null);
+    }
+}
+
+test "backend SIMD lanes: permutations preserve live homes and CSE keeps both mask words" {
+    const graph: ir.Graph = .{
+        .types = &.{ .v128, .v128, .v128, .v128, .i64, .i64, .i64, .i64, .v128, .v128, .v128, .v128 },
+        .argument_types = &.{ .v128, .v128, .v128, .v128, .i64, .i64, .i64, .i64 },
+        .result_types = &.{ .v128, .v128, .v128, .v128, .v128, .v128, .i64, .i64, .i64, .i64 },
+        .blocks = &.{.{ .params = &.{ 0, 1, 2, 3, 4, 5, 6, 7 }, .nodes = &.{
+            .{ .op = .vector_shuffle, .out = 8, .lhs = 0, .rhs = 1, .immediate = 0x0706050403020100, .immediate_hi = 0x1f1e1d1c1b1a1918 },
+            .{ .op = .vector_shuffle, .out = 9, .lhs = 0, .rhs = 1, .immediate = 0x1716151413121110, .immediate_hi = 0x1f1e1d1c1b1a1918 },
+            .{ .op = .vector_shuffle, .out = 10, .lhs = 0, .rhs = 1, .immediate = 0x0706050403020100, .immediate_hi = 0x0f0e0d0c0b0a0908 },
+            .{ .op = .vector_swizzle, .out = 11, .lhs = 0, .rhs = 2 },
+        }, .terminator = .{ .return_ = &.{ 8, 9, 10, 11, 0, 3, 4, 5, 6, 7 } } }},
+    };
+    try check(graph, &.{ 0x0706050403020100, 0x0f0e0d0c0b0a0908, 0x1716151413121110, 0x1f1e1d1c1b1a1918, 0x0807060504030201, 0xffff807f20100f00, 42, 43, 11, 22, 33, 44 }, &.{
+        0x0706050403020100, 0x1f1e1d1c1b1a1918, 0x1716151413121110, 0x1f1e1d1c1b1a1918,
+        0x0706050403020100, 0x0f0e0d0c0b0a0908, 0x0807060504030201, 0x0000000000000f00,
+        0x0706050403020100, 0x0f0e0d0c0b0a0908, 42,                 43,
+        11,                 22,                 33,                 44,
+    }, null);
+}
+
+test "backend SIMD lanes: verifier rejects invalid lane types indices and shuffle selectors" {
+    var nodes = [_]ir.Node{.{ .op = .vector_extract, .out = 1, .lhs = 0, .vector_lane = .i8x16, .immediate = 15 }};
+    const blocks = [_]ir.Block{.{ .params = &.{0}, .nodes = &nodes, .terminator = .{ .return_ = &.{1} } }};
+    var graph: ir.Graph = .{ .types = &.{ .v128, .i32 }, .argument_types = &.{.v128}, .result_types = &.{.i32}, .blocks = &blocks };
+    try graph.verify();
+    nodes[0].immediate = 16;
+    try std.testing.expectError(error.InvalidGraph, graph.verify());
+    nodes[0].immediate = 0;
+    nodes[0].vector_lane = .f32x4;
+    try std.testing.expectError(error.InvalidGraph, graph.verify());
+    nodes[0].vector_lane = null;
+    try std.testing.expectError(error.InvalidGraph, graph.verify());
+    nodes[0] = .{ .op = .vector_shuffle, .lhs = 0, .rhs = 0, .out = 1, .immediate = 0x20 };
+    graph.types = &.{ .v128, .v128 };
+    graph.result_types = &.{.v128};
+    try std.testing.expectError(error.InvalidGraph, graph.verify());
+    nodes[0].immediate = 0;
+    nodes[0].immediate_hi = 0x8000000000000000;
+    try std.testing.expectError(error.InvalidGraph, graph.verify());
+    nodes[0].immediate_hi = 0;
+    try graph.verify();
+    nodes[0].vector_lane = .i8x16;
+    try std.testing.expectError(error.InvalidGraph, graph.verify());
+}
+
 fn check(graph: ir.Graph, args: []const u64, expected: []const u64, runtime: ?native.Runtime) !void {
     if (!native.supported) return error.SkipZigTest;
     var owner = try CodeAllocator.init(a, 256 * 1024);

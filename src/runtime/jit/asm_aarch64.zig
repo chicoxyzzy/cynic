@@ -491,6 +491,33 @@ pub fn insDFromX(vd: Reg, lane: u1, xn: Reg) u32 {
     return 0x4E081C00 | (@as(u32, lane) << 20) | (r(xn) << 5) | r(vd);
 }
 
+/// INS Vd.T[lane], Rn. Lane bounds are checked by the shared IR verifier.
+pub fn insertIntegerLane(vd: Reg, rn: Reg, size: VectorIntegerSize, lane: u4) u32 {
+    const shift: u5 = @backingInt(size);
+    const immediate = (@as(u32, 1) << shift) | (@as(u32, lane) << (shift + 1));
+    return 0x4e001c00 | (immediate << 16) | (r(rn) << 5) | r(vd);
+}
+
+/// UMOV Wd/Xd, Vn.T[lane]. W writes zero-extend the scalar result.
+pub fn extractUnsignedIntegerLane(rd: Reg, vn: Reg, size: VectorIntegerSize, lane: u4) u32 {
+    const shift: u5 = @backingInt(size);
+    const immediate = (@as(u32, 1) << shift) | (@as(u32, lane) << (shift + 1));
+    const base: u32 = if (size == .double) 0x4e003c00 else 0x0e003c00;
+    return base | (immediate << 16) | (r(vn) << 5) | r(rd);
+}
+
+test "aarch64 vector lane transfer encodings" {
+    const expectEqual = @import("std").testing.expectEqual;
+    try expectEqual(@as(u32, 0x4e1f1e23), insertIntegerLane(.x3, .x17, .byte, 15));
+    try expectEqual(@as(u32, 0x4e1e1e23), insertIntegerLane(.x3, .x17, .half, 7));
+    try expectEqual(@as(u32, 0x4e1c1e23), insertIntegerLane(.x3, .x17, .word, 3));
+    try expectEqual(@as(u32, 0x4e181e23), insertIntegerLane(.x3, .x17, .double, 1));
+    try expectEqual(@as(u32, 0x0e1f3c71), extractUnsignedIntegerLane(.x17, .x3, .byte, 15));
+    try expectEqual(@as(u32, 0x0e1e3c71), extractUnsignedIntegerLane(.x17, .x3, .half, 7));
+    try expectEqual(@as(u32, 0x0e1c3c71), extractUnsignedIntegerLane(.x17, .x3, .word, 3));
+    try expectEqual(@as(u32, 0x4e183c71), extractUnsignedIntegerLane(.x17, .x3, .double, 1));
+}
+
 /// ORR Wd, Wn, Wm
 pub fn orrRegW(rd: Reg, rn: Reg, rm: Reg) u32 {
     return 0x2A000000 | (r(rm) << 16) | (r(rn) << 5) | r(rd);

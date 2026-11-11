@@ -17,7 +17,36 @@ pub const Type = enum {
         return if (self == .v128) 2 else 1;
     }
 };
-pub const VectorLane = enum { i8x16, i16x8, i32x4, i64x2, f32x4, f64x2 };
+pub const VectorLane = enum {
+    i8x16,
+    i16x8,
+    i32x4,
+    i64x2,
+    f32x4,
+    f64x2,
+
+    pub fn bytes(self: VectorLane) usize {
+        return switch (self) {
+            .i8x16 => 1,
+            .i16x8 => 2,
+            .i32x4, .f32x4 => 4,
+            .i64x2, .f64x2 => 8,
+        };
+    }
+
+    pub fn count(self: VectorLane) usize {
+        return 16 / self.bytes();
+    }
+
+    pub fn scalarType(self: VectorLane) Type {
+        return switch (self) {
+            .i8x16, .i16x8, .i32x4 => .i32,
+            .i64x2 => .i64,
+            .f32x4 => .f32,
+            .f64x2 => .f64,
+        };
+    }
+};
 
 pub fn wordCount(types: []const Type) usize {
     var count: usize = 0;
@@ -38,6 +67,14 @@ pub const Op = enum {
     bit_or,
     bit_xor,
     vector_add,
+    vector_splat,
+    /// Narrow integer lanes are zero-extended; signed extension is explicit.
+    vector_extract,
+    vector_replace,
+    /// Sixteen byte selectors in immediate/immediate_hi, each in [0, 32).
+    vector_shuffle,
+    /// Byte indices outside [0, 16) produce zero.
+    vector_swizzle,
     shl,
     shr_s,
     shr_u,
@@ -219,8 +256,8 @@ pub const Graph = struct {
             }
             if (self.valueWords(block.params) > max_arguments) return error.PrototypeLimit;
             for (block.nodes) |node| {
-                if ((node.op == .vector_add) != (node.vector_lane != null)) return error.InvalidGraph;
-                if (node.immediate_hi != 0 and (node.op != .constant or node.out == null or node.out.? >= self.types.len or self.types[node.out.?] != .v128)) return error.InvalidGraph;
+                if (hasVectorLane(node.op) != (node.vector_lane != null)) return error.InvalidGraph;
+                if (node.immediate_hi != 0 and node.op != .vector_shuffle and (node.op != .constant or node.out == null or node.out.? >= self.types.len or self.types[node.out.?] != .v128)) return error.InvalidGraph;
                 if (mayTrap(node.op) != (node.trap_site != null)) return error.InvalidGraph;
                 if (isMemoryOp(node.op) != (node.memory != null)) return error.InvalidGraph;
                 if ((node.op == .call) != (node.call != null)) return error.InvalidGraph;
@@ -287,11 +324,26 @@ pub const Graph = struct {
                     try self.use(node.lhs, &available);
                     const source = self.types[node.lhs];
                     if (source == .v128 or out_type == .v128 or isFloat(source) == isFloat(out_type) or is32(source) != is32(out_type)) return error.InvalidGraph;
+                } else if (isVectorOp(node.op)) {
+                    try self.use(node.lhs, &available);
+                    const scalar = if (node.vector_lane) |lane| lane.scalarType() else Type.v128;
+                    if (self.types[node.lhs] != (if (node.op == .vector_splat) scalar else .v128)) return error.InvalidGraph;
+                    if (out_type != (if (node.op == .vector_extract) scalar else .v128)) return error.InvalidGraph;
+                    if (inputCount(node.op) == 2) {
+                        try self.use(node.rhs, &available);
+                        if (self.types[node.rhs] != (if (node.op == .vector_replace) scalar else .v128)) return error.InvalidGraph;
+                    }
+                    if (node.op == .vector_extract or node.op == .vector_replace) {
+                        if (node.immediate >= node.vector_lane.?.count()) return error.InvalidGraph;
+                    } else if (node.op == .vector_shuffle) {
+                        for ([_]u64{ node.immediate, node.immediate_hi }) |word| for (0..8) |byte| {
+                            if ((word >> @as(u6, @intCast(byte * 8))) & 255 >= 32) return error.InvalidGraph;
+                        };
+                    } else if (node.immediate != 0) return error.InvalidGraph;
                 } else {
                     try self.use(node.lhs, &available);
                     const input_type = self.types[node.lhs];
-                    if (node.op == .vector_add and input_type != .v128) return error.InvalidGraph;
-                    if (input_type == .v128 and node.op != .vector_add and node.op != .bit_and and node.op != .bit_or and node.op != .bit_xor) return error.InvalidGraph;
+                    if (input_type == .v128 and node.op != .bit_and and node.op != .bit_or and node.op != .bit_xor) return error.InvalidGraph;
                     if (node.op == .sext32 and input_type != .i64) return error.InvalidGraph;
                     if (isFloatOp(node.op) != isFloat(input_type)) return error.InvalidGraph;
                     if (inputCount(node.op) == 2) {
@@ -410,7 +462,8 @@ pub fn isComparison(op: Op) bool {
 
 pub fn inputCount(op: Op) u2 {
     return switch (op) {
-        .vector_add => 2,
+        .vector_add, .vector_replace, .vector_shuffle, .vector_swizzle => 2,
+        .vector_splat, .vector_extract => 1,
         .constant, .call, .memory_length => 0,
         .load => 1,
         .store => 2,
@@ -435,7 +488,7 @@ pub const Effects = struct {
 pub fn effects(op: Op) Effects {
     // Exhaustive: new operations must declare their observable effects.
     return switch (op) {
-        .vector_add => .{},
+        .vector_add, .vector_splat, .vector_extract, .vector_replace, .vector_shuffle, .vector_swizzle => .{},
         .guard => .{ .exits = true },
         .div_s, .div_u, .rem_s, .rem_u, .trunc_s, .trunc_u => .{ .may_trap = true },
         .load => .{ .reads_memory = true, .may_trap = true },
@@ -445,6 +498,17 @@ pub fn effects(op: Op) Effects {
         .fceil, .ffloor, .ftrunc, .fnearest, .convert_s, .convert_u, .trunc_sat_s, .trunc_sat_u => .{},
         .constant, .add, .sub, .mul, .bit_and, .bit_or, .bit_xor, .shl, .shr_s, .shr_u, .rotl, .rotr, .clz, .ctz, .popcnt, .sext8, .sext16, .sext32, .eq, .ne, .lt_s, .lt_u, .gt_s, .gt_u, .le_s, .le_u, .ge_s, .ge_u, .sext_i32, .zext_i32, .trunc_i64, .fadd, .fsub, .fmul, .fdiv, .fmin, .fmax, .fcopysign, .fabs, .fneg, .fsqrt, .feq, .fne, .flt, .fgt, .fle, .fge, .reinterpret, .promote_f32, .demote_f64 => .{},
     };
+}
+
+pub fn hasVectorLane(op: Op) bool {
+    return switch (op) {
+        .vector_add, .vector_splat, .vector_extract, .vector_replace => true,
+        else => false,
+    };
+}
+
+pub fn isVectorOp(op: Op) bool {
+    return hasVectorLane(op) or op == .vector_shuffle or op == .vector_swizzle;
 }
 
 pub fn mayTrap(op: Op) bool {
