@@ -84,7 +84,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
 
       - name: Set up Zig
-        uses: xyzzylabs/setup-zig@2082e552e19803253444ed0f0124948d16e9a926  # v1.0.6
+        uses: xyzzylabs/setup-zig@c0fdcf100ed8a4e5619d2bf55fae0bf0dab9ba0a  # v1.0.7
         with:
           cache-key: ${{ matrix.os }}
           # The Linux `.zig-cache` grows to ~2.3 GB (Debug binary +
@@ -176,7 +176,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
 
       - name: Set up Zig
-        uses: xyzzylabs/setup-zig@2082e552e19803253444ed0f0124948d16e9a926  # v1.0.6
+        uses: xyzzylabs/setup-zig@c0fdcf100ed8a4e5619d2bf55fae0bf0dab9ba0a  # v1.0.7
 
       - name: zig build fmt-check
         run: zig build fmt-check
@@ -229,7 +229,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
 
       - name: Set up Zig
-        uses: xyzzylabs/setup-zig@2082e552e19803253444ed0f0124948d16e9a926  # v1.0.6
+        uses: xyzzylabs/setup-zig@c0fdcf100ed8a4e5619d2bf55fae0bf0dab9ba0a  # v1.0.7
         with:
           cache-key: wasm
 
@@ -251,7 +251,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
 
       - name: Set up Zig
-        uses: xyzzylabs/setup-zig@2082e552e19803253444ed0f0124948d16e9a926  # v1.0.6
+        uses: xyzzylabs/setup-zig@c0fdcf100ed8a4e5619d2bf55fae0bf0dab9ba0a  # v1.0.7
         with:
           cache-key: wpt-wasm-jsapi
 
@@ -315,7 +315,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y wabt
 
       - name: Set up Zig
-        uses: xyzzylabs/setup-zig@2082e552e19803253444ed0f0124948d16e9a926  # v1.0.6
+        uses: xyzzylabs/setup-zig@c0fdcf100ed8a4e5619d2bf55fae0bf0dab9ba0a  # v1.0.7
         with:
           cache-key: wasm-testsuite
 
@@ -371,7 +371,7 @@ jobs:
         run: brew install wabt
 
       - name: Set up Zig
-        uses: xyzzylabs/setup-zig@2082e552e19803253444ed0f0124948d16e9a926  # v1.0.6
+        uses: xyzzylabs/setup-zig@c0fdcf100ed8a4e5619d2bf55fae0bf0dab9ba0a  # v1.0.7
         with:
           cache-key: wasm-testsuite-spasm
 
@@ -443,7 +443,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
 
       - name: Set up Zig
-        uses: xyzzylabs/setup-zig@2082e552e19803253444ed0f0124948d16e9a926  # v1.0.6
+        uses: xyzzylabs/setup-zig@c0fdcf100ed8a4e5619d2bf55fae0bf0dab9ba0a  # v1.0.7
         with:
           cache-key: cross-${{ matrix.target }}
 
@@ -498,7 +498,7 @@ jobs:
           submodules: recursive
 
       - name: Set up Zig
-        uses: xyzzylabs/setup-zig@2082e552e19803253444ed0f0124948d16e9a926  # v1.0.6
+        uses: xyzzylabs/setup-zig@c0fdcf100ed8a4e5619d2bf55fae0bf0dab9ba0a  # v1.0.7
 
       - name: Run test262 (runtime, parallel)
         # Drop `--quiet` so the per-bucket tally lands in the CI
@@ -608,7 +608,7 @@ jobs:
           submodules: recursive
 
       - name: Set up Zig
-        uses: xyzzylabs/setup-zig@2082e552e19803253444ed0f0124948d16e9a926  # v1.0.6
+        uses: xyzzylabs/setup-zig@c0fdcf100ed8a4e5619d2bf55fae0bf0dab9ba0a  # v1.0.7
         with:
           cache-key: jit-differential-aarch64
 
@@ -687,7 +687,7 @@ jobs:
           submodules: recursive
 
       - name: Set up Zig
-        uses: xyzzylabs/setup-zig@2082e552e19803253444ed0f0124948d16e9a926  # v1.0.6
+        uses: xyzzylabs/setup-zig@c0fdcf100ed8a4e5619d2bf55fae0bf0dab9ba0a  # v1.0.7
         with:
           cache-key: ohaimark-x86-differential
 
@@ -728,7 +728,7 @@ jobs:
           submodules: recursive
 
       - name: Set up Zig
-        uses: xyzzylabs/setup-zig@2082e552e19803253444ed0f0124948d16e9a926  # v1.0.6
+        uses: xyzzylabs/setup-zig@c0fdcf100ed8a4e5619d2bf55fae0bf0dab9ba0a  # v1.0.7
         with:
           cache-key: jit-differential-x86-64
 
@@ -790,7 +790,7 @@ jobs:
           submodules: recursive
 
       - name: Set up Zig
-        uses: xyzzylabs/setup-zig@2082e552e19803253444ed0f0124948d16e9a926  # v1.0.6
+        uses: xyzzylabs/setup-zig@c0fdcf100ed8a4e5619d2bf55fae0bf0dab9ba0a  # v1.0.7
         with:
           cache-key: gc-stress-jit-${{ matrix.tier.cache }}
 
@@ -891,7 +891,7 @@ jobs:
           submodules: recursive
 
       - name: Set up Zig
-        uses: xyzzylabs/setup-zig@2082e552e19803253444ed0f0124948d16e9a926  # v1.0.6
+        uses: xyzzylabs/setup-zig@c0fdcf100ed8a4e5619d2bf55fae0bf0dab9ba0a  # v1.0.7
         with:
           # Every gc-stress job builds the same ReleaseSafe harness,
           # so share one cache namespace across the matrix.
